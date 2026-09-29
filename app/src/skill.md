@@ -159,9 +159,10 @@ the hooks `crook --agent-hooks claude` prints.
 
 `crook pane blocks <id> [--last N]` prints the pane's newest finished commands: the command line,
 what it printed (the end of it, when it is long), the exit status, how long it ran and where;
-`--json` for a script. An interactive agent — `claude` with no `-p` — is one live screen, not a
-list of finished commands, and `crook pane blocks` says so rather than printing nothing. To read
-a worker's answer, run it headless and wait for it to finish:
+`--json` for a script. A command still running has not finished, and an interactive agent —
+`claude` with no `-p` — is one live screen, not a list of finished commands: `crook pane blocks`
+says so rather than printing nothing. To read a worker's answer, run it headless and wait for it
+to finish:
 
 ```sh
 id=$(crook tab new --in-my-group -- claude -p "list the flaky tests in x")

@@ -78,9 +78,9 @@ pub mod code {
     /// watching it needs a grant from the person who opened it — which this
     /// window cannot ask for yet.
     pub const NEEDS_GRANT: &str = "needs-grant";
-    /// The pane has no finished command to read or wait for, and never will
-    /// while it is as it is: a full-screen program or an agent's TUI drawn as
-    /// one live grid, or a shell that reports no command marks.
+    /// The pane has no finished command to read or wait for: the first one
+    /// is still running, a full-screen program or an agent's TUI has the
+    /// pane, or its shell reports no command marks and so never finishes one.
     pub const NO_BLOCKS: &str = "no-blocks";
 }
 
@@ -312,9 +312,10 @@ pub struct BlocksRead {
     pub pane_id: u64,
     /// Its newest finished commands, oldest first.
     pub blocks: Vec<BlockEntry>,
-    /// Whether the pane is drawn as one live grid now — a full-screen
-    /// program, or an agent's TUI — whose screen is in none of these blocks.
-    pub grid: bool,
+    /// Whether something is running in the pane now — a command, a
+    /// full-screen program, an agent's TUI — whose output is in none of these
+    /// blocks yet.
+    pub running: bool,
 }
 
 /// One finished command, as `pane.blocks` answers for it.

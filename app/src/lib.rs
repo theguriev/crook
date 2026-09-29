@@ -1029,10 +1029,12 @@ COMMANDS:
     pane blocks <ID> [--last <N>]
                        Print pane ID's newest finished commands: the command,
                        what it printed (the end of it, when it is long), its
-                       exit status, how long it ran and where. A pane drawing
-                       a full-screen program or an agent's TUI with nothing
-                       finished says so. --json prints the window's answer.
-                       Your own pane and the tabs it opened; not on Windows yet
+                       exit status, how long it ran and where. A pane whose
+                       first command is still running, or that is drawing a
+                       full-screen program or an agent's TUI, says so rather
+                       than printing nothing. --json prints the window's
+                       answer. Your own pane and the tabs it opened; not on
+                       Windows yet
     tab new [...] -- <COMMAND>...
                        From inside a pane, open a tab beside it in the same
                        window, without switching to it, and run the command

@@ -10,16 +10,17 @@
 //!
 //! # What is not a block
 //!
-//! A full-screen program, and an agent's TUI, are drawn as one live grid — see
-//! [`pane_surface`] — and nothing in a grid has finished: an interactive
-//! Claude Code in a pane is one block that is still open, and its answer is on
-//! a screen, not in a block. A pane like that with no finished command is
-//! refused as `no-blocks` with a sentence that says so, rather than answered
-//! with an empty list that reads as "nothing ran"; one with finished commands
-//! from before is answered with those and `grid` set. So is a shell that
-//! reports no command marks, whose output is one block that never closes. A
-//! worker whose answer is meant to be read runs headless — `claude -p` — and
-//! its answer is then its block's output.
+//! A command that is still running has not finished, whatever it is drawn as:
+//! a build printing on the primary screen, a full-screen program on the
+//! alternate one, an interactive Claude Code whose answer is on a screen and
+//! never in a block. A pane like that with no finished command is refused as
+//! `no-blocks` with a sentence that says which — a running command is waited
+//! for with `--until finished`, and a screen is not a block at all — rather
+//! than answered with an empty list that reads as "nothing ran"; one with
+//! finished commands from before is answered with those and `running` set. A
+//! shell that reports no command marks is refused too, since its output is
+//! one block that never closes. A worker whose answer is meant to be read runs
+//! headless — `claude -p` — and its answer is then its block's output.
 //!
 //! # Caps
 //!
@@ -31,14 +32,14 @@
 //! command printed is where its errors and its summary are, and marked
 //! `truncated`.
 
-use std::time::Instant;
+use std::sync::Arc;
 
+use crook_terminal::{Block, BlockState};
 use crookui_core::prelude::*;
 use serde_json::Value;
 
 use super::protocol::{BlockEntry, BlocksRead, MAX_BLOCKS, ReadBlocks, Refusal, code};
 use super::watch;
-use crate::pane_surface::{self, Surface};
 use crate::workspace::Workspace;
 
 /// The most bytes of one block's output an answer carries: its end.
@@ -80,9 +81,21 @@ pub fn read(
             "has no shell running, and so no finished command",
         ));
     };
-    let grid = pane_surface::of(&snapshot, Instant::now()).surface == Surface::Grid;
-    if history.is_empty() {
-        if grid {
+    let running = snapshot.alt_screen
+        || matches!(
+            snapshot.live_block.state,
+            BlockState::Submitted | BlockState::Executing
+        );
+    // Newest first, which is the order the output budget is spent in.
+    let last = asked.last.unwrap_or(MAX_BLOCKS).min(MAX_BLOCKS);
+    let newest: Vec<&Arc<Block>> = (0..history.len())
+        .rev()
+        .filter_map(|index| history.get(index))
+        .filter(|block| is_command(block))
+        .take(last)
+        .collect();
+    if newest.is_empty() {
+        if snapshot.alt_screen {
             return Err(no_blocks(
                 "is drawn as one live grid — a full-screen program or an agent's TUI is \
                  running there — and no command has finished in it: what it shows is a screen, \
@@ -96,14 +109,19 @@ pub fn read(
                  never finishes",
             ));
         }
+        if running {
+            return Err(no_blocks(&format!(
+                "has a command running and none finished yet: what it prints is read once it \
+                 has finished, which `crook pane wait {number} --until finished` answers; an \
+                 interactive agent's answer is on its screen and never in a finished block, so \
+                 run a worker whose answer you want to read headless, like `claude -p`"
+            )));
+        }
     }
 
-    let last = asked.last.unwrap_or(MAX_BLOCKS).min(MAX_BLOCKS);
     let mut left = MAX_OUTPUT;
-    // Newest first, which is the order the output budget is spent in.
-    let mut blocks: Vec<BlockEntry> = (history.len().saturating_sub(last)..history.len())
-        .rev()
-        .filter_map(|index| history.get(index))
+    let mut blocks: Vec<BlockEntry> = newest
+        .into_iter()
         .map(|block| {
             let from = block.output_from.unwrap_or(0);
             let rows = block.rows.rows();
@@ -139,9 +157,21 @@ pub fn read(
     Ok(serde_json::to_value(BlocksRead {
         pane_id: number,
         blocks,
-        grid,
+        running,
     })
     .expect("a block is numbers and strings, which encode"))
+}
+
+/// Whether a block of a pane's history is a command's: one the shell ran —
+/// it was sent, or started, or the shell said how it ended.
+///
+/// Not what a shell printed on its own, before its first prompt — a login
+/// banner, a startup file's line — or between two, which the history keeps as
+/// a block too: nothing ran there, and nothing finished. A tab whose first
+/// command is still running has no command's block yet, whatever its shell
+/// said while it started.
+pub fn is_command(block: &Block) -> bool {
+    block.command.is_some() || block.exit.is_some() || block.started_at.is_some()
 }
 
 /// The end of `text`, at most `cap` bytes of it, and whether anything was

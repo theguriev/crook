@@ -3226,7 +3226,7 @@ mod socket {
             .ask(read_blocks(&token, lead, Some(2)))
             .expect("read");
         assert_eq!(read.pane_id, lead.as_u64());
-        assert!(!read.grid);
+        assert!(!read.running, "nothing is running at the prompt");
         let [two, three] = &read.blocks[..] else {
             panic!("the last two, oldest first: {read:#?}");
         };
@@ -3401,6 +3401,15 @@ mod socket {
             return None;
         }
         Some(served)
+    }
+
+    /// Whether a pane's shell says a command is running in it.
+    fn executing(served: &Served, pane: PaneId) -> bool {
+        served.read(|workspace, app| {
+            workspace
+                .terminal(pane, app)
+                .is_some_and(|(_, snapshot)| snapshot.live_block.state.is_running())
+        })
     }
 
     /// Linux only: that is where a half-close is told from a hang-up. See
@@ -3587,6 +3596,73 @@ mod socket {
             .expect_err("closed");
         assert!(refused.contains("no-such-pane"), "{refused}");
         assert_eq!(served.waiting(), 0, "nothing was left waiting");
+    }
+
+    #[test]
+    fn blocks_of_a_pane_whose_first_command_is_still_running_say_so_rather_than_nothing() {
+        let Some(mut served) = marked_bash() else {
+            return;
+        };
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        served.shell.open();
+        served.pump_until("the shell never came to a prompt", |served| {
+            served.at_prompt(lead)
+        });
+
+        // What the shell printed on its way to its first prompt — `starting`,
+        // here — is not a command, and nothing has run.
+        let read = served
+            .ask(read_blocks(&token, lead, None))
+            .expect("nothing ran, which is an answer");
+        assert!(read.blocks.is_empty(), "{read:#?}");
+        assert!(!read.running);
+
+        // A command that prints more than the pane holds and goes on running:
+        // the block has grown past the top of the viewport, which the pane
+        // draws as a grid, and it is still an ordinary command.
+        served.update(|workspace, ctx| {
+            workspace.type_into(lead, "seq 1 500; sleep 30\r", ctx);
+        });
+        served.pump_until("the command never overflowed the pane", |served| {
+            executing(served, lead)
+                && served.read(|workspace, app| {
+                    workspace
+                        .terminal(lead, app)
+                        .is_some_and(|(_, snapshot)| snapshot.live_block.top_row < 0)
+                })
+        });
+        let refused = served
+            .ask(read_blocks(&token, lead, Some(1)))
+            .expect_err("nothing has finished");
+        assert!(refused.contains("no-blocks"), "{refused}");
+        assert!(refused.contains("has a command running"), "{refused}");
+        assert!(
+            refused.contains(&format!("pane wait {} --until finished", lead.as_u64())),
+            "and says what to wait for: {refused}"
+        );
+        assert!(
+            !refused.contains("live grid"),
+            "it is not a full-screen program: {refused}"
+        );
+
+        // Interrupted, it has finished; the next one running is said to be.
+        served.update(|workspace, ctx| workspace.type_into(lead, "\u{3}", ctx));
+        served.pump_until("the interrupted command never became a block", |served| {
+            served.at_prompt(lead)
+        });
+        served.update(|workspace, ctx| workspace.type_into(lead, "sleep 30\r", ctx));
+        served.pump_until("the second command never started", |served| {
+            executing(served, lead)
+        });
+        let read = served
+            .ask(read_blocks(&token, lead, None))
+            .expect("the finished one is read");
+        let [block] = &read.blocks[..] else {
+            panic!("the one that finished: {read:#?}");
+        };
+        assert_eq!(block.command.as_deref(), Some("seq 1 500; sleep 30"));
+        assert!(read.running, "and something is running now");
     }
 
     #[test]

@@ -50,7 +50,7 @@ use crookui_core::prelude::*;
 use serde_json::Value;
 
 use super::protocol::{Follow, Following, PaneEvent, Refusal, Until, Verb, Wait, Waited, code};
-use super::word;
+use super::{blocks, word};
 use crate::tab::{AgentSession, AgentStatus, PaneId, StatusSource, TabStrip};
 use crate::workspace::Workspace;
 
@@ -736,9 +736,10 @@ fn where_it_is(
 ///
 /// At rest — at a prompt, or between a command's end and the next prompt —
 /// with no line waiting to be sent at its first prompt, and a command
-/// finished there. The line waiting is what keeps a wait asked the moment a
-/// tab opened from being answered by the tab's empty shell, before the
-/// command it was opened for has started.
+/// finished there: a command's block, not what the shell printed on its own
+/// (see [`blocks::is_command`]). The line waiting is what keeps a wait asked
+/// the moment a tab opened from being answered by the tab's empty shell,
+/// before the command it was opened for has started.
 fn finished(workspace: &Workspace, pane: PaneId, app: &AppContext) -> (bool, Option<i32>) {
     if workspace.waits_for_first_prompt(pane) {
         return (false, None);
@@ -749,9 +750,16 @@ fn finished(workspace: &Workspace, pane: PaneId, app: &AppContext) -> (bool, Opt
             BlockState::AtPrompt | BlockState::Done
         )
     });
-    let last = workspace
-        .terminal_blocks(pane, app)
-        .and_then(|history| history.iter().last().map(|block| block.exit));
+    // The newest command's, past whatever the shell printed on its own: a
+    // tab's startup lines before its first prompt are not a command that
+    // finished.
+    let last = workspace.terminal_blocks(pane, app).and_then(|history| {
+        (0..history.len())
+            .rev()
+            .filter_map(|index| history.get(index))
+            .find(|block| blocks::is_command(block))
+            .map(|block| block.exit)
+    });
     match (resting, last) {
         (true, Some(exit)) => (true, exit),
         _ => (false, None),

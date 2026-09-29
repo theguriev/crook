@@ -576,10 +576,9 @@ pub fn blocks_text(read: &BlocksRead, home: Option<&Path>) -> String {
             read.pane_id
         ));
     }
-    if read.grid {
+    if read.running {
         lines.push(format!(
-            "(pane {} is drawing a full-screen program or an agent's TUI now, and what is on \
-             its screen is in none of these)",
+            "(something is running in pane {} now, and what it shows is in none of these)",
             read.pane_id
         ));
     }

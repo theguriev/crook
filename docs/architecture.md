@@ -1248,11 +1248,15 @@ directory, duration, and output — the text a copy of the block's output gives,
 region a drag over it makes. Every part is capped, since it is built between two frames and
 written down a socket: the last 4096 rows of a block are read, the last 64 KiB of those kept,
 and 512 KiB in all, spent newest first; cut from the front, at a line, and marked `truncated`,
-because the end of what a command printed is where its errors and its summary are. A pane drawn
-as one live grid — a full-screen program, an agent's interactive TUI — is one open block, and
-with nothing finished it is refused as `no-blocks` with a sentence saying so, rather than
-answered with an empty list that reads as "nothing ran"; with finished commands from before, it
-gets those and `grid: true`. A worker whose answer is meant to be read runs headless.
+because the end of what a command printed is where its errors and its summary are. Only
+commands' blocks count — one the shell ran, sent or started or ended with a status — and not
+what a shell printed on its own before its first prompt or between two. A command still running
+has not finished, whatever the pane draws it as: a build on the primary screen, a full-screen
+program on the alternate one, an agent's interactive TUI. With nothing finished such a pane is
+refused as `no-blocks` with a sentence saying which — wait `--until finished` for a command,
+and a screen is never a block — rather than answered with an empty list that reads as "nothing
+ran"; with finished commands from before, it gets those and `running: true`. A worker whose
+answer is meant to be read runs headless.
 
 **`events.follow`** answers `{panes}`, what it follows as of now, then one line per event until
 the client hangs up: `status` (only when the status or the message changed — an agent reports
