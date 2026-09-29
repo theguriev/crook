@@ -722,6 +722,27 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.worktree_base())
     }
 
+    /// The sentence the worktree menu is showing under its controls, if any.
+    ///
+    /// Read from the state the note is drawn from, not from the frame: a
+    /// sentence that wraps inside the 260px popup is two runs of glyphs, and
+    /// "says X" over those would be a question about where the line broke.
+    fn worktree_problem(&self) -> Option<String> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.tab_menu().problem.clone()
+        })
+    }
+
+    /// Puts `name` in the creator's branch field, replacing what is there.
+    fn name_the_worktree(&mut self, name: &str) {
+        self.workspace_update(|workspace, _| {
+            workspace
+                .worktree_branch()
+                .expect("crook/worktrees is on, so the creator has its field")
+                .edit(|editor| editor.set_text(name));
+        });
+    }
+
     /// How many worktrees the menu has read, if it has finished reading.
     fn worktrees_listed(&self) -> Option<usize> {
         self.workspace
@@ -5257,6 +5278,90 @@ fn a_worktree_made_with_the_default_branch_picked_starts_there_and_not_at_the_ta
         Some(head),
         git_says(&repository, &["rev-parse", SORTS_FIRST]),
         "the checkout started at the branch git lists first"
+    );
+}
+
+#[test]
+fn the_creator_refuses_a_blank_name_itself_and_a_dash_name_through_add() {
+    // Two names no branch can have, and which refusal a person reads for
+    // each. A blank one never reaches git: `checkout_for` has no checkout to
+    // name without it, so the creator stops with its own sentence, and
+    // `worktree::add`'s empty-name refusal guards other callers only. A name
+    // beginning with a dash does reach `add`, which has to refuse it before
+    // git runs — with the default branch picked, `-m` used to rename the
+    // tab's own branch to one called `refs/heads/<default>` and then blame
+    // the base.
+    let scratch = Scratch::new();
+    let Some((repository, _)) = repository_on_a_feature_branch(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| {
+        workspace.set_worktrees_directory(scratch.path().join("store"));
+    });
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "feature", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(harness.active_id()));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    let panes = harness.pane_ids().len();
+    let branches = git_says(&repository, &["branch", "--format=%(refname)"]);
+
+    // Spaces are trimmed away, which leaves the same blank name.
+    for blank in ["", "   "] {
+        harness.name_the_worktree(blank);
+        assert!(harness.press_key("enter", Modifiers::default()));
+        assert_eq!(
+            harness.worktree_problem().as_deref(),
+            Some("A worktree needs a branch name."),
+            "a name of {blank:?} was not refused by the creator itself"
+        );
+        assert!(
+            !harness.worktree_menu_is_busy(),
+            "a name of {blank:?} was handed to git"
+        );
+    }
+
+    // The base picked is what made `-m` dangerous: from `HEAD`, git refused
+    // `HEAD` as the new name and nothing changed.
+    assert!(harness.press_key("down", Modifiers::default()));
+    assert_eq!(harness.worktree_base(), Some(1));
+    harness.name_the_worktree("-m");
+    assert!(harness.press_key("enter", Modifiers::default()));
+    harness.wait_for("add to answer", |harness| !harness.worktree_menu_is_busy());
+    assert_eq!(
+        harness.worktree_problem().as_deref(),
+        Some("-m cannot name a branch: it begins with a dash"),
+        "the creator did not say what was wrong with -m"
+    );
+
+    assert_eq!(
+        git_says(&repository, &["symbolic-ref", "--short", "HEAD"]).as_deref(),
+        Some("feature"),
+        "the tab's own branch was renamed"
+    );
+    assert_eq!(
+        git_says(&repository, &["branch", "--format=%(refname)"]),
+        branches,
+        "a refused name changed the repository's branches"
+    );
+    assert_eq!(
+        harness.pane_ids().len(),
+        panes,
+        "a refused name opened a pane"
+    );
+    assert!(
+        harness.worktree_menu_is_creating(),
+        "a refused name took the creator down, and the name with it"
     );
 }
 
