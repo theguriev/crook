@@ -1242,7 +1242,10 @@ contributes the palettes it reads, the wire stays as it is, and the question of 
 somewhere to live.
 
 **Phase 4 — the process transport.** `plugins/host-process`: the NDJSON socket, the CLI as
-SDK, `--skill` output for an agent in a pane, supervised long-lived plugins with budgets.
+SDK, `--skill` output for an agent in a pane, supervised long-lived plugins with budgets. The
+socket's first slice is in: a per-process Unix socket that answers one read-only verb,
+`crook pane list` — see "The window answers" in `docs/architecture.md` for its threat model and
+what the verbs after it will need. Everything else in this phase is still to come.
 
 **Phase 5 — the agent seam: the status half is done, and it is not a plugin.**
 `AgentStatus::Running`/`NeedsInput`/`Failed` are written by the agent itself, over an escape

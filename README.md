@@ -285,6 +285,13 @@ Nineteen features, and the page that configures them:
   `crook --skill` prints the skill file that teaches an agent the rest — how to tell it is in
   a pane, what the four words do, where the worktrees and the plugins are — to save as
   `~/.claude/skills/crook/SKILL.md`.
+  **And the window answers.** `crook pane list` asks the window a pane is in what it has open
+  and prints a row per pane: its number (the one in `CROOK_PANE_ID`, the focused one marked
+  `*`), what its agent said, its title, group, branch and directory, and under it what a
+  waiting agent is waiting for; `--json` prints the window's own array, for a script or
+  another agent. It goes over a Unix socket in a directory only you can enter, named in every
+  pane's `CROOK_SOCKET` — never a network port — and it only reads. Outside a pane it asks
+  the one Crook that is running and refuses to guess among several. Not on Windows yet.
   A status the agent never took back goes when the shell's own marks say the command ended,
   and a failure stays on the row until the next command starts. Looking at a tab clears the
   *attention* it asked for and nothing else: an agent waiting for an approval is still waiting
@@ -381,7 +388,8 @@ Nineteen features, and the page that configures them:
   `crook --shell <path>` starts another shell in every pane, for trying one out. Marks or no
   marks, every shell Crook starts has `TERM_PROGRAM=Crook` and `CROOK_PANE_ID` set to the
   pane's number — what WezTerm's `WEZTERM_PANE` is — so a script or an agent can tell it is
-  inside Crook and which pane, and name a log file after it.
+  inside Crook and which pane, and name a log file after it — and `CROOK_SOCKET`, where the
+  window answers `crook pane list`.
 
   It also **answers**, which is what makes Tab work. Command marks are an announcement and
   completion is a question, so there is a second channel beside them: Crook writes the line

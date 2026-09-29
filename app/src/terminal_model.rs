@@ -424,6 +424,13 @@ pub struct TerminalModel {
     /// could not be started is a state nothing else can reach on purpose.
     shell: Option<PathBuf>,
 
+    /// Where the window answers questions, for the shells to be told.
+    ///
+    /// `None` until the window has opened its socket, and for good on a
+    /// platform with none: every shell is then told `CROOK_SOCKET` is empty.
+    /// See [`crate::control`].
+    control_socket: Option<PathBuf>,
+
     /// The one thread that comes back for batches parsed too soon to draw.
     ///
     /// Shared by every pane and started with the first of them, so a model that
@@ -476,6 +483,7 @@ impl TerminalModel {
             shell_marks: true,
             shell_login: shell_integration::login_by_default(),
             shell: None,
+            control_socket: None,
             flusher: Arc::new(Flusher::default()),
             flushing: false,
         }
@@ -535,6 +543,16 @@ impl TerminalModel {
     /// sent afterwards can make it read them again.
     pub fn set_shell_login(&mut self, login: bool) {
         self.shell_login = login;
+    }
+
+    /// Says where the window's control socket is, for the shells opened from
+    /// now on.
+    ///
+    /// Only those, for the reason every setting here is: a shell's environment
+    /// is fixed when it starts. The window sets it before its first shell
+    /// opens, so no pane of a window with a socket goes without it.
+    pub fn set_control_socket(&mut self, socket: Option<PathBuf>) {
+        self.control_socket = socket;
     }
 
     /// Whether the next shell opened will be a login shell.
@@ -719,6 +737,7 @@ impl TerminalModel {
                 enabled: self.shell_marks,
                 login: self.shell_login,
                 shell: self.shell.clone(),
+                control_socket: self.control_socket.clone(),
             },
         );
         let mut options = TerminalOptions {

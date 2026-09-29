@@ -5,9 +5,9 @@
 //! ended under an agent that never said it stopped. Every one of those is a
 //! fact the session already holds — see [`AgentSession`] — and this is the
 //! one place they are read out in words. herdr answers the same question with
-//! `herdr agent explain <target>`; Crook has no socket to ask over, so the
-//! answer is an entry on the row's own menu, "Why this status", contributed by
-//! [`crook/tabs`](crate::plugins::tabs).
+//! `herdr agent explain <target>`; Crook's socket answers only `pane list` so
+//! far — see [`crate::control`] — so the answer is an entry on the row's own
+//! menu, "Why this status", contributed by [`crook/tabs`](crate::plugins::tabs).
 //!
 //! # Where it hangs
 //!

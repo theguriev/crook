@@ -23,6 +23,7 @@ use crook_terminal::{Program, TerminalOptions, default_shell};
 
 use super::launch::{HostEnv, Launch, ScratchFile, plain, plan};
 use super::{Options, PANE_ID_VARIABLE, Shell, opted_out};
+use crate::control::SOCKET_VARIABLE;
 use crate::tab::PaneId;
 
 /// The one directory under the platform's temporary directory that every
@@ -98,7 +99,7 @@ impl Session {
         let shell = Shell::of(&program);
 
         if !options.enabled || opted_out() {
-            return Self::unmarked(pane, shell, &program, options.login);
+            return Self::unmarked(pane, shell, &program, options);
         }
 
         SWEPT.call_once(|| sweep(&root(), &mine(), STALE_AFTER));
@@ -106,7 +107,7 @@ impl Session {
         let scratch = scratch_directory();
         let launch = plan(shell, &program, &scratch, options.login, &host);
         if !launch.marks() {
-            return Self::unmarked(pane, shell, &program, options.login);
+            return Self::unmarked(pane, shell, &program, options);
         }
 
         if let Err(error) = write(&launch.files) {
@@ -116,10 +117,10 @@ impl Session {
                 scratch.display()
             );
             remove(&scratch);
-            return Self::unmarked(pane, shell, &program, options.login);
+            return Self::unmarked(pane, shell, &program, options);
         }
 
-        Self::from_launch(pane, shell, launch, Some(scratch))
+        Self::from_launch(pane, shell, launch, Some(scratch), options)
     }
 
     /// The shell this launch is for.
@@ -160,8 +161,8 @@ impl Session {
 
     /// The launch with no integration in it. Still a login shell, when that is
     /// what the setting says and the shell has a switch for it.
-    fn unmarked(pane: PaneId, shell: Shell, program: &Path, login: bool) -> Self {
-        Self::from_launch(pane, shell, plain(program, login), None)
+    fn unmarked(pane: PaneId, shell: Shell, program: &Path, options: &Options) -> Self {
+        Self::from_launch(pane, shell, plain(program, options.login), None, options)
     }
 
     /// Where the shell reads a completion request from and writes its answer.
@@ -178,13 +179,30 @@ impl Session {
         Some(self.scratch.as_ref()?.join(COMPLETION_ANSWER_FILE))
     }
 
-    fn from_launch(pane: PaneId, shell: Shell, launch: Launch, scratch: Option<PathBuf>) -> Self {
+    fn from_launch(
+        pane: PaneId,
+        shell: Shell,
+        launch: Launch,
+        scratch: Option<PathBuf>,
+        options: &Options,
+    ) -> Self {
         let mut environment = launch.environment;
         // Here rather than in the launch, because the launch is what a shell
         // gets and this is what a pane gets: the planners know the shell and
         // not the pane, and every session — marked, unmarked, opted out —
         // passes through this one constructor, so no path can forget it.
         environment.push((PANE_ID_VARIABLE.to_owned(), pane.as_u64().to_string()));
+        // Set when there is no socket too, and set empty: the variable is
+        // otherwise inherited, and a Crook started in another Crook's pane
+        // would hand its shells a window they are not in. A path that is not
+        // UTF-8 cannot be put in the environment this crate builds, and is no
+        // socket as far as the shell can tell.
+        let socket = options
+            .control_socket
+            .as_deref()
+            .and_then(Path::to_str)
+            .unwrap_or_default();
+        environment.push((SOCKET_VARIABLE.to_owned(), socket.to_owned()));
         // The snippet has to be told where to look, and an environment
         // variable is the only channel that reaches it: the file it reads is
         // in a directory whose name is minted per session.
