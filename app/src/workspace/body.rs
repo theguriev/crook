@@ -392,8 +392,14 @@ fn panel(
     // consumed by `Workspace::action_for` in the window delegate, so nothing
     // here has to know which chords those are.
     //
+    // The question a close asks takes even those three. It has an Escape, so
+    // nothing is left uninterruptible, and it is asking whether to end the
+    // program they would reach: a reflexive `ctrl-c` to get out of the card
+    // would interrupt the very agent it is there to protect. See
+    // [`closing`](super::closing).
     let keys = match (is_focused, workspace.a_popup_is_open()) {
         (false, _) => Keys::None,
+        (true, true) if workspace.closing_question().is_some() => Keys::None,
         (true, true) => Keys::Signals,
         (true, false) => Keys::All,
     };

@@ -30,7 +30,9 @@
 //! * the repository's worktrees, each of which opens a tab in it *in the group
 //!   the tab the menu was opened on belongs to* — or brings forward the pane
 //!   already there;
-//! * a way to make one, which asks for a branch name and where it starts;
+//! * a way to make one, which asks for a branch name and where it starts, and
+//!   locks the checkout it makes until no pane in the window is working in it
+//!   or the window closes;
 //! * a way to remove one, offered only for a checkout nothing is working in;
 //! * a way to remove all of those at once, for the day a repository has eight
 //!   of them and seven are finished.
@@ -788,19 +790,33 @@ fn listing(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
 
 /// Whether a checkout is one this menu may take away.
 ///
-/// Never the main checkout, never one somebody is working in, never a locked
-/// one, and never one git has already noticed is not there. git refuses all
-/// four, and an × that always fails is worse than no × at all — the locked
-/// case especially, because Crook's own agent worktrees are locked by the
-/// session that holds them, and that lock is exactly what stops one agent
-/// tidying away another's work.
+/// Never the main checkout, never one somebody is working in, never one
+/// somebody else has locked, and never one git has already noticed is not
+/// there. git refuses all four, and an × that always fails is worse than no ×
+/// at all — the locked case especially, because a lock is somebody saying an
+/// agent is working in there, which is exactly what stops one agent tidying
+/// away another's work.
+///
+/// A lock Crook took is the exception, and the reason is the second
+/// conjunct. A window takes its own lock off a checkout once none of its
+/// panes is working in it, and the rest when it closes, so Crook's lock on a
+/// checkout nothing in the window is working in is one a Crook that crashed
+/// or was killed left behind — and holding the checkout against Crook's own
+/// menu for ever would make the lock a trap rather than a statement. Removing
+/// it takes that lock off first. The prefix cannot say which Crook took it,
+/// so a second Crook window's checkout reads the same; that is the one thing
+/// this cannot tell apart, and it is no more than the menu offered before
+/// there was a lock.
 ///
 /// One function rather than the same four conjuncts written twice, because
 /// the × on a row and the row that sweeps all of them have to mean the same
 /// thing by "free": a person who has read what the × is offered for should not
 /// have to find out that the other one goes further.
 fn removable(worktree: &Worktree, occupied: bool) -> bool {
-    !worktree.is_main && !occupied && worktree.locked.is_none() && worktree.prunable.is_none()
+    !worktree.is_main
+        && !occupied
+        && !worktree.is_locked_by_another()
+        && worktree.prunable.is_none()
 }
 
 /// Every free checkout, as its path and the name the list calls it by.
@@ -850,7 +866,9 @@ fn worktree_row(
         Some("this tab")
     } else if elsewhere {
         Some("open")
-    } else if worktree.locked.is_some() {
+    } else if worktree.is_locked_by_another() {
+        // Crook's own lock says nothing here: with no pane in the checkout it
+        // is one left behind, and the row offers the × instead.
         Some("locked")
     } else if worktree.prunable.is_some() {
         // Registered, and its directory is gone. Saying so is the difference
@@ -1573,14 +1591,26 @@ fn buttons(
             .with_child(
                 Expanded::new(
                     1.,
-                    button(state.control(Control::Cancel), cancel, false, cancels, ui),
+                    button(
+                        state.control(Control::Cancel),
+                        cancel,
+                        false,
+                        cancels.map(WorkspaceAction::Worktree),
+                        ui,
+                    ),
                 )
                 .finish(),
             )
             .with_child(
                 Expanded::new(
                     1.,
-                    button(state.control(Control::Confirm), label, true, action, ui),
+                    button(
+                        state.control(Control::Confirm),
+                        label,
+                        true,
+                        action.map(WorkspaceAction::Worktree),
+                        ui,
+                    ),
                 )
                 .finish(),
             )
@@ -1591,12 +1621,17 @@ fn buttons(
     .finish()
 }
 
-/// One of the two buttons.
-fn button(
+/// One of a question's two buttons.
+///
+/// Also the face of the question a close asks before it ends agents that
+/// are still working — see [`closing`](super::closing) — which is why it
+/// takes any action rather than the worktree menu's own: two questions that
+/// looked different would be two things a person has to learn to read.
+pub(super) fn button(
     state: MouseStateHandle,
     label: &str,
     primary: bool,
-    action: Option<WorktreeAction>,
+    action: Option<WorkspaceAction>,
     ui: FamilyId,
 ) -> Box<dyn Element> {
     let label = label.to_owned();
@@ -1640,7 +1675,7 @@ fn button(
     match action {
         Some(action) => control
             .on_click(move |_, ctx, _| {
-                ctx.dispatch_typed_action(WorkspaceAction::Worktree(action));
+                ctx.dispatch_typed_action(action);
             })
             .finish(),
         None => control.finish(),
@@ -1692,7 +1727,10 @@ fn branch_label(worktree: &Worktree) -> String {
 }
 
 /// The line at the top of whichever face the menu is showing.
-fn header(title: impl Into<std::borrow::Cow<'static, str>>, ui: FamilyId) -> Box<dyn Element> {
+pub(super) fn header(
+    title: impl Into<std::borrow::Cow<'static, str>>,
+    ui: FamilyId,
+) -> Box<dyn Element> {
     Container::new(
         Text::new(title, ui, PATH_SIZE)
             .with_color(theme().text_muted)
@@ -1821,7 +1859,7 @@ fn pellet(color: Color) -> Box<dyn Element> {
 }
 
 /// A line of explanation, or of apology, wrapped to the popup's width.
-fn note(text: impl AsRef<str>, ui: FamilyId) -> Box<dyn Element> {
+pub(super) fn note(text: impl AsRef<str>, ui: FamilyId) -> Box<dyn Element> {
     Container::new(
         Paragraph::new(text.as_ref().to_owned(), ui, PATH_SIZE)
             .with_color(theme().text_muted)
@@ -1834,7 +1872,7 @@ fn note(text: impl AsRef<str>, ui: FamilyId) -> Box<dyn Element> {
 }
 
 /// The hairline between the worktrees and the way to another.
-fn divider() -> Box<dyn Element> {
+pub(super) fn divider() -> Box<dyn Element> {
     Container::new(
         ConstrainedBox::new(Empty::new().finish())
             .with_height(1.)

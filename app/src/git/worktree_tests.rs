@@ -774,6 +774,141 @@ fn a_locked_worktree_survives_a_forced_removal() {
     assert!(checkout.exists());
 }
 
+// --- locking -------------------------------------------------------------------
+
+#[test]
+fn a_lock_crook_took_is_told_apart_from_anybody_elses() {
+    let mut worktree = worktree_on("side");
+
+    worktree.locked = Some(lock_reason("side"));
+    assert!(worktree.is_locked_by_crook());
+    assert!(!worktree.is_locked_by_another());
+
+    // Claude Code's own shape, and a person's `git worktree lock` with a
+    // reason and without one: none of them is Crook's to take off.
+    for theirs in [
+        "claude session side (pid 1415238 start 20712995)",
+        "",
+        "held by crook: no",
+    ] {
+        worktree.locked = Some(theirs.to_owned());
+        assert!(!worktree.is_locked_by_crook(), "{theirs:?} read as Crook's");
+        assert!(
+            worktree.is_locked_by_another(),
+            "{theirs:?} read as nobody's"
+        );
+    }
+
+    worktree.locked = None;
+    assert!(!worktree.is_locked_by_crook());
+    assert!(!worktree.is_locked_by_another());
+}
+
+#[test]
+fn a_locked_checkout_lists_the_reason_it_was_locked_with_and_unlocks_again() {
+    if without_git("a_locked_checkout_lists_the_reason_it_was_locked_with_and_unlocks_again") {
+        return;
+    }
+    let scratch = ScratchDir::new("lock");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    let checkout = scratch.spot("held");
+    add(&repo, &checkout, "held", Some("main")).expect("git added the worktree");
+
+    lock(&repo, &checkout, &lock_reason("held")).expect("git locked the worktree");
+
+    let listed = list(&repo).expect("git answered");
+    assert_eq!(
+        entry(&listed, &checkout).locked.as_deref(),
+        Some("crook: held")
+    );
+    // What the lock is for: git will not take the checkout away under it.
+    match remove(&repo, &checkout, true).expect_err("the lock holds") {
+        Error::Locked { reason } => assert_eq!(reason, "crook: held"),
+        other => panic!("expected Locked, got {other:?}"),
+    }
+
+    unlock(&repo, &checkout).expect("git unlocked the worktree");
+    assert_eq!(
+        entry(&list(&repo).expect("git answered"), &checkout).locked,
+        None
+    );
+    // Twice is not an error: the second has nothing to do, and two tabs
+    // closing at once in one checkout both ask.
+    unlock(&repo, &checkout).expect("a checkout that is not locked stays that way");
+}
+
+#[test]
+fn locking_a_checkout_somebody_else_locked_keeps_their_lock() {
+    if without_git("locking_a_checkout_somebody_else_locked_keeps_their_lock") {
+        return;
+    }
+    let scratch = ScratchDir::new("lock-taken");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    let checkout = scratch.spot("held");
+    add(&repo, &checkout, "held", Some("main")).expect("git added the worktree");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "claude session held",
+            checkout.to_str().expect("the scratch path is utf-8"),
+        ],
+    );
+
+    match lock(&repo, &checkout, &lock_reason("held")).expect_err("it is locked already") {
+        Error::Locked { reason } => assert_eq!(reason, "claude session held"),
+        other => panic!("expected Locked, got {other:?}"),
+    }
+    assert_eq!(
+        entry(&list(&repo).expect("git answered"), &checkout)
+            .locked
+            .as_deref(),
+        Some("claude session held")
+    );
+}
+
+#[test]
+fn releasing_takes_off_crooks_own_lock_and_nobody_elses() {
+    if without_git("releasing_takes_off_crooks_own_lock_and_nobody_elses") {
+        return;
+    }
+    let scratch = ScratchDir::new("release");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    let ours = scratch.spot("ours");
+    let theirs = scratch.spot("theirs");
+    let open = scratch.spot("open");
+    add(&repo, &ours, "ours", Some("main")).expect("git added the worktree");
+    add(&repo, &theirs, "theirs", Some("main")).expect("git added the worktree");
+    add(&repo, &open, "open", Some("main")).expect("git added the worktree");
+    lock(&repo, &ours, &lock_reason("ours")).expect("git locked it");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "claude session theirs",
+            theirs.to_str().expect("the scratch path is utf-8"),
+        ],
+    );
+
+    assert!(release(&repo, &ours).expect("git answered"));
+    assert!(!release(&repo, &theirs).expect("git answered"));
+    assert!(!release(&repo, &open).expect("git answered"));
+
+    let listed = list(&repo).expect("git answered");
+    assert_eq!(entry(&listed, &ours).locked, None);
+    assert_eq!(
+        entry(&listed, &theirs).locked.as_deref(),
+        Some("claude session theirs"),
+        "somebody else's lock was taken off"
+    );
+    assert_eq!(entry(&listed, &open).locked, None);
+    remove(&repo, &ours, false).expect("nothing holds it any more");
+}
+
 #[test]
 fn neither_the_main_worktree_nor_a_path_that_is_not_one_can_be_removed() {
     if without_git("neither_the_main_worktree_nor_a_path_that_is_not_one_can_be_removed") {
@@ -1126,6 +1261,20 @@ fn each_fatal_git_prints_for_a_worktree_is_recognised() {
         classify("fatal: '../nope' is not a working tree\n"),
         Error::NotAWorktree { .. }
     ));
+}
+
+#[test]
+fn a_lock_git_will_not_replace_is_recognised_with_whose_it_is() {
+    // Both real messages from git 2.55.0's `worktree lock`, which will not
+    // put one lock over another: the reason is the half a person is told.
+    match classify("fatal: '../side' is already locked, reason: claude session x\n") {
+        Error::Locked { reason } => assert_eq!(reason, "claude session x"),
+        other => panic!("expected Locked, got {other:?}"),
+    }
+    match classify("fatal: '../side' is already locked\n") {
+        Error::Locked { reason } => assert_eq!(reason, ""),
+        other => panic!("expected Locked, got {other:?}"),
+    }
 }
 
 #[test]

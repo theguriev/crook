@@ -182,6 +182,16 @@ pub enum Event {
     /// which is what keeps every platform's way of asking behind the window
     /// layer.
     SystemTheme(SystemTheme),
+
+    /// The window gained the desktop's keyboard focus (`true`) or lost it to
+    /// another window (`false`).
+    ///
+    /// About the window, not about anything in it: an element's own focus is
+    /// the application's business and never arrives this way. Sent on every
+    /// change and not when the window opens — a window is focused until told
+    /// otherwise, which is what every window was before this was sent, so a
+    /// desktop that never says leaves an application exactly as it was.
+    WindowFocused(bool),
 }
 
 /// Whether the desktop is set to light or to dark.
@@ -246,7 +256,11 @@ impl Event {
             | Self::MouseMoved { position, .. }
             | Self::ScrollWheel { position, .. }
             | Self::ModifiersChanged { position, .. } => Some(*position),
-            Self::KeyDown { .. } | Self::KeyUp { .. } | Self::Ime(_) | Self::SystemTheme(_) => None,
+            Self::KeyDown { .. }
+            | Self::KeyUp { .. }
+            | Self::Ime(_)
+            | Self::SystemTheme(_)
+            | Self::WindowFocused(_) => None,
         }
     }
 
@@ -274,7 +288,7 @@ impl Event {
             // An input method reports what it composed, never what was held to
             // compose it: the modifiers went into the composition and came out
             // the other side as text.
-            Self::Ime(_) | Self::SystemTheme(_) => Modifiers::default(),
+            Self::Ime(_) | Self::SystemTheme(_) | Self::WindowFocused(_) => Modifiers::default(),
         }
     }
 
@@ -327,6 +341,7 @@ impl DispatchedEvent {
             | Event::KeyUp { .. }
             | Event::Ime(_)
             | Event::SystemTheme(_)
+            | Event::WindowFocused(_)
             | Event::MouseMoved { .. }
             | Event::ModifiersChanged { .. } => Some(&self.event),
         }
