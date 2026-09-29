@@ -1306,7 +1306,9 @@ disagree, because they are the same range.
    reader used to hold, so an unconditional `ctrl-d` would be an end of file every time; over
    a written line it is the delete-forward it is in every line editor. A modal menu over the
    window takes the typing away and leaves these three, because a running command has to stay
-   interruptible.
+   interruptible — except the question a close asks, which takes all three: it has an Escape,
+   so nothing is left uninterruptible, and a reflexive `ctrl-c` to get out of it would
+   interrupt the very program it is asking whether to end.
 4. **Everything else on the normal screen is the field's**, and a key the keymap has no
    meaning for does nothing rather than leaking into the shell.
 
