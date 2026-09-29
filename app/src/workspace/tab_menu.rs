@@ -230,10 +230,11 @@ pub(super) enum Mode {
         /// Whether git has already refused once.
         refused: bool,
     },
-    /// Asking about deleting every branch whose work is proved to have landed
-    /// that no checkout has checked out. What it is asking about lives in
-    /// [`TabMenuState::pruning`], for the reason [`Self::Tidying`] keeps its
-    /// answer outside.
+    /// Asking about deleting the branches whose work is proved to have landed
+    /// that no checkout has checked out: the first [`NAMED`] of them by name,
+    /// and the rest counted, for the question after this one. What it is
+    /// asking about lives in [`TabMenuState::pruning`], for the reason
+    /// [`Self::Tidying`] keeps its answer outside.
     Pruning,
     /// Asking about finishing the task in one checkout, or discarding it,
     /// and then doing it. See [`super::finish`]; what it found lives in

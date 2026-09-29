@@ -126,8 +126,11 @@ pub(super) enum Again {
     CarryOut,
 }
 
-/// Everything the question needs to say what will happen, read once when it
-/// opens.
+/// Everything the question needs to say what will happen, read when it opens
+/// and read again when a pane in the checkout stops, when Discard's first
+/// question is answered, and when a button is pressed. Each read replaces the
+/// one the question shows, and a press carries out the one it read itself,
+/// not the one that was on screen.
 #[derive(Clone, Debug)]
 pub(super) struct Plan {
     /// Every checkout the repository has, main one first — the one being

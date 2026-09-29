@@ -291,10 +291,13 @@ pub enum WorktreeAction {
     /// Remove those of them git lets go without being forced, and leave the
     /// rest standing. There is no second question: this one never forces.
     Tidy,
-    /// Ask about deleting every branch proved to have landed on the base
-    /// that no checkout has checked out.
+    /// Ask about deleting the branches proved to have landed on the base that
+    /// no checkout has checked out: the first six of them (the menu's
+    /// `NAMED`), each named with what proved it, and the rest counted and
+    /// asked about by the next question, once these have gone.
     AskDeleteLanded,
-    /// Delete them: each is proved again first, and kept if it has moved.
+    /// Delete the branches that question named, and none of the ones it only
+    /// counted: each is proved again first, and kept if it has moved.
     DeleteLanded,
     /// Ask about finishing the task in the checkout this pane is in: close
     /// what is working there, remove the checkout, and delete its branch if
