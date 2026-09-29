@@ -83,10 +83,13 @@
 //! # What it costs when it does not work
 //!
 //! One pane's blocks, and nothing else. [`Session::open`] cannot fail: an
-//! unrecognised shell, an unwritable temporary directory, no `HOME` for zsh's
-//! stubs to point back at — each of them returns a session whose
-//! [`marks`](Session::marks) is false, which starts the user's shell exactly as
-//! before. Degraded is a state this module reports, not an error it raises.
+//! unrecognised shell, an unwritable temporary directory, a scratch root that
+//! is not this user's alone, no `HOME` for zsh's stubs to point back at — each
+//! of them returns a session whose [`marks`](Session::marks) is false, which
+//! starts the user's shell exactly as before. The two that are the machine's
+//! doing rather than the shell's, the directory and the root, say so in one
+//! line of the log. Degraded is a state this module reports, not an error it
+//! raises.
 //!
 //! # Getting out of it, and getting it somewhere else
 //!
@@ -106,8 +109,9 @@
 //! # Layout
 //!
 //! * `launch` decides — pure functions, no filesystem, one per shell.
-//! * `scratch` does — writes the files, hands over the launch, removes the
-//!   directory when the session is dropped.
+//! * `scratch` does — makes sure the directory is the user's alone, writes the
+//!   files, hands over the launch, removes the directory when the session is
+//!   dropped.
 //! * `crook.zsh`, `crook.bash` and `crook.fish` are the snippets themselves,
 //!   compiled in.
 //!

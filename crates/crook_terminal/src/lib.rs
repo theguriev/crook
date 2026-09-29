@@ -356,6 +356,21 @@ impl Terminal {
         self.write(COMPLETION_REQUEST)
     }
 
+    /// Tells the child its terminal gained or lost the keyboard, if it has
+    /// asked to be told.
+    ///
+    /// Returns whether anything was sent. Nothing is until the child has set
+    /// `?1004`, which is what keeps `CSI I` off a shell's command line; see
+    /// [`input::focus`]. Which terminal *has* the keyboard — the window's, and
+    /// within it one pane's — is the caller's to know and to say.
+    pub fn send_focus(&mut self, focused: bool) -> io::Result<bool> {
+        let Some(bytes) = input::focus(focused, self.emulator.focus_reporting()) else {
+            return Ok(false);
+        };
+        self.write(bytes)?;
+        Ok(true)
+    }
+
     /// Sends pasted text, the way [`input::paste`] spells it: bracketed when
     /// the child asked for that, with the bytes that could end the bracket
     /// taken out, and with newlines as the Enter key sends them otherwise.

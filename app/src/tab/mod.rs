@@ -376,7 +376,8 @@ impl AgentSession {
     /// The count in the header and the tab the "next waiting" chord goes to:
     /// something happened here unseen, the person marked it to come back to,
     /// or the agent said it needs input and is still saying so. `active` is
-    /// whether the pane is the one being looked at, and a pane that is can
+    /// whether the pane is the one being looked at — the one with the
+    /// keyboard, in a window that has the desktop's — and a pane that is can
     /// wait for nobody.
     pub fn is_waiting(&self, active: bool) -> bool {
         !active && (self.asks_for_a_look() || self.status == AgentStatus::NeedsInput)

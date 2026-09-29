@@ -160,20 +160,10 @@ impl RowFacts {
         facts: Option<&GitFacts>,
         home: Option<&Path>,
     ) -> Self {
-        // A name the session has, else the directory's own — `agent 3` is the
-        // last resort it always was, and now reaches only a pane with no name,
-        // no program and nowhere to be.
-        let named = session.name().map(str::to_owned);
-        let label = session
-            .working_directory
-            .as_deref()
-            .and_then(|directory| git::directory_label(directory, home));
-        let command_is_the_directory = named.is_none() && label.is_some();
+        let (command, command_is_the_directory) = command_of(session, home);
 
         Self {
-            command: named
-                .or(label)
-                .unwrap_or_else(|| session.display_title().to_owned()),
+            command,
             command_is_the_directory,
             directory: session
                 .working_directory
@@ -268,6 +258,36 @@ impl RowFacts {
             Subtitle::Command if self.command_is_the_directory => None,
             Subtitle::Command => Some(RowLine::plain(self.command.clone())),
         }
+    }
+}
+
+/// What a row calls a session: the name it has, else its directory's.
+///
+/// The row's "Command / Conversation" fact, and what a desktop notification
+/// names the pane by: a banner that named it any other way — the `agent 1`
+/// a shell at a prompt was born as, while its row says `app` — would name a
+/// tab nobody can find.
+pub(super) fn row_name(session: &AgentSession, home: Option<&Path>) -> String {
+    command_of(session, home).0
+}
+
+/// [`row_name`], and whether it is the directory's own name rather than a
+/// name the session has.
+///
+/// A name the session has, else the directory's own — `agent 3` is the last
+/// resort it always was, and now reaches only a pane with no name, no
+/// program and nowhere to be.
+fn command_of(session: &AgentSession, home: Option<&Path>) -> (String, bool) {
+    if let Some(name) = session.name() {
+        return (name.to_owned(), false);
+    }
+    match session
+        .working_directory
+        .as_deref()
+        .and_then(|directory| git::directory_label(directory, home))
+    {
+        Some(label) => (label, true),
+        None => (session.display_title().to_owned(), false),
     }
 }
 

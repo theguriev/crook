@@ -25,6 +25,7 @@ mod about;
 mod appearance;
 pub mod blocks;
 pub mod header;
+pub mod notifications;
 mod palette;
 pub mod pane;
 pub mod pictures;
@@ -59,11 +60,12 @@ pub fn defaults() -> Vec<Box<dyn Plugin>> {
         // the convention this list's own doc gives rather than a requirement.
         Box::new(worktrees::Worktrees),
         Box::new(settings::Settings),
-        // The rail's order is these four, and it is the `order` each of them
+        // The rail's order is these five, and it is the `order` each of them
         // asks for rather than this list — a plugin that adds a page cannot
         // be made to load in the right place in somebody else's list.
         Box::new(appearance::Appearance),
         Box::new(shell::Shell),
+        Box::new(notifications::Notifications),
         Box::new(shortcuts::Shortcuts),
         Box::new(plugins_page::Plugins::new()),
         // After the page that lists what is installed, which is the order the

@@ -495,3 +495,92 @@ fn a_scroll_shorter_than_a_line_is_carried_to_the_next_one() {
     assert_eq!((0, -0.5), whole_lines(0.0, -0.5));
     assert_eq!((-1, 0.0), whole_lines(-0.5, -0.5));
 }
+
+/// How long a test watches for the terminal to come free while a writer is
+/// kept from installing the snapshot it built.
+///
+/// Not a wait for something to happen: on the right code the terminal never
+/// comes free here and the test spends the whole of it. On the wrong code it
+/// comes free the instant the writer has synced its blocks, so this only has to
+/// outlast a scheduler that has parked the writer's thread in between — which
+/// is also the one way the wrong code could slip through.
+const GAP_WINDOW: Duration = Duration::from_millis(100);
+
+/// Runs `write` on a thread of its own with the snapshot slot held, and asserts
+/// that it does not let go of the terminal before its snapshot is in the slot.
+///
+/// The gap is the whole race. A writer that builds its snapshot and syncs the
+/// blocks under the terminal's lock, then installs the snapshot after letting
+/// go, leaves a moment in which the other writer can build, sync and install a
+/// newer pair — and then have its snapshot overwritten by the older one, beside
+/// its own newer block list. A command that finished during a drag was painted
+/// twice, once as a block and once in the live viewport, with its tab still
+/// labelled running.
+///
+/// Holding the slot here turns that moment into one that lasts, so the test
+/// needs no second writer racing the first: a terminal that can be taken while
+/// the slot is still waiting is the gap.
+///
+/// `write` must leave the drawn content as it was. That is what lets the count
+/// on the installed snapshot say where the writer has got to.
+fn assert_the_terminal_is_held_until_the_snapshot_is_published(
+    shared: &Arc<Shared>,
+    write: impl FnOnce() + Send + 'static,
+) {
+    let slot = shared.latest.lock().unwrap_or_else(PoisonError::into_inner);
+    // The terminal is clean, so the snapshot a writer builds is this very `Arc`
+    // again, and one more count on it is the writer holding a snapshot it has
+    // built and not yet installed — under the terminal's lock either way.
+    let installed = Arc::strong_count(&*slot);
+    let writer = thread::spawn(write);
+
+    let deadline = Instant::now() + REPLY_TIMEOUT;
+    while Arc::strong_count(&*slot) == installed {
+        assert!(
+            Instant::now() < deadline,
+            "the writer never built a snapshot"
+        );
+        thread::yield_now();
+    }
+
+    let watching = Instant::now();
+    while watching.elapsed() < GAP_WINDOW {
+        assert!(
+            shared.terminal.try_lock().is_err(),
+            "the terminal was let go before its snapshot was published, so the \
+             other writer could publish a newer one in between and be overwritten"
+        );
+        thread::yield_now();
+    }
+
+    drop(slot);
+    writer.join().expect("the writer panicked");
+}
+
+#[test]
+fn a_key_press_publishes_what_it_drew_before_it_lets_go_of_the_terminal() {
+    // The UI thread's writer: typing, a resize, the wheel, all through `drive`.
+    let Some(shared) = session() else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    let handle = TerminalHandle(shared.clone());
+
+    assert_the_terminal_is_held_until_the_snapshot_is_published(&shared, move || {
+        handle.send_key(Key::Char('a'), Modifiers::default());
+    });
+}
+
+#[test]
+fn the_reader_publishes_what_it_drew_before_it_lets_go_of_the_terminal() {
+    // The other writer: the reader thread and the flusher, through `publish`.
+    let Some(shared) = session() else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    let publishing = shared.clone();
+
+    assert_the_terminal_is_held_until_the_snapshot_is_published(&shared, move || {
+        publishing.publish();
+    });
+}

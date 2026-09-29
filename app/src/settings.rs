@@ -46,6 +46,8 @@ use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::notify::Occasion;
+
 /// The directory Crook keeps its per-user files in, inside the platform's
 /// configuration directory.
 const CONFIG_DIRECTORY: &str = "crook";
@@ -257,15 +259,15 @@ impl StatusMarks {
 
 /// Everything the settings page writes that is not about the tab strip.
 ///
-/// Four switches, and that is not an accident of scheduling. Crook has a
-/// window and a tab strip; every option that could be offered about the strip
-/// is already in [`TabOptions`], and what a plugin wants asked about itself
-/// belongs to that plugin rather than here. Warp's settings hold roughly eight
-/// hundred keys behind a schema system, a migration path and a cloud-sync
-/// policy —
-/// `docs/architecture.md` is explicit that a `serde` struct in a file is the
-/// right answer until there are ten of them, and this is the second struct,
-/// not the beginning of a schema.
+/// A type size and seven switches, and that is not an accident of
+/// scheduling. Crook has a window and a tab strip; every option that could be
+/// offered about the strip is already in [`TabOptions`], and what a plugin
+/// wants asked about itself belongs to that plugin rather than here. Warp's
+/// settings hold roughly eight hundred keys behind a schema system, a
+/// migration path and a cloud-sync policy — `docs/architecture.md` is
+/// explicit that a `serde` struct in a file is the right answer until there
+/// are ten of them, and this is the second struct, not the beginning of a
+/// schema.
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GeneralOptions {
@@ -339,6 +341,27 @@ pub struct GeneralOptions {
     /// back while one of those is showing and goes again on the way back to
     /// the tabs.
     pub show_tabs_panel: bool,
+    /// Whether a pane whose row turns to needs-input while the window is
+    /// behind another one posts a desktop notification.
+    ///
+    /// On, because it is the one notification a person away from the window
+    /// is waiting for: an agent that stopped to ask does nothing until
+    /// somebody answers. See [`crate::notify`] for when else one is posted
+    /// and how often.
+    pub notify_on_needs_input: bool,
+    /// Whether an agent saying it failed posts one.
+    ///
+    /// Off, because a failure is the agent's to report and many agents say
+    /// "failed" on the way to trying again; somebody who wants to hear it
+    /// turns it on.
+    pub notify_on_failed: bool,
+    /// Whether a command that ran for at least
+    /// [`LONG_COMMAND`](crate::notify::LONG_COMMAND) posts one when it ends.
+    ///
+    /// Off, for the reason every terminal that offers this has it off: a
+    /// banner at the end of every build is a banner a person learns to
+    /// ignore, and the one that mattered goes with the rest.
+    pub notify_on_long_command: bool,
 }
 
 impl Default for GeneralOptions {
@@ -352,6 +375,9 @@ impl Default for GeneralOptions {
             restore_session: true,
             login_shell: crate::shell_integration::login_by_default(),
             show_tabs_panel: true,
+            notify_on_needs_input: true,
+            notify_on_failed: false,
+            notify_on_long_command: false,
         }
     }
 }
@@ -393,6 +419,32 @@ impl GeneralOptions {
     /// negative step — and still within the bounds.
     pub fn zoomed(self, step: f32) -> f32 {
         (self.font_size() + step).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+    }
+
+    /// Whether a person asked to be notified of `occasion`.
+    pub fn notifies_on(self, occasion: Occasion) -> bool {
+        match occasion {
+            Occasion::NeedsInput => self.notify_on_needs_input,
+            Occasion::Failed => self.notify_on_failed,
+            Occasion::LongCommand => self.notify_on_long_command,
+        }
+    }
+
+    /// Whether a person asked to be notified of anything at all: one of the
+    /// switches [`Self::notifies_on`] reads is on.
+    pub fn notifies_on_any(self) -> bool {
+        self.notify_on_needs_input || self.notify_on_failed || self.notify_on_long_command
+    }
+
+    /// The same options, with `occasion`'s switch turned the other way.
+    pub fn toggled(mut self, occasion: Occasion) -> Self {
+        let switch = match occasion {
+            Occasion::NeedsInput => &mut self.notify_on_needs_input,
+            Occasion::Failed => &mut self.notify_on_failed,
+            Occasion::LongCommand => &mut self.notify_on_long_command,
+        };
+        *switch = !*switch;
+        self
     }
 }
 
@@ -1312,6 +1364,55 @@ mod tests {
         assert_eq!(StatusMarks::Dots, options.status_marks);
     }
 
+    #[test]
+    fn test_a_desktop_notification_is_on_for_a_question_and_off_for_the_rest() {
+        let general = GeneralOptions::default();
+
+        assert!(general.notifies_on(Occasion::NeedsInput));
+        assert!(!general.notifies_on(Occasion::Failed));
+        assert!(!general.notifies_on(Occasion::LongCommand));
+    }
+
+    #[test]
+    fn test_each_notification_switch_turns_only_itself() {
+        let general = GeneralOptions::default();
+        for occasion in [
+            Occasion::NeedsInput,
+            Occasion::Failed,
+            Occasion::LongCommand,
+        ] {
+            let toggled = general.toggled(occasion);
+            assert_ne!(
+                toggled.notifies_on(occasion),
+                general.notifies_on(occasion),
+                "{occasion:?} did not turn"
+            );
+            assert_eq!(
+                toggled.toggled(occasion),
+                general,
+                "{occasion:?} turned something else with it"
+            );
+        }
+    }
+
+    #[test]
+    fn test_the_notification_switches_survive_a_save_and_a_load() {
+        let scratch = ScratchDirectory::new("notifications");
+        let mut settings = Settings::load(scratch.settings_file());
+        settings.set_general(
+            settings
+                .general()
+                .toggled(Occasion::NeedsInput)
+                .toggled(Occasion::LongCommand),
+        );
+        settings.save_blocking().expect("the save should succeed");
+
+        let general = Settings::load(scratch.settings_file()).general();
+        assert!(!general.notifies_on(Occasion::NeedsInput));
+        assert!(!general.notifies_on(Occasion::Failed));
+        assert!(general.notifies_on(Occasion::LongCommand));
+    }
+
     // `/dev/full` answers every write with "no space left on device", which
     // is the way a save really fails; reached through a link, so what the
     // failed save removes is the link and never the device.
@@ -1553,6 +1654,11 @@ mod tests {
                 // Crook's own, and the one key here that changes what the
                 // shell itself is rather than what the window looks like.
                 "login_shell",
+                // Crook's own: which of a pane's stops post a desktop
+                // notification while the window is behind another.
+                "notify_on_failed",
+                "notify_on_long_command",
+                "notify_on_needs_input",
                 "primary_info",
                 "restore_session",
                 "show_details_on_hover",
@@ -1752,11 +1858,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Nine tab options, five general ones and three theme names, and
+        // Nine tab options, eight general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(17, written.len());
+        assert_eq!(20, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),

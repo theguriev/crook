@@ -36,6 +36,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use crate::rendering::init_wgpu_instance;
 
 use super::chrome::{RESIZE_GRAB, WindowChrome, WindowControls, edge_at};
+use super::dock;
 use super::event::InputState;
 use super::window::Window;
 
@@ -68,8 +69,8 @@ impl Default for WindowOptions {
 /// What the window asks of the application above it.
 ///
 /// This is the whole seam between the platform layer and the application:
-/// three methods, no winit types, no wgpu types. A headless test double
-/// implements it in a dozen lines.
+/// four methods, one of them optional, no winit types, no wgpu types. A
+/// headless test double implements it in a dozen lines.
 pub trait WindowDelegate: 'static {
     /// Lays out and paints the frame to draw.
     ///
@@ -87,6 +88,18 @@ pub trait WindowDelegate: 'static {
 
     /// Runs after each frame reaches the screen.
     fn frame_drawn(&mut self);
+
+    /// Runs once, as the event loop stops, whatever stopped it.
+    ///
+    /// The one place an application hears that it is ending. Only some of
+    /// the ways a window closes pass through the application first — the
+    /// window manager's close and macOS's Quit go straight to the platform,
+    /// and Quit ends the process without [`run`] ever returning — and every
+    /// one of them passes through here.
+    ///
+    /// Nothing is drawn after it, so work done here is work the person
+    /// waits for with the window up and unanswering: bound it.
+    fn exiting(&mut self) {}
 }
 
 /// A `Send + Sync` handle for reaching the main thread from anywhere.
@@ -116,6 +129,57 @@ impl Proxy {
     /// frame is only paying for a message, as with the input method's area.
     pub fn set_title(&self, title: String) {
         self.send(CrookEvent::SetTitle(title));
+    }
+
+    /// Asks the desktop to point at the window: a bounce of the dock icon, an
+    /// urgency hint, a flash of the taskbar button — whichever the platform
+    /// has.
+    ///
+    /// For something in the window that wants a person who is somewhere
+    /// else, so it does nothing while the window has the focus. It is not a
+    /// notification: it says nothing but "this window", and the platform
+    /// decides how. The request is over when the window next gains the focus,
+    /// which is the look it asked for — taken back then on the desktop that
+    /// needs it, X11 — so the caller has nothing to undo.
+    pub fn request_attention(&self) {
+        self.send(CrookEvent::RequestAttention);
+    }
+
+    /// Puts `waiting` on the application's dock icon as a badge, or takes
+    /// the badge off at zero.
+    ///
+    /// The count of panes waiting for a person, the number the window's
+    /// title starts with, somewhere it is seen with the window out of sight.
+    /// It is set here and drawn by the dock, which for an application with a
+    /// bundle identifier — Crook.app — draws it only after the application
+    /// has asked Notification Center for leave to badge, and only while the
+    /// person's Badges switch allows it. Asking is the caller's, with
+    /// [`Self::show_badge_again`] once the answer is yes. For a binary
+    /// started from a shell, which has no identifier to ask as, it is set all
+    /// the same, and whether the dock draws it is not established.
+    ///
+    /// macOS only, and nothing is sent anywhere else: a Linux desktop has no
+    /// badge its docks agree on, and a Windows taskbar's overlay icon is a
+    /// picture rather than a number. Sending the same count twice is
+    /// harmless; a caller that sends one only when it changes saves the
+    /// dock a redraw.
+    pub fn set_badge(&self, waiting: usize) {
+        if cfg!(target_os = "macos") {
+            self.send(CrookEvent::SetBadge(waiting));
+        }
+    }
+
+    /// Sets the dock icon's badge again as it stands, for a dock that may
+    /// have dropped it while the application had no leave to badge.
+    ///
+    /// For the moment that leave arrives, which is on a queue of the
+    /// system's: whatever count [`Self::set_badge`] last sent is the one
+    /// shown, since both go through the event loop in the order they were
+    /// sent. Nothing when there is no badge, and nothing is sent off macOS.
+    pub fn show_badge_again(&self) {
+        if cfg!(target_os = "macos") {
+            self.send(CrookEvent::ShowBadgeAgain);
+        }
     }
 
     /// Says where the text being composed is, so the platform can put an input
@@ -168,8 +232,11 @@ pub struct Platform {
 /// Everything that reaches the main thread from somewhere else.
 ///
 /// A handful of variants rather than Warp's thirty, because Crook has one
-/// window and no menu bar, no global hotkeys and no notifications. Adding one
-/// is how any future off-thread capability should arrive.
+/// window and no menu bar, no global hotkeys and no notifications — asking
+/// for attention is not one: it names only the window, and the desktop says
+/// it however it says it; nor is the dock's badge, a number on the icon. The
+/// application posts its notifications itself. Adding one is how any future
+/// off-thread capability should arrive.
 enum CrookEvent {
     /// Poll a foreground task.
     RunTask(ManuallyDrop<Runnable>),
@@ -184,6 +251,12 @@ enum CrookEvent {
     },
     /// Name the window.
     SetTitle(String),
+    /// Ask the desktop to point at the window.
+    RequestAttention,
+    /// Put this many waiting panes on the dock icon's badge.
+    SetBadge(usize),
+    /// Set the dock icon's badge again, as it stands.
+    ShowBadgeAgain,
     /// Leave the event loop.
     Exit,
 }
@@ -227,6 +300,7 @@ pub fn run(
         window: None,
         controls,
         input: InputState::default(),
+        attention_requested: false,
         replay_requested_redraw: false,
         frame_retry: None,
     };
@@ -243,6 +317,10 @@ struct App {
     window: Option<Window>,
     controls: WindowControls,
     input: InputState,
+
+    /// Whether the desktop has been asked to point at the window since it
+    /// last had the focus, so that gaining it can take the request back.
+    attention_requested: bool,
 
     /// Whether the redraw now pending is the one the hover replay itself asked
     /// for. Without it, a delegate that repaints in response to the replay
@@ -276,6 +354,10 @@ impl ApplicationHandler<CrookEvent> for App {
         {
             window.request_redraw();
         }
+    }
+
+    fn exiting(&mut self, _: &ActiveEventLoop) {
+        self.delegate.exiting();
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -342,6 +424,15 @@ impl ApplicationHandler<CrookEvent> for App {
                     window.set_title(&title);
                 }
             }
+            CrookEvent::RequestAttention => {
+                if let Some(window) = self.window.as_mut()
+                    && window.request_attention()
+                {
+                    self.attention_requested = true;
+                }
+            }
+            CrookEvent::SetBadge(waiting) => dock::set_badge(dock::label(waiting).as_deref()),
+            CrookEvent::ShowBadgeAgain => dock::show_again(),
             CrookEvent::Exit => event_loop.exit(),
         }
     }
@@ -374,6 +465,17 @@ impl ApplicationHandler<CrookEvent> for App {
             WindowEvent::RedrawRequested => {
                 self.redraw(event_loop);
                 return;
+            }
+
+            // The look a request for attention asked for, so the request is
+            // over. Taken back here rather than left to the application,
+            // because only X11 needs taking back — it keeps its urgency hint
+            // until somebody removes it — and nothing above this line should
+            // have to know which desktop it is on. Then on to the delegate
+            // like any other focus change.
+            WindowEvent::Focused(true) if self.attention_requested => {
+                self.attention_requested = false;
+                self.with_window(|window| window.withdraw_attention_request());
             }
 
             _ => {}

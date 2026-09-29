@@ -238,6 +238,22 @@ fn test_the_mouse_modes_are_the_ones_the_child_asked_for() {
 }
 
 #[test]
+fn test_focus_reporting_is_the_mode_the_child_asked_for() {
+    let mut emulator = emulator();
+    assert!(
+        !emulator.focus_reporting(),
+        "a fresh terminal reports no focus, which is what keeps `CSI I` off a \
+         shell's command line"
+    );
+
+    emulator.advance(b"\x1b[?1004h");
+    assert!(emulator.focus_reporting());
+
+    emulator.advance(b"\x1b[?1004l");
+    assert!(!emulator.focus_reporting());
+}
+
+#[test]
 fn test_alternate_scroll_is_reported_separately_from_the_mouse() {
     // A pager relies on this and never asks for the mouse. The two have to
     // stay apart: a drag across `less` must still select, and the wheel must
