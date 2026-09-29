@@ -635,6 +635,264 @@ fn neither_the_main_worktree_nor_a_path_that_is_not_one_can_be_removed() {
     assert!(repo.join("tracked.txt").is_file());
 }
 
+// --- deleting a branch -----------------------------------------------------------
+
+const MAIN: &str = "refs/heads/main";
+
+/// Commits `contents` to `file` on whatever `repo` has checked out, and
+/// answers the new commit.
+fn commit(repo: &Path, file: &str, contents: &str, message: &str) -> String {
+    write(&repo.join(file), contents);
+    git(repo, &["add", file]);
+    git(repo, &["commit", "--no-verify", "-m", message]);
+    git(repo, &["rev-parse", "HEAD"])
+}
+
+/// A repository with a `feature` branch whose one commit the forge squashed
+/// onto `main`, back on `main`, with the proof `merged` makes of it.
+fn squash_landed(scratch: &ScratchDir) -> (PathBuf, Landed) {
+    let repo = repo_with_a_commit(scratch, "repo");
+    git(&repo, &["switch", "-c", "feature"]);
+    commit(&repo, "feature.txt", "the work\n", "the work");
+    git(&repo, &["switch", "main"]);
+    git(&repo, &["merge", "--squash", "feature"]);
+    git(&repo, &["commit", "--no-verify", "-m", "feature, squashed"]);
+
+    let landed = merged(&repo, MAIN, &["feature".to_owned()])
+        .remove("feature")
+        .expect("the squash proves the branch");
+    (repo, landed)
+}
+
+fn has_branch(repo: &Path, branch: &str) -> bool {
+    !git(repo, &["branch", "--list", branch]).is_empty()
+}
+
+#[test]
+fn a_branch_squashed_onto_the_base_is_deleted_on_its_proof() {
+    // What git itself will never do: `branch -d` calls a squashed branch
+    // unmerged, because its tip is on nothing. The proof says otherwise.
+    if without_git("a_branch_squashed_onto_the_base_is_deleted_on_its_proof") {
+        return;
+    }
+    let scratch = ScratchDir::new("delete-squashed");
+    let (repo, landed) = squash_landed(&scratch);
+    let refused = command("git")
+        .args(["branch", "-d", "feature"])
+        .current_dir(&repo)
+        .stdin(Stdio::null())
+        .output()
+        .expect("git runs");
+    assert!(
+        !refused.status.success(),
+        "git deleted a squashed branch with -d, so this proves nothing"
+    );
+
+    delete_branch(&repo, &landed).expect("a landed branch is deleted");
+
+    assert!(!has_branch(&repo, "feature"), "the branch is still there");
+}
+
+#[test]
+fn a_branch_that_moved_after_its_proof_is_kept() {
+    // Proved when the menu opened; committed on since. The proof was about a
+    // commit the branch is no longer on, and the new one is on no base.
+    if without_git("a_branch_that_moved_after_its_proof_is_kept") {
+        return;
+    }
+    let scratch = ScratchDir::new("delete-moved");
+    let (repo, landed) = squash_landed(&scratch);
+    git(&repo, &["switch", "feature"]);
+    let later = commit(&repo, "feature.txt", "the work\nand more\n", "more");
+    git(&repo, &["switch", "main"]);
+
+    match delete_branch(&repo, &landed).expect_err("the branch moved") {
+        Error::BranchMoved { branch } => assert_eq!(branch, "feature"),
+        other => panic!("expected BranchMoved, got {other:?}"),
+    }
+    assert_eq!(git(&repo, &["rev-parse", "feature"]), later);
+}
+
+#[test]
+fn a_branch_whose_proof_no_longer_holds_is_kept() {
+    // The branch is exactly where it was, and the base is not: somebody
+    // rewound it past the squash. Proved again, it has not landed.
+    if without_git("a_branch_whose_proof_no_longer_holds_is_kept") {
+        return;
+    }
+    let scratch = ScratchDir::new("delete-rewound");
+    let (repo, landed) = squash_landed(&scratch);
+    git(&repo, &["reset", "--hard", "HEAD~1"]);
+
+    match delete_branch(&repo, &landed).expect_err("the squash is gone") {
+        Error::NotLanded { branch, base } => {
+            assert_eq!((branch.as_str(), base.as_str()), ("feature", MAIN));
+        }
+        other => panic!("expected NotLanded, got {other:?}"),
+    }
+    assert!(has_branch(&repo, "feature"));
+}
+
+#[test]
+fn a_branch_a_checkout_has_is_kept_whatever_proves_it() {
+    if without_git("a_branch_a_checkout_has_is_kept_whatever_proves_it") {
+        return;
+    }
+    let scratch = ScratchDir::new("delete-checked-out");
+    let (repo, landed) = squash_landed(&scratch);
+    let checkout = scratch.spot("still-open");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            checkout.to_str().expect("the scratch path is utf-8"),
+            "feature",
+        ],
+    );
+
+    match delete_branch(&repo, &landed).expect_err("a checkout has it") {
+        Error::BranchInUse { branch, at } => {
+            assert_eq!(branch, "feature");
+            assert_eq!(at, checkout);
+        }
+        other => panic!("expected BranchInUse, got {other:?}"),
+    }
+    assert!(has_branch(&repo, "feature"));
+}
+
+#[test]
+fn the_base_is_kept_whatever_proves_it() {
+    // A branch is an ancestor of itself, so `main` checked against `main` is
+    // proved as surely as anything — and the local `main` behind a remote
+    // base is proved against that. Neither is a finished task.
+    if without_git("the_base_is_kept_whatever_proves_it") {
+        return;
+    }
+    let scratch = ScratchDir::new("delete-base");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    commit(&repo, "more.txt", "more\n", "more");
+    // Off `main`, so that it is the base that refuses it and not a checkout.
+    git(&repo, &["switch", "-c", "elsewhere"]);
+    git(&repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+
+    for base in [MAIN, "refs/remotes/origin/main"] {
+        let landed = merged(&repo, base, &["main".to_owned()])
+            .remove("main")
+            .unwrap_or_else(|| panic!("main is not proved against {base}"));
+        match delete_branch(&repo, &landed).expect_err("the base is never deleted") {
+            Error::IsBase { branch } => assert_eq!(branch, "main"),
+            other => panic!("expected IsBase against {base}, got {other:?}"),
+        }
+        assert!(has_branch(&repo, "main"));
+    }
+}
+
+#[test]
+fn the_commits_named_as_lost_are_the_ones_no_other_ref_holds() {
+    // Deleting a branch loses what only it reaches. A commit another branch
+    // is stacked on, or one pushed to a remote, is still somewhere after.
+    if without_git("the_commits_named_as_lost_are_the_ones_no_other_ref_holds") {
+        return;
+    }
+    let scratch = ScratchDir::new("held-only");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    git(&repo, &["switch", "-c", "feature"]);
+    commit(&repo, "one.txt", "one\n", "stacked on");
+    let second = commit(&repo, "two.txt", "two\n", "only here");
+    let third = commit(&repo, "three.txt", "three\n", "only here too");
+    git(&repo, &["branch", "stacked", "feature~2"]);
+    git(&repo, &["switch", "main"]);
+
+    let lost = held_only_by(&repo, "feature", &third).expect("git answers");
+
+    assert_eq!(
+        lost,
+        vec![
+            Commit {
+                id: third[..7].to_owned(),
+                subject: "only here too".to_owned(),
+            },
+            Commit {
+                id: second[..7].to_owned(),
+                subject: "only here".to_owned(),
+            },
+        ]
+    );
+
+    git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/feature", &third],
+    );
+    assert_eq!(
+        held_only_by(&repo, "feature", &third).expect("git answers"),
+        Vec::new(),
+        "commits a remote has are named as lost"
+    );
+}
+
+#[test]
+fn discarding_a_branch_takes_only_the_commit_its_losses_were_counted_from() {
+    // The one deletion with no proof behind it. What a person agreed to lose
+    // was counted from one tip; a commit made since is one nobody was shown.
+    if without_git("discarding_a_branch_takes_only_the_commit_its_losses_were_counted_from") {
+        return;
+    }
+    let scratch = ScratchDir::new("discard");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    git(&repo, &["switch", "-c", "feature"]);
+    let counted = commit(&repo, "feature.txt", "unfinished\n", "unfinished");
+    let later = commit(&repo, "feature.txt", "unfinished\nstill\n", "still");
+    git(&repo, &["switch", "main"]);
+
+    match discard_branch(&repo, "feature", &counted, Some(MAIN)).expect_err("it moved") {
+        Error::BranchMoved { branch } => assert_eq!(branch, "feature"),
+        other => panic!("expected BranchMoved, got {other:?}"),
+    }
+    assert!(has_branch(&repo, "feature"));
+    assert!(matches!(
+        discard_branch(
+            &repo,
+            "main",
+            &git(&repo, &["rev-parse", "main"]),
+            Some(MAIN)
+        ),
+        Err(Error::IsBase { .. })
+    ));
+
+    discard_branch(&repo, "feature", &later, Some(MAIN)).expect("the tip is the one counted");
+    assert!(!has_branch(&repo, "feature"));
+}
+
+#[test]
+fn a_forced_removal_names_the_files_it_throws_away_and_not_the_ignored_ones() {
+    if without_git("a_forced_removal_names_the_files_it_throws_away_and_not_the_ignored_ones") {
+        return;
+    }
+    let scratch = ScratchDir::new("loose-files");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    write(&repo.join(".gitignore"), "target/\n");
+    git(&repo, &["add", ".gitignore"]);
+    git(&repo, &["commit", "--no-verify", "-m", "ignore"]);
+    write(&repo.join("tracked.txt"), "changed\n");
+    write(&repo.join("notes.txt"), "not committed\n");
+    write(&repo.join("target/build.o"), "built\n");
+
+    let mut loose = loose_files(&repo).expect("git answers");
+    loose.sort();
+
+    assert_eq!(
+        loose,
+        vec!["notes.txt".to_owned(), "tracked.txt".to_owned()]
+    );
+}
+
+#[test]
+fn a_renamed_file_is_named_once_at_its_new_name() {
+    let status = b"R  after.txt\0before.txt\0?? new.txt\0";
+    assert_eq!(parse_paths(status), vec!["after.txt", "new.txt"]);
+}
+
 // --- tidying the store after a removal -----------------------------------------
 
 #[test]

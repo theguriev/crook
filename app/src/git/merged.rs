@@ -41,6 +41,16 @@
 //! pass over the base's history is bounded twice, by [`PASS_COMMITS`] and
 //! [`PASS_DEADLINE`], because it is the one read here whose length grows
 //! with the repository rather than with the question.
+//!
+//! # What a proof is good for
+//!
+//! That day has come: [`super::worktree::delete_branch`] deletes a branch on
+//! the strength of one. So a proof is a value, [`Landed`], that only
+//! [`merged`] can make — no code outside this module can write "I think it
+//! landed" in a form the deletion will accept — and it says what it was a
+//! proof *of*: the branch, the base, and the one commit that was the branch's
+//! tip when it was proved. A branch that has moved since is a different
+//! question, which the proof never answered.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
@@ -81,6 +91,72 @@ pub enum Proof {
         /// The commit on the base, as a full object id.
         commit: String,
     },
+}
+
+/// A branch [`merged`] proved has landed, and exactly what it proved.
+///
+/// Every field is private and this module is the only place one is made, so
+/// holding one means the proof was run: it is what
+/// [`super::worktree::delete_branch`] takes instead of a name, and a caller
+/// cannot hand it a branch nobody proved. Cloning one copies a proof that
+/// was made; it does not make a new one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Landed {
+    /// The branch, as a short name.
+    branch: String,
+    /// The ref it was proved against, as [`base_of`] names one.
+    base: String,
+    /// The branch's tip when it was proved, as a full object id. Every
+    /// question the proof asked was asked of this commit rather than of the
+    /// name, which an agent can move while the questions are being asked.
+    tip: String,
+    /// How it was proved.
+    proof: Proof,
+    /// The subject line of the commit a [`Proof::Patch`] names, when git
+    /// would say it: the evidence a person reads before a branch is deleted.
+    subject: Option<String>,
+}
+
+impl Landed {
+    /// A proof that has just gone through.
+    ///
+    /// Private, and that is the whole of what makes a `Landed` mean
+    /// something: [`merged_within`] is the only caller.
+    fn new(branch: &str, base: &str, tip: String, proof: Proof) -> Self {
+        Self {
+            branch: branch.to_owned(),
+            base: base.to_owned(),
+            tip,
+            proof,
+            subject: None,
+        }
+    }
+
+    /// The branch, as a short name.
+    pub fn branch(&self) -> &str {
+        &self.branch
+    }
+
+    /// The ref the branch was proved to have landed on.
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    /// The commit the branch's tip was when it was proved, in full.
+    pub fn tip(&self) -> &str {
+        &self.tip
+    }
+
+    /// How it was proved.
+    pub fn proof(&self) -> &Proof {
+        &self.proof
+    }
+
+    /// The subject of the commit a patch proof found on the base, if the
+    /// proof was by patch and git said what it was.
+    pub fn subject(&self) -> Option<&str> {
+        self.subject.as_deref()
+    }
 }
 
 /// The branch a repository's work lands on, as a full ref name.
@@ -137,6 +213,33 @@ pub fn base_of(repository: &Path) -> Option<String> {
         .find(|candidate| existing.contains(candidate.as_str()))
 }
 
+/// A ref as a person says it: `main` for `refs/heads/main`, `origin/main`
+/// for `refs/remotes/origin/main`, and anything else whole.
+///
+/// For showing [`base_of`]'s answer, which is always one of the first two.
+pub fn short_name(reference: &str) -> &str {
+    reference
+        .strip_prefix("refs/heads/")
+        .or_else(|| reference.strip_prefix("refs/remotes/"))
+        .unwrap_or(reference)
+}
+
+/// Whether `branch`, a short name, is `base` — or the local branch a
+/// remote-tracking `base` shares its name with.
+///
+/// The second, because a base read off `origin/HEAD` is
+/// `refs/remotes/origin/main`, and a local `main` behind it with a commit of
+/// somebody's own on it is proved by ancestry like any other branch — and is
+/// the one branch in the repository nobody finishing a task means.
+pub fn is_base(branch: &str, base: &str) -> bool {
+    let local = base.strip_prefix("refs/heads/");
+    let remote = base
+        .strip_prefix("refs/remotes/")
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(_, name)| name);
+    local == Some(branch) || remote == Some(branch)
+}
+
 /// Which of `branches` have landed on `base`, and how each was proved.
 ///
 /// **Blocking**, and the most expensive read in the git module: a handful of
@@ -153,7 +256,7 @@ pub fn base_of(repository: &Path) -> Option<String> {
 /// with `diff.relative` switched off, since a configured one would narrow both
 /// sides of the comparison to the directory it ran in, and two diffs that
 /// agree about a subdirectory prove nothing about the rest.
-pub fn merged(repository: &Path, base: &str, branches: &[String]) -> HashMap<String, Proof> {
+pub fn merged(repository: &Path, base: &str, branches: &[String]) -> HashMap<String, Landed> {
     merged_within(repository, base, branches, PASS_COMMITS, PASS_DEADLINE)
 }
 
@@ -166,29 +269,42 @@ fn merged_within(
     branches: &[String],
     commits: usize,
     deadline: Duration,
-) -> HashMap<String, Proof> {
+) -> HashMap<String, Landed> {
     let mut landed = HashMap::new();
-    // The branches ancestry did not prove: each one's fork from the base and
-    // the patch-id of everything it has done since.
+    // The branches ancestry did not prove: each one's tip, its fork from the
+    // base, and the patch-id of everything it has done since.
     let mut pending = Vec::new();
 
     for branch in branches {
         // In full, so that a tag or a file named like the branch is not what
         // git goes and reads.
         let reference = format!("refs/heads/{branch}");
-        if is_ancestor(repository, &reference, base) {
+        // Read once, and every question after is asked of the commit rather
+        // than of the name: a branch an agent commits on while this runs
+        // would otherwise have its ancestry asked about one tip and its patch
+        // about the next, and the proof would be about neither.
+        let Some(tip) = answer(
+            repository,
+            &["rev-parse", "--verify", "--quiet", &reference],
+        ) else {
+            continue;
+        };
+        if is_ancestor(repository, &tip, base) {
             // Its diff since the fork is empty either way, so a branch
             // ancestry does not prove has nothing for the patch to prove.
-            if worked_on(repository, &reference) {
-                landed.insert(branch.clone(), Proof::Ancestor);
+            if worked_on(repository, &reference, &tip) {
+                landed.insert(
+                    branch.clone(),
+                    Landed::new(branch, base, tip, Proof::Ancestor),
+                );
             }
             continue;
         }
-        let Some(fork) = merge_base(repository, base, &reference) else {
+        let Some(fork) = merge_base(repository, base, &tip) else {
             continue;
         };
-        if let Some(patch) = patch_since(repository, &fork, &reference) {
-            pending.push((branch, reference, fork, patch));
+        if let Some(patch) = patch_since(repository, &fork, &tip) {
+            pending.push((branch, reference, tip, fork, patch));
         }
     }
     if pending.is_empty() {
@@ -197,11 +313,11 @@ fn merged_within(
 
     let forks: Vec<&str> = pending
         .iter()
-        .map(|(_, _, fork, _)| fork.as_str())
+        .map(|(_, _, _, fork, _)| fork.as_str())
         .collect();
     let since = oldest(repository, &forks);
     let patches = patches_on(repository, base, since.as_deref(), commits, deadline);
-    for (branch, reference, fork, patch) in pending {
+    for (branch, reference, tip, fork, patch) in pending {
         let Some(candidates) = patches.get(&patch) else {
             continue;
         };
@@ -218,16 +334,54 @@ fn merged_within(
         else {
             continue;
         };
-        if worked_on(repository, &reference) {
-            landed.insert(
-                branch.clone(),
-                Proof::Patch {
-                    commit: commit.clone(),
-                },
-            );
+        if worked_on(repository, &reference, &tip) {
+            let proof = Proof::Patch {
+                commit: commit.clone(),
+            };
+            landed.insert(branch.clone(), Landed::new(branch, base, tip, proof));
+        }
+    }
+
+    let subjects = {
+        let commits: Vec<&str> = landed
+            .values()
+            .filter_map(|landed| match &landed.proof {
+                Proof::Patch { commit } => Some(commit.as_str()),
+                Proof::Ancestor => None,
+            })
+            .collect();
+        subjects(repository, &commits)
+    };
+    for landed in landed.values_mut() {
+        if let Proof::Patch { commit } = &landed.proof {
+            landed.subject = subjects.get(commit).cloned();
         }
     }
     landed
+}
+
+/// The subject line of each of `commits`, by full object id.
+///
+/// One `git log` for all of them rather than one apiece, because a sweep can
+/// prove a dozen squashes at once and this is only what is shown beside them.
+/// Empty when git could not be asked, which costs a line of evidence and
+/// never a proof.
+fn subjects(repository: &Path, commits: &[&str]) -> HashMap<String, String> {
+    if commits.is_empty() {
+        return HashMap::new();
+    }
+    let mut args = vec!["log", "--no-walk=unsorted", "--format=%H %s"];
+    args.extend(commits);
+    args.push("--");
+    answer(repository, &args)
+        .map(|listed| {
+            listed
+                .lines()
+                .filter_map(|line| line.split_once(' '))
+                .map(|(commit, subject)| (commit.to_owned(), subject.to_owned()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// What git printed for `args`, trimmed, when it succeeded and printed
@@ -291,7 +445,9 @@ fn is_ancestor(repository: &Path, reference: &str, base: &str) -> bool {
 /// month old: once gc has pruned the commits' entries, the rebase's is the
 /// newest, ends at the tip and is not [`WORK`], and the branch is unproved
 /// until that entry expires too.
-fn worked_on(repository: &Path, reference: &str) -> bool {
+///
+/// `tip` is the commit the proof is about, read before any of this was asked.
+fn worked_on(repository: &Path, reference: &str, tip: &str) -> bool {
     let args = ["log", "-g", "--format=%H %gs", reference].map(OsStr::new);
     let Ok(finished) = run(repository, &args, Intent::Read) else {
         return false;
@@ -313,8 +469,7 @@ fn worked_on(repository: &Path, reference: &str) -> bool {
     {
         return true;
     }
-    answer(repository, &["rev-parse", "--verify", "--quiet", reference])
-        .is_some_and(|tip| tip != *newest)
+    tip != *newest
 }
 
 /// How git's reflog begins the entry for each way of writing a commit onto the
