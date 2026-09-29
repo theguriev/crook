@@ -447,7 +447,22 @@ Nineteen features, and the page that configures them:
   where the checkout will go, and asks where the branch starts: this tab's own branch, already
   picked, the repository's default branch (`origin/HEAD`, else `init.defaultBranch`, else
   `main` or `master`) one arrow below it, and every other local branch after that. Then it
-  opens a tab in it — folded into a group with the tab that asked for it. Removal is offered
+  opens a tab in it — folded into a group with the tab that asked for it. Under all that it
+  offers **an agent to start there**: the coding agents it finds installed (`claude`, `codex`,
+  `gemini`, `copilot`, `opencode`, `aider` — looked for on `PATH`, never run to ask), with
+  `Shell only` first and picked, which makes exactly the worktree it always made. Pick one
+  and a prompt field appears; the branch is named after the prompt as you type it
+  (`worktree/fix-the-login-bug`) until you type a name of your own. Create, or Enter from
+  either field, opens the tab with the agent's line — `claude 'fix the login bug'`, the
+  prompt quoted as one word for the shell — **in the composer, unsent**, for you to read and
+  send; `Start` sends it for you. Tab moves between the two fields, and the arrows walk the
+  list under whichever has the keyboard. `New task…` in the palette
+  (`crook/worktrees/new-task`) is the same creator with the first agent found already
+  picked and the keyboard in the prompt, so a task is a sentence and Enter; it ships with no
+  chord, and `{ "key": "cmd+shift+n", "command": "crook/worktrees/new-task" }` (`ctrl+shift+n`
+  off macOS) is one that nothing else takes. In a shell whose quoting Crook has not proven —
+  anything but sh, dash, bash, zsh and fish, and every shell on Windows for now — the line is
+  the agent's name alone and there is no prompt field. Removal is offered
   only for a checkout
   that is not locked, not the main one, and not one a tab is working in; it says what it will
   delete first, and it never deletes the branch. One row down, `Remove 3 free checkouts…`
@@ -528,7 +543,7 @@ Nineteen features, and the page that configures them:
   `rerun-block`, `scroll-to-block-top`, `scroll-to-block-bottom`), every entry of a tab's
   (`crook/tabs/pin-tab`, `close-tab`, `open-menu`, `view-options`,
   `toggle-group`, `close-group`, the seven colours), the worktree list (`crook/worktrees/menu`)
-  and every settings page (`crook/appearance/open-page` and its three neighbours). The block
+  and its task creator (`crook/worktrees/new-task`), and every settings page (`crook/appearance/open-page` and its three neighbours). The block
   entries act on the block the menu is up on, or — with no menu — on the one the keyboard has
   selected, so each of them is a chord as well as a row.
 

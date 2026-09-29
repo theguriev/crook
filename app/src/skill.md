@@ -82,7 +82,11 @@ Worktrees are reached from a tab's own menu: right-click its row and, inside a r
 forward the tab already in it; `New worktree…` asks for a branch name and where it starts —
 the tab's own branch unless the repository's default branch or another is picked — and opens
 a tab in a checkout under Crook's own store, folded into a group with the tab that asked.
-There is no command-line flag for any of this; tell the person where the menu is.
+The same creator can start an agent there: pick one of the agents it found installed, type a
+prompt, and the new tab opens with `claude '<prompt>'` (or that agent's equivalent) waiting,
+unsent, in its composer — or sent, if the person pressed Start. `New task…` in the command
+palette opens it with an agent already picked. There is no command-line flag for any of this;
+tell the person where the menu is.
 
 ## Where things are
 
