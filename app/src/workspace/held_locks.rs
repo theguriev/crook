@@ -210,6 +210,15 @@ impl HeldLocks {
         self.held().locks.is_empty()
     }
 
+    /// Whether the window holds the lock on the checkout git lists at
+    /// `checkout`.
+    pub(crate) fn holds(&self, checkout: &Path) -> bool {
+        self.held()
+            .locks
+            .iter()
+            .any(|lock| lock.spellings().contains(&checkout))
+    }
+
     /// The checkouts whose lock the window still holds, as git lists them.
     #[cfg(test)]
     pub(crate) fn checkouts(&self) -> Vec<PathBuf> {

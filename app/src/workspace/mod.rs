@@ -31,6 +31,7 @@ mod changes_panel;
 mod closing;
 mod controls;
 mod crash_note;
+mod finish;
 mod header_toolbar;
 mod held_locks;
 mod input_element;

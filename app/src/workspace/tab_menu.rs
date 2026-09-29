@@ -36,8 +36,11 @@
 //! * a way to remove one, offered only for a checkout nothing is working in;
 //! * a way to remove all of those at once, for the day a repository has eight
 //!   of them and seven are finished;
-//! * and a way to remove only the ones whose work has already landed, which is
-//!   the question that day is really asking.
+//! * a way to remove only the ones whose work has already landed, which is
+//!   the question that day is really asking;
+//! * and a way to delete the branches whose work has landed, which is the
+//!   question the day after asks — see [Deleting what has
+//!   landed](#deleting-what-has-landed).
 //!
 //! # Tidying up
 //!
@@ -69,6 +72,23 @@
 //! the very same sweep — looked in first, never forced, the branches kept. A
 //! branch the proof cannot reach is simply not marked; the first sweep and the
 //! × are still there for it.
+//!
+//! # Deleting what has landed
+//!
+//! Removing a checkout keeps its branch, so the sweeps above leave a branch
+//! behind for every task they tidy away. "Delete N merged branches…" is the
+//! other half, and a gesture of its own rather than an option on those: a
+//! checkout is a directory and a branch is the work, and a person tidying one
+//! has not said anything about the other. It offers exactly the branches the
+//! proof reached that no checkout has checked out, names each with what
+//! proved it — the commit on the base that has its work, or its own tip there
+//! — and deletes them through [`crate::git::worktree::delete_branches`], which
+//! proves each one again first and refuses any that moved. Six to a question:
+//! every branch a press deletes is one the question named with its evidence,
+//! and the rest are counted and asked about once those have gone. A branch the proof
+//! cannot reach is never offered; Discard, on a tab's own menu, is the only
+//! way to delete one of those, and it says what goes — see
+//! [`super::finish`].
 //!
 //! # A wait is the pirate eating it
 //!
@@ -209,6 +229,7 @@ use crookui_core::elements::{
 use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::prelude::*;
 
+use crate::git::merged::{Landed, Proof};
 use crate::git::worktree::{Local, Worktree};
 use crate::tab::TabId;
 use crate::theme::theme;
@@ -297,6 +318,23 @@ pub(super) enum Mode {
         /// Whether git has already refused once.
         refused: bool,
     },
+    /// Asking about deleting the branches whose work is proved to have landed
+    /// that no checkout has checked out: the first [`NAMED`] of them by name,
+    /// and the rest counted, for the question after this one. What it is
+    /// asking about lives in [`TabMenuState::pruning`], for the reason
+    /// [`Self::Tidying`] keeps its answer outside.
+    Pruning,
+    /// Asking about finishing the task in one checkout, or discarding it,
+    /// and then doing it. See [`super::finish`]; what it found lives in
+    /// [`TabMenuState::finishing`].
+    Finishing {
+        /// Discard rather than Finish: a branch whose work has not landed
+        /// goes too, and so does anything loose in the checkout.
+        discard: bool,
+        /// Discard's second question, which names what is lost, is the one
+        /// on screen.
+        losing: bool,
+    },
 }
 
 /// What a look inside one checkout found, or that it has not come back yet.
@@ -384,6 +422,49 @@ impl Sweep {
     }
 }
 
+/// What deleting the landed branches would take, and then that it is doing it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Pruning {
+    /// What the button would do.
+    Ready {
+        /// The branches it would delete, in name order, each with its proof:
+        /// at most [`NAMED`], because every branch this deletes is one the
+        /// question named with what proved it, and a face that names more
+        /// than that is a wall nobody reads — nor one this face scrolls.
+        going: Vec<Landed>,
+        /// How many more are proved and left for the question after this
+        /// one: the list offers them again once these have gone.
+        more: usize,
+    },
+    /// The button has been pressed: the proofs are being made again and the
+    /// branches deleted, all in one background task — the proof is one pass
+    /// for all of them and each deletion is a moment, so there is no list of
+    /// steps for the pirate to walk along.
+    Deleting {
+        /// How many were going.
+        of: usize,
+    },
+}
+
+impl Pruning {
+    /// The question about `deletable` — [`deletable_branches`]'s answer —
+    /// which asks about the first [`NAMED`] of them and counts the rest.
+    pub(super) fn of(mut deletable: Vec<Landed>) -> Self {
+        let more = deletable.len().saturating_sub(NAMED);
+        deletable.truncate(NAMED);
+        Self::Ready {
+            going: deletable,
+            more,
+        }
+    }
+}
+
+impl Default for Pruning {
+    fn default() -> Self {
+        Self::of(Vec::new())
+    }
+}
+
 /// One place the creator can start a new branch from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Base {
@@ -430,6 +511,8 @@ pub(super) enum Control {
     Tidy,
     /// "Remove N merged checkouts…".
     TidyLanded,
+    /// "Delete N merged branches…".
+    DeleteLanded,
     /// The creator's branch field.
     Branch,
     /// One of the creator's places to start from, by its index in
@@ -522,7 +605,12 @@ pub(super) struct TabMenuState {
     /// open a second late for a badge. `None` until it lands, and drawn
     /// exactly as an empty set is: no badge, no row. A proof that has not
     /// arrived and one that found nothing both offer nothing to tidy.
-    pub(super) landed: Option<HashSet<String>>,
+    ///
+    /// Every local branch is asked about, not only the checkouts': the ones
+    /// with no checkout are the branches earlier removals left behind, and
+    /// deleting those is what the proof is kept for — see
+    /// [`deletable_branches`].
+    pub(super) landed: Option<HashMap<String, Landed>>,
     /// Where Crook keeps checkouts it made.
     pub(super) store: Option<PathBuf>,
     /// What a tidy-up would take, while one is being asked about.
@@ -530,6 +618,19 @@ pub(super) struct TabMenuState {
     /// Meaningless outside [`Mode::Tidying`], which is what reads it: the mode
     /// is the question and this is the answer being assembled for it.
     pub(super) sweep: Sweep,
+    /// What deleting the landed branches would take, while that is being
+    /// asked about. [`Mode::Pruning`]'s, as [`Self::sweep`] is Tidying's.
+    pub(super) pruning: Pruning,
+    /// What finishing a task found, while that is being asked about.
+    /// [`Mode::Finishing`]'s.
+    pub(super) finishing: super::finish::Finishing,
+    /// Which look at a task's checkout is the latest, counted up by each.
+    ///
+    /// Finer than [`Self::epoch`], which is the question: a second look at
+    /// the same checkout — see [`super::finish::Again`] — replaces the first
+    /// without changing the question, and so without dropping the answers the
+    /// question is still waiting on, such as the list it was opened over.
+    pub(super) look: u64,
     /// What git said about the last thing that was asked of it, if it refused.
     pub(super) problem: Option<String>,
     /// Whether a git command is running for the creator or the confirmation
@@ -609,6 +710,8 @@ impl TabMenuState {
         match self.mode {
             Mode::Tidying => self.sweep.is_working(),
             Mode::Removing { local, .. } => local == Looked::NotYet,
+            Mode::Pruning => matches!(self.pruning, Pruning::Deleting { .. }),
+            Mode::Finishing { .. } => self.finishing.is_working(),
             Mode::Listing | Mode::Creating => false,
         }
     }
@@ -820,6 +923,10 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
             local,
             refused,
         } => confirmation(workspace, index, local, refused, ui),
+        Mode::Pruning => pruning(workspace, ui),
+        Mode::Finishing { discard, losing } => {
+            super::finish::render(workspace, discard, losing, ui)
+        }
     };
 
     let popup = ConstrainedBox::new(
@@ -926,11 +1033,71 @@ fn listing(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
             ui,
         ));
     }
+    // A gesture of its own and not a third sweep: this one deletes branches
+    // and touches no checkout, and the ones it offers are mostly branches no
+    // checkout is on any more — the ones the two rows above left behind.
+    let deletable = deletable_branches(state).len();
+    if deletable > 0 {
+        column.add_child(sweep_row(
+            workspace,
+            Control::DeleteLanded,
+            match deletable {
+                1 => "Delete 1 merged branch…".to_owned(),
+                deletable => format!("Delete {deletable} merged branches…"),
+            },
+            WorktreeAction::AskDeleteLanded,
+            ui,
+        ));
+    }
     if let Some(problem) = &state.problem {
         column.add_child(note(problem.as_str(), ui));
     }
 
     column.finish()
+}
+
+/// Every branch proved to have landed that no listed checkout has checked
+/// out, in name order, each with its proof.
+///
+/// Not the checkouts' own branches: deleting a branch a checkout is on would
+/// leave that checkout on nothing, and the deletion refuses it anyway. A
+/// finished checkout goes first — by the sweep above, or by Finish on its
+/// tab — and its branch is offered here after.
+pub(super) fn deletable_branches(state: &TabMenuState) -> Vec<Landed> {
+    let held: HashSet<&str> = state
+        .worktrees()
+        .iter()
+        .filter_map(|worktree| worktree.branch.as_deref())
+        .collect();
+    let mut going: Vec<Landed> = state
+        .landed
+        .iter()
+        .flat_map(HashMap::values)
+        .filter(|landed| !held.contains(landed.branch()))
+        .cloned()
+        .collect();
+    going.sort_by(|left, right| left.branch().cmp(right.branch()));
+    going
+}
+
+/// What shows that a branch has landed, in a line a person can check: the
+/// commit on the base that has its work, with its subject, or — when the
+/// branch's own tip is on the base — that tip.
+///
+/// Worded as what the base has rather than as how it got there. A patch
+/// proof is a squash most often and a cherry-pick sometimes, and a tip on the
+/// base was fast-forwarded or merged; the proof cannot tell those apart, and
+/// the line claims only what it showed.
+pub(super) fn evidence(landed: &Landed) -> String {
+    let base = crate::git::merged::short_name(landed.base());
+    let short = |commit: &str| commit.get(..7).unwrap_or(commit).to_owned();
+    match (landed.proof(), landed.subject()) {
+        (Proof::Patch { commit }, Some(subject)) => {
+            format!("{base} has it as {} · {subject}", short(commit))
+        }
+        (Proof::Patch { commit }, None) => format!("{base} has it as {}", short(commit)),
+        (Proof::Ancestor, _) => format!("{base} has its tip, {}", short(landed.tip())),
+    }
 }
 
 /// Whether a checkout is one this menu may take away.
@@ -1018,33 +1185,52 @@ pub(super) fn has_landed(state: &TabMenuState, worktree: &Worktree) -> bool {
             state
                 .landed
                 .as_ref()
-                .is_some_and(|landed| landed.contains(branch))
+                .is_some_and(|landed| landed.contains_key(branch))
         })
 }
 
-/// The branches of `worktrees` whose work has landed on the base of the
-/// repository `directory` is in.
+/// Which of the repository's branches have landed on the base of the
+/// repository `directory` is in, each with its proof.
 ///
 /// **Blocking**: the base, then the proof, which is a pass over the base's
 /// history. Background pool only — and the one place the menu asks either
 /// question, so that the list and a snapshot of it cannot disagree about
-/// which checkouts are asked about. The main checkout is left out for the
-/// reason [`has_landed`] gives, and a detached one has no branch to prove.
-pub(super) fn landed_branches(directory: &Path, worktrees: &[Worktree]) -> HashSet<String> {
-    let branches: Vec<String> = worktrees
-        .iter()
-        .filter(|worktree| !worktree.is_main)
-        .filter_map(|worktree| worktree.branch.clone())
-        .collect();
-    if branches.is_empty() {
-        return HashSet::new();
-    }
+/// which branches are asked about.
+///
+/// `branches` is every local branch; the checkouts' are added in case that
+/// read failed. Left out: the main checkout's, for the reason [`has_landed`]
+/// gives, and the base's own name, which
+/// [`is_base`](crate::git::merged::is_base) explains. A detached checkout
+/// has no branch to prove.
+pub(super) fn landed_branches(
+    directory: &Path,
+    worktrees: &[Worktree],
+    branches: &[String],
+) -> HashMap<String, Landed> {
     let Some(base) = crate::git::merged::base_of(directory) else {
-        return HashSet::new();
+        return HashMap::new();
     };
-    crate::git::merged::merged(directory, &base, &branches)
-        .into_keys()
-        .collect()
+    let main = worktrees
+        .iter()
+        .find(|worktree| worktree.is_main)
+        .and_then(|worktree| worktree.branch.as_deref());
+    let mut asked: Vec<String> = branches
+        .iter()
+        .chain(
+            worktrees
+                .iter()
+                .filter_map(|worktree| worktree.branch.as_ref()),
+        )
+        .filter(|branch| Some(branch.as_str()) != main)
+        .filter(|branch| !crate::git::merged::is_base(branch, &base))
+        .cloned()
+        .collect();
+    asked.sort();
+    asked.dedup();
+    if asked.is_empty() {
+        return HashMap::new();
+    }
+    crate::git::merged::merged(directory, &base, &asked)
 }
 
 /// One worktree.
@@ -1617,7 +1803,7 @@ fn check_row(
 /// Six, which is a face that stays one screenful. Past that the names have
 /// stopped being a list somebody reads and become a wall they scroll, and the
 /// count in the button is the fact they were after anyway.
-const NAMED: usize = 6;
+pub(super) const NAMED: usize = 6;
 
 /// Removing every free checkout, which asks once and never forces.
 ///
@@ -1748,8 +1934,154 @@ fn tidying(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     column.finish()
 }
 
+/// Deleting the branches whose work has landed, which asks once and names
+/// each branch with what proved it.
+///
+/// No looking first, as the sweep has to: what decides whether a branch may
+/// go is its proof, and the menu already holds that. It is made again at
+/// the press, branch by branch, and a branch whose proof no longer holds is
+/// kept and said to be.
+///
+/// Every branch the button deletes is on the face with its evidence, which is
+/// why the button deletes at most [`NAMED`] of them: past that, the rest are
+/// counted and left for the next question, not deleted unseen.
+fn pruning(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
+    let state = workspace.tab_menu();
+    let (going, more, of) = match &state.pruning {
+        Pruning::Ready { going, more } => (going.as_slice(), *more, going.len()),
+        Pruning::Deleting { of } => (&[][..], 0, *of),
+    };
+
+    let mut column = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_child(header(
+            if of == 1 {
+                "Delete this branch?"
+            } else {
+                "Delete these branches?"
+            },
+            ui,
+        ));
+
+    if let Pruning::Deleting { of } = state.pruning {
+        let sentence = match of {
+            1 => "Proving it again, and deleting it…".to_owned(),
+            of => format!("Proving them again, and deleting {of}…"),
+        };
+        column.add_child(busy_line(state, &sentence, None, ui));
+        column.add_child(buttons(workspace, &format!("Delete {of}"), None, ui));
+        return column.finish();
+    }
+
+    for landed in going {
+        column.add_child(proved_row(landed, ui));
+    }
+    column.add_child(divider());
+
+    let base = going
+        .first()
+        .map(|landed| crate::git::merged::short_name(landed.base()).to_owned())
+        .unwrap_or_default();
+    column.add_child(note(
+        match going.len() {
+            1 => format!(
+                "Its work is on {base}. It is proved again before it goes, and kept if it has moved."
+            ),
+            _ => format!(
+                "Their work is on {base}. Each is proved again before it goes, and kept if it has moved."
+            ),
+        },
+        ui,
+    ));
+    column.add_child(note("No checkout is touched.", ui));
+    match more {
+        0 => {}
+        1 => column.add_child(note(
+            "1 more is proved too, and is asked about once these have gone.",
+            ui,
+        )),
+        more => column.add_child(note(
+            format!("{more} more are proved too, and are asked about once these have gone."),
+            ui,
+        )),
+    }
+    if let Some(problem) = &state.problem {
+        column.add_child(note(problem.as_str(), ui));
+    }
+
+    column.add_child(buttons(
+        workspace,
+        &match going.len() {
+            0 => "Delete".to_owned(),
+            count => format!("Delete {count}"),
+        },
+        (!going.is_empty()).then_some(WorktreeAction::DeleteLanded),
+        ui,
+    ));
+    column.finish()
+}
+
+/// What deleting the landed branches did, in a sentence or two: how many
+/// went, and each one that was kept and why.
+///
+/// A refusal is named rather than counted, unlike the sweep's, because a
+/// branch kept here is kept for a reason worth reading — it moved, or it is
+/// no longer on the base — and the person who asked is about to look for it.
+pub(super) fn pruned(deleted: &[(String, Result<(), crate::git::worktree::Error>)]) -> String {
+    let gone = deleted
+        .iter()
+        .filter(|(_, deleted)| deleted.is_ok())
+        .count();
+    let mut sentences = vec![match gone {
+        1 => "Deleted 1 branch.".to_owned(),
+        gone => format!("Deleted {gone} branches."),
+    }];
+    for (branch, deleted) in deleted {
+        if let Err(problem) = deleted {
+            log::warn!("{branch} was not deleted: {problem}");
+            sentences.push(format!("{problem}, so it was kept."));
+        }
+    }
+    sentences.join(" ")
+}
+
+/// One branch a deletion would take: its name, and under it what proved its
+/// work has landed.
+///
+/// Laid out as a worktree row is — the name, and a smaller line under it —
+/// because a list of names each followed by a sentence in the same type
+/// reads as one paragraph.
+pub(super) fn proved_row(landed: &Landed, ui: FamilyId) -> Box<dyn Element> {
+    Container::new(
+        Flex::column()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_child(
+                Text::new(landed.branch().to_owned(), ui, LABEL_SIZE)
+                    .with_color(theme().text_primary)
+                    .with_ellipsis(Cut::End)
+                    .finish(),
+            )
+            .with_child(
+                Container::new(
+                    Text::new(evidence(landed), ui, PATH_SIZE)
+                        .with_color(theme().text_muted)
+                        .with_ellipsis(Cut::End)
+                        .finish(),
+                )
+                .with_margin_top(1.)
+                .finish(),
+            )
+            .finish(),
+    )
+    .with_horizontal_padding(ROW_INSET)
+    .with_margin_bottom(6.)
+    .finish()
+}
+
 /// Some branches in a line, with the ones past [`NAMED`] counted instead.
-fn named(branches: &[String]) -> String {
+pub(super) fn named(branches: &[String]) -> String {
     let mut sentence = branches
         .iter()
         .take(NAMED)
@@ -1841,7 +2173,7 @@ fn confirmation(
 ///
 /// git removes over them without refusing, so this line is the only warning
 /// there is: after the press, nothing but `git fsck` can find them.
-fn stranded_summary(stranded: usize) -> String {
+pub(super) fn stranded_summary(stranded: usize) -> String {
     match stranded {
         1 => String::from("1 commit on no branch will be lost."),
         many => format!("{many} commits on no branch will be lost."),
@@ -1849,7 +2181,7 @@ fn stranded_summary(stranded: usize) -> String {
 }
 
 /// What is in a checkout, in one line.
-fn local_summary(local: &Local) -> String {
+pub(super) fn local_summary(local: &Local) -> String {
     let mut parts = Vec::new();
     if local.modified > 0 {
         parts.push(format!("{} modified", local.modified));
@@ -1878,7 +2210,7 @@ fn local_summary(local: &Local) -> String {
 /// the way out of one. During a sweep it is *Stop*, which is Cancel with the
 /// one difference the face cannot hide: the checkout under the knife
 /// finishes going, and it is the ones after it that are spared.
-fn buttons(
+pub(super) fn buttons(
     workspace: &Workspace,
     label: &str,
     action: Option<WorktreeAction>,
@@ -2116,7 +2448,7 @@ const PELLETS: usize = 16;
 ///
 /// The frame is [`TabMenuState::chomp`], which the workspace's chain moves
 /// while [`TabMenuState::is_busy`]; this only draws whichever frame that is.
-fn busy_line(
+pub(super) fn busy_line(
     state: &TabMenuState,
     text: &str,
     trail: Option<(usize, usize)>,

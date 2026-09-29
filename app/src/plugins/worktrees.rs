@@ -80,7 +80,11 @@ impl Plugin for Worktrees {
         // itself down before it runs anything, on purpose — and until this was
         // a command the worktree list was the one part of the window nothing
         // but a secondary press could reach.
-        let opens = host.register_command(action("menu"), "Worktrees", |workspace, ctx| {
+        // "Worktree list" rather than the plugin's own name: with Finish and
+        // Discard beside it the plugin has a heading of its own on the
+        // Keyboard Shortcuts page, and a row reading "Worktrees" under a
+        // heading reading "Worktrees" says one thing twice.
+        let opens = host.register_command(action("menu"), "Worktree list", |workspace, ctx| {
             let Some((tab, _)) = workspace.menu_target() else {
                 return;
             };
@@ -110,7 +114,11 @@ impl Plugin for Worktrees {
         // submenu is its own kind of row and does not belong in a group with
         // things that happen when you press them.
         host.contribute(TAB_MENU_ENTRIES, "menu", 500, move |workspace, app| {
-            let open = workspace.worktree_menu_is_open();
+            // Not lit while the menu is asking about a task: that question
+            // hangs where the list would, and it is the task's row that
+            // opened it.
+            let open =
+                workspace.worktree_menu_is_open() && workspace.worktree_menu_task().is_none();
             if !open && !workspace.menu_tab_is_in_a_repository(app) {
                 return None;
             }
@@ -122,6 +130,40 @@ impl Plugin for Worktrees {
                 WorkspaceAction::Run(opens),
             ))
         });
+
+        // The end of a task, on the tab doing it: Finish, which deletes the
+        // branch only when its work is proved to be on the base, and Discard,
+        // which deletes it anyway after a second question naming what goes.
+        // Offered only in a checkout Crook made — one somebody made by hand
+        // elsewhere is theirs to finish — and in the same band as the list,
+        // because each opens a question where the list would hang.
+        for (name, title, discard, order) in [
+            ("finish-task", "Finish task", false, 510),
+            ("discard-task", "Discard task", true, 520),
+        ] {
+            let asks = host.register_command(action(name), title, move |workspace, ctx| {
+                let Some((_, pane)) = workspace.menu_target() else {
+                    return;
+                };
+                workspace.handle_action(
+                    &WorkspaceAction::Worktree(WorktreeAction::AskFinish { pane, discard }),
+                    ctx,
+                );
+            });
+            host.contribute(TAB_MENU_ENTRIES, name, order, move |workspace, _| {
+                let open = workspace.worktree_menu_task() == Some(discard);
+                if !open && !workspace.menu_pane_is_in_a_crook_checkout() {
+                    return None;
+                }
+                Some(submenu_entry(
+                    workspace,
+                    &format!("crook/worktrees/{name}"),
+                    title,
+                    open,
+                    WorkspaceAction::Run(asks),
+                ))
+            });
+        }
 
         Ok(())
     }

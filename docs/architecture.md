@@ -1194,12 +1194,59 @@ less than a month old of commits more than a month old still goes unproved until
 expires. The base is what `origin/HEAD` names, then `init.defaultBranch` if that branch exists,
 then `main`, then `master`.
 Anything it cannot prove — a stack squashed in pieces, a branch reworked during review, a pass
-cut off by its cap — is simply unproved, because a miss costs a badge and a false proof would
-cost somebody's branch the day deleting one is on the table. The menu asks after the list is
-in, marks a proved row `merged`, and offers `Remove N merged checkouts…`: the free checkouts
-narrowed to the proved ones, with the sweep's own safety — looked in first, never forced, the
-branches kept. On this repository it proves 14 of those eighteen in a second or two; the
-four it misses are stacked or were reworked, and are the ones it should miss.
+cut off by its cap — is simply unproved, because a miss costs a badge and a false proof costs
+somebody's branch: a branch is deleted on the strength of one, below. The menu asks after the
+list is in — about every local branch, not only the checkouts' — marks a proved row `merged`,
+and offers `Remove N merged checkouts…`: the free checkouts narrowed to the proved ones, with
+the sweep's own safety — looked in first, never forced, the branches kept. On this repository
+it proves 14 of those eighteen in a second or two; the four it misses are stacked or were
+reworked, and are the ones it should miss.
+
+**A branch is deleted only on a proof.** `git::worktree` said from the start that a removal
+never deletes the branch — "not as an option, not under `force`" — because a branch is the work
+and deleting it was "not a thing a terminal gets to decide". That was right for as long as
+nothing could tell a finished branch from an unfinished one. A branch whose work is proved to
+be on the base is not where the work is any more, only a name git lists as unmerged for ever,
+so the rule now reads *never without a proof*, and a removal on its own still never deletes
+one. `worktree::delete_branch` takes a `merged::Landed`, which only `merged()` can make, so
+nothing can hand it a bare name; and it does not trust the proof for longer than it takes to
+use it. It refuses the base and the local branch a remote base shares its name with, proves the
+branch again against the same base, refuses a branch any checkout has out, and reads the tip
+last and refuses it unless it is the commit that was proved. It deletes with `git branch -D`,
+because a squash-merged branch is never "merged" to git and `-d` would refuse every one of
+them — the checks are what `-d` stood in for. Three gestures reach it:
+
+- `Delete N merged branches…`, under the worktree list, offers the proved branches no checkout
+  has out — mostly the ones earlier removals left behind — and names each with its evidence:
+  the commit on the base with its change and that commit's subject, or its own tip on the
+  base. Six to a question, because the face does not scroll and a press deletes only what it
+  named; the rest are counted and offered again once those have gone. One pass proves them all
+  again, and a branch that moved is kept and named.
+- **Finish task**, on a tab in a checkout Crook made, is one confirmation that says what will
+  happen: the panes working in the checkout close, the checkout is removed unforced, and the
+  branch is deleted if it is proved, or kept with `kept feat/x: not on main yet`. The panes, not
+  the tab's group: a worktree opens into the group of the tab it came from, so a group is the
+  repository, and closing it would end the main checkout and every task beside this one. It is
+  refused, in a sentence naming the pane, while an agent there is running or waiting on an
+  answer or a command is open in its shell. The panes close first — a shell sitting in a
+  directory keeps Windows from deleting it — and since the menu hung off a row that is now
+  gone, it moves to a tab in the main checkout and says what happened under the list.
+- **Discard task** is the one way to delete a branch nobody proved, and it asks twice. The
+  second question names the commits only that branch holds — on no other branch, tag or
+  remote, since one that is elsewhere is not lost — and the modified or untracked files the
+  forced removal throws away, six of each by name and the rest counted, over a button that
+  says "for good" and is never Enter's. The branch is deleted only if its tip is still the one
+  those commits were counted from.
+
+What a question says is what its press does, however long it was up. It stays up while an agent
+finishes — that is what lights its button — and an agent's last act is often a file or a
+commit, so the checkout is looked at again three times: when a pane in it stops working, so the
+question shows what was left; when a button is pressed, before any pane closes — a checkout
+that no longer holds what the question said is asked about again, as it is now, and nothing is
+done, which is also how Discard's second question comes to be about the checkout as it is and
+not as it was when the first opened; and once the panes have closed, just before git runs,
+when anything new the press would take — ignored files included, which either removal deletes
+without git saying a word — keeps both the checkout and the branch.
 
 **A row counts the work, not only what is left to commit.** The diff chip used to be `git diff
 --shortstat HEAD` alone, the working tree against the last commit — so the moment an agent
@@ -1244,8 +1291,10 @@ list nobody is waiting on. `app/src/pirate.rs` is the artwork both he and the us
 plugin draw from.
 
 `app/src/git/worktree.rs` is the git side of the menu — list, add, remove, a count of what is
-loose in a checkout, and the store's tidying — with an error type whose variants are the things
-a UI can offer to do about them, and `app/src/git/merged.rs` is the proof. Both spawn git
+loose in a checkout, the store's tidying, and deleting a branch on a proof — with an error type
+whose variants are the things a UI can offer to do about them, and `app/src/git/merged.rs` is
+the proof. `app/src/workspace/finish.rs` is Finish and Discard: the question, the look behind
+it, and the order things go in. Both spawn git
 through `app/src/git/run.rs`, which puts a timeout on every call (a removal's is the long one,
 because it deletes whatever was built in the checkout and a kill halfway through leaves a
 worktree the sweep will never touch again), gives every call two reader threads so a repository

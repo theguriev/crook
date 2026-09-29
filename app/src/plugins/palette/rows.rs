@@ -81,11 +81,11 @@ use super::{chord, list};
 
 /// How many commands a plugin registers before its name is worth a heading.
 ///
-/// Seven plugins register exactly one command each — the worktrees menu, the
-/// store, this plugin, and the four `Settings: <page>` commands every settings
-/// page gets for free. Seven 28px headings over seven rows is a fence rather
-/// than a list, and one of them would read `Command palette` directly above a
-/// row reading `Command palette`.
+/// Six plugins register exactly one command each — the store, this plugin,
+/// and the four `Settings: <page>` commands every settings page gets for free.
+/// Six 28px headings over six rows is a fence rather than a list, and one of
+/// them would read `Command palette` directly above a row reading `Command
+/// palette`.
 const GROUP_MINIMUM: usize = 3;
 
 /// The heading a plugin too small for one of its own goes under.

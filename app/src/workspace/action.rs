@@ -392,6 +392,34 @@ pub enum WorktreeAction {
     /// Remove those of them git lets go without being forced, and leave the
     /// rest standing. There is no second question: this one never forces.
     Tidy,
+    /// Ask about deleting the branches proved to have landed on the base that
+    /// no checkout has checked out: the first six of them (the menu's
+    /// `NAMED`), each named with what proved it, and the rest counted and
+    /// asked about by the next question, once these have gone.
+    AskDeleteLanded,
+    /// Delete the branches that question named, and none of the ones it only
+    /// counted: each is proved again first, and kept if it has moved.
+    DeleteLanded,
+    /// Ask about finishing the task in the checkout this pane is in: close
+    /// what is working there, remove the checkout, and delete its branch if
+    /// its work is proved to have landed — or keep it, and say so.
+    ///
+    /// `discard` asks about Discard instead, which deletes the branch whether
+    /// or not it has landed and throws away what is loose in the checkout,
+    /// and so asks a second question naming everything that goes.
+    AskFinish {
+        /// The pane whose row the menu was opened on.
+        pane: PaneId,
+        /// Discard, rather than Finish.
+        discard: bool,
+    },
+    /// Do what Finish's question said.
+    Finish,
+    /// Go from Discard's first question to its second, which looks at the
+    /// checkout again and names the commits and files that go.
+    ReviewDiscard,
+    /// Do what Discard's second question said.
+    Discard,
     /// Back to the list, from the creator or from the confirmation.
     Cancel,
     /// Step the keyboard's row through the list by this many places.

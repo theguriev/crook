@@ -11,6 +11,7 @@
 //! file gives: thirty lines duplicated beat a helper that has to be understood
 //! from another module.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -141,6 +142,36 @@ const MAIN: &str = "refs/heads/main";
 
 fn names(branches: &[&str]) -> Vec<String> {
     branches.iter().map(|name| (*name).to_owned()).collect()
+}
+
+/// [`super::merged`], answered as the proofs alone.
+///
+/// Named after it and standing in front of it on purpose: almost every case
+/// here is about *whether* and *how* a branch was proved, and a [`Landed`]
+/// carries more than that — the tip, the base, the evidence — which has its
+/// own cases below and would be noise in every assertion above them.
+fn merged(repository: &Path, base: &str, branches: &[String]) -> HashMap<String, Proof> {
+    proofs(super::merged(repository, base, branches))
+}
+
+/// [`super::merged_within`], answered the same way.
+fn merged_within(
+    repository: &Path,
+    base: &str,
+    branches: &[String],
+    commits: usize,
+    deadline: Duration,
+) -> HashMap<String, Proof> {
+    proofs(super::merged_within(
+        repository, base, branches, commits, deadline,
+    ))
+}
+
+fn proofs(landed: HashMap<String, Landed>) -> HashMap<String, Proof> {
+    landed
+        .into_iter()
+        .map(|(branch, landed)| (branch, landed.proof().clone()))
+        .collect()
 }
 
 // --- proving it ----------------------------------------------------------------
@@ -413,6 +444,40 @@ fn a_squash_merged_branch_is_proved_by_its_patch() {
 }
 
 #[test]
+fn a_proof_names_the_tip_it_was_made_against_and_the_squash_it_found() {
+    // A proof is what a branch is deleted on the strength of, so it has to
+    // say what it proved: the commit that was the tip — a deletion is refused
+    // once the branch is anywhere else — and, for a squash, the commit on the
+    // base a person reads before agreeing to it.
+    if without_git("a_proof_names_the_tip_it_was_made_against_and_the_squash_it_found") {
+        return;
+    }
+    let scratch = ScratchDir::new("evidence");
+    let repo = repository(&scratch, "repo");
+    git(&repo, &["switch", "-c", "done"]);
+    let done_tip = commit(&repo, "done.txt", "finished\n", "done");
+    git(&repo, &["switch", "main"]);
+    git(&repo, &["merge", "--ff-only", "done"]);
+    git(&repo, &["switch", "-c", "feature"]);
+    let feature_tip = commit(&repo, "feature.txt", "the work\n", "the work");
+    let squash = squash_onto_main(&repo, "feature");
+
+    let landed = super::merged(&repo, MAIN, &names(&["feature", "done"]));
+
+    let feature = &landed["feature"];
+    assert_eq!(feature.branch(), "feature");
+    assert_eq!(feature.base(), MAIN);
+    assert_eq!(feature.tip(), feature_tip);
+    assert_eq!(feature.proof(), &Proof::Patch { commit: squash });
+    assert_eq!(feature.subject(), Some("feature, squashed"));
+
+    let done = &landed["done"];
+    assert_eq!(done.tip(), done_tip);
+    assert_eq!(done.proof(), &Proof::Ancestor);
+    assert_eq!(done.subject(), None, "a fast-forward has no squash to name");
+}
+
+#[test]
 fn the_lower_branch_of_a_stack_squashed_as_one_is_not_proved() {
     // Two stacked branches and one squash of the upper — the combined diff —
     // onto main. The upper's whole change is that commit's; the lower's is
@@ -494,10 +559,8 @@ fn a_branch_whose_commit_after_its_squash_only_changes_whitespace_is_not_proved(
     // The case plain `patch-id --stable` gets wrong: it hashes each line with
     // its whitespace taken out, so a follow-up that only re-indents a line
     // hashes the same as the squash before it. In YAML, Python or a Makefile
-    // the indentation is the change — here `b` moves under `a` — and a false
-    // proof offers somebody's checkout for tidying, and would cost their
-    // branch once deleting one is on the table, so the follow-up has to count
-    // as work.
+    // the indentation is the change — here `b` moves under `a` — and a proof
+    // is what a branch is deleted on, so the follow-up has to count as work.
     if without_git("a_branch_whose_commit_after_its_squash_only_changes_whitespace_is_not_proved") {
         return;
     }

@@ -1,5 +1,6 @@
 //! Every checkout a repository has, the two commands that make and unmake
-//! one, what a new one is given, and the lock that says one is in use.
+//! one, what a new one is given, the lock that says one is in use, and the
+//! one that deletes a branch whose work has landed.
 //!
 //! A tab in Crook is an agent working somewhere, and two agents working in the
 //! same directory fight over the same files. A worktree is git's answer to
@@ -10,7 +11,9 @@
 //! first run needs, the `.env` and the local configuration, by the rules of
 //! Claude Code's `.worktreeinclude` — and the lock that tells every other
 //! tool an agent is working in one: see [`LOCK_PREFIX`] for how Crook tells
-//! its own lock from anybody else's.
+//! its own lock from anybody else's — and, once the work is done, the branch
+//! it was done on, which [`delete_branch`] deletes only on a proof that the
+//! work is on the base.
 //!
 //! Everything here is a subprocess, which puts it in [`super::diff`]'s bracket
 //! rather than [`super::branch`]'s: blocking, background-only, and able to
@@ -32,11 +35,12 @@
 //! [`super::run`], which says why the deadline bounds the whole call and not
 //! only git.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+use super::merged::{Landed, merged};
 use super::run::{Failure, Intent, run, run_fed};
 pub(crate) use super::run::{READ_TIMEOUT, WRITE_TIMEOUT};
 
@@ -266,6 +270,35 @@ pub enum Error {
         /// The path that was asked for.
         path: PathBuf,
     },
+    /// The branch is the one work lands on — the base itself, or the local
+    /// branch a remote base shares its name with — and is never deleted.
+    IsBase {
+        /// The branch that was asked about.
+        branch: String,
+    },
+    /// A checkout has the branch checked out, and deleting it would leave
+    /// that checkout on a branch that does not exist.
+    BranchInUse {
+        /// The branch that was asked about.
+        branch: String,
+        /// The checkout that has it.
+        at: PathBuf,
+    },
+    /// The branch is not the commit it was when it was looked at — it has
+    /// moved, or it is gone — so what a person agreed to delete is not what
+    /// is there now.
+    BranchMoved {
+        /// The branch that was asked about.
+        branch: String,
+    },
+    /// Proved again just before deleting it, the branch has not landed after
+    /// all: the base was rewound, or the commit that proved it has left it.
+    NotLanded {
+        /// The branch that was asked about.
+        branch: String,
+        /// The ref it was proved against, in full.
+        base: String,
+    },
     /// Anything else, carrying what git said.
     Failed {
         /// git's own diagnostic, tidied into one line.
@@ -331,6 +364,18 @@ impl std::fmt::Display for Error {
             Self::NotAWorktree { path } => {
                 write!(formatter, "There is no worktree at {}", path.display())
             }
+            Self::IsBase { branch } => write!(formatter, "{branch} is the branch work lands on"),
+            Self::BranchInUse { branch, at } => {
+                write!(formatter, "{branch} is checked out at {}", at.display())
+            }
+            Self::BranchMoved { branch } => {
+                write!(formatter, "{branch} has moved since it was looked at")
+            }
+            Self::NotLanded { branch, base } => write!(
+                formatter,
+                "{branch} is no longer on {}",
+                super::merged::short_name(base)
+            ),
             Self::Failed { message } => write!(formatter, "{message}"),
         }
     }
@@ -406,9 +451,11 @@ pub fn list(directory: &Path) -> Result<Vec<Worktree>, Error> {
 /// This exists for [`suggested_branch`], and the reason is worth stating where
 /// it can be read: [`remove`] deliberately never deletes a branch, so every
 /// checkout Crook has made and unmade has left its branch behind with nothing
-/// checked out on it. Those are exactly the names a listing of *worktrees*
-/// cannot see and `add` still refuses. It is also the list a new worktree can
-/// be started from, and what [`default_branch`] checks its fallbacks against.
+/// checked out on it — until [`delete_branch`] is asked about it, which only a
+/// branch proved to have landed ever is. Those are exactly the names a listing
+/// of *worktrees* cannot see and `add` still refuses. It is also the list a
+/// new worktree can be started from, and what [`default_branch`] checks its
+/// fallbacks against.
 pub fn branches(directory: &Path) -> Result<Vec<String>, Error> {
     let finished = run(
         directory,
@@ -686,10 +733,12 @@ pub fn add(repository: &Path, path: &Path, branch: &str, base: Option<&str>) -> 
 ///
 /// **Blocking**: it deletes a directory tree.
 ///
-/// The branch is never deleted — not as an option, not under `force`. A branch
-/// is the work; a checkout is a directory the work happened in, and deleting
-/// the first because somebody asked to tidy up the second is not a thing a
-/// terminal gets to decide.
+/// The branch is left alone whatever `force` says. A branch is the work; a
+/// checkout is a directory the work happened in, and tidying the second is
+/// no reason to delete the first. Deleting a branch is a separate call —
+/// [`delete_branch`], which takes a proof that the work has reached the base
+/// instead of a flag, or [`discard_branch`], which a person reaches only
+/// through a question naming the commits it loses.
 ///
 /// `force` means "throw away what is loose in the directory": git refuses to
 /// remove a worktree holding modified or untracked files, and `--force` is how
@@ -762,6 +811,294 @@ pub fn prune_empty_parents(store: &Path, removed: &Path) -> usize {
         directory = parent.parent();
     }
     pruned
+}
+
+// MARK: - Deleting a branch
+
+/// Deletes the branch `landed` proved has reached the base — if it still has,
+/// and is still exactly the commit that was proved.
+///
+/// **Blocking**: the proof is made again, which is a pass over the base's
+/// history, and then `git branch -D`. Background executor only.
+///
+/// This is where the rule this module kept from the start — a branch is never
+/// deleted, not as an option and not under force — gives way, and only this
+/// far. A branch whose work is on the base is no longer where the work is; the
+/// base is, and the branch is a name git will list as unmerged for ever. So
+/// what this takes is a [`Landed`], which only [`merged`] makes, and never a
+/// name: nothing can ask for a branch to be deleted without having proved it
+/// first.
+///
+/// Nor is the proof trusted for longer than it takes to use. It was made when
+/// a menu opened, perhaps minutes ago, and since then an agent may have
+/// committed on the branch or somebody may have rewound the base. So nothing
+/// is deleted unless each of these holds, in this order:
+///
+/// * the branch is not the base, nor the local branch a remote base shares its
+///   name with — [`Error::IsBase`];
+/// * proved again, now, against the same base, it has still landed —
+///   [`Error::NotLanded`] — and the new proof is about the same tip;
+/// * no checkout has it checked out — [`Error::BranchInUse`];
+/// * its tip, read last, is the commit that was proved — [`Error::BranchMoved`].
+pub fn delete_branch(repository: &Path, landed: &Landed) -> Result<(), Error> {
+    delete_branches(repository, std::slice::from_ref(landed))
+        .pop()
+        .map_or(Ok(()), |(_, deleted)| deleted)
+}
+
+/// [`delete_branch`] for several branches, answering for each in the order
+/// they were given.
+///
+/// **Blocking**, background executor only.
+///
+/// One proof for all of them rather than one each: proving is a pass over the
+/// base's history, and a dozen passes over the same history to delete a dozen
+/// branches is a dozen times the wait for the same answer. The checks that
+/// are cheap — the checkouts and the tip — are still made for each branch
+/// just before it goes, which is the moment they are about.
+pub fn delete_branches(repository: &Path, landed: &[Landed]) -> Vec<(String, Result<(), Error>)> {
+    // By base, because a proof is against one. Every proof one menu holds is
+    // against the same base, so this is one pass in practice.
+    let mut again: HashMap<&str, HashMap<String, Landed>> = HashMap::new();
+    for base in landed.iter().map(Landed::base) {
+        if again.contains_key(base) {
+            continue;
+        }
+        let branches: Vec<String> = landed
+            .iter()
+            .filter(|landed| landed.base() == base)
+            .map(|landed| landed.branch().to_owned())
+            .collect();
+        again.insert(base, merged(repository, base, &branches));
+    }
+
+    landed
+        .iter()
+        .map(|landed| {
+            let branch = landed.branch();
+            let deleted = refuse_base(branch, landed.base()).and_then(|()| {
+                let now = again
+                    .get(landed.base())
+                    .and_then(|proved| proved.get(branch));
+                if now.is_none_or(|now| now.tip() != landed.tip()) {
+                    // Which of the two it is is worth saying: "it moved" sends
+                    // a person to the branch, "it is not on main" to the base.
+                    let moved = tip_of(repository, branch)?.as_deref() != Some(landed.tip());
+                    return Err(if moved {
+                        Error::BranchMoved {
+                            branch: branch.to_owned(),
+                        }
+                    } else {
+                        Error::NotLanded {
+                            branch: branch.to_owned(),
+                            base: landed.base().to_owned(),
+                        }
+                    });
+                }
+                force_delete(repository, branch, landed.tip())
+            });
+            (branch.to_owned(), deleted)
+        })
+        .collect()
+}
+
+/// Deletes `branch` whether or not its work has landed, provided its tip is
+/// still `tip`.
+///
+/// **Blocking**, background executor only.
+///
+/// The one way to delete a branch without a proof. It is what Discard does,
+/// and a person reaches it only through a second question that names the
+/// commits [`held_only_by`] says this throws away — which were counted from
+/// `tip`, so a branch that has moved since holds commits nobody was shown and
+/// is refused. The base and a branch a checkout has are refused as
+/// [`delete_branch`] refuses them; `base` is `None` only in a repository
+/// [`base_of`](super::merged::base_of) found none in.
+pub fn discard_branch(
+    repository: &Path,
+    branch: &str,
+    tip: &str,
+    base: Option<&str>,
+) -> Result<(), Error> {
+    if let Some(base) = base {
+        refuse_base(branch, base)?;
+    }
+    force_delete(repository, branch, tip)
+}
+
+/// One commit, as a question about losing it names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Commit {
+    /// Its object id, abbreviated the way [`Worktree::head`] is.
+    pub id: String,
+    /// Its subject line.
+    pub subject: String,
+}
+
+/// The commits `tip` reaches that no other branch, no tag and no
+/// remote-tracking branch does, newest first: what deleting `branch` at
+/// `tip` would lose.
+///
+/// **Blocking**, one subprocess, background executor only.
+///
+/// "No other ref" rather than "not on the base", because that is what losing
+/// a commit means: one that is also on a pushed copy of the branch, or on
+/// another branch stacked on this one, is still somewhere after this one is
+/// gone, and naming it as lost would be a warning about nothing.
+pub fn held_only_by(repository: &Path, branch: &str, tip: &str) -> Result<Vec<Commit>, Error> {
+    // A ref name cannot hold `*`, `?` or `[` — `check-ref-format` refuses all
+    // three — so a branch is always a glob that matches exactly itself.
+    let exclude = format!("--exclude={branch}");
+    let finished = run(
+        repository,
+        &[
+            "log",
+            // `log.showSignature` would put gpg's lines among the commits,
+            // and each would be read as one more commit lost.
+            "--no-show-signature",
+            "--format=%H %s",
+            tip,
+            "--not",
+            &exclude,
+            "--branches",
+            "--tags",
+            "--remotes",
+            "--",
+        ]
+        .map(OsStr::new),
+        Intent::Read,
+    )?;
+    if !finished.success {
+        return Err(classify(&finished.stderr));
+    }
+    Ok(String::from_utf8_lossy(&finished.stdout)
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .map(|(id, subject)| Commit {
+            id: short_sha(id.as_bytes()),
+            subject: subject.to_owned(),
+        })
+        .collect())
+}
+
+/// What a forced [`remove`] of `worktree` throws away that a plain one would
+/// have refused over — its modified and untracked files — by path.
+///
+/// **Blocking**, one subprocess, background executor only.
+///
+/// The `git status` [`local_work`] counts, without `--ignored`: ignored files
+/// go with any removal, forced or not, and are what that count is for — a
+/// `target/` listed file by file is not something a person reads. An
+/// untracked directory is one entry ending in `/`, as it is there.
+pub fn loose_files(worktree: &Path) -> Result<Vec<String>, Error> {
+    if !worktree.is_dir() {
+        return Err(Error::NotAWorktree {
+            path: worktree.to_owned(),
+        });
+    }
+    let finished = run(
+        worktree,
+        &["status", "--porcelain", "-z"].map(OsStr::new),
+        Intent::Read,
+    )?;
+    if !finished.success {
+        return Err(classify(&finished.stderr));
+    }
+    Ok(parse_paths(&finished.stdout))
+}
+
+/// The paths of one `git status --porcelain -z`, in the order git gave them.
+///
+/// The same records [`Local::parse_status`] counts: `XY <path>`, with a
+/// rename's or a copy's origin as a field of its own after it, which is
+/// skipped — the file that will be lost is the one at the new name.
+fn parse_paths(stdout: &[u8]) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut entries = stdout.split(|byte| *byte == 0).filter(|f| !f.is_empty());
+    while let Some(entry) = entries.next() {
+        let (Some(code), Some(path)) = (entry.get(..2), entry.get(3..)) else {
+            continue;
+        };
+        paths.push(text(path));
+        if code.contains(&b'R') || code.contains(&b'C') {
+            entries.next();
+        }
+    }
+    paths
+}
+
+/// Refuses `branch` if [`is_base`](super::merged::is_base) says it is the
+/// base.
+fn refuse_base(branch: &str, base: &str) -> Result<(), Error> {
+    if super::merged::is_base(branch, base) {
+        return Err(Error::IsBase {
+            branch: branch.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Where `branch` is now, in full, or `None` when there is no such branch.
+///
+/// **Blocking**, one subprocess, background executor only.
+pub fn tip_of(repository: &Path, branch: &str) -> Result<Option<String>, Error> {
+    let reference = format!("refs/heads/{branch}");
+    let finished = run(
+        repository,
+        &["rev-parse", "--verify", "--quiet", &reference].map(OsStr::new),
+        Intent::Read,
+    )?;
+    if finished.success {
+        return Ok(Some(text(&finished.stdout).trim().to_owned()));
+    }
+    // `--quiet` makes a ref that is not there a failure with nothing said,
+    // which is the answer; anything said is git failing for another reason.
+    if finished.stderr.trim().is_empty() {
+        return Ok(None);
+    }
+    Err(classify(&finished.stderr))
+}
+
+/// Deletes `branch` with `git branch -D`, once no checkout has it and its tip
+/// is still `tip`.
+///
+/// Both checks are the last things before the deletion, the tip last of all,
+/// so that as little as possible can happen between the look and the
+/// deletion: one process starting. `git branch -D` takes no commit to expect,
+/// so that window is as narrow as this can make it.
+fn force_delete(repository: &Path, branch: &str, tip: &str) -> Result<(), Error> {
+    // git refuses this too, but in a sentence that would have to be parsed —
+    // and asking first is what names the checkout.
+    let holder = list(repository)?
+        .into_iter()
+        .find(|worktree| worktree.branch.as_deref() == Some(branch));
+    if let Some(holder) = holder {
+        return Err(Error::BranchInUse {
+            branch: branch.to_owned(),
+            at: holder.path,
+        });
+    }
+    if tip_of(repository, branch)?.as_deref() != Some(tip) {
+        return Err(Error::BranchMoved {
+            branch: branch.to_owned(),
+        });
+    }
+
+    // `-D` and not `-d`, and only because a squash-merged branch is never
+    // "merged" as far as git can tell: `-d` asks whether the tip is reachable
+    // from `HEAD` or from the branch's upstream, and a squash is exactly the
+    // landing that leaves it neither — so `-d` would refuse every branch the
+    // patch proof exists to find. What `-d` stands in for is the checking
+    // above, which this does instead and more exactly.
+    let finished = run(
+        repository,
+        &["branch", "-D", "--", branch].map(OsStr::new),
+        Intent::Write,
+    )?;
+    if finished.success {
+        return Ok(());
+    }
+    Err(classify(&finished.stderr))
 }
 
 // MARK: - What a new checkout is given
