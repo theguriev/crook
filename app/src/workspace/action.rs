@@ -218,11 +218,11 @@ impl From<WindowAction> for WorkspaceAction {
 
 /// What the question a close asks before it ends working agents was told.
 ///
-/// Two answers and a move between them, and the question itself is not one
-/// of them: it opens from the close that asked — [`WindowAction::Close`], or
-/// a tab, pane or group closing — and never from an action of its own, so
-/// there is no way to put it up with nothing to ask about. See
-/// [`closing`](super::closing).
+/// Two answers, a move between them and a key held back, and the question
+/// itself is not one of them: it opens from the close that asked —
+/// [`WindowAction::Close`], or a tab, pane or group closing — and never from
+/// an action of its own, so there is no way to put it up with nothing to ask
+/// about. See [`closing`](super::closing).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum EndingAction {
     /// Leave everything running and take the question down. Its Cancel,
@@ -234,6 +234,15 @@ pub enum EndingAction {
     /// Put the keyboard on one of the two buttons, so that Enter and Space
     /// press it. Tab and the arrow keys.
     Choose(EndingButton),
+    /// Nothing: a key that would have moved the keyboard or pressed End,
+    /// typed before the keyboard had been still long enough for the card to
+    /// have been read.
+    ///
+    /// Something is returned all the same, for the reason
+    /// [`WorkspaceAction::Chord`] is: a keystroke the window has no action
+    /// for goes on to whatever is under the card, and a Tab the card held
+    /// back must not reach a palette under it instead.
+    TooSoon,
 }
 
 /// One of the two buttons on the question a close asks.
@@ -253,14 +262,6 @@ impl EndingButton {
         match self {
             Self::End => Self::Cancel,
             Self::Cancel => Self::End,
-        }
-    }
-
-    /// What pressing it answers.
-    pub fn answer(self) -> EndingAction {
-        match self {
-            Self::End => EndingAction::End,
-            Self::Cancel => EndingAction::Cancel,
         }
     }
 }

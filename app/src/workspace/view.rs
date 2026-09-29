@@ -2082,6 +2082,20 @@ impl Workspace {
         self.closing.as_ref()
     }
 
+    /// The window has just taken the keyboard.
+    ///
+    /// Whatever is typed in the moment after is likely to have been meant for
+    /// wherever the keyboard was before — a desktop that answers a close's
+    /// request for attention by focusing the window does it in the middle of
+    /// somebody's sentence in another application — so the question a close
+    /// asks starts its wait before a key can reach End again. See
+    /// [`closing`].
+    pub fn window_focused(&mut self) {
+        if let Some(question) = self.closing.as_ref() {
+            question.unsettle(Instant::now());
+        }
+    }
+
     /// Asks before `close` ends anything still working, and says whether it
     /// asked.
     ///
@@ -2095,13 +2109,13 @@ impl Workspace {
         if !self.general().ask_before_ending_agents {
             return false;
         }
-        let Some(question) = Question::about(close, &self.tabs) else {
+        let Some(question) = Question::about(close, &self.tabs, Instant::now()) else {
             return false;
         };
 
         // Two popups are never up at once. A plugin's floating surface is the
         // one this cannot take down — it is the plugin's to close — so the
-        // card is painted above it instead and claims its two keys first.
+        // card is painted above it instead and claims its keys first.
         self.close_menu();
         self.close_tab_context_menu(ctx);
         self.close_tab_menu(ctx);
@@ -2134,12 +2148,18 @@ impl Workspace {
     /// takes the last tab finds no card to keep in step on its way out, and a
     /// Cancel is nothing but the card going.
     fn answer_closing(&mut self, answer: EndingAction, ctx: &mut ViewContext<Self>) {
-        if let EndingAction::Choose(button) = answer {
-            if let Some(question) = self.closing.as_mut() {
-                question.choose(button);
-                ctx.notify();
+        match answer {
+            EndingAction::Choose(button) => {
+                if let Some(question) = self.closing.as_mut() {
+                    question.choose(button);
+                    ctx.notify();
+                }
+                return;
             }
-            return;
+            // The wait it restarts was written down when the key was asked
+            // about, and nothing on the card changes.
+            EndingAction::TooSoon => return,
+            EndingAction::Cancel | EndingAction::End => {}
         }
         let Some(question) = self.closing.take() else {
             return;
@@ -5659,9 +5679,11 @@ impl Workspace {
         // field under it would be answered by something the person cannot
         // see is still listening. Escape cancels, Tab and the arrows move
         // between its two buttons, and Enter and Space press the one the
-        // keyboard is on, which starts as Cancel. See [`closing`].
+        // keyboard is on, which starts as Cancel — and none of the way to End
+        // opens until the keyboard has been still for a moment, so that keys
+        // typed on after a stray close cannot find it. See [`closing`].
         if let Some(question) = self.closing.as_ref()
-            && let Some(action) = closing::action_for(question, keystroke)
+            && let Some(action) = closing::action_for(question, keystroke, Instant::now())
         {
             return Some(action);
         }

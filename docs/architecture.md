@@ -1749,7 +1749,10 @@ than ending the event loop there. What cannot ask is anything that ends the proc
 it: a `SIGTERM` or a kill, a logout that kills rather than closes, a power cut — and macOS's Quit
 menu item and `cmd-q`, which winit turns into `applicationWillTerminate:` with no
 `applicationShouldTerminate:` to say no in. A window manager's close is not one of them: it
-arrives as `CloseRequested` and asks like the rest.
+arrives as `CloseRequested` and asks like the rest. Because it can come while somebody is typing
+elsewhere, the window asks the desktop for attention rather than taking the keyboard, and the
+card's way to End opens only after the keyboard has been still for a second — since the card
+came up, since the window last took the keyboard, and since the last key it had no use for.
 
 **Telemetry, crash reporting, autoupdate.** All absent. Worth noting that adding Sentry on
 macOS is not a `Cargo.toml` line: Warp's build script downloads an `xcframework` and its

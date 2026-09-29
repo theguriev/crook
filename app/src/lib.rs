@@ -3395,6 +3395,15 @@ impl WindowDelegate for Shell {
         );
         false
     }
+
+    /// The window took the keyboard, which the question a close asks has to
+    /// hear: the keys that follow may have been typed at another
+    /// application. See `workspace::closing`.
+    fn focused(&mut self) {
+        let workspace = &self.workspace;
+        self.app
+            .update(|ctx| workspace.update(ctx, |workspace, _| workspace.window_focused()));
+    }
 }
 
 #[cfg(test)]

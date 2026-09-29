@@ -46,6 +46,20 @@
 //! agent short of turning the question off; with it, ending one still takes
 //! a deliberate move first.
 //!
+//! **But not with keys typed before it was read.** A close chord pressed by
+//! mistake mid-word leaves hands still typing, and Tab is every shell's
+//! completion key while a Space or an Enter is what follows one: `lo<Tab> -l`
+//! would be a move onto End and a press of it. So the way to End opens only
+//! once the keyboard has been still for [`SETTLE`] — after the card comes up,
+//! after the window takes the keyboard (a desktop can hand it over mid-word,
+//! see below), and after any key the card has no use for, since that is
+//! somebody typing at something else. Until then Tab, the arrows, and Enter
+//! or Space on End are taken and do nothing, and each one starts the wait
+//! again. Escape, and Enter or Space on Cancel, work at once: a way out never
+//! waits. Firefox holds the buttons of its install and download prompts for a
+//! moment (`security.dialog_enable_delay`) against the same typed-ahead
+//! press.
+//!
 //! **The panes under it hear nothing.** Any other popup leaves the focused
 //! pane its interrupt, end and suspend keys (see `Keys::Signals`), because a
 //! menu with no Escape must not make a `sleep 600` uninterruptible. This one
@@ -58,9 +72,15 @@
 //! **A close from the desktop brings the window forward.** A taskbar's
 //! "Close window" or a window manager's close can reach a window that is
 //! minimised or on another workspace, and a card drawn there would be a close
-//! that seemed to do nothing. A window close that asks therefore restores the
-//! window and asks for the keyboard, as far as the platform lets it — see
+//! that seemed to do nothing. A window close that asks therefore restores a
+//! minimised window and, if the window does not have the keyboard, asks the
+//! desktop for the person's attention — see
 //! [`WindowControls::bring_forward`](crate::window_controls::WindowControls::bring_forward).
+//! It asks rather than takes: a close can come from a script while somebody
+//! is typing in another application, and a window that seized the keyboard
+//! would be handed the rest of what they typed. Where restoring it, or the
+//! desktop's answer to the request, hands it the keyboard anyway, the
+//! keyboard's wait starts again when it does.
 //!
 //! It holds the close it is waiting to do and the panes that were working
 //! when it asked, and nothing else about them: the names are read off the
@@ -89,11 +109,15 @@
 //! is up; a windowed run with a frame budget exits through its own budget
 //! and answers a desktop's close at once. See `Shell::close_requested`.
 
+use std::cell::Cell;
+use std::time::{Duration, Instant};
+
 use crookui_core::elements::{MouseStateHandle, WINDOW_INSET};
 use crookui_core::event::{Keystroke, Modifiers};
 use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
+use crate::keybindings::Recording;
 use crate::tab::{Pane, PaneId, TabAction, TabStrip};
 use crate::theme::theme;
 
@@ -120,6 +144,17 @@ const CARD_RADIUS: f32 = 6.;
 /// is read rather than scanned. The count in the header is the number that
 /// matters, and it is always the whole of it.
 const NAMED: usize = 3;
+
+/// How long the keyboard has to have been still before a key can reach the
+/// button that ends them.
+///
+/// A second: longer than the gap between two keys of somebody still typing,
+/// so hands that carry on after a stray close keep the way to End shut, and
+/// about what reading the card's first line takes anyway. What it costs
+/// somebody who meant it is a Tab pressed inside that second doing nothing;
+/// the card says how many are working and names them, and that is worth the
+/// second it takes to read.
+const SETTLE: Duration = Duration::from_secs(1);
 
 /// What a close that stopped to ask is waiting to do.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -201,14 +236,24 @@ pub(super) struct Question {
     /// The button the keyboard is on, which is the one Enter and Space press
     /// and the one drawn filled. Cancel, until Tab or an arrow moves it.
     chosen: EndingButton,
+    /// When a key may first move the keyboard onto the button that ends them,
+    /// or press it: [`SETTLE`] after the card came up, after the window last
+    /// took the keyboard, or after the last key that was typed too soon or
+    /// meant nothing to the card, whichever was latest.
+    ///
+    /// A cell because the keystroke being asked about is what moves it, and
+    /// the window asks about each keystroke exactly once — the same terms the
+    /// half-typed chord sequence is written down on.
+    settles_at: Cell<Instant>,
 }
 
 impl Question {
     /// Asks about `close`, if anything it would end is working.
     ///
     /// `None` is the ordinary answer: nothing is working, and the close goes
-    /// at once.
-    pub(super) fn about(close: Close, strip: &TabStrip) -> Option<Self> {
+    /// at once. `now` is when it comes up, which is where the keyboard's wait
+    /// for [`SETTLE`] starts.
+    pub(super) fn about(close: Close, strip: &TabStrip, now: Instant) -> Option<Self> {
         let working = close.working(strip);
         (!working.is_empty()).then(|| Self {
             close,
@@ -216,7 +261,27 @@ impl Question {
             cancel: MouseStateHandle::default(),
             end: MouseStateHandle::default(),
             chosen: EndingButton::default(),
+            settles_at: Cell::new(now + SETTLE),
         })
+    }
+
+    /// Starts the keyboard's wait for [`SETTLE`] again, from `now`.
+    pub(super) fn unsettle(&self, now: Instant) {
+        self.settles_at.set(now + SETTLE);
+    }
+
+    /// Whether the keyboard has been still long enough, by `now`, for a key
+    /// to reach the button that ends them.
+    fn has_settled(&self, now: Instant) -> bool {
+        now >= self.settles_at.get()
+    }
+
+    /// Lets the keyboard reach End from now on, as though it had been still
+    /// for [`SETTLE`] — which a test says this way rather than by sleeping
+    /// through it.
+    #[cfg(test)]
+    pub(super) fn settle(&self) {
+        self.settles_at.set(Instant::now());
     }
 
     /// The button the keyboard is on.
@@ -248,7 +313,7 @@ impl Question {
     }
 }
 
-/// What a keystroke means while the question is up.
+/// What a keystroke means while the question is up, at `now`.
 ///
 /// Escape is Cancel wherever the keyboard is. Enter and Space press the
 /// button it is on, which starts as Cancel: Enter is Cancel rather than
@@ -257,9 +322,22 @@ impl Question {
 /// other button, and the arrows move it the way the buttons sit — the one
 /// that ends them on the left, Cancel on the right.
 ///
-/// The rest fall through as they would over any popup; the pane under the
-/// card is not listening to any of them. See the [module](self).
-pub(super) fn action_for(question: &Question, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+/// Every key but the ways to Cancel waits for the keyboard to settle first.
+/// Until it has, Tab, the arrows, and Enter or Space on End are
+/// [`EndingAction::TooSoon`] — taken, so that they reach nothing under the
+/// card either, and nothing done — and each of them starts the wait again.
+/// So does any other key: it falls through as it would over any popup, but it
+/// is somebody typing at something that is not the card. A modifier held on
+/// its own is neither, since Shift is how Shift-Tab is reached. The pane under
+/// the card is not listening to any of them. See the [module](self).
+pub(super) fn action_for(
+    question: &Question,
+    keystroke: &Keystroke,
+    now: Instant,
+) -> Option<WorkspaceAction> {
+    if Recording::is_a_modifier(keystroke) {
+        return None;
+    }
     let modifiers = keystroke.modifiers;
     let bare = modifiers.is_empty();
     let shifted = modifiers
@@ -268,14 +346,24 @@ pub(super) fn action_for(question: &Question, keystroke: &Keystroke) -> Option<W
             ..Modifiers::default()
         };
     let action = match keystroke.key.as_str() {
-        "escape" if bare => EndingAction::Cancel,
-        "enter" | "space" if bare => question.chosen().answer(),
+        "escape" if bare => return Some(EndingAction::Cancel.into()),
+        "enter" | "space" if bare => match question.chosen() {
+            EndingButton::Cancel => return Some(EndingAction::Cancel.into()),
+            EndingButton::End => EndingAction::End,
+        },
         "tab" if bare || shifted => EndingAction::Choose(question.chosen().other()),
         "left" if bare => EndingAction::Choose(EndingButton::End),
         "right" if bare => EndingAction::Choose(EndingButton::Cancel),
-        _ => return None,
+        _ => {
+            question.unsettle(now);
+            return None;
+        }
     };
-    Some(action.into())
+    if question.has_settled(now) {
+        return Some(action.into());
+    }
+    question.unsettle(now);
+    Some(EndingAction::TooSoon.into())
 }
 
 /// The card's first line.
