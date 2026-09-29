@@ -993,8 +993,13 @@ reached the base after the branch left it, which is what a squash is), found in 
 `git log -p | git patch-id --stable` pass capped at a thousand commits and ten seconds. Neither
 proof counts for a branch whose own reflog records no commit made on it: a checkout nobody has
 committed in — fresh, only brought up to date, or cut from the tip of a branch that was
-squashed — is not "merged", whatever `--merged` says. The base is what `origin/HEAD` names,
-then `init.defaultBranch` if that branch exists, then `main`, then `master`.
+squashed — is not "merged", whatever `--merged` says. A reflog is not a complete record,
+though: a month after an amend or a rebase, `gc` expires the entry of every commit it replaced
+and leaves only the branch's creation. So a reflog git has pruned, told by a newest entry that
+no longer ends at the branch's tip, is left to the proofs, as is no reflog at all; a rebase
+less than a month old of commits more than a month old still goes unproved until its own entry
+expires. The base is what `origin/HEAD` names, then `init.defaultBranch` if that branch exists,
+then `main`, then `master`.
 Anything it cannot prove — a stack squashed in pieces, a branch reworked during review, a pass
 cut off by its cap — is simply unproved, because a miss costs a badge and a false proof would
 cost somebody's branch the day deleting one is on the table. The menu asks after the list is

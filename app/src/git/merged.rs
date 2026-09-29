@@ -23,7 +23,9 @@
 //! only brought up to date — and a branch cut from the tip of a squashed one
 //! carries that one's patch without a line of its own. "merged" on either row
 //! is a sentence about work that does not exist, so a branch whose own reflog
-//! records no commit made on it is proved by neither: see [`worked_on`].
+//! records no commit made on it is proved by neither — unless git has pruned
+//! that record, as it does a month after an amend or a rebase: see
+//! [`worked_on`].
 //!
 //! A branch neither proves is *unproved*, never "not merged": a stack squashed
 //! in pieces, a branch rebased or reworded during review, and a branch with a
@@ -268,13 +270,29 @@ fn is_ancestor(repository: &Path, reference: &str, base: &str) -> bool {
 ///
 /// Every doubt reads as "not worked on", which only ever takes a proof away:
 /// a reflog git could not read, and a branch whose only commits were written
-/// some other way — on a detached `HEAD` mid-rebase, or by a tool that moves
-/// the branch with a message of its own. The one exception is a branch with
-/// no reflog at all — made with `core.logAllRefUpdates` off, or whose entries
-/// have all expired — which is not known to be empty-handed and is left to
-/// the proofs as git would leave it.
+/// some other way — on a detached `HEAD`, mid-rebase or before the branch was
+/// named, or by a tool that moves the branch with a message of its own.
+///
+/// The exception is a reflog that no longer says what happened, which is not
+/// known to be empty-handed and is left to the proofs as git would leave it.
+/// One is no reflog at all: made with `core.logAllRefUpdates` off, or every
+/// entry expired. The other is a reflog git has pruned. `gc` expires an entry
+/// after thirty days (`gc.reflogExpireUnreachable`) once either commit it
+/// names is one the branch no longer holds, so an amend or a rebase takes the
+/// entry of every commit it replaced with it, its own entry too, and leaves
+/// the creation — which reads exactly like a branch nobody committed on. What
+/// tells the two apart is the newest entry left: every move writes one that
+/// ends at the new tip, so a reflog whose newest entry ends anywhere else has
+/// lost the ones after it, or the branch was moved by something that wrote
+/// none. The three branches above lose nothing to that prune, since every
+/// entry of theirs names a commit they still hold, and stay unproved.
+///
+/// That still misses a rebase less than a month old of commits more than a
+/// month old: once gc has pruned the commits' entries, the rebase's is the
+/// newest, ends at the tip and is not [`WORK`], and the branch is unproved
+/// until that entry expires too.
 fn worked_on(repository: &Path, reference: &str) -> bool {
-    let args = ["log", "-g", "--format=%gs", reference].map(OsStr::new);
+    let args = ["log", "-g", "--format=%H %gs", reference].map(OsStr::new);
     let Ok(finished) = run(repository, &args, Intent::Read) else {
         return false;
     };
@@ -282,8 +300,21 @@ fn worked_on(repository: &Path, reference: &str) -> bool {
         return false;
     }
     let reflog = String::from_utf8_lossy(&finished.stdout);
-    let mut entries = reflog.lines().peekable();
-    entries.peek().is_none() || entries.any(|entry| WORK.iter().any(|work| entry.starts_with(work)))
+    let entries: Vec<(&str, &str)> = reflog
+        .lines()
+        .filter_map(|entry| entry.split_once(' '))
+        .collect();
+    let Some((newest, _)) = entries.first() else {
+        return true;
+    };
+    if entries
+        .iter()
+        .any(|(_, entry)| WORK.iter().any(|work| entry.starts_with(work)))
+    {
+        return true;
+    }
+    answer(repository, &["rev-parse", "--verify", "--quiet", reference])
+        .is_some_and(|tip| tip != *newest)
 }
 
 /// How git's reflog begins the entry for each way of writing a commit onto the

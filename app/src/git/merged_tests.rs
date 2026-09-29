@@ -265,6 +265,115 @@ fn a_branch_cut_from_a_squashed_branch_is_not_called_merged() {
     assert_eq!(landed.get("fresh"), None);
 }
 
+/// What `git gc` does to every reflog once its entries are a month old:
+/// `gc.reflogExpireUnreachable`'s thirty days, brought forward to now.
+fn prune_reflogs(repo: &Path) {
+    git(
+        repo,
+        &["reflog", "expire", "--expire-unreachable=now", "--all"],
+    );
+}
+
+/// Every entry `branch`'s reflog still holds, newest first.
+fn reflog(repo: &Path, branch: &str) -> Vec<String> {
+    git(
+        repo,
+        &["log", "-g", "--format=%gs", &format!("refs/heads/{branch}")],
+    )
+    .lines()
+    .map(str::to_owned)
+    .collect()
+}
+
+#[test]
+fn a_rewritten_branch_keeps_its_proof_once_git_prunes_its_reflog() {
+    // An amend or a rebase replaces the commits the branch's `commit` entries
+    // name, and a month later gc expires every entry that names one — all of
+    // them but the creation, which is what a branch nobody committed on has.
+    // These three were committed on, and landed, and still have after gc.
+    if without_git("a_rewritten_branch_keeps_its_proof_once_git_prunes_its_reflog") {
+        return;
+    }
+    let scratch = ScratchDir::new("pruned");
+    let repo = repository(&scratch, "repo");
+    let rewritten = ["amended", "rebased", "forwarded"];
+    for branch in rewritten {
+        git(&repo, &["branch", branch, "main"]);
+    }
+    git(&repo, &["switch", "amended"]);
+    commit(&repo, "amended.txt", "a first draft\n", "the work");
+    std::fs::write(repo.join("amended.txt"), "the final draft\n")
+        .expect("the scratch directory is writable");
+    git(
+        &repo,
+        &["commit", "--no-verify", "--amend", "--all", "--no-edit"],
+    );
+    for branch in ["rebased", "forwarded"] {
+        git(&repo, &["switch", branch]);
+        commit(&repo, &format!("{branch}.txt"), "the work\n", "the work");
+    }
+    git(&repo, &["switch", "main"]);
+    commit(&repo, "later.txt", "main moves on\n", "later");
+    for branch in ["rebased", "forwarded"] {
+        git(&repo, &["switch", branch]);
+        git(&repo, &["rebase", "main"]);
+    }
+    git(&repo, &["switch", "main"]);
+    git(&repo, &["merge", "--ff-only", "forwarded"]);
+    let amended = squash_onto_main(&repo, "amended");
+    let rebased = squash_onto_main(&repo, "rebased");
+
+    prune_reflogs(&repo);
+    for branch in rewritten {
+        // Or the pruning did not happen, and this is a test of nothing.
+        let left = reflog(&repo, branch);
+        assert!(
+            left.len() == 1 && left[0].starts_with("branch: Created"),
+            "{branch}'s reflog was not pruned to its creation: {left:?}"
+        );
+    }
+
+    let landed = merged(&repo, MAIN, &names(&rewritten));
+
+    assert_eq!(
+        landed.get("amended"),
+        Some(&Proof::Patch { commit: amended })
+    );
+    assert_eq!(
+        landed.get("rebased"),
+        Some(&Proof::Patch { commit: rebased })
+    );
+    assert_eq!(landed.get("forwarded"), Some(&Proof::Ancestor));
+}
+
+#[test]
+fn a_pruned_reflog_does_not_make_a_branch_nobody_committed_on_merged() {
+    // gc leaves these reflogs whole — every entry names a commit the branch
+    // still holds — so the leniency a pruned reflog is given must not reach
+    // them: fresh, only brought up to date, and cut from a squashed branch.
+    if without_git("a_pruned_reflog_does_not_make_a_branch_nobody_committed_on_merged") {
+        return;
+    }
+    let scratch = ScratchDir::new("pruned-empty-handed");
+    let repo = repository(&scratch, "repo");
+    git(&repo, &["branch", "fresh", "main"]);
+    git(&repo, &["branch", "synced", "main"]);
+    git(&repo, &["switch", "-c", "feature"]);
+    commit(&repo, "feature.txt", "the work\n", "the work");
+    squash_onto_main(&repo, "feature");
+    git(&repo, &["branch", "cut", "feature"]);
+    git(&repo, &["switch", "synced"]);
+    git(&repo, &["rebase", "main"]);
+    git(&repo, &["switch", "main"]);
+
+    prune_reflogs(&repo);
+    assert_eq!(reflog(&repo, "synced").len(), 2, "gc took a live entry");
+
+    let landed = merged(&repo, MAIN, &names(&["fresh", "synced", "cut"]));
+
+    assert!(landed.is_empty(), "proved {landed:?}");
+}
+
 #[test]
 fn a_squash_merged_branch_is_proved_by_its_patch() {
     if without_git("a_squash_merged_branch_is_proved_by_its_patch") {
