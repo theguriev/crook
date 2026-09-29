@@ -15,7 +15,9 @@
 //! is index 4?", "how big is the text area?", a device attributes request. The
 //! emulator answers those into [`Emulator::take_replies`], and it is the
 //! caller's job to put those bytes back on the pty; a caller that drops them
-//! will hang any program that waits for an answer.
+//! will hang any program that waits for an answer. The one caller that must
+//! not answer is a mirror — an emulator following a stream that another one
+//! is already answering — and [`Emulator::advance_mirrored`] is its feed.
 //!
 //! **Nothing here knows what the pointer has selected.** A pane's output is a
 //! list of blocks, and all but the last of them were harvested out of this
@@ -46,6 +48,39 @@ use crate::marks::ShellMark;
 use crate::mouse::MouseModes;
 use crate::pty::ChildExit;
 use crate::snapshot::{self, Palette, Snapshot, TerminalSize};
+
+/// One item of a stream fed to a mirror, in the order it happened.
+///
+/// Almost everything an emulator knows arrives as bytes from the child. One
+/// thing does not: a submitted command line, which [`crate::Terminal::submit`]
+/// hands the emulator directly, before a byte leaves for the pty, and which
+/// nothing in the child's output announces — the echo is what the shell chose
+/// to print, not what was typed. A stream replayed into another emulator has
+/// to carry it, and carries it as an item of its own rather than as bytes
+/// spliced in among the child's. A read ends wherever it ends, inside an
+/// escape sequence or a character as readily as anywhere else, and a submit
+/// lands between two reads, so bytes spliced in there would reach the parser
+/// in the middle of the child's and end whatever it was reading. As an item it
+/// reaches no parser at all: [`Emulator::advance_mirrored`] makes the same
+/// [`Emulator::command_submitted`] call a direct submit makes, at the same
+/// point. Nothing a child prints can pass for one, either. Turning a stream of
+/// these into bytes is the writer's job, and framing them is how it keeps a
+/// submit apart from the output around it.
+///
+/// A replay makes the blocks its stream's own emulator made only when every
+/// read is fed as the [`Fed::Output`] it was. Where a read ends is part of what
+/// an emulator makes of it: a directory the shell reports is applied when the
+/// read it came in is over, so a mark later in that same read still settles
+/// against the directory before it, and a replay that joined two reads into
+/// one could file a block under a different directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fed<'a> {
+    /// Output from the child: one read's worth, exactly as it was read.
+    Output(&'a [u8]),
+    /// A command line submitted at this point in the stream, as it was
+    /// typed.
+    Submitted(&'a str),
+}
 
 /// Something the child process asked the surrounding application to do.
 ///
@@ -305,6 +340,9 @@ pub struct Emulator {
     agent: AgentReport,
     events: Vec<TerminalEvent>,
     replies: Vec<u8>,
+    /// Whether this has ever been fed through [`Self::advance_mirrored`],
+    /// which makes it an emulator that owes the child nothing for good.
+    mirrored: bool,
     snapshot: Arc<Snapshot>,
     /// Whether something has happened since the cached snapshot was built.
     ///
@@ -352,6 +390,7 @@ impl Emulator {
             agent: AgentReport::default(),
             events: Vec::new(),
             replies: Vec::new(),
+            mirrored: false,
             snapshot,
             dirty: false,
         }
@@ -428,12 +467,40 @@ impl Emulator {
         self.drain();
     }
 
+    /// Feeds one item of a stream that another emulator is also being fed,
+    /// and answering.
+    ///
+    /// The grid, the blocks and the events come out exactly as the same calls
+    /// to [`Self::advance`] and [`Self::command_submitted`], in the same
+    /// order, would make them. What does not come out is a reply: the other
+    /// emulator has already answered every query in the stream, and a second
+    /// answer would reach the child as input it never asked for, typed into
+    /// whatever it is running. Feeding an emulator this way once makes it a
+    /// mirror for the rest of its life, so [`Self::take_replies`] is empty from
+    /// then on however it is fed — including of the answers to queries a
+    /// synchronized update was holding when a later [`Self::snapshot`] let it
+    /// go.
+    ///
+    /// Nothing in Crook feeds an emulator this way yet.
+    pub fn advance_mirrored(&mut self, fed: Fed<'_>) {
+        self.mirrored = true;
+        match fed {
+            Fed::Output(bytes) => self.advance(bytes),
+            Fed::Submitted(line) => self.command_submitted(line),
+        }
+    }
+
     /// Records that a command line has been handed to the shell, which is the
     /// one block boundary that needs no cooperation from it.
     ///
     /// The application knows what it wrote and when, so a block opened this way
     /// carries the command text exactly, where a shell-integrated one carries
     /// whatever was echoed on screen. Call it just before writing the line.
+    ///
+    /// A stream that has to carry this — one replayed into another emulator —
+    /// carries it as a [`Fed::Submitted`] of its own, which
+    /// [`Self::advance_mirrored`] turns back into a call to this at the same
+    /// point in the stream.
     pub fn command_submitted(&mut self, command: &str) {
         self.blocks.submitted(
             command,
@@ -612,7 +679,8 @@ impl Emulator {
     }
 
     /// The bytes owed back to the child, in answer to its queries. The caller
-    /// must write these to the pty.
+    /// must write these to the pty. Always empty on a mirror — see
+    /// [`Self::advance_mirrored`].
     pub fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.replies)
     }
@@ -760,6 +828,13 @@ impl Emulator {
 
         if let Some(serial) = self.osc_watcher.completions.take() {
             self.events.push(TerminalEvent::Completions(serial));
+        }
+
+        // A mirror's stream is answered by the emulator it mirrors. Here and
+        // not at the end of a mirrored feed, because this is also where a
+        // synchronized update that a snapshot let go gets its answers.
+        if self.mirrored {
+            self.replies.clear();
         }
 
         self.apply_agent_report();

@@ -1,5 +1,5 @@
 use super::*;
-use crate::emulator::Emulator;
+use crate::emulator::{Emulator, Fed};
 use crate::snapshot::{SnapshotCell, TerminalSize};
 
 /// OSC 133 prompt start.
@@ -362,6 +362,190 @@ fn test_a_submitted_command_line_is_the_blocks_command() {
         block.command,
         "the echoed text overwrote what the application knows it wrote"
     );
+}
+
+/// Everything a block list is drawn from, down to the rows and where the
+/// output starts in them — all of it but the two instants, which no two runs
+/// share.
+fn everything(emulator: &mut Emulator) -> impl PartialEq + std::fmt::Debug + use<> {
+    let blocks = emulator
+        .blocks()
+        .iter()
+        .map(|block| {
+            (
+                block.id,
+                block.state,
+                block.command.clone(),
+                block.exit,
+                block.working_directory.clone(),
+                block.rows.clone(),
+                block.output_from,
+                block.started_at.is_some(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let live = emulator.live_block();
+    let live = (
+        live.id,
+        live.state,
+        live.command,
+        live.started_at.is_some(),
+        live.top_row,
+        live.bottom_row,
+        live.prompt_end,
+    );
+    (blocks, live, emulator.snapshot().text())
+}
+
+/// A pane that lived `stream` the way the application lives one: every read
+/// advanced, every submit made on the emulator directly.
+fn lived(stream: &[Fed]) -> Emulator {
+    let mut emulator = emulator();
+    for fed in stream {
+        match *fed {
+            Fed::Output(bytes) => emulator.advance(bytes),
+            Fed::Submitted(line) => emulator.command_submitted(line),
+        }
+    }
+    emulator
+}
+
+/// A mirror fed `stream` as a replay of it would be.
+fn mirrored(stream: &[Fed]) -> Emulator {
+    let mut emulator = emulator();
+    for fed in stream {
+        emulator.advance_mirrored(*fed);
+    }
+    emulator
+}
+
+#[test]
+fn test_a_submit_fed_to_a_mirror_makes_the_blocks_a_direct_one_does() {
+    // What a replayed stream has to be able to carry: the submit is the one
+    // boundary that never passes through the child's bytes, so an emulator
+    // rebuilt from them alone would have the echo and not the command. What
+    // was typed is not what was echoed: fish expands an abbreviation on
+    // Enter, and the echo is the expansion.
+    let prompt = format!("\x1b]7;file:///srv/app\x07{A}$ {B}");
+    let rest = format!("git checkout main\r\n{C}ok\r\n\x1b]133;D;0\x07{A}$ {B}");
+    let stream = [
+        Fed::Output(prompt.as_bytes()),
+        Fed::Submitted("gco main"),
+        Fed::Output(rest.as_bytes()),
+    ];
+
+    let mut direct = lived(&stream);
+    let [block] = direct.blocks() else {
+        panic!("one finished block, got {}", direct.blocks().len());
+    };
+    assert_eq!(Some("gco main".to_owned()), block.command);
+    assert_eq!(everything(&mut direct), everything(&mut mirrored(&stream)));
+}
+
+#[test]
+fn test_a_submit_fed_between_two_halves_of_a_sequence_leaves_the_sequence_whole() {
+    // Why a submit is an item of its own and not bytes in the stream. A pty
+    // read ends wherever it ends, inside an escape sequence or a character as
+    // readily as anywhere else, and a submit lands between two reads — a line
+    // typed ahead while a command is still printing does exactly that. The
+    // child's bytes on either side of it have to reach the parser as though
+    // it were not there.
+    let prompt = format!("{A}$ {B}");
+    let cut_before = format!("sleep 1\r\n{C}\x1b]13");
+    let cut_after = format!("3;D;0\x07{A}$ {B}");
+    let scenarios: [(&str, &[Fed]); 4] = [
+        (
+            "a colour cut after its first digit",
+            &[
+                Fed::Output(b"$ \x1b[3"),
+                Fed::Submitted("ls"),
+                Fed::Output(b"1mX"),
+            ],
+        ),
+        (
+            "an \u{e9} cut between its two bytes",
+            &[
+                Fed::Output(b"$ caf\xc3"),
+                Fed::Submitted("ls"),
+                Fed::Output(b"\xa9"),
+            ],
+        ),
+        (
+            "the shell's own D cut in two by a line typed ahead of it",
+            &[
+                Fed::Output(prompt.as_bytes()),
+                Fed::Submitted("sleep 1"),
+                Fed::Output(cut_before.as_bytes()),
+                Fed::Submitted("ls"),
+                Fed::Output(cut_after.as_bytes()),
+            ],
+        ),
+        (
+            // No mark between the two commands, so nothing but the submits
+            // cuts the stream; the second is typeahead the block keeps.
+            "two submits to a shell with no integration",
+            &[
+                Fed::Output(b"$ "),
+                Fed::Submitted("ls"),
+                Fed::Output(b"ls\r\na  b\r\n$ "),
+                Fed::Submitted("pwd"),
+                Fed::Output(b"pwd\r\n/srv\r\n$ "),
+            ],
+        ),
+    ];
+
+    for (scenario, stream) in scenarios {
+        assert_eq!(
+            everything(&mut lived(stream)),
+            everything(&mut mirrored(stream)),
+            "{scenario}"
+        );
+    }
+
+    assert_eq!("$ X", lived(scenarios[0].1).snapshot().text().trim_end());
+    let typed_ahead = lived(scenarios[2].1);
+    let [block] = typed_ahead.blocks() else {
+        panic!("the running command made one block");
+    };
+    assert_eq!(Some(0), block.exit, "the split D was read as a D");
+    assert_eq!("$ sleep 1", block.rows.to_text());
+}
+
+#[test]
+fn test_a_replay_fed_in_its_reads_files_each_block_under_its_own_directory() {
+    // What a replay has to keep besides the bytes. A directory the shell
+    // reports is applied when the read it came in is over, so a mark later in
+    // that same read still sees the one before it: fold `cd`'s report and the
+    // next prompt into one read and `pwd` is filed under the old directory.
+    // Fed in the reads it arrived in, each block lands where it did.
+    let first = format!("\x1b]7;file:///a\x07{A}$ {B}");
+    let cd = format!("cd /b\r\n{C}\x1b]133;D;0\x07");
+    let prompt = format!("{A}$ {B}");
+    let pwd = format!("pwd\r\n{C}/b\r\n\x1b]133;D;0\x07{A}$ {B}");
+    let stream = [
+        Fed::Output(first.as_bytes()),
+        Fed::Submitted("cd /b"),
+        Fed::Output(cd.as_bytes()),
+        Fed::Output(b"\x1b]7;file:///b\x07"),
+        Fed::Output(prompt.as_bytes()),
+        Fed::Submitted("pwd"),
+        Fed::Output(pwd.as_bytes()),
+    ];
+
+    let mut direct = lived(&stream);
+    let filed = direct
+        .blocks()
+        .iter()
+        .map(|block| (block.command.clone(), block.working_directory.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec![
+            (Some("cd /b".to_owned()), Some(PathBuf::from("/a"))),
+            (Some("pwd".to_owned()), Some(PathBuf::from("/b"))),
+        ],
+        filed
+    );
+    assert_eq!(everything(&mut direct), everything(&mut mirrored(&stream)));
 }
 
 #[test]

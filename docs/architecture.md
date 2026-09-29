@@ -701,6 +701,28 @@ fit in a twelve-byte `Copy` cell, and dropping them turns `José` into `Jose` on
 that hands out decomposed names. They ride beside the grid in a small side table that is
 empty for essentially every screen.
 
+**The pty is behind a link.** `Terminal` holds a `Box<dyn PtyLink>` rather than a `Pty`: a
+reader, a writer, a resize, `try_wait`, `wait`, `kill` and a process id, which is everything
+`Terminal` and `terminal_model` ask of a child and nothing more, and `Pty` is the
+implementation whose child runs on a pty this process opened. What the seam buys today is a
+session with no process in it — `terminal_tests.rs` drives a prompt, a submit, output, a
+query's answer, a resize and an exit through an in-memory link — and what it leaves room for
+is a far end that is not this process's own, without deciding there will be one. Two pieces
+go with it that the app does not use yet. `Terminal::feed_mirrored` draws a stream without
+answering the queries in it, for a stream some other emulator is already answering, where a
+second answer would reach the child as typed input; a terminal fed that way once never
+answers again. And the stream it takes is made of `Fed` items, so that the one boundary
+`Terminal::submit` hands the emulator out of band can travel with the output as an item of
+its own. It is not spliced into the child's bytes, because a submit falls between two reads
+and a read can end inside an escape sequence: bytes spliced in there would end the sequence.
+A replay makes the blocks the stream's own emulator made only when each read is fed as the
+item it was, since a directory the shell reports is applied when its read is over and a mark
+later in the same read still sees the one before. The link is a trait object rather than a
+type parameter because no keystroke passes through it: a write goes through the writer the
+link handed out once and output through the reader it handed out once, both of them boxed
+trait objects before the link existed, so the box costs one indirect call per resize and per
+child poll.
+
 ### Which shell, and how it is started
 
 Two decisions live in `crates/crook_terminal/src/pty.rs`, and both of them are the difference
