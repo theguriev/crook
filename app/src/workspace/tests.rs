@@ -955,7 +955,7 @@ impl Harness {
     /// bottom of the list still has its glyphs in the frame, and a press where
     /// they are lands on whatever is drawn there instead. That is the footer
     /// on macOS, where the traffic lights' strip moves the list down: with
-    /// `crook/notifications` in the box the probe is the last of sixteen rows,
+    /// `crook/changes` and `crook/notifications` in the box the probe is the last row,
     /// its line fell under "1 update in the registry", and the press selected
     /// nothing — the card stayed on the first built-in.
     fn click_plugin(&mut self, name: &str) {
@@ -5704,9 +5704,10 @@ fn the_worktree_list_is_walked_and_opened_with_the_keyboard() {
 #[test]
 fn a_tabs_menu_is_the_entries_its_plugins_put_in_it() {
     // The shell knows no entry by name, so this list is the whole of what a
-    // tab's menu is — and it comes from two plugins rather than one, which is
-    // the fact the slot exists to make true. `crook/worktrees` is last because
-    // it asked for the band after the one "Close tab" is alone in.
+    // tab's menu is — and it comes from three plugins rather than one, which
+    // is the fact the slot exists to make true. `crook/changes` sits among
+    // the copies because it asked for their band; `crook/worktrees` is last
+    // because it asked for the band after the one "Close tab" is alone in.
     let harness = Harness::seeded();
 
     assert_eq!(
@@ -5721,6 +5722,7 @@ fn a_tabs_menu_is_the_entries_its_plugins_put_in_it() {
             "crook/tabs/copy-git-branch",
             "crook/tabs/open-pull-request",
             "crook/tabs/check-pull-request",
+            "crook/changes/toggle",
             "crook/tabs/rename-tab",
             "crook/tabs/rename-pane",
             "crook/tabs/close-tab",
@@ -28095,6 +28097,335 @@ mod what_a_tab_is_called {
         assert_eq!(
             name_of(&harness, pane),
             Some("AG-2517 UI simplify".to_owned())
+        );
+    }
+}
+
+mod changes_column {
+    //! The Changes column in the real view tree: where it is, what a frame
+    //! of it builds, and what a press on it asks git for.
+
+    use super::*;
+    use crate::git::changes::{Against, Base, Commits, FileChange, Overview, Status};
+    use crate::workspace::changes_panel::PANEL_WIDTH;
+
+    /// The column, by its ground: the one surface-filled box its width.
+    fn column_box(scene: &Scene) -> Option<RectF> {
+        visible_rects(scene)
+            .filter(|(rect, bounds)| {
+                rect.background == Fill::Solid(theme().surface)
+                    && (bounds.width() - PANEL_WIDTH).abs() < 0.5
+            })
+            .map(|(_, bounds)| bounds)
+            .next()
+    }
+
+    /// What the column says, one line at a time, with where it said it.
+    fn column_lines(scene: &Scene) -> Vec<(Vector2F, String)> {
+        let column = column_box(scene).expect("the column is not up");
+        text_lines(scene, |position| column.contains_point(position))
+    }
+
+    /// Whether the column is up and has read something.
+    fn has_read(harness: &Harness) -> bool {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.changes_panel().overview().is_some()
+        })
+    }
+
+    /// How many diffs the column has asked git for.
+    fn hunk_reads(harness: &Harness) -> u64 {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.changes_panel().hunk_reads()
+        })
+    }
+
+    /// An overview of `count` modified files, put in front of the column the
+    /// way a read would put it there.
+    fn show_files(harness: &mut Harness, count: usize) {
+        let overview = Overview {
+            repository: PathBuf::from("/work/repo"),
+            base: Base {
+                name: "main".to_owned(),
+                fork: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                against: Against::Branch,
+            },
+            commits: Commits::default(),
+            files: (0..count)
+                .map(|n| FileChange {
+                    status: Status::Modified,
+                    path: PathBuf::from(format!("src/file-{n:04}.rs")),
+                    from: None,
+                })
+                .collect(),
+            more_files: false,
+        };
+        harness.workspace_update(|workspace, ctx| workspace.show_changes(overview, ctx));
+    }
+
+    #[test]
+    fn the_command_puts_the_column_beside_the_work_and_takes_it_away_again() {
+        // A directory in no repository, so the column's read answers at once
+        // and nothing here depends on the machine's git.
+        let scratch = Scratch::new();
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        let directory = scratch.path().to_path_buf();
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(directory);
+        });
+        let scene = harness.frame();
+        let wide = panel_boxes(&scene)[0];
+        assert!(column_box(&scene).is_none(), "the column was up unasked");
+
+        harness.run_command("crook/changes/toggle");
+        let scene = harness.frame();
+        let column = column_box(&scene).expect("the command put no column up");
+        assert!(
+            text_where(&scene, |position| column.contains_point(position)).contains("Changes"),
+            "the column is not the Changes column"
+        );
+        // Beside the work, not over it: the pane gave up the column's width.
+        let squeezed = panel_boxes(&scene)[0];
+        assert!(
+            (wide.width() - squeezed.width() - PANEL_WIDTH).abs() < 1.,
+            "the pane went from {} to {} wide, which is not the column's {PANEL_WIDTH}",
+            wide.width(),
+            squeezed.width()
+        );
+        assert!(
+            column.min_x() >= tabs_panel::PANEL_WIDTH - 0.5
+                && column.max_x() <= squeezed.min_x() + 0.5,
+            "the column at {column:?} is not between the tabs and the pane at {squeezed:?}"
+        );
+
+        harness.run_command("crook/changes/toggle");
+        let scene = harness.frame();
+        assert!(column_box(&scene).is_none(), "the second press left it up");
+        assert!(
+            (panel_boxes(&scene)[0].width() - wide.width()).abs() < 0.5,
+            "the pane did not get its width back"
+        );
+    }
+
+    #[test]
+    fn with_the_tabs_hidden_the_leftmost_column_has_the_corner_the_traffic_lights_are_in() {
+        // On a client-decorated macOS window AppKit paints the lights over the
+        // window's top-left corner. With the tabs hidden, a docked column is
+        // what is there, not the header: the header keeping the room is room
+        // for nothing, and the column drawing its title there puts it under
+        // the lights.
+        let mut harness = Harness::new(1);
+        harness.override_controls(ControlLayout::MacOs);
+        harness.run_command("crook/window/toggle-panel");
+        let lights = harness.window_insets().header_left;
+        assert!(
+            lights > 0.,
+            "with nothing on the left the header owes the corner"
+        );
+
+        let nothing_in_the_corner = |harness: &mut Harness, which: &str| {
+            let scene = harness.frame();
+            let corner = RectF::new(
+                Vector2F::zero(),
+                vec2f(lights, tabs_panel::TITLE_STRIP_HEIGHT),
+            );
+            let under = text_lines(&scene, |position| corner.contains_point(position));
+            assert!(
+                under.is_empty(),
+                "{which} drew {under:?} where the traffic lights are painted"
+            );
+            let insets = harness.window_insets();
+            assert_eq!(
+                (insets.panel_left, insets.header_left),
+                (lights, 0.),
+                "with {which} leftmost the header kept the corner"
+            );
+        };
+
+        show_files(&mut harness, 3);
+        let scene = harness.frame();
+        let column = column_box(&scene).expect("the column is up");
+        assert!(
+            column.min_x() < 0.5,
+            "the column at {column:?} is not leftmost"
+        );
+        assert!(
+            column_lines(&scene)
+                .iter()
+                .any(|(_, line)| line.starts_with("Changes")),
+            "the column's title is not drawn at all"
+        );
+        nothing_in_the_corner(&mut harness, "the Changes column");
+
+        // The Themes panel docks left of it, and has the corner instead.
+        harness.open_theme_panel();
+        nothing_in_the_corner(&mut harness, "the Themes panel");
+    }
+
+    #[test]
+    fn a_long_file_list_draws_only_the_rows_on_screen() {
+        // Five thousand files is a vendored tree or a generated one, and a
+        // frame of the column is still a screenful: every row built and laid
+        // out would be thousands of text runs sixty times a second.
+        let mut harness = Harness::new(1);
+        show_files(&mut harness, 5_000);
+
+        let files = |scene: &Scene| -> Vec<String> {
+            column_lines(scene)
+                .into_iter()
+                .map(|(_, line)| line)
+                .filter(|line| line.contains("src/file-"))
+                .collect()
+        };
+        let scene = harness.frame();
+        let drawn = files(&scene);
+        assert!(
+            drawn.first().is_some_and(|line| line.contains("file-0000")),
+            "the first file is not at the top: {drawn:?}"
+        );
+        assert!(
+            drawn.len() < 100,
+            "{} file rows were drawn for a column a screen tall",
+            drawn.len()
+        );
+        assert!(
+            !frame_text(&scene).contains("file-4999"),
+            "the last file was drawn at the top of the list"
+        );
+
+        // Down to the end, by the wheel, as a person gets there.
+        let column = column_box(&scene).expect("the column is up");
+        for _ in 0..10 {
+            harness.dispatch(Event::ScrollWheel {
+                position: center(column),
+                delta: ScrollDelta::Lines(vec2f(0., -1_000.)),
+                modifiers: Modifiers::default(),
+            });
+            harness.frame();
+        }
+        let scene = harness.frame();
+        let drawn = files(&scene);
+        assert!(
+            drawn.last().is_some_and(|line| line.contains("file-4999")),
+            "the end of the list is not drawn at the end of the scroll: {drawn:?}"
+        );
+        assert!(drawn.len() < 100, "{} file rows were drawn", drawn.len());
+        assert!(!frame_text(&scene).contains("file-0000"));
+    }
+
+    #[test]
+    fn pressing_a_file_shows_its_hunks_and_reads_them_once() {
+        let scratch = Scratch::new();
+        let Some(repository) = scratch_repository(&scratch.path().join("repository")) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        fs::write(
+            repository.join("README"),
+            "worktree test\nwhat the agent added\n",
+        )
+        .expect("writable");
+
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(repository.clone());
+        });
+        harness.run_command("crook/changes/toggle");
+        harness.wait_for("the column never read the repository", |harness| {
+            has_read(harness)
+        });
+
+        let scene = harness.frame();
+        let (at, _) = column_lines(&scene)
+            .into_iter()
+            .find(|(_, line)| line.contains("README"))
+            .expect("the changed file is not listed");
+        let row = vec2f(at.x() + 4., at.y() - 3.);
+        let added = "+what the agent added";
+        assert!(
+            !frame_text(&scene).contains(added),
+            "a hunk was drawn unasked"
+        );
+
+        harness.click(row, MouseButton::Left);
+        harness.wait_for("the file's hunks never arrived", |harness| {
+            frame_text(&harness.frame()).contains(added)
+        });
+        assert_eq!(hunk_reads(&harness), 1);
+
+        harness.click(row, MouseButton::Left);
+        assert!(
+            !frame_text(&harness.frame()).contains(added),
+            "a second press did not hide the hunks"
+        );
+
+        // Shown again at once, from what was read, with nothing asked of git.
+        harness.click(row, MouseButton::Left);
+        assert!(
+            frame_text(&harness.frame()).contains(added),
+            "the hunks came back only after another read"
+        );
+        assert_eq!(hunk_reads(&harness), 1, "the diff was read again");
+    }
+
+    #[test]
+    fn the_column_follows_the_focused_tab_to_where_it_works() {
+        let scratch = Scratch::new();
+        let mut harness = Harness::new(2);
+        let [first, second] = harness.tab_ids()[..] else {
+            panic!("two tabs were asked for");
+        };
+        for (tab, name) in [(first, "one"), (second, "two")] {
+            let directory = scratch.path().join(name);
+            fs::create_dir_all(&directory).expect("writable");
+            let pane = harness.panes_of(tab)[0];
+            harness.update_session(pane, |session| {
+                session.working_directory = Some(directory);
+            });
+        }
+        let target = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.changes_panel().target.clone()
+            })
+        };
+
+        harness.dispatch_action(TabAction::Select(first));
+        harness.run_command("crook/changes/toggle");
+        assert_eq!(target(&harness), Some(scratch.path().join("one")));
+
+        harness.dispatch_action(TabAction::Select(second));
+        assert_eq!(
+            target(&harness),
+            Some(scratch.path().join("two")),
+            "the column stayed on the tab that was left"
+        );
+    }
+
+    #[test]
+    fn a_tabs_menu_shows_the_column_and_then_offers_to_hide_it() {
+        let mut harness = Harness::seeded();
+        let tab = harness.active_id();
+        let pane = harness.focused_pane_id().expect("the tab has a pane");
+
+        harness.open_tab_menu_on(tab, pane);
+        let scene = harness.frame();
+        harness.click(
+            center(tab_menu_row_saying(&scene, "Show changes")),
+            MouseButton::Left,
+        );
+        let scene = harness.frame();
+        assert!(column_box(&scene).is_some(), "the entry put no column up");
+        assert!(
+            tab_menu_box(&scene).is_none(),
+            "the menu stayed up over the column it opened"
+        );
+
+        harness.open_tab_menu_on(tab, pane);
+        assert!(
+            tab_menu_offers(&harness.frame(), "Hide changes"),
+            "the entry does not say pressing it again hides the column"
         );
     }
 }

@@ -132,7 +132,8 @@ description of something that was never built.
     off, even though the popup that draws it has not moved yet. `crook/tabs` renames a tab and
     a pane through one of its own, and nothing about renaming is in the menu's shell — it
     draws the field, and that is the whole of its involvement.
-  - The menu is nine entries from two plugins across seven bands, and one of them is not a line
+  - The menu is thirteen entries from three plugins across seven bands — `crook/changes` puts
+    its "Show changes" among the copies — and one of them is not a line
     of text: the colour swatches are a row of controls the shell offers and the plugin fills,
     because which six colours a tab may be is the tab model's business and how a menu row
     looks is the menu's.
@@ -1261,7 +1262,10 @@ of the twelve thousand lines of workspace tests names it.
 floating surface — it is a docked column between the sidebar and the work, which is a place
 nothing can contribute to today: `window.overlay` floats and `sidebar.section` replaces. So
 `crook/window` declares `window.column`, `Cardinality::Single`, and `Workspace::render` composes
-whatever is in it exactly where it composes the panel now. After that it is a move:
+whatever is in it exactly where it composes the panel now. The Changes column
+(`workspace::changes_panel`) is composed in the same place for the same reason, and is the
+second thing the slot would hold: native for now, because a slot whose only two contributors
+are built in has no stranger to hold its API to, and it moves when the Themes panel does. After that it is a move:
 `ThemePanelState` into the plugin, its actions registered by name, the creator's field through
 `claim_field`, and the Appearance page's "Current theme" row reaching it the way the palette
 reaches everything — by action name. What does *not* move is `Workspace::set_theme`: applying a

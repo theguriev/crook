@@ -1253,6 +1253,69 @@ with a fat `target/` cannot deadlock a pipe, and joins `log -p` to `patch-id` wi
 their own so a history's patches never pass through Crook. The row's count since the base, in
 `app/src/git/diff.rs`, spawns its two through the same runner.
 
+### What the agent changed
+
+A worktree gives an agent somewhere to work; the Changes column is how a person sees what it
+did there without leaving for another terminal to type `git log` and `git diff`. The row's
+`+214 −37` chip counts only what is not committed yet, so the moment an agent commits, the one
+thing Crook said about its work used to go blank — and checking an agent's claim against its
+diff is exactly the step a person reviewing ten agents a day skips when it costs a context
+switch.
+
+`crook/changes/toggle`, from the palette or a tab's menu, docks a column where the Themes panel
+docks — composed once in `Workspace::render`, beside the work rather than over it — about the
+focused pane's repository. `app/src/git/changes.rs` reads it: the base (the merge-base of `HEAD`
+and `merged::base_of`'s branch, which is what a pull request compares from, so the base moving
+on is not shown as the task undoing it), `git log <merge-base>..HEAD`, `git diff --raw
+<merge-base>` against the working tree plus `git ls-files --others --exclude-standard`, and one
+file's unified diff when somebody opens that file. A read never refreshes the index, so a file
+whose bytes are what they were but whose mtime moved — a formatter that changed nothing, `touch`,
+a test run writing the same snapshot picture — is one `--raw` calls modified without having read
+it; those files, text or binary, go through one `git hash-object --stdin-paths`, and a file that
+hashes to the id it had at the base is left out. The list never diffs a file: a diff's cost is
+whatever `diff.algorithm` somebody chose makes of the file's lines (twenty seconds for one data
+file under `histogram`), and one file it cannot read fails it, where hashing reads each file once
+and keeps a file it cannot read. A new link to a directory is the one diff written by hand,
+because `diff --no-index` follows the link and fails inside the directory. Every call goes
+through `git/run.rs`'s deadline on the background pool, with `--no-ext-diff`, `--no-textconv`
+and `core.fsmonitor` off, because each of those is a program a repository's configuration names
+and git would run it for a column that only reads; the `a/` and `b/` prefixes and the spelling
+of a blank context line are pinned too, so `diff.noprefix` cannot make "Copy diff" hand on a
+patch `git apply` refuses. A single file's diff goes through `run_capped`, which stops reading
+one byte past half a megabyte and drops the pipe so git ends there, and is cut again at three
+thousand lines — both say so on screen, and "Copy diff" is not offered for a diff that is not
+whole.
+
+**It reads on beats that already exist.** On opening, when the focused pane moves to another
+repository (a walk up for `.git`, no subprocess), on its Refresh button, and at the end of every
+cycle of `GitModel` — which now emits an event per cycle, changed or not, because what the column
+shows is nothing the cycle gathers. No timer of its own; a cycle that arrives while a read is in
+flight is not a second read, and an answer is taken only if it is for the question still being
+asked.
+
+**A frame costs a screenful.** Every row — headings, commits, files, a file's hunk lines — is
+one entry of one flat list with a fixed height per kind and a running sum of heights beside it,
+rebuilt when what is listed changes. A frame binary-searches the scroll offset for the first row
+and builds rows until it passes the bottom of the box, with a spacer standing for the rest: the
+arithmetic `block_list.rs` draws a pane's output with. A file's diff is read when the file is
+opened and kept while it is folded away, until the next refresh: that reads again the files
+that are open and drops the folded ones' diffs, which are read again when they are opened. A
+line of a diff is kept to 256 bytes for drawing, because a line is shaped whole on every frame
+before it is cut to the column, and one line of a minified bundle is milliseconds of that;
+"Copy diff" copies the patch with its lines whole.
+
+**It is read-only, and that is the design rather than the first slice of an editor.** There is
+no stage, no revert and no in-place edit, because the tree it shows is one an agent is writing
+to: a revert that lands between the agent's read of a file and its write is one the agent
+silently undoes, and an edit made under it is an edit it did not read. "Revert this" is a thing
+to tell the agent. What the column offers instead is a way out to where the change can be made
+safely — "Open" in `$VISUAL` or `$EDITOR` at the first changed line (at the top of the file for
+an editor not known to take a line, since one that does not reads `+12` as a file to open),
+"Copy path", "Copy diff" — and "Open" only for an editor with a window of its own, since an
+editor that draws in the terminal it was started from has none when Crook starts it detached
+(Neovim, measured, waits for one for ever). No syntax highlighting: added and removed lines are
+the theme's `diff_added` and `diff_removed`.
+
 ### The agent says what it is doing
 
 The dot on a tab's row has four colours and, until this section, one real source: a bell in a

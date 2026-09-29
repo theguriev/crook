@@ -66,11 +66,12 @@ use crate::window_controls::WindowHandle;
 use crate::{Channel, WINDOW_CHROME};
 
 use super::action::{
-    BlockAction, BlockEdge, BlockPart, CrashNoteAction, CreatorField, EndingAction, FindAction,
-    OptionsAction, SearchAction, SettingsAction, Subject, TabMenuAction, ThemeAction, WindowAction,
-    WorkspaceAction, WorktreeAction,
+    BlockAction, BlockEdge, BlockPart, ChangesAction, CrashNoteAction, CreatorField, EndingAction,
+    FindAction, OptionsAction, SearchAction, SettingsAction, Subject, TabMenuAction, ThemeAction,
+    WindowAction, WorkspaceAction, WorktreeAction,
 };
 use super::block_list::block_text;
+use super::changes_panel::{ChangesPanelState, Editor, HunkRead};
 use super::closing::{self, Close, Question};
 use super::crash_note::CrashNote;
 use super::held_locks::{HeldLock, HeldLocks};
@@ -822,6 +823,8 @@ pub struct Workspace {
     block_menu: BlockMenuState,
     /// The Themes panel, which is the other surface that lists themes.
     panel: ThemePanelState,
+    /// The Changes column: what the focused tab's agent changed.
+    changes: ChangesPanelState,
     /// Every theme that can be chosen, as of the last time a surface that
     /// lists them was opened.
     ///
@@ -978,6 +981,10 @@ impl Workspace {
             workspace.forget_moved_pull_requests();
             ctx.notify();
         });
+        // And the end of every cycle, changed or not, is when the Changes
+        // column reads its repository again: the one beat the window already
+        // keeps, rather than a second one of its own.
+        ctx.subscribe_to_model(&git, |workspace, _, _, ctx| workspace.refresh_changes(ctx));
 
         let terminals = ctx.add_model(TerminalModel::new);
         // Two channels, and they carry different things. The observation is
@@ -1101,6 +1108,7 @@ impl Workspace {
             tab_menu: TabMenuState::default(),
             block_menu: BlockMenuState::default(),
             panel: ThemePanelState::default(),
+            changes: ChangesPanelState::default(),
             themes: crate::theme::available(),
             unreadable_themes: Vec::new(),
             theme_before_draft: None,
@@ -2595,6 +2603,287 @@ impl Workspace {
     /// Whether it is showing the creator.
     pub fn is_creating_theme(&self) -> bool {
         self.panel.mode == Mode::Creating
+    }
+
+    /// The Changes column's state.
+    pub(super) fn changes_panel(&self) -> &ChangesPanelState {
+        &self.changes
+    }
+
+    /// Whether the Changes column is up.
+    pub fn is_changes_panel_open(&self) -> bool {
+        self.changes.open
+    }
+
+    /// Puts the Changes column up on the focused pane's repository, or takes
+    /// it down. What `crook/changes/toggle` does, from the palette, a chord
+    /// or a tab's menu.
+    pub fn toggle_changes_panel(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.changes.open {
+            self.close_changes_panel(ctx);
+            return;
+        }
+        // Crook's own environment, the one it was started with — not a pane
+        // shell's, which may have set `$VISUAL` in its rc file and cannot say
+        // so to anything outside it. Read once per opening rather than on the
+        // render path, where the button would read it every frame.
+        let editor = Editor::from_environment();
+        if let Some(epoch) = self.changes.open(self.changes_target(), editor) {
+            self.read_changes(epoch, ctx);
+        }
+        ctx.notify();
+    }
+
+    /// Takes the Changes column down.
+    fn close_changes_panel(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self.changes.open {
+            return;
+        }
+        self.changes.close();
+        ctx.notify();
+    }
+
+    /// Where the Changes column should be looking: the top of the repository
+    /// the focused pane is in, or the pane's own directory when that is in
+    /// none — which the read then says, rather than this guessing.
+    ///
+    /// The walk up for `.git` is a handful of syscalls and no subprocess,
+    /// which is what lets it run on every move of the strip: a pane's `cd`
+    /// inside one repository is the same target, and nothing is read again.
+    fn changes_target(&self) -> Option<PathBuf> {
+        let directory = self
+            .tabs
+            .focused_pane_id()
+            .and_then(|pane| self.tabs.pane(pane))
+            .and_then(|pane| pane.session().working_directory.clone())?;
+        Some(
+            crate::git::discover(&directory)
+                .and_then(|layout| layout.work_tree)
+                .unwrap_or(directory),
+        )
+    }
+
+    /// Points the column at the focused pane's repository, if that is not
+    /// where it is already looking.
+    ///
+    /// Called after everything that can change the answer: a tab chosen, a
+    /// pane focused or closed, a shell reporting a new directory.
+    fn follow_changes(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self.changes.open {
+            return;
+        }
+        let target = self.changes_target();
+        if target == self.changes.target {
+            return;
+        }
+        if let Some(epoch) = self.changes.retarget(target) {
+            self.read_changes(epoch, ctx);
+        }
+        ctx.notify();
+    }
+
+    /// Reads the column's repository again, unless it is down or a read is
+    /// already on its way.
+    fn refresh_changes(&mut self, ctx: &mut ViewContext<Self>) {
+        if let Some(epoch) = self.changes.refresh() {
+            self.read_changes(epoch, ctx);
+            ctx.notify();
+        }
+    }
+
+    /// Reads what the column shows on the background pool, and lands it if
+    /// it is still the answer to the question being asked.
+    fn read_changes(&mut self, epoch: u64, ctx: &mut ViewContext<Self>) {
+        let Some(target) = self.changes.target.clone() else {
+            return;
+        };
+        let reading = ctx
+            .background()
+            .spawn(async move { crate::git::changes::overview(&target) });
+        ctx.spawn(reading, move |workspace, read, ctx| {
+            let Some(again) = workspace.changes.land(epoch, read) else {
+                return;
+            };
+            for read in again {
+                workspace.read_hunks(read, ctx);
+            }
+            ctx.notify();
+        })
+        .detach();
+    }
+
+    /// Reads one file's diff on the background pool.
+    fn read_hunks(&mut self, read: HunkRead, ctx: &mut ViewContext<Self>) {
+        let HunkRead {
+            repository,
+            base,
+            file,
+            ticket,
+        } = read;
+        let path = file.path.clone();
+        let reading = ctx.background().spawn(async move {
+            crate::git::changes::hunks(&repository, &base, &file).map_err(|error| error.to_string())
+        });
+        ctx.spawn(reading, move |workspace, read, ctx| {
+            if workspace.changes.land_hunks(&path, ticket, read) {
+                ctx.notify();
+            }
+        })
+        .detach();
+    }
+
+    /// What a press in the Changes column asks for.
+    fn apply_changes_action(&mut self, action: ChangesAction, ctx: &mut ViewContext<Self>) {
+        match action {
+            ChangesAction::Close => self.close_changes_panel(ctx),
+            ChangesAction::Refresh => self.refresh_changes(ctx),
+            ChangesAction::ToggleFile(index) => {
+                if let Some(read) = self.changes.toggle(index) {
+                    self.read_hunks(read, ctx);
+                }
+                ctx.notify();
+            }
+            ChangesAction::OpenFile(index) => {
+                let Some(overview) = self.changes.overview() else {
+                    return;
+                };
+                let Some(file) = overview.files.get(index) else {
+                    return;
+                };
+                let listed = file.path.clone();
+                let path = overview.repository.join(&file.path);
+                // The first changed line once the diff has said which it is,
+                // and the top of the file until then.
+                let line = self
+                    .changes
+                    .diff(&file.path)
+                    .and_then(|diff| diff.first_line)
+                    .unwrap_or(1);
+                let Some(editor) = self.changes.editor() else {
+                    return;
+                };
+                let started = editor.open(&path, line).map_err(|error| {
+                    log::warn!(
+                        "could not start {} on {}: {error}",
+                        editor.name(),
+                        path.display()
+                    );
+                    format!("Could not start {}: {error}", editor.name())
+                });
+                self.changes.opened(&listed, started);
+                ctx.notify();
+            }
+            ChangesAction::CopyPath(index) => {
+                let path = self
+                    .changes
+                    .overview()
+                    .and_then(|overview| overview.files.get(index))
+                    .map(|file| file.path.to_string_lossy().into_owned());
+                if let Some(path) = path {
+                    self.clipboard.write(&path);
+                }
+            }
+            ChangesAction::CopyDiff(index) => {
+                let patch = self
+                    .changes
+                    .overview()
+                    .and_then(|overview| overview.files.get(index))
+                    .and_then(|file| self.changes.diff(&file.path))
+                    .filter(|diff| !diff.binary && !diff.cut)
+                    .map(|diff| diff.patch.clone());
+                if let Some(patch) = patch {
+                    self.clipboard.write(&patch);
+                }
+            }
+        }
+    }
+
+    /// Puts `overview` in front of the Changes column as though a read had
+    /// brought it home, opening the column on it.
+    ///
+    /// The way a test shows the column a repository of any shape without
+    /// building it on disk, and the way the snapshot shows it one it read
+    /// itself — the same seam [`GitModel::record`] is for the tab rows.
+    pub(crate) fn show_changes(
+        &mut self,
+        overview: crate::git::changes::Overview,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let target = Some(overview.repository.clone());
+        let epoch = if self.changes.open {
+            self.changes.retarget(target)
+        } else {
+            self.changes.open(target, Editor::from_environment())
+        };
+        if let Some(epoch) = epoch
+            && let Some(again) = self.changes.land(epoch, Ok(overview))
+        {
+            for read in again {
+                self.read_hunks(read, ctx);
+            }
+        }
+        ctx.notify();
+    }
+
+    /// Opens the Changes column on the directory the process is running in,
+    /// read *now*, with the first file that has lines to show showing them —
+    /// for a run that was asked to start with it up.
+    ///
+    /// Blocking, and only here: a snapshot draws one frame and would
+    /// otherwise photograph the column saying it is reading. The demo's
+    /// directories are invented, so the focused pane is pointed at the real
+    /// one first, which is a repository whenever anybody is taking this
+    /// picture — the worktree menu's snapshot does the same.
+    pub fn open_changes_for_snapshot(&mut self, ctx: &mut ViewContext<Self>) {
+        if let Some(directory) = std::env::current_dir().ok().filter(|path| path.is_dir())
+            && let Some(pane) = self.tabs.focused_pane_id()
+        {
+            self.update_session(pane, ctx, |session| {
+                session.working_directory = Some(directory);
+            });
+        }
+        let Some(target) = self.changes_target() else {
+            return;
+        };
+        let overview = match crate::git::changes::overview(&target) {
+            Ok(overview) => overview,
+            Err(problem) => {
+                // The picture is of the column saying so, which is what a
+                // person would see.
+                if let Some(epoch) = self.changes.open(Some(target), None) {
+                    self.changes.land(epoch, Err(problem));
+                }
+                ctx.notify();
+                return;
+            }
+        };
+        let paths: Vec<PathBuf> = overview
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect();
+        self.show_changes(overview, ctx);
+
+        for (index, path) in paths.iter().enumerate() {
+            if let Some(read) = self.changes.toggle(index) {
+                let diff = crate::git::changes::hunks(&read.repository, &read.base, &read.file)
+                    .map_err(|error| error.to_string());
+                self.changes.land_hunks(path, read.ticket, diff);
+            }
+            let shown = self.changes.is_expanded(path);
+            if shown
+                && self
+                    .changes
+                    .diff(path)
+                    .is_some_and(|diff| !diff.lines.is_empty())
+            {
+                break;
+            }
+            if shown {
+                self.changes.toggle(index);
+            }
+        }
+        ctx.notify();
     }
 
     /// Whether one pane's field is listening to the keyboard.
@@ -5471,9 +5760,13 @@ impl Workspace {
             .control_layout
             .insets(WINDOW_CHROME, self.window.state().fullscreen)
             .split();
-        // The corner is the header's while the panel is hidden, and the room
-        // the platform paints its controls in goes to whoever has the corner.
-        if self.tabs_panel_is_showing() {
+        // The room the platform paints its controls in goes to whoever has
+        // the top-left corner: the leftmost column — the tabs, or with the
+        // tabs hidden a docked column, the Themes panel or the Changes column
+        // — and the header only when no column is up at all. Both docked
+        // columns start with a strip whose left end is empty, which is where
+        // the traffic lights are painted.
+        if self.tabs_panel_is_showing() || self.panel.open || self.changes.open {
             insets
         } else {
             insets.without_panel()
@@ -6082,11 +6375,13 @@ impl Workspace {
         report(pane.session_mut());
         // A report can move the session somewhere else, and the git facts a
         // row shows are looked up by directory — which is what makes the branch
-        // chip follow a shell's `cd`.
+        // chip follow a shell's `cd`. The Changes column follows it into
+        // another repository the same way.
         self.sync_git(ctx);
         // And a `cd` out of a checkout this window locked may have been the
         // last pane in it leaving.
         self.release_vacated(ctx);
+        self.follow_changes(ctx);
         ctx.notify();
         true
     }
@@ -7109,6 +7404,7 @@ impl Workspace {
         // and a tab `tab.new` opened that closed is remembered for a wait
         // asked after it.
         self.watches.settled(&self.tabs);
+        self.follow_changes(ctx);
         // After the strip has moved, so "which pane is being looked at" is the
         // answer for the state the frame is about to draw. Every action comes
         // through here, which is what makes looking at a pane the one and only
@@ -8804,6 +9100,12 @@ impl Workspace {
         ctx.spawn(written, Self::note_session_save).detach();
     }
 
+    /// How tall the window was when it was last laid out, or zero where it
+    /// has not been — a test, a headless picture.
+    pub(super) fn window_height(&self) -> f32 {
+        self.window_size.get().y()
+    }
+
     /// How big the window was when it was last laid out, if it has been.
     fn window_size(&self) -> Option<[f32; 2]> {
         let size = self.window_size.get();
@@ -8829,6 +9131,7 @@ impl Workspace {
         self.sync_interactions();
         self.offer_resumes(ctx);
         self.sync_git(ctx);
+        self.follow_changes(ctx);
         self.sync_input_keys();
         ctx.notify();
     }
@@ -8945,6 +9248,13 @@ impl View for Workspace {
         }
         if self.panel.open {
             content.add_child(super::theme_panel::render(self, app));
+        }
+        // The Changes column is docked the same way and for the same reason:
+        // beside the work rather than over it, whichever section is showing.
+        // Right of the Themes panel, so the two sidebars stay together at the
+        // edge and the column is the one next to the pane it is about.
+        if self.changes.open {
+            content.add_child(super::changes_panel::render(self, app));
         }
         content.add_child(Expanded::new(1., main).finish());
         let content = content.finish();
@@ -9119,6 +9429,7 @@ impl TypedActionView for Workspace {
             WorkspaceAction::Search(action) => self.apply_search(action, ctx),
             WorkspaceAction::Find { pane, action } => self.apply_find(pane, action, ctx),
             WorkspaceAction::Theme(action) => self.apply_theme_action(action, ctx),
+            WorkspaceAction::Changes(action) => self.apply_changes_action(action, ctx),
             WorkspaceAction::Window(action) => self.apply_window_action(action, ctx),
             WorkspaceAction::Ending(answer) => self.answer_closing(answer, ctx),
             WorkspaceAction::TabMenu(action) => self.apply_tab_menu(action, ctx),

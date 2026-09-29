@@ -27,6 +27,7 @@
 //! found — rather than asking again every time it runs.
 
 pub mod branch;
+pub mod changes;
 pub mod diff;
 pub mod merged;
 mod run;
