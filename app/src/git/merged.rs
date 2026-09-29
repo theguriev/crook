@@ -33,9 +33,13 @@
 //! checkout is not offered for tidying. The one thing this module must never
 //! do is prove a branch that did not land — the day branches are deleted on
 //! the strength of it, a false proof is somebody's work gone — so every doubt,
-//! failure and timeout resolves to unproved. The one leniency is git's own:
-//! `patch-id` ignores whitespace, so a squash that differs from the branch
-//! only in spacing still proves it.
+//! failure and timeout resolves to unproved. That includes whitespace, which
+//! `patch-id` ignores unless it is told not to: a branch whose last commit
+//! re-indents a line of Python or YAML, or puts a tab back in a Makefile,
+//! changes what the file means, and a squash of the commits before it is not
+//! that branch's work. So both sides are hashed `--verbatim`, which a git
+//! older than 2.39 does not have: there the pass fails, and nothing is proved
+//! by patch — only by ancestry.
 //!
 //! Everything is read-only and runs through [`super::run`]'s deadline. The
 //! pass over the base's history is bounded twice, by [`PASS_COMMITS`] and
@@ -367,10 +371,19 @@ const DIFF_FLAGS: [&str; 5] = [
     "--ignore-submodules=none",
 ];
 
-/// `patch-id --stable`, which is the half of each pipe that does the proving:
-/// it hashes a patch with its line numbers and whitespace taken out, and
-/// "stable" sums the files' hashes so that their order does not matter.
-const PATCH_ID: [&str; 2] = ["patch-id", "--stable"];
+/// `patch-id --verbatim`, which is the half of each pipe that does the
+/// proving: it hashes a patch with its line numbers taken out and every
+/// character of every line kept, and sums the files' hashes so that their
+/// order does not matter — `--verbatim` implies `--stable`, and git refuses
+/// the two together.
+///
+/// Not plain `--stable`, which also takes the whitespace out of each line
+/// before hashing it: a branch whose change differs from a squash on the base
+/// only in indentation would be proved by it, and deleted on the strength of
+/// it, though in a Python file, a YAML file or a Makefile the indentation is
+/// the change. A git that predates the flag (2.39) fails the pipe, which
+/// proves nothing — the answer this module gives to every doubt.
+const PATCH_ID: [&str; 2] = ["patch-id", "--verbatim"];
 
 /// The patch-id of everything `reference` changed since `fork`, or `None`
 /// when it changed nothing — a branch whose commits cancel out has no patch
