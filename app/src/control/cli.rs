@@ -1,8 +1,9 @@
-//! `crook pane list`: the command line's end of the socket.
+//! `crook pane list` and `crook tab new`: the command line's end of the
+//! socket.
 //!
 //! The command line is the SDK: what a script or an agent can ask a window is
 //! what this prints, a table for a person and, with `--json`, the window's own
-//! array with every field it sent — read as JSON rather than into
+//! answer with every field it sent — read as JSON rather than into
 //! [`PaneEntry`], so a field a newer window adds reaches a script through an
 //! older `crook`.
 //!
@@ -17,6 +18,14 @@
 //! one live socket in this user's directory is taken when there is exactly
 //! one, and several are refused by name: every window is its own process, and
 //! the newest is a guess that hands a script another window's panes.
+//!
+//! # Which pane
+//!
+//! Every request carries the pane's `CROOK_TOKEN` when the environment has
+//! one, and it is the window that decides what it is worth: nothing for a
+//! listing, and everything for `tab new`, which is refused to a request
+//! without one. The command line does not refuse first, so that the one
+//! refusal there is comes from the one place that knows.
 //!
 //! # Nothing it prints is a control character
 //!
@@ -33,16 +42,75 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use super::protocol::PaneEntry;
+use super::protocol::{NewTab, PaneEntry};
 
 /// What `crook pane` takes after it, for the refusal that lists it.
 const VERBS: &str = "list";
+
+/// How `crook tab new` is spelled, for the refusals that show it.
+const TAB_NEW: &str =
+    "crook tab new [--worktree <BRANCH>] [--in-my-group] [--title <TITLE>] [--json] -- <COMMAND>…";
 
 /// Answers `crook pane …`, given everything after `pane`, with the text to
 /// print.
 pub fn pane(args: impl Iterator<Item = String>) -> Result<String> {
     let json = list_arguments(args)?;
     listed(json)
+}
+
+/// Answers `crook tab …`, given everything after `tab`, with the text to
+/// print: the new pane's number, or the window's answer as JSON.
+pub fn tab(args: impl Iterator<Item = String>) -> Result<String> {
+    let (asked, json) = tab_arguments(args)?;
+    opened(asked, json)
+}
+
+/// What follows `tab`: the tab to open, and whether `--json` was asked for.
+///
+/// The command is everything after `--`, word for word, and the `--` is
+/// required: a command is the part of the line most likely to hold a word
+/// that starts with a dash, and without the separator `claude --resume`
+/// would be read as a flag of this command's.
+pub fn tab_arguments(mut args: impl Iterator<Item = String>) -> Result<(NewTab, bool)> {
+    let verb = args
+        .next()
+        .with_context(|| format!("`crook tab` needs a verb: {TAB_NEW}"))?;
+    if verb != "new" {
+        bail!("`crook tab` takes new, not {verb}: {TAB_NEW}");
+    }
+    let mut asked = NewTab::default();
+    let mut json = false;
+    let mut command = None;
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--" => {
+                command = Some(args.by_ref().collect::<Vec<_>>());
+                break;
+            }
+            "--worktree" if asked.worktree.is_none() => {
+                asked.worktree = Some(value_of(&mut args, "--worktree")?);
+            }
+            "--title" if asked.title.is_none() => {
+                asked.title = Some(value_of(&mut args, "--title")?);
+            }
+            "--in-my-group" if !asked.in_my_group => asked.in_my_group = true,
+            "--json" if !json => json = true,
+            flag @ ("--worktree" | "--title" | "--in-my-group" | "--json") => {
+                bail!("`{flag}` was given twice")
+            }
+            other => bail!("unrecognised argument {other}; the command goes after `--`: {TAB_NEW}"),
+        }
+    }
+    asked.command = command
+        .filter(|command| !command.is_empty())
+        .with_context(|| format!("`crook tab new` needs a command after `--`: {TAB_NEW}"))?;
+    Ok((asked, json))
+}
+
+/// The word after a flag that takes one.
+fn value_of(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
+    args.next()
+        .with_context(|| format!("`{flag}` needs a value: {TAB_NEW}"))
 }
 
 /// What follows `pane`: the verb, and whether `--json` was asked for.
@@ -76,16 +144,31 @@ fn listed(json: bool) -> Result<String> {
     )
 }
 
+#[cfg(not(unix))]
+fn opened(asked: NewTab, json: bool) -> Result<String> {
+    let flag = if json { " --json" } else { "" };
+    bail!(
+        "`crook tab new{flag} -- {}` is not available on this platform yet: a window answers on \
+         a Unix socket, and the Windows named pipe is still to come",
+        asked.command.join(" ")
+    )
+}
+
 #[cfg(unix)]
 fn listed(json: bool) -> Result<String> {
-    use crate::shell_integration::PANE_ID_VARIABLE;
+    let socket = unix::socket_here()?;
+    unix::listing(
+        &socket,
+        unix::token_here().as_deref(),
+        json,
+        std::env::home_dir().as_deref(),
+    )
+}
 
-    let socket = unix::socket_from(
-        std::env::var_os(super::SOCKET_VARIABLE),
-        std::env::var_os(PANE_ID_VARIABLE),
-        &super::server::directory(),
-    )?;
-    unix::listing(&socket, json, std::env::home_dir().as_deref())
+#[cfg(unix)]
+fn opened(asked: NewTab, json: bool) -> Result<String> {
+    let socket = unix::socket_here()?;
+    unix::open_tab(&socket, unix::token_here().as_deref(), asked, json)
 }
 
 /// The table `crook pane list` prints: one row a pane, the focused one's
@@ -207,15 +290,15 @@ pub mod unix {
     use anyhow::{Context, Result, anyhow, bail};
     use serde_json::Value;
 
-    use super::super::protocol::{self, PaneEntry, Reply, Verb};
-    use super::super::{SOCKET_VARIABLE, server};
+    use super::super::protocol::{self, NewTab, Opened, PaneEntry, Reply, Verb};
+    use super::super::{SOCKET_VARIABLE, TOKEN_VARIABLE, server};
     use super::table;
 
-    /// How long the command line waits for a window.
+    /// How much longer than the window the command line waits.
     ///
     /// A second past the window's own deadline, so that a window which ran out
     /// of time says so itself rather than being cut off first.
-    const WAIT: Duration = server::DEADLINE.saturating_add(Duration::from_secs(1));
+    const PAST_THE_WINDOW: Duration = Duration::from_secs(1);
 
     /// The longest reply read, in bytes.
     ///
@@ -223,6 +306,24 @@ pub mod unix {
     /// this is far past any real answer; it bounds what a socket that is not
     /// a window's can make the command line hold.
     const MAX_REPLY: u64 = 16 * 1024 * 1024;
+
+    /// The socket to ask from here: this pane's, or the one window running.
+    pub fn socket_here() -> Result<PathBuf> {
+        use crate::shell_integration::PANE_ID_VARIABLE;
+
+        socket_from(
+            std::env::var_os(SOCKET_VARIABLE),
+            std::env::var_os(PANE_ID_VARIABLE),
+            &server::directory(),
+        )
+    }
+
+    /// This pane's token, when this runs in a pane that was handed one.
+    pub fn token_here() -> Option<String> {
+        std::env::var(TOKEN_VARIABLE)
+            .ok()
+            .filter(|token| !token.is_empty())
+    }
 
     /// The socket to ask, from the pane's environment or, outside any pane,
     /// from what is listening in `directory`. See the module docs for the
@@ -293,8 +394,13 @@ pub mod unix {
     }
 
     /// What `crook pane list` prints, having asked the window at `socket`.
-    pub fn listing(socket: &Path, json: bool, home: Option<&Path>) -> Result<String> {
-        let result = ask(socket, Verb::PaneList)?;
+    pub fn listing(
+        socket: &Path,
+        token: Option<&str>,
+        json: bool,
+        home: Option<&Path>,
+    ) -> Result<String> {
+        let result = ask(socket, &Verb::PaneList, token)?;
         if json {
             return Ok(super::json(&result));
         }
@@ -303,8 +409,26 @@ pub mod unix {
         Ok(table(&panes, home))
     }
 
+    /// What `crook tab new` prints, having asked the window at `socket` to
+    /// open `asked`: the new pane's number, which is what a script goes on to
+    /// find in `crook pane list`, or the whole answer with `--json`.
+    pub fn open_tab(
+        socket: &Path,
+        token: Option<&str>,
+        asked: NewTab,
+        json: bool,
+    ) -> Result<String> {
+        let result = ask(socket, &Verb::TabNew(asked), token)?;
+        if json {
+            return Ok(super::json(&result));
+        }
+        let opened: Opened = serde_json::from_value(result)
+            .context("the window's answer is not the tab it opened")?;
+        Ok(opened.pane_id.to_string())
+    }
+
     /// Asks the window at `socket` one verb, and hands back its answer.
-    fn ask(socket: &Path, verb: Verb) -> Result<Value> {
+    fn ask(socket: &Path, verb: &Verb, token: Option<&str>) -> Result<Value> {
         let stream = UnixStream::connect(socket).map_err(|error| match error.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => anyhow!(
                 "nothing is answering on {}: the Crook that opened it has closed",
@@ -312,10 +436,11 @@ pub mod unix {
             ),
             _ => anyhow!(error).context(format!("could not connect to {}", socket.display())),
         })?;
-        stream.set_read_timeout(Some(WAIT))?;
-        stream.set_write_timeout(Some(WAIT))?;
+        let wait = server::DEADLINE.max(verb.patience().unwrap_or_default()) + PAST_THE_WINDOW;
+        stream.set_read_timeout(Some(wait))?;
+        stream.set_write_timeout(Some(wait))?;
         (&stream)
-            .write_all(protocol::request_line(verb).as_bytes())
+            .write_all(protocol::request_line(verb, token).as_bytes())
             .context("could not ask the window")?;
 
         let mut line = Vec::new();

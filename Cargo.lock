@@ -587,6 +587,7 @@ dependencies = [
  "crookui_core",
  "dirs",
  "env_logger",
+ "getrandom 0.2.17",
  "log",
  "png",
  "serde",

@@ -6,21 +6,35 @@
 //! come back, and it cannot go the same way: anything that prints can write
 //! into a pane, so a request read off the pane's output could be forged by a
 //! `cat` of a file. So the window listens on a Unix socket only this user can
-//! reach, tells every pane where it is in [`SOCKET_VARIABLE`], and answers one
-//! verb for now, `pane.list`, which only reads. "The window answers" in
-//! `docs/architecture.md` is the whole argument: the threat model, the
-//! protocol, and what the verbs after this one will need.
+//! reach, tells every pane where it is in [`SOCKET_VARIABLE`], and answers two
+//! verbs: `pane.list`, which only reads, and `tab.new`, which opens a tab
+//! beside the pane that asked and runs a command in it. "The window answers"
+//! in `docs/architecture.md` is the whole argument: the threat model, the
+//! protocol, and what the verbs after these will need.
+//!
+//! # Who may open a tab
+//!
+//! Anything this user runs can connect, so connecting proves nothing about
+//! which pane is asking — and a tab opened for nobody is a tab with no budget
+//! and no lineage to show. Every pane's shell is handed a secret of its own in
+//! [`TOKEN_VARIABLE`], minted from the operating system's random source by
+//! [`mint_token`] when the shell opens and forgotten when it ends; a request
+//! carries it, and the window reads the pane back out of it. A request with no
+//! token, or one no open pane holds, may still list the panes and may open
+//! nothing. See [`spawn`] for the rest of what `tab.new` checks.
 //!
 //! # Layout
 //!
-//! * [`protocol`] is the wire: a line into a [`Verb`] or a refusal, an answer
-//!   into a line. Nothing in it touches a socket.
+//! * [`protocol`] is the wire: a line into a [`Request`] or a refusal, an
+//!   answer into a line. Nothing in it touches a socket.
 //! * `server` is the socket, on Unix: the private directory, the stale-socket
 //!   probe, the listener thread and one short-lived thread per connection.
-//! * [`cli`] is `crook pane list`, the other end.
-//! * This file is the window's side: the [`Inbox`] a connection leaves its
-//!   question in, the chain that answers it on the main thread, and
-//!   [`panes`], which is what the answer says.
+//! * [`cli`] is `crook pane list` and `crook tab new`, the other end.
+//! * [`spawn`] is the window's side of `tab.new`: the token, the budget, the
+//!   worktree, and the command typed at the new pane's first prompt.
+//! * This file is the window's side of the rest: the [`Inbox`] a connection
+//!   leaves its question in, the chain that answers it on the main thread,
+//!   and [`panes`], which is what `pane.list` says.
 //!
 //! # Never on the UI thread
 //!
@@ -31,26 +45,30 @@
 //! through `ctx.spawn`, so answering is a read of the tab strip done between
 //! two frames and nothing on the main thread ever blocks on a socket. A window
 //! that has closed says so rather than leaving the question to time out: see
-//! [`Inbox::close`].
+//! [`Inbox::close`]. The one answer that takes longer, a tab in a new
+//! worktree, does its git on the pool and answers when that comes home.
 //!
 //! # Windows
 //!
 //! Nothing listens there yet: [`Control::open`] is `None`, every pane is told
-//! so with an empty [`SOCKET_VARIABLE`], and `crook pane list` says the command
-//! is not available on this platform. An owner-only named pipe is the route
-//! when it comes.
+//! so with an empty [`SOCKET_VARIABLE`] and an empty [`TOKEN_VARIABLE`], and
+//! `crook pane list` and `crook tab new` say the command is not available on
+//! this platform. An owner-only named pipe is the route when it comes.
 
 pub mod cli;
 pub mod protocol;
 #[cfg(unix)]
 pub mod server;
+pub mod spawn;
 
 #[cfg(test)]
 mod tests;
 
+use std::cell::RefCell;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context as TaskContext, Poll, Waker};
@@ -64,7 +82,8 @@ use crate::git;
 use crate::tab::{AgentSession, AgentStatus};
 use crate::workspace::Workspace;
 
-use self::protocol::{PaneEntry, Refusal, Verb, code};
+use self::protocol::{PaneEntry, Refusal, Request, Verb, code};
+use self::spawn::Spawns;
 
 /// The variable every pane's shell finds the window's socket in.
 ///
@@ -73,6 +92,36 @@ use self::protocol::{PaneEntry, Refusal, Verb, code};
 /// another Crook's pane would otherwise hand its own shells the outer one's,
 /// and `crook pane list` would answer about a window the person is not in.
 pub const SOCKET_VARIABLE: &str = "CROOK_SOCKET";
+
+/// The variable every pane's shell finds its own secret in: what a request
+/// carries to say which pane it comes from.
+///
+/// Beside [`SOCKET_VARIABLE`], and set *empty* for the same reason: a Crook
+/// started inside another Crook's pane would otherwise hand its shells the
+/// outer pane's, and anything run in them could open tabs in the outer window
+/// as that pane.
+pub const TOKEN_VARIABLE: &str = "CROOK_TOKEN";
+
+/// How many random bytes a token is made of.
+///
+/// Thirty-two, which is what a session key is: a token is compared with the
+/// others by the window and nothing else, so its only job is to be impossible
+/// to guess, and at 256 bits nobody is guessing.
+const TOKEN_BYTES: usize = 32;
+
+/// A new pane's secret, from the operating system's random source, as hex.
+///
+/// `None` when that source cannot be read, which the log says: the pane is
+/// then handed no token and can open no tab, which is the safe way for a
+/// secret to fail.
+pub fn mint_token() -> Option<String> {
+    let mut bytes = [0u8; TOKEN_BYTES];
+    if let Err(error) = getrandom::getrandom(&mut bytes) {
+        log::warn!("no control token for a pane: the random source failed: {error}");
+        return None;
+    }
+    Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
 
 /// The window's end of the socket, for as long as the window holds it.
 ///
@@ -122,7 +171,7 @@ impl Control {
         let asking = inbox.clone();
         let socket = server::Socket::open_in(
             directory,
-            Arc::new(move |verb, deadline| asking.ask(verb, deadline)),
+            Arc::new(move |request, deadline| asking.ask(request, deadline)),
         )?;
         Ok(Self { socket, inbox })
     }
@@ -130,7 +179,7 @@ impl Control {
     /// Starts answering what the socket's connections ask, on the window's
     /// own thread, for as long as the window is open.
     pub fn serve(&self, ctx: &mut ViewContext<Workspace>) {
-        serve(self.inbox.clone(), ctx);
+        serve(self.inbox.clone(), Rc::default(), ctx);
     }
 
     /// Where the socket is, for the panes' environment.
@@ -175,8 +224,26 @@ struct Asked {
 
 /// One question, and where its answer goes.
 struct Question {
-    verb: Verb,
-    answer: mpsc::Sender<Result<Value, Refusal>>,
+    request: Request,
+    answer: Answering,
+}
+
+/// Where one question's answer goes: the connection's thread, waiting on the
+/// other end.
+///
+/// Carried rather than answered at once by a verb that has work to do off the
+/// main thread first — a worktree to check out — and answered when that comes
+/// home. A connection that has given up waiting has dropped its end, and an
+/// answer sent to it goes nowhere, which is all giving up has to mean.
+pub struct Answering(mpsc::Sender<Result<Value, Refusal>>);
+
+impl Answering {
+    /// Hands the connection its answer.
+    pub fn send(self, answer: Result<Value, Refusal>) {
+        // A closed receiver is the whole of how a connection that gave up
+        // says so, and there is nobody left to tell.
+        let _ = self.0.send(answer);
+    }
 }
 
 impl Inbox {
@@ -188,14 +255,17 @@ impl Inbox {
     ///
     /// Called on a connection's own thread, never on the window's: this
     /// blocks, and the window is what it is waiting for.
-    pub fn ask(&self, verb: Verb, deadline: Instant) -> Result<Value, Refusal> {
+    pub fn ask(&self, request: Request, deadline: Instant) -> Result<Value, Refusal> {
         let (answer, answered) = mpsc::channel();
         let waker = {
             let mut asked = self.lock();
             if asked.closed {
                 return Err(gone());
             }
-            asked.questions.push(Question { verb, answer });
+            asked.questions.push(Question {
+                request,
+                answer: Answering(answer),
+            });
             asked.waker.take()
         };
         if let Some(waker) = waker {
@@ -263,25 +333,41 @@ fn gone() -> Refusal {
 /// One outstanding wait, and the only thing that starts the next is the last
 /// one finishing — the ownership trick every chain in the window uses. It
 /// parks on a waker rather than a timer, so a window nobody asks anything
-/// does no work at all.
-fn serve(inbox: Arc<Inbox>, ctx: &mut ViewContext<Workspace>) {
+/// does no work at all. `spawns` rides along it: what the window remembers
+/// about who has been refused and what is still being opened, which only
+/// this chain and the answers it hands to the pool ever touch.
+fn serve(inbox: Arc<Inbox>, spawns: Rc<RefCell<Spawns>>, ctx: &mut ViewContext<Workspace>) {
     let questions = inbox.asked();
     ctx.spawn(questions, move |workspace, questions, ctx| {
         for question in questions {
-            // The connection may have given up waiting, and a closed
-            // receiver is the whole of how it says so.
-            let _ = question.answer.send(answer(workspace, question.verb, ctx));
+            answer(workspace, question, &spawns, ctx);
         }
-        serve(inbox, ctx);
+        serve(inbox, spawns, ctx);
     })
     .detach();
 }
 
-/// What the window says to one verb.
-fn answer(workspace: &Workspace, verb: Verb, app: &AppContext) -> Result<Value, Refusal> {
-    match verb {
-        Verb::PaneList => Ok(serde_json::to_value(panes(workspace, app))
-            .expect("a pane entry is numbers, strings and booleans, which encode")),
+/// What the window says to one question.
+fn answer(
+    workspace: &mut Workspace,
+    question: Question,
+    spawns: &Rc<RefCell<Spawns>>,
+    ctx: &mut ViewContext<Workspace>,
+) {
+    let Question { request, answer } = question;
+    match request.verb {
+        Verb::PaneList => answer.send(Ok(serde_json::to_value(panes(workspace, ctx))
+            .expect("a pane entry is numbers, strings and booleans, which encode"))),
+        Verb::TabNew(asked) => {
+            spawn::open(
+                workspace,
+                asked,
+                request.token.as_deref(),
+                spawns,
+                answer,
+                ctx,
+            );
+        }
     }
 }
 
@@ -334,7 +420,7 @@ pub fn panes(workspace: &Workspace, app: &AppContext) -> Vec<PaneEntry> {
 /// in the workspace — so that what a script reads is what a person sees: a
 /// name the session has, else its directory's, else the name it was opened
 /// with.
-fn title(session: &AgentSession, home: Option<&Path>) -> String {
+pub fn title(session: &AgentSession, home: Option<&Path>) -> String {
     session
         .name()
         .map(str::to_owned)

@@ -1,13 +1,13 @@
 ---
 name: crook
-description: Work inside Crook, a terminal whose unit of work is an agent. Use only when the user mentions Crook or the task is about Crook — reporting an agent's status to its tab, worktrees, plugins, the palette or the find bar. Requires TERM_PROGRAM=Crook.
+description: Work inside Crook, a terminal whose unit of work is an agent. Use only when the user mentions Crook or the task is about Crook — reporting an agent's status to its tab, opening worker tabs, worktrees, plugins, the palette or the find bar. Requires TERM_PROGRAM=Crook.
 ---
 
 # Crook
 
 Crook is a terminal whose unit of work is an agent: one tab per agent, a dot on the tab's row
 saying what the agent is doing, and a panel down the left edge that lists them all. The
-`crook` binary has flags, and one command, for what an agent can do from inside a pane, and
+`crook` binary has flags, and two commands, for what an agent can do from inside a pane, and
 this file is the whole of them.
 
 ## Tell whether you are inside Crook
@@ -24,7 +24,9 @@ of the pane and different from every other pane in the window. It is for telling
 — a log file named after it, a lock keyed on it, your own row in `crook pane list` — and for
 nothing else: no command takes it, and reporting status needs no id at all, because the
 terminal you are in is the pane. `CROOK_SOCKET` is where the window answers `crook pane list`
-(below), and it is empty when the window has none.
+and `crook tab new` (below), and it is empty when the window has none. `CROOK_TOKEN` is your
+pane's own secret, which `crook tab new` sends to say which pane is asking; it is empty when
+there is no socket.
 
 Use this skill only when the user mentions Crook or the task is about Crook. In any other
 terminal, or for any other task, do nothing Crook-specific: the flags below write an escape
@@ -82,8 +84,9 @@ opened from it — which is what says two checkouts are one piece of work.
 Worktrees are reached from a tab's own menu: right-click its row and, inside a repository,
 `Worktrees` lists that repository's checkouts. Choosing one opens a tab there, or brings
 forward the tab already in it; `New worktree…` asks for a branch name and opens a tab in a
-checkout under Crook's own store, folded into a group with the tab that asked. There is no
-command-line flag for any of this; tell the person where the menu is.
+checkout under Crook's own store, folded into a group with the tab that asked. To open a tab
+for work of your own, use `crook tab new` (below); for everything else in the menu, tell the
+person where it is.
 
 ## See what is open
 
@@ -99,6 +102,34 @@ reads. Each entry has `pane_id` — the one equal to `$CROOK_PANE_ID` is your ow
 waiting and on what, which branch each is on — rather than guessing. It works on this machine
 only: not from the far side of `ssh`, and not on Windows yet. When it says the window has no
 socket, or that it is older than the command, there is nothing to ask; say so and go on.
+
+## Fan work out into tabs
+
+```sh
+crook tab new --worktree fix-x --in-my-group --title "fix x" -- claude "fix the flaky test in x"
+crook pane list    # the workers' dots, branches and questions
+```
+
+`crook tab new` opens a tab beside yours, in the same window, and runs the command in it at its
+shell's first prompt. It prints the new pane's number, the `pane_id` to find in `crook pane
+list`; `--json` prints `pane_id`, `tab_id` and `cwd`.
+
+- `--worktree <branch>` makes a git worktree on a new branch from your `HEAD` and opens the tab
+  in it, so two agents never edit one checkout. Without it the tab opens in your directory.
+- `--in-my-group` folds the tab into your tab's group, which says it is part of your work.
+- `--title` names the new row.
+- Everything after `--` is the command, one argument a word, and each word arrives as itself:
+  quotes, `$(…)` and backticks are characters rather than shell syntax, and an alias is not
+  expanded. For a pipeline or `&&`, run `sh -c '…'`.
+
+The tab opens without taking the person's keyboard, as a row of its own with a dot, and its card
+says your tab opened it. Only a pane can open one: the request carries your pane's
+`CROOK_TOKEN`, and a script outside a pane is refused. At most eight tabs may be open on behalf
+of the tab a person opened, and the tabs your workers open count against the same eight. When
+it says `budget`, wait for a worker to finish and its tab to close — `crook pane list` shows
+them — rather than asking again: after sixteen refusals in a row the window stops answering
+your pane. It types into `sh`, `bash`, `zsh` and `fish`, works on this machine only, and not on
+Windows yet.
 
 ## Where things are
 
@@ -130,6 +161,10 @@ built in and runs it again on every build; nothing is installed and nothing is l
 - Never guess a pane id, a tab name or a worktree path. Reporting status needs none of them —
   the terminal it runs in is the pane — and `crook pane list` is where they are read when
   something else does.
+- Open a tab with `crook tab new` only for work you were asked to do: each one is a row the
+  person has to read, and a worktree is a branch left in their repository.
+- Never print `CROOK_TOKEN` or hand it to anything outside your pane; it is what lets a program
+  open tabs as you.
 - Never write `~/.claude/settings.json` or a project's `.claude/settings.json` yourself, nor
   another agent's hooks file. Print the hooks with `crook --agent-hooks <agent>` and let the
   person merge them.

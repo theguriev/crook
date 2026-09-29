@@ -556,6 +556,18 @@ fn detail_section(
         ));
     }
 
+    // Where the work came from, when it was not a person: a tab another
+    // pane's agent opened is one nobody in the room asked for by hand, and
+    // the card is where a row says what it could not fit.
+    if let Some(lineage) = &session.spawned_by {
+        column.add_child(
+            Text::new(format!("opened by {}", lineage.title), ui, 12.)
+                .with_color(theme().text_muted)
+                .with_ellipsis(Cut::End)
+                .finish(),
+        );
+    }
+
     let mut footer = Flex::row()
         .with_main_axis_size(MainAxisSize::Max)
         .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)

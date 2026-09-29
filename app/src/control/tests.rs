@@ -14,7 +14,7 @@ use crookui_core::fonts::FamilyId;
 use crookui_core::{App, ViewHandle};
 use serde_json::{Value, json};
 
-use super::protocol::{self, PaneEntry, Reply, Verb, code};
+use super::protocol::{self, NewTab, Opened, PaneEntry, Reply, Request, Verb, code};
 use super::*;
 use crate::Channel;
 use crate::git::{GitFacts, Head};
@@ -58,13 +58,26 @@ fn two_panes() -> Vec<PaneEntry> {
 /// The verb a line asks for, and the code of the refusal when it asks for
 /// none.
 fn verdict(line: &str) -> (Option<Value>, Result<Verb, String>) {
-    let (id, verb) = protocol::read(line.as_bytes());
-    (id, verb.map_err(|refusal| refusal.code))
+    let (id, request) = protocol::read(line.as_bytes());
+    (
+        id,
+        request
+            .map(|request| request.verb)
+            .map_err(|refusal| refusal.code),
+    )
+}
+
+/// A `pane.list` from nobody in particular.
+fn listing() -> Request {
+    Request {
+        verb: Verb::PaneList,
+        token: None,
+    }
 }
 
 #[test]
 fn a_request_and_its_answer_come_back_off_the_wire_as_they_went_on() {
-    let line = protocol::request_line(Verb::PaneList);
+    let line = protocol::request_line(&Verb::PaneList, None);
     assert!(line.ends_with('\n') && line.matches('\n').count() == 1);
     assert_eq!(verdict(line.trim_end()), (None, Ok(Verb::PaneList)));
     // Whatever the request called itself comes back with the answer, so a
@@ -184,6 +197,264 @@ fn crook_pane_takes_list_and_json_and_refuses_anything_else() {
         let refusal = arguments(words).expect_err("refused");
         assert!(refusal.contains(said), "{words:?}: {refusal}");
     }
+}
+
+/// A `tab.new` of `words`, and nothing else.
+fn new_tab(words: &[&str]) -> NewTab {
+    NewTab {
+        command: words.iter().map(|word| (*word).to_owned()).collect(),
+        ..NewTab::default()
+    }
+}
+
+#[test]
+fn a_new_tab_request_carries_its_command_words_and_the_panes_token_off_the_wire() {
+    let asked = NewTab {
+        command: vec!["claude".to_owned(), "fix the \"flaky\" test".to_owned()],
+        worktree: Some("fix-x".to_owned()),
+        in_my_group: true,
+        title: Some("fix x".to_owned()),
+    };
+    let line = protocol::request_line(&Verb::TabNew(asked.clone()), Some("5ec2e7"));
+    assert!(line.ends_with('\n') && line.matches('\n').count() == 1);
+    let (_, request) = protocol::read(line.trim_end().as_bytes());
+    assert_eq!(
+        request,
+        Ok(Request {
+            verb: Verb::TabNew(asked),
+            token: Some("5ec2e7".to_owned()),
+        })
+    );
+
+    // What is left out is what the window assumes: no worktree, no group, no
+    // title, and no token — which is a request from nobody.
+    let (_, bare) = protocol::read(br#"{"v":1,"verb":"tab.new","args":{"command":["make"]}}"#);
+    assert_eq!(
+        bare,
+        Ok(Request {
+            verb: Verb::TabNew(new_tab(&["make"])),
+            token: None,
+        })
+    );
+    // A listing may carry a token too, and it changes nothing about it.
+    let (_, listing) = protocol::read(br#"{"v":1,"verb":"pane.list","token":"5ec2e7"}"#);
+    assert_eq!(listing.map(|request| request.verb), Ok(Verb::PaneList));
+}
+
+#[test]
+fn a_new_tab_argument_this_window_does_not_know_is_refused_rather_than_ignored() {
+    // Ignoring one could open an agent somewhere nobody asked: a `worktree`
+    // spelled some other way, dropped, would put it in the caller's checkout.
+    for (line, said) in [
+        (
+            r#"{"v":1,"verb":"tab.new","args":{"command":["make"],"branch":"fix-x"}}"#,
+            "branch",
+        ),
+        (r#"{"v":1,"verb":"tab.new"}"#, "command"),
+        (
+            r#"{"v":1,"verb":"tab.new","args":{"command":"make"}}"#,
+            "args",
+        ),
+        (
+            r#"{"v":1,"verb":"pane.list","args":{"all":true}}"#,
+            "no `args`",
+        ),
+        (r#"{"v":1,"verb":"pane.list","token":7}"#, "token"),
+    ] {
+        let (_, request) = protocol::read(line.as_bytes());
+        let refusal = request.expect_err(line);
+        assert_eq!(refusal.code, code::BAD_REQUEST, "{line}");
+        assert!(
+            refusal.message.contains(said),
+            "{line}: {}",
+            refusal.message
+        );
+    }
+    let (_, unknown) = protocol::read(br#"{"v":1,"verb":"tab.frobnicate"}"#);
+    let refusal = unknown.expect_err("not a verb");
+    assert!(
+        refusal.message.contains("pane.list") && refusal.message.contains("tab.new"),
+        "the refusal names every verb there is: {}",
+        refusal.message
+    );
+}
+
+#[test]
+fn crook_tab_new_takes_its_flags_before_the_separator_and_the_command_after_it() {
+    let arguments = |words: &[&str]| {
+        cli::tab_arguments(words.iter().map(|word| (*word).to_owned()))
+            .map_err(|error| error.to_string())
+    };
+    assert_eq!(
+        arguments(&["new", "--", "make", "test"]),
+        Ok((new_tab(&["make", "test"]), false))
+    );
+    // Everything after `--` is the command's, flags and all: `--resume` is
+    // claude's, and `--json` there is a word of the command, not this one's.
+    assert_eq!(
+        arguments(&[
+            "new",
+            "--worktree",
+            "fix-x",
+            "--in-my-group",
+            "--title",
+            "fix x",
+            "--json",
+            "--",
+            "claude",
+            "--resume",
+            "--json",
+        ]),
+        Ok((
+            NewTab {
+                command: vec!["claude".into(), "--resume".into(), "--json".into()],
+                worktree: Some("fix-x".into()),
+                in_my_group: true,
+                title: Some("fix x".into()),
+            },
+            true
+        ))
+    );
+    for (words, said) in [
+        (&[][..], "needs a verb"),
+        (&["open", "--", "make"][..], "takes new, not open"),
+        (&["new"][..], "needs a command after `--`"),
+        (&["new", "--"][..], "needs a command after `--`"),
+        (&["new", "make"][..], "the command goes after `--`"),
+        (&["new", "--worktree"][..], "`--worktree` needs a value"),
+        (
+            &["new", "--json", "--json", "--", "make"][..],
+            "given twice",
+        ),
+        (
+            &["new", "--in-my-group", "--in-my-group", "--", "make"][..],
+            "given twice",
+        ),
+    ] {
+        let refusal = arguments(words).expect_err("refused");
+        assert!(refusal.contains(said), "{words:?}: {refusal}");
+    }
+}
+
+#[test]
+fn a_command_is_refused_for_a_shell_its_quoting_is_not_proven_in_and_for_a_control_character() {
+    let words = |words: &[&str]| {
+        words
+            .iter()
+            .map(|word| (*word).to_owned())
+            .collect::<Vec<_>>()
+    };
+    let refused = |words: &[String], shell: &str| {
+        spawn::command_line(words, Path::new(shell))
+            .expect_err("refused")
+            .code
+    };
+    for shell in [
+        "/usr/bin/nu",
+        "/usr/bin/pwsh",
+        "/usr/bin/xonsh",
+        "/usr/local/bin/elvish",
+    ] {
+        assert_eq!(
+            refused(&words(&["make"]), shell),
+            code::UNSUPPORTED_SHELL,
+            "{shell} reads single quotes its own way, or has not been asked"
+        );
+    }
+    // A newline ends a command line, and what came after it would be a
+    // second command nobody typed as one.
+    assert_eq!(
+        refused(&words(&["echo", "one\necho two"]), "/bin/bash"),
+        code::BAD_REQUEST
+    );
+    assert_eq!(
+        refused(&words(&["echo", "\u{1b}[2J"]), "/bin/bash"),
+        code::BAD_REQUEST
+    );
+    assert_eq!(refused(&[], "/bin/bash"), code::BAD_REQUEST);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_command_arrives_in_every_shell_as_the_words_it_was_given() {
+    // The plugin host's own proof, for the line `tab new` types: a real shell
+    // reads the line and prints the words it read, one to a line. Every shell
+    // a pane can run that is on this machine, since they do not agree about
+    // single quotes.
+    //
+    // Every word that would do something unquoted does something harmless:
+    // this line is run for real, and a quoting that broke would run it.
+    let given: Vec<String> = [
+        "printf",
+        "%s\\n",
+        "it's here",
+        "\"double\" quotes",
+        "$(echo pwned)",
+        "`id`",
+        "$HOME",
+        "a\\b",
+        "x\\' ; echo PWNED ; echo \\'",
+        "*",
+        "~",
+        "",
+        "; echo pwned",
+        "if",
+        "--flag",
+    ]
+    .iter()
+    .map(|word| (*word).to_owned())
+    .collect();
+    for (shell, flags) in [
+        ("sh", &["-c"][..]),
+        ("bash", &["-c"][..]),
+        ("zsh", &["-f", "-c"][..]),
+        ("fish", &["--no-config", "-c"][..]),
+    ] {
+        let line = spawn::command_line(&given, Path::new(shell)).expect("a proven shell");
+        let Ok(output) = crate::process::command(shell)
+            .args(flags)
+            .arg(&line)
+            .output()
+        else {
+            // Not on this machine.
+            continue;
+        };
+        let read = String::from_utf8_lossy(&output.stdout);
+        let expected: String = given[2..].iter().map(|word| format!("{word}\n")).collect();
+        assert_eq!(
+            read, expected,
+            "{shell}: {line:?} did not come back word for word"
+        );
+    }
+}
+
+#[test]
+fn sixteen_refusals_in_a_row_stop_the_window_answering_that_pane_and_no_other() {
+    let refusal = Refusal::new(code::BUDGET, "full");
+    let (pane, other) = (crate::tab::PaneId::next(), crate::tab::PaneId::next());
+    let mut spawns = spawn::Spawns::default();
+
+    for _ in 1..spawn::REFUSALS_ALLOWED {
+        spawns.refuse(pane, &refusal);
+    }
+    assert!(!spawns.stopped(pane), "one short of the bound");
+    // An allowed tab starts the count again: a pane nobody refused since is
+    // in the ordinary state, not a bad one.
+    spawns.accept(pane, pane);
+    for _ in 1..spawn::REFUSALS_ALLOWED {
+        spawns.refuse(pane, &refusal);
+    }
+    assert!(
+        !spawns.stopped(pane),
+        "the count began again at the tab it was allowed"
+    );
+
+    spawns.refuse(pane, &refusal);
+    assert!(spawns.stopped(pane), "sixteen in a row");
+    assert!(
+        !spawns.stopped(other),
+        "a loop in one pane costs no other pane anything"
+    );
 }
 
 #[test]
@@ -464,9 +735,8 @@ fn a_question_to_a_window_that_has_closed_is_refused_as_gone_at_once() {
     let inbox = Arc::new(Inbox::default());
     let asking = inbox.clone();
     let started = Instant::now();
-    let asked = std::thread::spawn(move || {
-        asking.ask(Verb::PaneList, Instant::now() + Duration::from_secs(5))
-    });
+    let asked =
+        std::thread::spawn(move || asking.ask(listing(), Instant::now() + Duration::from_secs(5)));
     std::thread::sleep(Duration::from_millis(50));
     inbox.close();
     let refusal = asked
@@ -482,7 +752,7 @@ fn a_question_to_a_window_that_has_closed_is_refused_as_gone_at_once() {
 
     // And one asked after it closed is refused before it is queued.
     let refusal = inbox
-        .ask(Verb::PaneList, Instant::now() + Duration::from_secs(5))
+        .ask(listing(), Instant::now() + Duration::from_secs(5))
         .expect_err("closed");
     assert_eq!(refusal.code, code::GONE);
 }
@@ -491,7 +761,7 @@ fn a_question_to_a_window_that_has_closed_is_refused_as_gone_at_once() {
 fn a_question_nobody_answers_is_refused_as_a_timeout() {
     let inbox = Inbox::default();
     let refusal = inbox
-        .ask(Verb::PaneList, Instant::now() + Duration::from_millis(50))
+        .ask(listing(), Instant::now() + Duration::from_millis(50))
         .expect_err("no window is serving this inbox");
     assert_eq!(refusal.code, code::TIMEOUT);
 }
@@ -539,11 +809,12 @@ mod socket {
         }
     }
 
-    /// A window that answers `pane.list` with these, and never looks at a
-    /// tab strip.
+    /// A window that answers `pane.list` with these, refuses every tab, and
+    /// never looks at a tab strip.
     fn answering(panes: Vec<PaneEntry>) -> Answer {
-        Arc::new(move |verb, _| match verb {
+        Arc::new(move |request: Request, _| match request.verb {
             Verb::PaneList => Ok(serde_json::to_value(&panes).expect("encodes")),
+            Verb::TabNew(_) => Err(Refusal::new(code::UNAUTHORIZED, "not in this test")),
         })
     }
 
@@ -633,7 +904,7 @@ mod socket {
         assert!(reply.ok, "{reply:?}");
         // Read whole, newline and all: the connection is still there for the
         // next line, as it would not be after one that was cut short.
-        client.send(&protocol::request_line(Verb::PaneList));
+        client.send(&protocol::request_line(&Verb::PaneList, None));
         assert!(client.reply().expect("the next line answered too").ok);
         drop(client);
         answering.join().expect("the connection's thread");
@@ -712,10 +983,10 @@ mod socket {
         let inbox = Arc::new(Inbox::default());
         let asking = inbox.clone();
         let (mut client, answering) = conversation(
-            Arc::new(move |verb, deadline| asking.ask(verb, deadline)),
+            Arc::new(move |request, deadline| asking.ask(request, deadline)),
             Duration::from_millis(600),
         );
-        client.send(&protocol::request_line(Verb::PaneList));
+        client.send(&protocol::request_line(&Verb::PaneList, None));
         let reply = client
             .reply()
             .expect("the window says it ran out of time, rather than hanging up");
@@ -731,7 +1002,7 @@ mod socket {
         // time is up, and the command line has to wait long enough to be told.
         let control = Control::open_in(&root.sockets()).expect("opens");
         let path = control.path().expect("a socket").to_owned();
-        let refusal = cli::unix::listing(&path, true, None).expect_err("never answered");
+        let refusal = cli::unix::listing(&path, None, true, None).expect_err("never answered");
         let said = refusal.to_string();
         assert!(
             said.contains("did not answer in time") && said.contains("timeout"),
@@ -760,7 +1031,7 @@ mod socket {
         );
 
         let mut client = Client::connect(socket.path());
-        client.send(&protocol::request_line(Verb::PaneList));
+        client.send(&protocol::request_line(&Verb::PaneList, None));
         assert!(client.reply().expect("answered").ok);
     }
 
@@ -818,7 +1089,7 @@ mod socket {
             "the name is taken back"
         );
         let mut client = Client::connect(socket.path());
-        client.send(&protocol::request_line(Verb::PaneList));
+        client.send(&protocol::request_line(&Verb::PaneList, None));
         assert!(client.reply().expect("and it is this window answering").ok);
     }
 
@@ -931,12 +1202,13 @@ mod socket {
         let root = TempDir::new();
         let socket = Socket::open_in(&root.sockets(), answering(two_panes())).expect("opens");
 
-        let json = cli::unix::listing(socket.path(), true, None).expect("answered");
+        let json = cli::unix::listing(socket.path(), None, true, None).expect("answered");
         let read: Value = serde_json::from_str(&json).expect("the output is JSON");
         assert_eq!(read, serde_json::to_value(two_panes()).expect("encodes"));
 
-        let table = cli::unix::listing(socket.path(), false, Some(Path::new("/home/someone")))
-            .expect("answered");
+        let table =
+            cli::unix::listing(socket.path(), None, false, Some(Path::new("/home/someone")))
+                .expect("answered");
         assert_eq!(
             table,
             cli::table(&two_panes(), Some(Path::new("/home/someone")))
@@ -957,7 +1229,7 @@ mod socket {
         )
         .expect("opens");
 
-        let refusal = cli::unix::listing(socket.path(), true, None).expect_err("refused");
+        let refusal = cli::unix::listing(socket.path(), None, true, None).expect_err("refused");
         let said = refusal.to_string();
         assert!(
             said.contains("did not answer in time") && said.contains("timeout"),
@@ -965,7 +1237,7 @@ mod socket {
         );
 
         let missing = root.0.join("nobody.sock");
-        let refusal = cli::unix::listing(&missing, true, None).expect_err("nothing there");
+        let refusal = cli::unix::listing(&missing, None, true, None).expect_err("nothing there");
         assert!(
             refusal.to_string().contains("nothing is answering"),
             "{refusal}"
@@ -1032,8 +1304,8 @@ mod socket {
         // Twice, one after the other, the way a script polling the window
         // would: the window has to be listening again after it answered.
         let asking = thread::spawn(move || {
-            let json = cli::unix::listing(&path, true, None)?;
-            let table = cli::unix::listing(&path, false, None)?;
+            let json = cli::unix::listing(&path, None, true, None)?;
+            let table = cli::unix::listing(&path, None, false, None)?;
             anyhow::Ok((json, table))
         });
         // The window's side runs here, on the thread that owns it, the way
@@ -1056,6 +1328,511 @@ mod socket {
             table,
             cli::table(&read, None),
             "and answered the second time"
+        );
+    }
+
+    /// A shell for these tests that says nothing until its gate is opened,
+    /// then prompts, reads one line, and says it ran it.
+    ///
+    /// Named `sh`, so the window types into it — `sh` is one of the shells
+    /// the quoting is proven in, and one with no marks, whose first prompt is
+    /// the first thing it prints. Gated, so that a test can look at a pane
+    /// before its first prompt for as long as it likes: a real shell prompts
+    /// whenever its startup files let it, and "not sent yet" would be a race.
+    struct GatedShell {
+        program: PathBuf,
+        gate: PathBuf,
+    }
+
+    impl GatedShell {
+        fn new(root: &TempDir) -> Self {
+            let program = root.0.join("sh");
+            let gate = root.0.join("gate");
+            let script = format!(
+                "#!/bin/sh\n\
+                 while [ ! -e '{gate}' ]; do sleep 0.1; done\n\
+                 printf 'fake$ '\n\
+                 IFS= read -r line\n\
+                 printf 'ran: %s\\n' \"$line\"\n\
+                 exec cat\n",
+                gate = gate.display()
+            );
+            fs::write(&program, script).expect("the shell is written");
+            fs::set_permissions(&program, fs::Permissions::from_mode(0o755))
+                .expect("the shell is runnable");
+            Self { program, gate }
+        }
+
+        /// Lets every shell waiting at the gate go on to its prompt.
+        fn open(&self) {
+            fs::write(&self.gate, "").expect("the gate opens");
+        }
+    }
+
+    /// A git repository in `directory` with one commit, or `None` where git
+    /// is not installed.
+    fn repository(directory: &Path) -> Option<PathBuf> {
+        fs::create_dir_all(directory).ok()?;
+        let run = |args: &[&str]| {
+            crate::process::command("git")
+                .args(args)
+                .current_dir(directory)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .ok()
+                .filter(std::process::ExitStatus::success)
+        };
+        run(&["init", "--quiet"])?;
+        run(&["config", "user.email", "crook@example.invalid"])?;
+        run(&["config", "user.name", "crook"])?;
+        fs::write(directory.join("README"), "a repository for a worktree\n").ok()?;
+        run(&["add", "-A"])?;
+        run(&["commit", "--quiet", "-m", "one"])?;
+        Some(directory.to_path_buf())
+    }
+
+    /// What git says in `directory`.
+    fn git(directory: &Path, args: &[&str]) -> String {
+        let output = crate::process::command("git")
+            .args(args)
+            .current_dir(directory)
+            .output()
+            .expect("git runs");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    /// A window serving its socket, with a gated shell in every pane.
+    struct Served {
+        window: Window,
+        control: Control,
+        shell: GatedShell,
+        /// Kept for its drop, which takes the shell and the sockets with it.
+        _root: TempDir,
+    }
+
+    impl Served {
+        /// `prepare` runs on the workspace before the shells open, which is
+        /// when a pane's directory decides where its shell starts.
+        fn new(
+            prepare: impl FnOnce(&mut Workspace, &mut ViewContext<Workspace>, &TempDir),
+        ) -> Self {
+            let root = TempDir::new();
+            let shell = GatedShell::new(&root);
+            let mut window = Window::new();
+            let control = Control::open_in(&root.sockets()).expect("opens");
+            let socket = control.path().map(Path::to_path_buf);
+            window.workspace.update(&mut window.app, |workspace, ctx| {
+                prepare(workspace, ctx, &root);
+                control.serve(ctx);
+                workspace.set_shell(Some(shell.program.clone()), ctx);
+                workspace.set_shell_login(false, ctx);
+                workspace.set_control_socket(socket, ctx);
+                workspace.start_terminals(ctx);
+            });
+            Self {
+                window,
+                control,
+                shell,
+                _root: root,
+            }
+        }
+
+        fn socket(&self) -> PathBuf {
+            self.control.path().expect("a socket").to_owned()
+        }
+
+        /// Runs the window's side until `done`, the way the event loop would.
+        fn pump_until(&mut self, what: &str, mut done: impl FnMut(&Self) -> bool) {
+            let started = Instant::now();
+            while !done(self) {
+                self.window.queue.run_until_parked();
+                assert!(started.elapsed() < Duration::from_secs(30), "{what}");
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        /// Asks from a thread of its own, the way a program in a pane would,
+        /// while the window answers on this one.
+        fn ask<T: Send + 'static>(
+            &mut self,
+            asking: impl FnOnce(PathBuf) -> T + Send + 'static,
+        ) -> T {
+            let socket = self.socket();
+            let asking = thread::spawn(move || asking(socket));
+            self.pump_until("the window never answered", |_| asking.is_finished());
+            asking.join().expect("the asking thread")
+        }
+
+        /// Asks for `asked` as the pane holding `token`, and hands back what
+        /// the command line would print, or say.
+        fn open_tab(&mut self, token: Option<String>, asked: NewTab) -> Result<Opened, String> {
+            self.ask(move |socket| {
+                cli::unix::open_tab(&socket, token.as_deref(), asked, true)
+                    .map(|json| serde_json::from_str(&json).expect("the answer is JSON"))
+                    .map_err(|error| error.to_string())
+            })
+        }
+
+        fn read<T>(&self, read: impl FnOnce(&Workspace, &AppContext) -> T) -> T {
+            self.window.workspace.read(&self.window.app, read)
+        }
+
+        /// The token the window handed a pane's shell.
+        fn token(&self, pane: PaneId) -> String {
+            self.read(|workspace, app| workspace.token_of(pane, app))
+                .expect("a pane of a window with a socket is handed a token")
+        }
+
+        fn pane(&self, number: u64) -> PaneId {
+            self.read(|workspace, _| {
+                workspace
+                    .tabs()
+                    .panes()
+                    .map(|(_, pane)| pane.id())
+                    .find(|pane| pane.as_u64() == number)
+            })
+            .unwrap_or_else(|| panic!("no pane {number} in the window"))
+        }
+
+        fn field(&self, pane: PaneId) -> String {
+            self.read(|workspace, _| {
+                workspace
+                    .input(pane)
+                    .map(|input| input.editor().text().to_owned())
+                    .unwrap_or_default()
+            })
+        }
+
+        fn text(&self, pane: PaneId) -> String {
+            self.read(|workspace, app| workspace.terminal_text(pane, app))
+                .unwrap_or_default()
+        }
+
+        fn session<T>(&self, pane: PaneId, read: impl FnOnce(&crate::tab::AgentSession) -> T) -> T {
+            self.read(|workspace, _| {
+                read(
+                    workspace
+                        .tabs()
+                        .pane(pane)
+                        .expect("the pane is open")
+                        .session(),
+                )
+            })
+        }
+
+        /// The tab holding `pane`.
+        fn tab_of(&self, pane: PaneId) -> crate::tab::TabId {
+            self.read(|workspace, _| {
+                workspace
+                    .tabs()
+                    .panes()
+                    .find(|(_, open)| open.id() == pane)
+                    .map(|(tab, _)| tab)
+                    .expect("the pane is open")
+            })
+        }
+
+        fn tab_count(&self) -> usize {
+            self.read(|workspace, _| workspace.tabs().len())
+        }
+    }
+
+    use crate::tab::{Lineage, PaneId};
+
+    /// The one pane a new window opens with.
+    fn first_pane(served: &Served) -> PaneId {
+        served.read(|workspace, _| workspace.tabs().focused_pane_id().expect("a pane"))
+    }
+
+    #[test]
+    fn with_no_token_a_script_may_list_the_panes_and_may_not_open_a_tab() {
+        let mut served = Served::new(|_, _, _| {});
+        let pane = first_pane(&served);
+        let token = served.token(pane);
+        let tabs = served.tab_count();
+
+        // Read-only, with no token at all, as it always was: what a script
+        // outside every pane is allowed.
+        let listed = served.ask(|socket| cli::unix::listing(&socket, None, true, None));
+        let listed: Vec<PaneEntry> =
+            serde_json::from_str(&listed.expect("listed")).expect("a list of panes");
+        assert_eq!(listed.len(), 1);
+
+        for (who, sent) in [
+            ("no token", None),
+            ("a token no pane holds", Some("0".repeat(token.len()))),
+            ("an empty token", Some(String::new())),
+        ] {
+            let refused = served
+                .open_tab(sent, new_tab(&["make"]))
+                .expect_err("only a pane may open a tab");
+            assert!(refused.contains("unauthorized"), "{who}: {refused}");
+            assert!(
+                refused.contains("CROOK_TOKEN"),
+                "{who}: the refusal says what is missing: {refused}"
+            );
+        }
+        assert_eq!(served.tab_count(), tabs, "nothing was opened");
+
+        // And the pane's own token is what makes the difference.
+        served
+            .open_tab(Some(token), new_tab(&["make"]))
+            .expect("the pane may");
+        assert_eq!(served.tab_count(), tabs + 1);
+    }
+
+    #[test]
+    fn a_pane_opens_a_tab_in_its_group_without_focus_and_its_command_runs_at_the_first_prompt() {
+        let mut served = Served::new(|workspace, ctx, _| {
+            // A second tab, and the one a person is looking at: the new tab
+            // goes beside the pane that asked, not beside the person.
+            workspace.apply(TabAction::New, ctx);
+        });
+        let (caller, looking_at) = served.read(|workspace, _| {
+            let strip = workspace.tabs();
+            let first = strip.iter().next().expect("a tab").panes().focused_id();
+            (first, strip.focused_pane_id().expect("a pane"))
+        });
+        let caller_tab = served.tab_of(caller);
+        let active = served.read(|workspace, _| workspace.tabs().active_id());
+        served.read(|workspace, _| {
+            assert_eq!(workspace.tabs().get(caller_tab).and_then(Tab::group), None)
+        });
+        let token = served.token(caller);
+
+        let opened = served
+            .open_tab(
+                Some(token),
+                NewTab {
+                    command: vec!["claude".to_owned(), "fix the \"flaky\" test".to_owned()],
+                    in_my_group: true,
+                    title: Some("fix the flaky test".to_owned()),
+                    ..NewTab::default()
+                },
+            )
+            .expect("the pane may open a tab");
+        let worker = served.pane(opened.pane_id);
+
+        // In this window, in the caller's group, and nobody's keyboard moved.
+        let worker_tab = served.tab_of(worker);
+        assert_eq!(worker_tab.as_u64(), opened.tab_id);
+        served.read(|workspace, _| {
+            let strip = workspace.tabs();
+            let group = strip.get(caller_tab).and_then(Tab::group);
+            assert!(group.is_some(), "the caller's tab was made a group with it");
+            assert_eq!(strip.get(worker_tab).and_then(Tab::group), group);
+            assert_eq!(strip.active_id(), active, "the tab took the person's focus");
+            assert_eq!(strip.focused_pane_id(), Some(looking_at));
+        });
+        assert_eq!(
+            served.session(worker, |session| session.display_title().to_owned()),
+            "fix the flaky test"
+        );
+        let caller_title = served.read(|workspace, _| {
+            super::super::title(
+                workspace.tabs().pane(caller).expect("open").session(),
+                workspace.home(),
+            )
+        });
+        assert_eq!(
+            served.session(worker, |session| session.spawned_by.clone()),
+            Some(Lineage {
+                caller,
+                root: caller,
+                title: caller_title,
+            })
+        );
+
+        // Typed into its field, and not sent: its shell has not prompted.
+        let line = r#"'claude' 'fix the "flaky" test'"#;
+        assert_eq!(served.field(worker), line);
+        served.window.queue.run_until_parked();
+        assert!(
+            !served.text(worker).contains("ran:"),
+            "{}",
+            served.text(worker)
+        );
+        assert_eq!(served.field(worker), line, "sent before the shell prompted");
+
+        // The prompt, and the line goes, the way Enter sends one.
+        served.shell.open();
+        served.pump_until("the command never ran", |served| {
+            served.text(worker).contains("ran: ")
+        });
+        assert!(
+            served.text(worker).contains(&format!("ran: {line}")),
+            "the shell was sent the line as it was typed: {}",
+            served.text(worker)
+        );
+        assert_eq!(served.field(worker), "", "the field was sent, not copied");
+    }
+
+    #[test]
+    fn a_worktree_is_made_from_the_callers_head_and_the_tab_opens_in_it() {
+        let mut checkout_store = None;
+        let mut made = None;
+        let mut served = Served::new(|workspace, ctx, root| {
+            let Some(repository) = repository(&root.0.join("repo")) else {
+                return;
+            };
+            // The caller works in a checkout of its own, a commit ahead of
+            // the main one: its HEAD is the base, and the main checkout's is
+            // not.
+            let feature = root.0.join("feature");
+            git(
+                &repository,
+                &[
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    "feature",
+                    &feature.display().to_string(),
+                ],
+            );
+            fs::write(feature.join("NOTES"), "a commit ahead\n").expect("written");
+            git(&feature, &["add", "NOTES"]);
+            git(&feature, &["commit", "--quiet", "-m", "two"]);
+
+            let store = root.0.join("store");
+            workspace.set_worktrees_directory(store.clone());
+            let pane = workspace.tabs().focused_pane_id().expect("a pane");
+            workspace.update_session(pane, ctx, |session| {
+                session.working_directory = Some(feature.clone());
+            });
+            checkout_store = Some(store);
+            made = Some((repository, feature));
+        });
+        let (Some(store), Some((repository, feature))) = (checkout_store, made) else {
+            eprintln!("skipped: no git here to make a repository with");
+            return;
+        };
+        assert_ne!(
+            git(&feature, &["rev-parse", "HEAD"]),
+            git(&repository, &["rev-parse", "HEAD"]),
+            "the caller's checkout is not where the main one is"
+        );
+        let caller = first_pane(&served);
+        let token = served.token(caller);
+
+        let opened = served
+            .open_tab(
+                Some(token.clone()),
+                NewTab {
+                    command: vec!["make".to_owned()],
+                    worktree: Some("fix-x".to_owned()),
+                    in_my_group: true,
+                    ..NewTab::default()
+                },
+            )
+            .expect("git made the worktree");
+        let checkout = crate::git::worktree::checkout_path(&store, "repo", "fix-x");
+        assert_eq!(opened.cwd, Some(checkout.display().to_string()));
+        assert!(checkout.join("NOTES").is_file(), "nothing was checked out");
+        assert_eq!(git(&checkout, &["branch", "--show-current"]), "fix-x");
+        assert_eq!(
+            git(&checkout, &["rev-parse", "HEAD"]),
+            git(&feature, &["rev-parse", "HEAD"]),
+            "the branch starts at the caller's HEAD"
+        );
+
+        let worker = served.pane(opened.pane_id);
+        assert_eq!(
+            served.session(worker, |session| session.working_directory.clone()),
+            Some(checkout),
+            "the tab's shell starts in the checkout"
+        );
+        served.read(|workspace, _| {
+            let strip = workspace.tabs();
+            let group = strip
+                .get(served.tab_of(worker))
+                .and_then(Tab::group)
+                .and_then(|group| strip.group(group))
+                .map(|group| group.name().to_owned());
+            assert_eq!(
+                group.as_deref(),
+                Some("repo"),
+                "the group is the repository's"
+            );
+        });
+
+        // A name git will not make a branch of is git's to refuse, as it is
+        // in the menu's creator, and a blank one is refused before git.
+        let tabs = served.tab_count();
+        for (branch, said) in [
+            ("bad..name", "not a valid branch name"),
+            ("  ", "needs a branch name"),
+        ] {
+            let refused = served
+                .open_tab(
+                    Some(token.clone()),
+                    NewTab {
+                        command: vec!["make".to_owned()],
+                        worktree: Some(branch.to_owned()),
+                        ..NewTab::default()
+                    },
+                )
+                .expect_err("refused");
+            assert!(refused.contains(said), "{branch:?}: {refused}");
+        }
+        assert_eq!(served.tab_count(), tabs, "a refused worktree opened a tab");
+    }
+
+    #[test]
+    fn the_budget_refuses_the_tab_past_it_and_a_worker_spends_its_roots() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+
+        let mut workers = Vec::new();
+        for _ in 0..spawn::SPAWN_BUDGET {
+            let opened = served
+                .open_tab(Some(token.clone()), new_tab(&["make"]))
+                .expect("within the budget");
+            workers.push(served.pane(opened.pane_id));
+        }
+        let refused = served
+            .open_tab(Some(token.clone()), new_tab(&["make"]))
+            .expect_err("past the budget");
+        assert!(refused.contains("budget"), "{refused}");
+        assert_eq!(served.tab_count(), spawn::SPAWN_BUDGET + 1);
+
+        // A worker asking for workers of its own spends the lead's: eight
+        // each, and each of those eight more, is how a loop fills a window.
+        let worker = workers[0];
+        let worker_token = served.token(worker);
+        let refused = served
+            .open_tab(Some(worker_token.clone()), new_tab(&["make"]))
+            .expect_err("the lead's budget is spent");
+        assert!(refused.contains("budget"), "{refused}");
+
+        // A tab that closes gives its place back.
+        served
+            .window
+            .workspace
+            .update(&mut served.window.app, |workspace, ctx| {
+                workspace.apply(TabAction::ClosePane(workers[1]), ctx);
+            });
+        let opened = served
+            .open_tab(Some(worker_token), new_tab(&["make"]))
+            .expect("a place came free");
+        assert_eq!(
+            served.session(served.pane(opened.pane_id), |session| session
+                .spawned_by
+                .clone()),
+            Some(Lineage {
+                caller: worker,
+                root: lead,
+                title: served.read(|workspace, _| {
+                    super::super::title(
+                        workspace.tabs().pane(worker).expect("open").session(),
+                        workspace.home(),
+                    )
+                }),
+            }),
+            "opened by the worker, and counted against the lead"
         );
     }
 }

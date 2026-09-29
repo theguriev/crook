@@ -788,7 +788,8 @@ script or an agent gates on or names a log after, not an address anything routes
 status channel writes to its own tty and needs no pane id. The one address a pane is given is
 `CROOK_SOCKET`, where its window answers questions — see "The window answers" below — and it is
 set empty when the window has no socket, so a Crook started inside another Crook's pane does not
-hand its shells the outer one's.
+hand its shells the outer one's. Beside it is the one secret, `CROOK_TOKEN`, which is how a
+request says which pane it comes from, set empty on the same terms.
 
 **The pty opens at the pane's size.** A shell prints its whole startup — a `~/.zprofile`
 banner, a greeting sized with `tput cols` — before any resize can reach it, and what it
@@ -1109,10 +1110,11 @@ day and why a plugin that wants to do more starts from a status that is already 
 ### The window answers
 
 A status travels one way, from the program to the row. The other direction — a script or an
-agent asking a running Crook what is open — is a question whose answer has to come back, and
-it goes over a socket: `crook pane list` asks the window its pane is in and prints every pane
-that window has. It only reads, and it is the first verb of `docs/plugins.md`'s Phase 4. The
-code is `app/src/control/`.
+agent asking a running Crook what is open, or asking it to open something — is a question whose
+answer has to come back, and it goes over a socket: `crook pane list` asks the window its pane
+is in and prints every pane that window has, and `crook tab new` asks it to open a tab beside
+the pane and run a command there. They are the first two verbs of `docs/plugins.md`'s Phase 4.
+The code is `app/src/control/`.
 
 **Why control is a socket when status is an OSC.** The three reasons above are reasons against
 a socket *for reporting*. Control turns the third one round. A request written into the pane
@@ -1138,19 +1140,68 @@ not a corner of the shell integration's scratch, which is swept of entries a wee
 window can be open longer than a week. The listening socket and every accepted one are
 close-on-exec, so no shell a pane starts inherits them.
 
-**What it exposes, and what the later verbs will need.** What the panel shows, per pane: its
-number and its tab's, its title and its tab's, its group, whether it is the focused one, the
-agent's status and message, its directory and its branch — nothing of a pane's scrollback and
-nothing of its input. All of that is already on the screen, in the session file, and in the
-shells' own process entries, every one of them this user's to read, so a socket only this user
-can reach that only reads gives nobody anything new — and there is deliberately no token, since
-one that authorised nothing would be a promise with nothing behind it. The verbs after this one
-change what a program can do quietly, and they will carry authority by *lineage*: a caller names
-its pane with a per-pane token handed to that pane's environment (never the pane's number, which
-is not a secret), may act on its own pane and on the tabs it opened, and reading or typing into
-a pane a person opened is a grant that person answers on a card. An agent that reads one pane
-and types into another is a confused deputy waiting for a prompt injection, which is why that is
-never a default.
+**What it exposes.** What the panel shows, per pane: its number and its tab's, its title and
+its tab's, its group, whether it is the focused one, the agent's status and message, its
+directory and its branch — nothing of a pane's scrollback and nothing of its input. All of that
+is already on the screen, in the session file, and in the shells' own process entries, every one
+of them this user's to read, so a socket only this user can reach that only reads gives nobody
+anything new. That is why `pane.list` needs no token: a listing any process of this user can
+already put together is not a thing to guard, and a script outside every pane is answered as it
+always was.
+
+**Authority by lineage: the token.** Opening a tab is not reading. Anything this user runs can
+connect to the socket — a script, a cron job, a tool in another terminal, a helper some other
+program left listening — and none of those is a piece of work somebody opened a pane for. So
+every pane's shell is handed a secret of its own, `CROOK_TOKEN`, beside `CROOK_SOCKET`: 32 bytes
+from the operating system's random source (the `getrandom` the TLS stack already builds with),
+minted when the shell opens, known to the window alone, and gone with the shell. A request
+carries it, the window finds the open pane that holds it, and that pane is the caller. A request
+with no token, an empty one, or one no open pane of this window holds is refused `tab.new` as
+`unauthorized`, and may still list. The pane's number is not a credential and never becomes one:
+every listing prints it. The token is in the environment of everything the pane runs, so
+whatever the agent starts — a tool call, a sub-process, a script it wrote — can open tabs as the
+agent. That is the boundary meant: a pane is one piece of work, what runs in it acts for it, and
+the budget below counts it all as one. What the token is not is a wall inside this user's
+account. A process of this user that sets out to can read another's environment
+(`/proc/<pid>/environ`), and could as well write to the pty or run the command itself; the token
+keeps a stray client from opening tabs by connecting, and makes every tab that opens one a pane
+answers for. It does not make one user's processes strangers to each other, and nothing on one
+machine under one user could.
+
+**Opening a tab.** `tab.new` opens one tab in the caller's window — the socket a pane is told
+about is its own window's, and no token names a pane of another — beside the caller's tab, in
+its group when `in_my_group` says so (a group of the two is made when there is none), and never
+selected: the person may be typing, and a tab that took the keyboard would take the rest of
+their line with it. With `worktree`, the window makes the checkout the tab menu's creator makes —
+the branch name trimmed and required and otherwise git's to judge, the checkout filed under
+Crook's store by repository, `git worktree add -b` from the caller's `HEAD` — on the pool, and
+the tab opens in it when git is done. The command arrives as words, and the window joins them
+with the quoting the plugin host types an argument with, which is proven to read back word for
+word in `sh`, `bash`, `zsh` and `fish` (#342). A new pane that would run any other shell is
+refused as `unsupported-shell`, and a word holding a control character as `bad-request`, since a
+newline in a command line is a second command. A word arrives as itself: an alias is not
+expanded, `&&` is an argument, and a pipeline is `sh -c '…'`. The line is typed into the new
+pane's field at once, where a person can see it, and sent by the field's own submit at the
+shell's first prompt — the first `A` for a shell with marks, since a line submitted into the
+block open from before it is one the shell never reports a boundary for, and the first thing it
+prints for a shell without. That is an event and not a clock, so a shell whose integration never
+marks a prompt keeps the line in its field for a person to send, and a person who edits the line
+before its prompt owns it, and it is not sent. The reply is the new pane's number, its tab's
+and its directory. The new row's hover card and its "Why this status" say which pane opened it.
+
+**The budget, and refusals.** Eight tabs at once on behalf of one pane a person opened. The
+count is by *root*: a tab opened by a tab that was itself opened counts against the pane the
+chain began at, so a worker that opens workers spends its lead's eight rather than eight of its
+own — counted per caller, a loop would be eight tabs each opening eight more. Tabs still waiting
+on git count, and a tab that closes gives its place back. Refusals are bounded as a plugin's
+are: sixteen in a row and the window stops answering that pane's `tab.new` until it closes, as
+`too-many-refusals`, with a line in the log at the sixteenth; every refusal before it is logged,
+and an allowed tab starts the count again. Requests with no token are logged sixteen in a row
+and then refused quietly, since there is no pane to stop answering. What is still to come keeps
+to the rule these start: a caller may act on its own pane and on the tabs it opened, and reading
+or typing into a pane a person opened is a grant that person answers on a card. An agent that
+reads one pane and types into another is a confused deputy waiting for a prompt injection,
+which is why that is never a default.
 
 **The transport.** One socket per process, because every `crook` launch is its own process with
 one window. At startup the name is probed: a socket there that refuses a connection was left by
@@ -1162,7 +1213,9 @@ The socket is removed when the window closes. One OS thread accepts, because it 
 long as nobody connects — the reason a pty reader is a thread and not a pool worker — and each
 connection gets a short-lived thread of its own, eight at once and the ninth refused as `busy`.
 A connection has five seconds all told and a line 64 KiB; a longer line is refused as `too-long`
-and the connection closed, since nothing says where the next line starts. A question that needs
+and the connection closed, since nothing says where the next line starts. The one exception is a
+tab in a new worktree, which waits on git and its `post-checkout` hook: that reply is given the
+worktree module's own read and write budgets and a margin, and the connection closes after it. A question that needs
 the window is posted to it and answered on the main thread through the `ctx.spawn` a pty's
 output comes home by, while the connection's thread waits for the answer until a quarter of a
 second before its five are up — the quarter being what it writes `timeout` back in, so a window
@@ -1172,16 +1225,20 @@ yet**: nothing listens there, and the CLI says the command is not available on t
 owner-only named pipe with `PIPE_REJECT_REMOTE_CLIENTS` is the route when it comes.
 
 **The protocol.** Newline-delimited JSON, one object a line each way. A request is
-`{"v":1,"verb":"pane.list"}`, with an optional `id` of any JSON value the reply echoes and an
-optional `min_version`; a reply is `{"v":1,"ok":true,"result":…}` or
+`{"v":1,"verb":"pane.list"}`, or
+`{"v":1,"verb":"tab.new","token":"…","args":{"command":["claude","…"],"worktree":"fix-x","in_my_group":true,"title":"…"}}`,
+with an optional `id` of any JSON value the reply echoes and an optional `min_version`. An
+argument a verb does not take is refused as `bad-request` rather than ignored, since ignoring a
+misspelt `worktree` would open an agent in the caller's own checkout. A reply is
+`{"v":1,"ok":true,"result":…}` or
 `{"v":1,"ok":false,"error":{"code":…,"message":…}}`. Every reply carries `v`, the version the
 window speaks. A request's `v` is the version it was written against: a window refuses, as
 `version`, one older than the oldest it still answers — 1 today — and one whose `min_version` is
 newer than the window, so a script written against a later verb is told to update Crook rather
 than handed a half-understood answer. A verb is a promise that is hard to take back, so within a
 version verbs and fields are only ever added, and a field that changes meaning is a new version.
-The codes are `bad-request`, `too-long`, `unknown-verb`, `version`, `busy`, `timeout` and
-`gone`.
+The codes are `bad-request`, `too-long`, `unknown-verb`, `version`, `busy`, `timeout`, `gone`,
+`unauthorized`, `budget`, `too-many-refusals`, `unsupported-shell` and `failed`.
 
 **The CLI is the other end.** `crook pane list` prints a table, and `--json` prints the window's
 own array with every field in it, so a field a newer window adds reaches a script through an
@@ -1191,6 +1248,11 @@ was one; both are refused rather than looked around, since either way the window
 cannot be asked. Outside every pane it takes the one live socket in this user's directory when
 there is exactly one, and refuses when there are several, naming them: each window is its own
 process, and choosing the newest would be a guess that hands a script another window's panes.
+`crook tab new [--worktree B] [--in-my-group] [--title T] [--json] -- CMD…` prints the new
+pane's number, or the window's answer with `--json`; the `--` is required, since a command is
+the part of the line most likely to hold a word that starts with a dash. Every request carries
+`$CROOK_TOKEN` when there is one, and the CLI refuses nothing on the token's account: the window
+is the one place that knows what a token is worth.
 What it prints carries no control character. A pane's directory arrives percent-decoded from the
 OSC 7 its shell printed, so `%1b` in it is an ESC, and a listing that printed what it was given
 would replay a pane's escape sequence into the terminal the listing runs in; the table writes

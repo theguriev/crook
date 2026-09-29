@@ -250,6 +250,32 @@ pub struct AgentSession {
     /// Reported off the open block's OSC 133 marks. It is a *name*, not state:
     /// the dot already says whether something is running, and this says what.
     pub running_command: Option<String>,
+
+    /// Which pane opened this one through `crook tab new`, when one did.
+    ///
+    /// `None` for every pane a person opened. It is what the row's card and
+    /// its "Why this status" say — a tab nobody in the room opened is one a
+    /// person should be able to trace — and what the spawn budget is counted
+    /// by: see [`crate::control::spawn`]. Not saved with the session: the
+    /// pane it names is gone when the window is, and the pane that comes back
+    /// in its place was opened by the restore.
+    pub spawned_by: Option<Lineage>,
+}
+
+/// Where a pane opened by `crook tab new` came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Lineage {
+    /// The pane that asked for it.
+    pub caller: PaneId,
+    /// The pane a person opened that the chain of asking began at: the
+    /// caller itself, or the root the caller's own lineage names. What the
+    /// budget is counted against, so that a worker opening workers spends its
+    /// root's tabs rather than a budget of its own.
+    pub root: PaneId,
+    /// What the caller's row was called when it asked, for the card. Kept
+    /// rather than looked up, because the caller can close and its worker is
+    /// still the one it opened.
+    pub title: String,
 }
 
 /// Where a session starts when nobody named a directory.
@@ -297,6 +323,7 @@ impl AgentSession {
             working_directory: starting_directory(),
             pull_request: None,
             running_command: None,
+            spawned_by: None,
         }
     }
 
@@ -636,6 +663,21 @@ pub enum TabAction {
     /// agents in one rectangle, which is a different claim — that they are two
     /// halves of one screen — and it is the wrong one.
     NewInGroupOf(TabId),
+    /// Open a tab beside `tab` — at the end of its group, making a group of
+    /// the two when `grouped` and it has none, and after its block otherwise —
+    /// and leave the active tab as it is.
+    ///
+    /// What `crook tab new` opens. A tab an agent asked for is not one a
+    /// person switched to: selecting it would move the keyboard out from
+    /// under whoever is typing, and the rest of their line would land in the
+    /// worker's field. It goes last in the most-recently-used order, since
+    /// nobody has used it.
+    NewBeside {
+        /// The tab it opens beside.
+        tab: TabId,
+        /// Whether it joins that tab's group.
+        grouped: bool,
+    },
     /// Put a tab somewhere else in the list: into a group, out of one, or at
     /// another place among its neighbours.
     ///
@@ -1368,7 +1410,29 @@ impl TabStrip {
 
     /// Opens a tab in `anchor`'s group, making one of the two when it has no
     /// group yet.
-    fn new_in_group_of(&mut self, anchor: TabId) -> TabEffect {
+    /// Where a tab opened after the tab at `index` goes.
+    ///
+    /// Past the rest of that tab's group when it is in one, because a tab
+    /// that belongs to nothing cannot be dropped into the middle of tabs that
+    /// belong together — Warp's `clamp_to_unpinned_region` is the same move
+    /// for its own reason — and at the end when there is no such tab.
+    fn slot_after(&self, index: Option<usize>) -> usize {
+        let at = match index {
+            Some(index) => match self.tabs[index].group().and_then(|id| self.run_of(id)) {
+                Some(run) => run.end,
+                None => index + 1,
+            },
+            None => self.tabs.len(),
+        };
+        // And through the clamp every other move goes through, so that
+        // opening a tab from a pinned one puts it after the pins rather than
+        // among them.
+        self.slot_for(None, self.tabs.get(at).map(Tab::id), false)
+    }
+
+    /// Opens a tab at the end of `anchor`'s group, making one of the two when
+    /// it has none, and selects it when `select` says to.
+    fn new_in_group_of(&mut self, anchor: TabId, select: bool) -> TabEffect {
         let Some(index) = self.index_of(anchor) else {
             return TabEffect::Unchanged;
         };
@@ -1405,7 +1469,13 @@ impl TabStrip {
         // it in the middle of checkouts made before it.
         let at = self.run_of(group).map_or(index + 1, |run| run.end);
         self.tabs.insert(at, tab);
-        self.repair(Some(id));
+        if select {
+            self.repair(Some(id));
+        } else {
+            // Last in the order of use, for the reason `NewBeside` gives.
+            self.mru.push(id);
+            self.repair(None);
+        }
         TabEffect::Changed
     }
 
@@ -1460,28 +1530,33 @@ impl TabStrip {
                 let tab = Tab::new(format!("agent {}", self.opened));
                 let id = tab.id();
                 // After the active tab, which is where a person who just
-                // branched off what they were doing expects to find it — and
-                // past the rest of its group when it is in one, because a tab
-                // that belongs to nothing cannot be dropped into the middle of
-                // tabs that belong together. Warp's `clamp_to_unpinned_region`
-                // is the same move for its own reason.
-                let at = match self.index_of(self.active) {
-                    Some(index) => match self.tabs[index].group().and_then(|id| self.run_of(id)) {
-                        Some(run) => run.end,
-                        None => index + 1,
-                    },
-                    None => self.tabs.len(),
-                };
-                // And through the clamp every other move goes through, so that
-                // opening a tab from a pinned one puts it after the pins rather
-                // than among them.
-                let at = self.slot_for(None, self.tabs.get(at).map(Tab::id), false);
+                // branched off what they were doing expects to find it.
+                let at = self.slot_after(self.index_of(self.active));
                 self.tabs.insert(at, tab);
                 self.repair(Some(id));
                 TabEffect::Changed
             }
 
-            TabAction::NewInGroupOf(anchor) => self.new_in_group_of(anchor),
+            TabAction::NewInGroupOf(anchor) => self.new_in_group_of(anchor, true),
+
+            TabAction::NewBeside { tab, grouped: true } => self.new_in_group_of(tab, false),
+
+            TabAction::NewBeside {
+                tab: anchor,
+                grouped: false,
+            } => {
+                let Some(index) = self.index_of(anchor) else {
+                    return TabEffect::Unchanged;
+                };
+                self.opened += 1;
+                let tab = Tab::new(format!("agent {}", self.opened));
+                let id = tab.id();
+                let at = self.slot_after(Some(index));
+                self.tabs.insert(at, tab);
+                self.mru.push(id);
+                self.repair(None);
+                TabEffect::Changed
+            }
 
             TabAction::MoveTab { tab, group, before } => self.move_tab(tab, group, before),
 

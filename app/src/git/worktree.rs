@@ -60,7 +60,7 @@ static GIT_MISSING: AtomicBool = AtomicBool::new(false);
 /// only reason a local read is slow is a cold page cache — and short enough
 /// that a stall is something a person waits out rather than a hang they have to
 /// restart the app to clear.
-const READ_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long [`add`] may take.
 ///
@@ -70,7 +70,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// whatever the user wrote. Killing an honest checkout halfway leaves a
 /// half-written directory *and* a registered worktree — strictly worse than
 /// having waited.
-const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How long [`remove`] may take.
 ///

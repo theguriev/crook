@@ -1243,9 +1243,11 @@ somewhere to live.
 
 **Phase 4 — the process transport.** `plugins/host-process`: the NDJSON socket, the CLI as
 SDK, `--skill` output for an agent in a pane, supervised long-lived plugins with budgets. The
-socket's first slice is in: a per-process Unix socket that answers one read-only verb,
-`crook pane list` — see "The window answers" in `docs/architecture.md` for its threat model and
-what the verbs after it will need. Everything else in this phase is still to come.
+socket's first slices are in: a per-process Unix socket that answers `crook pane list`, which
+only reads, and `crook tab new`, which a pane uses to open a worker's tab beside it — known by a
+per-pane token, under a spawn budget, with its lineage on the new row. See "The window answers"
+in `docs/architecture.md` for the threat model and what the verbs after these will need.
+Everything else in this phase is still to come.
 
 **Phase 5 — the agent seam: the status half is done, and it is not a plugin.**
 `AgentStatus::Running`/`NeedsInput`/`Failed` are written by the agent itself, over an escape

@@ -84,8 +84,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crook_terminal::{
-    Block, BlockId, BlockRows, Key, Modifiers, MouseButton, MouseEventKind, MouseModes, Palette,
-    Rgb, Snapshot, Terminal, TerminalEvent, TerminalOptions, TerminalSize,
+    Block, BlockId, BlockRows, BlockState, Key, Modifiers, MouseButton, MouseEventKind, MouseModes,
+    Palette, Rgb, Snapshot, Terminal, TerminalEvent, TerminalOptions, TerminalSize,
 };
 use crookui_core::geometry::{Color, Vector2F};
 use crookui_core::prelude::*;
@@ -296,6 +296,15 @@ pub enum TerminalUpdate {
     /// say which of the two happened: the agent finished, or something ended
     /// it before it could say so.
     AgentSettled(PaneId),
+    /// The shell has reached its first prompt, and a line sent now is a
+    /// command of its own. Once per shell.
+    ///
+    /// For a shell that reports marks that is the first `A`: a line submitted
+    /// into the block still open from before it is one the shell never
+    /// reports a boundary for. For one that reports none it is the first
+    /// thing it prints, which is the most a shell with no marks ever says
+    /// about being ready — the wait `--run` makes before it types.
+    Prompted(PaneId),
 }
 
 /// The finished blocks of one pane, as the surface holds them.
@@ -463,6 +472,15 @@ struct Session {
     directory: Option<PathBuf>,
     /// What it was last running, for the same reason again.
     running: Option<String>,
+    /// The secret this pane's shell was handed for the control socket, and
+    /// the whole of how the window tells which pane a request comes from.
+    /// Goes with the session, so a token outlives its pane by nothing.
+    token: Option<String>,
+    /// Whether the shell reports command marks, which decides what its first
+    /// prompt looks like from here: see [`TerminalUpdate::Prompted`].
+    marks: bool,
+    /// Whether [`TerminalUpdate::Prompted`] has been sent for this shell.
+    prompted: bool,
 }
 
 impl Entity for TerminalModel {
@@ -610,6 +628,27 @@ impl TerminalModel {
         }
     }
 
+    /// The pane whose shell was handed `token`, while that shell runs.
+    ///
+    /// A walk of the open sessions, which are a few dozen at most, asked once
+    /// per request that carries a token. An empty token is nobody's: it is
+    /// what a pane with none is told, and it must not match one either.
+    pub fn pane_with_token(&self, token: &str) -> Option<PaneId> {
+        if token.is_empty() {
+            return None;
+        }
+        self.sessions
+            .iter()
+            .find(|(_, session)| session.token.as_deref() == Some(token))
+            .map(|(pane, _)| *pane)
+    }
+
+    /// The token a pane's shell was handed, for a test that has to ask as it.
+    #[cfg(test)]
+    pub fn token(&self, pane: PaneId) -> Option<&str> {
+        self.sessions.get(&pane)?.token.as_deref()
+    }
+
     /// The running terminal in a pane, for the element that draws it.
     pub fn handle(&self, pane: PaneId) -> Option<TerminalHandle> {
         self.sessions
@@ -728,6 +767,13 @@ impl TerminalModel {
             return;
         }
 
+        // Only for a window that has a socket to send it to: a token that
+        // could reach nothing would be a secret handed out for nothing.
+        let token = self
+            .control_socket
+            .is_some()
+            .then(crate::control::mint_token)
+            .flatten();
         // The integration writes its stub files before the shell is started
         // and removes them when this value is dropped, so it is moved into the
         // session below rather than left to fall out of scope here.
@@ -738,8 +784,10 @@ impl TerminalModel {
                 login: self.shell_login,
                 shell: self.shell.clone(),
                 control_socket: self.control_socket.clone(),
+                control_token: token.clone(),
             },
         );
+        let marks = integration.marks();
         let mut options = TerminalOptions {
             size: self.measured.get(pane).unwrap_or(INITIAL_GRID),
             working_directory: directory,
@@ -747,7 +795,7 @@ impl TerminalModel {
             ..Default::default()
         };
         integration.apply(&mut options);
-        if !integration.marks() {
+        if !marks {
             log::debug!(
                 "pane {pane:?} is running {:?}, which Crook has no command marks for; \
                  its output will be one continuous block",
@@ -824,6 +872,9 @@ impl TerminalModel {
                 title: None,
                 directory: None,
                 running: None,
+                token,
+                marks,
+                prompted: false,
             },
         );
         self.watch(pane, ctx);
@@ -991,6 +1042,20 @@ impl TerminalModel {
         if session.running != running {
             session.running = running.clone();
             updates.push(TerminalUpdate::Running(pane, running));
+        }
+        // Read off the snapshot for the reason `running` is: what matters is
+        // where the shell has come to rest, not which marks it took to get
+        // there. Only until it has been said once, so the text of a grid is
+        // built for a shell with no marks until it prints and never after.
+        if !session.prompted {
+            let prompted = match session.marks {
+                true => session.snapshot.live_block.state == BlockState::AtPrompt,
+                false => !session.snapshot.text().trim().is_empty(),
+            };
+            if prompted {
+                session.prompted = true;
+                updates.push(TerminalUpdate::Prompted(pane));
+            }
         }
         for event in events {
             match event {

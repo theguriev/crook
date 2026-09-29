@@ -46,6 +46,8 @@ chrono.workspace = true
 # The settings file lives in the platform's configuration directory.
 dirs.workspace = true
 env_logger.workspace = true
+# The secret every pane is handed for the control socket. See `control`.
+getrandom.workspace = true
 log.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true

@@ -768,8 +768,11 @@ fn fill(template: &str, argument: &str) -> Option<String> {
 /// `'\\'` — out of the quotes, one escaped backslash, back in — it is a
 /// backslash to all four, and nothing inside the quotes is ever a backslash
 /// for fish to read as an escape.
+///
+/// `crook tab new` types its command's words with this too — see
+/// [`crate::control::spawn`] — and only into those four shells.
 #[cfg(not(windows))]
-fn quote(argument: &str) -> String {
+pub(crate) fn quote(argument: &str) -> String {
     let mut quoted = String::with_capacity(argument.len() + 2);
     quoted.push('\'');
     for character in argument.chars() {
@@ -785,7 +788,7 @@ fn quote(argument: &str) -> String {
 
 /// See the other one.
 #[cfg(windows)]
-fn quote(argument: &str) -> String {
+pub(crate) fn quote(argument: &str) -> String {
     format!("'{}'", argument.replace('\'', "''"))
 }
 

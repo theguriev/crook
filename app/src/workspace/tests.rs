@@ -2953,6 +2953,32 @@ fn show_details_on_hover_opens_a_card_over_the_row_and_closes_with_the_option() 
 }
 
 #[test]
+fn the_hover_card_says_which_pane_opened_the_tab() {
+    // What the row has no room for, and what a person needs to trace a tab
+    // nobody in the room opened: the pane whose agent asked for it.
+    let mut harness = Harness::seeded();
+    let row = tab_boxes(&harness.frame())[0];
+    harness.move_to(row.origin() + vec2f(40., row.height() / 2.));
+    assert!(
+        !frame_text(&harness.frame()).contains("opened by"),
+        "a tab a person opened was said to have been opened by a pane"
+    );
+
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.spawned_by = Some(crate::tab::Lineage {
+            caller: PaneId::next(),
+            root: PaneId::next(),
+            title: "the lead".to_owned(),
+        });
+    });
+    let scene = harness.frame();
+    assert_eq!(detail_cards(&scene).len(), 1, "the card is up");
+    let text = frame_text(&scene);
+    assert!(text.contains("opened by the lead"), "{text}");
+}
+
+#[test]
 fn the_hover_card_shows_the_chips_the_row_was_told_to_hide() {
     // Warp's asymmetry, kept: those two settings govern the row, and the card
     // is what the row could not fit.
@@ -15884,6 +15910,33 @@ mod the_agent {
         let text = explanation_of(&mut harness, tabs[0], away);
         assert!(text.contains("no report yet"), "{text}");
         assert!(text.contains("at a prompt"), "{text}");
+        assert!(
+            !text.contains("Opened by"),
+            "a tab a person opened was said to have been opened by a pane: {text}"
+        );
+    }
+
+    #[test]
+    fn why_this_status_names_the_pane_that_opened_the_tab() {
+        // A row nobody in the room opened by hand: `crook tab new` from
+        // another pane's agent. Who started the work is the first thing a
+        // person asks about it.
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let (lead, worker) = (harness.panes_of(tabs[0])[0], harness.panes_of(tabs[1])[0]);
+        harness.update_session(worker, |session| {
+            session.spawned_by = Some(crate::tab::Lineage {
+                caller: lead,
+                root: lead,
+                title: "port the tab bar".to_owned(),
+            });
+        });
+
+        let text = explanation_of(&mut harness, tabs[1], worker);
+        assert!(
+            text.contains("Opened by “port the tab bar” with crook tab new."),
+            "{text}"
+        );
     }
 
     #[test]
