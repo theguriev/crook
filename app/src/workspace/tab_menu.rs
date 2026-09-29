@@ -100,13 +100,18 @@
 //! So the creator asks, under the name, as a list of places to start from —
 //! the tab's own `HEAD`, then the default branch (see
 //! [`crate::git::worktree::default_branch`]), then every other local branch.
-//! `HEAD` is picked when it opens, so a person who does not look gets exactly
-//! the worktree they got before there was a question; the default branch is one
-//! arrow away. The whole list rather than those two and a filter, because the
-//! filter would be a second field with a caret of its own in a popup whose
-//! promise is a name and a press, and every letter typed here belongs to the
-//! name: the list is short in practice, the two rows that matter lead it, and
-//! it scrolls past a few rows rather than growing the popup.
+//! `HEAD` is picked when it opens, so a person who does not look gets a branch
+//! from the commit they got one from before there was a question; the default
+//! branch is one arrow away. Not quite the same branch: every new one is made
+//! with no upstream now, where `branch.autoSetupMerge` set to `always` or
+//! `inherit` used to give one made from `HEAD` an upstream (see
+//! [`crate::git::worktree::add`]).
+//!
+//! The whole list rather than those two and a filter, because the filter
+//! would be a second field with a caret of its own in a popup whose promise is
+//! a name and a press, and every letter typed here belongs to the name: the
+//! list is short in practice, the two rows that matter lead it, and it scrolls
+//! past a few rows rather than growing the popup.
 //!
 //! # The two keys
 //!
@@ -412,8 +417,8 @@ pub(super) struct TabMenuState {
     /// [`Self::base`] is an index into it.
     pub(super) bases: Vec<Base>,
     /// Which of [`Self::bases`] is picked: the tab's own `HEAD` until somebody
-    /// picks another, which is the worktree this creator made before it had
-    /// anything to ask.
+    /// picks another, which is where this creator started every branch before
+    /// it had anything to ask.
     pub(super) base: usize,
     /// How far the places to start from are scrolled, in a repository with
     /// more branches than [`BASE_ROWS`].
@@ -621,10 +626,10 @@ fn scroll_into_view(scroll: &ScrollStateHandle, at: usize, count: usize) {
 /// Where a new branch can start, in the order the creator offers them.
 ///
 /// The tab's own `HEAD` first, labelled the way its row in the list is, which
-/// is the worktree the creator made before it asked. The default branch
-/// second, one arrow away, because it is the answer that is right most of the
-/// time. Then every other local branch in git's order, for the branch that is
-/// meant to stack on another.
+/// is where the creator started every branch before it asked. The default
+/// branch second, one arrow away, because it is the answer that is right most
+/// of the time. Then every other local branch in git's order, for the branch
+/// that is meant to stack on another.
 ///
 /// Nothing is offered twice. The tab's own branch is its first row and not
 /// also a later one, and a default branch that *is* the tab's own branch —

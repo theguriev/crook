@@ -946,18 +946,21 @@ there is not one yet, which is what keeps one repository's branches together.
 
 The creator asks where the new branch starts — herdr's `--base`, asked as a list with a check
 on it under the name rather than as a flag. The tab's own `HEAD` comes first and is picked
-when the creator opens, so a person who does not look gets exactly the worktree they got
-before there was a question. The repository's default branch comes next, one arrow away:
+when the creator opens, so a person who does not look gets a branch from the same commit
+as before there was a question. The repository's default branch comes next, one arrow away:
 `origin/HEAD`, else `init.defaultBranch`, else `main` or `master` — each only if the
 repository really has it, because the configuration is the machine's. Every other local branch
 follows, for work that is meant to stack on another. The question was left out at first, on
 the grounds that a menu could not ask it well, and leaving it out answered it wrongly: a tab on
 a feature branch cut every worktree made from it from that feature, and an agent's work
 stacked on another's without anybody having said so. The default branch is read with the rest
-of the menu when it opens, on the background pool; the new branch is made with `--no-track`,
-so starting it from `origin/main` does not also make `main` its upstream; and a base that
-begins with a dash is refused before git sees it, since past `--` git still reads a lone `-`
-as the branch checked out before this one.
+of the menu when it opens, on the background pool. The new branch is made with `--no-track`,
+so starting it from `origin/main` does not also make `main` its upstream — and so no new
+branch gets an upstream at all, including one made from `HEAD` under
+`branch.autoSetupMerge=always` or `inherit`, which used to. A base that begins with a dash
+is refused before git sees it, since past `--` git still reads a lone `-` as the branch
+checked out before this one; so is a branch name that does, since `git worktree add` hands
+the name to `git branch` where `-m` is an option and would rename the tab's own branch.
 
 It opened a *pane* first, splitting the tab, and that was the wrong claim made in the right
 place. Belonging together and being on screen together are two different statements: a split

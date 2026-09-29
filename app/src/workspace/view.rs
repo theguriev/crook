@@ -3999,7 +3999,7 @@ impl Workspace {
             return;
         };
         // `None` for the tab's own `HEAD`, which is `add`'s own default and
-        // so exactly the worktree this made before it asked.
+        // so the commit this started every branch from before it asked.
         let base = self
             .tab_menu
             .bases
