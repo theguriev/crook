@@ -488,13 +488,14 @@ Twenty features, and the page that configures them:
   column, makes them one message — `Review of <branch> since <base>:`, then each comment as
   `path:line`, the line quoted, and what you said — pastes it into the tab's agent as one
   bracketed paste **with no Enter**, and puts the keyboard there: you read it, and you send it.
-  The agent is the tab's pane whose agent has reported a status, else the focused one. It is
-  never pasted into a shell prompt, where its lines would be commands, nor into a program that
-  has not turned bracketed paste on, where every line would arrive as its own Enter; the column
-  says so and keeps the comments. **Copy review** puts the same text on the clipboard, for an
-  agent in another tool. Checked by hand to take a multi-line bracketed paste into the prompt
-  unsent: Claude Code 2.1.280 and OpenCode 1.18.33. Codex 0.149.1 and Gemini CLI 0.61.0 turn
-  bracketed paste on when they start, but a paste into their prompts is not verified.
+  The agent is the tab's pane whose agent has reported a status and has not exited back to its
+  shell's prompt, else the focused one. It is never pasted into a shell prompt, where its lines
+  would be commands, nor into a program that has not turned bracketed paste on, where every
+  line would arrive as its own Enter; the column says so and keeps the comments. **Copy
+  review** puts the same text on the clipboard, for an agent in another tool. Checked by hand
+  to take a multi-line bracketed paste into the prompt unsent: Claude Code 2.1.280 and OpenCode
+  1.18.33. Codex 0.149.1 and Gemini CLI 0.61.0 turn bracketed paste on when they start, but a
+  paste into their prompts is not verified.
 
 - **A settings page**, which opens the way a shell does: `cmd/ctrl-,` — or the View options
   menu's last entry — puts it in a **tab of its own**, listed beside the work it

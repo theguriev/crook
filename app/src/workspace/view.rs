@@ -2402,19 +2402,31 @@ impl Workspace {
 
     /// Which pane of the tab in front a review of `repository` goes to.
     ///
-    /// The one with an agent in it: a pane whose agent has reported, and has
-    /// not ended since — the focused one if it is such a pane, else the first
-    /// such in the tab, among those working in the repository the review is
-    /// about, since a review of one checkout is no use to an agent in
-    /// another. With no such pane, the focused one — which is the pane the
-    /// column is about, and which may be running an agent that says nothing
-    /// of itself.
-    pub(super) fn review_pane(&self, repository: &Path) -> Option<PaneId> {
+    /// The one with an agent in it: a pane whose agent has reported and
+    /// whose shell is not back at its prompt — the focused one if it is such
+    /// a pane, else the first such in the tab, among those working in the
+    /// repository the review is about, since a review of one checkout is no
+    /// use to an agent in another. With no such pane, the focused one — which
+    /// is the pane the column is about, and which may be running an agent
+    /// that says nothing of itself.
+    ///
+    /// The prompt, and not the report, because a report outlives the agent
+    /// that made it. The hooks say `idle` when a session ends, and the shell
+    /// ending the command takes back only a report of running or waiting
+    /// (`settle_agent` in `crook_terminal`), so the pane of an agent that
+    /// has exited goes on saying [`StatusSource::Agent`] from its prompt.
+    pub(super) fn review_pane(&self, repository: &Path, app: &AppContext) -> Option<PaneId> {
         let panes = self.tabs.active()?.panes();
         let focused = panes.focused_id();
+        let now = Instant::now();
         let agents: Vec<PaneId> = panes
             .iter()
             .filter(|pane| matches!(pane.session().source, StatusSource::Agent(_)))
+            .filter(|pane| {
+                !self
+                    .terminal(pane.id(), app)
+                    .is_some_and(|(_, snapshot)| a_shell_is_listening(&snapshot, now))
+            })
             .filter(|pane| {
                 pane.session()
                     .working_directory
@@ -2444,7 +2456,8 @@ impl Workspace {
     /// review would be submitted on its own. And never to a shell's prompt,
     /// where the lines of a review are commands — `> +    let b = 3;` is a
     /// redirection that writes a file into the very tree this column
-    /// promises not to touch.
+    /// promises not to touch. Whatever the pane last heard from an agent:
+    /// the shell an agent exited to is a shell, see [`Self::review_pane`].
     ///
     /// The comments go when the paste did, and stay for every reason it did
     /// not.
@@ -2457,24 +2470,18 @@ impl Workspace {
         ) else {
             return;
         };
-        let Some(pane) = self.review_pane(&repository) else {
+        let Some(pane) = self.review_pane(&repository, ctx) else {
             return;
         };
-        let (title, agent) = match self.tabs.pane(pane) {
-            Some(found) => (
-                found.title().to_owned(),
-                matches!(found.session().source, StatusSource::Agent(_)),
-            ),
-            None => return,
+        let Some(title) = self.tabs.pane(pane).map(|found| found.title().to_owned()) else {
+            return;
         };
 
         let refusal = match self.terminal(pane, ctx) {
             None => Some(format!(
                 "{title} has no shell any more. The comments are kept."
             )),
-            Some((_, snapshot))
-                if !agent && pane_surface::of(&snapshot, Instant::now()).composer =>
-            {
+            Some((_, snapshot)) if a_shell_is_listening(&snapshot, Instant::now()) => {
                 Some(format!(
                     "{title} is at a shell prompt, where a review would be run as commands. \
                      Start the agent there first, or copy the review."
@@ -7924,6 +7931,27 @@ const OVERLAY_ANCHOR: AnchorTo = AnchorTo {
 /// platform keeps data rather than in a dotfile of our own.
 fn worktree_store() -> Option<PathBuf> {
     dirs::data_dir().map(|directory| directory.join("crook").join("worktrees"))
+}
+
+/// Whether what a paste into this pane would reach is its shell, as of
+/// `now`: a composer drawn under it, or a shell that has said it is at its
+/// prompt — or between a command handed to it and the command starting, or
+/// between one ending and the next prompt.
+///
+/// What the Changes column asks before it pastes a review: the lines of one
+/// are commands to a shell, and a shell that turns bracketed paste on at its
+/// prompt — bash 5.3 does — would take the whole of it into its line editor,
+/// one Enter away from running it. A full-screen program is never a shell,
+/// whatever the marks under it last said; and a shell that reports no marks
+/// is known only by the composer.
+fn a_shell_is_listening(snapshot: &Snapshot, now: Instant) -> bool {
+    use crook_terminal::BlockState;
+    pane_surface::of(snapshot, now).composer
+        || (!snapshot.alt_screen
+            && matches!(
+                snapshot.live_block.state,
+                BlockState::AtPrompt | BlockState::Submitted | BlockState::Done
+            ))
 }
 
 /// The top of the working tree `directory` is in, or `directory` itself when

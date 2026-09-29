@@ -23172,9 +23172,9 @@ mod changes_column {
             });
         }
         let chosen = |harness: &Harness| {
-            harness
-                .workspace
-                .read(&harness.app, |workspace, _| workspace.review_pane(&here))
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace.review_pane(&here, app)
+            })
         };
         let agent = |harness: &mut Harness, pane: PaneId| {
             harness.update_session(pane, |session| {
@@ -23392,5 +23392,68 @@ mod changes_column {
             "a refused send moved the keyboard"
         );
         assert_eq!(what_the_agent_received(&mut harness, agent, &received), "");
+    }
+
+    #[test]
+    fn a_shell_an_agent_exited_to_is_not_sent_the_review_nor_chosen_over_the_focused_pane() {
+        let scratch = Scratch::new();
+        let Some((repository, base)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let received = scratch.path().join("received");
+        let mut harness = Harness::new(1);
+        let Some((agent, shell)) =
+            an_agent_beside_a_shell(&mut harness, &repository, &received, true)
+        else {
+            return;
+        };
+
+        // What an agent's SessionEnd hook leaves in the pane it ran in: its
+        // last word, idle, over a shell back at its prompt — a report the
+        // shell ending the command never takes back. And beside it, the
+        // stand-in as an agent that says nothing of itself.
+        harness.update_session(shell, |session| {
+            session.source = StatusSource::Agent(std::time::Instant::now());
+            session.status = AgentStatus::Idle;
+        });
+        harness.update_session(agent, |session| {
+            session.source = StatusSource::NoReport;
+        });
+
+        harness.dispatch_action(TabAction::FocusPane(shell));
+        comment_on_the_added_line(&mut harness);
+        click_column_text(&mut harness, "Send 1 comment to the agent");
+        assert!(
+            review_note(&harness).is_some_and(|note| note.contains("shell prompt")),
+            "{:?}",
+            review_note(&harness)
+        );
+        assert_eq!(
+            comment_count(&harness),
+            1,
+            "a refused send took the comments"
+        );
+        harness.settle(std::time::Duration::from_millis(200));
+        assert!(
+            !harness.terminal_text(shell).contains("Review of"),
+            "the review reached the shell"
+        );
+
+        // With the stand-in in front, it is the one the review goes to, and
+        // not the shell of an agent that is gone.
+        harness.dispatch_action(TabAction::FocusPane(agent));
+        click_column_text(&mut harness, "Send 1 comment to the agent");
+        assert_eq!(
+            comment_count(&harness),
+            0,
+            "the review did not go: {:?}",
+            review_note(&harness)
+        );
+        assert_eq!(harness.focused_pane_id(), Some(agent));
+        assert_eq!(
+            what_the_agent_received(&mut harness, agent, &received),
+            format!("\u{1b}[200~{}\u{1b}[201~", the_review(&base))
+        );
     }
 }
