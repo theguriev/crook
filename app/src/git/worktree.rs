@@ -1010,6 +1010,9 @@ struct Limits {
     file_bytes: u64,
     /// All of them together bigger than this, and nothing is copied.
     total_bytes: u64,
+    /// How many bytes of `:(exclude)` pathspecs the walk may be handed. See
+    /// [`PRUNE_BUDGET`].
+    prune_bytes: usize,
 }
 
 /// The limits outside a test.
@@ -1017,6 +1020,7 @@ const LIMITS: Limits = Limits {
     files: MAX_INCLUDED_FILES,
     file_bytes: MAX_INCLUDED_FILE_BYTES,
     total_bytes: MAX_INCLUDED_BYTES,
+    prune_bytes: PRUNE_BUDGET,
 };
 
 /// Copies the ignored files the main checkout's [`INCLUDE_FILE`] names into
@@ -1141,7 +1145,7 @@ fn copy_or_refuse(repository: &Path, worktree: &Path, limits: Limits) -> Include
         return Included::default();
     }
 
-    let candidates = match candidates(&main, &include, &patterns) {
+    let candidates = match candidates(&main, &include, &patterns, limits.prune_bytes) {
         Ok(candidates) => candidates,
         Err(error) => return Included::refused(Refusal::CouldNotLook(error)),
     };
@@ -1203,8 +1207,12 @@ fn main_checkout(repository: &Path) -> Result<Option<PathBuf>, Error> {
 ///
 /// They are pathspecs on the command line, and a Windows command line is
 /// 32,767 characters, all of it. A monorepo with a `node_modules/` and a
-/// `dist/` in each of four hundred packages would pass that; past this budget
-/// the walk goes everywhere instead, which is slower and gives the same answer.
+/// `dist/` in each of four hundred packages would pass that, so the budget
+/// goes to the shallowest directories and the deepest, which do not fit, are
+/// walked instead — [`prunes`] says why. A directory walked gives the same
+/// answer as one left out, because what is found in it is cut from the
+/// candidates afterwards; what it costs is time, and a walk that outlives the
+/// read deadline copies nothing.
 const PRUNE_BUDGET: usize = 16 * 1024;
 
 /// Every file in `main` that git ignores and that `patterns` — read from
@@ -1227,13 +1235,19 @@ const PRUNE_BUDGET: usize = 16 * 1024;
 /// *adds* ignore patterns, and `--ignored` turns the listing round to show
 /// what they match instead of what they leave, so together they are "list
 /// what these patterns match". The ignored directories no pattern reaches are
-/// left out of that walk as `:(exclude)` pathspecs, which is what keeps a
-/// `.env` pattern from reading all of `target/` looking for one.
+/// left out of that walk as `:(exclude)` pathspecs, as many as `prune_bytes`
+/// holds, which is what keeps a `.env` pattern from reading all of `target/`
+/// looking for one.
 ///
 /// What comes back is the second list cut down to what the first says is
 /// ignored: a file it listed, or one inside a directory it listed that a
 /// pattern reaches.
-fn candidates(main: &Path, include: &Path, patterns: &[Reach]) -> Result<Vec<PathBuf>, Error> {
+fn candidates(
+    main: &Path,
+    include: &Path,
+    patterns: &[Reach],
+    prune_bytes: usize,
+) -> Result<Vec<PathBuf>, Error> {
     let status = run(
         main,
         &[
@@ -1280,19 +1294,7 @@ fn candidates(main: &Path, include: &Path, patterns: &[Reach]) -> Result<Vec<Pat
         include.as_os_str().to_owned(),
         OsString::from("--"),
     ];
-    let pruned: Vec<OsString> = passed
-        .iter()
-        .map(|directory| {
-            // Literal, so a directory called `[abc]` or `*` is that
-            // directory and not a glob over its neighbours.
-            let mut spec = OsString::from(":(exclude,literal)");
-            spec.push(path_from(directory));
-            spec
-        })
-        .collect();
-    if pruned.iter().map(|spec| spec.len()).sum::<usize>() <= PRUNE_BUDGET {
-        args.extend(pruned);
-    }
+    args.extend(prunes(&passed, prune_bytes));
     let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
 
     let listed = run(main, &args, Intent::Read)?;
@@ -1312,6 +1314,44 @@ fn candidates(main: &Path, include: &Path, patterns: &[Reach]) -> Result<Vec<Pat
         })
         .map(path_from)
         .collect())
+}
+
+/// The `:(exclude)` pathspecs that leave `directories` out of a walk, as many
+/// of them as fit in `budget` bytes, the shallowest first.
+///
+/// The shallowest first because that is where the weight is: `node_modules/`
+/// and `target/` at the root hold hundreds of thousands of files between them
+/// and cost a pathspec each, where the long tail of a monorepo's
+/// `packages/<name>/dist/` is many pathspecs over a few files apiece. Keeping
+/// the root's and walking the tail costs milliseconds; dropping everything
+/// once the tail no longer fitted walked the root's too, and a cold walk of a
+/// `node_modules/` runs past the read deadline. Among directories equally
+/// deep the shorter goes first, so the budget leaves out as many as it can.
+fn prunes(directories: &[&[u8]], budget: usize) -> Vec<OsString> {
+    let mut specs: Vec<(usize, OsString)> = directories
+        .iter()
+        .map(|directory| {
+            let depth = directory.iter().filter(|byte| **byte == b'/').count();
+            // Literal, so a directory called `[abc]` or `*` is that
+            // directory and not a glob over its neighbours.
+            let mut spec = OsString::from(":(exclude,literal)");
+            spec.push(path_from(directory));
+            (depth, spec)
+        })
+        .collect();
+    specs.sort_by_key(|(depth, spec)| (*depth, spec.len()));
+
+    let mut left = budget;
+    specs
+        .into_iter()
+        .filter_map(|(_, spec)| {
+            let fits = spec.len() <= left;
+            fits.then(|| {
+                left -= spec.len();
+                spec
+            })
+        })
+        .collect()
 }
 
 /// The paths `git status --porcelain -z --ignored` marks ignored, a directory

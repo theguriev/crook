@@ -1215,6 +1215,7 @@ const SMALL: Limits = Limits {
     files: 3,
     file_bytes: 16,
     total_bytes: 24,
+    prune_bytes: PRUNE_BUDGET,
 };
 
 #[test]
@@ -1608,6 +1609,69 @@ fn files_that_together_pass_the_size_limit_are_refused_whole() {
     );
     assert_eq!(included.copied, 0);
     assert_eq!(contents(&checkout.join("a.pem")), None);
+}
+
+#[test]
+fn the_walk_finds_the_same_files_when_the_budget_leaves_ignored_directories_in_it() {
+    if without_git("the_walk_finds_the_same_files_when_the_budget_leaves_ignored_directories_in_it")
+    {
+        return;
+    }
+    // No room for a single `:(exclude)`: git walks `node_modules/` and finds
+    // a `.env` there the pattern matches. No pattern reaches into
+    // `node_modules/`, so it is not copied — slower, and the same answer.
+    let scratch = ScratchDir::new("include-unpruned");
+    let repo = repo_including(&scratch, "node_modules/\n.env\n", Some(".env\n"));
+    write(&repo.join(".env"), "ours\n");
+    write(&repo.join("node_modules/pkg/.env"), "a package's\n");
+    let checkout = checkout_of(&repo, &scratch, "unpruned");
+
+    let included = copy_included_within(
+        &repo,
+        &checkout,
+        Limits {
+            prune_bytes: 0,
+            ..LIMITS
+        },
+    );
+
+    assert_eq!(included.copied, 1, "{included:?}");
+    assert_eq!(contents(&checkout.join(".env")).as_deref(), Some("ours\n"));
+    assert_eq!(contents(&checkout.join("node_modules/pkg/.env")), None);
+}
+
+#[test]
+fn the_shallowest_ignored_directories_are_left_out_of_the_walk_first() {
+    // Past the budget the root's `node_modules/` and `target/` — where the
+    // hundreds of thousands of files are — are still left out, and only the
+    // long tail is walked. Dropping every one because the tail did not fit
+    // walked the root's too, and ran past the read deadline.
+    let spec = |directory: &str| format!(":(exclude,literal){directory}");
+    let directories: [&[u8]; 4] = [
+        b"packages/web/node_modules/",
+        b"node_modules/",
+        b"packages/api/dist/",
+        b"target/",
+    ];
+    let kept = |budget: usize| -> Vec<String> {
+        prunes(&directories, budget)
+            .iter()
+            .map(|spec| spec.to_string_lossy().replace('\\', "/"))
+            .collect()
+    };
+
+    let three =
+        spec("target/").len() + spec("node_modules/").len() + spec("packages/api/dist/").len();
+    assert_eq!(
+        kept(three),
+        [
+            spec("target/"),
+            spec("node_modules/"),
+            spec("packages/api/dist/")
+        ]
+    );
+    assert_eq!(kept(spec("target/").len() - 1), Vec::<String>::new());
+    assert_eq!(kept(usize::MAX).len(), 4);
 }
 
 #[cfg(unix)]
