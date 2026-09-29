@@ -1788,7 +1788,13 @@ fn button_row(
         .with_child(
             Expanded::new(
                 1.,
-                button(state.control(Control::Cancel), cancel, false, cancels.map(WorkspaceAction::Worktree), ui),
+                button(
+                    state.control(Control::Cancel),
+                    cancel,
+                    false,
+                    cancels.map(WorkspaceAction::Worktree),
+                    ui,
+                ),
             )
             .finish(),
         );
@@ -1797,7 +1803,13 @@ fn button_row(
         row.add_child(
             Expanded::new(
                 1.,
-                button(state.control(Control::Start), middle, false, pressed.map(WorkspaceAction::Worktree), ui),
+                button(
+                    state.control(Control::Start),
+                    middle,
+                    false,
+                    pressed.map(WorkspaceAction::Worktree),
+                    ui,
+                ),
             )
             .finish(),
         );
@@ -1805,7 +1817,13 @@ fn button_row(
     row.add_child(
         Expanded::new(
             1.,
-            button(state.control(Control::Confirm), label, true, action.map(WorkspaceAction::Worktree), ui),
+            button(
+                state.control(Control::Confirm),
+                label,
+                true,
+                action.map(WorkspaceAction::Worktree),
+                ui,
+            ),
         )
         .finish(),
     );
