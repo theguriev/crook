@@ -45,7 +45,11 @@ pub mod code {
     pub const VERSION: &str = "version";
     /// The window is answering as many connections as it takes at once.
     pub const BUSY: &str = "busy";
-    /// The window did not answer before the connection's deadline.
+    /// The window did not answer in the time the connection had for it.
+    ///
+    /// That time ends a little short of the connection's deadline, not at it,
+    /// so that the refusal can still be written: a window that answers in the
+    /// last moments before the deadline is refused as this all the same.
     pub const TIMEOUT: &str = "timeout";
     /// The window closed before it answered.
     pub const GONE: &str = "gone";

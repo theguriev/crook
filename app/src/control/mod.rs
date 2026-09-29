@@ -24,13 +24,14 @@
 //!
 //! # Never on the UI thread
 //!
-//! A connection's thread reads the line, and waits — up to its deadline — for
-//! the window's answer. The window hears about the question the way it hears
-//! about a pty's output: a future the connection's thread wakes, awaited on
-//! the foreground through `ctx.spawn`, so answering is a read of the tab strip
-//! done between two frames and nothing on the main thread ever blocks on a
-//! socket. A window that has closed says so rather than leaving the question
-//! to time out: see [`Inbox::close`].
+//! A connection's thread reads the line, and waits — until a little short of
+//! its deadline, so that a `timeout` can still be written — for the window's
+//! answer. The window hears about the question the way it hears about a pty's
+//! output: a future the connection's thread wakes, awaited on the foreground
+//! through `ctx.spawn`, so answering is a read of the tab strip done between
+//! two frames and nothing on the main thread ever blocks on a socket. A window
+//! that has closed says so rather than leaving the question to time out: see
+//! [`Inbox::close`].
 //!
 //! # Windows
 //!
@@ -216,8 +217,8 @@ impl Inbox {
     /// Refuses every question waiting, and every one asked from now on.
     ///
     /// Without it a question asked of a window that has closed would sit in a
-    /// queue nothing reads until its connection's deadline, and a script would
-    /// be told "timeout" about a window that is not there.
+    /// queue nothing reads until its connection gave up on it, and a script
+    /// would be told "timeout" about a window that is not there.
     pub fn close(&self) {
         let mut asked = self.lock();
         asked.closed = true;
