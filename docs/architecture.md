@@ -1110,9 +1110,12 @@ diff of each file with a comment on it, folded or not, so nothing is sent about 
 read again; the comment moves to the line that says the same thing nearest to where it was (a
 header by the function name after its numbers, which move), and one whose line is gone is
 dropped and named — unless the read was cut short (`MAX_DIFF_LINES`, `MAX_DIFF_BYTES`), which
-proves nothing about the lines past the cut: that comment is kept with its last line and number,
-drawn nowhere and counted in the note where the diff stops, until a read finds the line or a
-whole one does not. `Send N comments to the agent` composes one message — a heading, then
+proves nothing about the lines past the cut: that comment is kept with its last line and number
+until a read finds the line or a whole one does not. It is listed where the diff stops, under
+the line it was last found on and with its ×, rather than only counted, since not being in the
+part that was read is all that is known of it — pushed past the cut, or deleted from above it —
+and the person has to be able to see what will be sent and take it out.
+`Send N comments to the agent` composes one message — a heading, then
 `path:line`, the quoted line and the comment for each, in the order the diff reads, with no
 newline at the end — and hands it to `TerminalHandle::paste_bracketed`, the terminal model's
 paste behind a check that the program asked for bracketed paste, made under the same lock as the

@@ -845,8 +845,28 @@ fn cut(mut diff: FileDiff) -> FileDiff {
     diff
 }
 
+/// The rows under the note where the first file's cut read stops.
+fn under_the_cut(state: &ChangesPanelState) -> &[Row] {
+    let rows = state.rows();
+    let at = rows
+        .iter()
+        .position(|row| matches!(row, Row::Note(note) if note.starts_with("Cut short here")))
+        .unwrap_or_else(|| panic!("the diff is not cut: {rows:?}"));
+    &rows[at + 1..]
+}
+
+/// What is listed under the cut for the one comment `id` a cut read did not
+/// find: the note, the line it was last found on, and the comment with its ×.
+fn listed_under_the_cut(id: u64) -> [Row; 3] {
+    [
+        Row::Note("1 comment not found in the part that was read:".to_owned()),
+        Row::Quoted(0, id),
+        Row::Comment(0, id),
+    ]
+}
+
 #[test]
-fn a_comment_on_a_line_pushed_past_the_cut_is_kept_and_not_drawn() {
+fn a_comment_on_a_line_pushed_past_the_cut_is_kept_and_listed_where_the_cut_is() {
     let mut state = showing_diff("a.rs", a_hunk());
     comment(&mut state, 0, 3, "why three?");
     let id = state.comments()[0].id;
@@ -874,16 +894,19 @@ fn a_comment_on_a_line_pushed_past_the_cut_is_kept_and_not_drawn() {
         None,
         "a comment past the cut was said dropped"
     );
-    assert!(
-        !state.rows().contains(&Row::Comment(0, id)),
-        "a comment past the cut is drawn under some other line"
+    assert_eq!(
+        under_the_cut(&state),
+        listed_under_the_cut(id),
+        "a comment past the cut is not listed where the cut is"
     );
-    assert!(
-        state.rows().iter().any(|row| matches!(
-            row,
-            Row::Note(note) if note.contains("1 comment on a line past it")
-        )),
-        "{:?}",
+    assert_eq!(
+        state
+            .rows()
+            .iter()
+            .filter(|row| **row == Row::Comment(0, id))
+            .count(),
+        1,
+        "a comment past the cut is drawn under some other line too: {:?}",
         state.rows()
     );
     assert!(
@@ -910,6 +933,7 @@ fn a_comment_on_a_line_pushed_past_the_cut_is_kept_and_not_drawn() {
     assert_eq!(said(&state), [(4, "why three?".to_owned())]);
     assert!(!state.comments()[0].past_cut);
     assert!(state.rows().contains(&Row::Comment(0, id)));
+    assert!(!state.rows().contains(&Row::Quoted(0, id)));
 
     // …and one that is cut, and then one that is whole and without it,
     // drops it.
@@ -924,6 +948,46 @@ fn a_comment_on_a_line_pushed_past_the_cut_is_kept_and_not_drawn() {
             .is_some_and(|note| note.contains("no longer in the diff")),
         "{:?}",
         state.note()
+    );
+}
+
+#[test]
+fn a_comment_a_cut_read_did_not_find_can_be_seen_and_taken_out_before_it_is_sent() {
+    let mut state = showing_diff("a.rs", a_hunk());
+    comment(&mut state, 0, 3, "why three?");
+    let id = state.comments()[0].id;
+
+    // The agent deleted the line, and the read shows the hunk it was in
+    // without it — then stops short further down. Nothing in a read like
+    // this tells a line that went from one pushed past the cut, so the
+    // comment is kept; and shown, since it would otherwise be sent about a
+    // line that may be gone with no way to see it or take it out.
+    refresh_with(
+        &mut state,
+        &["a.rs"],
+        cut(diff_of(&[
+            "@@ -10,3 +10,3 @@ fn main() {",
+            "     let a = 1;",
+            "-    let b = 2;",
+            "+    let c = 4;",
+            "     done();",
+            "@@ -200,2 +200,4000 @@ fn later() {",
+            "+    more();",
+        ])),
+    );
+    assert!(state.comments()[0].past_cut);
+    assert_eq!(under_the_cut(&state), listed_under_the_cut(id));
+
+    assert!(state.remove_comment(id), "its × took nothing out");
+    assert_eq!(
+        state.review(Some("feat/review")),
+        None,
+        "a comment that was taken out is still sent"
+    );
+    assert!(
+        under_the_cut(&state).is_empty(),
+        "{:?}",
+        under_the_cut(&state)
     );
 }
 

@@ -35,11 +35,13 @@
 //!
 //! Not finding the line in a diff that was cut short is not the same as the
 //! line being gone: the agent may only have written enough above it to push
-//! it past the cut. Such a comment is kept, marked [`Comment::past_cut`],
-//! drawn nowhere and counted in the note where the diff stops, and sent with
-//! the line and the number it had when it was last drawn. The next read that
-//! finds the line puts it back under it; the next one that is not cut and
-//! still does not find it drops it.
+//! it past the cut. Nor is it proof of the line being there — the agent may
+//! as well have deleted it from the part that was read. Such a comment is
+//! kept, marked [`Comment::past_cut`], and listed where the diff stops, under
+//! the line it was last found on and with its ×, so the person can see it
+//! will be sent and take it out; it is sent with that line and the number it
+//! had then. The next read that finds the line puts it back under it; the
+//! next one that is not cut and still does not find it drops it.
 //!
 //! # The message
 //!
@@ -110,8 +112,9 @@ pub(crate) struct Comment {
     pub(crate) anchor: Anchor,
     /// What was said.
     pub(crate) text: String,
-    /// Whether the last read of its file was cut short before its line was
-    /// found, so that it is kept but not drawn. See the module's docs.
+    /// Whether the last read of its file was cut short and did not find its
+    /// line, so that it is kept and listed under the cut rather than drawn
+    /// under a line. See the module's docs.
     pub(crate) past_cut: bool,
 }
 

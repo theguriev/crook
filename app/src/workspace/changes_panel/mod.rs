@@ -218,6 +218,10 @@ pub(super) enum Row {
     Note(String),
     /// A comment on file `.0`, by its id.
     Comment(usize, u64),
+    /// The line comment `.1` on file `.0` was on when it was last found,
+    /// over the comment: where a cut read lists the comments it did not
+    /// find, away from the lines they are about.
+    Quoted(usize, u64),
     /// The field a comment is being typed in, under a line of file `.0`.
     Draft(usize),
 }
@@ -234,6 +238,7 @@ impl Row {
             Self::Line(..) => height::LINE,
             Self::Note(_) => height::NOTE,
             Self::Comment(..) => height::COMMENT,
+            Self::Quoted(..) => height::LINE,
             Self::Draft(_) => height::DRAFT,
         }
     }
@@ -719,8 +724,9 @@ impl ChangesPanelState {
             .map_or(&[], Vec::as_slice)
     }
 
-    /// The comments drawn on the file at `path`, top to bottom: all of them
-    /// but those on lines past where its diff was cut short.
+    /// The comments drawn under the lines of the file at `path`, top to
+    /// bottom: all of them but those a cut read did not find, which are
+    /// listed under the cut instead (see [`Self::past_cut_on`]).
     fn comments_on(&self, path: &Path) -> Vec<&Comment> {
         let mut on: Vec<&Comment> = self
             .comments()
@@ -731,13 +737,17 @@ impl ChangesPanelState {
         on
     }
 
-    /// How many comments on the file at `path` are on lines past where its
-    /// diff was cut short, and so are kept without being drawn.
-    fn past_cut_on(&self, path: &Path) -> usize {
-        self.comments()
+    /// The comments on the file at `path` that its last read, which was cut
+    /// short, did not find — kept, and listed under the cut rather than
+    /// under a line. In the order of the lines they were last found on.
+    fn past_cut_on(&self, path: &Path) -> Vec<&Comment> {
+        let mut past: Vec<&Comment> = self
+            .comments()
             .iter()
             .filter(|comment| comment.anchor.path == path && comment.past_cut)
-            .count()
+            .collect();
+        past.sort_by_key(|comment| (comment.anchor.at, comment.id));
+        past
     }
 
     /// Opens the field a comment is typed in, under line `line` of the file
@@ -1067,16 +1077,29 @@ impl ChangesPanelState {
                         }
                     }
                     if diff.cut {
-                        rows.push(Row::Note(match self.past_cut_on(&file.path) {
-                            0 => "Cut short here. Open the file to see the rest.".to_owned(),
-                            1 => "Cut short here, with 1 comment on a line past it. Open the \
-                                  file to see the rest."
-                                .to_owned(),
-                            count => format!(
-                                "Cut short here, with {count} comments on lines past it. Open \
-                                 the file to see the rest."
-                            ),
-                        }));
+                        rows.push(Row::Note(
+                            "Cut short here. Open the file to see the rest.".to_owned(),
+                        ));
+                        // Listed, each under the line it was last found on,
+                        // with its × — not only counted. Not being in the
+                        // part that was read is all that is known of each
+                        // line: pushed past the cut, or gone from above it.
+                        // Only a whole read can tell which, and until one
+                        // does the person has to be able to see what will be
+                        // sent and take it out.
+                        let past = self.past_cut_on(&file.path);
+                        if !past.is_empty() {
+                            rows.push(Row::Note(match past.len() {
+                                1 => "1 comment not found in the part that was read:".to_owned(),
+                                count => {
+                                    format!("{count} comments not found in the part that was read:")
+                                }
+                            }));
+                        }
+                        for comment in past {
+                            rows.push(Row::Quoted(index, comment.id));
+                            rows.push(Row::Comment(index, comment.id));
+                        }
                     }
                 }
             }
@@ -1500,6 +1523,12 @@ fn row(workspace: &Workspace, row: &Row) -> Box<dyn Element> {
         }
         Row::Comment(_, id) => match state.comments().iter().find(|comment| comment.id == *id) {
             Some(comment) => comment_row(workspace, comment, fonts.ui),
+            None => Empty::new().finish(),
+        },
+        // In the diff's own colours and nothing more: it is not a line of
+        // this read, so it takes no press and no comment.
+        Row::Quoted(_, id) => match state.comments().iter().find(|comment| comment.id == *id) {
+            Some(comment) => diff_line(&comment.anchor.line, fonts.monospace),
             None => Empty::new().finish(),
         },
         Row::Draft(_) => draft_row(workspace),
