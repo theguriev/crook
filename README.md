@@ -142,6 +142,39 @@ timer and no background poll, which is the same rule the store is written under:
 goes out when you run one of these, or press one of those buttons, and carries no version, no
 machine id and nothing else about this machine.
 
+## When something goes wrong
+
+Every window Crook opens writes a log file, and a panic writes a crash report, into one folder
+on this machine:
+
+| platform | folder |
+| --- | --- |
+| Linux | `~/.local/state/crook` — `$XDG_STATE_HOME/crook` when that is set |
+| macOS | `~/Library/Logs/Crook` |
+| Windows | `%LOCALAPPDATA%\crook` |
+
+`logs/` holds `crook-<channel>-<when>.log`, `<when>` being the launch in UTC: the lines the
+terminal gets, filtered the same way (`RUST_LOG` still decides), written whether or not a
+terminal is attached. `crashes/` holds `crook-<channel>-<when>.txt`, `<when>` being the panic:
+the version and platform, where it panicked and with what message, a backtrace, the GPU it was
+drawing with, and the last 200 lines of the log. A shipped build's backtrace names functions but
+not files and lines on Linux and macOS, and names nothing on Windows, whose names are in a
+`crook.pdb` the download does not carry — there the report's `Where` line is the place to start.
+The newest five of each are kept, and a log another Crook window is still writing is never
+removed. **Settings → About → Logs and crash reports** names the folder and opens it, and after
+a crash the next window says so in one line under the header: *Show* opens the folder,
+*Dismiss* puts the line away, and neither brings back a report that line was about.
+
+**Nothing in that folder leaves this machine.** Crook never sends, uploads or reads any of it
+back to anyone. To report a problem, [open an issue](https://github.com/theguriev/crook/issues)
+and attach the crash report, or paste the log lines from around the time it went wrong — having
+read them first, since a log can name folders and files of yours.
+
+What it cannot catch is a native crash: a segfault in a GPU driver, an access violation, an
+abort inside a system library ends the process without running any of Crook's code, so it
+leaves no report. The log file is still there up to its last line, and the system's own crash
+reporter — `coredumpctl`, Console.app, the Event Viewer — has the rest.
+
 ## v1 scope
 
 Nineteen features, and the page that configures them:

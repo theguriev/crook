@@ -12555,6 +12555,187 @@ fn the_about_page_says_which_plugin_api_this_build_speaks() {
     );
 }
 
+// --- what an earlier run left behind ---------------------------------------
+
+/// A window told that this run writes its log and crash reports into
+/// `folder`, and that `crashes` are waiting there unseen — what the launch
+/// hands a real window before its first frame.
+fn diagnosed(folder: &Path, crashes: Vec<PathBuf>) -> Harness {
+    let mut harness = Harness::new(1);
+    let diagnostics = crate::diagnostics::Diagnostics {
+        folder: folder.to_owned(),
+        crashes,
+    };
+    harness.workspace_update(|workspace, ctx| workspace.set_diagnostics(diagnostics, ctx));
+    harness
+}
+
+/// The window, as a box, for finding a word anywhere in it.
+fn whole_window(scene: &Scene) -> RectF {
+    let bottom = visible_rects(scene)
+        .map(|(_, bounds)| bounds.max_y())
+        .fold(0., f32::max);
+    RectF::new(Vector2F::zero(), vec2f(far_edge(scene), bottom))
+}
+
+#[test]
+fn a_crash_an_earlier_run_left_is_one_line_under_the_header() {
+    let scratch = Scratch::new();
+    let report = crate::diagnostics::crash::write(
+        scratch.path(),
+        Channel::Dev,
+        "20260929T081500Z",
+        "a report",
+    )
+    .expect("the report is written");
+    let mut harness = diagnosed(scratch.path(), vec![report]);
+
+    let scene = harness.frame();
+    let header = header_box(&scene);
+    let said = word_in(&scene, whole_window(&scene), super::crash_note::SAID);
+    assert!(
+        said.y() > header.max_y(),
+        "the line is not under the header: it is at {said:?}, the header ends at {}",
+        header.max_y()
+    );
+    for button in ["Show", "Dismiss"] {
+        let at = word_in(&scene, whole_window(&scene), button);
+        assert!(
+            (at.y() - said.y()).abs() < 4.,
+            "{button} is not on the line: {at:?} against {said:?}"
+        );
+    }
+}
+
+#[test]
+fn a_window_with_no_crash_to_tell_of_says_nothing_about_one() {
+    // Both ways a window has nothing to say: a run that writes no reports at
+    // all — every test and every snapshot — and one whose folder holds none
+    // that are unseen.
+    let scratch = Scratch::new();
+    for mut harness in [Harness::new(1), diagnosed(scratch.path(), Vec::new())] {
+        let scene = harness.frame();
+        assert!(
+            !says(&scene, super::crash_note::SAID),
+            "{}",
+            frame_text(&scene)
+        );
+    }
+}
+
+#[test]
+fn dismissing_the_line_takes_it_down_and_the_next_window_says_nothing() {
+    let scratch = Scratch::new();
+    let report = crate::diagnostics::crash::write(
+        scratch.path(),
+        Channel::Dev,
+        "20260929T081500Z",
+        "a report",
+    )
+    .expect("the report is written");
+    let mut harness = diagnosed(scratch.path(), vec![report.clone()]);
+
+    let scene = harness.frame();
+    let dismiss = word_in(&scene, whole_window(&scene), "Dismiss");
+    harness.click(dismiss + vec2f(4., 4.), MouseButton::Left);
+
+    let scene = harness.frame();
+    assert!(
+        !says(&scene, super::crash_note::SAID),
+        "the line is still up: {}",
+        frame_text(&scene)
+    );
+    assert_eq!(
+        crate::diagnostics::crash::unseen(scratch.path(), Channel::Dev),
+        Vec::<PathBuf>::new(),
+        "the next launch would offer the dismissed report again"
+    );
+    assert!(
+        !report.exists()
+            && scratch
+                .path()
+                .join("crook-dev-20260929T081500Z.seen.txt")
+                .exists(),
+        "the report was not kept under its seen name"
+    );
+}
+
+#[test]
+fn answering_the_line_answers_for_every_report_it_was_about_and_no_other() {
+    // A launch whose reader thread panicked and whose main thread then did:
+    // two reports, one line. Dismissing it must leave nothing for the next
+    // window to call "last time" after a run that ended well. A report that
+    // another window wrote while the line was up is not one this line told
+    // anybody of, and the next window still should.
+    let scratch = Scratch::new();
+    let write = |at: &str| {
+        crate::diagnostics::crash::write(scratch.path(), Channel::Dev, at, "a report")
+            .expect("the report is written")
+    };
+    let told = vec![write("20260929T081500Z"), write("20260929T081500Z")];
+    let mut harness = diagnosed(scratch.path(), told);
+    let meanwhile = write("20260929T093000Z");
+
+    let scene = harness.frame();
+    let dismiss = word_in(&scene, whole_window(&scene), "Dismiss");
+    harness.click(dismiss + vec2f(4., 4.), MouseButton::Left);
+
+    assert_eq!(
+        crate::diagnostics::crash::unseen(scratch.path(), Channel::Dev),
+        [meanwhile],
+        "the next window would say too much or too little"
+    );
+}
+
+#[test]
+fn the_about_page_names_the_folder_the_logs_and_crash_reports_are_in() {
+    let scratch = Scratch::new();
+    let mut harness = diagnosed(scratch.path(), Vec::new());
+    harness.open_settings_page();
+    harness.select_settings_section("About");
+    let scene = harness.frame();
+    let pane = settings_pane_box(&scene);
+    let lines = text_lines(&scene, |position| pane.contains_point(position));
+
+    let folder = scratch
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("the scratch folder has a name");
+    let (_, row) = lines
+        .iter()
+        .find(|(_, line)| line.starts_with("Logs and crash reports"))
+        .unwrap_or_else(|| panic!("the About page has no row for the logs: {lines:?}"));
+    assert!(
+        row.contains(folder) && row.ends_with("Open"),
+        "the row does not name the folder and offer to open it: {row:?}"
+    );
+    assert!(
+        says(&scene, "sent nowhere"),
+        "the row does not say the files stay here: {lines:?}"
+    );
+}
+
+#[test]
+fn a_run_that_writes_no_logs_says_so_on_the_about_page() {
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.select_settings_section("About");
+    let scene = harness.frame();
+    let pane = settings_pane_box(&scene);
+    let lines = text_lines(&scene, |position| pane.contains_point(position));
+
+    let (_, row) = lines
+        .iter()
+        .find(|(_, line)| line.starts_with("Logs and crash reports"))
+        .unwrap_or_else(|| panic!("the About page has no row for the logs: {lines:?}"));
+    assert!(row.ends_with("nowhere"), "{row:?}");
+    assert!(
+        !row.contains("Open"),
+        "a folder that is not there is offered to open: {row:?}"
+    );
+}
+
 #[test]
 fn the_page_and_the_scroll_position_outlive_leaving_the_section() {
     // Coming back to the settings comes back to where you were. The state is

@@ -2359,11 +2359,14 @@ recent" is the repository's rather than the directory's is offered its picker or
 rule above still holds: nothing old is redrawn, and a new process starts only when a person
 presses Enter, or "Resume every agent" for every line nobody has touched.
 
-**Telemetry, crash reporting, autoupdate.** All absent. Worth noting that adding Sentry on
-macOS is not a `Cargo.toml` line: Warp's build script downloads an `xcframework` and its
-bundler wires an rpath for it, which is precisely the class of thing §3 was written to avoid.
-If crash reporting becomes necessary, prefer something that is a pure-Rust crate on all three
-platforms, and treat a build script as the cost it is.
+**Telemetry, crash reports that are sent, automatic updates.** All absent. What exists is
+local and asked for: a panic writes a report into a folder on the machine and the next window
+says so (`app/src/diagnostics`), and the updater runs when a person presses it — nothing is
+sent by either. Worth noting that adding Sentry on macOS is not a `Cargo.toml` line: Warp's
+build script downloads an `xcframework` and its bundler wires an rpath for it, which is
+precisely the class of thing §3 was written to avoid. If sending crash reports ever becomes
+necessary, prefer something that is a pure-Rust crate on all three platforms, and treat a
+build script as the cost it is.
 
 ---
 

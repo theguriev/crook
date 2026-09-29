@@ -52,8 +52,8 @@ use std::fmt;
 pub use frame::{Frame, Renderer};
 pub use offscreen::{Offscreen, render_scene_to_rgba};
 pub use resources::{
-    GetSurfaceTextureError, Resources, SurfaceConfigureError, WindowResources, init_wgpu_instance,
-    reset_wgpu_instance,
+    GetSurfaceTextureError, Resources, SurfaceConfigureError, WindowResources, adapter_in_use,
+    init_wgpu_instance, reset_wgpu_instance,
 };
 pub use util::{create_buffer_init, with_error_scope};
 

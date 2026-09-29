@@ -1,4 +1,5 @@
-//! Handing a URL to whatever the machine opens URLs with.
+//! Handing a URL to whatever the machine opens URLs with — and a folder of
+//! Crook's own to the file manager, which is the same three commands.
 //!
 //! Three commands, one per platform, and nothing else. The crates that do this
 //! are small and good, and they are still a dependency for a `Command::new`
@@ -20,7 +21,9 @@
 //! `ms-msdt:`, `search-ms:`, an application's own registered scheme — by
 //! printing it into somebody's terminal.
 
+use std::ffi::OsStr;
 use std::io;
+use std::path::Path;
 
 use crate::process::command;
 
@@ -48,8 +51,30 @@ pub fn open(url: &str) -> bool {
         return false;
     }
 
-    if let Err(error) = spawn(url) {
+    if let Err(error) = spawn(url.as_ref()) {
         log::warn!("could not open {url:?}: {error}");
+    }
+    true
+}
+
+/// Shows `folder` in the platform's file manager, reporting whether the
+/// attempt was made.
+///
+/// For the folders Crook itself writes into — its logs and crash reports —
+/// and never for anything a program printed, which is what [`open`] and its
+/// list of schemes are for. A path rather than a `file://` URL, which would
+/// need every space and `%` in a home directory escaped to mean the same
+/// folder. Only a folder that exists is handed over: `explorer` given a
+/// program runs it, and `open` given an application launches it, so a path
+/// that is not a folder is refused here rather than trusted there.
+pub fn open_folder(folder: &Path) -> bool {
+    if !folder.is_dir() {
+        log::debug!("refusing to open {}: not a folder", folder.display());
+        return false;
+    }
+
+    if let Err(error) = spawn(folder.as_os_str()) {
+        log::warn!("could not open {}: {error}", folder.display());
     }
     true
 }
@@ -63,7 +88,7 @@ fn is_openable(url: &str) -> bool {
 }
 
 /// Starts the platform's handler and does not wait for it.
-fn spawn(url: &str) -> io::Result<()> {
+fn spawn(url: &OsStr) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     let mut launcher = {
         let mut launcher = command("open");
@@ -152,6 +177,18 @@ mod tests {
         // turn away most of the addresses anyone actually clicks.
         assert!(is_openable("https://example.com/search?q=rust&hl=en"));
         assert!(is_openable("https://example.com/a?x=1&y=2"));
+    }
+
+    #[test]
+    fn a_path_that_is_not_a_folder_is_never_handed_to_the_platform() {
+        // `explorer` given a program runs it, and `open` given an application
+        // launches it: the one thing the folder opener must never be is a way
+        // to start a file.
+        let this_binary = std::env::current_exe().expect("the test binary knows where it is");
+        let nowhere = std::env::temp_dir().join("crook-browser-a-folder-that-is-not-there");
+
+        assert!(!open_folder(&this_binary), "a program was handed over");
+        assert!(!open_folder(&nowhere), "a missing folder was handed over");
     }
 
     #[test]
