@@ -492,7 +492,9 @@ Twenty features, and the page that configures them:
   as `path:line`, the line quoted, and what you said — pastes it into the tab's agent as one
   bracketed paste **with no Enter**, and puts the keyboard there: you read it, and you send it.
   The agent is the tab's pane whose agent has reported a status and has not exited back to its
-  shell's prompt, else the focused one. It is never pasted into a shell prompt, where its lines
+  shell's prompt, else the focused one — an agent started in a line the shell says nothing
+  about (bash's `( … )`, or any line in a shell without Crook's marks) counts once it has
+  reported since that line. It is never pasted into a shell prompt, where its lines
   would be commands, nor into a program that has not turned bracketed paste on, where every
   line would arrive as its own Enter; the column says so and keeps the comments. **Copy
   review** puts the same text on the clipboard, for an agent in another tool. Checked by hand

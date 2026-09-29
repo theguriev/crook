@@ -23475,6 +23475,313 @@ mod changes_column {
     }
 
     #[test]
+    fn a_shell_listens_at_its_prompt_and_not_under_an_agent_that_reported_since_its_line() {
+        use std::time::{Duration, Instant};
+
+        use crook_terminal::{BlockState, LiveBlock, PromptEnd, Rgb, Snapshot};
+
+        use crate::workspace::view::a_shell_is_listening;
+
+        let pane = |live_block: LiveBlock, alt_screen: bool| Snapshot {
+            revision: 1,
+            columns: 0,
+            rows: 0,
+            cells: Vec::new(),
+            combining: Vec::new(),
+            cursor: None,
+            foreground: Rgb::new(0, 0, 0),
+            background: Rgb::new(0, 0, 0),
+            display_offset: 0,
+            history_len: 0,
+            alt_screen,
+            live_block,
+            title: None,
+        };
+        let before = Instant::now();
+        let handed_over = before + Duration::from_secs(1);
+        let since = before + Duration::from_secs(2);
+        let now = before + Duration::from_secs(60);
+        // The block a line handed to the shell opened: in a shell that
+        // reports its prompt or one that reports nothing, fitting the pane
+        // or grown past its top.
+        let submitted = |marked: bool, top_row: i32| LiveBlock {
+            state: BlockState::Submitted,
+            started_at: Some(handed_over),
+            top_row,
+            bottom_row: top_row + 2,
+            prompt_end: marked.then_some(PromptEnd {
+                row: top_row,
+                column: 2,
+            }),
+            ..LiveBlock::default()
+        };
+        let listening = |block: LiveBlock, reported: Option<Instant>| {
+            a_shell_is_listening(&pane(block, false), reported, now)
+        };
+
+        // A shell that reports its prompt, handed a line it has not
+        // answered, may be reading the rest of it — until an agent reports
+        // from under the line. bash runs no DEBUG trap for a top-level
+        // `( … )`, so that is how an agent started in one looks for as long
+        // as it runs.
+        assert!(
+            listening(submitted(true, 0), None),
+            "a shell reading the rest of a line would take the paste"
+        );
+        assert!(
+            listening(submitted(true, 0), Some(before)),
+            "a report from before the line counted as one from under it"
+        );
+        assert!(
+            !listening(submitted(true, 0), Some(since)),
+            "an agent under a `( … )` line was taken for its shell"
+        );
+
+        // A shell that reports no marks is in Submitted from its first line
+        // to its last: a report from under the line decides, and without one
+        // the composer does.
+        assert!(
+            !listening(submitted(false, -40), Some(since)),
+            "an agent whose output outgrew a shell with no marks was taken for the shell"
+        );
+        assert!(!listening(submitted(false, 0), Some(since)));
+        assert!(
+            listening(submitted(false, 0), None),
+            "the composer of a shell with no marks would take the paste"
+        );
+        assert!(
+            !listening(submitted(false, -40), None),
+            "a grid with no composer is whatever runs there, asked only about bracketed paste"
+        );
+
+        // The shell's own word that it is at its prompt beats any agent's,
+        // since an agent's last report outlives it.
+        let at_prompt = LiveBlock {
+            state: BlockState::AtPrompt,
+            prompt_end: Some(PromptEnd { row: 0, column: 2 }),
+            ..LiveBlock::default()
+        };
+        assert!(
+            listening(at_prompt.clone(), Some(since)),
+            "the prompt an agent exited to would take the paste"
+        );
+        assert!(listening(
+            LiveBlock {
+                state: BlockState::Done,
+                ..LiveBlock::default()
+            },
+            None
+        ));
+
+        // So does its word that a command is running, from the first
+        // moment, while the composer is still drawn.
+        let started = LiveBlock {
+            state: BlockState::Executing,
+            started_at: Some(now),
+            ..LiveBlock::default()
+        };
+        assert!(
+            crate::pane_surface::of(&pane(started.clone(), false), now).composer,
+            "the premise: a command this new still has its composer"
+        );
+        assert!(
+            !listening(started, None),
+            "a command that had just started was taken for its shell"
+        );
+
+        // A full-screen program is never a shell, whatever the marks under
+        // it last said.
+        assert!(!a_shell_is_listening(&pane(at_prompt, true), None, now));
+
+        // And a shell that has exited is refused as the prompt it was at: a
+        // paste there reaches nobody, and would clear the comments as sent.
+        assert!(listening(
+            LiveBlock {
+                state: BlockState::Terminated,
+                ..LiveBlock::default()
+            },
+            Some(since)
+        ));
+    }
+
+    /// The open block of `pane`'s shell.
+    fn live_block_of(harness: &Harness, pane: PaneId) -> crook_terminal::LiveBlock {
+        harness
+            .workspace
+            .read(&harness.app, |workspace, app| {
+                workspace
+                    .terminal(pane, app)
+                    .map(|(_, snapshot)| snapshot.live_block.clone())
+            })
+            .expect("the pane has a shell")
+    }
+
+    /// Starts the stand-in of [`an_agent_beside_a_shell`] in `pane` the way a
+    /// person starts an agent, by handing `line` to the pane's composer, and
+    /// waits for it to say it is ready.
+    fn start_through_the_composer(
+        harness: &mut Harness,
+        pane: PaneId,
+        line: &str,
+        received: &Path,
+    ) {
+        // A frame first: Enter reaches the composer through the tree the
+        // last frame laid out.
+        harness.frame();
+        harness.type_field(pane, line);
+        harness.press("enter", Modifiers::default(), "\r");
+        harness.wait_for("the stand-in never started", |harness| {
+            harness.terminal_text(pane).contains("READY") && received.exists()
+        });
+    }
+
+    #[test]
+    fn an_agent_started_in_a_bash_subshell_line_is_sent_the_review_once_it_has_reported() {
+        use crate::shell_integration::{Marks, Shell, Standing};
+
+        // bash runs no DEBUG trap for a top-level `( … )`, so a line like
+        // `(cd app && claude)` never says `C`: its block stays Submitted for
+        // as long as the agent runs, which is also how bash still reading the
+        // rest of a line looks. The agent reporting is what tells them apart.
+        if Standing::current().marks != Marks::Installed(Shell::Bash) {
+            eprintln!("skipping: the shell here is not bash");
+            return;
+        }
+        let scratch = Scratch::new();
+        let Some((repository, base)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let received = scratch.path().join("received");
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(repository.clone());
+        });
+        if !harness.start_terminals_with_marks() {
+            return;
+        }
+        await_prompt(&mut harness, pane);
+
+        start_through_the_composer(
+            &mut harness,
+            pane,
+            &format!(
+                "(printf '\\033[?2004hRE%s\\n' ADY; cat > '{}')",
+                received.display()
+            ),
+            &received,
+        );
+        let block = live_block_of(&harness, pane);
+        assert_eq!(
+            block.state,
+            crook_terminal::BlockState::Submitted,
+            "the premise: bash said nothing of the `( … )` line starting"
+        );
+        assert!(
+            block.prompt_end.is_some(),
+            "the premise: the shell reports its prompt"
+        );
+
+        // With nothing reported from under it, the line may as well be one
+        // bash is still reading, and the review is kept.
+        comment_on_the_added_line(&mut harness);
+        click_column_text(&mut harness, "Send 1 comment to the agent");
+        assert!(
+            review_note(&harness).is_some_and(|note| note.contains("shell prompt")),
+            "{:?}",
+            review_note(&harness)
+        );
+        assert_eq!(comment_count(&harness), 1);
+
+        // What Claude Code's Stop hook says while it waits for the next
+        // instruction, which is when a review is sent.
+        harness.update_session(pane, |session| {
+            session.source = StatusSource::Agent(std::time::Instant::now());
+            session.status = AgentStatus::Idle;
+        });
+        click_column_text(&mut harness, "Send 1 comment to the agent");
+        assert_eq!(
+            comment_count(&harness),
+            0,
+            "the review did not go: {:?}",
+            review_note(&harness)
+        );
+        assert_eq!(
+            what_the_agent_received(&mut harness, pane, &received),
+            format!("\u{1b}[200~{}\u{1b}[201~", the_review(&base))
+        );
+    }
+
+    #[test]
+    fn an_agent_in_a_shell_that_reports_no_marks_is_sent_the_review_once_it_has_reported() {
+        // Such a shell's one block is Submitted from the first line the
+        // composer hands it to the end of the session, whatever is running:
+        // only a report from under the line says an agent is there.
+        if !a_shell_these_tests_speak() {
+            return;
+        }
+        let scratch = Scratch::new();
+        let Some((repository, base)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let received = scratch.path().join("received");
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(repository.clone());
+        });
+        if !harness.start_terminals() {
+            return;
+        }
+
+        start_through_the_composer(
+            &mut harness,
+            pane,
+            &format!(
+                "printf '\\033[?2004hRE%s\\n' ADY; cat > '{}'",
+                received.display()
+            ),
+            &received,
+        );
+        let block = live_block_of(&harness, pane);
+        assert_eq!(block.state, crook_terminal::BlockState::Submitted);
+        assert!(
+            block.prompt_end.is_none(),
+            "the premise: the shell reports no marks"
+        );
+
+        // The agent reports, after the line that started it. Whether the
+        // composer is still drawn by now or the block has grown past the
+        // pane's top — the column opening beside it narrows the pane, which
+        // can be enough — that report says an agent is what runs there.
+        harness.update_session(pane, |session| {
+            session.source = StatusSource::Agent(std::time::Instant::now());
+            session.status = AgentStatus::Running;
+        });
+        comment_on_the_added_line(&mut harness);
+        click_column_text(&mut harness, "Send 1 comment to the agent");
+        assert_eq!(
+            comment_count(&harness),
+            0,
+            "the review did not go: {:?}",
+            review_note(&harness)
+        );
+
+        // No prompt comes back to wait for in a shell that marks none: the
+        // stand-in's file, closed with everything in it, is the end.
+        harness.type_into(pane, "\u{4}\u{4}");
+        harness.wait_for("the stand-in never wrote what it was given", |_| {
+            fs::read_to_string(&received).is_ok_and(|text| text.ends_with("\u{1b}[201~"))
+        });
+        assert_eq!(
+            fs::read_to_string(&received).expect("the stand-in wrote its file"),
+            format!("\u{1b}[200~{}\u{1b}[201~", the_review(&base))
+        );
+    }
+
+    #[test]
     fn typing_on_after_a_refresh_took_the_line_away_reaches_the_field_and_not_the_agent() {
         let scratch = Scratch::new();
         let Some((repository, _)) = a_task(&scratch) else {

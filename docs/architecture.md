@@ -1119,14 +1119,22 @@ paste behind a check that the program asked for bracketed paste, made under the 
 write. Without the markers `crook_terminal::input::paste` turns every newline into the Enter key,
 so a program that has not asked is refused rather than handed a review a line at a time. The
 pane is the one in the tab whose agent has reported (`StatusSource::Agent`), whose shell is not
-back at its prompt, and which works in the reviewed repository, else the focused one. The
-prompt and not the report, because a report outlives its agent: the hooks say `idle` when a
+listening, and which works in the reviewed repository, else the focused one; a pane whose shell
+is listening is refused, because a review's quoted lines are commands there (bash 5.3 turns
+bracketed paste on at its prompt, so the whole review would sit in its line editor one Enter
+from running), and `> +x` is a redirection that writes a file into the tree this column
+promises not to touch. Whether it is listening (`a_shell_is_listening`) is the shell's word
+first, and not the report's, because a report outlives its agent: the hooks say `idle` when a
 session ends, and `Emulator::settle_agent` takes back only a report of running or waiting when
-the command ends. Any pane at a shell prompt — a composer under it, or the marks saying the
-shell is at its prompt — is refused, whatever it last heard from an agent, because a review's
-quoted lines are commands there (bash 5.3 turns bracketed paste on at its prompt, so the whole
-review would sit in its line editor one Enter from running), and `> +x` is a redirection that
-writes a file into the tree this column promises not to touch. A paste that
+the command ends. So marks saying the shell is at its prompt (`AtPrompt`, `Done`) refuse the
+paste whatever the pane last heard from an agent, and a command running (`C`) or a full-screen
+program never does. What the marks leave open is a line handed to the shell and not answered
+(`Submitted`), and that the report decides: an agent that reported since the line was handed
+over is running under it. bash runs no DEBUG trap for a top-level `( … )`, so an agent started
+in one never gets a `C`, and a shell without Crook's marks stays `Submitted` from its first
+line on. Short of such a report, a shell that reports its prompt is taken to be still reading
+the line — an open quote, a here-document — and one that reports nothing is judged by its
+composer. A paste that
 went clears the comments and focuses the pane the ordinary way, so the person reads it in the
 agent's own prompt and presses Enter; any refusal keeps them and says why, and `Copy review` is
 the same text on the clipboard. The field takes the keyboard the way the tab search box does, as

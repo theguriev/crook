@@ -2403,29 +2403,32 @@ impl Workspace {
     /// Which pane of the tab in front a review of `repository` goes to.
     ///
     /// The one with an agent in it: a pane whose agent has reported and
-    /// whose shell is not back at its prompt — the focused one if it is such
-    /// a pane, else the first such in the tab, among those working in the
-    /// repository the review is about, since a review of one checkout is no
-    /// use to an agent in another. With no such pane, the focused one — which
-    /// is the pane the column is about, and which may be running an agent
-    /// that says nothing of itself.
+    /// whose shell is not listening (see [`a_shell_is_listening`]) — the
+    /// focused one if it is such a pane, else the first such in the tab,
+    /// among those working in the repository the review is about, since a
+    /// review of one checkout is no use to an agent in another. With no such
+    /// pane, the focused one — which is the pane the column is about, and
+    /// which may be running an agent that says nothing of itself.
     ///
-    /// The prompt, and not the report, because a report outlives the agent
-    /// that made it. The hooks say `idle` when a session ends, and the shell
-    /// ending the command takes back only a report of running or waiting
-    /// (`settle_agent` in `crook_terminal`), so the pane of an agent that
-    /// has exited goes on saying [`StatusSource::Agent`] from its prompt.
+    /// The shell, and not the report alone, because a report outlives the
+    /// agent that made it. The hooks say `idle` when a session ends, and the
+    /// shell ending the command takes back only a report of running or
+    /// waiting (`settle_agent` in `crook_terminal`), so the pane of an agent
+    /// that has exited goes on saying [`StatusSource::Agent`] from its
+    /// prompt.
     pub(super) fn review_pane(&self, repository: &Path, app: &AppContext) -> Option<PaneId> {
         let panes = self.tabs.active()?.panes();
         let focused = panes.focused_id();
         let now = Instant::now();
         let agents: Vec<PaneId> = panes
             .iter()
-            .filter(|pane| matches!(pane.session().source, StatusSource::Agent(_)))
             .filter(|pane| {
-                !self
-                    .terminal(pane.id(), app)
-                    .is_some_and(|(_, snapshot)| a_shell_is_listening(&snapshot, now))
+                let Some(reported) = agent_report(pane) else {
+                    return false;
+                };
+                !self.terminal(pane.id(), app).is_some_and(|(_, snapshot)| {
+                    a_shell_is_listening(&snapshot, Some(reported), now)
+                })
             })
             .filter(|pane| {
                 pane.session()
@@ -2473,7 +2476,11 @@ impl Workspace {
         let Some(pane) = self.review_pane(&repository, ctx) else {
             return;
         };
-        let Some(title) = self.tabs.pane(pane).map(|found| found.title().to_owned()) else {
+        let Some((title, reported)) = self
+            .tabs
+            .pane(pane)
+            .map(|found| (found.title().to_owned(), agent_report(found)))
+        else {
             return;
         };
 
@@ -2481,7 +2488,7 @@ impl Workspace {
             None => Some(format!(
                 "{title} has no shell any more. The comments are kept."
             )),
-            Some((_, snapshot)) if a_shell_is_listening(&snapshot, Instant::now()) => {
+            Some((_, snapshot)) if a_shell_is_listening(&snapshot, reported, Instant::now()) => {
                 Some(format!(
                     "{title} is at a shell prompt, where a review would be run as commands. \
                      Start the agent there first, or copy the review."
@@ -7950,25 +7957,81 @@ fn worktree_store() -> Option<PathBuf> {
     dirs::data_dir().map(|directory| directory.join("crook").join("worktrees"))
 }
 
-/// Whether what a paste into this pane would reach is its shell, as of
-/// `now`: a composer drawn under it, or a shell that has said it is at its
-/// prompt — or between a command handed to it and the command starting, or
-/// between one ending and the next prompt.
+/// Whether what a paste into this pane would reach is its shell's line
+/// editor rather than a program the shell is running, as of `now`.
 ///
 /// What the Changes column asks before it pastes a review: the lines of one
 /// are commands to a shell, and a shell that turns bracketed paste on at its
 /// prompt — bash 5.3 does — would take the whole of it into its line editor,
-/// one Enter away from running it. A full-screen program is never a shell,
-/// whatever the marks under it last said; and a shell that reports no marks
-/// is known only by the composer.
-fn a_shell_is_listening(snapshot: &Snapshot, now: Instant) -> bool {
+/// one Enter away from running it.
+///
+/// `reported` is when an agent in the pane last reported, if the pane's
+/// status came from one. A full-screen program is never a shell, whatever
+/// the marks under it last said. Otherwise the shell's own marks answer
+/// where they can: at its prompt, or between a command ending and the next
+/// prompt, it is listening, whatever an agent there last said; with a
+/// command running (`C`), it is not. What they leave open is a line handed
+/// to the shell that it has not answered (`Submitted`), and a shell that has
+/// said nothing at all (`Unknown`):
+///
+/// - An agent that has reported since the line was handed over is running
+///   under it: the report came from something the line started, and the
+///   shell has not said that ended. That is how an agent looks when it was
+///   started in a line the shell's hook never sees — bash runs no DEBUG trap
+///   for a top-level `( … )`, so no `C` comes, and `D` and `A` come only
+///   once it exits. Any report counts, `idle` included, since that is what an
+///   agent waiting for its next instruction says; one from before the line
+///   is from a command the marks have since closed.
+/// - Short of that, a shell that has reported its prompt ending (`B`) and not
+///   answered the line is taken to be listening. It answers a command with
+///   `C` within milliseconds, and until it does it may be reading the rest
+///   of the line — an open quote, a here-document — in its line editor.
+/// - A shell that reports no marks is known only by the composer, which is
+///   where its commands are typed: `Submitted` says nothing about it, since
+///   Crook's own submit puts it there for the rest of the session. With no
+///   composer — the one block it keeps has outgrown the viewport — the paste
+///   goes to whatever is running there, asked only whether it wants
+///   bracketed paste. An agent that has exited in such a pane leaves a report
+///   that cannot be told from a live one's, which is what the marks are for.
+pub(super) fn a_shell_is_listening(
+    snapshot: &Snapshot,
+    reported: Option<Instant>,
+    now: Instant,
+) -> bool {
     use crook_terminal::BlockState;
-    pane_surface::of(snapshot, now).composer
-        || (!snapshot.alt_screen
-            && matches!(
-                snapshot.live_block.state,
-                BlockState::AtPrompt | BlockState::Submitted | BlockState::Done
-            ))
+    if snapshot.alt_screen {
+        return false;
+    }
+    let live = &snapshot.live_block;
+    match live.state {
+        BlockState::AtPrompt | BlockState::Done => true,
+        // Nobody is listening in a shell that has exited, but a paste
+        // written there reaches nobody either and would clear the comments
+        // as sent: refused like the prompt it was at.
+        BlockState::Terminated => true,
+        BlockState::Executing => false,
+        BlockState::Submitted | BlockState::Unknown => {
+            let since_the_line = reported
+                .is_some_and(|at| live.started_at.is_none_or(|handed_over| at >= handed_over));
+            if since_the_line {
+                false
+            } else if live.prompt_end.is_some() {
+                true
+            } else {
+                pane_surface::of(snapshot, now).composer
+            }
+        }
+    }
+}
+
+/// When the agent in `pane` last reported, if the pane's status came from
+/// one — rather than from nothing, or from the shell ending the command a
+/// report came from.
+fn agent_report(pane: &Pane) -> Option<Instant> {
+    match pane.session().source {
+        StatusSource::Agent(at) => Some(at),
+        StatusSource::NoReport | StatusSource::CommandEnded(_) => None,
+    }
 }
 
 /// The top of the working tree `directory` is in, or `directory` itself when
