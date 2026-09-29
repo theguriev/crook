@@ -129,9 +129,18 @@ fn git(dir: &Path, args: &[&str]) -> String {
 }
 
 /// A repository at `<scratch>/<name>` on `main`, with one commit.
+///
+/// It keeps its line endings as committed. The code under test runs git with
+/// this machine's own configuration, not the isolated one above, and a
+/// `core.autocrlf=true` there — Git for Windows sets it, the CI runner has it —
+/// would check a tracked file out into a new worktree with CRLF endings, so a
+/// test comparing what the branch has would be comparing bytes git rewrote.
+/// Set in the repository, which outranks the machine's configuration and
+/// which every worktree of it shares.
 fn repo_with_a_commit(scratch: &ScratchDir, name: &str) -> PathBuf {
     let repo = scratch.dir(name);
     git(&repo, &["init"]);
+    git(&repo, &["config", "core.autocrlf", "false"]);
     write(&repo.join("tracked.txt"), "one\ntwo\nthree\n");
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "--no-verify", "-m", "initial"]);
