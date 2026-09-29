@@ -56,7 +56,9 @@ use crate::tab::{
     TabAction, TabEffect, TabGroup, TabId, TabStrip,
 };
 use crate::terminal_font::CellFont;
-use crate::terminal_model::{BlockHistory, TerminalHandle, TerminalModel, TerminalUpdate};
+use crate::terminal_model::{
+    BlockHistory, BracketedPaste, TerminalHandle, TerminalModel, TerminalUpdate,
+};
 use crate::text_input::{CARET_PHASE, TextInput};
 use crate::theme::creator::Draft;
 use crate::theme::{Available, theme};
@@ -2153,7 +2155,10 @@ impl Workspace {
         // so to anything outside it. Read once per opening rather than on the
         // render path, where the button would read it every frame.
         let editor = Editor::from_environment();
-        if let Some(epoch) = self.changes.open(self.changes_target(), editor) {
+        if let Some(epoch) = self
+            .changes
+            .open(self.changes_tab(), self.changes_target(), editor)
+        {
             self.read_changes(epoch, ctx);
         }
         ctx.notify();
@@ -2165,6 +2170,9 @@ impl Workspace {
             return;
         }
         self.changes.close();
+        // A comment field goes with the column, and the keyboard it had goes
+        // back to the pane.
+        self.sync_input_keys();
         ctx.notify();
     }
 
@@ -2181,29 +2189,39 @@ impl Workspace {
             .focused_pane_id()
             .and_then(|pane| self.tabs.pane(pane))
             .and_then(|pane| pane.session().working_directory.clone())?;
-        Some(
-            crate::git::discover(&directory)
-                .and_then(|layout| layout.work_tree)
-                .unwrap_or(directory),
-        )
+        Some(checkout_of(directory))
+    }
+
+    /// The tab the Changes column is about: the one in front, whose focused
+    /// pane it follows.
+    fn changes_tab(&self) -> Option<TabId> {
+        self.tabs.active().map(Tab::id)
     }
 
     /// Points the column at the focused pane's repository, if that is not
     /// where it is already looking.
     ///
     /// Called after everything that can change the answer: a tab chosen, a
-    /// pane focused or closed, a shell reporting a new directory.
+    /// pane focused or closed, a shell reporting a new directory. Another
+    /// tab on the same repository is a move too, because its review is its
+    /// own and its comments are anchored against a read of their own.
     fn follow_changes(&mut self, ctx: &mut ViewContext<Self>) {
+        // Whether the column is up or not: a review is kept while the column
+        // is down, and a closed tab's is one nobody can come back to.
+        let tabs = &self.tabs;
+        self.changes.forget_tabs(|tab| tabs.get(tab).is_some());
         if !self.changes.open {
             return;
         }
         let target = self.changes_target();
-        if target == self.changes.target {
+        let tab = self.changes_tab();
+        if target == self.changes.target && tab == self.changes.tab() {
             return;
         }
-        if let Some(epoch) = self.changes.retarget(target) {
+        if let Some(epoch) = self.changes.retarget(tab, target) {
             self.read_changes(epoch, ctx);
         }
+        self.sync_input_keys();
         ctx.notify();
     }
 
@@ -2232,6 +2250,9 @@ impl Workspace {
             for read in again {
                 workspace.read_hunks(read, ctx);
             }
+            // A read can take a comment field down with the file it was on,
+            // and the keyboard has to go back to the pane with it.
+            workspace.sync_input_keys();
             ctx.notify();
         })
         .detach();
@@ -2251,6 +2272,9 @@ impl Workspace {
         });
         ctx.spawn(reading, move |workspace, read, ctx| {
             if workspace.changes.land_hunks(&path, ticket, read) {
+                // The line a comment was being typed on can be gone from
+                // what came back, and the field with it.
+                workspace.sync_input_keys();
                 ctx.notify();
             }
         })
@@ -2266,6 +2290,47 @@ impl Workspace {
                 if let Some(read) = self.changes.toggle(index) {
                     self.read_hunks(read, ctx);
                 }
+                // Folding a file takes a comment field on it down, and the
+                // keyboard has to go back to where it was.
+                self.sync_input_keys();
+                ctx.notify();
+            }
+            ChangesAction::Comment { file, line } => {
+                if self.changes.start_comment(file, line) {
+                    // The keyboard goes to the field, so it has to leave the
+                    // search box if it was there: one field is typed into
+                    // at a time.
+                    self.stop_searching();
+                    self.sync_input_keys();
+                    ctx.notify();
+                }
+            }
+            ChangesAction::FocusComment => {
+                if self.changes.focus_draft(true) {
+                    self.stop_searching();
+                    self.sync_input_keys();
+                    ctx.notify();
+                }
+            }
+            ChangesAction::AddComment => {
+                self.changes.add_comment();
+                self.sync_input_keys();
+                ctx.notify();
+            }
+            ChangesAction::CancelComment => {
+                self.changes.cancel_comment();
+                self.sync_input_keys();
+                ctx.notify();
+            }
+            ChangesAction::RemoveComment(id) => {
+                if self.changes.remove_comment(id) {
+                    ctx.notify();
+                }
+            }
+            ChangesAction::Send => self.send_review(ctx),
+            ChangesAction::CopyReview => self.copy_review(ctx),
+            ChangesAction::DismissNote => {
+                self.changes.dismiss_note();
                 ctx.notify();
             }
             ChangesAction::OpenFile(index) => {
@@ -2323,6 +2388,177 @@ impl Workspace {
         }
     }
 
+    /// The review the Changes column holds for the tab in front, as the
+    /// message it would send: `None` with no comment to send.
+    ///
+    /// The heading names the checkout's head the way its row does, read
+    /// off `.git/HEAD` here rather than kept, since it is read once a press.
+    fn review_message(&self) -> Option<String> {
+        let repository = &self.changes.overview()?.repository;
+        let head = crate::git::current_branch(repository);
+        self.changes
+            .review(head.as_ref().map(crate::git::Head::label))
+    }
+
+    /// Which pane of the tab in front a review of `repository` goes to.
+    ///
+    /// The one with an agent in it: a pane whose agent has reported, and has
+    /// not ended since — the focused one if it is such a pane, else the first
+    /// such in the tab, among those working in the repository the review is
+    /// about, since a review of one checkout is no use to an agent in
+    /// another. With no such pane, the focused one — which is the pane the
+    /// column is about, and which may be running an agent that says nothing
+    /// of itself.
+    pub(super) fn review_pane(&self, repository: &Path) -> Option<PaneId> {
+        let panes = self.tabs.active()?.panes();
+        let focused = panes.focused_id();
+        let agents: Vec<PaneId> = panes
+            .iter()
+            .filter(|pane| matches!(pane.session().source, StatusSource::Agent(_)))
+            .filter(|pane| {
+                pane.session()
+                    .working_directory
+                    .clone()
+                    .map(checkout_of)
+                    .as_deref()
+                    == Some(repository)
+            })
+            .map(Pane::id)
+            .collect();
+        agents
+            .iter()
+            .copied()
+            .find(|pane| *pane == focused)
+            .or_else(|| agents.first().copied())
+            .or(Some(focused))
+    }
+
+    /// Pastes the review into the tab's agent, and puts the keyboard there.
+    ///
+    /// Only ever on the press: nothing else in the column writes to a pane.
+    /// Pasted and not typed, and never followed by Enter — the message lands
+    /// in the agent's prompt for the person to read, change and send, and a
+    /// review is the kind of thing a person wants one last look at. So it
+    /// goes only to a program that has asked for bracketed paste: without
+    /// the markers every newline is the Enter key, and the first line of the
+    /// review would be submitted on its own. And never to a shell's prompt,
+    /// where the lines of a review are commands — `> +    let b = 3;` is a
+    /// redirection that writes a file into the very tree this column
+    /// promises not to touch.
+    ///
+    /// The comments go when the paste did, and stay for every reason it did
+    /// not.
+    fn send_review(&mut self, ctx: &mut ViewContext<Self>) {
+        let (Some(message), Some(repository)) = (
+            self.review_message(),
+            self.changes
+                .overview()
+                .map(|overview| overview.repository.clone()),
+        ) else {
+            return;
+        };
+        let Some(pane) = self.review_pane(&repository) else {
+            return;
+        };
+        let (title, agent) = match self.tabs.pane(pane) {
+            Some(found) => (
+                found.title().to_owned(),
+                matches!(found.session().source, StatusSource::Agent(_)),
+            ),
+            None => return,
+        };
+
+        let refusal = match self.terminal(pane, ctx) {
+            None => Some(format!(
+                "{title} has no shell any more. The comments are kept."
+            )),
+            Some((_, snapshot))
+                if !agent && pane_surface::of(&snapshot, Instant::now()).composer =>
+            {
+                Some(format!(
+                    "{title} is at a shell prompt, where a review would be run as commands. \
+                     Start the agent there first, or copy the review."
+                ))
+            }
+            Some((handle, _)) => match handle.paste_bracketed(&message) {
+                BracketedPaste::Sent => None,
+                BracketedPaste::NotAsked => Some(format!(
+                    "What is running in {title} has not turned on bracketed paste, so every line \
+                     of the review would arrive as its own Enter. Copy the review instead."
+                )),
+                BracketedPaste::Failed => Some(format!(
+                    "Could not paste into {title}. The comments are kept."
+                )),
+            },
+        };
+        if let Some(refusal) = refusal {
+            self.changes.say(refusal);
+            ctx.notify();
+            return;
+        }
+
+        let count = self.changes.comments().len();
+        self.changes.sent();
+        // Through the ordinary path, so the pane is focused exactly as a
+        // click on it would focus it — tab, keyboard, attention and all.
+        self.handle_action(&WorkspaceAction::Tab(TabAction::FocusPane(pane)), ctx);
+        self.changes.say(format!(
+            "Pasted {} into {title}. Read it there, and press Enter to send it.",
+            match count {
+                1 => "1 comment".to_owned(),
+                count => format!("{count} comments"),
+            }
+        ));
+        ctx.notify();
+    }
+
+    /// Puts the review on the clipboard, for an agent that is not in a pane
+    /// here. The comments stay: a copy is not a send.
+    fn copy_review(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(message) = self.review_message() else {
+            return;
+        };
+        let note = if self.clipboard.write(&message) {
+            "Copied the review to the clipboard."
+        } else {
+            "There is no clipboard here to copy the review to."
+        };
+        self.changes.say(note.to_owned());
+        ctx.notify();
+    }
+
+    /// Whether the keyboard is the Changes column's comment field's rather
+    /// than the pane's.
+    ///
+    /// The field sits beside the panes, as the tab search box does, so it
+    /// takes the keyboard the same way: only when a person put it there, and
+    /// never from under anything that has taken the keyboard from every
+    /// field — a menu, the Themes panel, a plugin's surface, the search box.
+    pub(super) fn changes_takes_keys(&self) -> bool {
+        self.changes.open
+            && self.changes.draft_is_focused()
+            && !self.panel.open
+            && !self.a_popup_is_open()
+            && !self.search_takes_keys()
+    }
+
+    /// What a keystroke means to the comment field, if it means anything:
+    /// Enter keeps the comment and Escape throws it away. Both are taken
+    /// here rather than left to the field, which answers Escape by emptying
+    /// itself and Enter by nothing — the search box's arrangement, for its
+    /// reason.
+    fn changes_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+        if !keystroke.modifiers.is_empty() {
+            return None;
+        }
+        let action = match keystroke.key.as_str() {
+            "escape" => ChangesAction::CancelComment,
+            "enter" => ChangesAction::AddComment,
+            _ => return None,
+        };
+        Some(WorkspaceAction::Changes(action))
+    }
+
     /// Puts `overview` in front of the Changes column as though a read had
     /// brought it home, opening the column on it.
     ///
@@ -2336,9 +2572,10 @@ impl Workspace {
     ) {
         let target = Some(overview.repository.clone());
         let epoch = if self.changes.open {
-            self.changes.retarget(target)
+            self.changes.retarget(self.changes_tab(), target)
         } else {
-            self.changes.open(target, Editor::from_environment())
+            self.changes
+                .open(self.changes_tab(), target, Editor::from_environment())
         };
         if let Some(epoch) = epoch
             && let Some(again) = self.changes.land(epoch, Ok(overview))
@@ -2375,7 +2612,7 @@ impl Workspace {
             Err(problem) => {
                 // The picture is of the column saying so, which is what a
                 // person would see.
-                if let Some(epoch) = self.changes.open(Some(target), None) {
+                if let Some(epoch) = self.changes.open(self.changes_tab(), Some(target), None) {
                     self.changes.land(epoch, Err(problem));
                 }
                 ctx.notify();
@@ -2668,6 +2905,7 @@ impl Workspace {
             && !self.a_popup_is_open()
             && !self.host.a_surface_is_up()
             && !self.search_takes_keys()
+            && !self.changes_takes_keys()
     }
 
     /// Every place the focused pane\'s find query occurs in its output, in
@@ -2855,7 +3093,8 @@ impl Workspace {
         // after switching sections would go nowhere.
         input.set_has_keys(
             self.section.as_deref() == Some(section)
-                && self.field_with_keys().as_deref() == Some(name),
+                && self.field_with_keys().as_deref() == Some(name)
+                && !self.changes_takes_keys(),
         );
         (index, input)
     }
@@ -5104,6 +5343,9 @@ impl Workspace {
             // invented and a tab being renamed — and neither is this struct's.
             return self.host.a_field_has_keys();
         }
+        if self.changes_takes_keys() {
+            return true;
+        }
         let Some(pane) = self.tabs.focused_pane_id() else {
             return false;
         };
@@ -5970,6 +6212,14 @@ impl Workspace {
             return Some(action);
         }
 
+        // The comment field in the Changes column owns the same two keys
+        // while it has the keyboard, for the same reason.
+        if self.changes_takes_keys()
+            && let Some(action) = self.changes_action_for(keystroke)
+        {
+            return Some(action);
+        }
+
         // The find bar owns Escape and Enter while it has the keyboard, for
         // the reason the search box owns its two: the field answers Escape by
         // clearing itself and Enter by nothing, and neither of those is a way
@@ -6745,12 +6995,18 @@ impl Workspace {
         // shell under it. It is over the focused pane, so it competes only
         // with that pane\'s composer.
         let find_has_keys = self.find_takes_keys();
+        // The Changes column's comment field counts as the search box does,
+        // and for its reason: it is beside the pane, and a person typing a
+        // comment about an agent's work is not typing to the agent.
+        let comment_has_keys = self.changes_takes_keys();
+        self.changes.set_draft_keys(comment_has_keys);
         let listening = (!self.a_popup_is_open()
             && !self.panel.open
             && !self.host.a_surface_is_up()
             && !self.search_takes_keys()
             && !find_has_keys
-            && !a_field_has_keys)
+            && !a_field_has_keys
+            && !comment_has_keys)
             .then(|| self.tabs.focused_pane_id())
             .flatten();
         for (id, input) in &self.inputs {
@@ -6787,11 +7043,16 @@ impl Workspace {
         // which is also when no pane is: the sidebar's sections replace the
         // panes rather than sitting beside them. Exactly one of them is being
         // typed into — see `field_with_keys`.
+        // Unless a comment is being typed in the Changes column, which is
+        // drawn beside every section and is the field a person last put the
+        // keyboard in.
         let showing = self.section.clone();
         let focused = self.field_with_keys();
         for (section, name, input) in self.fields.borrow().iter() {
             input.set_has_keys(
-                showing.as_deref() == Some(section.as_str()) && focused.as_deref() == Some(name),
+                showing.as_deref() == Some(section.as_str())
+                    && focused.as_deref() == Some(name)
+                    && !comment_has_keys,
             );
         }
     }
@@ -6970,6 +7231,7 @@ impl Workspace {
                 // to keep finding.
                 self.set_tabs_panel_shown(true, ctx);
                 self.panel_search.set_focused(true);
+                self.changes.focus_draft(false);
             }
             SearchAction::Dismiss => {
                 self.panel_search.clear();
@@ -7664,6 +7926,14 @@ fn worktree_store() -> Option<PathBuf> {
     dirs::data_dir().map(|directory| directory.join("crook").join("worktrees"))
 }
 
+/// The top of the working tree `directory` is in, or `directory` itself when
+/// it is in none: what the Changes column looks at for a pane there.
+fn checkout_of(directory: PathBuf) -> PathBuf {
+    crate::git::discover(&directory)
+        .and_then(|layout| layout.work_tree)
+        .unwrap_or(directory)
+}
+
 /// Removes the checkout at `path`, and then the directories of `store` it
 /// leaves with nothing in them.
 ///
@@ -7721,6 +7991,12 @@ impl TypedActionView for Workspace {
                 // gesture is a thing about one row of it.
                 if self.panel_drag.carrying().is_none() {
                     self.stop_searching();
+                }
+                // A comment being typed is kept, and the keyboard goes back
+                // to the strip for the same reason the search box's does: a
+                // click on a pane is a person who has finished typing here.
+                if self.changes.focus_draft(false) {
+                    self.sync_input_keys();
                 }
                 // And anything a plugin hung off a place in the interface. A
                 // panel under a chip in a pane is drawn by that pane; asking

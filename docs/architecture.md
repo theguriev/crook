@@ -1100,6 +1100,36 @@ editor that draws in the terminal it was started from has none when Crook starts
 (Neovim, measured, waits for one for ever). No syntax highlighting: added and removed lines are
 the theme's `diff_added` and `diff_removed`.
 
+**What a person finds goes to the agent as words.** A press on a changed line or a hunk header
+opens a one-line `TextField` under it, and Enter keeps what was typed as a comment.
+`changes_panel/review.rs` holds them: per tab, repository and base, in memory only, because a
+review is minutes of reading about a diff that is itself moving. A comment remembers its line by
+what the line says, marker included, and by its number — counted from the hunk header, on the
+new side for an added line and the old side for a removed one. Every refresh reads again the
+diff of each file with a comment on it, folded or not, so nothing is sent about a diff nobody
+read again; the comment moves to the line that says the same thing nearest to where it was (a
+header by the function name after its numbers, which move), and one whose line is gone is
+dropped and named. `Send N comments to the agent` composes one message — a heading, then
+`path:line`, the quoted line and the comment for each, in the order the diff reads, with no
+newline at the end — and hands it to `TerminalHandle::paste_bracketed`, the terminal model's
+paste behind a check that the program asked for bracketed paste, made under the same lock as the
+write. Without the markers `crook_terminal::input::paste` turns every newline into the Enter key,
+so a program that has not asked is refused rather than handed a review a line at a time. The
+pane is the one in the tab whose agent has reported (`StatusSource::Agent`) and works in the
+reviewed repository, else the focused one; one sitting at a shell prompt — a composer, no agent
+— is refused too, because a review's quoted lines are commands there, and `> +x` is a
+redirection that writes a file into the tree this column promises not to touch. A paste that
+went clears the comments and focuses the pane the ordinary way, so the person reads it in the
+agent's own prompt and presses Enter; any refusal keeps them and says why, and `Copy review` is
+the same text on the clipboard. The field takes the keyboard the way the tab search box does, as
+a wish granted by `changes_takes_keys` and claimed Escape and Enter in `action_for` — and the
+pane beside it is given no keys at all while it has them (`body.rs`), since every element sees
+every keystroke and an agent with no composer would otherwise be typed into alongside the
+field. Against the agents themselves, a multi-line bracketed paste was checked to land in the
+prompt unsent in Claude Code 2.1.280 (as `[Pasted text #1 +3 lines]`) and OpenCode 1.18.33 (as
+`[Pasted ~4 lines]`); Codex 0.149.1 and Gemini CLI 0.61.0 turn bracketed paste on at start-up,
+but stopped at sign-in and a trust question here, so a paste into their prompts is not verified.
+
 ### The agent says what it is doing
 
 The dot on a tab's row has four colours and, until this section, one real source: a bell in a

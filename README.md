@@ -479,6 +479,22 @@ Twenty features, and the page that configures them:
   the agent — asking the agent, or your editor, is how the work changes. An editor that draws
   in a terminal (`vim`, `nvim`, `nano`, `hx`, `emacs -nw`) has nothing to draw in when Crook
   starts it, so Open is offered only for one that opens a window.
+  **Asking the agent is one press.** Press a changed line — or a hunk's header — and type a
+  comment in the field that opens under it: Enter keeps it, Escape drops it, one line each.
+  Comments belong to the tab (and the repository and base it is looking at), live in memory
+  only — a restart or closing the tab loses them — and follow their line while the agent keeps
+  writing: a refresh moves each one to the line that still says what it said, and drops the
+  ones whose line is gone, saying which. **Send N comments to the agent**, at the top of the
+  column, makes them one message — `Review of <branch> since <base>:`, then each comment as
+  `path:line`, the line quoted, and what you said — pastes it into the tab's agent as one
+  bracketed paste **with no Enter**, and puts the keyboard there: you read it, and you send it.
+  The agent is the tab's pane whose agent has reported a status, else the focused one. It is
+  never pasted into a shell prompt, where its lines would be commands, nor into a program that
+  has not turned bracketed paste on, where every line would arrive as its own Enter; the column
+  says so and keeps the comments. **Copy review** puts the same text on the clipboard, for an
+  agent in another tool. Checked by hand to take a multi-line bracketed paste into the prompt
+  unsent: Claude Code 2.1.280 and OpenCode 1.18.33. Codex 0.149.1 and Gemini CLI 0.61.0 turn
+  bracketed paste on when they start, but a paste into their prompts is not verified.
 
 - **A settings page**, which opens the way a shell does: `cmd/ctrl-,` — or the View options
   menu's last entry — puts it in a **tab of its own**, listed beside the work it

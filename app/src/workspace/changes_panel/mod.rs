@@ -23,6 +23,17 @@
 //! highlighting: added and removed lines are the theme's own `diff_added`
 //! and `diff_removed`, the colours the row's `+12 −3` chip is already in.
 //!
+//! # Telling the agent
+//!
+//! Which it does do. A press on a changed line, or on a hunk's header, opens
+//! a field under it; what is typed there is a comment, and the comments of a
+//! tab are one review, sent to that tab's agent as one message pasted into
+//! its prompt and left there unsent — or copied, for an agent somewhere
+//! else. How a comment keeps to its line while the agent goes on writing,
+//! and what the message says, is [`review`]; which pane it goes to, and why
+//! it goes nowhere rather than to a shell's prompt, is
+//! [`Workspace::review_pane`] and the send beside it.
+//!
 //! # Where it is
 //!
 //! A docked column beside the work, composed where the Themes panel is — in
@@ -55,25 +66,31 @@
 //! git-shaped is on the render path.
 
 mod launch;
+mod review;
 
 #[cfg(test)]
 mod tests;
 
 pub(crate) use launch::Editor;
+pub(crate) use review::Comment;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use crookui_core::elements::{MouseStateHandle, Padding};
+use crookui_core::elements::{MouseStateHandle, Padding, Paragraph};
 use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::prelude::*;
 
 use crate::git::changes::{
     Against, Base, Error, FileChange, FileDiff, MAX_COMMITS, MAX_FILES, Overview, Status,
 };
+use crate::tab::TabId;
+use crate::text_input::TextInput;
 use crate::theme::theme;
+
+use review::{Anchor, Key};
 
 use super::action::{ChangesAction, WorkspaceAction};
 use super::view::Workspace;
@@ -143,6 +160,10 @@ mod height {
     pub(super) const LINE: f32 = 16.;
     /// A sentence under a file: reading, binary, cut short.
     pub(super) const NOTE: f32 = 22.;
+    /// A comment, under the line it is about.
+    pub(super) const COMMENT: f32 = 24.;
+    /// The field a comment is typed in, and a little air around it.
+    pub(super) const DRAFT: f32 = super::super::text_field::HEIGHT + 8.;
 }
 
 /// What has been read about the repository.
@@ -195,6 +216,10 @@ pub(super) enum Row {
     Line(usize, usize),
     /// A sentence about a shown file's hunks.
     Note(String),
+    /// A comment on file `.0`, by its id.
+    Comment(usize, u64),
+    /// The field a comment is being typed in, under a line of file `.0`.
+    Draft(usize),
 }
 
 impl Row {
@@ -208,6 +233,8 @@ impl Row {
             Self::Actions(_) => height::ACTIONS,
             Self::Line(..) => height::LINE,
             Self::Note(_) => height::NOTE,
+            Self::Comment(..) => height::COMMENT,
+            Self::Draft(_) => height::DRAFT,
         }
     }
 }
@@ -230,6 +257,31 @@ pub(super) enum Control {
     CopyPath(usize),
     /// A file's "Copy diff".
     CopyDiff(usize),
+    /// Line `.1` of file `.0`'s hunks, which a press leaves a comment on.
+    Line(usize, usize),
+    /// A comment's ×, by the comment's id.
+    RemoveComment(u64),
+    /// The field a comment is typed in.
+    Draft,
+    /// "Send N comments to the agent".
+    Send,
+    /// "Copy review".
+    CopyReview,
+    /// The × on what the review last said.
+    DismissNote,
+}
+
+/// The comment being typed: where it will go, and what has been typed.
+struct Draft {
+    /// The line it is about.
+    anchor: Anchor,
+    /// What has been typed, with its own caret and undo.
+    input: TextInput,
+    /// Whether the keyboard has been put in it, rather than left with the
+    /// pane. A wish, the way the tab search box's is: whether it actually has
+    /// the keyboard is [`Workspace::changes_takes_keys`], which also asks
+    /// whether anything is covering it.
+    focused: bool,
 }
 
 /// Whether the column is up, what it is showing, and what the mouse is doing
@@ -273,6 +325,20 @@ pub(super) struct ChangesPanelState {
     launch_failure: Option<(PathBuf, String)>,
     /// One mouse state per control, made on the control's first frame.
     controls: RefCell<HashMap<Control, MouseStateHandle>>,
+    /// The tab the column is about: the one the focused pane is in.
+    tab: Option<TabId>,
+    /// Every review there is, by tab, repository and base — kept when the
+    /// column closes and when it moves to another tab, and let go of when
+    /// the tab closes. See [`review`].
+    reviews: HashMap<Key, Vec<Comment>>,
+    /// How many comments have been made, which is also where each one's id
+    /// comes from.
+    comments_made: u64,
+    /// The comment being typed, if one is.
+    draft: Option<Draft>,
+    /// The last thing the review had to say: where a Send went, why it went
+    /// nowhere, which comments a refresh dropped.
+    note: Option<String>,
 }
 
 impl ChangesPanelState {
@@ -318,6 +384,11 @@ impl ChangesPanelState {
         self.editor.as_ref()
     }
 
+    /// The tab the column is about.
+    pub(super) fn tab(&self) -> Option<TabId> {
+        self.tab
+    }
+
     /// Whether a read is under way.
     pub(super) fn is_reading(&self) -> bool {
         self.in_flight
@@ -325,10 +396,15 @@ impl ChangesPanelState {
 
     /// Puts the column up, looking at `target`, and answers the read to
     /// start: `None` when there is nowhere to read.
-    pub(super) fn open(&mut self, target: Option<PathBuf>, editor: Option<Editor>) -> Option<u64> {
+    pub(super) fn open(
+        &mut self,
+        tab: Option<TabId>,
+        target: Option<PathBuf>,
+        editor: Option<Editor>,
+    ) -> Option<u64> {
         self.open = true;
         self.editor = editor;
-        self.retarget(target)
+        self.retarget(tab, target)
     }
 
     /// Takes the column down, and everything it read with it: a column
@@ -342,17 +418,22 @@ impl ChangesPanelState {
         self.expanded.clear();
         self.hunks.clear();
         self.launch_failure = None;
+        self.draft = None;
+        self.note = None;
         self.forget_hover_state();
         self.relayout();
     }
 
     /// Starts looking somewhere else, and answers the read to start.
-    pub(super) fn retarget(&mut self, target: Option<PathBuf>) -> Option<u64> {
+    pub(super) fn retarget(&mut self, tab: Option<TabId>, target: Option<PathBuf>) -> Option<u64> {
+        self.tab = tab;
         self.target = target;
         self.reading = Reading::Nothing;
         self.expanded.clear();
         self.hunks.clear();
         self.launch_failure = None;
+        self.draft = None;
+        self.note = None;
         self.scroll.lock().scroll_to_top();
         self.forget_hover_state();
         self.epoch = self.epoch.wrapping_add(1);
@@ -391,12 +472,17 @@ impl ChangesPanelState {
                 let listed: HashSet<&PathBuf> =
                     overview.files.iter().map(|file| &file.path).collect();
                 self.expanded.retain(|path| listed.contains(path));
+                self.reading = Reading::Ready(overview);
+                self.drop_unlisted();
                 // A diff nobody is looking at is read again when somebody
                 // does, rather than kept on the strength of a list that has
-                // just been read again itself.
+                // just been read again itself — unless a comment is on it:
+                // what is sent about a line has to be about the line as it
+                // is, folded or not.
+                let commented = self.commented();
                 let expanded = &self.expanded;
-                self.hunks.retain(|path, _| expanded.contains(path));
-                self.reading = Reading::Ready(overview);
+                self.hunks
+                    .retain(|path, _| expanded.contains(path) || commented.contains(path));
             }
             Err(error) => {
                 self.reading = Reading::Failed(error);
@@ -404,9 +490,18 @@ impl ChangesPanelState {
                 self.hunks.clear();
             }
         }
+        if self
+            .draft
+            .as_ref()
+            .is_some_and(|draft| !self.expanded.contains(&draft.anchor.path))
+        {
+            self.draft = None;
+        }
 
         let mut again: Vec<PathBuf> = self.expanded.iter().cloned().collect();
+        again.extend(self.commented());
         again.sort();
+        again.dedup();
         let reads = again.iter().filter_map(|path| self.request(path)).collect();
         self.relayout();
         Some(reads)
@@ -423,6 +518,14 @@ impl ChangesPanelState {
         let path = file.path.clone();
         let nested = file.status == Status::Repository;
         if self.expanded.remove(&path) {
+            // A field nobody can see must not keep the keyboard.
+            if self
+                .draft
+                .as_ref()
+                .is_some_and(|draft| draft.anchor.path == path)
+            {
+                self.draft = None;
+            }
             self.relayout();
             return None;
         }
@@ -446,6 +549,7 @@ impl ChangesPanelState {
         ticket: u64,
         read: Result<FileDiff, String>,
     ) -> bool {
+        let key = self.key();
         let Some(hunks) = self.hunks.get_mut(path) else {
             return false;
         };
@@ -453,6 +557,24 @@ impl ChangesPanelState {
             return false;
         }
         hunks.ticket = None;
+        // Every comment on the file, and the field if it is on it, moves to
+        // where its line is in what was just read. A read that failed moves
+        // nothing: the diff is the same diff until git says otherwise.
+        if let (Some(key), Ok(diff)) = (&key, &read) {
+            let (dropped, draft_gone) =
+                follow_lines(path, diff, self.reviews.get_mut(key), &mut self.draft);
+            if draft_gone {
+                self.draft = None;
+                self.note = Some(
+                    "The line being commented on is no longer in the diff, so the comment \
+                     was not added."
+                        .to_owned(),
+                );
+            }
+            if let Some(note) = review::dropped(&dropped) {
+                self.note = Some(note);
+            }
+        }
         hunks.diff = Some(read);
         self.relayout();
         true
@@ -490,6 +612,245 @@ impl ChangesPanelState {
             file,
             ticket,
         })
+    }
+
+    /// Which review the column is showing: its tab's, about the repository
+    /// and the base it read. `None` until a read has come home, and for a
+    /// read that failed — there is nothing to leave a comment on then.
+    fn key(&self) -> Option<Key> {
+        let overview = self.overview()?;
+        Some(Key {
+            tab: self.tab?,
+            repository: overview.repository.clone(),
+            base: overview.base.name.clone(),
+        })
+    }
+
+    /// The comments of the review the column is showing, in the order they
+    /// were made.
+    pub(super) fn comments(&self) -> &[Comment] {
+        self.key()
+            .and_then(|key| self.reviews.get(&key))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// The comments on the file at `path`, top to bottom.
+    fn comments_on(&self, path: &Path) -> Vec<&Comment> {
+        let mut on: Vec<&Comment> = self
+            .comments()
+            .iter()
+            .filter(|comment| comment.anchor.path == path)
+            .collect();
+        on.sort_by_key(|comment| (comment.anchor.at, comment.id));
+        on
+    }
+
+    /// Opens the field a comment is typed in, under line `line` of the file
+    /// at `file`, with the keyboard in it — in place of any other, and what
+    /// was typed there with it. Says whether it did: only a line added or
+    /// removed, or a hunk's header, takes a comment.
+    pub(super) fn start_comment(&mut self, file: usize, line: usize) -> bool {
+        let Some(path) = self
+            .overview()
+            .and_then(|overview| overview.files.get(file))
+            .map(|file| file.path.clone())
+        else {
+            return false;
+        };
+        let Some(diff) = self.diff(&path) else {
+            return false;
+        };
+        let Some(text) = diff
+            .lines
+            .get(line)
+            .filter(|text| review::commentable(text))
+        else {
+            return false;
+        };
+        let Some(place) = review::places(&diff.lines).get(line).copied().flatten() else {
+            return false;
+        };
+        let anchor = Anchor {
+            path,
+            line: text.clone(),
+            place,
+            at: line,
+        };
+        self.draft = Some(Draft {
+            anchor,
+            input: TextInput::new(),
+            focused: true,
+        });
+        self.relayout();
+        true
+    }
+
+    /// What is being typed into the comment field, while one is up.
+    pub(super) fn draft_input(&self) -> Option<&TextInput> {
+        self.draft.as_ref().map(|draft| &draft.input)
+    }
+
+    /// Tells the comment field whether the keyboard is its. See
+    /// [`Workspace::sync_input_keys`].
+    pub(super) fn set_draft_keys(&self, has_keys: bool) {
+        if let Some(draft) = &self.draft {
+            draft.input.set_has_keys(has_keys);
+        }
+    }
+
+    /// Whether the keyboard has been put in the comment field.
+    pub(super) fn draft_is_focused(&self) -> bool {
+        self.draft.as_ref().is_some_and(|draft| draft.focused)
+    }
+
+    /// Puts the keyboard in the comment field, or takes it out; the words
+    /// stay either way. Says whether that changed anything.
+    pub(super) fn focus_draft(&mut self, focused: bool) -> bool {
+        match &mut self.draft {
+            Some(draft) if draft.focused != focused => {
+                draft.focused = focused;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Adds what was typed as a comment on the field's line, and takes the
+    /// field down. Says whether a comment was added: Enter on an empty field
+    /// is a field somebody changed their mind in, and it only goes away.
+    pub(super) fn add_comment(&mut self) -> bool {
+        let Some(draft) = self.draft.take() else {
+            return false;
+        };
+        let text = draft.input.editor().text().trim().to_owned();
+        let added = match self.key() {
+            Some(key) if !text.is_empty() => {
+                self.comments_made += 1;
+                self.reviews.entry(key).or_default().push(Comment {
+                    id: self.comments_made,
+                    anchor: draft.anchor,
+                    text,
+                });
+                self.note = None;
+                true
+            }
+            _ => false,
+        };
+        self.relayout();
+        added
+    }
+
+    /// Takes the field down, and what was typed in it with it.
+    pub(super) fn cancel_comment(&mut self) -> bool {
+        if self.draft.take().is_none() {
+            return false;
+        }
+        self.relayout();
+        true
+    }
+
+    /// Takes the comment `id` away. Says whether there was one.
+    pub(super) fn remove_comment(&mut self, id: u64) -> bool {
+        let Some(comments) = self.key().and_then(|key| self.reviews.get_mut(&key)) else {
+            return false;
+        };
+        let before = comments.len();
+        comments.retain(|comment| comment.id != id);
+        if comments.len() == before {
+            return false;
+        }
+        self.note = None;
+        self.relayout();
+        true
+    }
+
+    /// The message the review's comments make, or `None` without a comment.
+    ///
+    /// In the order the diff is read in — file by file as the column lists
+    /// them, top to bottom within each — rather than the order they were
+    /// made in, which is the order a person happened to scroll past them.
+    pub(super) fn review(&self, branch: Option<&str>) -> Option<String> {
+        let overview = self.overview()?;
+        let comments = self.comments();
+        if comments.is_empty() {
+            return None;
+        }
+        let file_order = |path: &Path| {
+            overview
+                .files
+                .iter()
+                .position(|file| file.path == path)
+                .unwrap_or(usize::MAX)
+        };
+        let mut ordered: Vec<&Comment> = comments.iter().collect();
+        ordered.sort_by_key(|comment| {
+            (
+                file_order(&comment.anchor.path),
+                comment.anchor.at,
+                comment.id,
+            )
+        });
+        Some(review::compose(
+            &review::heading(branch, &overview.base),
+            &ordered,
+        ))
+    }
+
+    /// Says `note` where the review is, in place of whatever it said before.
+    pub(super) fn say(&mut self, note: String) {
+        self.note = Some(note);
+    }
+
+    /// Takes away what the review last said.
+    pub(super) fn dismiss_note(&mut self) {
+        self.note = None;
+    }
+
+    /// The review went to the agent: its comments are done with.
+    pub(super) fn sent(&mut self) {
+        if let Some(key) = self.key() {
+            self.reviews.remove(&key);
+        }
+        self.relayout();
+    }
+
+    /// What the review last said.
+    pub(super) fn note(&self) -> Option<&str> {
+        self.note.as_deref()
+    }
+
+    /// Lets go of every review but those of tabs `open` says are still open.
+    pub(super) fn forget_tabs(&mut self, open: impl Fn(TabId) -> bool) {
+        self.reviews.retain(|key, _| open(key.tab));
+    }
+
+    /// Drops the comments on files the list no longer has, and says which.
+    fn drop_unlisted(&mut self) {
+        let (Some(key), Reading::Ready(overview)) = (self.key(), &self.reading) else {
+            return;
+        };
+        let listed: HashSet<&PathBuf> = overview.files.iter().map(|file| &file.path).collect();
+        let mut dropped = Vec::new();
+        if let Some(comments) = self.reviews.get_mut(&key) {
+            comments.retain(|comment| {
+                if listed.contains(&comment.anchor.path) {
+                    return true;
+                }
+                dropped.push(review::location(&comment.anchor));
+                false
+            });
+        }
+        if let Some(note) = review::dropped(&dropped) {
+            self.note = Some(note);
+        }
+    }
+
+    /// The files with a comment on them, in the review being shown.
+    fn commented(&self) -> HashSet<PathBuf> {
+        self.comments()
+            .iter()
+            .map(|comment| comment.anchor.path.clone())
+            .collect()
     }
 
     /// Rebuilds the rows and the running sum of their heights, from what is
@@ -574,7 +935,23 @@ impl ChangesPanelState {
                     rows.push(Row::Note("No lines changed.".to_owned()));
                 }
                 Some(Ok(diff)) => {
-                    rows.extend((0..diff.lines.len()).map(|line| Row::Line(index, line)));
+                    let mut comments = self.comments_on(&file.path).into_iter().peekable();
+                    let draft = self
+                        .draft
+                        .as_ref()
+                        .filter(|draft| draft.anchor.path == file.path)
+                        .map(|draft| draft.anchor.at);
+                    for line in 0..diff.lines.len() {
+                        rows.push(Row::Line(index, line));
+                        while let Some(comment) =
+                            comments.next_if(|comment| comment.anchor.at == line)
+                        {
+                            rows.push(Row::Comment(index, comment.id));
+                        }
+                        if draft == Some(line) {
+                            rows.push(Row::Draft(index));
+                        }
+                    }
                     if diff.cut {
                         rows.push(Row::Note(
                             "Cut short here. Open the file to see the rest.".to_owned(),
@@ -635,6 +1012,47 @@ impl ChangesPanelState {
     }
 }
 
+/// Moves every comment in `comments` on the file at `path` — and `draft`,
+/// if it is on that file — to where its line is in `diff`, which has just
+/// been read. Answers where each comment whose line is gone was, having
+/// dropped it, and whether the draft's line is gone too, which is the
+/// caller's to drop.
+///
+/// Over the fields rather than the state, because the diff it reads is the
+/// state's own and is borrowed while this runs.
+fn follow_lines(
+    path: &Path,
+    diff: &FileDiff,
+    comments: Option<&mut Vec<Comment>>,
+    draft: &mut Option<Draft>,
+) -> (Vec<String>, bool) {
+    let places = review::places(&diff.lines);
+    let follow = |anchor: &mut Anchor| match review::reanchor(anchor, &diff.lines, &places) {
+        Some((at, place)) => {
+            anchor.at = at;
+            anchor.place = place;
+            anchor.line.clone_from(&diff.lines[at]);
+            true
+        }
+        None => false,
+    };
+
+    let mut dropped = Vec::new();
+    if let Some(comments) = comments {
+        comments.retain_mut(|comment| {
+            if comment.anchor.path != path || follow(&mut comment.anchor) {
+                return true;
+            }
+            dropped.push(review::location(&comment.anchor));
+            false
+        });
+    }
+    let draft_gone = draft
+        .as_mut()
+        .is_some_and(|draft| draft.anchor.path == path && !follow(&mut draft.anchor));
+    (dropped, draft_gone)
+}
+
 /// The whole column.
 pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     let ui = workspace.fonts().ui;
@@ -649,6 +1067,7 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
                 .with_child(header(workspace, ui))
                 .with_child(title_row(ui))
                 .with_child(base_line(workspace, ui))
+                .with_child(review_bar(workspace, ui))
                 .with_child(Expanded::new(1., list(workspace, app)).finish())
                 .finish(),
         )
@@ -743,6 +1162,84 @@ fn base_line(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     .finish()
 }
 
+/// The review's strip, at the top of the column where it is found without
+/// scrolling: the two ways a review leaves the column, and what the last of
+/// them said. Nothing at all with no comment and nothing to say, which is how
+/// the column is most of the time.
+fn review_bar(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
+    let state = workspace.changes_panel();
+    let count = state.comments().len();
+    let note = state.note();
+    if count == 0 && note.is_none() {
+        return Empty::new().finish();
+    }
+
+    let mut column = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+    if count > 0 {
+        let label = match count {
+            1 => "Send 1 comment to the agent".to_owned(),
+            count => format!("Send {count} comments to the agent"),
+        };
+        column.add_child(
+            Flex::row()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_child(
+                    Container::new(text_button(
+                        state.control(Control::Send),
+                        &label,
+                        Some(ChangesAction::Send),
+                        ui,
+                    ))
+                    .with_margin_right(6.)
+                    .finish(),
+                )
+                .with_child(text_button(
+                    state.control(Control::CopyReview),
+                    "Copy review",
+                    Some(ChangesAction::CopyReview),
+                    ui,
+                ))
+                .finish(),
+        );
+    }
+    if let Some(note) = note {
+        // Wrapped rather than cut: a note is the answer to a press, and the
+        // half of it an ellipsis would take is the half that says what to
+        // do instead.
+        column.add_child(
+            Container::new(
+                Flex::row()
+                    .with_main_axis_size(MainAxisSize::Max)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Start)
+                    .with_child(
+                        Expanded::new(
+                            1.,
+                            Paragraph::new(note.to_owned(), ui, 11.)
+                                .with_color(theme().text_muted)
+                                .with_line_height_ratio(1.4)
+                                .finish(),
+                        )
+                        .finish(),
+                    )
+                    .with_child(small_cross(
+                        state.control(Control::DismissNote),
+                        ChangesAction::DismissNote,
+                    ))
+                    .finish(),
+            )
+            .with_margin_top(if count > 0 { 6. } else { 0. })
+            .finish(),
+        );
+    }
+
+    Container::new(column.finish())
+        .with_margin_bottom(8.)
+        .finish()
+}
+
 /// A directory's last component, which is what a person calls a checkout.
 fn name_of(path: &Path) -> String {
     path.file_name()
@@ -832,10 +1329,18 @@ fn row(workspace: &Workspace, row: &Row) -> Box<dyn Element> {
                 .and_then(|file| state.diff(&file.path))
                 .and_then(|diff| diff.lines.get(*line));
             match text {
+                Some(text) if review::commentable(text) => {
+                    commentable_line(workspace, *file, *line, text, fonts.monospace)
+                }
                 Some(text) => diff_line(text, fonts.monospace),
                 None => Empty::new().finish(),
             }
         }
+        Row::Comment(_, id) => match state.comments().iter().find(|comment| comment.id == *id) {
+            Some(comment) => comment_row(workspace, comment, fonts.ui),
+            None => Empty::new().finish(),
+        },
+        Row::Draft(_) => draft_row(workspace),
     };
 
     ConstrainedBox::new(content)
@@ -1078,6 +1583,134 @@ fn diff_line(text: &str, monospace: FamilyId) -> Box<dyn Element> {
             .finish(),
     )
     .left()
+    .finish()
+}
+
+/// A changed line, or a hunk's header, which a press leaves a comment on.
+///
+/// The `+` at its end appears under the pointer and says so; the whole row
+/// takes the press, because a sixteen-pixel line is target enough and a
+/// twelve-pixel mark at the far end of it is not.
+fn commentable_line(
+    workspace: &Workspace,
+    file: usize,
+    line: usize,
+    text: &str,
+    monospace: FamilyId,
+) -> Box<dyn Element> {
+    let state = workspace.changes_panel();
+    let text = text.to_owned();
+    Hoverable::new(state.control(Control::Line(file, line)), move |mouse| {
+        let hovered = mouse.is_hovered();
+        let mut row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(Expanded::new(1., diff_line(&text, monospace)).finish());
+        if hovered {
+            row.add_child(
+                Icon::new(Lucide::Plus, 10.)
+                    .with_color(theme().accent)
+                    .finish(),
+            );
+        }
+        Container::new(row.finish())
+            .with_background_color(if hovered {
+                theme().overlay_1
+            } else {
+                Color::TRANSPARENT
+            })
+            .finish()
+    })
+    .on_click(move |_, ctx, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::Changes(ChangesAction::Comment {
+            file,
+            line,
+        }));
+    })
+    .finish()
+}
+
+/// A comment, under its line: a bar in the accent down its left edge, so it
+/// reads as a note on the code rather than as more of it, what was said, and
+/// a × that takes it away.
+fn comment_row(workspace: &Workspace, comment: &Comment, ui: FamilyId) -> Box<dyn Element> {
+    let state = workspace.changes_panel();
+    Container::new(
+        Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(
+                Expanded::new(
+                    1.,
+                    Align::new(
+                        Text::new(comment.text.clone(), ui, 12.)
+                            .with_color(theme().text_primary)
+                            .with_ellipsis(Cut::End)
+                            .finish(),
+                    )
+                    .left()
+                    .finish(),
+                )
+                .finish(),
+            )
+            .with_child(small_cross(
+                state.control(Control::RemoveComment(comment.id)),
+                ChangesAction::RemoveComment(comment.id),
+            ))
+            .finish(),
+    )
+    .with_padding_left(8.)
+    .with_margin_top(2.)
+    .with_margin_bottom(2.)
+    .with_background_color(theme().overlay_1)
+    .with_border(Border::left(2.).with_border_color(theme().accent))
+    .finish()
+}
+
+/// The field a comment is typed in, under the line it is about.
+///
+/// One line: [`TextField`](super::text_field::TextField) has no second, so
+/// Shift-Enter does nothing here. Enter keeps the comment and Escape drops
+/// it — both taken by the workspace before the field sees them, see
+/// [`Workspace::changes_takes_keys`].
+fn draft_row(workspace: &Workspace) -> Box<dyn Element> {
+    let state = workspace.changes_panel();
+    let Some(input) = state.draft_input() else {
+        return Empty::new().finish();
+    };
+    Container::new(
+        super::text_field::TextField::new(
+            input.clone(),
+            workspace.clipboard().clone(),
+            workspace.fonts(),
+            state.control(Control::Draft),
+            "Comment for the agent · Enter adds it",
+        )
+        .with_focus(WorkspaceAction::Changes(ChangesAction::FocusComment))
+        .finish(),
+    )
+    .with_vertical_padding(4.)
+    .finish()
+}
+
+/// A 16px × that sends `action`: a comment's, and the note's.
+fn small_cross(state: MouseStateHandle, action: ChangesAction) -> Box<dyn Element> {
+    Hoverable::new(state, move |mouse| {
+        let color = if mouse.is_hovered() {
+            theme().text_primary
+        } else {
+            theme().text_muted
+        };
+        ConstrainedBox::new(
+            Align::new(Icon::new(Lucide::X, 10.).with_color(color).finish()).finish(),
+        )
+        .with_width(16.)
+        .with_height(16.)
+        .finish()
+    })
+    .on_click(move |_, ctx, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::Changes(action));
+    })
     .finish()
 }
 
