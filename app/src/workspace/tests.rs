@@ -3130,7 +3130,7 @@ fn card_text(harness: &mut Harness) -> String {
 }
 
 #[test]
-fn checking_with_no_gh_installed_says_so_on_the_card() {
+fn checking_with_no_gh_to_be_found_says_so_on_the_card() {
     let mut harness = Harness::seeded();
     let pane = harness.pane_ids()[0];
     report_pull_request(&mut harness, pane, PULL_REQUEST);
@@ -3145,8 +3145,12 @@ fn checking_with_no_gh_installed_says_so_on_the_card() {
         check_pull_request(&mut harness, pane),
         PullRequestCheck::Failed(crate::forge::CheckError::Missing)
     );
+    // Whole, not cut at the card's edge: the sentence is the one thing the
+    // card has to say about a check that never ran.
+    let said = crate::forge::CheckError::Missing.to_string();
+    assert!(said.contains("GitHub CLI (gh) was not found"), "{said}");
     assert!(
-        card_text(&mut harness).contains("GitHub CLI (gh) is not installed"),
+        card_text(&mut harness).contains(&said),
         "the card does not say why there is no answer"
     );
 }

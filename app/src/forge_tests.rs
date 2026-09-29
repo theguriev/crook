@@ -174,7 +174,10 @@ fn every_failure_says_what_to_do_in_words() {
     // person can act on — and the three the brief names say the three
     // things they are.
     assert!(CheckError::Missing.to_string().contains("gh"));
-    assert!(CheckError::Missing.to_string().contains("not installed"));
+    // Not found, which is what is known — not "not installed", which a
+    // `gh` outside this process's `PATH` would make a lie.
+    assert!(CheckError::Missing.to_string().contains("not found"));
+    assert!(!CheckError::Missing.to_string().contains("not installed"));
     assert!(CheckError::SignedOut.to_string().contains("gh auth login"));
     assert!(CheckError::Offline.to_string().contains("network"));
     assert!(
@@ -193,6 +196,24 @@ fn a_gh_that_is_not_there_is_said_to_be_missing() {
         Err(CheckError::Missing),
         check(&nowhere.to_string_lossy(), URL, TIMEOUT)
     );
+}
+
+#[test]
+fn gh_is_looked_for_where_a_mac_installs_it_when_path_has_none() {
+    // A Crook.app opened from the Dock is handed launchd's PATH, which holds
+    // none of these; every way of installing gh on a Mac puts it in one.
+    let places = usual_places();
+    if cfg!(target_os = "macos") {
+        for place in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"] {
+            assert!(
+                places.contains(&std::path::PathBuf::from(place)),
+                "{place} in {places:?}"
+            );
+        }
+    }
+    if cfg!(windows) {
+        assert!(places.is_empty(), "{places:?}");
+    }
 }
 
 // --- a fake gh ---------------------------------------------------------------
@@ -237,9 +258,14 @@ mod with_a_fake_gh {
 
     /// A `gh` that records its arguments beside itself and then runs `body`.
     fn fake_gh(scratch: &ScratchDir, body: &str) -> String {
+        fake_named(scratch, "gh", body)
+    }
+
+    /// [`fake_gh`], under another name.
+    fn fake_named(scratch: &ScratchDir, name: &str, body: &str) -> String {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let gh = scratch.path().join("gh");
+        let gh = scratch.path().join(name);
         let asked = scratch.path().join("asked");
         std::fs::write(
             &gh,
@@ -326,6 +352,57 @@ mod with_a_fake_gh {
         assert!(
             took < Duration::from_secs(3),
             "gh was waited on for {took:?}, not killed at {deadline:?}"
+        );
+    }
+
+    #[test]
+    fn a_gh_not_on_the_path_is_found_where_it_is_usually_installed() {
+        // A name no PATH holds, so the first look fails the way `gh` does
+        // for a Crook.app from the Dock, and only the second can find it.
+        const NAME: &str = "crook-forge-test-gh-7c1e";
+        let installed = ScratchDir::new("installed");
+        fake_named(
+            &installed,
+            NAME,
+            &format!("cat <<'EOF'\n{}\nEOF", printed("OPEN", "")),
+        );
+        let empty = ScratchDir::new("empty");
+        let places = [empty.path().to_owned(), installed.path().to_owned()];
+
+        let found = check_in(NAME, &places, URL, TIMEOUT).expect("found in the second place");
+        assert_eq!(State::Open, found.state);
+        let asked = std::fs::read_to_string(installed.path().join("asked")).unwrap();
+        assert_eq!(
+            vec!["pr", "view", URL, "--json", "state,statusCheckRollup"],
+            asked.lines().collect::<Vec<_>>()
+        );
+
+        // Nowhere it is looked for: missing, and said so.
+        assert_eq!(
+            Err(CheckError::Missing),
+            check_in(NAME, &places[..1], URL, TIMEOUT)
+        );
+
+        // A file of that name that cannot be run is not a gh.
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let listed = ScratchDir::new("not-runnable");
+            let file = listed.path().join(NAME);
+            std::fs::write(&file, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(
+                Err(CheckError::Missing),
+                check_in(NAME, &[listed.path().to_owned()], URL, TIMEOUT)
+            );
+        }
+
+        // A path names one program, and is not looked for anywhere else.
+        let nowhere = std::env::temp_dir()
+            .join("crook-forge-no-such-directory")
+            .join(NAME);
+        assert_eq!(
+            Err(CheckError::Missing),
+            check_in(&nowhere.to_string_lossy(), &places, URL, TIMEOUT)
         );
     }
 }

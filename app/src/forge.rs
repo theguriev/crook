@@ -30,9 +30,24 @@
 //! abandoned rather than joined. `gh` runs no hooks, so what could hold its
 //! pipes past its own death is rarer here than it is for `git`; the grace
 //! costs nothing when it is not needed.
+//!
+//! # Finding `gh`
+//!
+//! On the `PATH` Crook was started with, and then where `gh` is usually
+//! installed — see [`usual_places`]. The second look is not a nicety: a
+//! `Crook.app` opened from the Dock or Finder is started by launchd with
+//! `/usr/bin:/bin:/usr/sbin:/sbin` and nothing else, and every way of
+//! installing `gh` on a Mac — Homebrew, gh's own package, MacPorts — puts it
+//! outside that. `git` never had the problem because macOS keeps one in
+//! `/usr/bin`; `gh` is the first program Crook runs from its own process that
+//! is not there. The pane's shells have the person's whole `PATH` because
+//! they are login shells; this process is not one, and does not run one to
+//! find out — a profile that prints, prompts or takes seconds is a profile a
+//! press would be waiting on.
 
 use std::fmt;
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -145,7 +160,8 @@ impl Found {
 /// own, because each has a different thing to do; the rest is what `gh` said.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CheckError {
-    /// There is no `gh` to ask.
+    /// There is no `gh` to ask: none on the `PATH` Crook was started with,
+    /// and none in [`usual_places`].
     Missing,
     /// `gh` is installed and not signed in, or its token went bad.
     SignedOut,
@@ -164,9 +180,9 @@ pub enum CheckError {
 impl fmt::Display for CheckError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Missing => {
-                f.write_str("GitHub CLI (gh) is not installed, and the check asks through it")
-            }
+            // Not "not installed": this process's `PATH` is not the person's,
+            // and a `gh` somewhere unusual is installed all the same.
+            Self::Missing => f.write_str("GitHub CLI (gh) was not found on Crook's PATH"),
             Self::SignedOut => f.write_str("gh is not signed in: run `gh auth login`"),
             Self::Offline => f.write_str("gh could not reach GitHub: is there a network?"),
             Self::TimedOut(after) => {
@@ -181,19 +197,98 @@ impl fmt::Display for CheckError {
 
 /// Asks `gh` how the pull request at `url` stands, killing it at `timeout`.
 ///
-/// `gh` is the program's name, found on `PATH` — the person's own, which is
-/// the point — or a path, which is how a test hands it a fake. Blocking, for
-/// up to `timeout`: call it on the background pool.
+/// `gh` is the program's name — looked for on `PATH`, and then in
+/// [`usual_places`], so that it is the person's own however Crook was
+/// started — or a path, which is how a test hands it a fake and which is
+/// looked for nowhere else. Blocking, for up to `timeout` a run: call it on
+/// the background pool.
 pub fn check(gh: &str, url: &str, timeout: Duration) -> Result<Found, CheckError> {
-    let finished = run(
-        gh,
-        &["pr", "view", url, "--json", "state,statusCheckRollup"],
-        timeout,
-    )?;
+    check_in(gh, &usual_places(), url, timeout)
+}
+
+/// [`check`], with the directories a bare name is looked for in after
+/// `PATH` given rather than [`usual_places`].
+fn check_in(
+    gh: &str,
+    places: &[PathBuf],
+    url: &str,
+    timeout: Duration,
+) -> Result<Found, CheckError> {
+    let arguments = ["pr", "view", url, "--json", "state,statusCheckRollup"];
+    let finished = match run(gh, &arguments, timeout) {
+        Err(CheckError::Missing) => {
+            let found = elsewhere(gh, places).ok_or(CheckError::Missing)?;
+            run(&found, &arguments, timeout)?
+        }
+        finished => finished?,
+    };
     if !finished.success {
         return Err(refused(finished.code, &finished.stderr));
     }
     read(&finished.stdout)
+}
+
+/// Where `gh` is looked for once the `PATH` Crook was started with has none.
+///
+/// The directories the ways of installing it put it in, which a login shell
+/// adds to `PATH` and launchd does not. On a Mac: Homebrew's two prefixes,
+/// Apple silicon's and Intel's — the second is also where gh's own package
+/// installs it — and MacPorts'. Elsewhere on Unix: `/usr/local/bin` and
+/// Homebrew on Linux's. Both: `~/.local/bin`, where a binary put in by hand
+/// goes, and a Nix profile's. Windows has none: gh's installer puts it on the
+/// system `PATH`, which an application started from Explorer is handed.
+pub fn usual_places() -> Vec<PathBuf> {
+    #[cfg(unix)]
+    {
+        let system: &[&str] = if cfg!(target_os = "macos") {
+            &["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"]
+        } else {
+            &["/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin"]
+        };
+        let mut places: Vec<PathBuf> = system.iter().map(PathBuf::from).collect();
+        if let Some(home) = std::env::home_dir() {
+            places.push(home.join(".local").join("bin"));
+            places.push(home.join(".nix-profile").join("bin"));
+        }
+        places
+    }
+    #[cfg(not(unix))]
+    {
+        Vec::new()
+    }
+}
+
+/// `program` in the first of `places` that holds one that can be run, when
+/// `program` is a bare name. A path names one program, and is not looked for
+/// anywhere else.
+fn elsewhere(program: &str, places: &[PathBuf]) -> Option<String> {
+    let mut parts = Path::new(program).components();
+    let bare = matches!(
+        (parts.next(), parts.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    );
+    if !bare {
+        return None;
+    }
+    places
+        .iter()
+        .map(|place| place.join(program))
+        .find(|candidate| runnable(candidate))
+        .and_then(|found| found.to_str().map(str::to_owned))
+}
+
+/// Whether `path` is a file with an execute bit for anybody.
+#[cfg(unix)]
+fn runnable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path)
+        .is_ok_and(|data| data.is_file() && data.permissions().mode() & 0o111 != 0)
+}
+
+/// Everywhere else, being a file is being runnable.
+#[cfg(not(unix))]
+fn runnable(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// What one `gh` invocation produced.
