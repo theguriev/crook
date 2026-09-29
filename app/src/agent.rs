@@ -206,9 +206,18 @@ spaces or control characters, not {url:?}",
 /// — and the last found is taken. Input that is not JSON is gh's own output piped
 /// through — `gh pr create --fill | crook --agent running --pull-request -`
 /// — and its last https address is taken.
+///
+/// Input that is a JSON object serde cannot read is a hook's all the same,
+/// and says nothing: read as piped text, its last https word — any link in
+/// any tool's output, a `"}}` still on it — would be sent as the pull request
+/// without either question above asked of it. That happens: an agent can cut
+/// a long output in the middle of a character, and a lone surrogate escape
+/// is JSON serde refuses.
 fn pull_request_from_hook(input: &str) -> Option<String> {
-    let Ok(hook) = serde_json::from_str::<Value>(input) else {
-        return last_address(input, |_| true);
+    let hook = match serde_json::from_str::<Value>(input) {
+        Ok(hook) => hook,
+        Err(_) if input.trim_start().starts_with('{') => return None,
+        Err(_) => return last_address(input, |_| true),
     };
     let command = hook.get("tool_input")?.get("command")?.as_str()?;
     if !opens_a_pull_request(command) {
@@ -1153,6 +1162,34 @@ mod tests {
         assert_eq!(
             None,
             pull_request_from_hook("http://github.com/o/r/pull/1\n")
+        );
+    }
+
+    #[test]
+    fn a_hook_input_that_does_not_parse_is_not_read_as_piped_text() {
+        // An output cut in the middle of an emoji leaves half a surrogate
+        // pair, which JSON can escape and serde will not read. Taken as piped
+        // text, the last https word in it — a link any tool printed, braces
+        // and all — would become the pull request with no `gh pr create` in
+        // sight.
+        let cut = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"cargo test"},"tool_response":{"stdout":"see https://docs.rs/x \ud83d"}}"#;
+        assert!(serde_json::from_str::<Value>(cut).is_err(), "serde read it");
+        assert_eq!(None, pull_request_from_hook(cut));
+
+        // Nor with the command and a pull request's address in it: the
+        // input cannot be read, so neither can be trusted to be what it
+        // looks like.
+        let created = format!(
+            r#"{{"tool_input":{{"command":"gh pr create --fill"}},"tool_response":{{"stdout":"{PR}\n\ud83d"}}}}"#
+        );
+        assert!(serde_json::from_str::<Value>(&created).is_err());
+        assert_eq!(None, pull_request_from_hook(&created));
+        assert_eq!(None, pull_request_from_hook(&format!("  {{ {PR}")));
+
+        // Piped text is still piped text.
+        assert_eq!(
+            Some(PR.to_owned()),
+            pull_request_from_hook(&format!("Creating pull request\n{PR}\n"))
         );
     }
 
