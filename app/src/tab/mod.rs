@@ -456,9 +456,12 @@ impl AgentSession {
 /// terminal, and any program can write one: a bare `PR #12` for
 /// `https://github.com.example.net/o/r/pull/12` would be a link that reads
 /// as the agent's own and opens somebody else's server. The host is the one
-/// after any `user@`, which is where a browser goes. Warp's fallback when it
-/// finds no number is the whole address; this is the host, since an address
-/// is wider than a row — the card prints the whole of it.
+/// a browser goes to, read as the URL standard reads an https address: after
+/// any `user@`, and ended by a `\` as well as by a `/` — so
+/// `https://attacker.example\@github.com/o/r/pull/12` is attacker.example's,
+/// with `@github.com` the start of its path. Warp's fallback when it finds no
+/// number is the whole address; this is the host, since an address is wider
+/// than a row — the card prints the whole of it.
 pub fn pull_request_label(url: &str) -> Option<String> {
     let url = url.trim();
     if url.is_empty() {
@@ -467,7 +470,7 @@ pub fn pull_request_label(url: &str) -> Option<String> {
     let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
     let (authority, rest) = after_scheme.split_at(
         after_scheme
-            .find(['/', '?', '#'])
+            .find(['/', '\\', '?', '#'])
             .unwrap_or(after_scheme.len()),
     );
     let host = authority.rsplit('@').next().unwrap_or(authority);

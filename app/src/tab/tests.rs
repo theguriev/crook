@@ -1730,6 +1730,16 @@ fn an_address_dressed_as_github_is_labelled_with_the_host_it_opens() {
         pull_request_label("https://github.com@attacker.example/o/r/pull/12").as_deref(),
         Some("attacker.example #12")
     );
+    // A browser ends an https host at a `\` as it does at a `/`, so an
+    // `@github.com` after one is in the path, and the host is before it.
+    assert_eq!(
+        pull_request_label("https://attacker.example\\@github.com/o/r/pull/12").as_deref(),
+        Some("attacker.example #12")
+    );
+    assert_eq!(
+        pull_request_label("https://github.com\\@attacker.example/o/r/pull/12").as_deref(),
+        Some("PR #12")
+    );
     // And `/pull/` in the query is not in the path.
     assert_eq!(
         pull_request_label("https://github.com/o/r/issues?q=/pull/12").as_deref(),

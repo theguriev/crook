@@ -1077,10 +1077,11 @@ rule either end applies: `https://` with a host, at most 512 bytes, no control c
 no white space. The row opens it through `app/src/browser.rs`, whose allow-list checks it a
 second time. The wire checks the scheme and nothing else, and any program's output can write
 the sequence, so the chip reads `PR #<n>` only for github.com and names the host anywhere else
-(`gitlab.com #42`, `github.com.example.net #12`) — the host after any `user@`, which is where a
-browser goes — cut at a fixed width from the start, and the hover card prints the whole
-address. `AgentSession::pull_request` records it against the branch the pane is on at the
-moment it arrives — read from `HEAD`, not from the row's git facts, which are up to a poll old
+(`gitlab.com #42`, `github.com.example.net #12`) — the host a browser goes to, read the way the
+URL standard reads an https address: after any `user@`, and ended by a `\` as well as a `/`,
+so `https://attacker.example\@github.com/o/r/pull/12` is attacker.example's — cut at a fixed
+width from the start, and the hover card prints the whole address. `AgentSession::pull_request`
+records it against the branch the pane is on at the moment it arrives — read from `HEAD`, not from the row's git facts, which are up to a poll old
 and would record a branch made, pushed and opened inside one poll as the one it started on —
 and drops it when `HEAD` names another branch or the pane leaves the repository, which is
 asked whenever the git model reports a change and whenever the pane moves, never on a clock.
