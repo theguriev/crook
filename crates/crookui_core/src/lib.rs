@@ -52,7 +52,7 @@ pub mod text_layout;
 pub use element::{Element, ParentElement, SizeConstraint};
 pub use event::Event;
 pub use geometry::{Color, RectF, Vector2F, vec2f};
-pub use presenter::{EventContext, LayoutContext, PaintContext, Presenter};
+pub use presenter::{EventContext, FrameCounts, LayoutContext, PaintContext, Presenter};
 pub use scene::{ClipBounds, Scene};
 
 pub use crate::core::*;

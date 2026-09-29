@@ -118,13 +118,21 @@ impl AgentStatus {
 /// are answered differently by the person reading them — and so that the
 /// two can never disagree: attention that is set has a cause, and attention
 /// that is cleared has none.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Attention {
     /// The shell rang the bell in a pane without the keyboard.
     Bell,
     /// The agent's status changed to something other than running, in a
     /// pane without the keyboard.
     StatusChange,
+    /// A program in a pane without the keyboard sent one of the
+    /// notifications other terminals show — OSC 9, 777 or 99 — and this is
+    /// what it said, on one line.
+    ///
+    /// The words ride with the flag for the reason the cause does: they
+    /// are what the look is being asked for, so they go when the look is
+    /// given and never linger on a row somebody has already read.
+    Notification(String),
 }
 
 /// Where a session's status came from.
@@ -204,12 +212,12 @@ pub struct AgentSession {
     pub source: StatusSource,
     /// Whether something happened here while nobody was looking, and what.
     ///
-    /// The bell in a pane without the keyboard, or a status that changed
-    /// there to anything but running: a person who walked away from a tab
-    /// wants to know its agent stopped, whatever it stopped for. Cleared by
-    /// looking — every focus change runs `attend` — because attention is a
-    /// fact about the person and not about the work, which is the whole
-    /// reason it is not folded into [`Self::status`].
+    /// The bell in a pane without the keyboard, a notification sent there,
+    /// or a status that changed there to anything but running: a person who
+    /// walked away from a tab wants to know its agent stopped, whatever it
+    /// stopped for. Cleared by looking — every focus change runs `attend` —
+    /// because attention is a fact about the person and not about the work,
+    /// which is the whole reason it is not folded into [`Self::status`].
     pub attention: Option<Attention>,
     /// Whether a person asked to be brought back here.
     ///
@@ -249,7 +257,21 @@ pub struct AgentSession {
     ///
     /// Reported off the open block's OSC 133 marks. It is a *name*, not state:
     /// the dot already says whether something is running, and this says what.
+    /// Written through [`Self::set_running_command`].
     pub running_command: Option<String>,
+    /// The agent this pane was running when the window it came back from
+    /// was closed, by its program's name, until anything runs here.
+    ///
+    /// Set by a restore and by nothing else, and only for a pane whose
+    /// directory came back: the process is gone, but the conversation is
+    /// still on disk, keyed by that directory, and this is what lets the
+    /// pane offer it back. Kept until a command runs — the resume line, or
+    /// whatever a person runs instead, seen running or only seen finishing
+    /// (see [`Self::command_finished`]) — so that a window closed again before
+    /// anybody pressed Enter still remembers what it was offering, rather
+    /// than the first save after the restore writing the agent out of the
+    /// file.
+    pub restored_agent: Option<String>,
 }
 
 /// Where a session starts when nobody named a directory.
@@ -297,7 +319,55 @@ impl AgentSession {
             working_directory: starting_directory(),
             pull_request: None,
             running_command: None,
+            restored_agent: None,
         }
+    }
+
+    /// The coding agent this pane is running, or was running when the window
+    /// it came back from was closed, by its program's name — `claude`, never
+    /// the prompt typed after it.
+    ///
+    /// What the session file remembers of a pane's process, and all it
+    /// remembers: see [`crate::session`].
+    pub fn agent(&self) -> Option<&str> {
+        self.running_command
+            .as_deref()
+            .and_then(crate::agent::program_of)
+            .or(self.restored_agent.as_deref())
+    }
+
+    /// Records what the pane is running, answering whether that changed the
+    /// agent it names — which is when the session file has something new to
+    /// say.
+    ///
+    /// Any command at all ends [`Self::restored_agent`]: the conversation it
+    /// named has been resumed, or the person has done something else with the
+    /// pane, and either way the pane is no longer offering it.
+    pub fn set_running_command(&mut self, command: Option<String>) -> bool {
+        let before = self.agent().map(str::to_owned);
+        if command.is_some() {
+            self.restored_agent = None;
+        }
+        self.running_command = command;
+        before.as_deref() != self.agent()
+    }
+
+    /// Ends [`Self::restored_agent`] because a command finished in the pane,
+    /// answering whether that changed the agent it names.
+    ///
+    /// [`Self::set_running_command`] alone is not enough. What a pane is
+    /// running is read off it at rest, so a command that starts and ends
+    /// between two reads — `cd`, `ls`, `git status` — is never seen running,
+    /// and a pane that ran only commands like those would go on naming the
+    /// agent, against whatever directory the `cd` left it in. The shell marks
+    /// the end of every command, however quick, and that mark is what calls
+    /// this — the mark of a command, that is: the one a shell sends for a line
+    /// that ran nothing, ctrl-c at the prompt or an empty Enter, does not. An
+    /// agent the pane is running now stays named.
+    pub fn command_finished(&mut self) -> bool {
+        let before = self.agent().map(str::to_owned);
+        self.restored_agent = None;
+        before.as_deref() != self.agent()
     }
 
     /// What the tab bar should print: what a person called it, else the
@@ -323,6 +393,21 @@ impl AgentSession {
             .as_deref()
             .or(self.derived_title.as_deref())
             .or(self.running_command.as_deref())
+    }
+
+    /// What the row says on its second line in place of the table's: what
+    /// a notification nobody has seen yet said, else what a waiting agent
+    /// is asking.
+    ///
+    /// The notification first, because it is the newer of the two — a
+    /// status change after it takes its place in [`Self::attention`] — and
+    /// because it is the one a look will take away: once somebody has read
+    /// it, the question the agent is still asking comes back.
+    pub fn row_message(&self) -> Option<&str> {
+        match &self.attention {
+            Some(Attention::Notification(message)) => Some(message),
+            _ => self.message.as_deref(),
+        }
     }
 
     /// Whether somebody should look here: the work asked, or the person did.
@@ -353,7 +438,8 @@ impl AgentSession {
     /// The count in the header and the tab the "next waiting" chord goes to:
     /// something happened here unseen, the person marked it to come back to,
     /// or the agent said it needs input and is still saying so. `active` is
-    /// whether the pane is the one being looked at, and a pane that is can
+    /// whether the pane is the one being looked at — the one with the
+    /// keyboard, in a window that has the desktop's — and a pane that is can
     /// wait for nobody.
     pub fn is_waiting(&self, active: bool) -> bool {
         !active && (self.asks_for_a_look() || self.status == AgentStatus::NeedsInput)
