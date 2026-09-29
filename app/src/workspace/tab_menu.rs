@@ -229,7 +229,7 @@ const LABEL_GAP: f32 = 8.;
 const BRANCH_PLACEHOLDER: &str = "branch";
 
 /// What the prompt field says before anything is typed into it.
-const PROMPT_PLACEHOLDER: &str = "what it should do";
+pub(super) const PROMPT_PLACEHOLDER: &str = "what it should do";
 
 /// How many places to start from the creator shows before the list scrolls.
 ///

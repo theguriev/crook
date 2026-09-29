@@ -5615,6 +5615,63 @@ fn every_agent_is_a_key_away_from_shell_only() {
 
 #[cfg(unix)]
 #[test]
+fn the_creator_draws_the_name_over_its_bases_and_the_prompt_under_its_agents() {
+    // The creator's two halves are not the same way up. The name is over the
+    // places to start from, and the prompt is under the agents, since it is
+    // what the picked one is asked. `CreatorField` once said both fields were
+    // over their lists, and anything placed or clicked by that sentence finds
+    // the prompt on the wrong side of "Shell only".
+    let scratch = Scratch::new();
+    let Some((mut harness, _, _)) = a_window_with_an_agent(&scratch) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    harness.workspace_update(|workspace, ctx| {
+        workspace.set_shell(Some(PathBuf::from("/bin/bash")), ctx);
+    });
+    harness.run_command("crook/worktrees/new-task");
+    harness.wait_for("the creator to open on the task", |harness| {
+        harness.worktree_menu_is_creating()
+    });
+    assert!(
+        harness.worktree_prompt_has_keys(),
+        "New task… asked for no prompt"
+    );
+    let branch = harness.worktree_field(crate::plugins::worktrees::BRANCH_FIELD);
+
+    let scene = harness.frame();
+    let menu = worktree_menu_box(&scene).expect("the menu is up");
+    let lines = text_lines(&scene, |position| menu.contains_point(position));
+    let height = |start: &str| {
+        lines
+            .iter()
+            .find(|(_, text)| text.starts_with(start))
+            .map(|(at, _)| at.y())
+            .unwrap_or_else(|| panic!("no line of the creator starts {start:?}: {lines:?}"))
+    };
+
+    let name = height(&branch);
+    let bases = height("Start from");
+    let agents = height("Agent");
+    let shell_only = height("Shell only");
+    let agent = height("Claude Code");
+    let prompt = height(super::tab_menu::PROMPT_PLACEHOLDER);
+    assert!(
+        name < bases,
+        "the name is not over the places to start from: {lines:?}"
+    );
+    assert!(
+        bases < agents && agents < shell_only && shell_only < agent,
+        "the agents are not under the places to start from, \"Shell only\" first: {lines:?}"
+    );
+    assert!(
+        agent < prompt,
+        "the prompt is not under the agents: {lines:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn a_new_task_leaves_the_agents_quoted_line_unsent_in_the_new_tabs_composer() {
     // The whole gesture: the palette's "New task…", a sentence, Enter. The
     // checkout is made on a branch named after the sentence, and the new
