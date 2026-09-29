@@ -11,6 +11,7 @@
 
 use crook_terminal::BlockId;
 
+use crate::notify::Occasion;
 use crate::plugin::{ActionId, PageId, SectionId};
 use crate::settings::{Density, Granularity, PrimaryInfo, StatusMarks, Subtitle};
 use crate::tab::{PaneId, TabAction, TabId};
@@ -29,6 +30,9 @@ pub enum WorkspaceAction {
     Theme(ThemeAction),
     /// The header was used as what it is: the window's title bar.
     Window(WindowAction),
+    /// The question a close asks before it ends agents that are still
+    /// working was answered. See [`closing`](super::closing).
+    Ending(EndingAction),
     /// Something happened to the context menu a tab's secondary press opens.
     TabMenu(TabMenuAction),
     /// Something happened in the worktree menu, which is one entry of that one.
@@ -119,6 +123,9 @@ pub enum WorkspaceAction {
     /// and it is the model that knows where this session's scratch directory
     /// is. See [`crate::completion`].
     Complete(PaneId),
+    /// Send the resume lines a restore left in the composers, where nobody
+    /// has touched them. See `Workspace::resume_every_agent`.
+    ResumeAgents,
 }
 
 /// Something an action is about, as something `Copy`.
@@ -196,13 +203,76 @@ pub enum WindowAction {
     ToggleMaximized,
     /// Put the window wherever this desktop keeps minimised ones.
     Minimize,
-    /// Close it, which for a one-window application is to quit.
+    /// Close it, which for a one-window application is to quit — asking
+    /// first while anything in it is still working. See
+    /// [`closing`](super::closing).
     Close,
+    /// Quit without asking, whatever is still working.
+    ///
+    /// "End all agents and quit": the answer to the question [`Self::Close`]
+    /// asks, given before it is asked, for a person who already knows.
+    Quit,
 }
 
 impl From<WindowAction> for WorkspaceAction {
     fn from(action: WindowAction) -> Self {
         Self::Window(action)
+    }
+}
+
+/// What the question a close asks before it ends working agents was told.
+///
+/// Two answers, a move between them and a key held back, and the question
+/// itself is not one of them: it opens from the close that asked —
+/// [`WindowAction::Close`], or a tab, pane or group closing — and never from
+/// an action of its own, so there is no way to put it up with nothing to ask
+/// about. See [`closing`](super::closing).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum EndingAction {
+    /// Leave everything running and take the question down. Its Cancel,
+    /// Escape, a press anywhere off it, and Enter or Space while the keyboard
+    /// is on Cancel.
+    Cancel,
+    /// End them, and go on with the close that asked.
+    End,
+    /// Put the keyboard on one of the two buttons, so that Enter and Space
+    /// press it. Tab and the arrow keys.
+    Choose(EndingButton),
+    /// Nothing: a key that would have moved the keyboard or pressed End,
+    /// typed before the keyboard had been still long enough for the card to
+    /// have been read.
+    ///
+    /// Something is returned all the same, for the reason
+    /// [`WorkspaceAction::Chord`] is: a keystroke the window has no action
+    /// for goes on to whatever is under the card, and a Tab the card held
+    /// back must not reach a palette under it instead.
+    TooSoon,
+}
+
+/// One of the two buttons on the question a close asks.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum EndingButton {
+    /// The one that ends them and goes on with the close.
+    End,
+    /// The one that leaves everything running, which is where the keyboard
+    /// starts.
+    #[default]
+    Cancel,
+}
+
+impl EndingButton {
+    /// The other one.
+    pub fn other(self) -> Self {
+        match self {
+            Self::End => Self::Cancel,
+            Self::Cancel => Self::End,
+        }
+    }
+}
+
+impl From<EndingAction> for WorkspaceAction {
+    fn from(action: EndingAction) -> Self {
+        Self::Ending(action)
     }
 }
 
@@ -290,7 +360,7 @@ pub enum WorktreeAction {
         force: bool,
     },
     /// Ask about removing every checkout that is free: not the main one, not
-    /// locked, and nothing in the window working in it.
+    /// locked by anybody but Crook, and nothing in the window working in it.
     AskTidy,
     /// Remove those of them git lets go without being forced, and leave the
     /// rest standing. There is no second question: this one never forces.
@@ -513,6 +583,12 @@ pub enum SettingsAction {
     /// where the answer is kept, and a chord sends it as well as the page —
     /// the same arrangement [`Self::SetFontSize`] has with the zoom chords.
     ToggleTabsPanel,
+    /// "Ask before ending working agents": whether a close that would end
+    /// something still working asks first.
+    ToggleAskBeforeEnding,
+    /// One of the Notifications page's switches: whether this occasion posts
+    /// a desktop notification while the window is behind another.
+    ToggleNotification(Occasion),
     /// Start recording a chord for this command, on the Keyboard Shortcuts
     /// page.
     ///

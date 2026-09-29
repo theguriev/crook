@@ -270,6 +270,34 @@ fn a_derived_title_replaces_the_one_the_session_was_created_with() {
 }
 
 #[test]
+fn a_session_is_working_while_its_agent_runs_or_waits_or_its_shell_runs_a_command() {
+    let mut session = AgentSession::new("agent 1");
+    assert!(!session.is_working(), "a shell at its prompt");
+
+    for (status, working) in [
+        (AgentStatus::Running, true),
+        (AgentStatus::NeedsInput, true),
+        (AgentStatus::Failed, false),
+        (AgentStatus::Idle, false),
+    ] {
+        session.status = status;
+        assert_eq!(session.is_working(), working, "{status:?}");
+    }
+
+    // A command with no agent report behind it: a build, an ssh session, an
+    // agent started without the hooks.
+    session.running_command = Some("cargo build".to_owned());
+    assert!(session.is_working(), "a command the shell is running");
+    session.running_command = None;
+
+    // The bell makes the dot say "waiting", and the shell under it is still
+    // only a prompt.
+    session.attention = Some(Attention::Bell);
+    assert_eq!(session.shown_status(), AgentStatus::NeedsInput);
+    assert!(!session.is_working(), "a prompt that rang");
+}
+
+#[test]
 fn the_mru_list_holds_every_open_tab_once_with_the_active_one_at_its_head() {
     // The rule that closing the active tab returns you to the one you were on
     // before rests entirely on this: a duplicate entry, a missing tab or a
@@ -1120,6 +1148,73 @@ mod groups {
             "both tabs are in it, in strip order"
         );
         assert_eq!(strip.active_id(), order(&strip)[1], "and it is selected");
+    }
+
+    #[test]
+    fn a_tab_opened_beside_another_takes_no_focus_and_goes_last_in_the_order_of_use() {
+        // What `crook tab new` opens: the person is looking at the third tab,
+        // the pane that asked is in the first, and the new tab goes beside
+        // the first without moving anybody's keyboard.
+        let (mut strip, ids) = strip(3);
+        strip.apply(TabAction::Select(ids[2]));
+        let used = strip.mru().to_vec();
+
+        assert_eq!(
+            TabEffect::Changed,
+            strip.apply(TabAction::NewBeside {
+                tab: ids[0],
+                grouped: false,
+            })
+        );
+        let now = order(&strip);
+        assert_eq!(now.len(), 4);
+        let opened = now[1];
+        assert!(!ids.contains(&opened), "beside the tab that asked: {now:?}");
+        assert_eq!(strip.get(opened).and_then(Tab::group), None);
+        assert_eq!(
+            strip.active_id(),
+            ids[2],
+            "the person's tab is still active"
+        );
+        assert_eq!(
+            strip.mru(),
+            [&used[..], &[opened]].concat(),
+            "nobody has used it, so it is the last tab to go back to"
+        );
+
+        // In a group, the same: it joins, and it is not selected.
+        strip.apply(TabAction::NewBeside {
+            tab: ids[0],
+            grouped: true,
+        });
+        let group = strip
+            .get(ids[0])
+            .and_then(Tab::group)
+            .expect("a group was made");
+        let members: Vec<TabId> = strip.members(group).map(Tab::id).collect();
+        assert_eq!(members.len(), 2, "{members:?}");
+        assert_eq!(members[0], ids[0]);
+        assert_eq!(
+            strip.active_id(),
+            ids[2],
+            "the person's tab is still active"
+        );
+        assert_eq!(strip.mru().last(), Some(&members[1]));
+        assert_eq!(
+            strip.mru().len(),
+            strip.len(),
+            "every tab is in the order of use"
+        );
+
+        // Beside a tab that has closed there is nowhere to put one.
+        strip.apply(TabAction::Close(ids[1]));
+        assert_eq!(
+            TabEffect::Unchanged,
+            strip.apply(TabAction::NewBeside {
+                tab: ids[1],
+                grouped: false,
+            })
+        );
     }
 
     #[test]

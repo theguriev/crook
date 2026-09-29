@@ -283,6 +283,9 @@ pub enum Binding {
     OpenBlockMenu,
     /// Bring one edge of the selected block to the matching edge of the pane.
     ScrollToBlock(BlockEdge),
+    /// Send every resume line a restore left in a composer and nobody has
+    /// touched since.
+    ResumeAgents,
 }
 
 /// **The whole keyboard policy of a pane, in one function.**

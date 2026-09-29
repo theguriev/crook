@@ -149,8 +149,16 @@ There is no diffing, no reconciliation, and no keys. This surprises people who a
 React, so it is worth being explicit about why it is affordable: there *is* no previous tree
 to compare against, because the tree was never retained. Invalidation is per-view — an entity
 calls `notify()`, that view's id lands in the window's invalidation set, and the presenter
-re-renders that view's subtree only. A tab title change rebuilds one tab, not the window. The
-expensive part of a VDOM is the diff, and skipping the retention skips the diff.
+re-renders that view's subtree only. The expensive part of a VDOM is the diff, and skipping the
+retention skips the diff.
+
+Per-view is the mechanism, and Crook barely uses it yet: the workspace is the one view the
+window has, so a notify anywhere in it rebuilds the whole window, and what is allowed to notify
+is the budget that matters. So the presenter counts. `FrameCounts` says how many frames it has
+built and how many times it has rendered each view — counts rather than times, so that a test
+can hold the window to a budget and get the same number on every machine and all three
+platforms. The first budget is the terminal's, in §7: output streaming into a pane nobody can
+see renders the window no times at all.
 
 The consequence you must internalize: **element trees are frames, not state.** Anything that
 has to survive a rebuild lives in the view. Hover and click state is the standard case —
@@ -701,6 +709,32 @@ fit in a twelve-byte `Copy` cell, and dropping them turns `José` into `Jose` on
 that hands out decomposed names. They ride beside the grid in a small side table that is
 empty for essentially every screen.
 
+**The pty is behind a link.** `Terminal` holds a `Box<dyn PtyLink>` rather than a `Pty`: a
+reader, a writer, a resize, `try_wait`, `wait`, `kill` and a process id, which is everything
+`Terminal` and `terminal_model` ask of a child and nothing more, and `Pty` is the
+implementation whose child runs on a pty this process opened. What the seam buys today is a
+session with no process in it — `terminal_tests.rs` drives a prompt, a submit, output, a
+query's answer, a resize and an exit through an in-memory link — and what it leaves room for
+is a far end that is not this process's own, without deciding there will be one. Two pieces
+go with it that the app does not use yet. `Terminal::feed_mirrored` draws a stream without
+answering the queries in it, for a stream some other emulator is already answering, where a
+second answer would reach the child as typed input; a terminal fed that way once never
+answers again. And the stream it takes is made of `Fed` items, so that the one boundary
+`Terminal::submit` hands the emulator out of band can travel with the output as an item of
+its own. It is not spliced into the child's bytes, because a submit falls between two reads
+and a read can end inside an escape sequence: bytes spliced in there would end the sequence.
+The items are not all a replay has to keep: it makes the blocks the stream's own emulator made
+only when each read is fed as the item it was, and at the pace the reads came. The pace,
+because a synchronized update the child never ended is let go by the clock, at the first feed
+or paint 150 ms after it opened, so a replay that runs ahead of that places the marks after it
+against a screen that has not drawn the update. The reads, because each one's arrival is a
+moment that clock is looked at, and the end of one is where the first row of a block is looked
+for again after `clear`. Those are the conditions known to matter, not a list proven complete.
+The link is a trait object rather than a type parameter because no keystroke passes through it:
+a write goes through the writer the link handed out once and output through the reader it
+handed out once, both of them boxed trait objects before the link existed, so the box costs one
+indirect call per resize and per child poll.
+
 ### Which shell, and how it is started
 
 Two decisions live in `crates/crook_terminal/src/pty.rs`, and both of them are the difference
@@ -775,6 +809,23 @@ plays the login shell itself — `/etc/profile`, then the first of `~/.bash_prof
 profile in it — and plays the logout shell too, chaining an `EXIT` trap onto whatever it finds
 so `~/.bash_logout` still runs and `logout` still closes the pane.
 
+**Where the scratch lives, and who can read it.** Every pane's directory — the stubs, and the
+`complete.in` that holds the command line as far as the caret — sits in one root that is this
+user's alone: `$XDG_RUNTIME_DIR/crook` when the runtime directory is set, absolute, and a real
+directory the user owns; otherwise `crook-<uid>` in the temporary directory; on Windows,
+`crook-shell-integration` in a temporary directory that is per user already. It used to be one
+`crook-shell-integration` in `/tmp` for everybody, made `0755` by whoever came first, so any
+user on the machine could read what another had half typed, or make the directory before them
+and own it. Now the root is made `0700` in one step (`DirBuilder` with its mode, never made and
+then narrowed), and one that is already there is checked with `lstat` — a directory, not a link,
+owned by this uid, no group or other bits — and refused otherwise. A refused root is what an
+unwritable temporary directory always was: that pane runs without marks, and one line in the
+log says why. Inside it, directories are `0700` and every file Crook writes is `0600`, written under
+another name and renamed into place, because the completion request is rewritten on every Tab
+while the shell may still be reading the last one. `shell_integration::scratch::Root` is the
+checked root, and it is the only thing the sweep of dead sessions' directories accepts: the
+sweep deletes, and a root it had not checked could be a link to anywhere.
+
 **What the child is told beside that.** `TERM=xterm-256color` and `COLORTERM=truecolor`,
 because `alacritty_terminal` implements those sequences and the entry is in every terminfo
 database old enough to matter. `LINES` and `COLUMNS` are *removed* rather than set: whatever
@@ -785,7 +836,14 @@ and so does `CROOK_PANE_ID`, the pane's bare number — the same one a plugin is
 `shell_integration::Session` because the session is the one thing that is per pane where the
 launch planners are per shell. It is what `WEZTERM_PANE` and `KITTY_WINDOW_ID` are: a fact a
 script or an agent gates on or names a log after, not an address anything routes by — the agent
-status channel writes to its own tty and needs no pane id.
+status channel writes to its own tty and needs no pane id. The one address a pane is given is
+`CROOK_SOCKET`, where its window answers questions — see "The window answers" below — and it is
+set empty when the window has no socket, so a Crook started inside another Crook's pane does not
+hand its shells the outer one's. Beside it is the one secret, `CROOK_TOKEN`, which is how a
+request says which pane it comes from, set empty on the same terms. `CROOK_BIN`, the absolute
+path of the running binary, is set in the same place, read once at the first pane: a hook runs
+in whatever `PATH` its agent was started with, where a Crook.app nobody linked is not, and on
+Linux a binary an upgrade has replaced reads its own path back as `… (deleted)`.
 
 **The pty opens at the pane's size.** A shell prints its whole startup — a `~/.zprofile`
 banner, a greeting sized with `tput cols` — before any resize can reach it, and what it
@@ -805,11 +863,13 @@ before any frame at all.
 ### Who drives it
 
 `app/src/terminal_model.rs`, in the shape `git_model` established and `usage_model` shared
-before it left for a plugin: work off the UI thread, delivered on it, `ctx.notify` only when
-something a viewer could see actually changed. Each terminal gets an OS thread of its own
-rather than a background-pool worker, because a pty read blocks for as long as the shell is
-quiet and the pool is sized for exactly the chains that park on timers — five of them, counted
-one by one in `PARKED_WORKERS`, and a pane is not one.
+before it left for a plugin: work off the UI thread, delivered on it, and a word to the window
+only when something it draws could have changed. A changed grid is not a `notify` but a
+`TerminalUpdate::Repainted`, which the workspace weighs (below); the model's own `notify` is
+kept for the one-offs, a palette change and a shell that opened or failed to open. Each
+terminal gets an OS thread of its own rather than a background-pool worker, because a pty read
+blocks for as long as the shell is quiet and the pool is sized for exactly the chains that park
+on timers — five of them, counted one by one in `PARKED_WORKERS`, and a pane is not one.
 
 **Reading and drawing are throttled separately, and conflating them costs three orders of
 magnitude.** A pty master hands out about a kilobyte per `read` however large a buffer it is
@@ -822,10 +882,29 @@ back for it when the window is up. That thread is not a nicety: the batch that m
 window is always the *last* one of a burst, and without it the final screenful of a `cat`
 would sit invisible until the shell next said something.
 
+**And a frame is spent only on a pane somebody can see.** The workspace answers a
+`TerminalUpdate::Repainted` with a frame only when the pane is on screen — in the active tab,
+not hidden by a zoom, with no section of the sidebar over the body. It asks at the moment the
+repaint arrives, from its own state, rather than keeping a set of visible panes pushed into the
+model: what decides it changes in a tab switch, a split, a zoom, a close, a restored session
+and a plugin switched off under the section it was showing, and a push missed in any one of
+them would freeze a pane somebody is looking at. A pane nobody can see goes on being read,
+parsed and published, and everything its *row* shows — a title, a directory, a bell, an agent's
+status, a command finishing — still arrives as it happens, because the row is on screen. The
+frame that brings the pane back reads the snapshot published last, not the last one drawn. Ten
+thousand lines printed in a background tab used to rebuild the window six to eight times on an
+idle laptop; `the_frame_budget` in `app/src/workspace/tests.rs` holds it to none. What the gate
+cannot see is the window itself: nothing tells the workspace that it has been minimised or
+covered, so a window nobody is looking at still asks to draw the panes it shows.
+
 The emulator's mutex is never held across a frame. The reader takes it to parse, and again to
-build a snapshot, and publishes the `Arc` into a slot of its own; painting clones that `Arc`
-and walks owned data. Layout — which asks "did the grid move?" on every single frame —
-answers from an atomic before it ever asks for the lock.
+build a snapshot, and publishes the `Arc` into a slot of its own before it lets go; painting
+clones that `Arc` and walks owned data. The UI thread publishes too, after a keystroke or a
+resize, and both writers keep the mutex until their snapshot is in the slot: one that
+installed it after letting go could be overtaken in the gap and put an older snapshot back
+beside a newer block list, which painted a finished command twice. Layout — which asks "did
+the grid move?" on every single frame — answers from an atomic before it ever asks for the
+lock.
 
 ### Blocks: the output is a list of commands
 
@@ -1009,10 +1088,36 @@ directory stops being authoritative the instant the shell reports a different on
 **Removal asks, and asks about the right thing.** `git worktree remove` refuses over modified
 and untracked files — and, measured rather than assumed, *not* over ignored ones, which it
 deletes without a word. So the ignored count is the one most worth showing before the button,
-and it is the one git will never raise on its own. A checkout that is locked, that is the main
-worktree, or that a tab is open in is not offered for removal at all: Crook's own agent
-worktrees are locked by the session holding them, and that lock is what stops one agent tidying
-away another's work.
+and it is the one git will never raise on its own. A checkout that is the main worktree, that a
+tab is open in, or that somebody else has locked is not offered for removal at all.
+
+**A checkout Crook makes is locked while the window that made it is working in it.** Right
+after `git worktree add`, and before the tab opens, it runs `git worktree lock --reason "crook:
+<branch>"`, and the window remembers that it took that lock. It takes it off again the moment no
+pane in the window is working in the checkout — the last one there closes, or its shell `cd`s
+out — and whatever it still holds when the window closes, since closing a window closes no pane:
+those come off as the event loop stops, whatever stopped it — the last tab, the title bar's ×,
+the window manager, macOS's Quit — with a few seconds' patience for a git that hangs. A checkout
+git is still making as the window closes is locked only once it is made, which is after all of
+that, so the creation takes its own lock straight back off. Opening the checkout again later, from
+the list or from a restored session, does not lock it again: the lock covers the stretch from
+making a checkout to leaving it, which is the agent it was made for. The lock is what tells
+everything outside Crook that touches the repository —
+`git worktree remove` typed by hand, `git worktree prune`, another agent's tidy-up — that an
+agent is in there, and it is what stops one of them taking the checkout from under it. A lock
+does not record which Crook took it, which is why a window takes off only the ones it remembers:
+a pane of this window passing through a second window's checkout and closing leaves that
+window's lock alone. The worktree menu tells Crook's lock from anybody else's by the `crook: `
+prefix alone, and it treats the two differently: somebody else's lock (Claude Code's `claude
+session …`, a person's own) is never taken off and keeps its checkout out of the × and the
+sweep; Crook's own lock on a checkout no pane in the window is working in is taken for one a
+crashed or killed Crook left behind, so that checkout is free, and removing it takes the lock off
+first. That reading has one blind spot, which the menu had before there was a lock at all: a
+window knows only its own panes, so a second Crook window's checkout looks the same as an
+abandoned one. A removal aimed at a checkout a pane of *this* window is in meets Crook's own
+lock like any other, and git refuses it. All of it — the lock, reading whose a lock is, the
+unlock — runs on the background pool like the rest of the menu's git, except the unlocks at
+exit, which have no frame left to hold up.
 
 **A sweep asks once and never forces.** The same offer made about the list — remove every
 checkout nothing is working in — is deliberately the weaker one. A confirmation about a single
@@ -1074,7 +1179,25 @@ them.
 **The CLI writes it.** `crook --agent running --title "port the tab bar"` opens `/dev/tty` —
 `CONOUT$` on Windows — and writes the sequence there, not to standard output. The caller is a
 hook, and a hook's standard output belongs to the program that ran it: Claude Code reads what
-its hooks print. `--message "run rm -rf build?"` is what a `needs-input` is waiting for, cut to
+its hooks print. A hook often has no `/dev/tty` either: Claude Code starts every command hook
+in a session of its own, with no controlling terminal, on macOS and Linux alike. The pane is
+still one or two processes up, as the terminal of the program that ran the hook, so a process
+that cannot open its own writes to the controlling terminal of the program that started its
+session: the first ancestor outside that session, past the shells inside it — `session` and
+`tty_nr` in `/proc/<pid>/stat` on Linux, `getsid` and `e_tdev` from `proc_pidinfo` on macOS,
+and the character device under `/dev` with that number (`app/src/agent/ancestors.rs`). The
+walk stops at that program whether or not it has a terminal. One with none is an agent that
+another agent's Bash tool runs, in a session of its own, or one whose pane has hung up, which
+takes the terminal from its whole session; the next terminal up is the outer agent's tab, which
+a nested `claude -p` would call idle mid tool call, or the terminal Crook was started from. It
+is a fallback and never a second route: with a terminal of its own the process writes there,
+and a process whose session was started by one with no terminal — `cron`, a CI runner — fails
+the way it always did. A test that hands a hook a stand-in binary, one that never opens a
+terminal, passes while every real report fails, so `app/tests/claude_code_hooks.rs` runs each
+of the plugin's commands, and each one `--agent-hooks claude` prints, with the real binary
+under `sh -c` in a session of its own below a process on a pty, and reads the report off the
+pty; and runs the plugin's once more below a shell with no terminal, where nothing may arrive.
+`--message "run rm -rf build?"` is what a `needs-input` is waiting for, cut to
 one line of 200 characters in the writer so the sequence never carries a novel; `--message -`
 reads it from standard input, the `message` of a hook's JSON when the input is one and the
 whole input otherwise. `crook --agent-hooks claude` prints the fragment of Claude Code's settings
@@ -1082,7 +1205,19 @@ that makes it say all of this by itself — running on a prompt and around every
 input on every notification with the notification's text piped in as the message, idle on
 stop — naming the binary by its full path, since a hook
 runs in whatever `PATH` Claude Code was started with. It is printed rather than installed:
-Crook writes no file it does not own, and it has never opened that one. Codex CLI and Gemini
+Crook writes no file it does not own, and it has never opened that one. What it prints first is
+the way that needs no merging at all: the repository is a Claude Code plugin marketplace
+(`.claude-plugin/marketplace.json`) whose one plugin, `packaging/claude-code`, carries the same
+hooks and the skill, and `claude plugin marketplace add theguriev/crook` with
+`claude plugin install crook@crook` is Claude Code writing its own settings. A file shipped to
+everybody cannot name one person's binary, so the plugin's hooks call `"$CROOK_BIN"` — `crook`
+on `PATH` for a Crook older than the variable — behind a guard that exits 0 unless
+`TERM_PROGRAM` is Crook or `CROOK_PANE_ID` is set, since a UserPromptSubmit hook that fails is a
+notice on every prompt and one that prints is text the model reads. For the same reason each
+command exits 0 after the report too, whatever the report did: a Crook too old to reach the
+pane from a hook is a line of stderr in Claude Code's debug log, not a notice on every prompt
+and tool call. Tests in `agent.rs` build the plugin's `hooks/hooks.json` from `CLAUDE_EVENTS`
+and run each of its commands under `sh`, and hold its `SKILL.md` byte for byte to `skill.md`. Codex CLI and Gemini
 CLI read the same object under their own event names, and GitHub Copilot CLI a versioned
 cousin of it with `bash` for the command, so `--agent-hooks codex`, `gemini` and `copilot`
 are the same table with a different first column; OpenCode has no command hooks, and
@@ -1123,6 +1258,62 @@ the panel is drawn and never ticked), the title and the question, which of the b
 status change set `attention` and whether `marked` is set, and what the shell is running —
 on a read-only panel that hangs off the menu's corner where the worktree list does.
 
+**Other terminals' notifications ask for the same look.** OSC 6340 is spoken only by a program
+that has been told about Crook, and the ones that have not already say "look here" in three
+sequences other terminals show: OSC 9, iTerm2's; OSC 777 `notify`, rxvt's, which Ghostty
+reads; and OSC 99, kitty's. Claude Code writes one of them when it stops to ask, in whichever
+form its notification channel names, and it does so on a remote box with no Crook binary as
+readily as next door. The same watcher reads them, in `crates/crook_terminal/src/notify.rs`,
+into a `Notification` of a title and a body, putting a message `vte` split on `;` back
+together and marking one that ran past `vte`'s sixteen pieces with `…`, the way a report cut in
+the writer is. ConEmu's commands on OSC 9 — `9;4` progress, which winget among others
+writes, and the rest of `9;1` to `9;12` — are not notifications and are dropped; a kitty
+notification sent in chunks is put back together by its `i=`, and a payload in base64 is
+skipped rather than shown as it arrived. It is not a status, and the status is left as it was:
+an agent that says it is running is still running after it notifies. What it sets is
+`attention` — `Attention::Notification`, which carries the text, joined `title: body` since
+the row has one line for both — in a pane without the keyboard, exactly where a bell would:
+the row washes, counts as waiting, and prints the text on its second line in place of the
+table's, ahead of a `needs-input` message since it is the newer of the two. Whatever clears a
+bell's attention clears it — a look, an agent reporting running — and the text goes with it; a
+bell after it keeps it, because Claude Code's `iterm2_with_bell` channel sends that pair. A
+burst with no report between is handed over as its last one, beside the bell's rule. In one
+read it keeps its place among the reports and marks around it, so a status written after it —
+a `running`, or the `D` that ends a running agent — takes it away and one written before it
+does not, wherever the pty split the bytes. The watcher stops where a report and a
+notification meet, as it stops on a mark, so a report before the notification is handed over
+ahead of it rather than folded into one written after it: `needs-input`, `9;done`, `running`
+is three changes, not a notification and a `running` that changed nothing. Nothing here posts
+a desktop notification of its own; a row it turns amber is told to the desktop the way a
+bell's is.
+
+**Looking needs the window in front.** "Nobody was looking" meant "the pane without the
+keyboard", and that made the one-pane window the one that could never be waiting: its pane
+has the keyboard the whole time somebody is in another application, so an agent that stopped
+to ask there never reached the count, the title or the chip. crookui forwards winit's
+`WindowEvent::Focused` as `Event::WindowFocused`, the workspace keeps the bit, and
+`Workspace::looking_at` — the pane with the keyboard while the window has the desktop's
+focus, and nothing while it does not — is the one answer `ring`, `agent_reported`, `attend`
+and the tabs plugin's count, chord and group roll-up read. A window starts out focused, which
+is what every window was before the bit existed, so a desktop that never says changes nothing.
+`attend` does nothing while the window is behind another, because a pane the strip moves to
+then is a pane nobody saw. Coming back to the window runs it for the pane with the keyboard,
+with the pane that had it on leaving as `before`: the same pane is a glance, which answers the
+attention asked for while nobody was there and leaves a person's mark, since the strip did
+not move; a pane the strip moved to in the meantime — a shell that exited closed the one in
+front — is arrived at, and its mark goes as it would have on the move itself. The panel's
+rows keep asking only whether a row is the selected one: the selected row is painted as
+selected whether or not it is waiting, so the window's focus would change nothing on it.
+
+**Focus reports ride the same bit.** A program that sets `?1004` is sent xterm's `CSI I` and
+`CSI O` (`crook_terminal::input::focus`, read against the emulator's mode by
+`Terminal::send_focus`), and a pane stands in for xterm's window: the window going behind
+another and coming back is out and in for the looked-at pane, and a tab switch or a split's
+focus move inside a window in front is out for the pane left and in for the pane reached,
+in that order. `Workspace::report_focus` compares the looked-at pane before and after, from
+`set_window_focused` and from `settle`, so no gesture has a path of its own. Nothing is sent
+until a program asks, which is what keeps `[I` off a shell's command line.
+
 **The strip answers.** A waiting row is washed in the amber its dot shows, faintly, because a
 dot is nine pixels and a person scanning a long list wants the row to say it. A group folded
 away carries the worst of the rows it hides on its heading — the same wash when any member is
@@ -1138,11 +1329,336 @@ three times visits three tabs rather than the same two in turn. Focusing it is w
 the request for a look; an agent's own question stays asked until the agent says otherwise,
 which is why the pane you just left can be waiting again the moment you leave it.
 
+**And outside the window.** The window's title carries the same count in front of the active
+tab's name, and when the count *rises* while the window is behind something else the shell
+asks the desktop to point at it through `Proxy::request_attention`, winit's
+`request_user_attention` with the informational kind: one dock bounce on macOS, the urgency
+hint on X11, an xdg-activation request on Wayland, a taskbar flash on Windows, all from winit
+and no dependency of Crook's own. A rise rather than a count above zero, because the panes
+waiting as a person leaves are panes they just saw — the pane they leave with a question on
+it joins the count at that moment without being news — so the count on leaving is the mark
+the next one has to pass (`Urgency` in `app/src/lib.rs`). crookui asks only while the window
+does not have the focus, checked when the request reaches the window rather than trusted to
+the platform, and takes the request back itself when the window next gains the focus, which
+only X11 needs: Windows stops its flash when the window comes to the front, macOS bounces
+once and a Wayland compositor clears its own. It is not a notification: it names only the
+window. Both the title and the request follow every change to the window's views — the
+invalidation callback that asks for a frame, through `Beacon` — and not the frame, because
+the window they are for may get no frames: a Wayland compositor sends no frame callback to a
+surface it is not showing and winit holds every redraw back until that callback comes, and
+wgpu refuses to present to an occluded window on macOS. That covers the window's opening
+too: registering the callback is itself an update, and its flush runs the callback for
+everything the window opened with, since no frame has taken any of it yet. On macOS `Beacon`
+also puts the title's count on the dock icon as its badge when the count moves
+(`Proxy::set_badge`, the dock tile's `badgeLabel` in `crookui::windowing::dock`, none at zero).
+Since macOS 12, by the reports of the apps that hit it, the dock draws a bundled app's badge
+only once the app has asked Notification Center for leave to badge, and then only as its
+Badges switch says, so with the first count above zero `Beacon` asks
+(`notify::ask_to_badge`) and a yes sets the badge again (`Proxy::show_badge_again`); whether
+the dock draws one for a binary outside Crook.app, which cannot ask, is unverified. `Beacon`
+asks only while notifications are wanted (`plugins::notifications::are_wanted`: the plugin
+loaded and one of its switches on), because macOS words that prompt as leave to send
+notifications, and a person who turned them off would be asked for what they had just refused
+— and, answering no, would find them refused when they turn them back on. The badge is set all
+the same.
+
+**And in words, on Linux and macOS.** When a pane's row turns to needs-input while the window
+is behind another one — its agent asking, its agent saying it is done while nobody is looking,
+or a bell in a pane with nothing else to say, which is how Codex asks in a terminal it does not
+recognise — `Workspace::tell_the_desktop` posts a desktop
+notification: `Crook — <the pane's name>`, the name its row shows (`row_content::row_name`, so
+a shell at a prompt is its directory and not `agent 1`), with the agent's question on one line
+and cut to `notify::MESSAGE_CHARS` under it. A *turn* of the row's status rather than a
+report: the agent saying needs-input again with another word in its question is the same stop,
+and the question on screen as a person leaves is one they saw — the rule `Urgency` gives the
+request for a look.
+An agent that failed and a command that ran `notify::LONG_COMMAND` or longer take the same
+path and are off out of the box. The three switches are `GeneralOptions::notify_on_*`, on the
+Notifications page `crook/notifications` owns, and the workspace posts only while that plugin
+is loaded, so the Plugins page's switch for it is a switch for the feature. `notify::Cooldown`
+keeps a pane quiet for `notify::QUIET` after it posts, counted from the post and not from the
+refusals, so an agent whose hooks flap posts once: #352's rule for the bell, one level up.
+The quiet also ends when somebody looks at the pane (`Workspace::attend` calls
+`Cooldown::seen`), so the next question of an agent a person just answered is posted however
+soon it comes.
+Posting is a `Notifier` the window that runs on a desktop hands in (`Workspace::set_notifier`);
+a test and a snapshot keep `Silent`. On Linux that is `notify::linux::NotifySend`,
+`notify-send` started on the pool through `crate::process::command` and waited on by a thread
+of its own, which is `plugins::wasm::sound`'s arrangement with `pw-play` — no D-Bus crate,
+because `zbus` is a whole bus client for one method call and `dbus` binds libdbus. It passes
+only the flags every `notify-send` has, the two texts after `--`, and the body with `&`, `<`
+and `>` escaped, since servers read a body as markup and a program's words are not Crook's, and
+its backslashes doubled, since `notify-send` reads C escapes out of the body. A
+machine without `notify-send` is one warning and then nothing is started again. There is no
+click: `--action` implies `--wait`, one process held for as long as each notification lives,
+and a click heard could switch the pane but not bring the window forward — winit's
+`focus_window` does nothing on Wayland, with no way to hand it the activation token a server
+sends. On macOS it is `notify::macos::NotificationCenter`, `UNUserNotificationCenter` through
+the objc2 bindings, asking leave with each post and, while notifications are on, with the
+dock's first badge — macOS prompts the first time and answers from the setting after — and
+made only for a process with a bundle identifier (`notify::Service::of`), because asking for
+the center without one throws;
+a click brings Crook forward and not the pane. A binary outside Crook.app and Windows post nothing; the page
+says so and its switches have no handler there. The session bus is a socket on this machine
+and Notification Center a daemon on it, so nothing of this reaches a network.
+
 What is deliberately not here is a plugin. `docs/plugins.md` planned this seam as an `Agent`
 service a plugin provides, and that is still the right shape for anything that *drives* an
 agent — spending its budget, reading its transcript. Saying what it is doing needed none of
 that: a word on a wire, written by the agent itself, which is why it reached the sidebar in a
 day and why a plugin that wants to do more starts from a status that is already true.
+
+### The window answers
+
+A status travels one way, from the program to the row. The other direction — a script or an
+agent asking a running Crook what is open, or asking it to open something — is a question whose
+answer has to come back, and it goes over a socket: `crook pane list` asks the window its pane
+is in and prints every pane that window has, `crook tab new` asks it to open a tab beside the
+pane and run a command there, and `crook pane wait`, `crook pane blocks` and `crook events
+--follow` let that pane watch the tabs it opened — wait for one to stop, read what its commands
+printed, hear everything that happens to them. They are the first verbs of `docs/plugins.md`'s
+Phase 4. The code is `app/src/control/`.
+
+**Why control is a socket when status is an OSC.** The three reasons above are reasons against
+a socket *for reporting*. Control turns the third one round. A request written into the pane
+would be read off the stream the pane's output arrives on, and anything that can print can put
+anything there — `cat` of a file, a `git log`, an LLM streaming its answer, a host at the far
+end of `ssh`. A forged status paints a dot; a forged request is escape-sequence injection with
+the window's authority behind it, and the moment a verb opens a tab or types into a pane it is
+a path to running commands. Completion's OSC is safe only because Crook asks first and the
+shell's reply carries nothing but the request's number. So status stays on OSC 6340, unchanged,
+and the window answers on a socket, paying for it with the address — `CROOK_SOCKET`, in every
+pane's environment beside `TERM_PROGRAM` and `CROOK_PANE_ID` — and with the stop at this
+machine, which for control is the point.
+
+**Who can connect: this user, on this machine.** There is no TCP listener and there will not be
+one, which is what keeps the README's promise that nothing touches the network until asked. The
+socket is `<pid>.sock` in a directory of its own: `$XDG_RUNTIME_DIR/crook-control` when that
+variable names an absolute, real directory this user owns, and `crook-control-<uid>` in the
+temporary directory otherwise — the per-user `$TMPDIR` on macOS. The directory is made `0700`
+and the socket `0600`, and a directory that is already there is refused — no socket, a line in
+the log — when it is a link, not a directory, somebody else's, or open to anyone else, because
+whoever made it first could otherwise leave a socket in it that answers the CLI with lies. It is
+not a corner of the shell integration's scratch, which is swept of entries a week old, and a
+window can be open longer than a week. The listening socket and every accepted one are
+close-on-exec, so no shell a pane starts inherits them.
+
+**What it exposes.** What the panel shows, per pane: its number and its tab's, its title and
+its tab's, its group, whether it is the focused one, the agent's status and message, its
+directory and its branch — nothing of a pane's scrollback and nothing of its input. All of that
+is already on the screen, in the session file, and in the shells' own process entries, every one
+of them this user's to read, so a socket only this user can reach that only reads gives nobody
+anything new. That is why `pane.list` needs no token: a listing any process of this user can
+already put together is not a thing to guard, and a script outside every pane is answered as it
+always was.
+
+**Authority by lineage: the token.** Opening a tab is not reading. Anything this user runs can
+connect to the socket — a script, a cron job, a tool in another terminal, a helper some other
+program left listening — and none of those is a piece of work somebody opened a pane for. So
+every pane's shell is handed a secret of its own, `CROOK_TOKEN`, beside `CROOK_SOCKET`: 32 bytes
+from the operating system's random source (the `getrandom` the TLS stack already builds with),
+minted when the shell opens, known to the window alone, and gone with the shell. A request
+carries it, the window finds the open pane that holds it, and that pane is the caller. A request
+with no token, an empty one, or one no open pane of this window holds is refused `tab.new` as
+`unauthorized`, and may still list. The pane's number is not a credential and never becomes one:
+every listing prints it. The token is in the environment of everything the pane runs, so
+whatever the agent starts — a tool call, a sub-process, a script it wrote — can open tabs as the
+agent. That is the boundary meant: a pane is one piece of work, what runs in it acts for it, and
+the budget below counts it all as one. What the token is not is a wall inside this user's
+account. A process of this user that sets out to can read another's environment
+(`/proc/<pid>/environ`), and could as well write to the pty or run the command itself; the token
+keeps a stray client from opening tabs by connecting, and makes every tab that opens one a pane
+answers for. It does not make one user's processes strangers to each other, and nothing on one
+machine under one user could.
+
+**Opening a tab.** `tab.new` opens one tab in the caller's window — the socket a pane is told
+about is its own window's, and no token names a pane of another — beside the caller's tab, in
+its group when `in_my_group` says so (a group of the two is made when there is none), and never
+selected: the person may be typing, and a tab that took the keyboard would take the rest of
+their line with it. With `worktree`, the window makes the checkout the tab menu's creator makes —
+the branch name trimmed and required and otherwise git's to judge, the checkout filed under
+Crook's store by repository, `git worktree add -b` from the caller's `HEAD` — on the pool, and
+the tab opens in it when git is done. The command arrives as words, and the window joins them
+with the quoting the plugin host types an argument with, which is proven to read back word for
+word in `sh`, `bash`, `zsh` and `fish` (#342). A new pane that would run any other shell is
+refused as `unsupported-shell`, and a word holding a control character as `bad-request`, since a
+newline in a command line is a second command. A word arrives as itself: an alias is not
+expanded, `&&` is an argument, and a pipeline is `sh -c '…'`. The line is typed into the new
+pane's field at once, where a person can see it, and sent by the field's own submit at the
+shell's first prompt — the first `A` for a shell with marks, since a line submitted into the
+block open from before it is one the shell never reports a boundary for, and the first thing it
+prints for a shell without. That is an event and not a clock, so a shell whose integration never
+marks a prompt keeps the line in its field for a person to send, and a person who edits the line
+before its prompt owns it, and it is not sent. The reply is the new pane's number, its tab's
+and its directory. The new row's hover card and its "Why this status" say which pane opened it.
+
+**The budget, and refusals.** Eight tabs at once on behalf of one pane a person opened. The
+count is by *root*: a tab opened by a tab that was itself opened counts against the pane the
+chain began at, so a worker that opens workers spends its lead's eight rather than eight of its
+own — counted per caller, a loop would be eight tabs each opening eight more. Tabs still waiting
+on git count, and a tab that closes gives its place back. Refusals are bounded as a plugin's
+are: sixteen in a row and the window stops answering that pane's `tab.new` until it closes, as
+`too-many-refusals`, with a line in the log at the sixteenth; every refusal before it is logged,
+including a worktree git would not make, and only a tab that opens starts the count again —
+never once the pane is stopped, since a worktree agreed to before the stop can still open after
+it and must not lift it. Requests with no token are logged sixteen in a row and then refused
+quietly, since there is no pane to stop answering. What comes after keeps to the rule these
+start: a caller may act on its own pane and on the tabs it opened, and reading or typing into a
+pane a person opened is a grant that person answers on a card. An agent that reads one pane and
+types into another is a confused deputy waiting for a prompt injection, which is why that is
+never a default.
+
+**Watching what it opened: authority by lineage.** `pane.wait`, `pane.blocks` and
+`events.follow` read what a pane's agent says, what its commands printed and when they ended.
+`pane.list` needs no token because everything in it is already on the screen; a block's output
+is more than that — it is what an agent reading it would take instructions from — so these are
+scoped the way typing will be. The caller, found by its token, may watch its own pane and the
+tabs it opened, and the tabs those opened: up the chain of lineage through the panes still open
+and the closed tabs the window remembers, or directly when a pane's lineage names the caller as
+the root the chain began at, so a lead still watches a worker's worker after the worker in
+between has closed. Nothing else: a pane a
+person opened, or one another pane's agent opened, is refused as `needs-grant`, with a sentence
+saying that watching it needs a grant from the person who opened it, which this version cannot
+ask for. The grant card belongs to the verb that types, and until it exists the answer is no.
+Refusals come in an order that tells a stranger nothing: no pane's token is `unauthorized`
+first, then a number no open pane has is `no-such-pane`, then `needs-grant`. A closed pane is
+`no-such-pane` to everyone, except to a `pane.wait` from a pane that may watch it — the one that
+opened it, or any pane up that chain (below).
+
+**`pane.wait`** answers when the pane gets to `until`: `idle` — its agent said so; the idle a
+pane starts in, before anything has reported, is not it, so a worker whose agent has not
+started is not taken for one that has finished — `needs-input`, `finished` or `exited`.
+`finished` is a state and not an event: nothing is running, no line is waiting for the shell's
+first prompt (a tab `tab.new` just opened has not run its command yet), and a command has been
+closed by the shell's own `D`, whose exit status the answer carries — a command's, not an empty
+line's, which a shell ends with a `D` too. That is what keeps a
+command that ended before the wait was asked from being missed, and a tab that has not started
+from being taken for one that has finished; it is refused as `no-blocks` for a shell with no
+marks, where nothing ever says a command ended. `exited` is the pane closing by whichever road.
+A state already reached answers at once, and a pane that closes first answers at once with
+`reached: false`. A pane that closed before the wait was asked answers at once too: the window
+remembers who opened the last 256 tabs `tab.new` opened that have closed, whether anybody was
+watching or not, and a wait on one the caller may watch answers `closed: true`, `reached` for
+`exited` only — so `crook pane wait 7 --until exited && …` does not depend on whether the worker
+ended before the lead got round to asking. A wait is at most an hour, which is also the
+default; `timeout: 0` answers with where the pane is now. The answer is `{pane_id, until, reached, status, message, exit,
+closed}` — and when the time runs out, the connection asks the window once more with no time to
+wait, so a script reads the state the pane was left in rather than a bare `timeout`.
+
+**`pane.blocks`** answers the newest `last` finished commands, a hundred at most and all of
+them up to that by default: the command (display-only, as `Block.command` warns), exit status,
+directory, duration, and output — the text a copy of the block's output gives, through the same
+region a drag over it makes. Every part is capped, since it is built between two frames and
+written down a socket: the last 4096 rows of a block are read, the last 64 KiB of those kept,
+and 512 KiB in all, spent newest first; cut from the front, at a line, and marked `truncated`,
+because the end of what a command printed is where its errors and its summary are. Only
+commands' blocks count — one the shell ran, sent or started or ended with a status — and not
+what a shell printed on its own before its first prompt or between two, nor an empty line sent
+from the field, which the block tracker gives no start. A command still running
+has not finished, whatever the pane draws it as: a build on the primary screen, a full-screen
+program on the alternate one, an agent's interactive TUI. With nothing finished such a pane is
+refused as `no-blocks` with a sentence saying which — wait `--until finished` for a command,
+and a screen is never a block — rather than answered with an empty list that reads as "nothing
+ran"; with finished commands from before, it gets those and `running: true`. A worker whose
+answer is meant to be read runs headless.
+
+**`events.follow`** answers `{panes}`, what it follows as of now, then one line per event until
+the client hangs up: `status` (only when the status or the message changed — an agent reports
+`running` around every tool it calls), `started`, `finished` with the command line, exit and
+duration, `opened` for a tab the caller opens later, `closed`, and `lagged`. `started` is read
+off a frame the pane's terminal published, since there is no event for a command running: one
+that starts and ends between two frames — `true`, `git status` — is never seen running, and its
+`finished` is what names it. With `pane` it follows that one pane,
+and the stream ends after the `closed` of the pane it is anchored on — the one named, or the
+caller's own. The events come from where the workspace already applies what a pane's shell did
+(`apply_terminal_update`) and from `settle`, which every road a pane opens or closes by goes
+through: no poll, no timer, and nothing done at all while nobody watches.
+
+**Kept connections.** A wait with time to wait, and a stream, keep their connection, and neither
+fits a five-second deadline or one of the eight places a question is answered in: a lead
+waiting on each of its eight workers would leave its own `pane list` refused as `busy`. Such a
+connection moves to a lane of its own, thirty-two at once and the next refused as `busy`. Before
+it asks, its thread makes a bounded feed; the window registers the feed beside what was asked
+and pushes into it on the main thread — a lock and a notify — and the connection's thread is the
+one that blocks. A stream's feed holds 256 events, and a reader that falls further behind loses
+the oldest and is sent `{"event":"lagged","dropped":N}` where they were, rather than the window
+holding everything for a client that is not reading. A second thread per kept connection blocks
+on a read of it, to see the client hang up — a script killed at its own timeout, an agent's tool
+call cut short — and ends the wait then rather than an hour later. A client that only closes its
+half after the request — `nc -N` — is still reading: on Linux the read's end is followed by a
+`poll` that asks for nothing, which only a close of both ways wakes, and the wait is answered;
+elsewhere nothing that blocks tells the two apart — macOS's `poll` says `POLLHUP` for both — so
+the end of what the client says is taken for its leaving, and a client of a kept verb keeps its
+half open until the reply comes. The connection answers
+nothing after the verb, and closes when it is over; a window that closes ends every feed, and a
+wait still open is refused as `gone`.
+
+**The transport.** One socket per process, because every `crook` launch is its own process with
+one window. At startup the name is probed: a socket there that refuses a connection was left by
+a Crook that crashed, and is removed and taken; one that answers belongs to somebody alive —
+another PID namespace sharing the directory — and the next name, `<pid>-1.sock`, is tried. Other
+refusing sockets in the directory are swept once they are a minute old, the minute being what
+keeps a sweep off a socket another Crook bound a moment ago and has not started listening on.
+The socket is removed when the window closes. One OS thread accepts, because it blocks for as
+long as nobody connects — the reason a pty reader is a thread and not a pool worker — and each
+connection gets a short-lived thread of its own, eight at once and the ninth refused as `busy`.
+A connection has five seconds all told and a line 64 KiB; a longer line is refused as `too-long`
+and the connection closed, since nothing says where the next line starts. The one exception is a
+tab in a new worktree, which waits on git and its `post-checkout` hook: that reply is given the
+worktree module's own read and write budgets and a margin, and the connection closes after it. A question that needs
+the window is posted to it and answered on the main thread through the `ctx.spawn` a pty's
+output comes home by, while the connection's thread waits for the answer until a quarter of a
+second before its five are up — the quarter being what it writes `timeout` back in, so a window
+that could not answer says so rather than hanging up: the UI thread never blocks on a socket,
+and a client that stops reading costs its own thread and nothing more. **Windows has no socket
+yet**: nothing listens there, and the CLI says the command is not available on that platform. An
+owner-only named pipe with `PIPE_REJECT_REMOTE_CLIENTS` is the route when it comes.
+
+**The protocol.** Newline-delimited JSON, one object a line each way. A request is
+`{"v":1,"verb":"pane.list"}`, or
+`{"v":1,"verb":"tab.new","token":"…","args":{"command":["claude","…"],"worktree":"fix-x","in_my_group":true,"title":"…"}}`,
+or `{"v":1,"verb":"pane.wait","token":"…","args":{"pane":7,"until":"needs-input","timeout":600}}`,
+`{"v":1,"verb":"pane.blocks","token":"…","args":{"pane":7,"last":1}}`,
+`{"v":1,"verb":"events.follow","token":"…","args":{"pane":7}}`,
+with an optional `id` of any JSON value the reply echoes and an optional `min_version`. An
+argument a verb does not take is refused as `bad-request` rather than ignored, since ignoring a
+misspelt `worktree` would open an agent in the caller's own checkout. A reply is
+`{"v":1,"ok":true,"result":…}` or
+`{"v":1,"ok":false,"error":{"code":…,"message":…}}`. Every reply carries `v`, the version the
+window speaks. A request's `v` is the version it was written against: a window refuses, as
+`version`, one older than the oldest it still answers — 1 today — and one whose `min_version` is
+newer than the window, so a script written against a later verb is told to update Crook rather
+than handed a half-understood answer. A verb is a promise that is hard to take back, so within a
+version verbs and fields are only ever added, and a field that changes meaning is a new version.
+The codes are `bad-request`, `too-long`, `unknown-verb`, `version`, `busy`, `timeout`, `gone`,
+`unauthorized`, `budget`, `too-many-refusals`, `unsupported-shell`, `failed`, `no-such-pane`,
+`needs-grant` and `no-blocks`. An `events.follow` stream's lines after the first reply are
+events, `{"event":"status","pane_id":7,"status":"needs-input","message":"…"}`, not replies.
+
+**The CLI is the other end.** `crook pane list` prints a table, and `--json` prints the window's
+own array with every field in it, so a field a newer window adds reaches a script through an
+older CLI. It asks `$CROOK_SOCKET`. An empty one means the pane's Crook could not open its
+socket, and a `CROOK_PANE_ID` with no `CROOK_SOCKET` beside it means a Crook from before there
+was one; both are refused rather than looked around, since either way the window the pane is in
+cannot be asked. Outside every pane it takes the one live socket in this user's directory when
+there is exactly one, and refuses when there are several, naming them: each window is its own
+process, and choosing the newest would be a guess that hands a script another window's panes.
+`crook tab new [--worktree B] [--in-my-group] [--title T] [--json] -- CMD…` prints the new
+pane's number, or the window's answer with `--json`; the `--` is required, since a command is
+the part of the line most likely to hold a word that starts with a dash.
+`crook pane wait <ID> --until <STATE> [--timeout <SECS>]` prints where the pane got to and exits
+with a failure, having printed where it is, when it did not get there, so `&&` after it reads
+the way it looks; `crook pane blocks <ID> [--last <N>]` prints each block as its command line,
+its output and a line of how it ended; both take `--json`. `crook events --follow [--pane <ID>]`
+prints the events as one JSON object a line, always, since what reads a stream is a program.
+Every request carries `$CROOK_TOKEN` when there is one, and the CLI refuses nothing on the
+token's account: the window is the one place that knows what a token is worth.
+What it prints carries no control character. A pane's directory arrives percent-decoded from the
+OSC 7 its shell printed, so `%1b` in it is an ESC, and a listing that printed what it was given
+would replay a pane's escape sequence into the terminal the listing runs in; the table writes
+every control character out as its escape, and `--json` escapes the DEL and C1 characters a JSON
+encoder leaves as they are. A block's output printed as text keeps its newlines and writes out
+every other control character the same way, and an event line is escaped as `--json` is.
 
 ### The command line is an input field
 
@@ -1347,7 +1863,9 @@ disagree, because they are the same range.
    reader used to hold, so an unconditional `ctrl-d` would be an end of file every time; over
    a written line it is the delete-forward it is in every line editor. A modal menu over the
    window takes the typing away and leaves these three, because a running command has to stay
-   interruptible.
+   interruptible — except the question a close asks, which takes all three: it has an Escape,
+   so nothing is left uninterruptible, and a reflexive `ctrl-c` to get out of it would
+   interrupt the very program it is asking whether to end.
 4. **Everything else on the normal screen is the field's**, and a key the keymap has no
    meaning for does nothing rather than leaking into the shell.
 
@@ -1610,7 +2128,8 @@ since grown, and one it closed but for a corner:
   and the three snippets.
 
   The question is a **file**: Crook writes the line up to the caret into the session's own
-  scratch and sends `ESC [ 6339 ~`, a key the snippet has bound. The answer is a file too, and
+  scratch — private to the user, and renamed into place whole (see "Where the scratch lives"
+  in §7) — and sends `ESC [ 6339 ~`, a key the snippet has bound. The answer is a file too, and
   the `ESC ] 6339 ; n BEL` that says it is ready carries nothing but the request's number. A
   command line can hold a semicolon, a newline and bytes that are not UTF-8, and escaping every
   one of them past a shell *and* past an OSC parser — twice, on the way back — is a protocol
@@ -1752,9 +2271,10 @@ keeping was already kept: keyboard and mouse produce the *same* action values, s
 sits above every handler and touches none of them.
 
 **Persistence is in**, in `app/src/session.rs`, and it is exactly the shape this paragraph used
-to prescribe: snapshot types entirely separate from the live ones, holding a title, a directory
-and a share of a split and nothing else — a `Vec<TabSnapshot>` plus an active index and a
-window size, `serde_json` to a file beside the settings.
+to prescribe: snapshot types entirely separate from the live ones, holding a title, a directory,
+a share of a split and the name of the agent a pane ran, and nothing else — a
+`Vec<TabSnapshot>` plus an active index and a window size, `serde_json` to a file beside the
+settings.
 
 Three decisions in it are worth naming. It is written **on every change rather than on the way
 out**, because there is no reliable way out: a window closed by the window manager, a process
@@ -1779,6 +2299,33 @@ What is *not* remembered is the point: no scrollback, no output, no process. A w
 redrew yesterday's output over a shell that had never run any of it would be lying about the
 state of the machine. The settings section is left out too — it is something somebody opened to
 change a setting, not work in progress.
+
+Which is why a close asks before it ends anything still working. A process is exactly what does
+not come back, and every agent is a child of the window — a pane's pty hangs its child up when it
+goes — so the window's close, a tab's, a group's and a pane's stop when a pane they would take
+has an agent running or waiting on a person, or a shell running a command, and put a question up
+whose default is Cancel (`app/src/workspace/closing.rs`). The window's close includes the
+desktop's: winit's `CloseRequested` goes to the application through the window delegate rather
+than ending the event loop there. What cannot ask is anything that ends the process from outside
+it: a `SIGTERM` or a kill, a logout that kills rather than closes, a power cut — and macOS's Quit
+menu item and `cmd-q`, which winit turns into `applicationWillTerminate:` with no
+`applicationShouldTerminate:` to say no in. A window manager's close is not one of them: it
+arrives as `CloseRequested` and asks like the rest. Because it can come while somebody is typing
+elsewhere, the window asks the desktop for attention rather than taking the keyboard, and the
+card's way to End opens only after the keyboard has been still for a second — since the card
+came up, since the window last took the keyboard, and since the last key it had no use for.
+
+What *is* remembered of a process is one word: the program name of a coding agent a pane was
+running — `claude`, never the prompt typed after it, and only for a program in `agent.rs`'s
+table — so that the restored pane can offer that agent's resume line (`claude --continue`,
+`codex resume --last`) in its composer, unsent. The directory is the session key: those lines
+resume the most recent conversation *in the directory they run in*, and Crook's worktrees give
+each agent a directory of its own, so no session id, hook or wire change is needed. Two panes of
+one agent in one directory are offered the agent's picker instead, or nothing where it has none,
+and a CLI whose "most
+recent" is the repository's rather than the directory's is offered its picker or nothing. The
+rule above still holds: nothing old is redrawn, and a new process starts only when a person
+presses Enter, or "Resume every agent" for every line nobody has touched.
 
 **Telemetry, crash reporting, autoupdate.** All absent. Worth noting that adding Sentry on
 macOS is not a `Cargo.toml` line: Warp's build script downloads an `xcframework` and its

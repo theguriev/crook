@@ -686,6 +686,49 @@ fn an_answer_that_is_not_what_it_should_be_is_refused() {
     assert!(matches!(problem, Problem::Answer(_)), "{problem:?}");
 }
 
+#[test]
+fn a_tree_nested_deeper_than_the_limit_is_a_refused_answer_and_not_an_abort() {
+    // A pressable holds its content ahead of its action, so half a million of
+    // them inside one another are half a million of its variant, the `Empty`
+    // at the bottom, and half a million empty action names — one fill over
+    // zeroed memory, inside the megabyte an answer may be, and cheap enough
+    // in fuel for any render's budget. Decoded with no limit, that was a
+    // recursion per level on the thread that draws, and the stack ran out
+    // long before the bottom: not a refused answer but an abort of the host,
+    // which no fuel and no bound on a read can catch. Take the limit out and
+    // this does not fail — it takes the test binary down with it.
+    let one = to_bytes(&Node::Pressable {
+        content: Box::new(Node::Empty),
+        action: String::new(),
+    })
+    .expect("a pressable should encode");
+    assert_eq!(
+        one[1..],
+        [0, 0],
+        "a pressable no longer holds its content ahead of its action"
+    );
+    let levels: u32 = 500_000;
+    let length = 2 * levels + 1;
+    let body = format!(
+        r#"
+        (func (export "crook_build") (result i32) (i32.const 0))
+        (func (export "crook_render") (param i32 i32) (result i64)
+          (memory.fill (i32.const 65536) (i32.const {variant}) (i32.const {levels}))
+          (i64.or (i64.shl (i64.const 65536) (i64.const 32)) (i64.const {length})))
+        "#,
+        variant = one[0],
+    );
+    // A page for the helper's own data, and the answer after it.
+    let pages = 1 + length.div_ceil(64 * 1024);
+    let (mut sandbox, _) = open(&module_with_memory(&body, pages)).expect("it should open");
+
+    let problem = sandbox
+        .render(&for_slot("header.right"))
+        .expect_err("it should be refused");
+
+    assert!(matches!(problem, Problem::Answer(_)), "{problem:?}");
+}
+
 /// A render that works for a while before it answers: `$turns` times round
 /// a loop, then the tree.
 fn working(turns: u32) -> Vec<u8> {
