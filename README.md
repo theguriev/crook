@@ -108,12 +108,20 @@ crook --title notes --app-id notes      # its name, and the app_id / WM_CLASS a 
 Everything after `-e` is the command, as in xterm, and `crook -- htop -d 10` says the same. It is
 typed into the pane's shell as an `exec`, so it runs on the `PATH` your profile built and, when it
 exits, the pane closes the way it does when a shell exits. `-e` is not available on Windows, whose
-shells have no `exec`.
+shells have no `exec`. The line it types has to fit what a terminal keeps of a line typed before its
+shell is reading, which is 4095 bytes on Linux and about a thousand on macOS; a longer command is
+refused rather than cut short.
 
 **A window opened with `-e` or `--working-directory` is a launcher's.** It is a quick terminal
 beside your work rather than the work: it opens fresh instead of as the last window, and nothing it
 does is written to the session file, so closing it leaves the agent tabs your next ordinary launch
 comes back to exactly as they were. `--title` and `--app-id` alone open an ordinary window.
+
+That covers every window a launcher opens with a directory, including one that always names a
+directory. Omarchy's terminal key is one: it runs `xdg-terminal-exec --dir=…` with the focused
+terminal's directory, or your home when there is none. So once Crook is xdg-terminal-exec's first
+choice, the windows that key opens start fresh and never save the session. To get your tabs back,
+open Crook from the application menu or run a plain `crook`.
 
 ### macOS, from the browser
 

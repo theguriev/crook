@@ -235,5 +235,11 @@ if [ "$DESKTOP" = 1 ]; then
     echo
     # printf rather than echo, whose `\n` dash's echo would turn into a line.
     printf '    %s\n' "printf 'crook.desktop\\n%s\\n' \"\$(cat '$LIST' 2>/dev/null)\" > '$LIST'"
+    # Said here because this is where it starts: a launcher that always names
+    # a directory — Omarchy's terminal key does — opens only launcher windows.
+    echo
+    echo "A window xdg-terminal-exec opens with a directory starts fresh and never saves the"
+    echo "session. Omarchy's terminal key always passes one; to get your tabs back, open"
+    echo "Crook from the application menu or run a plain \`crook\`."
   fi
 fi
