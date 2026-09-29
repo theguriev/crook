@@ -123,9 +123,9 @@ list`; `--json` prints `pane_id`, `tab_id` and `cwd`.
   expanded. For a pipeline or `&&`, run `sh -c '…'`.
 
 The tab opens without taking the person's keyboard, as a row of its own with a dot, and its card
-says your tab opened it. Only a pane can open one: the request carries your pane's
+says your pane opened it. Only a pane can open one: the request carries your pane's
 `CROOK_TOKEN`, and a script outside a pane is refused. At most eight tabs may be open on behalf
-of the tab a person opened, and the tabs your workers open count against the same eight. When
+of the pane a person opened, and the tabs your workers open count against the same eight. When
 it says `budget`, wait for a worker to finish and its tab to close — `crook pane list` shows
 them — rather than asking again: after sixteen refusals in a row the window stops answering
 your pane. It types into `sh`, `bash`, `zsh` and `fish`, works on this machine only, and not on

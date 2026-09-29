@@ -1013,8 +1013,8 @@ COMMANDS:
                        names it. Prints the new pane's number, or with --json
                        the window's answer. The pane is known by the secret in
                        its CROOK_TOKEN, and eight tabs may be open on behalf of
-                       one a person opened. sh, bash, zsh and fish only; not on
-                       Windows yet
+                       one pane a person opened. sh, bash, zsh and fish only;
+                       not on Windows yet
 
 OPTIONS:
     --install-plugin <PATH>

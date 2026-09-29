@@ -391,7 +391,7 @@ fn plan(
         return Err(Refusal::new(
             code::BUDGET,
             format!(
-                "{SPAWN_BUDGET} tabs are already open on behalf of the tab this work began in, \
+                "{SPAWN_BUDGET} tabs are already open on behalf of the pane this work began in, \
                  which is as many as it may have; wait for one of them to close — `crook pane \
                  list` shows them — rather than asking again"
             ),

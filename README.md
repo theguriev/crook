@@ -298,7 +298,7 @@ Nineteen features, and the page that configures them:
   without taking your keyboard, and runs the command at the new shell's first prompt, every word
   as itself; it prints the new pane's number for `crook pane list` to watch. A pane is known by
   the secret in its own `CROOK_TOKEN`, so a script that is not in a pane can list but cannot
-  open anything; eight tabs may be open on behalf of one tab you opened, a worker's own workers
+  open anything; eight tabs may be open on behalf of one pane you opened, a worker's own workers
   counted in, and the new row's card says which pane opened it. `sh`, `bash`, `zsh` and `fish`
   only.
   A status the agent never took back goes when the shell's own marks say the command ended,
