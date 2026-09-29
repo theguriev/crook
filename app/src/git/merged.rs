@@ -11,9 +11,11 @@
 //! Crook does not otherwise need. Two local proofs answer most of it:
 //!
 //! * **Ancestry.** The branch's tip is on the base: it was merged or
-//!   fast-forwarded, or it never moved off the base at all — which is what
-//!   `git branch --merged` has always meant by merged, and the right meaning
-//!   here too, since tidying such a checkout away loses nothing.
+//!   fast-forwarded. Not a branch whose own reflog says it is still where it
+//!   was made, though `git branch --merged` lists that one too — its tip is on
+//!   the base because nobody has committed on it, and "merged" on the row of a
+//!   checkout an agent was handed a minute ago is a sentence about work that
+//!   does not exist.
 //! * **The patch.** The branch's whole change since it left the base — `git
 //!   diff <merge-base> <branch>` — has the `patch-id` of one commit on the
 //!   base. A squash merge is exactly that commit.
@@ -62,7 +64,8 @@ const PASS_DEADLINE: Duration = READ_TIMEOUT;
 /// How a branch was shown to have landed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Proof {
-    /// Its tip is on the base: merged, fast-forwarded, or never moved off it.
+    /// Its tip is on the base, and it has moved since it was made: merged or
+    /// fast-forwarded.
     Ancestor,
     /// Its whole change since it left the base is the change this commit on
     /// the base made — a squash merge, most often.
@@ -166,7 +169,11 @@ fn merged_within(
         // git goes and reads.
         let reference = format!("refs/heads/{branch}");
         if is_ancestor(repository, &reference, base) {
-            landed.insert(branch.clone(), Proof::Ancestor);
+            // Its diff since the fork is empty either way, so a branch that
+            // never moved has nothing for the patch to prove either.
+            if !never_moved(repository, &reference) {
+                landed.insert(branch.clone(), Proof::Ancestor);
+            }
             continue;
         }
         let Some(fork) = merge_base(repository, base, &reference) else {
@@ -215,6 +222,22 @@ fn answer(repository: &Path, args: &[&str]) -> Option<String> {
 fn is_ancestor(repository: &Path, reference: &str, base: &str) -> bool {
     let args = ["merge-base", "--is-ancestor", reference, base].map(OsStr::new);
     run(repository, &args, Intent::Read).is_ok_and(|finished| finished.success)
+}
+
+/// Whether `reference` is, by its own reflog, still where it was made.
+///
+/// Every way of making a branch — `branch`, `switch -c`, `checkout -b`,
+/// `worktree add -b` — writes `branch: Created from …` as its first entry,
+/// and every way of moving one writes something else after it, so a newest
+/// entry that is still the creation is a branch nobody has committed on,
+/// reset or renamed. The text is git's own and is not translated.
+///
+/// A branch with no reflog at all — made with `core.logAllRefUpdates` off, or
+/// whose entries have expired — is not known to be unmoved, and is left to
+/// the ancestry proof as git would leave it.
+fn never_moved(repository: &Path, reference: &str) -> bool {
+    answer(repository, &["log", "-g", "-1", "--format=%gs", reference])
+        .is_some_and(|newest| newest.starts_with("branch: Created from"))
 }
 
 /// Where `reference` left `base`.

@@ -156,15 +156,43 @@ fn a_fast_forward_merged_branch_is_proved_by_ancestry() {
     commit(&repo, "feature.txt", "the work\n", "the work");
     git(&repo, &["switch", "main"]);
     git(&repo, &["merge", "--ff-only", "feature"]);
-    // A branch that never left main has nothing on it main lacks, which is
-    // what git's own `branch --merged` means by merged — and removing its
-    // checkout loses nothing, because the branch stays.
-    git(&repo, &["branch", "fresh", "main"]);
 
-    let landed = merged(&repo, MAIN, &names(&["feature", "fresh"]));
+    let landed = merged(&repo, MAIN, &names(&["feature"]));
 
     assert_eq!(landed.get("feature"), Some(&Proof::Ancestor));
-    assert_eq!(landed.get("fresh"), Some(&Proof::Ancestor));
+}
+
+#[test]
+fn a_branch_nobody_has_committed_on_is_not_called_merged() {
+    // Its tip is on main, so git's own `branch --merged` lists it — and on the
+    // row of a checkout an agent was handed a minute ago, "merged" is a
+    // sentence about work that does not exist. Its own reflog still says it
+    // is where it was made, and that is what keeps it out.
+    if without_git("a_branch_nobody_has_committed_on_is_not_called_merged") {
+        return;
+    }
+    let scratch = ScratchDir::new("fresh");
+    let repo = repository(&scratch, "repo");
+    git(&repo, &["branch", "fresh", "main"]);
+    git(&repo, &["switch", "-c", "switched"]);
+    git(&repo, &["switch", "main"]);
+    commit(&repo, "later.txt", "main moves on\n", "later");
+
+    let landed = merged(&repo, MAIN, &names(&["fresh", "switched"]));
+
+    assert_eq!(landed.get("fresh"), None);
+    assert_eq!(landed.get("switched"), None);
+
+    // Committed on and merged into main, it has moved, and its tip being on
+    // main is its work having landed.
+    git(&repo, &["switch", "fresh"]);
+    commit(&repo, "fresh.txt", "work\n", "work");
+    git(&repo, &["switch", "main"]);
+    git(&repo, &["merge", "--no-edit", "fresh"]);
+    assert_eq!(
+        merged(&repo, MAIN, &names(&["fresh"])).get("fresh"),
+        Some(&Proof::Ancestor)
+    );
 }
 
 #[test]
