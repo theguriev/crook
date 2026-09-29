@@ -513,6 +513,49 @@ fn a_base_beginning_with_a_dash_is_refused_before_git_sees_it() {
 }
 
 #[test]
+fn a_branch_name_beginning_with_a_dash_is_refused_before_git_sees_it() {
+    if without_git("a_branch_name_beginning_with_a_dash_is_refused_before_git_sees_it") {
+        return;
+    }
+    let scratch = ScratchDir::new("add-dash-branch");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    git(&repo, &["branch", "side"]);
+    git(&repo, &["switch", "--quiet", "-c", "feature"]);
+    // `worktree add -b <name>` makes the branch by running
+    // `git branch <name> <base> --no-track`, with nothing between the two to
+    // say the name is not an option. So `-m` is `git branch -m <base>`: the
+    // branch checked out here renamed to the base before the worktree step
+    // fails — and a full ref, which every base the creator offers is, is a
+    // name `git branch` accepts.
+    for branch in ["-m", "-M", "-u", "-c", "-", ""] {
+        let checkout = scratch.spot("dashed");
+        match add(&repo, &checkout, branch, Some("refs/heads/side")) {
+            Err(Error::InvalidBranch { branch: refused }) => assert_eq!(refused, branch),
+            other => panic!("{branch:?} was not refused: {other:?}"),
+        }
+        assert!(!checkout.exists(), "{branch:?} checked something out");
+        assert_eq!(
+            git(&repo, &["symbolic-ref", "--short", "HEAD"]),
+            "feature",
+            "{branch:?} moved the branch this checkout is on"
+        );
+        assert_eq!(
+            branches(&repo).expect("git answered"),
+            ["feature", "main", "side"],
+            "{branch:?} changed the branches"
+        );
+        assert_eq!(
+            git(
+                &repo,
+                &["for-each-ref", "--format=%(upstream)", "refs/heads"]
+            ),
+            "",
+            "{branch:?} gave a branch an upstream"
+        );
+    }
+}
+
+#[test]
 fn a_base_that_names_nothing_is_reported_as_the_base() {
     if without_git("a_base_that_names_nothing_is_reported_as_the_base") {
         return;
@@ -556,8 +599,8 @@ fn a_branch_started_from_a_remote_branch_does_not_track_it() {
     // git's own default would make `origin/main` the new branch's upstream,
     // and a branch called `agent-work` whose upstream is `main` is one a bare
     // `git push` refuses and a `git pull` merges main into. Started from the
-    // tab's own `HEAD` a branch has never had one, and starting it from
-    // somewhere else is not a reason to acquire one.
+    // tab's own `HEAD` a branch gets none under git's own default, and
+    // starting it from somewhere else is not a reason to acquire one.
     let upstream_of = command("git")
         .args(["rev-parse", "--abbrev-ref", "agent-work@{upstream}"])
         .current_dir(&clone)

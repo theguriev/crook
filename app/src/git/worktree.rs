@@ -277,6 +277,13 @@ pub enum Error {
         /// The name that is taken.
         branch: String,
     },
+    /// The name a new branch was to have is not one a branch can have: it was
+    /// empty or began with a dash, and was refused before git was asked. The
+    /// way out is typing another.
+    InvalidBranch {
+        /// The name, as it was handed to [`add`].
+        branch: String,
+    },
     /// The place a new branch was to start from is not one: git found no ref
     /// or commit by that name, or it began with a dash and was refused before
     /// git was asked. The way out is picking another.
@@ -343,6 +350,15 @@ impl std::fmt::Display for Error {
             }
             Self::BranchExists { branch } => {
                 write!(formatter, "A branch named {branch} already exists")
+            }
+            Self::InvalidBranch { branch } if branch.is_empty() => {
+                write!(formatter, "A branch needs a name")
+            }
+            Self::InvalidBranch { branch } => {
+                write!(
+                    formatter,
+                    "{branch} cannot name a branch: it begins with a dash"
+                )
             }
             Self::InvalidBase { base } => {
                 write!(formatter, "{base} is not a branch to start from")
@@ -647,12 +663,31 @@ fn stranded(worktree: &Path) -> Result<usize, Error> {
 /// and every base the creator offers is a full ref besides, so nothing real
 /// is turned away.
 ///
-/// The new branch is made with no upstream, whatever it starts from. That is
-/// what a branch made from `HEAD` always had; made from `origin/main` git
-/// would otherwise set `origin/main` as its upstream, and a branch called
+/// `branch` is refused the same way, as [`Error::InvalidBranch`], and it is
+/// the one of the two that `--` cannot protect. `-b <branch>` is carried out
+/// by a child `git branch <branch> <base> --no-track` with nothing between
+/// `branch` and the options, so a name of `-m` is `git branch -m <base>`: the
+/// branch this repository has out, renamed to the base — which, being a full
+/// ref, is a name `git branch` takes — before the worktree step fails. With
+/// `HEAD` as the only base, `git branch` refused `HEAD` as a name and the
+/// harm stopped there; with a base somebody picked, it does not. A branch
+/// name cannot begin with a dash anyway (`git check-ref-format --branch`
+/// refuses one), so here too nothing real is turned away.
+///
+/// The new branch is made with no upstream, whatever it starts from and
+/// whatever `branch.autoSetupMerge` says. Made from `origin/main` git would
+/// otherwise set `origin/main` as its upstream, and a branch called
 /// `worktree/amber-anchor-0155` whose upstream is `origin/main` is one a
-/// plain `git push` refuses and a plain `git pull` merges `main` into.
+/// plain `git push` refuses and a plain `git pull` merges `main` into. Made
+/// from `HEAD` that changes nothing under git's own default, and drops the
+/// upstream `always` (the branch `HEAD` is on) or `inherit` (that branch's
+/// own upstream) used to give it.
 pub fn add(repository: &Path, path: &Path, branch: &str, base: Option<&str>) -> Result<(), Error> {
+    if branch.is_empty() || branch.starts_with('-') {
+        return Err(Error::InvalidBranch {
+            branch: branch.to_owned(),
+        });
+    }
     let base = base.unwrap_or("HEAD");
     if base.is_empty() || base.starts_with('-') {
         return Err(Error::InvalidBase {
