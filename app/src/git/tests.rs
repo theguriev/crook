@@ -671,7 +671,7 @@ fn what_main_did_after_the_branch_left_it_is_not_counted_against_the_branch() {
     commit(&repo, "notes.txt", "alpha\nbeta\n", "add notes");
     git(&repo, &["switch", "main"]);
     commit(&repo, "other.txt", "x\ny\nz\n", "main moves on");
-    commit(&repo, "tracked.txt", "zero\none\ntwo\nthree\n", "main edits too");
+    commit(&repo, "tracked.txt", "zero\none\ntwo\nthree\n", "on main");
     git(&repo, &["switch", "agent/task"]);
     write(&repo.join("tracked.txt"), "uno\ntwo\nthree\nfour\n");
 
