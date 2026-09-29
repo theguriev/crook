@@ -472,6 +472,26 @@ impl AgentSession {
         !active && (self.asks_for_a_look() || self.status == AgentStatus::NeedsInput)
     }
 
+    /// Whether closing this pane would end work somebody has not finished
+    /// with: the agent says it is running or waiting on a person, or the
+    /// shell has a command open.
+    ///
+    /// Both, because each misses what the other sees. An agent started
+    /// without `crook --agent-hooks` reports nothing and is still a command
+    /// running; an agent in a shell with no command marks — one Crook has no
+    /// snippet for, or one with the marks switched off — reports its status
+    /// and opens no block. A build or an `ssh` session is work too, for the
+    /// same reason a conversation is: the pane's pty ends it.
+    ///
+    /// [`Self::status`] and never [`Self::shown_status`], which turns a bell
+    /// in an idle shell into a waiting dot. A shell at its prompt that rang
+    /// is not something a close can take away from anyone. A failed agent has
+    /// stopped, and so has one that went idle.
+    pub fn is_working(&self) -> bool {
+        matches!(self.status, AgentStatus::Running | AgentStatus::NeedsInput)
+            || self.running_command.is_some()
+    }
+
     /// What a pull-request chip says: `PR #123`, or the raw URL when the number
     /// cannot be read out of it.
     ///

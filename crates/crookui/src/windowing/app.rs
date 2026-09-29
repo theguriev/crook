@@ -69,7 +69,7 @@ impl Default for WindowOptions {
 /// What the window asks of the application above it.
 ///
 /// This is the whole seam between the platform layer and the application:
-/// four methods, one of them optional, no winit types, no wgpu types. A
+/// six methods, three of them with a default, no winit types, no wgpu types. A
 /// headless test double implements it in a dozen lines.
 pub trait WindowDelegate: 'static {
     /// Lays out and paints the frame to draw.
@@ -88,6 +88,31 @@ pub trait WindowDelegate: 'static {
 
     /// Runs after each frame reaches the screen.
     fn frame_drawn(&mut self);
+
+    /// The window's own close was asked for: its close button, the desktop's
+    /// shortcut for closing a window, a window manager closing it.
+    ///
+    /// Return `true` to leave the event loop now. An application that has
+    /// something to ask first returns `false`, puts its question on screen —
+    /// which asks for its own frame, as any change does — and leaves later
+    /// through [`Proxy::exit`], or not at all if the answer was no.
+    ///
+    /// The default leaves at once, which is right for a window with nothing
+    /// in it to lose. It is not asked when the operating system ends the
+    /// process itself: that does not come through the window.
+    fn close_requested(&mut self) -> bool {
+        true
+    }
+
+    /// The window has just taken the keyboard: a click on it, the desktop's
+    /// switcher, or the desktop answering a request for attention by focusing
+    /// it.
+    ///
+    /// Not an [`Event`], because nothing in the element tree is under it and
+    /// nothing is drawn differently for it. What it is for is knowing that the
+    /// next few keys may have been typed at whatever had the keyboard before.
+    /// The default does nothing with that.
+    fn focused(&mut self) {}
 
     /// Runs once, as the event loop stops, whatever stopped it.
     ///
@@ -448,8 +473,13 @@ impl ApplicationHandler<CrookEvent> for App {
         }
 
         match event {
+            // The application's to answer rather than this loop's: a window
+            // with work in it asks before that work is ended, and the answer
+            // comes back as an `Exit` on the proxy — or never, if it was no.
             WindowEvent::CloseRequested => {
-                event_loop.exit();
+                if self.delegate.close_requested() {
+                    event_loop.exit();
+                }
                 return;
             }
 
@@ -467,15 +497,22 @@ impl ApplicationHandler<CrookEvent> for App {
                 return;
             }
 
-            // The look a request for attention asked for, so the request is
-            // over. Taken back here rather than left to the application,
-            // because only X11 needs taking back — it keeps its urgency hint
-            // until somebody removes it — and nothing above this line should
-            // have to know which desktop it is on. Then on to the delegate
-            // like any other focus change.
-            WindowEvent::Focused(true) if self.attention_requested => {
-                self.attention_requested = false;
-                self.with_window(|window| window.withdraw_attention_request());
+            // Taking the keyboard is the look a request for attention asked
+            // for, so the request is over — whichever asked, a close's
+            // question or a pane waiting. Taken back here rather than left to
+            // the application, because only X11 needs taking back — it keeps
+            // its urgency hint until somebody removes it — and nothing above
+            // this line should have to know which desktop it is on. It is also
+            // the moment the application's next keys stop being certainly its
+            // own. Then on to the delegate as an event, like losing the
+            // keyboard, because the workspace keeps whether the window is in
+            // front.
+            WindowEvent::Focused(true) => {
+                self.controls.focused();
+                if std::mem::take(&mut self.attention_requested) {
+                    self.with_window(|window| window.withdraw_attention_request());
+                }
+                self.delegate.focused();
             }
 
             _ => {}

@@ -1822,7 +1822,9 @@ disagree, because they are the same range.
    reader used to hold, so an unconditional `ctrl-d` would be an end of file every time; over
    a written line it is the delete-forward it is in every line editor. A modal menu over the
    window takes the typing away and leaves these three, because a running command has to stay
-   interruptible.
+   interruptible — except the question a close asks, which takes all three: it has an Escape,
+   so nothing is left uninterruptible, and a reflexive `ctrl-c` to get out of it would
+   interrupt the very program it is asking whether to end.
 4. **Everything else on the normal screen is the field's**, and a key the keymap has no
    meaning for does nothing rather than leaking into the shell.
 
@@ -2256,6 +2258,21 @@ What is *not* remembered is the point: no scrollback, no output, no process. A w
 redrew yesterday's output over a shell that had never run any of it would be lying about the
 state of the machine. The settings section is left out too — it is something somebody opened to
 change a setting, not work in progress.
+
+Which is why a close asks before it ends anything still working. A process is exactly what does
+not come back, and every agent is a child of the window — a pane's pty hangs its child up when it
+goes — so the window's close, a tab's, a group's and a pane's stop when a pane they would take
+has an agent running or waiting on a person, or a shell running a command, and put a question up
+whose default is Cancel (`app/src/workspace/closing.rs`). The window's close includes the
+desktop's: winit's `CloseRequested` goes to the application through the window delegate rather
+than ending the event loop there. What cannot ask is anything that ends the process from outside
+it: a `SIGTERM` or a kill, a logout that kills rather than closes, a power cut — and macOS's Quit
+menu item and `cmd-q`, which winit turns into `applicationWillTerminate:` with no
+`applicationShouldTerminate:` to say no in. A window manager's close is not one of them: it
+arrives as `CloseRequested` and asks like the rest. Because it can come while somebody is typing
+elsewhere, the window asks the desktop for attention rather than taking the keyboard, and the
+card's way to End opens only after the keyboard has been still for a second — since the card
+came up, since the window last took the keyboard, and since the last key it had no use for.
 
 What *is* remembered of a process is one word: the program name of a coding agent a pane was
 running — `claude`, never the prompt typed after it, and only for a program in `agent.rs`'s

@@ -262,7 +262,7 @@ impl StatusMarks {
 
 /// Everything the settings page writes that is not about the tab strip.
 ///
-/// A type size and seven switches, and that is not an accident of
+/// A type size and eight switches, and that is not an accident of
 /// scheduling. Crook has a window and a tab strip; every option that could be
 /// offered about the strip is already in [`TabOptions`], and what a plugin
 /// wants asked about itself belongs to that plugin rather than here. Warp's
@@ -345,6 +345,17 @@ pub struct GeneralOptions {
     /// back while one of those is showing and goes again on the way back to
     /// the tabs.
     pub show_tabs_panel: bool,
+    /// Whether a close that would end something still working asks first.
+    ///
+    /// The window's close, a tab's, a group's and a pane's all end the
+    /// processes in the panes they take — a pty that goes hangs its child up
+    /// — and a pane whose agent is running or waiting, or whose shell is
+    /// running a command, is somebody's unfinished work. On, because the
+    /// question costs a press and an agent's context cannot be had back.
+    /// Off, for a person who closes things on purpose and would rather not be
+    /// asked; "End all agents and quit" is the same answer given once, with
+    /// this left on. See `workspace::closing`.
+    pub ask_before_ending_agents: bool,
     /// Whether a pane whose row turns to needs-input while the window is
     /// behind another one posts a desktop notification.
     ///
@@ -379,6 +390,7 @@ impl Default for GeneralOptions {
             restore_session: true,
             login_shell: crate::shell_integration::login_by_default(),
             show_tabs_panel: true,
+            ask_before_ending_agents: true,
             notify_on_needs_input: true,
             notify_on_failed: false,
             notify_on_long_command: false,
@@ -1710,6 +1722,9 @@ mod tests {
 
         assert_eq!(
             vec![
+                // Crook's own: whether a close that would end an agent still
+                // working asks first.
+                "ask_before_ending_agents",
                 "compact_subtitle",
                 // The dark half of the pair the desktop chooses between. Warp
                 // has this too, spelled the same way.
@@ -1926,11 +1941,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Nine tab options, eight general ones and three theme names, and
+        // Nine tab options, nine general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(20, written.len());
+        assert_eq!(21, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),

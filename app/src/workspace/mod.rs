@@ -27,6 +27,7 @@ mod action;
 mod block_list;
 pub(crate) mod block_menu;
 mod body;
+mod closing;
 mod controls;
 mod header_toolbar;
 mod held_locks;
@@ -54,8 +55,9 @@ mod tests;
 use crate::theme::theme;
 
 pub use action::{
-    BlockAction, BlockEdge, BlockPart, OptionsAction, SearchAction, SettingsAction, Subject,
-    TabMenuAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
+    BlockAction, BlockEdge, BlockPart, EndingAction, EndingButton, OptionsAction, SearchAction,
+    SettingsAction, Subject, TabMenuAction, ThemeAction, WindowAction, WorkspaceAction,
+    WorktreeAction,
 };
 pub use block_list::BlockList;
 pub use held_locks::HeldLocks;
