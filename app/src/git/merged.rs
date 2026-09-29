@@ -17,8 +17,9 @@
 //!   checkout an agent was handed a minute ago is a sentence about work that
 //!   does not exist.
 //! * **The patch.** The branch's whole change since it left the base — `git
-//!   diff <merge-base> <branch>` — has the `patch-id` of one commit on the
-//!   base. A squash merge is exactly that commit.
+//!   diff <merge-base> <branch>` — has the `patch-id` of one commit that
+//!   reached the base after the branch left it. A squash merge is exactly
+//!   that commit.
 //!
 //! A branch neither proves is *unproved*, never "not merged": a stack squashed
 //! in pieces, a branch rebased or reworded during review, and a branch with a
@@ -67,8 +68,9 @@ pub enum Proof {
     /// Its tip is on the base, and it has moved since it was made: merged or
     /// fast-forwarded.
     Ancestor,
-    /// Its whole change since it left the base is the change this commit on
-    /// the base made — a squash merge, most often.
+    /// Its whole change since it left the base is the change this commit made,
+    /// which reached the base after the branch left it — a squash merge, most
+    /// often.
     Patch {
         /// The commit on the base, as a full object id.
         commit: String,
@@ -190,8 +192,21 @@ fn merged_within(
     let forks: Vec<&str> = pending.iter().map(|(_, fork, _)| fork.as_str()).collect();
     let since = oldest(repository, &forks);
     let patches = patches_on(repository, base, since.as_deref(), commits, deadline);
-    for (branch, _, patch) in pending {
-        if let Some(commit) = patches.get(&patch) {
+    for (branch, fork, patch) in pending {
+        let Some(candidates) = patches.get(&patch) else {
+            continue;
+        };
+        // The pass reads back to the oldest fork of all of them, so for a
+        // branch that left the base later it also reads commits from before
+        // that — and one of those can never be this branch's squash. A change
+        // the base made, took back, and this branch then made again has the
+        // patch-id of the first of those, while the base no longer has the
+        // change at all. Newest first, so a real squash of the same change
+        // after the fork is the one found.
+        if let Some(commit) = candidates
+            .iter()
+            .find(|commit| after_fork(repository, commit, &fork))
+        {
             landed.insert(
                 branch.clone(),
                 Proof::Patch {
@@ -238,6 +253,22 @@ fn is_ancestor(repository: &Path, reference: &str, base: &str) -> bool {
 fn never_moved(repository: &Path, reference: &str) -> bool {
     answer(repository, &["log", "-g", "-1", "--format=%gs", reference])
         .is_some_and(|newest| newest.starts_with("branch: Created from"))
+}
+
+/// Whether `commit` reached the base after `fork` did: it is neither `fork`
+/// nor one of the commits `fork` descends from.
+///
+/// Asked as "is there anything `commit` reaches that `fork` does not", which
+/// is `commit` itself exactly when the answer is yes — so that a git that
+/// could not be asked answers no, and a patch-id match it could not place
+/// proves nothing.
+fn after_fork(repository: &Path, commit: &str, fork: &str) -> bool {
+    let exclude = format!("^{fork}");
+    answer(
+        repository,
+        &["rev-list", "--max-count=1", commit, &exclude, "--"],
+    )
+    .is_some()
 }
 
 /// Where `reference` left `base`.
@@ -305,7 +336,7 @@ fn oldest(repository: &Path, forks: &[&str]) -> Option<String> {
 }
 
 /// The patch-id of each of the newest `commits` commits on `base` since
-/// `since`, mapped to the commit.
+/// `since`, mapped to every commit that has it, newest first.
 ///
 /// One `git log -p` piped into one `patch-id`, which is the whole cost of
 /// asking about any number of branches. Merges are left out: a merge's own
@@ -317,13 +348,17 @@ fn oldest(repository: &Path, forks: &[&str]) -> Option<String> {
 /// would be a true patch-id, but a pass that read half the range is not the
 /// pass the caller asked for, and nothing here gets to prove anything with an
 /// answer nobody can describe.
+///
+/// Every commit and not only one, because two commits on a base can share a
+/// patch-id — a change made, taken back and made again — and which of them
+/// can prove a branch depends on where that branch left the base.
 fn patches_on(
     repository: &Path,
     base: &str,
     since: Option<&str>,
     commits: usize,
     deadline: Duration,
-) -> HashMap<String, String> {
+) -> HashMap<String, Vec<String>> {
     let cap = format!("--max-count={commits}");
     let exclude = since.map(|since| format!("^{since}"));
 
@@ -350,11 +385,17 @@ fn patches_on(
         }
     };
 
-    String::from_utf8_lossy(&finished.stdout)
+    let mut patches: HashMap<String, Vec<String>> = HashMap::new();
+    for (patch, commit) in String::from_utf8_lossy(&finished.stdout)
         .lines()
         .filter_map(|line| line.split_once(' '))
-        .map(|(patch, commit)| (patch.to_owned(), commit.trim().to_owned()))
-        .collect()
+    {
+        patches
+            .entry(patch.to_owned())
+            .or_default()
+            .push(commit.trim().to_owned());
+    }
+    patches
 }
 
 #[cfg(test)]

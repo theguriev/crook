@@ -310,6 +310,40 @@ fn a_branch_with_a_commit_after_its_squash_is_not_proved() {
     );
 }
 
+#[test]
+fn a_patch_the_base_had_before_the_branch_left_it_proves_nothing() {
+    // Main adds a file and takes it back; a branch then adds it again. The
+    // branch's diff has the patch-id of main's first commit — and that commit
+    // is from before the branch left main, so it cannot be the branch's
+    // squash, and main does not have the file. An older branch in the same
+    // call is what sends the pass back far enough to meet it.
+    if without_git("a_patch_the_base_had_before_the_branch_left_it_proves_nothing") {
+        return;
+    }
+    let scratch = ScratchDir::new("reland");
+    let repo = repository(&scratch, "repo");
+    git(&repo, &["switch", "-c", "old"]);
+    commit(&repo, "old.txt", "early\n", "early");
+    git(&repo, &["switch", "main"]);
+    let first = commit(&repo, "foo.txt", "foo\n", "foo");
+    git(&repo, &["revert", "--no-edit", &first]);
+    git(&repo, &["switch", "-c", "reland"]);
+    commit(&repo, "foo.txt", "foo\n", "foo, again");
+    let branches = names(&["old", "reland"]);
+
+    let landed = merged(&repo, MAIN, &branches);
+
+    assert!(landed.is_empty(), "proved {landed:?}");
+
+    // Squashed after all, it is proved by that squash — though the commit
+    // from before its fork has the same patch-id and sits further down.
+    let squash = squash_onto_main(&repo, "reland");
+    assert_eq!(
+        merged(&repo, MAIN, &branches).get("reland"),
+        Some(&Proof::Patch { commit: squash })
+    );
+}
+
 // --- what bounds the pass ------------------------------------------------------
 
 /// A repository whose `feature` was squashed onto main, with `after` more
