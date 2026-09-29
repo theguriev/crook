@@ -1538,9 +1538,18 @@ impl Reach {
 /// `#` comments are nothing, a `\` before a leading `#` or `!` makes it a
 /// character, and a `!` negation is left out — it can only take away what
 /// another pattern matched, which cannot make a directory worth looking in.
+///
+/// Read the way git reads the file, which matters because git does the
+/// matching and this only decides where it may look: a UTF-8 byte order mark
+/// at the start is not part of the first pattern, and neither is the carriage
+/// return at the end of a Windows line. Left in, either one would be a
+/// character the pattern had to match, and its directory would go unwalked
+/// with nothing said.
 fn reaching_patterns(text: &str) -> Vec<Reach> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     text.lines()
         .filter_map(|line| {
+            let line = line.strip_suffix('\r').unwrap_or(line);
             let line = line.trim_end_matches(' ');
             if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
                 return None;

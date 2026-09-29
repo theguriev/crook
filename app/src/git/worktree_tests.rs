@@ -1612,6 +1612,33 @@ fn files_that_together_pass_the_size_limit_are_refused_whole() {
 }
 
 #[test]
+fn a_worktreeinclude_with_a_byte_order_mark_is_read_the_way_git_reads_it() {
+    if without_git("a_worktreeinclude_with_a_byte_order_mark_is_read_the_way_git_reads_it") {
+        return;
+    }
+    // What PowerShell 5's `Set-Content -Encoding UTF8` writes: a byte order
+    // mark, then Windows line endings. git reads past both; the first
+    // pattern must reach into `.claude/`, ignored as a whole, the same.
+    let scratch = ScratchDir::new("include-bom");
+    let repo = repo_including(
+        &scratch,
+        ".claude/\n.env\n",
+        Some("\u{feff}.claude/settings.local.json\r\n.env\r\n"),
+    );
+    write(&repo.join(".claude/settings.local.json"), "{}\n");
+    write(&repo.join(".env"), "SECRET=1\n");
+    let checkout = checkout_of(&repo, &scratch, "bom");
+
+    let included = copy_included(&repo, &checkout);
+
+    assert_eq!(
+        contents(&checkout.join(".claude/settings.local.json")).as_deref(),
+        Some("{}\n")
+    );
+    assert_eq!(included.copied, 2, "{included:?}");
+}
+
+#[test]
 fn the_walk_finds_the_same_files_when_the_budget_leaves_ignored_directories_in_it() {
     if without_git("the_walk_finds_the_same_files_when_the_budget_leaves_ignored_directories_in_it")
     {
@@ -1725,6 +1752,11 @@ fn a_pattern_reaches_an_ignored_directory_the_way_claude_code_describes() {
     assert!(reaches("*", "node_modules"));
     assert!(reaches("node_*", "node_modules"));
     assert!(reaches("cache", "build/cache"));
+    // Read the way git reads the file: a byte order mark and a carriage
+    // return are not part of a pattern — the return here on a last line with
+    // no newline after it, which `lines` leaves where it is.
+    assert!(reaches("\u{feff}.claude/x\r\n", ".claude"));
+    assert!(reaches(".env\r\nvendor\r", "vendor"));
     // What cannot add a file cannot reach one.
     assert!(!reaches("!vendor", "vendor"));
     assert!(!reaches("# vendor", "vendor"));
