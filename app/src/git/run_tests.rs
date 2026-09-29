@@ -5,12 +5,15 @@
 //! call does when a hook git ran leaves the pipes held open is shown where the
 //! hook runs, in `worktree_tests.rs`, because only a real `worktree add` runs
 //! one.
+//!
+//! Unix only, because both cases spawn a Unix utility; on the other
+//! platforms the module is empty rather than a pair of imports nothing uses.
+#![cfg(unix)]
 
 use std::process::Stdio;
 
 use super::*;
 
-#[cfg(unix)]
 #[test]
 fn a_process_that_outlives_its_deadline_is_killed_and_reaped() {
     // `sleep` stands in for the git this exists to survive: one that has taken
@@ -44,7 +47,6 @@ fn a_process_that_outlives_its_deadline_is_killed_and_reaped() {
     assert!(matches!(reaped, Some(status) if !status.success()));
 }
 
-#[cfg(unix)]
 #[test]
 fn a_process_that_finishes_in_time_is_not_killed() {
     let mut child = command("true")

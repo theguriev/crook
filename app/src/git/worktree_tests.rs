@@ -14,6 +14,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
+// Only the Unix hook case below keeps time, and an import nothing uses is an
+// error under the CI's `-D warnings` on Windows.
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use super::*;
