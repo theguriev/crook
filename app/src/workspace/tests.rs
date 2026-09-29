@@ -5080,6 +5080,17 @@ fn make_a_worktree_through_the_menu(
         .expect("no pane was opened in the new checkout")
 }
 
+/// Commits everything in `repository`'s working tree, the way a repository
+/// sharing its `.gitignore` and `.worktreeinclude` has them.
+fn commit_everything(repository: &Path) {
+    git_says(repository, &["add", "-A"]).expect("git staged the scratch repository");
+    git_says(
+        repository,
+        &["commit", "--quiet", "-m", "ignore and include"],
+    )
+    .expect("git committed the scratch repository");
+}
+
 #[test]
 fn what_worktreeinclude_names_is_in_a_new_checkout_before_its_tab_opens() {
     // Claude Code's `.worktreeinclude`, honoured for the worktrees Crook
@@ -5094,6 +5105,9 @@ fn what_worktreeinclude_names_is_in_a_new_checkout_before_its_tab_opens() {
     };
     fs::write(repository.join(".gitignore"), ".env\n").expect("the scratch is writable");
     fs::write(repository.join(".worktreeinclude"), ".env\n").expect("the scratch is writable");
+    // Committed, so the new checkout ignores the `.env` too: one that did not
+    // would be given none, lest an agent's `git add -A` commit it.
+    commit_everything(&repository);
     fs::write(repository.join(".env"), "SECRET=1\n").expect("the scratch is writable");
     let store = scratch.path().join("store");
 
@@ -5127,6 +5141,7 @@ fn a_file_worktreeinclude_could_not_bring_is_said_on_the_new_tabs_menu() {
     };
     fs::write(repository.join(".gitignore"), "*.sql\n").expect("the scratch is writable");
     fs::write(repository.join(".worktreeinclude"), "*.sql\n").expect("the scratch is writable");
+    commit_everything(&repository);
     // Past the limit for one file without writing it: a file extended rather
     // than written is sparse where the filesystem can be, and is never read,
     // because its size alone leaves it out.

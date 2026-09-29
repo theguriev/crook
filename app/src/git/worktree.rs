@@ -792,8 +792,7 @@ pub const INCLUDE_FILE: &str = ".worktreeinclude";
 pub struct Included {
     /// How many files were copied.
     pub copied: usize,
-    /// Files that matched and were not copied, each with the reason, in the
-    /// order git listed them.
+    /// Files that matched and were not copied, each with the reason.
     pub skipped: Vec<(PathBuf, Skip)>,
     /// Why nothing at all was copied, when that is what happened.
     pub refused: Option<Refusal>,
@@ -810,6 +809,11 @@ pub enum Skip {
     Link,
     /// It is not a regular file: a socket, a pipe, a device.
     NotAFile,
+    /// The main checkout ignores it and the new one does not — its
+    /// `.gitignore` is an older branch's, or the main checkout's has an edit
+    /// nobody committed. A copy there would be an untracked file, and the next
+    /// `git add -A` in it would commit whatever secret the file holds.
+    NotIgnored,
     /// It is bigger than one file may be.
     TooLarge {
         /// Its size.
@@ -910,6 +914,7 @@ impl Skip {
             Self::Exists => "already there".to_owned(),
             Self::Link => "a symbolic link".to_owned(),
             Self::NotAFile => "not a file".to_owned(),
+            Self::NotIgnored => "not ignored in the new checkout".to_owned(),
             Self::TooLarge { bytes, limit } => {
                 format!(
                     "{}, over the {} one file may be",
@@ -1026,7 +1031,7 @@ const LIMITS: Limits = Limits {
 /// Copies the ignored files the main checkout's [`INCLUDE_FILE`] names into
 /// `worktree`, which has just been made from the repository `repository` is in.
 ///
-/// **Blocking**: three git subprocesses and the copying. Background executor
+/// **Blocking**: up to four git subprocesses and the copying. Background executor
 /// only, and before a shell is started in `worktree` — a shell whose rc reads
 /// `.env`, through `direnv` or anything like it, reads it once, as it starts.
 /// The subprocesses are reads, under the read deadline like every other here;
@@ -1064,6 +1069,9 @@ const LIMITS: Limits = Limits {
 ///   anywhere on the machine, and a link in the new one would have the copy
 ///   written wherever it points.
 /// * A file already in the new checkout is never overwritten.
+/// * A file the new checkout does not ignore is not copied, because there it
+///   would be an untracked file for the next `git add -A` to commit. See
+///   [`Skip::NotIgnored`].
 /// * The executable bit comes with the file, and on Unix the copy has the
 ///   source's mode from the moment it exists.
 /// * Past [`MAX_INCLUDED_FILES`] or [`MAX_INCLUDED_BYTES`] nothing is copied,
@@ -1159,19 +1167,22 @@ fn copy_or_refuse(repository: &Path, worktree: &Path, limits: Limits) -> Include
 
     let mut included = Included::default();
     let mut going = Vec::with_capacity(candidates.len());
-    let mut total: u64 = 0;
     for relative in candidates {
         match source(&main, &relative, limits) {
-            Ok(metadata) => {
-                total = total.saturating_add(metadata.len());
-                going.push((relative, metadata.permissions()));
-            }
+            Ok(metadata) => going.push((relative, metadata)),
             Err(skip) => included.skipped.push((relative, skip)),
         }
     }
+    let going = match ignored_in(worktree, going, &mut included.skipped) {
+        Ok(going) => going,
+        Err(error) => return Included::refused(Refusal::CouldNotLook(error)),
+    };
     // Measured before anything is written, so a refusal leaves the new
     // checkout exactly as git made it rather than holding the first few
     // hundred megabytes of what was refused.
+    let total = going.iter().fold(0_u64, |total, (_, metadata)| {
+        total.saturating_add(metadata.len())
+    });
     if total > limits.total_bytes {
         return Included::refused(Refusal::TooLarge {
             bytes: total,
@@ -1179,8 +1190,8 @@ fn copy_or_refuse(repository: &Path, worktree: &Path, limits: Limits) -> Include
         });
     }
 
-    for (relative, permissions) in going {
-        match copy_one(&main, worktree, &relative, permissions) {
+    for (relative, metadata) in going {
+        match copy_one(&main, worktree, &relative, metadata.permissions()) {
             Ok(()) => included.copied += 1,
             Err(skip) => included.skipped.push((relative, skip)),
         }
@@ -1400,6 +1411,80 @@ fn source(main: &Path, relative: &Path, limits: Limits) -> Result<std::fs::Metad
         });
     }
     Ok(metadata)
+}
+
+/// Of `going`, the files `worktree` ignores as well; each of the rest goes to
+/// `skipped` with its reason.
+///
+/// The main checkout's ignore rules decided which files qualify, and the new
+/// checkout's can differ: a branch picked as the base from before `.env` was
+/// in `.gitignore`, or a `.gitignore` edit in the main checkout nobody has
+/// committed. There a copy would be an untracked file like any other, and an
+/// agent's `git add -A` would commit it. Claude Code's documentation says
+/// nothing about the new checkout's rules; this one is Crook's, and it only
+/// ever leaves out a file Claude Code's rules would have copied, never adds
+/// one.
+///
+/// One `git check-ignore --stdin` in the new checkout. A file it does not call
+/// ignored that is already there — one the branch tracks, which check-ignore
+/// never calls ignored — is [`Skip::Exists`], as the copy would have found
+/// it; the others are [`Skip::NotIgnored`].
+fn ignored_in(
+    worktree: &Path,
+    going: Vec<(PathBuf, std::fs::Metadata)>,
+    skipped: &mut Vec<(PathBuf, Skip)>,
+) -> Result<Vec<(PathBuf, std::fs::Metadata)>, Error> {
+    // Asked here as well as in `copy_one`, because check-ignore dies on the
+    // first path that goes through a link — "beyond a symbolic link" — and
+    // takes every other file's answer with it.
+    let (going, linked): (Vec<_>, Vec<_>) = going
+        .into_iter()
+        .partition(|(relative, _)| !through_a_link(worktree, relative));
+    skipped.extend(
+        linked
+            .into_iter()
+            .map(|(relative, _)| (relative, Skip::Link)),
+    );
+    if going.is_empty() {
+        return Ok(going);
+    }
+
+    let mut input = Vec::new();
+    for (relative, _) in &going {
+        input.extend_from_slice(&bytes_of(relative));
+        input.push(0);
+    }
+    let answered = run_feeding(
+        worktree,
+        &[
+            OsStr::new("check-ignore"),
+            OsStr::new("-z"),
+            OsStr::new("--stdin"),
+        ],
+        Intent::Read,
+        Some(input),
+    )?;
+    // 1 is "none of them is ignored", which is an answer; 128 is a failure.
+    if !answered.success && answered.code != Some(1) {
+        return Err(classify(&answered.stderr));
+    }
+    let ignored: HashSet<&[u8]> = answered
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .collect();
+
+    let mut kept = Vec::with_capacity(going.len());
+    for (relative, metadata) in going {
+        if ignored.contains(bytes_of(&relative).as_slice()) {
+            kept.push((relative, metadata));
+        } else if std::fs::symlink_metadata(worktree.join(&relative)).is_ok() {
+            skipped.push((relative, Skip::Exists));
+        } else {
+            skipped.push((relative, Skip::NotIgnored));
+        }
+    }
+    Ok(kept)
 }
 
 /// Copies `relative` from `main` to the same place in `worktree`, making the
@@ -2019,6 +2104,20 @@ fn path_from(bytes: &[u8]) -> PathBuf {
     }
 }
 
+/// `path` as the bytes git would print for it: [`path_from`] the other way
+/// round, and exact for every path that came out of it.
+fn bytes_of(path: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        path.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        path.to_string_lossy().into_owned().into_bytes()
+    }
+}
+
 /// An object id abbreviated the way [`super::branch`] abbreviates one, so the
 /// two halves of the git module print the same commit the same way.
 fn short_sha(bytes: &[u8]) -> String {
@@ -2266,6 +2365,10 @@ thread_local! {
 struct Finished {
     /// Whether git exited zero.
     success: bool,
+    /// The code it exited with, for the commands whose non-zero exit is an
+    /// answer — `check-ignore` exits 1 for "none of them". `None` when a
+    /// signal ended it.
+    code: Option<i32>,
     /// stdout, as bytes, because paths come out of it.
     stdout: Vec<u8>,
     /// stderr, as text, because messages come out of it.
@@ -2280,6 +2383,17 @@ struct Finished {
 /// those can outlive git by as long as whatever a hook backgrounded cares to
 /// live — see `collect`.
 fn run(directory: &Path, args: &[&OsStr], intent: Intent) -> Result<Finished, Error> {
+    run_feeding(directory, args, intent, None)
+}
+
+/// [`run`], with `input` written to git's stdin when there is one — and stdin
+/// closed at once when there is not, so nothing can wait on it.
+fn run_feeding(
+    directory: &Path,
+    args: &[&OsStr],
+    intent: Intent,
+    input: Option<Vec<u8>>,
+) -> Result<Finished, Error> {
     if git_is_missing() {
         return Err(Error::GitMissing);
     }
@@ -2315,9 +2429,14 @@ fn run(directory: &Path, args: &[&OsStr], intent: Intent) -> Result<Finished, Er
         // and start point precisely so nothing can decide to go and fetch one —
         // so there is no credential to be asked for. These two make that a
         // guarantee rather than an argument: git may not prompt on a terminal,
-        // and has no terminal on stdin to prompt on.
+        // and has no terminal on stdin to prompt on — a pipe, when there is
+        // input, is no terminal either.
         .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(std::process::Stdio::null())
+        .stdin(if input.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
@@ -2339,6 +2458,9 @@ fn run(directory: &Path, args: &[&OsStr], intent: Intent) -> Result<Finished, Er
     // a lie about what happened.
     let stdout = child.stdout.take().map(drain);
     let stderr = child.stderr.take().map(drain);
+    if let (Some(input), Some(stdin)) = (input, child.stdin.take()) {
+        feed(stdin, input);
+    }
 
     let timeout = intent.timeout();
     let deadline = Instant::now() + timeout;
@@ -2398,6 +2520,7 @@ fn run(directory: &Path, args: &[&OsStr], intent: Intent) -> Result<Finished, Er
 
     Ok(Finished {
         success: status.success(),
+        code: status.code(),
         stdout: stdout.unwrap_or_default(),
         stderr: String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned(),
     })
@@ -2426,6 +2549,24 @@ fn drain<R: std::io::Read + Send + 'static>(mut pipe: R) -> Receiver<Vec<u8>> {
         let _ = sender.send(bytes);
     });
     receiver
+}
+
+/// Writes `input` to git's stdin on a thread of its own, then closes it.
+///
+/// Not on the calling thread, for the deadline's sake: a write into a pipe
+/// git is not reading blocks, and it would block before [`wait_for`] had
+/// started counting. Not joined, for [`drain`]'s reason. Once git exits, or is
+/// killed at its deadline, the pipe has no reader and the write fails rather
+/// than blocks, so the thread ends with the command — nothing git runs for
+/// the one command that is fed, `check-ignore`, inherits the pipe to keep it
+/// open.
+fn feed(mut stdin: std::process::ChildStdin, input: Vec<u8>) {
+    std::thread::spawn(move || {
+        use std::io::Write as _;
+        // Ignored: a git that stopped reading has exited or failed, and says
+        // so in its exit status, which is what the caller reads.
+        let _ = stdin.write_all(&input);
+    });
 }
 
 /// How long a reader is given once git itself has been reaped.

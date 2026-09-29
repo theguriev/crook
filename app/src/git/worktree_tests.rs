@@ -1612,6 +1612,59 @@ fn files_that_together_pass_the_size_limit_are_refused_whole() {
 }
 
 #[test]
+fn a_file_the_new_checkout_does_not_ignore_is_not_copied() {
+    if without_git("a_file_the_new_checkout_does_not_ignore_is_not_copied") {
+        return;
+    }
+    // A base branch from before `.env` was ignored, which the creator's base
+    // picker makes a click away. The main checkout ignores the `.env`; the
+    // new checkout has no `.gitignore` saying so, and a copy there would be
+    // an untracked file for an agent's `git add -A` to commit. Beside it, a
+    // file the old branch tracks and the main checkout ignores: it is in the
+    // new checkout already, as the branch has it, which is the rule working
+    // and nothing to say.
+    let scratch = ScratchDir::new("include-not-ignored-there");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    git(&repo, &["checkout", "-q", "-b", "old"]);
+    write(&repo.join("local.json"), "the branch's\n");
+    git(&repo, &["add", "local.json"]);
+    git(&repo, &["commit", "--no-verify", "-m", "tracked here"]);
+    git(&repo, &["checkout", "-q", "main"]);
+    write(&repo.join(".gitignore"), ".env\nlocal.json\n");
+    write(&repo.join(INCLUDE_FILE), ".env\nlocal.json\n");
+    git(&repo, &["add", "."]);
+    git(
+        &repo,
+        &["commit", "--no-verify", "-m", "ignore and include"],
+    );
+    write(&repo.join(".env"), "SECRET=1\n");
+    write(&repo.join("local.json"), "the main checkout's\n");
+    let checkout = scratch.spot("from-old");
+    add(&repo, &checkout, "from-old", Some("old")).expect("git added the worktree");
+
+    let included = copy_included(&repo, &checkout);
+
+    assert_eq!(contents(&checkout.join(".env")), None);
+    assert_eq!(
+        contents(&checkout.join("local.json")).as_deref(),
+        Some("the branch's\n")
+    );
+    assert_eq!(included.copied, 0);
+    assert!(included.refused.is_none(), "{included:?}");
+    assert_eq!(
+        skipped_for(&included, |skip| matches!(skip, Skip::NotIgnored)),
+        [".env"]
+    );
+    assert_eq!(
+        skipped_for(&included, |skip| matches!(skip, Skip::Exists)),
+        ["local.json"]
+    );
+    let problem = included.problem().expect("a file left out is said");
+    assert!(problem.contains(".env (not ignored"), "{problem}");
+    assert!(!problem.contains("local.json"), "{problem}");
+}
+
+#[test]
 fn a_worktreeinclude_with_a_byte_order_mark_is_read_the_way_git_reads_it() {
     if without_git("a_worktreeinclude_with_a_byte_order_mark_is_read_the_way_git_reads_it") {
         return;

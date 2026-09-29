@@ -451,9 +451,10 @@ Nineteen features, and the page that configures them:
   [`.worktreeinclude`](https://code.claude.com/docs/en/worktrees) at the root of its main
   checkout — Claude Code's file, in `.gitignore` syntax — gets the files it names copied in
   before that tab's shell starts, so the `.env` an agent's first run needs is there: only files
-  git ignores (a tracked file is already in the checkout), never through a symbolic link, never
-  over a file already there, nothing at all past a thousand files or 256 MB, and no single file
-  over 64 MB. What did not arrive is said on the new tab's worktree menu. Removal is offered
+  git ignores (a tracked file is already in the checkout), and only where the new checkout
+  ignores it too, so an agent's `git add -A` cannot commit it; never through a symbolic link,
+  never over a file already there, nothing at all past a thousand files or 256 MB, and no single
+  file over 64 MB. What did not arrive is said on the new tab's worktree menu. Removal is offered
   only for a checkout
   that is not locked, not the main one, and not one a tab is working in; it says what it will
   delete first, and it never deletes the branch. One row down, `Remove 3 free checkouts…`
