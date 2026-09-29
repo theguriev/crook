@@ -1,11 +1,14 @@
-//! Every checkout a repository has, and the two commands that make and unmake
-//! one.
+//! Every checkout a repository has, the two commands that make and unmake one,
+//! and what a new one is given.
 //!
 //! A tab in Crook is an agent working somewhere, and two agents working in the
 //! same directory fight over the same files. A worktree is git's answer to
 //! that: one repository, several checkouts, each on its own branch. Giving a
 //! new session its own checkout is two commands; this module is those two, plus
-//! the reading that makes them safe to offer.
+//! the reading that makes them safe to offer — and [`copy_included`], which
+//! brings a new checkout the ignored files git leaves behind and an agent's
+//! first run needs, the `.env` and the local configuration, by the rules of
+//! Claude Code's `.worktreeinclude`.
 //!
 //! Everything here is a subprocess, which puts it in [`super::diff`]'s bracket
 //! rather than [`super::branch`]'s: blocking, background-only, and able to
@@ -34,7 +37,7 @@
 //! says what abandoning one costs and why it is the cheaper of the two prices.
 
 use std::collections::HashSet;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -768,6 +771,912 @@ pub fn remove(repository: &Path, path: &Path, force: bool) -> Result<(), Error> 
         return Ok(());
     }
     Err(classify(&finished.stderr))
+}
+
+// MARK: - What a new checkout is given
+
+/// The file in a repository's main checkout that names the ignored files a new
+/// worktree of it is given.
+///
+/// Claude Code's name, and Claude Code's rules — see [`copy_included`] — so
+/// that one file in a repository serves the worktrees both tools make. A second
+/// file with a Crook name would be a second list of the same `.env` for
+/// somebody to keep in step with the first.
+pub const INCLUDE_FILE: &str = ".worktreeinclude";
+
+/// What [`copy_included`] did for one new checkout.
+///
+/// The default is what a repository with no [`INCLUDE_FILE`] gets: nothing
+/// copied, nothing left out, nothing refused.
+#[derive(Debug, Default)]
+pub struct Included {
+    /// How many files were copied.
+    pub copied: usize,
+    /// Files that matched and were not copied, each with the reason, in the
+    /// order git listed them.
+    pub skipped: Vec<(PathBuf, Skip)>,
+    /// Why nothing at all was copied, when that is what happened.
+    pub refused: Option<Refusal>,
+}
+
+/// Why one matching file was not copied.
+#[derive(Debug)]
+pub enum Skip {
+    /// The new checkout already has something at that path — a file the
+    /// branch tracks, or one a `post-checkout` hook made. Never overwritten.
+    Exists,
+    /// It is a symbolic link, or the way to it goes through one, in the main
+    /// checkout or in the new one. Never followed.
+    Link,
+    /// It is not a regular file: a socket, a pipe, a device.
+    NotAFile,
+    /// It is bigger than one file may be.
+    TooLarge {
+        /// Its size.
+        bytes: u64,
+        /// The most one file may be.
+        limit: u64,
+    },
+    /// Reading it or writing the copy failed.
+    Failed(std::io::Error),
+}
+
+/// Why nothing was copied from [`INCLUDE_FILE`].
+#[derive(Debug)]
+pub enum Refusal {
+    /// More files match than a new checkout is given.
+    TooMany {
+        /// How many match.
+        files: usize,
+        /// How many a new checkout is given.
+        limit: usize,
+    },
+    /// The files that match come to more bytes than a new checkout is given.
+    TooLarge {
+        /// How many bytes they come to.
+        bytes: u64,
+        /// How many a new checkout is given.
+        limit: u64,
+    },
+    /// The file itself is there and could not be read.
+    Unreadable(std::io::Error),
+    /// git could not say which files the main checkout ignores, or which of
+    /// them match.
+    CouldNotLook(Error),
+}
+
+impl Included {
+    /// The sentence a person should be shown, when something they asked for
+    /// did not arrive: the copy was refused, or a file was left out for a
+    /// reason other than already being there.
+    ///
+    /// `None` when everything that matched is in the new checkout, whoever put
+    /// it there. A file the branch already has is the rule working, not a
+    /// failure — and a note after every checkout that merely confirmed the
+    /// copy would be a note people learn to dismiss unread.
+    pub fn problem(&self) -> Option<String> {
+        if let Some(refusal) = &self.refused {
+            return Some(format!(
+                "Nothing was copied from {INCLUDE_FILE}: {}.",
+                refusal.reason()
+            ));
+        }
+
+        let left_out: Vec<&(PathBuf, Skip)> = self
+            .skipped
+            .iter()
+            .filter(|(_, skip)| !matches!(skip, Skip::Exists))
+            .collect();
+        if left_out.is_empty() {
+            return None;
+        }
+
+        let mut named = left_out
+            .iter()
+            .take(NAMED_IN_A_NOTE)
+            .map(|(path, skip)| format!("{} ({})", path.display(), skip.reason()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let unnamed = left_out.len().saturating_sub(NAMED_IN_A_NOTE);
+        if unnamed > 0 {
+            named.push_str(&format!(" and {unnamed} more"));
+        }
+        Some(format!(
+            "Copied {} from {INCLUDE_FILE}, but not {named}.",
+            files(self.copied)
+        ))
+    }
+
+    /// Nothing copied, for `refusal`.
+    fn refused(refusal: Refusal) -> Self {
+        Self {
+            refused: Some(refusal),
+            ..Self::default()
+        }
+    }
+}
+
+/// How many of the files left out a note names before it counts the rest.
+///
+/// The note is a line or two in a popup a few hundred pixels wide, and three
+/// names is enough to say which kind of thing went wrong; the log has every
+/// one of them.
+const NAMED_IN_A_NOTE: usize = 3;
+
+impl Skip {
+    /// Why, as the few words a note puts in brackets after the path.
+    fn reason(&self) -> String {
+        match self {
+            Self::Exists => "already there".to_owned(),
+            Self::Link => "a symbolic link".to_owned(),
+            Self::NotAFile => "not a file".to_owned(),
+            Self::TooLarge { bytes, limit } => {
+                format!(
+                    "{}, over the {} one file may be",
+                    size(*bytes),
+                    size(*limit)
+                )
+            }
+            Self::Failed(error) => error.to_string(),
+        }
+    }
+}
+
+impl Refusal {
+    /// Why, as the end of a sentence that begins "Nothing was copied".
+    fn reason(&self) -> String {
+        match self {
+            Self::TooMany {
+                files: count,
+                limit,
+            } => format!(
+                "{} match it, more than the {limit} a new worktree is given",
+                files(*count)
+            ),
+            Self::TooLarge { bytes, limit } => format!(
+                "what matches it comes to {}, more than the {} a new worktree is given",
+                size(*bytes),
+                size(*limit)
+            ),
+            Self::Unreadable(error) => format!("it could not be read: {error}"),
+            Self::CouldNotLook(error) => error.to_string(),
+        }
+    }
+}
+
+/// `count` files, in words.
+fn files(count: usize) -> String {
+    if count == 1 {
+        "1 file".to_owned()
+    } else {
+        format!("{count} files")
+    }
+}
+
+/// `bytes` as a person reads a size.
+fn size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    if bytes < KB {
+        format!("{bytes} bytes")
+    } else if bytes < MB {
+        format!("{} KB", bytes.div_ceil(KB))
+    } else if bytes.is_multiple_of(MB) {
+        format!("{} MB", bytes / MB)
+    } else {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    }
+}
+
+/// How many files a new checkout is given from [`INCLUDE_FILE`] before the
+/// copy is refused outright.
+///
+/// What the file is for is a handful — `.env`, a local settings file, a
+/// directory of certificates — and a thousand is far past any of that. What
+/// goes past it is a pattern that caught a dependency tree: `*`, or `**` next
+/// to a `node_modules/`, is tens of thousands of files. Refused whole rather
+/// than cut off at the thousandth, because half a `node_modules` is worse than
+/// none — it looks installed and is not — and which half would be the order
+/// git happened to list it in.
+pub const MAX_INCLUDED_FILES: usize = 1_000;
+
+/// The largest one file copied from [`INCLUDE_FILE`] may be.
+///
+/// Configuration is kilobytes. A file past this is a database, a dump or a
+/// build artefact a broad pattern caught, and copying it would make creating
+/// the worktree the slow part of starting an agent. Left out on its own — the
+/// rest of what matched is still configuration, and still wanted — and named
+/// in the note, so a file somebody really meant is one they know to bring.
+pub const MAX_INCLUDED_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The most every file copied from [`INCLUDE_FILE`] may come to together.
+///
+/// The count and the per-file size between them still allow a thousand files
+/// at the per-file limit, which is sixty-four gigabytes. This is the bound on
+/// the whole, refused whole for the count's reason.
+pub const MAX_INCLUDED_BYTES: u64 = 256 * 1024 * 1024;
+
+/// How much a new checkout is given before a file is left out or the copy is
+/// refused.
+///
+/// A value rather than the three constants read where they are needed, so the
+/// tests can go past each one with a few bytes instead of writing hundreds of
+/// megabytes to find out.
+#[derive(Copy, Clone, Debug)]
+struct Limits {
+    /// More matching files than this, and nothing is copied.
+    files: usize,
+    /// A file bigger than this is left out.
+    file_bytes: u64,
+    /// All of them together bigger than this, and nothing is copied.
+    total_bytes: u64,
+}
+
+/// The limits outside a test.
+const LIMITS: Limits = Limits {
+    files: MAX_INCLUDED_FILES,
+    file_bytes: MAX_INCLUDED_FILE_BYTES,
+    total_bytes: MAX_INCLUDED_BYTES,
+};
+
+/// Copies the ignored files the main checkout's [`INCLUDE_FILE`] names into
+/// `worktree`, which has just been made from the repository `repository` is in.
+///
+/// **Blocking**: three git subprocesses and the copying. Background executor
+/// only, and before a shell is started in `worktree` — a shell whose rc reads
+/// `.env`, through `direnv` or anything like it, reads it once, as it starts.
+/// The subprocesses are reads, under the read deadline like every other here;
+/// the copying is local files and has no deadline of its own, and what bounds
+/// it instead is the limits below, checked before the first byte is written.
+///
+/// Claude Code's rules, because the point is one file serving both tools
+/// (<https://code.claude.com/docs/en/worktrees>):
+///
+/// * The file is [`INCLUDE_FILE`] at the root of the repository's **main**
+///   checkout, which is also where every file is copied from — whichever
+///   checkout `repository` is. A linked worktree has no `.env` of its own
+///   unless somebody put one there.
+/// * It is `.gitignore` syntax.
+/// * A file is copied only when a pattern matches it **and** git ignores it.
+///   A tracked file is already in the new checkout, as the branch has it, and
+///   copying the main checkout's edit of it over the top would hand one agent
+///   another's uncommitted work; an untracked file nothing ignores is work in
+///   progress, not configuration.
+/// * It goes to the same relative path in the new checkout.
+/// * A directory git ignores as a whole — `node_modules/`, `target/` — is
+///   looked inside only when a pattern reaches it: when it, or a directory
+///   above it, matches a pattern; when a pattern names a path through it
+///   (`vendor/**/config.json`); or, for a pattern beginning `**/`, when the
+///   name after the `**/` is one of its own names (`**/.claude/skills/*.md`
+///   reaches `.claude/`). `**/config.json` does not reach `vendor/`, and
+///   neither does a bare `config.json`, which means the same thing. That is
+///   what Claude Code documents, and it is also what keeps a `.env` pattern
+///   from walking a `target/` of half a million files to look for one.
+///
+/// And Crook's own, which the documentation says nothing about either way:
+///
+/// * A symbolic link is never followed — not one git listed, not one on the
+///   way to a file in either checkout. A link in the main checkout can point
+///   anywhere on the machine, and a link in the new one would have the copy
+///   written wherever it points.
+/// * A file already in the new checkout is never overwritten.
+/// * The executable bit comes with the file.
+/// * Past [`MAX_INCLUDED_FILES`] or [`MAX_INCLUDED_BYTES`] nothing is copied,
+///   and a file past [`MAX_INCLUDED_FILE_BYTES`] is left out on its own.
+///
+/// Nothing here fails the checkout it is copying into: that exists already,
+/// and every way this can go wrong is a line in the log — and, from the moment
+/// there is a file to have asked for something, a reason in what comes back.
+/// See [`Included::problem`].
+pub fn copy_included(repository: &Path, worktree: &Path) -> Included {
+    copy_included_within(repository, worktree, LIMITS)
+}
+
+/// [`copy_included`] under `limits`.
+fn copy_included_within(repository: &Path, worktree: &Path, limits: Limits) -> Included {
+    let included = copy_or_refuse(repository, worktree, limits);
+
+    for (path, skip) in &included.skipped {
+        match skip {
+            Skip::Exists => log::debug!(
+                "{} is already in {}; not copied from {INCLUDE_FILE}",
+                path.display(),
+                worktree.display()
+            ),
+            _ => log::warn!(
+                "{} not copied from {INCLUDE_FILE}: {}",
+                path.display(),
+                skip.reason()
+            ),
+        }
+    }
+    match &included.refused {
+        Some(refusal) => log::warn!(
+            "nothing copied from {INCLUDE_FILE} into {}: {}",
+            worktree.display(),
+            refusal.reason()
+        ),
+        None if included.copied > 0 => log::info!(
+            "copied {} from {INCLUDE_FILE} into {}",
+            files(included.copied),
+            worktree.display()
+        ),
+        None => {}
+    }
+    included
+}
+
+/// The copy itself, with the logging of what it did left to the caller.
+fn copy_or_refuse(repository: &Path, worktree: &Path, limits: Limits) -> Included {
+    let main = match main_checkout(repository) {
+        Ok(Some(main)) => main,
+        // A bare repository has no checkout to have a `.env` in.
+        Ok(None) => return Included::default(),
+        // Logged and not refused, unlike every failure after this one. The
+        // file is found through the main checkout, so without it there is no
+        // telling whether the repository has one — and a note about a
+        // `.worktreeinclude` somebody never wrote would be a note about
+        // nothing.
+        Err(error) => {
+            log::warn!(
+                "could not find the main checkout of {} to copy {INCLUDE_FILE} from: {error}",
+                repository.display()
+            );
+            return Included::default();
+        }
+    };
+
+    let include = main.join(INCLUDE_FILE);
+    let text = match std::fs::read(&include) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Included::default();
+        }
+        Err(error) => return Included::refused(Refusal::Unreadable(error)),
+    };
+    let patterns = reaching_patterns(&String::from_utf8_lossy(&text));
+    // Nothing but comments and negations: nothing can match, and git need
+    // not be asked to confirm it.
+    if patterns.is_empty() {
+        return Included::default();
+    }
+
+    let candidates = match candidates(&main, &include, &patterns) {
+        Ok(candidates) => candidates,
+        Err(error) => return Included::refused(Refusal::CouldNotLook(error)),
+    };
+    if candidates.len() > limits.files {
+        return Included::refused(Refusal::TooMany {
+            files: candidates.len(),
+            limit: limits.files,
+        });
+    }
+
+    let mut included = Included::default();
+    let mut going = Vec::with_capacity(candidates.len());
+    let mut total: u64 = 0;
+    for relative in candidates {
+        match source(&main, &relative, limits) {
+            Ok(metadata) => {
+                total = total.saturating_add(metadata.len());
+                going.push((relative, metadata.permissions()));
+            }
+            Err(skip) => included.skipped.push((relative, skip)),
+        }
+    }
+    // Measured before anything is written, so a refusal leaves the new
+    // checkout exactly as git made it rather than holding the first few
+    // hundred megabytes of what was refused.
+    if total > limits.total_bytes {
+        return Included::refused(Refusal::TooLarge {
+            bytes: total,
+            limit: limits.total_bytes,
+        });
+    }
+
+    for (relative, permissions) in going {
+        match copy_one(&main, worktree, &relative, permissions) {
+            Ok(()) => included.copied += 1,
+            Err(skip) => included.skipped.push((relative, skip)),
+        }
+    }
+    included
+}
+
+/// The main checkout of the repository `repository` is in, or `None` when the
+/// repository is bare and has none.
+///
+/// Out of `worktree list`, whose first record is the main checkout and which
+/// is the rule [`Worktree::is_main`] already follows — rather than out of the
+/// common git directory's parent, which is the main checkout only when nobody
+/// used `--separate-git-dir`.
+fn main_checkout(repository: &Path) -> Result<Option<PathBuf>, Error> {
+    Ok(list(repository)?
+        .into_iter()
+        .next()
+        .filter(|main| !main.is_bare)
+        .map(|main| main.path))
+}
+
+/// The byte budget for the directories [`candidates`] tells git to leave out
+/// of its walk.
+///
+/// They are pathspecs on the command line, and a Windows command line is
+/// 32,767 characters, all of it. A monorepo with a `node_modules/` and a
+/// `dist/` in each of four hundred packages would pass that; past this budget
+/// the walk goes everywhere instead, which is slower and gives the same answer.
+const PRUNE_BUDGET: usize = 16 * 1024;
+
+/// Every file in `main` that git ignores and that `patterns` — read from
+/// `include` — match, as paths relative to `main`.
+///
+/// Two walks, because gitignore's grammar has no way to say "ignored by one
+/// set of patterns *and* matched by another": in `.gitignore`'s precedence the
+/// first list that has an opinion decides, and a list cannot be intersected
+/// with another by writing it into the same file.
+///
+/// The first is `git status --ignored=matching`, which lists every ignored
+/// file on its own — except that a directory a pattern ignores as a whole is
+/// listed once, as the directory, without git walking into it. That is the
+/// shape Claude Code's rule for such a directory is written against, and the
+/// cheap half: `target/` is one line.
+///
+/// The second is `git ls-files --others --ignored --exclude-from=<include>`:
+/// every untracked file the include patterns match, in git's own reading of
+/// gitignore syntax, negations and all. `--exclude-from` is the flag that
+/// *adds* ignore patterns, and `--ignored` turns the listing round to show
+/// what they match instead of what they leave, so together they are "list
+/// what these patterns match". The ignored directories no pattern reaches are
+/// left out of that walk as `:(exclude)` pathspecs, which is what keeps a
+/// `.env` pattern from reading all of `target/` looking for one.
+///
+/// What comes back is the second list cut down to what the first says is
+/// ignored: a file it listed, or one inside a directory it listed that a
+/// pattern reaches.
+fn candidates(main: &Path, include: &Path, patterns: &[Reach]) -> Result<Vec<PathBuf>, Error> {
+    let status = run(
+        main,
+        &[
+            OsStr::new("status"),
+            OsStr::new("--porcelain"),
+            OsStr::new("-z"),
+            OsStr::new("--ignored=matching"),
+            // Spelled out, so a repository that sets `status.showUntrackedFiles`
+            // to `no` still lists what it ignores — git lists nothing ignored
+            // where it lists nothing untracked.
+            OsStr::new("--untracked-files=normal"),
+            // A submodule's own changes say nothing about what the
+            // superproject ignores, and asking costs a `status` in each one.
+            OsStr::new("--ignore-submodules=all"),
+        ],
+        Intent::Read,
+    )?;
+    if !status.success {
+        return Err(classify(&status.stderr));
+    }
+    let ignored = ignored_entries(&status.stdout);
+
+    let (files, directories): (Vec<&[u8]>, Vec<&[u8]>) = ignored
+        .into_iter()
+        .partition(|entry| !entry.ends_with(b"/"));
+    let (reached, passed): (Vec<&[u8]>, Vec<&[u8]>) =
+        directories.into_iter().partition(|directory| {
+            let text = String::from_utf8_lossy(directory);
+            let names: Vec<&str> = text.trim_end_matches('/').split('/').collect();
+            patterns.iter().any(|pattern| pattern.reaches(&names))
+        });
+    // Nothing ignored that a pattern could be matching: the second walk would
+    // list only files the cut below throws away, so it is not taken.
+    if files.is_empty() && reached.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut args = vec![
+        OsString::from("ls-files"),
+        OsString::from("-z"),
+        OsString::from("--others"),
+        OsString::from("--ignored"),
+        OsString::from("--exclude-from"),
+        include.as_os_str().to_owned(),
+        OsString::from("--"),
+    ];
+    let pruned: Vec<OsString> = passed
+        .iter()
+        .map(|directory| {
+            // Literal, so a directory called `[abc]` or `*` is that
+            // directory and not a glob over its neighbours.
+            let mut spec = OsString::from(":(exclude,literal)");
+            spec.push(path_from(directory));
+            spec
+        })
+        .collect();
+    if pruned.iter().map(|spec| spec.len()).sum::<usize>() <= PRUNE_BUDGET {
+        args.extend(pruned);
+    }
+    let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
+
+    let listed = run(main, &args, Intent::Read)?;
+    if !listed.success {
+        return Err(classify(&listed.stderr));
+    }
+
+    let files: HashSet<&[u8]> = files.into_iter().collect();
+    Ok(listed
+        .stdout
+        .split(|byte| *byte == 0)
+        // An entry ending in a slash is a repository nested inside this one,
+        // which git lists as a directory and does not look into.
+        .filter(|path| !path.is_empty() && !path.ends_with(b"/"))
+        .filter(|path| {
+            files.contains(path) || reached.iter().any(|directory| path.starts_with(directory))
+        })
+        .map(path_from)
+        .collect())
+}
+
+/// The paths `git status --porcelain -z --ignored` marks ignored, a directory
+/// keeping the slash git ends it with.
+///
+/// Every entry is `XY <path>`; `!!` is ignored. A rename or a copy of a tracked
+/// file carries where it came from as a second field, which is skipped for
+/// the reason [`Local::parse_status`] skips it.
+fn ignored_entries(stdout: &[u8]) -> Vec<&[u8]> {
+    let mut ignored = Vec::new();
+    let mut entries = stdout.split(|byte| *byte == 0).filter(|f| !f.is_empty());
+    while let Some(entry) = entries.next() {
+        let (Some(code), Some(path)) = (entry.get(..2), entry.get(3..)) else {
+            continue;
+        };
+        if code == b"!!" {
+            ignored.push(path);
+        } else if code.contains(&b'R') || code.contains(&b'C') {
+            entries.next();
+        }
+    }
+    ignored
+}
+
+/// The file at `relative` in `main`, if it is one to copy: its metadata, or
+/// why it is not.
+fn source(main: &Path, relative: &Path, limits: Limits) -> Result<std::fs::Metadata, Skip> {
+    if through_a_link(main, relative) {
+        return Err(Skip::Link);
+    }
+    // `symlink_metadata`, which describes the link rather than what it points
+    // at. git lists a link as a path of its own — to a file or to a directory,
+    // it does not look — so this is where one is caught.
+    let metadata = std::fs::symlink_metadata(main.join(relative)).map_err(Skip::Failed)?;
+    if metadata.file_type().is_symlink() {
+        return Err(Skip::Link);
+    }
+    if !metadata.is_file() {
+        return Err(Skip::NotAFile);
+    }
+    if metadata.len() > limits.file_bytes {
+        return Err(Skip::TooLarge {
+            bytes: metadata.len(),
+            limit: limits.file_bytes,
+        });
+    }
+    Ok(metadata)
+}
+
+/// Copies `relative` from `main` to the same place in `worktree`, making the
+/// directories it goes in and giving it `permissions`.
+fn copy_one(
+    main: &Path,
+    worktree: &Path,
+    relative: &Path,
+    permissions: std::fs::Permissions,
+) -> Result<(), Skip> {
+    // The new checkout's own links, which are the branch's: one tracked where
+    // the copy wants a directory would have it written wherever that points.
+    if through_a_link(worktree, relative) {
+        return Err(Skip::Link);
+    }
+    let target = worktree.join(relative);
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(Skip::Failed)?;
+    }
+
+    let mut source = std::fs::File::open(main.join(relative)).map_err(Skip::Failed)?;
+    // `create_new` is the whole of "never overwrite", and it is one system
+    // call rather than a look and then a write: it refuses anything already at
+    // the path, a link to nowhere included, so nothing between a check and
+    // the open can put something there to be written through.
+    let mut copy = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+    {
+        Ok(copy) => copy,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(Skip::Exists);
+        }
+        Err(error) => return Err(Skip::Failed(error)),
+    };
+
+    let written =
+        std::io::copy(&mut source, &mut copy).and_then(|_| copy.set_permissions(permissions));
+    if let Err(error) = written {
+        // The file is this call's own — `create_new` made it — so a half
+        // copy can go rather than sit there looking like the real one.
+        drop(copy);
+        let _ = std::fs::remove_file(&target);
+        return Err(Skip::Failed(error));
+    }
+    Ok(())
+}
+
+/// Whether the way from `root` to `relative` passes through a symbolic link,
+/// or leaves `root` some other way.
+///
+/// The directories above the file, not the file itself, which the callers look
+/// at on their own. One that is not there yet is not a link, and is made as a
+/// directory by whoever needs it.
+fn through_a_link(root: &Path, relative: &Path) -> bool {
+    let mut at = root.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        // git lists paths inside the repository and nothing else, so a `..`
+        // or a root here is not a path to copy whatever else it is.
+        let std::path::Component::Normal(name) = component else {
+            return true;
+        };
+        if components.peek().is_none() {
+            return false;
+        }
+        at.push(name);
+        match std::fs::symlink_metadata(&at) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+/// One pattern of an [`INCLUDE_FILE`], read only as far as deciding which
+/// ignored directories it reaches into.
+///
+/// Which files it matches is git's to say, in [`candidates`]; this is the one
+/// question git cannot answer, because it is Claude Code's rule rather than
+/// gitignore's.
+#[derive(Debug)]
+struct Reach {
+    /// The pattern's names, split at its slashes, with a leading and a
+    /// trailing slash taken off.
+    names: Vec<String>,
+    /// Whether it had a slash anywhere but at its end. In gitignore's grammar
+    /// that ties it to the directory the file is in; without one it matches a
+    /// name at any depth.
+    anchored: bool,
+}
+
+impl Reach {
+    /// Whether this pattern reaches into an ignored directory whose path from
+    /// the root is `names`.
+    ///
+    /// See [`copy_included`] for the rule. A pattern without a slash matches a
+    /// name at any depth, which is `**/` in front of it, and so reaches a
+    /// directory only through one of the directory's own names — which, for a
+    /// one-name pattern, is the directory or a directory above it matching.
+    fn reaches(&self, names: &[&str]) -> bool {
+        let Some(first) = self.names.first() else {
+            return false;
+        };
+        if !self.anchored {
+            return names.iter().any(|name| glob(first, name));
+        }
+        if first == "**" {
+            return match self.names.get(1) {
+                Some(after) => names.iter().any(|name| glob(after, name)),
+                None => true,
+            };
+        }
+
+        for (index, name) in names.iter().enumerate() {
+            match self.names.get(index) {
+                // The pattern ran out above the directory: it named one of
+                // the directories the directory is in, and gitignore matches
+                // everything inside a directory it matches.
+                None => return true,
+                Some(part) if part == "**" => return true,
+                Some(part) if glob(part, name) => {}
+                Some(_) => return false,
+            }
+        }
+        // The directory ran out first, or both did together: the pattern
+        // names it, or goes on inside it.
+        true
+    }
+}
+
+/// The patterns in an [`INCLUDE_FILE`]'s `text` that can add a file.
+///
+/// gitignore's line grammar, as much of it as [`Reach`] needs: blank lines and
+/// `#` comments are nothing, a `\` before a leading `#` or `!` makes it a
+/// character, and a `!` negation is left out — it can only take away what
+/// another pattern matched, which cannot make a directory worth looking in.
+fn reaching_patterns(text: &str) -> Vec<Reach> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim_end_matches(' ');
+            if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+                return None;
+            }
+            let line = line
+                .strip_prefix('\\')
+                .filter(|rest| rest.starts_with(['#', '!']))
+                .unwrap_or(line);
+            // A trailing slash says the pattern matches only a directory,
+            // which every path this is asked about is.
+            let line = line.trim_end_matches('/');
+            if line.is_empty() {
+                return None;
+            }
+            Some(Reach {
+                anchored: line.contains('/'),
+                names: line
+                    .trim_start_matches('/')
+                    .split('/')
+                    .map(str::to_owned)
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+/// Whether `name`, one component of a path, matches `pattern`, one component
+/// of a gitignore pattern.
+///
+/// `*` is any run of characters, `?` one, `[…]` one out of a set — `!` or `^`
+/// first turning it round, `a-z` a range — and `\` makes the next character
+/// itself. Two stars inside a component are two stars, which gitignore reads
+/// as one. POSIX classes such as `[:alpha:]` are not understood, and read as
+/// the characters they are spelled with; a pattern that relies on one reaches
+/// fewer directories than git would match.
+///
+/// One backtracking point, the last star, rather than a recursion per star:
+/// every other token takes exactly one character, and with that shape the
+/// last star is the only choice worth revisiting, so a pattern with ten stars
+/// costs what one does.
+fn glob(pattern: &str, name: &str) -> bool {
+    let tokens = tokens(pattern);
+    let name: Vec<char> = name.chars().collect();
+    let (mut token, mut at) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+
+    loop {
+        match tokens.get(token) {
+            Some(Token::Star) => {
+                star = Some((token, at));
+                token += 1;
+                continue;
+            }
+            Some(one) if at < name.len() && one.matches(name[at]) => {
+                token += 1;
+                at += 1;
+                continue;
+            }
+            None if at == name.len() => return true,
+            _ => {}
+        }
+        match star {
+            Some((after, from)) if from < name.len() => {
+                star = Some((after, from + 1));
+                token = after + 1;
+                at = from + 1;
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// One piece of a pattern component, for [`glob`].
+#[derive(Debug)]
+enum Token {
+    /// `*`, however many of them in a row.
+    Star,
+    /// `?`.
+    Any,
+    /// A character that matches itself.
+    Char(char),
+    /// `[…]`: the ranges it holds, a lone character being a range of one.
+    Class {
+        /// Whether it began `!` or `^`, and matches what is *not* in it.
+        negated: bool,
+        /// Its ranges, both ends included.
+        ranges: Vec<(char, char)>,
+    },
+}
+
+impl Token {
+    /// Whether this one-character token matches `character`.
+    fn matches(&self, character: char) -> bool {
+        match self {
+            Self::Star | Self::Any => true,
+            Self::Char(own) => *own == character,
+            Self::Class { negated, ranges } => {
+                ranges
+                    .iter()
+                    .any(|(low, high)| (*low..=*high).contains(&character))
+                    != *negated
+            }
+        }
+    }
+}
+
+/// `pattern` as [`glob`]'s tokens.
+fn tokens(pattern: &str) -> Vec<Token> {
+    let characters: Vec<char> = pattern.chars().collect();
+    let mut tokens = Vec::new();
+    let mut at = 0;
+    while at < characters.len() {
+        match characters[at] {
+            '*' => {
+                if !matches!(tokens.last(), Some(Token::Star)) {
+                    tokens.push(Token::Star);
+                }
+                at += 1;
+            }
+            '?' => {
+                tokens.push(Token::Any);
+                at += 1;
+            }
+            '\\' if at + 1 < characters.len() => {
+                tokens.push(Token::Char(characters[at + 1]));
+                at += 2;
+            }
+            '[' => match class(&characters[at + 1..]) {
+                Some((class, used)) => {
+                    tokens.push(class);
+                    at += 1 + used;
+                }
+                // No closing bracket: the bracket is a character, which is
+                // what git makes of one.
+                None => {
+                    tokens.push(Token::Char('['));
+                    at += 1;
+                }
+            },
+            character => {
+                tokens.push(Token::Char(character));
+                at += 1;
+            }
+        }
+    }
+    tokens
+}
+
+/// The class a `[` opens, read from what follows it, and how many characters
+/// it took up to and including its `]` — or `None` when nothing closes it.
+///
+/// A `]` straight after the `[`, or after its `!`, is a member rather than the
+/// end, as it is in every glob that has classes.
+fn class(rest: &[char]) -> Option<(Token, usize)> {
+    let negated = matches!(rest.first(), Some('!' | '^'));
+    let mut at = usize::from(negated);
+    let mut ranges = Vec::new();
+    let mut first = true;
+    while at < rest.len() {
+        if rest[at] == ']' && !first {
+            return Some((Token::Class { negated, ranges }, at + 1));
+        }
+        first = false;
+        if rest[at] == '\\' && at + 1 < rest.len() {
+            at += 1;
+        }
+        let low = rest[at];
+        if at + 2 < rest.len() && rest[at + 1] == '-' && rest[at + 2] != ']' {
+            ranges.push((low, rest[at + 2]));
+            at += 3;
+        } else {
+            ranges.push((low, low));
+            at += 1;
+        }
+    }
+    None
 }
 
 // MARK: - Naming the next one

@@ -1163,6 +1163,510 @@ fn an_unrecognised_failure_keeps_both_of_gits_lines_and_none_of_its_hints() {
     }
 }
 
+// --- what a new checkout is given ----------------------------------------------
+
+/// A repository at `<scratch>/repo` that ignores what `ignore` says and, when
+/// there is an `include`, names that in its `.worktreeinclude` — both
+/// committed, the way a repository sharing the file with Claude Code has it.
+///
+/// Files to be copied are written after this returns: written before, the
+/// ones git does not ignore would be committed with the rest.
+fn repo_including(scratch: &ScratchDir, ignore: &str, include: Option<&str>) -> PathBuf {
+    let repo = repo_with_a_commit(scratch, "repo");
+    write(&repo.join(".gitignore"), ignore);
+    if let Some(include) = include {
+        write(&repo.join(INCLUDE_FILE), include);
+    }
+    git(&repo, &["add", "."]);
+    git(
+        &repo,
+        &["commit", "--no-verify", "-m", "ignore and include"],
+    );
+    repo
+}
+
+/// A new worktree of `repo` at `<scratch>/<name>`, made the way Crook makes
+/// one.
+fn checkout_of(repo: &Path, scratch: &ScratchDir, name: &str) -> PathBuf {
+    let checkout = scratch.spot(name);
+    add(repo, &checkout, name, None).expect("git added the worktree");
+    checkout
+}
+
+/// What is at `path`, or `None` when nothing is — a dangling link counting as
+/// something, which is the point of asking this way.
+fn contents(path: &Path) -> Option<String> {
+    std::fs::symlink_metadata(path).ok()?;
+    Some(std::fs::read_to_string(path).unwrap_or_else(|_| "<unreadable>".to_owned()))
+}
+
+/// The paths `included` left out for `why`, as text, in the order it met them.
+fn skipped_for(included: &Included, why: fn(&Skip) -> bool) -> Vec<String> {
+    included
+        .skipped
+        .iter()
+        .filter(|(_, skip)| why(skip))
+        .map(|(path, _)| path.to_string_lossy().replace('\\', "/"))
+        .collect()
+}
+
+/// Limits small enough for a test to go past without writing megabytes.
+const SMALL: Limits = Limits {
+    files: 3,
+    file_bytes: 16,
+    total_bytes: 24,
+};
+
+#[test]
+fn an_ignored_file_worktreeinclude_names_is_copied_into_the_new_worktree() {
+    if without_git("an_ignored_file_worktreeinclude_names_is_copied_into_the_new_worktree") {
+        return;
+    }
+    let scratch = ScratchDir::new("include-copied");
+    let repo = repo_including(
+        &scratch,
+        ".env\nconfig/local.json\n",
+        Some(".env\nconfig/local.json\n"),
+    );
+    write(&repo.join(".env"), "SECRET=1\n");
+    write(&repo.join("config/local.json"), "{}\n");
+    let checkout = checkout_of(&repo, &scratch, "copied");
+
+    let included = copy_included(&repo, &checkout);
+
+    assert_eq!(
+        contents(&checkout.join(".env")).as_deref(),
+        Some("SECRET=1\n")
+    );
+    // Into the same place, with the directory it sits in made for it: git
+    // tracks no `config/` on this branch, so the checkout had none.
+    assert_eq!(
+        contents(&checkout.join("config/local.json")).as_deref(),
+        Some("{}\n")
+    );
+    assert_eq!(included.copied, 2);
+    assert!(included.skipped.is_empty(), "{included:?}");
+    assert!(included.refused.is_none(), "{included:?}");
+    assert_eq!(included.problem(), None);
+}
+
+#[test]
+fn an_ignored_file_worktreeinclude_does_not_name_stays_behind() {
+    if without_git("an_ignored_file_worktreeinclude_does_not_name_stays_behind") {
+        return;
+    }
+    let scratch = ScratchDir::new("include-unnamed");
+    let repo = repo_including(&scratch, ".env\n*.log\n", Some(".env\n"));
+    write(&repo.join(".env"), "SECRET=1\n");
+    write(&repo.join("debug.log"), "noise\n");
+    let checkout = checkout_of(&repo, &scratch, "unnamed");
+
+    let included = copy_included(&repo, &checkout);
+
+    assert_eq!(included.copied, 1);
+    assert!(contents(&checkout.join(".env")).is_some());
+    assert_eq!(contents(&checkout.join("debug.log")), None);
+}
+
+#[test]
+fn a_file_worktreeinclude_names_that_git_does_not_ignore_is_not_copied() {
+    if without_git("a_file_worktreeinclude_names_that_git_does_not_ignore_is_not_copied") {
+        return;
+    }
+    let scratch = ScratchDir::new("include-tracked");
+    // A tracked file the pattern names, changed in the main checkout since it
+    // was committed, and an untracked one nothing ignores. Claude Code copies
+    // a file only when it is ignored *and* named — the tracked one is already
+    // in the new checkout as the branch has it, and copying the main
+    // checkout's edit over it would hand one agent another's uncommitted work.
+    // The loose file's name is one no global excludes file will have heard of,
+    // so this machine's own git configuration cannot make it ignored. The
+    // `.env` is there so that git has something ignored to list: with nothing
+    // ignored at all there is no walk to leave the other two out of, and this
+    // would pass without looking.
+    let repo = repo_including(
+        &scratch,
+        ".env\n",
+        Some("tracked.txt\nloose.crook-test\n.env\n"),
+    );
+    write(&repo.join("tracked.txt"), "edited in the main checkout\n");
+    write(&repo.join("loose.crook-test"), "nobody ignores me\n");
+    write(&repo.join(".env"), "SECRET=1\n");
+    let checkout = checkout_of(&repo, &scratch, "tracked");
+
+    let included = copy_included(&repo, &checkout);
+
+    assert_eq!(
+        contents(&checkout.join("tracked.txt")).as_deref(),
+        Some("one\ntwo\nthree\n"),
+        "the branch's own copy of a tracked file was replaced"
+    );
+    assert_eq!(contents(&checkout.join("loose.crook-test")), None);
+    assert_eq!(included.copied, 1);
+    assert!(included.skipped.is_empty(), "{included:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_worktreeinclude_names_is_not_followed_out_of_the_main_checkout() {
+    if without_git("a_symlink_worktreeinclude_names_is_not_followed_out_of_the_main_checkout") {
+        return;
+    }
+    let scratch = ScratchDir::new("include-link");
+    let outside = scratch.dir("outside");
+    write(&outside.join("secret"), "not the repository's\n");
+    let repo = repo_including(&scratch, ".env\nshared\n", Some(".env\nshared\n"));
+    std::os::unix::fs::symlink(outside.join("secret"), repo.join(".env"))
+        .expect("the scratch directory takes a link");
+    std::os::unix::fs::symlink(&outside, repo.join("shared"))
+        .expect("the scratch directory takes a link");
+    let checkout = checkout_of(&repo, &scratch, "linked");
+
+    let included = copy_included(&repo, &checkout);
+
+    // Neither what the link points at nor the link itself: a copy of the
+    // target is a file from outside the repository, and a copy of the link is
+    // a door out of the new checkout.
+    assert_eq!(contents(&checkout.join(".env")), None);
+    assert_eq!(contents(&checkout.join("shared")), None);
+    assert_eq!(included.copied, 0);
+    assert_eq!(
+        skipped_for(&included, |skip| matches!(skip, Skip::Link)),
+        [".env", "shared"]
+    );
+    // Something that was asked for did not arrive, and the note says which.
+    let problem = included
+        .problem()
+        .expect("the creator says what it left out");
+    assert!(problem.contains(".env"), "{problem}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_in_the_new_worktree_is_not_written_through() {
+    if without_git("a_link_in_the_new_worktree_is_not_written_through") {
+        return;
+    }
+    let scratch = ScratchDir::new("include-dest-link");
+    let outside = scratch.dir("outside");
+    let repo = repo_including(
+        &scratch,
+        "config/secrets.json\n",
+        Some("config/secrets.json\n"),
+    );
+    // A branch on which `config` is a link out of the repository, and a main
+    // checkout on which it is a directory holding the ignored file. A worktree
+    // made from that branch has the link where the copy would make its
+    // directory, and writing through it would put the file in `outside`.
+    git(&repo, &["checkout", "-q", "-b", "linked"]);
+    std::os::unix::fs::symlink(&outside, repo.join("config"))
+        .expect("the scratch directory takes a link");
+    git(&repo, &["add", "config"]);
+    git(
+        &repo,
+        &["commit", "--no-verify", "-m", "config is a link here"],
+    );
+    git(&repo, &["checkout", "-q", "main"]);
+    write(&repo.join("config/secrets.json"), "secret\n");
+    let checkout = scratch.spot("from-linked");
+    add(&repo, &checkout, "from-linked", Some("linked")).expect("git added the worktree");
+
+    let included = copy_included(&repo, &checkout);
+
+    assert_eq!(contents(&outside.join("secrets.json")), None);
+    assert_eq!(included.copied, 0);
+    assert_eq!(
+        skipped_for(&included, |skip| matches!(skip, Skip::Link)),
+        ["config/secrets.json"]
+    );
+}
+
+#[test]
+fn a_file_already_in_the_new_worktree_is_not_overwritten() {
+    if without_git("a_file_already_in_the_new_worktree_is_not_overwritten") {
+        return;
+    }
+    let scratch = ScratchDir::new("include-exists");
+    let repo = repo_including(&scratch, ".env\n", Some(".env\n"));
+    write(&repo.join(".env"), "from the main checkout\n");
+    let checkout = checkout_of(&repo, &scratch, "exists");
+    // What a `post-checkout` hook that writes its own `.env` leaves behind.
+    write(&checkout.join(".env"), "made by the hook\n");
+
+    let included = copy_included(&repo, &checkout);
+
+    assert_eq!(
+        contents(&checkout.join(".env")).as_deref(),
+        Some("made by the hook\n")
+    );
+    assert_eq!(included.copied, 0);
+    assert_eq!(
+        skipped_for(&included, |skip| matches!(skip, Skip::Exists)),
+        [".env"]
+    );
+    // The rule doing what it says is not something to tell anybody about.
+    assert_eq!(included.problem(), None);
+}
+
+#[test]
+fn without_a_worktreeinclude_nothing_is_copied() {
+    if without_git("without_a_worktreeinclude_nothing_is_copied") {
+        return;
+    }
+    let scratch = ScratchDir::new("include-none");
+    let repo = repo_including(&scratch, ".env\n", None);
+    write(&repo.join(".env"), "SECRET=1\n");
+    let checkout = checkout_of(&repo, &scratch, "none");
+
+    let included = copy_included(&repo, &checkout);
+
+    assert_eq!(contents(&checkout.join(".env")), None);
+    assert_eq!(included.copied, 0);
+    assert!(included.skipped.is_empty(), "{included:?}");
+    assert!(included.refused.is_none(), "{included:?}");
+    assert_eq!(included.problem(), None);
+}
+
+#[test]
+fn the_main_checkouts_worktreeinclude_is_used_from_any_checkout_of_the_repository() {
+    if without_git("the_main_checkouts_worktreeinclude_is_used_from_any_checkout_of_the_repository")
+    {
+        return;
+    }
+    let scratch = ScratchDir::new("include-from-linked");
+    let repo = repo_including(&scratch, ".env\n", Some(".env\n"));
+    write(&repo.join(".env"), "SECRET=1\n");
+    // The menu can be opened on a tab that is itself in a linked worktree,
+    // which has no `.env` of its own; the file is the main checkout's.
+    let first = checkout_of(&repo, &scratch, "first");
+    let second = checkout_of(&repo, &scratch, "second");
+
+    let included = copy_included(&first, &second);
+
+    assert_eq!(included.copied, 1);
+    assert_eq!(
+        contents(&second.join(".env")).as_deref(),
+        Some("SECRET=1\n")
+    );
+}
+
+#[test]
+fn a_directory_worktreeinclude_names_is_copied_with_everything_under_it() {
+    if without_git("a_directory_worktreeinclude_names_is_copied_with_everything_under_it") {
+        return;
+    }
+    let scratch = ScratchDir::new("include-directory");
+    let repo = repo_including(&scratch, "certs/\n", Some("certs/\n"));
+    write(&repo.join("certs/local.pem"), "one\n");
+    write(&repo.join("certs/nested/ca.pem"), "two\n");
+    let checkout = checkout_of(&repo, &scratch, "directory");
+
+    let included = copy_included(&repo, &checkout);
+
+    assert_eq!(included.copied, 2);
+    assert_eq!(
+        contents(&checkout.join("certs/nested/ca.pem")).as_deref(),
+        Some("two\n")
+    );
+}
+
+#[test]
+fn a_double_star_pattern_reaches_into_an_ignored_directory_only_through_the_name_after_it() {
+    if without_git(
+        "a_double_star_pattern_reaches_into_an_ignored_directory_only_through_the_name_after_it",
+    ) {
+        return;
+    }
+    // Claude Code's documented rule for a directory git ignores as a whole:
+    // a `**/` pattern reaches into it only when the name after the `**/` is
+    // one of the directory's own names, a pattern that names the directory
+    // reaches into it, and a bare name matching somewhere inside does not.
+    let scratch = ScratchDir::new("include-reach");
+    let repo = repo_including(
+        &scratch,
+        "vendor/\n.claude/\nnode_modules/\n.env\n",
+        Some("**/config.json\n**/.claude/skills/*.md\n.env\n"),
+    );
+    write(&repo.join("vendor/lib/config.json"), "vendored\n");
+    write(&repo.join(".claude/skills/review.md"), "skill\n");
+    write(&repo.join("node_modules/pkg/.env"), "a package's\n");
+    write(&repo.join(".env"), "ours\n");
+    let checkout = checkout_of(&repo, &scratch, "reach");
+
+    let included = copy_included(&repo, &checkout);
+
+    assert_eq!(
+        contents(&checkout.join(".claude/skills/review.md")).as_deref(),
+        Some("skill\n")
+    );
+    assert_eq!(contents(&checkout.join(".env")).as_deref(), Some("ours\n"));
+    assert_eq!(contents(&checkout.join("vendor/lib/config.json")), None);
+    assert_eq!(contents(&checkout.join("node_modules/pkg/.env")), None);
+    assert_eq!(included.copied, 2);
+
+    // Named, the vendored file is reached — which is the way round the
+    // documentation gives for the pattern that did not.
+    write(&repo.join(INCLUDE_FILE), "vendor/**/config.json\n");
+    let named = checkout_of(&repo, &scratch, "named");
+
+    let included = copy_included(&repo, &named);
+
+    assert_eq!(
+        contents(&named.join("vendor/lib/config.json")).as_deref(),
+        Some("vendored\n")
+    );
+    assert_eq!(included.copied, 1);
+}
+
+#[test]
+fn a_star_that_reaches_node_modules_is_refused_rather_than_copied() {
+    if without_git("a_star_that_reaches_node_modules_is_refused_rather_than_copied") {
+        return;
+    }
+    // `*` names every ignored thing there is, `node_modules/` among them, and
+    // half a dependency tree is worse than none: past the count the whole copy
+    // is refused, the `.env` that was also asked for included, and the note
+    // says why.
+    let scratch = ScratchDir::new("include-star");
+    let repo = repo_including(&scratch, "node_modules/\n.env\n", Some("*\n"));
+    write(&repo.join(".env"), "SECRET=1\n");
+    for package in ["a", "b", "c"] {
+        write(
+            &repo.join(format!("node_modules/{package}/index.js")),
+            "x\n",
+        );
+    }
+    let checkout = checkout_of(&repo, &scratch, "star");
+
+    let included = copy_included_within(&repo, &checkout, SMALL);
+
+    assert!(
+        matches!(
+            included.refused,
+            Some(Refusal::TooMany { files: 4, limit: 3 })
+        ),
+        "{included:?}"
+    );
+    assert_eq!(included.copied, 0);
+    assert_eq!(contents(&checkout.join(".env")), None);
+    assert_eq!(contents(&checkout.join("node_modules")), None);
+    let problem = included.problem().expect("a refusal is said");
+    assert!(problem.contains(INCLUDE_FILE), "{problem}");
+}
+
+#[test]
+fn a_file_over_the_size_limit_is_left_out_and_the_rest_are_copied() {
+    if without_git("a_file_over_the_size_limit_is_left_out_and_the_rest_are_copied") {
+        return;
+    }
+    let scratch = ScratchDir::new("include-large");
+    let repo = repo_including(&scratch, ".env\n*.sql\n", Some(".env\n*.sql\n"));
+    write(&repo.join(".env"), "SECRET=1\n");
+    write(
+        &repo.join("dump.sql"),
+        &"x".repeat(SMALL.file_bytes as usize + 1),
+    );
+    let checkout = checkout_of(&repo, &scratch, "large");
+
+    let included = copy_included_within(&repo, &checkout, SMALL);
+
+    assert_eq!(included.copied, 1);
+    assert!(contents(&checkout.join(".env")).is_some());
+    assert_eq!(contents(&checkout.join("dump.sql")), None);
+    assert_eq!(
+        skipped_for(&included, |skip| matches!(skip, Skip::TooLarge { .. })),
+        ["dump.sql"]
+    );
+    let problem = included.problem().expect("a file left out is said");
+    assert!(problem.contains("dump.sql"), "{problem}");
+}
+
+#[test]
+fn files_that_together_pass_the_size_limit_are_refused_whole() {
+    if without_git("files_that_together_pass_the_size_limit_are_refused_whole") {
+        return;
+    }
+    let scratch = ScratchDir::new("include-total");
+    let repo = repo_including(&scratch, "*.pem\n", Some("*.pem\n"));
+    // Each under the limit for one file, and together over the limit for all.
+    for name in ["a.pem", "b.pem"] {
+        write(&repo.join(name), &"x".repeat(SMALL.file_bytes as usize));
+    }
+    let checkout = checkout_of(&repo, &scratch, "total");
+
+    let included = copy_included_within(&repo, &checkout, SMALL);
+
+    assert!(
+        matches!(
+            included.refused,
+            Some(Refusal::TooLarge {
+                bytes: 32,
+                limit: 24
+            })
+        ),
+        "{included:?}"
+    );
+    assert_eq!(included.copied, 0);
+    assert_eq!(contents(&checkout.join("a.pem")), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_copied_file_keeps_its_executable_bit() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if without_git("a_copied_file_keeps_its_executable_bit") {
+        return;
+    }
+    let scratch = ScratchDir::new("include-executable");
+    let repo = repo_including(&scratch, "bin/\n", Some("bin/\n"));
+    write(&repo.join("bin/dev-server"), "#!/bin/sh\n");
+    executable(&repo.join("bin/dev-server"));
+    let checkout = checkout_of(&repo, &scratch, "executable");
+
+    copy_included(&repo, &checkout);
+
+    let mode = std::fs::metadata(checkout.join("bin/dev-server"))
+        .expect("the file was copied")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o111, 0o111, "copied as {mode:o}");
+}
+
+#[test]
+fn a_pattern_reaches_an_ignored_directory_the_way_claude_code_describes() {
+    let reaches = |pattern: &str, directory: &str| {
+        let names: Vec<&str> = directory.split('/').collect();
+        reaching_patterns(pattern)
+            .iter()
+            .any(|pattern| pattern.reaches(&names))
+    };
+
+    // `**/`: through the first name after it, wherever in the path it is.
+    assert!(!reaches("**/config.json", "vendor"));
+    assert!(reaches("**/.claude/skills/*.md", ".claude"));
+    assert!(reaches("**/.claude/skills/*.md", "tools/.claude"));
+    assert!(reaches("**/v?ndor/x", "vendor"));
+    // A pattern naming the directory, or a directory above what it names.
+    assert!(reaches("vendor/**/config.json", "vendor"));
+    assert!(reaches("config/secrets.json", "config"));
+    assert!(!reaches("config/secrets.json", "vendor"));
+    assert!(reaches("packages/*/dist/", "packages/web/dist"));
+    assert!(reaches("packages/*/dist/", "packages/web"));
+    assert!(!reaches("packages/*/dist/", "apps/web"));
+    assert!(reaches("/target", "target"));
+    assert!(reaches("[vV]endor/x", "Vendor"));
+    // A bare name reaches only a directory it is the name of.
+    assert!(!reaches(".env", "node_modules"));
+    assert!(reaches("*", "node_modules"));
+    assert!(reaches("node_*", "node_modules"));
+    assert!(reaches("cache", "build/cache"));
+    // What cannot add a file cannot reach one.
+    assert!(!reaches("!vendor", "vendor"));
+    assert!(!reaches("# vendor", "vendor"));
+    assert!(!reaches("", "vendor"));
+}
+
 // --- naming the next one -------------------------------------------------------
 
 #[test]

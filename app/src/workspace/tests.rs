@@ -5044,6 +5044,117 @@ fn making_a_worktree_checks_it_out_and_opens_a_tab_in_the_group() {
     );
 }
 
+/// Makes a worktree of `repository` through the menu, the way the creator's
+/// button does, and returns the directory the new tab opened in — waiting
+/// only until the tab is there, which is the moment its shell starts.
+fn make_a_worktree_through_the_menu(
+    harness: &mut Harness,
+    repository: &Path,
+    store: &Path,
+) -> PathBuf {
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.to_owned()));
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.to_owned());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(harness.active_id()));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    let before = harness.pane_ids().len();
+    harness.dispatch_worktree(WorktreeAction::Create);
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > before
+    });
+
+    harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.pane_directories())
+        .into_iter()
+        .map(|(_, directory)| directory)
+        .find(|directory| directory.starts_with(store))
+        .expect("no pane was opened in the new checkout")
+}
+
+#[test]
+fn what_worktreeinclude_names_is_in_a_new_checkout_before_its_tab_opens() {
+    // Claude Code's `.worktreeinclude`, honoured for the worktrees Crook
+    // makes: the ignored `.env` the main checkout has is in the new one by
+    // the time its tab — and so its shell — exists, because a shell that
+    // reads `.env` as it starts reads it once. Everything went, so there is
+    // nothing to say and the menu is gone, as it always was.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    fs::write(repository.join(".gitignore"), ".env\n").expect("the scratch is writable");
+    fs::write(repository.join(".worktreeinclude"), ".env\n").expect("the scratch is writable");
+    fs::write(repository.join(".env"), "SECRET=1\n").expect("the scratch is writable");
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    let opened = make_a_worktree_through_the_menu(&mut harness, &repository, &store);
+
+    assert_eq!(
+        fs::read_to_string(opened.join(".env")).ok().as_deref(),
+        Some("SECRET=1\n"),
+        "the tab opened on a checkout without the file .worktreeinclude names"
+    );
+    let menu = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.tab_menu().tab);
+    assert_eq!(
+        menu, None,
+        "a copy with nothing wrong with it held the worktree menu up"
+    );
+}
+
+#[test]
+fn a_file_worktreeinclude_could_not_bring_is_said_on_the_new_tabs_menu() {
+    // The creator closes as its checkout opens, so what went wrong with the
+    // copy is said on the worktree menu opened on the *new* tab — the one
+    // whose checkout is missing the file — and the checkout is there all the
+    // same: a copy that fails never fails the worktree.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    fs::write(repository.join(".gitignore"), "*.sql\n").expect("the scratch is writable");
+    fs::write(repository.join(".worktreeinclude"), "*.sql\n").expect("the scratch is writable");
+    // Past the limit for one file without writing it: a file extended rather
+    // than written is sparse where the filesystem can be, and is never read,
+    // because its size alone leaves it out.
+    fs::File::create(repository.join("dump.sql"))
+        .and_then(|file| file.set_len(crate::git::worktree::MAX_INCLUDED_FILE_BYTES + 1))
+        .expect("the scratch is writable");
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    let opened = make_a_worktree_through_the_menu(&mut harness, &repository, &store);
+
+    assert!(opened.is_dir(), "{} was not checked out", opened.display());
+    assert!(!opened.join("dump.sql").exists());
+    let on = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.tab_menu().tab);
+    assert_eq!(
+        on,
+        Some(harness.active_id()),
+        "the note is not on the menu of the tab that opened"
+    );
+    let problem = harness
+        .worktree_problem()
+        .expect("the menu does not say what was left out");
+    assert!(problem.contains("dump.sql"), "{problem}");
+    assert!(problem.contains(".worktreeinclude"), "{problem}");
+}
+
 #[test]
 fn the_creator_answers_enter_with_its_button_and_escape_with_cancel() {
     // The popup's two keys, on the face a person types into. The branch field

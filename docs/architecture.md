@@ -962,6 +962,26 @@ is refused before git sees it, since past `--` git still reads a lone `-` as the
 checked out before this one; so is a branch name that does, since `git worktree add` hands
 the name to `git branch` where `-m` is an option and would rename the tab's own branch.
 
+A new checkout is a fresh one, and what git leaves out of it is exactly what an agent's first
+run trips on: the `.env`, the local settings file. So a checkout Crook makes is given what the
+main checkout's `.worktreeinclude` names, by Claude Code's rules rather than rules of Crook's
+own, because the point is one file in a repository serving the worktrees both tools make:
+`.gitignore` syntax, and a file is copied only when a pattern names it *and* git ignores it,
+to the same place — a tracked file is already there as the branch has it. git does the
+matching, twice, since gitignore's grammar cannot say "ignored by one list and named by
+another": `status --ignored=matching` for what is ignored, which lists a wholly ignored
+`target/` as one line without walking it, then `ls-files --others --ignored --exclude-from`
+for what the file names, with the ignored directories no pattern reaches left out of the walk
+— Claude Code's rule for those, under which `**/config.json` does not reach into `vendor/`
+and `vendor/**/config.json` does. It runs on the worker that ran `git worktree add`, before
+the tab opens, because a shell that reads `.env` as it starts reads it once. It never follows
+a symbolic link, in either checkout, and never overwrites; past a thousand files or 256 MB it
+copies nothing — half a `node_modules` a `*` caught is worse than none — and a file over 64
+MB is left out alone. None of that can fail the checkout, which exists by then: it is logged,
+and what did not arrive is said on the worktree menu reopened on the new tab, since the
+creator has closed. A copy that went as asked says nothing, because a menu that came back
+after every checkout would take the keyboard from the tab a person had just asked for.
+
 It opened a *pane* first, splitting the tab, and that was the wrong claim made in the right
 place. Belonging together and being on screen together are two different statements: a split
 puts two agents in one rectangle, half a window each, which is what a person asks for when
