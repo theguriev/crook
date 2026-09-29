@@ -990,10 +990,13 @@ lists for ever — this repository had eighteen, and every one had landed. `app/
 proves it from the repository alone, with no network: by ancestry (the tip is on the base), or
 by patch (the branch's whole diff since its merge-base has the `patch-id` of one commit that
 reached the base after the branch left it, which is what a squash is), found in one
-`git log -p | git patch-id --stable` pass capped at a thousand commits and ten seconds. Neither
-proof counts for a branch whose own reflog records no commit made on it: a checkout nobody has
-committed in — fresh, only brought up to date, or cut from the tip of a branch that was
-squashed — is not "merged", whatever `--merged` says. A reflog is not a complete record,
+`git log -p | git patch-id --verbatim` pass capped at a thousand commits and ten seconds —
+`--verbatim` because plain `--stable` ignores whitespace, and a follow-up commit that only
+re-indents a line of Python or YAML is still work the squash does not have; a git older than
+2.39, which lacks the flag, proves nothing by patch and only by ancestry. Neither proof counts
+for a branch whose own reflog records no commit made on it: a checkout nobody has committed
+in — fresh, only brought up to date, or cut from the tip of a branch that was squashed — is
+not "merged", whatever `--merged` says. A reflog is not a complete record,
 though: a month after an amend or a rebase, `gc` expires the entry of every commit it replaced
 and leaves only the branch's creation. So a reflog git has pruned, told by a newest entry that
 no longer ends at the branch's tip, is left to the proofs, as is no reflog at all; a rebase
