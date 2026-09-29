@@ -669,6 +669,7 @@ fn busy_window() -> (Window, Vec<u64>) {
                 GitFacts {
                     branch: Some(Head::Branch("main".to_owned())),
                     diff: None,
+                    since_base: None,
                     worktree: false,
                 },
                 ctx,

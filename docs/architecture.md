@@ -1201,6 +1201,28 @@ narrowed to the proved ones, with the sweep's own safety — looked in first, ne
 branches kept. On this repository it proves 14 of those eighteen in a second or two; the
 four it misses are stacked or were reworked, and are the ones it should miss.
 
+**A row counts the work, not only what is left to commit.** The diff chip used to be `git diff
+--shortstat HEAD` alone, the working tree against the last commit — so the moment an agent
+committed everything its row went blank, at exactly the moment there was most to look at. The
+15-second gather in `app/src/git_model.rs` now also asks, for a pane on a branch that is not
+the base, `git rev-list --count <base>..HEAD`, and when that is not zero `git diff --shortstat
+--merge-base <base>`: the working tree against where the branch left the base, committed and
+uncommitted work as one number. The chip then reads `2 commits, +40 -3`, and the hover card
+adds `since main`. The row leaves the base's name out because its metadata line shares about
+170 pixels with the branch, and the chip is never cut — the branch gives way to it, as it always
+did; the card, when a narrow window narrows it, gives up the base's name before the numbers.
+The base is `merged.rs`'s, found once per repository — by the common git directory, so every
+worktree of one shares it — and carried from cycle to cycle with the gather's ticket, so a
+refresh adds at most two subprocesses for each directory a pane sits in, and none while nothing
+shows the chip. Only the base is shared: the gather runs per directory, not per checkout, so
+two panes in different directories of one checkout each pay for the count, as they already did
+for the diff. A lookup that found no base is kept only for the branch that asked, because a
+repository made a minute ago has no `main` until its first commit, and one no gather has asked
+about for a whole cycle is forgotten. The base itself — a local `main` against `origin/main`
+as much as against `main` — a detached `HEAD`, an unborn branch and a repository with no base
+keep the plain count, and so does the plugin API's `Where`, whose `added` and `removed` are
+still what is not committed yet.
+
 **A removal takes its empty directories with it.** `git worktree remove` deletes the checkout
 and nothing above it, so the store kept a directory per repository after its last checkout
 went. After any removal Crook deletes the directories of its own store the checkout leaves
@@ -1228,7 +1250,8 @@ through `app/src/git/run.rs`, which puts a timeout on every call (a removal's is
 because it deletes whatever was built in the checkout and a kill halfway through leaves a
 worktree the sweep will never touch again), gives every call two reader threads so a repository
 with a fat `target/` cannot deadlock a pipe, and joins `log -p` to `patch-id` with a pipe of
-their own so a history's patches never pass through Crook.
+their own so a history's patches never pass through Crook. The row's count since the base, in
+`app/src/git/diff.rs`, spawns its two through the same runner.
 
 ### What the agent changed
 

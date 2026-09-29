@@ -44,7 +44,15 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 ///
 /// See the module docs: this is what makes a second poll chain unrepresentable
 /// rather than merely unlikely.
-struct Ticket;
+///
+/// It also carries what the chain remembers from one cycle to the next: each
+/// repository's base, which is up to three subprocesses to find and almost
+/// never changes. On the ticket rather than behind a lock on the model,
+/// because only the cycle holding the ticket ever reads or writes it, and
+/// there is only ever one.
+struct Ticket {
+    bases: git::Bases,
+}
 
 /// Everything the tab strip knows about the repositories its sessions sit in.
 pub struct GitModel {
@@ -64,9 +72,10 @@ pub struct GitModel {
     /// Whether anything on screen is showing diff stats.
     ///
     /// The cheap half — walking up for `.git` and reading `HEAD` — always runs.
-    /// The subprocess only runs when a chip would print its answer, which is
-    /// Warp's `needs_git_status_for_chip_ui` rule: do not pay for git when
-    /// nothing displays git.
+    /// The subprocesses — the diff, and the count since the base on a branch —
+    /// only run when a chip would print their answer, which is Warp's
+    /// `needs_git_status_for_chip_ui` rule: do not pay for git when nothing
+    /// displays git.
     wants_diff: Arc<AtomicBool>,
 
     /// Cuts the sleeping cycle's wait short.
@@ -110,7 +119,9 @@ impl GitModel {
             wants_diff: Arc::new(AtomicBool::new(false)),
             wake: None,
             poked: Arc::new(AtomicBool::new(false)),
-            idle_ticket: Some(Ticket),
+            idle_ticket: Some(Ticket {
+                bases: git::Bases::default(),
+            }),
         }
     }
 
@@ -216,13 +227,8 @@ impl GitModel {
                             .unwrap_or_else(PoisonError::into_inner)
                             .clone();
                         let with_diff = wants_diff.load(Ordering::Relaxed);
-                        let gathered: Vec<_> = dirs
-                            .into_iter()
-                            .map(|dir| {
-                                let facts = gather(&dir, with_diff);
-                                (dir, facts)
-                            })
-                            .collect();
+                        let mut ticket = ticket;
+                        let gathered = gather_all(dirs, with_diff, &mut ticket.bases);
 
                         (ticket, gathered)
                     })
@@ -318,13 +324,34 @@ impl GitModel {
     }
 }
 
-/// Reads one directory, skipping the subprocess when nothing shows its answer.
-fn gather(dir: &Path, with_diff: bool) -> GitFacts {
+/// Reads every directory a cycle serves, skipping the subprocesses when
+/// nothing shows their answer.
+///
+/// `bases` is the one the ticket carries, so a repository's base is looked up
+/// by the first cycle that needs it and read back by every one after. A cycle
+/// that ran the subprocesses then forgets the repositories none of its
+/// directories asked about; one that did not has asked nothing, and
+/// forgetting after it would throw every base away for the sake of a toggle.
+fn gather_all(
+    dirs: Vec<PathBuf>,
+    with_diff: bool,
+    bases: &mut git::Bases,
+) -> Vec<(PathBuf, GitFacts)> {
+    let gathered = dirs
+        .into_iter()
+        .map(|dir| {
+            let facts = if with_diff {
+                git::gather(&dir, bases)
+            } else {
+                git::facts_without_diff(&dir)
+            };
+            (dir, facts)
+        })
+        .collect();
     if with_diff {
-        git::gather(dir)
-    } else {
-        git::facts_without_diff(dir)
+        bases.forget_unasked();
     }
+    gathered
 }
 
 #[cfg(test)]
@@ -345,6 +372,7 @@ mod tests {
         GitFacts {
             branch: Some(Head::Branch(branch.to_owned())),
             diff: Some(DiffStats::default()),
+            since_base: None,
             worktree: false,
         }
     }
