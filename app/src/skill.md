@@ -65,8 +65,9 @@ crook --agent running --pull-request "https://github.com/owner/repo/pull/123"
 
 The row links to it, and its menu can ask the person's own `gh` what state it is in. Only an
 `https://` address is taken. Say it once, when you open the pull request; the row drops it
-when the pane's branch changes. The hooks below already report the address `gh pr create`
-prints, so an agent running them need not.
+when the pane's branch changes. The Claude Code and Codex hooks below already report the
+address `gh pr create` prints, so an agent running under them need not; under the others,
+report it yourself.
 
 The report is one escape sequence (`OSC 6340`) written to the terminal the command runs in,
 not to standard output, so it works from a hook whose output belongs to someone else. There
