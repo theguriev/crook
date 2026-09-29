@@ -5,6 +5,63 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.14
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.13...v0.1.14)
+
+### Features
+
+- **packaging:** Add crook-bin, the AUR package ([#377](https://github.com/theguriev/crook/pull/377))
+- **agent:** Count a pane waiting behind another window and ask the desktop for a look ([#385](https://github.com/theguriev/crook/pull/385))
+- **agent:** Post a desktop notification when a pane needs you behind another window ([#387](https://github.com/theguriev/crook/pull/387))
+- **agent:** Post to Notification Center from Crook.app and badge the dock with the count ([#390](https://github.com/theguriev/crook/pull/390))
+- **agent:** Read OSC 9, 777 and 99 as a pane asking for a look ([#386](https://github.com/theguriev/crook/pull/386))
+- **session:** Bring agents back after a restart as an unsent resume line ([#389](https://github.com/theguriev/crook/pull/389))
+- **control:** Answer `crook pane list` over a per-user socket ([#401](https://github.com/theguriev/crook/pull/401))
+- **control:** Open a worker's tab from a pane with `crook tab new` ([#403](https://github.com/theguriev/crook/pull/403))
+- **control:** Let a pane wait on, read and follow the tabs it opened ([#407](https://github.com/theguriev/crook/pull/407))
+- **agent:** Connect Claude Code through a plugin in the crook repository ([#388](https://github.com/theguriev/crook/pull/388))
+- **tabs:** Ask before a close ends agents that are still working ([#391](https://github.com/theguriev/crook/pull/391))
+- **worktrees:** Ask where a new worktree's branch starts ([#392](https://github.com/theguriev/crook/pull/392))
+- **worktrees:** Start an agent in a new worktree from the creator ([#394](https://github.com/theguriev/crook/pull/394))
+- **worktrees:** Copy what .worktreeinclude names into a new worktree ([#395](https://github.com/theguriev/crook/pull/395))
+- **diagnostics:** Keep a log file and a local crash report, and say so next launch ([#393](https://github.com/theguriev/crook/pull/393))
+- **agent:** Show the pull request an agent opened on its row ([#400](https://github.com/theguriev/crook/pull/400))
+- **launch:** Let a launcher start Crook with -e or a directory, and ship a desktop entry ([#406](https://github.com/theguriev/crook/pull/406))
+- **worktrees:** Mark checkouts whose work has landed, and offer to tidy them away ([#396](https://github.com/theguriev/crook/pull/396))
+- **tabs:** Count a branch's commits and lines since its base on the row ([#397](https://github.com/theguriev/crook/pull/397))
+- **changes:** Show what the agent in a tab changed, in a read-only column ([#399](https://github.com/theguriev/crook/pull/399))
+- **changes:** Send line comments to the tab's agent as one unsent paste ([#405](https://github.com/theguriev/crook/pull/405))
+- **worktrees:** Finish a task, and delete branches proved to have landed ([#402](https://github.com/theguriev/crook/pull/402))
+
+### Performance
+
+- **panes:** Stop rebuilding the window for output in a pane nobody can see ([#398](https://github.com/theguriev/crook/pull/398))
+
+### Fixes
+
+- **worktrees:** Lock the checkout Crook makes while its window works in it ([#380](https://github.com/theguriev/crook/pull/380))
+- **terminal:** Publish the snapshot before letting go of the terminal ([#381](https://github.com/theguriev/crook/pull/381))
+- **shell:** Keep the shell-integration scratch private to its user ([#382](https://github.com/theguriev/crook/pull/382))
+- **plugins:** Bound how deep a plugin's tree is decoded and drawn ([#383](https://github.com/theguriev/crook/pull/383))
+- **plugins:** Stop a plugin's deeds from freezing the window ([#384](https://github.com/theguriev/crook/pull/384))
+
+### Refactors
+
+- **terminal:** Talk to the pty through a PtyLink seam ([#404](https://github.com/theguriev/crook/pull/404))
+
+### Tests
+
+- **agent:** Read the plugin's pull-request hook as the status it reports ([#408](https://github.com/theguriev/crook/pull/408))
+
+### CI
+
+- **release:** Build the Linux binary in Debian 11 and hold it to glibc 2.31 ([#378](https://github.com/theguriev/crook/pull/378))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.13
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.12...v0.1.13)
