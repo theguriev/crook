@@ -6699,6 +6699,47 @@ fn carrying_out_a_task_keeps_everything_when_its_checkout_changed_after_the_last
 }
 
 #[test]
+fn an_ignored_file_written_after_the_last_look_keeps_the_checkout() {
+    // Either removal deletes ignored files without git saying a word, so the
+    // count on the question is all the warning they get. One written between
+    // the press's look and git — a `.env`, a first `target/` — is one nobody
+    // counted, and it keeps the checkout and the branch, for both.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let (checkout, _) = task_checkout(&mut harness, tab, &store);
+    let branch = git_in(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    fs::write(checkout.join(".gitignore"), "*.secret\n").expect("the checkout is there");
+    git_in(&checkout, &["add", ".gitignore"]);
+    git_in(
+        &checkout,
+        &["commit", "--no-verify", "-m", "ignore the secrets"],
+    );
+
+    for discard in [false, true] {
+        let plan = super::finish::read_plan(&checkout, &store).expect("the checkout is looked at");
+        assert_eq!(plan.local.ignored, 0, "the question would have counted it");
+        fs::write(checkout.join("keys.secret"), "nobody counted me\n")
+            .expect("the checkout is there");
+        let report = super::finish::carry_out(&repository, &plan, discard, Some(&store));
+        assert!(
+            report.contains("1 ignored appeared in it"),
+            "the report does not say why (discard: {discard}): {report}"
+        );
+        assert!(
+            checkout.join("keys.secret").is_file(),
+            "the ignored file went (discard: {discard})"
+        );
+        assert!(
+            has_branch(&repository, &branch),
+            "the branch went (discard: {discard})"
+        );
+        fs::remove_file(checkout.join("keys.secret")).expect("the file is there");
+    }
+}
+
+#[test]
 fn the_pirate_chews_while_git_is_out_and_rests_when_it_is_back() {
     // The indicator is the pirate, and the pirate has to move: a frame that
     // does not change for as long as git takes is exactly the hang the

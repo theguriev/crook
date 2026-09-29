@@ -1055,7 +1055,8 @@ question shows what was left; when a button is pressed, before any pane closes �
 that no longer holds what the question said is asked about again, as it is now, and nothing is
 done, which is also how Discard's second question comes to be about the checkout as it is and
 not as it was when the first opened; and once the panes have closed, just before git runs,
-when anything new keeps both the checkout and the branch.
+when anything new the press would take — ignored files included, which either removal deletes
+without git saying a word — keeps both the checkout and the branch.
 
 **A removal takes its empty directories with it.** `git worktree remove` deletes the checkout
 and nothing above it, so the store kept a directory per repository after its last checkout

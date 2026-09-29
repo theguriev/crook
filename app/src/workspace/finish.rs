@@ -66,8 +66,9 @@
 //!   is about the files and commits its press takes, and Finish does not
 //!   close a tab over a checkout git will then refuse to remove;
 //! * and once the panes have closed, just before git is asked: whatever
-//!   appeared in between — a process nobody could see, a moment's race —
-//!   keeps the checkout and the branch where they are.
+//!   appeared in between that the press would take — written by a process
+//!   nobody could see, or in a moment's race — keeps the checkout and the
+//!   branch where they are. See [`appeared_since`].
 
 use std::path::{Path, PathBuf};
 
@@ -621,8 +622,12 @@ pub(super) fn carry_out(
 /// no branch is nothing git's removal looks for. For Discard, any file or
 /// commit its second question did not name — a file already named that has
 /// changed since is still the file it named — and any commit that only the
-/// branch holds now and did not then. An error is a reason too, since a
-/// checkout that cannot be looked at is not one anyone can say is unchanged.
+/// branch holds now and did not then. For both, more ignored files than the
+/// question counted: either removal deletes them without git saying a word,
+/// so the count on the question is all the warning they get — and a `.env`
+/// or a first `target/` written by something nobody could see is exactly
+/// what this look is for. An error is a reason too, since a checkout that
+/// cannot be looked at is not one anyone can say is unchanged.
 fn appeared_since(repository: &Path, plan: &Plan, discard: bool) -> Option<String> {
     use crate::git::worktree;
 
@@ -631,10 +636,17 @@ fn appeared_since(repository: &Path, plan: &Plan, discard: bool) -> Option<Strin
         Ok(local) => local,
         Err(problem) => return Some(problem.to_string()),
     };
+    if !discard && local.blocks_removal() {
+        return Some(format!("there is work in it now — {}", work_in(local)));
+    }
+    if local.ignored > plan.local.ignored {
+        return Some(format!(
+            "{} ignored appeared in it after the question said what goes",
+            local.ignored - plan.local.ignored
+        ));
+    }
     if !discard {
-        return local
-            .blocks_removal()
-            .then(|| format!("there is work in it now — {}", work_in(local)));
+        return None;
     }
 
     if local.stranded > plan.local.stranded {
