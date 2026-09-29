@@ -1075,11 +1075,19 @@ word — is refused at both ends: the writer will not send an address that fills
 the reader takes a full list as cut. `crook_terminal::agent::pull_request_url` is the whole
 rule either end applies: `https://` with a host, at most 512 bytes, no control character and
 no white space. The row opens it through `app/src/browser.rs`, whose allow-list checks it a
-second time. `AgentSession::pull_request` records it against the branch the pane is on at the
+second time. The wire checks the scheme and nothing else, and any program's output can write
+the sequence, so the chip reads `PR #<n>` only for github.com and names the host anywhere else
+(`gitlab.com #42`, `github.com.example.net #12`) — the host after any `user@`, which is where a
+browser goes — cut at a fixed width from the start, and the hover card prints the whole
+address. `AgentSession::pull_request` records it against the branch the pane is on at the
 moment it arrives — read from `HEAD`, not from the row's git facts, which are up to a poll old
 and would record a branch made, pushed and opened inside one poll as the one it started on —
-and drops it when `HEAD` says otherwise, which is asked whenever the git model reports a
-change and whenever the pane moves, never on a clock. The hooks carry it with no second
+and drops it when `HEAD` names another branch or the pane leaves the repository, which is
+asked whenever the git model reports a change and whenever the pane moves, never on a clock.
+A rebase detaches `HEAD` for as long as it runs, conflicts and all, so `git::branch_at_work`
+reads a detached `HEAD` with a `rebase-merge/head-name` or `rebase-apply/head-name` beside it
+as the branch being rebased, as `git status` does; any other detached `HEAD` names no other
+branch and keeps the link, since nothing would report it again when the branch came back. The hooks carry it with no second
 process: the Claude Code and Codex hook after every tool is `running --pull-request -`, which
 finds the `https://…/pull/<n>` a `gh pr create` in `tool_input.command` printed into
 `tool_response` and finds nothing after any other tool. The chip is on the row's metadata line
@@ -1089,10 +1097,15 @@ request** for the density that draws no chip and **Check pull request**, which i
 place Crook asks the network about the work — the person's own `gh pr view <url> --json
 state,statusCheckRollup`, on the background pool under `git::worktree`'s deadline shape
 (`app/src/forge.rs`), once per press and never polled. `gh` holds the token and knows the
-host; Crook holds neither. The answer — open, merged or closed, and how many checks pass, fail
+host; Crook holds neither. It is looked for on Crook's own `PATH` and then in
+`forge::usual_places` — Homebrew's prefixes, MacPorts', `/usr/local/bin`, `~/.local/bin` and
+a Nix profile — because a `Crook.app` opened from the Dock is handed launchd's
+`/usr/bin:/bin:/usr/sbin:/sbin`, which holds `git` and no `gh`, and Crook runs no login shell
+to learn the person's. The answer — open, merged or closed, and how many checks pass, fail
 or are pending — is written onto the session and printed on the hover card until the next
-press, or the reason there is none: `gh` not installed, not signed in, or unable to reach the
-forge.
+press, or the reason there is none: `gh` not found, not signed in, or unable to reach the
+forge. The hook reads a PostToolUse input it cannot parse as saying nothing — only text that
+is not a JSON object is taken as `gh`'s own output piped in.
 
 **Attention is a separate fact.** The bell used to write `NeedsInput` and looking used to
 clear it, and that was right for a bell and wrong for an agent: an agent waiting for an
