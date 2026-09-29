@@ -16207,6 +16207,7 @@ mod restoring {
             &mut harness,
             TerminalUpdate::CommandFinished {
                 pane,
+                command: None,
                 exit: Some(0),
                 took: None,
                 ran: true,
@@ -18535,6 +18536,7 @@ mod desktop_notifications {
             &mut harness,
             TerminalUpdate::CommandFinished {
                 pane,
+                command: None,
                 exit: Some(0),
                 took: Some(LONG_COMMAND * 6),
                 ran: true,
@@ -18692,6 +18694,7 @@ mod desktop_notifications {
         leave(&mut harness);
         let finished = |took: Duration| TerminalUpdate::CommandFinished {
             pane,
+            command: None,
             exit: Some(2),
             took: Some(took),
             ran: true,
@@ -22775,6 +22778,7 @@ mod sandboxed {
                 workspace.apply_terminal_update(
                     &crate::terminal_model::TerminalUpdate::CommandFinished {
                         pane,
+                        command: None,
                         exit: Some(0),
                         took: None,
                         ran: true,

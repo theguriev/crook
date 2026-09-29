@@ -2924,6 +2924,7 @@ mod socket {
                     command: Some("make test".to_owned()),
                     exit: Some(2),
                     took: Some(Duration::from_millis(1500)),
+                    ran: true,
                 },
                 ctx,
             );
@@ -3802,6 +3803,7 @@ mod socket {
             command: command.map(str::to_owned),
             exit,
             took,
+            ran: command.is_some(),
         };
         served.update(|workspace, ctx| {
             workspace.apply_terminal_update(&finished(None, None, None), ctx);
