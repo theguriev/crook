@@ -23475,6 +23475,61 @@ mod changes_column {
     }
 
     #[test]
+    fn typing_on_after_a_refresh_took_the_line_away_reaches_the_field_and_not_the_agent() {
+        let scratch = Scratch::new();
+        let Some((repository, _)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let received = scratch.path().join("received");
+        let mut harness = Harness::new(1);
+        let Some((agent, _)) = an_agent_beside_a_shell(&mut harness, &repository, &received, true)
+        else {
+            return;
+        };
+
+        // The agent in front, which is where a person reading its work is.
+        harness.dispatch_action(TabAction::FocusPane(agent));
+        open_a_comment_on_the_added_line(&mut harness);
+        type_keys(&mut harness, "abc");
+
+        // The agent rewrites the very line being commented on, and a refresh
+        // brings that home in the middle of the comment.
+        fs::write(
+            repository.join("README"),
+            "worktree test\nwhat the agent wrote instead\n",
+        )
+        .expect("writable");
+        harness.dispatch_workspace_action(WorkspaceAction::Changes(ChangesAction::Refresh));
+        harness.wait_for("the refresh never brought the new line", |harness| {
+            frame_text(&harness.frame()).contains("+what the agent wrote instead")
+        });
+        assert!(
+            comment_has_keys(&harness),
+            "a refresh took the keyboard from the comment with nobody asking"
+        );
+
+        type_keys(&mut harness, "xyz");
+        assert_eq!(comment_typed(&harness).as_deref(), Some("abcxyz"));
+        harness.press("enter", Modifiers::default(), "\r");
+        assert_eq!(
+            comment_count(&harness),
+            0,
+            "a comment on a line that is gone was added"
+        );
+        assert!(
+            review_note(&harness).is_some_and(|note| note.contains("not added")),
+            "{:?}",
+            review_note(&harness)
+        );
+        assert_eq!(
+            what_the_agent_received(&mut harness, agent, &received),
+            "",
+            "typing meant for the comment reached the agent"
+        );
+    }
+
+    #[test]
     fn showing_a_section_or_pressing_its_field_takes_the_keyboard_from_a_comment() {
         let scratch = Scratch::new();
         let Some((repository, _)) = a_task(&scratch) else {

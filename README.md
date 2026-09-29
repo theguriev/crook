@@ -484,9 +484,12 @@ Twenty features, and the page that configures them:
   Comments belong to the tab (and the repository and base it is looking at), live in memory
   only — a restart or closing the tab loses them — and follow their line while the agent keeps
   writing: a refresh moves each one to the line that still says what it said, and drops the
-  ones whose line is gone, saying which. **Send N comments to the agent**, at the top of the
-  column, makes them one message — `Review of <branch> since <base>:`, then each comment as
-  `path:line`, the line quoted, and what you said — pastes it into the tab's agent as one
+  ones whose line is gone, saying which (one pushed past where a long diff is cut short is
+  kept, and counted there). A comment still being typed when a refresh takes its line keeps its
+  words and the keyboard, moved to the top of the column, and Enter there adds nothing — so
+  nothing typed for the comment reaches the agent. **Send N comments to the agent**, at the top
+  of the column, makes them one message — `Review of <branch> since <base>:`, then each comment
+  as `path:line`, the line quoted, and what you said — pastes it into the tab's agent as one
   bracketed paste **with no Enter**, and puts the keyboard there: you read it, and you send it.
   The agent is the tab's pane whose agent has reported a status and has not exited back to its
   shell's prompt, else the focused one. It is never pasted into a shell prompt, where its lines

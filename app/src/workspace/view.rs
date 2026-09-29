@@ -2542,9 +2542,10 @@ impl Workspace {
     /// never from under anything that has taken the keyboard from every
     /// field — a menu, the Themes panel, a plugin's surface, the search box.
     ///
-    /// And it gives the keyboard up the same way, to a person going somewhere
-    /// else with it — a click on a pane, a section shown, another field
-    /// pressed, the find bar opened — with its words kept.
+    /// And it gives the keyboard up the same way, to a person going
+    /// somewhere else with it — a click on a pane, a section shown, another
+    /// field pressed, the find bar opened — and never to a read that came
+    /// home while they typed (see `Adrift` in the column).
     pub(super) fn changes_takes_keys(&self) -> bool {
         self.changes.open
             && self.changes.draft_is_focused()

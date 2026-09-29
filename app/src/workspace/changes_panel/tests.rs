@@ -642,10 +642,27 @@ fn a_refresh_drops_a_comment_whose_line_is_gone_and_says_so() {
     );
 }
 
+/// What has been typed into the comment field, while one is up.
+fn typed(state: &ChangesPanelState) -> Option<String> {
+    state
+        .draft_input()
+        .map(|input| input.editor().text().to_owned())
+}
+
+/// Opens the field on line `line` of the first file and types `text` into
+/// it, leaving it open.
+fn typing(state: &mut ChangesPanelState, line: usize, text: &str) {
+    assert!(state.start_comment(0, line), "line {line} took no comment");
+    state
+        .draft_input()
+        .expect("a press on a line opens a field under it")
+        .edit(|editor| editor.paste(text));
+}
+
 #[test]
-fn a_comment_being_typed_on_a_line_that_is_gone_is_taken_down_and_said() {
+fn a_comment_being_typed_on_a_line_that_is_gone_keeps_its_words_and_is_not_added() {
     let mut state = showing_diff("a.rs", a_hunk());
-    assert!(state.start_comment(0, 4));
+    typing(&mut state, 4, "and c");
 
     refresh_with(
         &mut state,
@@ -656,13 +673,155 @@ fn a_comment_being_typed_on_a_line_that_is_gone_is_taken_down_and_said() {
             "+    let b = 3;",
         ]),
     );
+    // Kept, words and keyboard: a field that went away under a person's
+    // typing would hand the rest of it to the pane.
+    assert_eq!(state.adrift(), Some(Adrift::Gone));
+    assert_eq!(typed(&state).as_deref(), Some("and c"));
+    assert!(state.draft_is_focused(), "a read took the keyboard away");
     assert!(
-        state.draft_input().is_none(),
-        "the field is up under nothing"
+        !state.rows().contains(&Row::Draft(0)),
+        "the field is drawn under some other line"
     );
-    assert!(!state.rows().contains(&Row::Draft(0)));
+
+    // Enter adds nothing, and says so.
+    assert!(!state.add_comment(), "a comment on no line was added");
+    assert!(state.comments().is_empty());
+    assert_eq!(typed(&state), None, "Enter left the field up");
     assert!(
         state.note().is_some_and(|note| note.contains("not added")),
+        "{:?}",
+        state.note()
+    );
+}
+
+#[test]
+fn a_comment_being_typed_is_kept_when_its_file_goes_or_a_read_fails() {
+    // The file stopped differing.
+    let mut state = showing(overview(&["a.rs", "b.rs"]));
+    let read = state.toggle(0).expect("asked");
+    state.land_hunks(Path::new("a.rs"), read.ticket, Ok(a_hunk()));
+    typing(&mut state, 3, "why");
+    let epoch = state.refresh().expect("nothing is being read");
+    state.land(epoch, Ok(overview(&["b.rs"])));
+    assert_eq!(state.adrift(), Some(Adrift::Gone));
+    assert_eq!(typed(&state).as_deref(), Some("why"));
+    assert!(state.draft_is_focused());
+
+    // The list could not be read — once, on a slow machine, with the line
+    // very likely still there.
+    let mut state = showing_diff("a.rs", a_hunk());
+    typing(&mut state, 3, "why");
+    let epoch = state.refresh().expect("nothing is being read");
+    state.land(epoch, Err(Error::TimedOut));
+    assert_eq!(state.adrift(), Some(Adrift::Unread));
+    assert_eq!(typed(&state).as_deref(), Some("why"));
+    assert!(state.draft_is_focused());
+
+    // The diff could not be read, and the lines the field was among went.
+    let mut state = showing_diff("a.rs", a_hunk());
+    typing(&mut state, 3, "why");
+    let epoch = state.refresh().expect("nothing is being read");
+    let again = state
+        .land(epoch, Ok(overview(&["a.rs"])))
+        .expect("the answer is current");
+    assert_eq!(state.adrift(), None, "a list that still has the file");
+    state.land_hunks(
+        Path::new("a.rs"),
+        again[0].ticket,
+        Err("git fell over".to_owned()),
+    );
+    assert_eq!(state.adrift(), Some(Adrift::Unread));
+    assert_eq!(typed(&state).as_deref(), Some("why"));
+
+    // Folding the file is a person's own gesture, and leaves a field adrift
+    // where it is: at the top, not under the file.
+    state.toggle(0);
+    assert_eq!(typed(&state).as_deref(), Some("why"));
+}
+
+/// `diff`, cut short where it ends.
+fn cut(mut diff: FileDiff) -> FileDiff {
+    diff.cut = true;
+    diff
+}
+
+#[test]
+fn a_comment_on_a_line_pushed_past_the_cut_is_kept_and_not_drawn() {
+    let mut state = showing_diff("a.rs", a_hunk());
+    comment(&mut state, 0, 3, "why three?");
+    let id = state.comments()[0].id;
+
+    // The agent wrote enough above the line to push it past where the
+    // diff is cut short: not found, and not gone either.
+    refresh_with(
+        &mut state,
+        &["a.rs"],
+        cut(diff_of(&[
+            "@@ -10,3 +10,4000 @@ fn main() {",
+            "     let a = 1;",
+            "+    let x = 0;",
+            "+    let y = 0;",
+        ])),
+    );
+    assert_eq!(
+        state.comments().len(),
+        1,
+        "a comment past the cut was dropped"
+    );
+    assert!(state.comments()[0].past_cut);
+    assert_eq!(
+        state.note(),
+        None,
+        "a comment past the cut was said dropped"
+    );
+    assert!(
+        !state.rows().contains(&Row::Comment(0, id)),
+        "a comment past the cut is drawn under some other line"
+    );
+    assert!(
+        state.rows().iter().any(|row| matches!(
+            row,
+            Row::Note(note) if note.contains("1 comment on a line past it")
+        )),
+        "{:?}",
+        state.rows()
+    );
+    assert!(
+        state
+            .review(Some("feat/review"))
+            .is_some_and(|review| review.contains("> +    let b = 3;\nwhy three?")),
+        "a comment past the cut is not sent"
+    );
+
+    // A read that finds it again puts it back under its line…
+    refresh_with(
+        &mut state,
+        &["a.rs"],
+        diff_of(&[
+            "@@ -10,3 +10,5 @@ fn main() {",
+            "     let a = 1;",
+            "+    let x = 0;",
+            "-    let b = 2;",
+            "+    let b = 3;",
+            "+    let c = 4;",
+            "     done();",
+        ]),
+    );
+    assert_eq!(said(&state), [(4, "why three?".to_owned())]);
+    assert!(!state.comments()[0].past_cut);
+    assert!(state.rows().contains(&Row::Comment(0, id)));
+
+    // …and one that is cut, and then one that is whole and without it,
+    // drops it.
+    let without = diff_of(&["@@ -10,3 +10,3 @@ fn main() {", "-    let b = 2;"]);
+    refresh_with(&mut state, &["a.rs"], cut(without.clone()));
+    assert_eq!(state.comments().len(), 1);
+    refresh_with(&mut state, &["a.rs"], without);
+    assert!(state.comments().is_empty());
+    assert!(
+        state
+            .note()
+            .is_some_and(|note| note.contains("no longer in the diff")),
         "{:?}",
         state.note()
     );

@@ -1109,7 +1109,10 @@ new side for an added line and the old side for a removed one. Every refresh rea
 diff of each file with a comment on it, folded or not, so nothing is sent about a diff nobody
 read again; the comment moves to the line that says the same thing nearest to where it was (a
 header by the function name after its numbers, which move), and one whose line is gone is
-dropped and named. `Send N comments to the agent` composes one message — a heading, then
+dropped and named — unless the read was cut short (`MAX_DIFF_LINES`, `MAX_DIFF_BYTES`), which
+proves nothing about the lines past the cut: that comment is kept with its last line and number,
+drawn nowhere and counted in the note where the diff stops, until a read finds the line or a
+whole one does not. `Send N comments to the agent` composes one message — a heading, then
 `path:line`, the quoted line and the comment for each, in the order the diff reads, with no
 newline at the end — and hands it to `TerminalHandle::paste_bracketed`, the terminal model's
 paste behind a check that the program asked for bracketed paste, made under the same lock as the
@@ -1130,12 +1133,18 @@ the same text on the clipboard. The field takes the keyboard the way the tab sea
 a wish granted by `changes_takes_keys` and claimed Escape and Enter in `action_for` — and the
 pane beside it is given no keys at all while it has them (`body.rs`), since every element sees
 every keystroke and an agent with no composer would otherwise be typed into alongside the
-field. A click on a pane, a section shown, another field pressed or the find bar opened takes
-the keyboard back, and the comment keeps its words. Against the agents themselves, a
-multi-line bracketed paste was checked to land in the prompt unsent in Claude Code 2.1.280 (as
-`[Pasted text #1 +3 lines]`) and OpenCode 1.18.33 (as `[Pasted ~4 lines]`); Codex 0.149.1 and
-Gemini CLI 0.61.0 turn bracketed paste on at start-up, but stopped at sign-in and a trust
-question here, so a paste into their prompts is not verified.
+field. A click on a pane, a section shown, another field pressed, the find bar opened, Enter or
+Escape takes the keyboard back, and so does the column moving to another repository or tab,
+which takes the field with it; a read coming home never does. A read that takes the field's
+line away — the line gone, pushed past the cut, or a read that failed — keeps the field, its
+words and the keyboard and moves it to the top of the column under the reason (`Adrift`); Enter
+there adds nothing. Dropped instead, the field would hand the keyboard back to the focused pane
+— usually the agent being commented on — and the rest of the comment, and its Enter, would be
+typed into it. Against the agents themselves, a multi-line bracketed paste was checked to land
+in the prompt unsent in Claude Code 2.1.280 (as `[Pasted text #1 +3 lines]`) and OpenCode
+1.18.33 (as `[Pasted ~4 lines]`); Codex 0.149.1 and Gemini CLI 0.61.0 turn bracketed paste on at
+start-up, but stopped at sign-in and a trust question here, so a paste into their prompts is not
+verified.
 
 ### The agent says what it is doing
 

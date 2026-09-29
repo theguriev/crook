@@ -282,6 +282,47 @@ struct Draft {
     /// the keyboard is [`Workspace::changes_takes_keys`], which also asks
     /// whether anything is covering it.
     focused: bool,
+    /// Why a read has left it with no line to be drawn under, if one has.
+    adrift: Option<Adrift>,
+}
+
+/// Why the comment being typed has lost its line to a read.
+///
+/// A read never takes a field away from under a person's typing. A refresh
+/// that comes home while they type — and the agent the comment is about is
+/// editing the very lines being commented on — keeps the field, the words
+/// and the keyboard, and moves the field to the top of the column with this
+/// said over it. Were the field dropped instead, the keyboard would go back
+/// to the focused pane with nobody asking it to, and the rest of the comment
+/// and its Enter would be typed into the agent.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(super) enum Adrift {
+    /// The diff, or the list of files, was read again without the line.
+    Gone,
+    /// The diff was read again, cut short before the line was found.
+    PastCut,
+    /// A read failed, and what the column was showing went with it.
+    Unread,
+}
+
+impl Adrift {
+    /// What is said over the field.
+    fn caption(self) -> &'static str {
+        match self {
+            Self::Gone => {
+                "The line this comment is on is no longer in the diff, so it cannot be added. \
+                 Enter or Escape closes it."
+            }
+            Self::PastCut => {
+                "The line this comment is on has moved past where the diff is cut short, so it \
+                 cannot be added here. Enter or Escape closes it."
+            }
+            Self::Unread => {
+                "The changes could not be read again, so this comment has no line to go on. \
+                 Enter or Escape closes it."
+            }
+        }
+    }
 }
 
 /// Whether the column is up, what it is showing, and what the mouse is doing
@@ -490,12 +531,16 @@ impl ChangesPanelState {
                 self.hunks.clear();
             }
         }
-        if self
-            .draft
-            .as_ref()
-            .is_some_and(|draft| !self.expanded.contains(&draft.anchor.path))
-        {
-            self.draft = None;
+        // A field on a file this read took off the list, or on a list that
+        // could not be read, has nothing to be drawn under — and is kept,
+        // words and keyboard, see [`Adrift`].
+        let failed = matches!(self.reading, Reading::Failed(_));
+        if let Some(draft) = self.draft.as_mut().filter(|draft| draft.adrift.is_none()) {
+            if failed {
+                draft.adrift = Some(Adrift::Unread);
+            } else if !self.expanded.contains(&draft.anchor.path) {
+                draft.adrift = Some(Adrift::Gone);
+            }
         }
 
         let mut again: Vec<PathBuf> = self.expanded.iter().cloned().collect();
@@ -518,11 +563,12 @@ impl ChangesPanelState {
         let path = file.path.clone();
         let nested = file.status == Status::Repository;
         if self.expanded.remove(&path) {
-            // A field nobody can see must not keep the keyboard.
+            // A field nobody can see must not keep the keyboard. One adrift
+            // is drawn at the top rather than under the file, and stays.
             if self
                 .draft
                 .as_ref()
-                .is_some_and(|draft| draft.anchor.path == path)
+                .is_some_and(|draft| draft.anchor.path == path && draft.adrift.is_none())
             {
                 self.draft = None;
             }
@@ -559,21 +605,25 @@ impl ChangesPanelState {
         hunks.ticket = None;
         // Every comment on the file, and the field if it is on it, moves to
         // where its line is in what was just read. A read that failed moves
-        // nothing: the diff is the same diff until git says otherwise.
-        if let (Some(key), Ok(diff)) = (&key, &read) {
-            let (dropped, draft_gone) =
-                follow_lines(path, diff, self.reviews.get_mut(key), &mut self.draft);
-            if draft_gone {
-                self.draft = None;
-                self.note = Some(
-                    "The line being commented on is no longer in the diff, so the comment \
-                     was not added."
-                        .to_owned(),
-                );
+        // no comment: the diff is the same diff until git says otherwise. It
+        // does take away the lines the field was drawn among, though.
+        match (&key, &read) {
+            (Some(key), Ok(diff)) => {
+                let dropped = follow_lines(path, diff, self.reviews.get_mut(key), &mut self.draft);
+                if let Some(note) = review::dropped(&dropped) {
+                    self.note = Some(note);
+                }
             }
-            if let Some(note) = review::dropped(&dropped) {
-                self.note = Some(note);
+            (_, Err(_)) => {
+                if let Some(draft) = self
+                    .draft
+                    .as_mut()
+                    .filter(|draft| draft.anchor.path == path && draft.adrift.is_none())
+                {
+                    draft.adrift = Some(Adrift::Unread);
+                }
             }
+            (None, Ok(_)) => {}
         }
         hunks.diff = Some(read);
         self.relayout();
@@ -634,15 +684,25 @@ impl ChangesPanelState {
             .map_or(&[], Vec::as_slice)
     }
 
-    /// The comments on the file at `path`, top to bottom.
+    /// The comments drawn on the file at `path`, top to bottom: all of them
+    /// but those on lines past where its diff was cut short.
     fn comments_on(&self, path: &Path) -> Vec<&Comment> {
         let mut on: Vec<&Comment> = self
             .comments()
             .iter()
-            .filter(|comment| comment.anchor.path == path)
+            .filter(|comment| comment.anchor.path == path && !comment.past_cut)
             .collect();
         on.sort_by_key(|comment| (comment.anchor.at, comment.id));
         on
+    }
+
+    /// How many comments on the file at `path` are on lines past where its
+    /// diff was cut short, and so are kept without being drawn.
+    fn past_cut_on(&self, path: &Path) -> usize {
+        self.comments()
+            .iter()
+            .filter(|comment| comment.anchor.path == path && comment.past_cut)
+            .count()
     }
 
     /// Opens the field a comment is typed in, under line `line` of the file
@@ -680,6 +740,7 @@ impl ChangesPanelState {
             anchor,
             input: TextInput::new(),
             focused: true,
+            adrift: None,
         });
         self.relayout();
         true
@@ -688,6 +749,12 @@ impl ChangesPanelState {
     /// What is being typed into the comment field, while one is up.
     pub(super) fn draft_input(&self) -> Option<&TextInput> {
         self.draft.as_ref().map(|draft| &draft.input)
+    }
+
+    /// Why a read has left the comment field with no line, if one has: the
+    /// field is then drawn at the top of the column rather than in the list.
+    pub(super) fn adrift(&self) -> Option<Adrift> {
+        self.draft.as_ref().and_then(|draft| draft.adrift)
     }
 
     /// Tells the comment field whether the keyboard is its. See
@@ -717,12 +784,24 @@ impl ChangesPanelState {
 
     /// Adds what was typed as a comment on the field's line, and takes the
     /// field down. Says whether a comment was added: Enter on an empty field
-    /// is a field somebody changed their mind in, and it only goes away.
+    /// is a field somebody changed their mind in, and it only goes away — and
+    /// so does Enter on a field whose line a read took away, which says so.
     pub(super) fn add_comment(&mut self) -> bool {
         let Some(draft) = self.draft.take() else {
             return false;
         };
         let text = draft.input.editor().text().trim().to_owned();
+        if draft.adrift.is_some() {
+            if !text.is_empty() {
+                self.note = Some(
+                    "The comment was not added: the line it was on is not in the diff as read \
+                     now."
+                        .to_owned(),
+                );
+            }
+            self.relayout();
+            return false;
+        }
         let added = match self.key() {
             Some(key) if !text.is_empty() => {
                 self.comments_made += 1;
@@ -730,6 +809,7 @@ impl ChangesPanelState {
                     id: self.comments_made,
                     anchor: draft.anchor,
                     text,
+                    past_cut: false,
                 });
                 self.note = None;
                 true
@@ -939,7 +1019,7 @@ impl ChangesPanelState {
                     let draft = self
                         .draft
                         .as_ref()
-                        .filter(|draft| draft.anchor.path == file.path)
+                        .filter(|draft| draft.anchor.path == file.path && draft.adrift.is_none())
                         .map(|draft| draft.anchor.at);
                     for line in 0..diff.lines.len() {
                         rows.push(Row::Line(index, line));
@@ -953,9 +1033,16 @@ impl ChangesPanelState {
                         }
                     }
                     if diff.cut {
-                        rows.push(Row::Note(
-                            "Cut short here. Open the file to see the rest.".to_owned(),
-                        ));
+                        rows.push(Row::Note(match self.past_cut_on(&file.path) {
+                            0 => "Cut short here. Open the file to see the rest.".to_owned(),
+                            1 => "Cut short here, with 1 comment on a line past it. Open the \
+                                  file to see the rest."
+                                .to_owned(),
+                            count => format!(
+                                "Cut short here, with {count} comments on lines past it. Open \
+                                 the file to see the rest."
+                            ),
+                        }));
                     }
                 }
             }
@@ -1015,8 +1102,11 @@ impl ChangesPanelState {
 /// Moves every comment in `comments` on the file at `path` — and `draft`,
 /// if it is on that file — to where its line is in `diff`, which has just
 /// been read. Answers where each comment whose line is gone was, having
-/// dropped it, and whether the draft's line is gone too, which is the
-/// caller's to drop.
+/// dropped it.
+///
+/// A diff cut short proves nothing about a line it stops before: a comment
+/// not found in one is kept and marked past the cut, and a draft is set
+/// adrift, as it is when its line is gone.
 ///
 /// Over the fields rather than the state, because the diff it reads is the
 /// state's own and is borrowed while this runs.
@@ -1025,7 +1115,7 @@ fn follow_lines(
     diff: &FileDiff,
     comments: Option<&mut Vec<Comment>>,
     draft: &mut Option<Draft>,
-) -> (Vec<String>, bool) {
+) -> Vec<String> {
     let places = review::places(&diff.lines);
     let follow = |anchor: &mut Anchor| match review::reanchor(anchor, &diff.lines, &places) {
         Some((at, place)) => {
@@ -1040,17 +1130,33 @@ fn follow_lines(
     let mut dropped = Vec::new();
     if let Some(comments) = comments {
         comments.retain_mut(|comment| {
-            if comment.anchor.path != path || follow(&mut comment.anchor) {
+            if comment.anchor.path != path {
+                return true;
+            }
+            if follow(&mut comment.anchor) {
+                comment.past_cut = false;
+                return true;
+            }
+            if diff.cut {
+                comment.past_cut = true;
                 return true;
             }
             dropped.push(review::location(&comment.anchor));
             false
         });
     }
-    let draft_gone = draft
+    if let Some(draft) = draft
         .as_mut()
-        .is_some_and(|draft| draft.anchor.path == path && !follow(&mut draft.anchor));
-    (dropped, draft_gone)
+        .filter(|draft| draft.anchor.path == path && draft.adrift.is_none())
+        && !follow(&mut draft.anchor)
+    {
+        draft.adrift = Some(if diff.cut {
+            Adrift::PastCut
+        } else {
+            Adrift::Gone
+        });
+    }
+    dropped
 }
 
 /// The whole column.
@@ -1163,26 +1269,41 @@ fn base_line(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
 }
 
 /// The review's strip, at the top of the column where it is found without
-/// scrolling: the two ways a review leaves the column, and what the last of
-/// them said. Nothing at all with no comment and nothing to say, which is how
-/// the column is most of the time.
+/// scrolling: the two ways a review leaves the column, what the last of them
+/// said, and a comment field a read left with no line to be under (see
+/// [`Adrift`]). Nothing at all with none of those, which is how the column is
+/// most of the time.
 fn review_bar(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     let state = workspace.changes_panel();
     let count = state.comments().len();
     let note = state.note();
-    if count == 0 && note.is_none() {
+    let adrift = state.adrift();
+    if count == 0 && note.is_none() && adrift.is_none() {
         return Empty::new().finish();
     }
 
-    let mut column = Flex::column()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+    let mut children: Vec<Box<dyn Element>> = Vec::new();
+    if let Some(adrift) = adrift {
+        children.push(
+            Flex::column()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                .with_child(
+                    Paragraph::new(adrift.caption().to_owned(), ui, 11.)
+                        .with_color(theme().text_muted)
+                        .with_line_height_ratio(1.4)
+                        .finish(),
+                )
+                .with_child(draft_row(workspace))
+                .finish(),
+        );
+    }
     if count > 0 {
         let label = match count {
             1 => "Send 1 comment to the agent".to_owned(),
             count => format!("Send {count} comments to the agent"),
         };
-        column.add_child(
+        children.push(
             Flex::row()
                 .with_main_axis_size(MainAxisSize::Max)
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
@@ -1209,32 +1330,38 @@ fn review_bar(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
         // Wrapped rather than cut: a note is the answer to a press, and the
         // half of it an ellipsis would take is the half that says what to
         // do instead.
-        column.add_child(
-            Container::new(
-                Flex::row()
-                    .with_main_axis_size(MainAxisSize::Max)
-                    .with_cross_axis_alignment(CrossAxisAlignment::Start)
-                    .with_child(
-                        Expanded::new(
-                            1.,
-                            Paragraph::new(note.to_owned(), ui, 11.)
-                                .with_color(theme().text_muted)
-                                .with_line_height_ratio(1.4)
-                                .finish(),
-                        )
-                        .finish(),
+        children.push(
+            Flex::row()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_cross_axis_alignment(CrossAxisAlignment::Start)
+                .with_child(
+                    Expanded::new(
+                        1.,
+                        Paragraph::new(note.to_owned(), ui, 11.)
+                            .with_color(theme().text_muted)
+                            .with_line_height_ratio(1.4)
+                            .finish(),
                     )
-                    .with_child(small_cross(
-                        state.control(Control::DismissNote),
-                        ChangesAction::DismissNote,
-                    ))
                     .finish(),
-            )
-            .with_margin_top(if count > 0 { 6. } else { 0. })
-            .finish(),
+                )
+                .with_child(small_cross(
+                    state.control(Control::DismissNote),
+                    ChangesAction::DismissNote,
+                ))
+                .finish(),
         );
     }
 
+    let mut column = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+    for (index, child) in children.into_iter().enumerate() {
+        column.add_child(
+            Container::new(child)
+                .with_margin_top(if index == 0 { 0. } else { 6. })
+                .finish(),
+        );
+    }
     Container::new(column.finish())
         .with_margin_bottom(8.)
         .finish()
@@ -1667,7 +1794,8 @@ fn comment_row(workspace: &Workspace, comment: &Comment, ui: FamilyId) -> Box<dy
     .finish()
 }
 
-/// The field a comment is typed in, under the line it is about.
+/// The field a comment is typed in, under the line it is about — or in the
+/// review's strip, under what it says, when a read has set it adrift.
 ///
 /// One line: [`TextField`](super::text_field::TextField) has no second, so
 /// Shift-Enter does nothing here. Enter keeps the comment and Escape drops
