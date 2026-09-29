@@ -654,6 +654,46 @@ fn a_branch_two_commits_ahead_with_an_edit_counts_both_commits_and_every_line_si
 }
 
 #[test]
+fn what_main_did_after_the_branch_left_it_is_not_counted_against_the_branch() {
+    // The common case, and the one the test above cannot tell apart: there
+    // `main` never moved, so its tip *is* where the branch left it, and a
+    // diff against `main` and one against the fork print the same thing.
+    // Once `main` has work of its own, only the fork keeps that work out of
+    // the branch's count — a diff against `main`'s tip would read every line
+    // `main` added as a line this branch removed.
+    if without_git("what_main_did_after_the_branch_left_it_is_not_counted_against_the_branch") {
+        return;
+    }
+    let scratch = ScratchDir::new("base-moved-on");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    git(&repo, &["switch", "-c", "agent/task"]);
+    commit(&repo, "tracked.txt", "one\ntwo\nthree\nfour\n", "add four");
+    commit(&repo, "notes.txt", "alpha\nbeta\n", "add notes");
+    git(&repo, &["switch", "main"]);
+    commit(&repo, "other.txt", "x\ny\nz\n", "main moves on");
+    commit(&repo, "tracked.txt", "zero\none\ntwo\nthree\n", "main edits too");
+    git(&repo, &["switch", "agent/task"]);
+    write(&repo.join("tracked.txt"), "uno\ntwo\nthree\nfour\n");
+
+    let facts = gather(&repo, &mut Bases::default());
+
+    assert_eq!(
+        facts.since_base,
+        Some(SinceBase {
+            base: "main".to_owned(),
+            // `main`'s two new commits are not this branch's.
+            commits: 2,
+            // Exactly the branch's own lines, as when `main` stood still.
+            diff: DiffStats {
+                files_changed: 2,
+                lines_added: 4,
+                lines_removed: 1,
+            },
+        })
+    );
+}
+
+#[test]
 fn on_main_itself_the_count_is_the_plain_one_even_ahead_of_origin() {
     // The sharp case of "the base itself": `base_of` prefers the
     // remote-tracking branch, and a local `main` with a commit it has not
