@@ -1285,6 +1285,14 @@ impl Workspace {
         }
     }
 
+    /// The branches the menu has marked `merged`, in name order, or `None`
+    /// until the proof has come back. For a test.
+    pub fn worktrees_landed(&self) -> Option<Vec<String>> {
+        let mut landed: Vec<String> = self.tab_menu.landed.as_ref()?.iter().cloned().collect();
+        landed.sort();
+        Some(landed)
+    }
+
     /// Whether the menu is asking about removing a checkout. For a test.
     pub fn worktree_menu_is_confirming(&self) -> bool {
         matches!(self.tab_menu.mode, WorktreeMode::Removing { .. })
@@ -3094,7 +3102,14 @@ impl Workspace {
                     self.apply_worktree(WorktreeAction::AskRemove(index), ctx);
                 }
             }
-            WorktreeAction::AskTidy => self.ask_about_tidying(ctx),
+            WorktreeAction::AskTidy => {
+                let free = super::tab_menu::free_checkouts(self);
+                self.ask_about_tidying(free, ctx);
+            }
+            WorktreeAction::AskTidyLanded => {
+                let landed = super::tab_menu::landed_checkouts(self);
+                self.ask_about_tidying(landed, ctx);
+            }
             WorktreeAction::Tidy => self.tidy_worktrees(ctx),
 
             WorktreeAction::Cancel => {
@@ -3178,6 +3193,7 @@ impl Workspace {
         self.tab_menu.sweep = Sweep::default();
         self.tab_menu.contents = Contents::Reading;
         self.tab_menu.branches.clear();
+        self.tab_menu.landed = None;
         self.tab_menu.problem = None;
         self.tab_menu.working = false;
         self.tab_menu.store = self.worktrees_directory.clone();
@@ -3217,6 +3233,44 @@ impl Workspace {
                 }
                 Err(problem) => Contents::Failed(problem.to_string()),
             };
+            workspace.read_landed(ctx);
+            ctx.notify();
+        })
+        .detach();
+    }
+
+    /// Asks which of the listed checkouts' work has landed on the base, and
+    /// marks them when the answer comes.
+    ///
+    /// After the list rather than with it: the proof is a pass over the
+    /// base's history, a second or two on a busy repository, and the list is
+    /// what a person opened the menu to see. Nothing waits on it — the pirate
+    /// does not chew, because nothing on screen is blocked — and the rows and
+    /// the sweep that the answer adds simply appear.
+    ///
+    /// Kept for as long as the menu stays open, whatever it goes on to ask:
+    /// the answer is about the repository, not about a question, so it is
+    /// compared by the opening it was read for rather than by epoch. A removal
+    /// reopens the menu, which reads it again.
+    fn read_landed(&mut self, ctx: &mut ViewContext<Self>) {
+        let (Contents::Ready(worktrees), Some(directory)) = (
+            &self.tab_menu.contents,
+            self.tab_menu.pane_directory.clone(),
+        ) else {
+            return;
+        };
+        let worktrees = worktrees.clone();
+        let tab = self.tab_menu.tab;
+        let opening = self.tab_menu.opening;
+
+        let reading = ctx
+            .background()
+            .spawn(async move { super::tab_menu::landed_branches(&directory, &worktrees) });
+        ctx.spawn(reading, move |workspace, landed, ctx| {
+            if workspace.tab_menu.tab != tab || workspace.tab_menu.opening != opening {
+                return;
+            }
+            workspace.tab_menu.landed = Some(landed);
             ctx.notify();
         })
         .detach();
@@ -3275,6 +3329,8 @@ impl Workspace {
                     .map(|name| name.to_string_lossy().into_owned());
                 self.tab_menu.branches =
                     crate::git::worktree::branches(&directory).unwrap_or_default();
+                self.tab_menu.landed =
+                    Some(super::tab_menu::landed_branches(&directory, &worktrees));
                 Contents::Ready(worktrees)
             }
             Err(problem) => Contents::Failed(problem.to_string()),
@@ -3358,6 +3414,7 @@ impl Workspace {
         self.tab_menu.sweep = Sweep::default();
         self.tab_menu.contents = Contents::Reading;
         self.tab_menu.branches.clear();
+        self.tab_menu.landed = None;
         self.tab_menu.problem = None;
         self.tab_menu.working = false;
         self.tab_menu.chomp = 0;
@@ -4044,15 +4101,16 @@ impl Workspace {
         .detach();
     }
 
-    /// Asks about removing every free checkout, and looks in each of them
-    /// while it asks.
+    /// Asks about removing `free` — every free checkout, or the ones among
+    /// them whose work has landed — and looks in each of them while it asks.
     ///
     /// The looking is what makes the question answerable: which of them git
     /// will actually let go is not a fact the list carries, and a face that
     /// named all six and then removed four would have asked about something
-    /// other than what it did.
-    fn ask_about_tidying(&mut self, ctx: &mut ViewContext<Self>) {
-        let free = super::tab_menu::free_checkouts(self);
+    /// other than what it did. A checkout whose work has landed is looked in
+    /// all the same: the proof is about its commits, and says nothing about
+    /// a file somebody left in it since.
+    fn ask_about_tidying(&mut self, free: Vec<(PathBuf, String)>, ctx: &mut ViewContext<Self>) {
         if free.is_empty() {
             return;
         }
@@ -4232,7 +4290,8 @@ impl Workspace {
         let removing = ctx.background().spawn({
             let repository = repository.clone();
             let path = going.path.clone();
-            async move { crate::git::worktree::remove(&repository, &path, false) }
+            let store = self.tab_menu.store.clone();
+            async move { remove_checkout(&repository, &path, false, store.as_deref()) }
         });
 
         ctx.spawn(removing, move |workspace, removed, ctx| {
@@ -4281,7 +4340,8 @@ impl Workspace {
         let opening = self.tab_menu.opening;
         let removed = ctx.background().spawn({
             let path = path.clone();
-            async move { crate::git::worktree::remove(&repository, &path, force) }
+            let store = self.tab_menu.store.clone();
+            async move { remove_checkout(&repository, &path, force, store.as_deref()) }
         });
 
         ctx.spawn(removed, move |workspace, removed, ctx| {
@@ -7291,6 +7351,26 @@ const OVERLAY_ANCHOR: AnchorTo = AnchorTo {
 /// platform keeps data rather than in a dotfile of our own.
 fn worktree_store() -> Option<PathBuf> {
     dirs::data_dir().map(|directory| directory.join("crook").join("worktrees"))
+}
+
+/// Removes the checkout at `path`, and then the directories of `store` it
+/// leaves with nothing in them.
+///
+/// **Blocking**, both halves, and the second only after the first has
+/// succeeded: a checkout git refused to remove is still in its directory, and
+/// the directories above it are not empty anyway. The branch stays, as it
+/// always has — see [`crate::git::worktree::remove`].
+fn remove_checkout(
+    repository: &Path,
+    path: &Path,
+    force: bool,
+    store: Option<&Path>,
+) -> Result<(), crate::git::worktree::Error> {
+    crate::git::worktree::remove(repository, path, force)?;
+    if let Some(store) = store {
+        crate::git::worktree::prune_empty_parents(store, path);
+    }
+    Ok(())
 }
 
 /// Whether a keystroke is this platform's "copy" chord: cmd-c on macOS, and

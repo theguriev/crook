@@ -450,7 +450,11 @@ Nineteen features, and the page that configures them:
   delete first, and it never deletes the branch. One row down, `Remove 3 free checkouts…`
   does the same to all of them at once — it looks in each one first, names the branches that
   will actually go, and leaves anything with work in it exactly where it is. That row is there
-  only when there is something for it to take. Checkouts go in a store of Crook's own —
+  only when there is something for it to take. A checkout whose branch has already landed on
+  the base — merged, or squashed in by the forge, which git itself cannot tell — is marked
+  `merged`, worked out from the repository alone with nothing sent anywhere, and
+  `Remove 2 merged checkouts…` takes just those, on the same terms. A removal also takes the
+  directories of the store it leaves empty. Checkouts go in a store of Crook's own —
   neither inside the repository, where git will happily let you put one and every build and
   every search then trips over it, nor beside it in a directory somebody else laid out.
 
