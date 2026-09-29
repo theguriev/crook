@@ -36,7 +36,9 @@
 //! one line in the log to say so. An agent that answers a refusal by asking
 //! again is a loop, and each turn of it is a process, a connection and a line
 //! in the log; sixteen is far more than a pane has reason to be refused, and
-//! the count starts again at every tab it is allowed.
+//! the count starts again at every tab that opens for it. Only at one that
+//! opens: a worktree git will not make is refused after the request was
+//! agreed to, and a loop asking for that branch is a loop like any other.
 //!
 //! # The command
 //!
@@ -145,12 +147,22 @@ impl Spawns {
         }
     }
 
-    /// Records a tab accepted for `caller` and not yet open, which counts
-    /// against `root` until [`Self::settled`].
-    pub(super) fn accept(&mut self, caller: PaneId, root: PaneId) {
+    /// Holds a place in `root`'s budget for a tab accepted and not yet open,
+    /// until [`Self::settled`].
+    ///
+    /// Not an end to the caller's run of refusals: the tab may still not
+    /// open — git may refuse the worktree — and a loop asking for a branch
+    /// git will never make has to add up to [`REFUSALS_ALLOWED`] like any
+    /// other. That is [`Self::opened`]'s.
+    pub(super) fn accept(&mut self, root: PaneId) {
+        *self.opening.entry(root).or_default() += 1;
+    }
+
+    /// Starts `caller`'s count of refusals again, and the strangers' with it:
+    /// a tab opened for it, so it is a pane in the ordinary state again.
+    pub(super) fn opened(&mut self, caller: PaneId) {
         self.refusals.remove(&caller);
         self.strangers = 0;
-        *self.opening.entry(root).or_default() += 1;
     }
 
     /// Gives back the place [`Self::accept`] held for `root`: the tab is open
@@ -224,12 +236,12 @@ pub fn open(
         }
     };
     let root = plan.lineage.root;
-    spawns.borrow_mut().accept(caller, root);
+    spawns.borrow_mut().accept(root);
 
     let Some(branch) = plan.branch.clone() else {
         let directory = plan.directory.clone();
         spawns.borrow_mut().settled(root);
-        finish(workspace, plan, directory, None, answer, ctx);
+        finish(workspace, plan, directory, None, spawns, answer, ctx);
         return;
     };
     let (Some(repository), Some(store)) = (
@@ -264,9 +276,15 @@ pub fn open(
     ctx.spawn(made, move |workspace, made, ctx| {
         spawns.borrow_mut().settled(root);
         match made {
-            Ok((path, repository)) => {
-                finish(workspace, plan, Some(path), Some(repository), answer, ctx)
-            }
+            Ok((path, repository)) => finish(
+                workspace,
+                plan,
+                Some(path),
+                Some(repository),
+                &spawns,
+                answer,
+                ctx,
+            ),
             Err(error) => {
                 let refusal = Refusal::new(
                     code::FAILED,
@@ -396,11 +414,15 @@ fn plan(
 }
 
 /// Opens the tab a [`Plan`] describes, in `directory`, and answers with it.
+///
+/// The one place a caller's run of refusals ends, since it is the one place a
+/// tab is known to have opened.
 fn finish(
     workspace: &mut Workspace,
     plan: Plan,
     directory: Option<PathBuf>,
     heading: Option<String>,
+    spawns: &RefCell<Spawns>,
     answer: Answering,
     ctx: &mut ViewContext<Workspace>,
 ) {
@@ -430,12 +452,12 @@ fn finish(
         ctx,
     );
     let Some((tab, pane)) = opened else {
-        answer.send(Err(Refusal::new(
-            code::FAILED,
-            "the tab could not be opened",
-        )));
+        let refusal = Refusal::new(code::FAILED, "the tab could not be opened");
+        spawns.borrow_mut().refuse(caller, &refusal);
+        answer.send(Err(refusal));
         return;
     };
+    spawns.borrow_mut().opened(caller);
     workspace.run_at_first_prompt(pane, line, ctx);
     log::info!(
         "pane {} opened pane {} through the control socket",

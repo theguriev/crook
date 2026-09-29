@@ -438,15 +438,29 @@ fn sixteen_refusals_in_a_row_stop_the_window_answering_that_pane_and_no_other() 
         spawns.refuse(pane, &refusal);
     }
     assert!(!spawns.stopped(pane), "one short of the bound");
-    // An allowed tab starts the count again: a pane nobody refused since is
-    // in the ordinary state, not a bad one.
-    spawns.accept(pane, pane);
+    // A request agreed to is not yet a tab: git can still refuse its
+    // worktree, and that refusal is the next in the same run.
+    spawns.accept(pane);
+    assert!(!spawns.stopped(pane));
+    spawns.refuse(pane, &refusal);
+    assert!(
+        spawns.stopped(pane),
+        "a request agreed to and then refused started the count again"
+    );
+
+    // A tab that opens starts the count again: a pane nobody refused since
+    // is in the ordinary state, not a bad one.
+    let pane = crate::tab::PaneId::next();
+    for _ in 1..spawn::REFUSALS_ALLOWED {
+        spawns.refuse(pane, &refusal);
+    }
+    spawns.opened(pane);
     for _ in 1..spawn::REFUSALS_ALLOWED {
         spawns.refuse(pane, &refusal);
     }
     assert!(
         !spawns.stopped(pane),
-        "the count began again at the tab it was allowed"
+        "the count began again at the tab that opened"
     );
 
     spawns.refuse(pane, &refusal);
@@ -1957,5 +1971,59 @@ mod socket {
             "the words did not arrive as themselves: {output:?}"
         );
         assert_eq!(served.field(worker), "", "the field was sent, not copied");
+    }
+
+    #[test]
+    fn a_worktree_git_will_not_make_is_a_refusal_that_counts_toward_the_stop() {
+        // Agreed to, then refused by git on the pool: the refusal is counted
+        // after the request was, and it must not be the agreeing that starts
+        // the count again, or an agent asking for a branch git will never
+        // make would be answered — and send git to work — for ever.
+        let mut made = false;
+        let mut served = Served::new(|workspace, ctx, root| {
+            let Some(repository) = repository(&root.0.join("repo")) else {
+                return;
+            };
+            workspace.set_worktrees_directory(root.0.join("store"));
+            let pane = workspace.tabs().focused_pane_id().expect("a pane");
+            workspace.update_session(pane, ctx, |session| {
+                session.working_directory = Some(repository);
+            });
+            made = true;
+        });
+        if !made {
+            eprintln!("skipped: no git here to make a repository with");
+            return;
+        }
+        let token = served.token(first_pane(&served));
+        let bad = || NewTab {
+            command: vec!["make".to_owned()],
+            worktree: Some("bad..name".to_owned()),
+            ..NewTab::default()
+        };
+
+        let refuse = |served: &mut Served, times: u32| {
+            for _ in 0..times {
+                let refused = served
+                    .open_tab(Some(token.clone()), bad())
+                    .expect_err("git refuses the name");
+                assert!(refused.contains("failed"), "{refused}");
+            }
+        };
+        // One short, and then a tab that opens: that, and only that, starts
+        // the count again.
+        refuse(&mut served, spawn::REFUSALS_ALLOWED - 1);
+        served
+            .open_tab(Some(token.clone()), new_tab(&["make"]))
+            .expect("one short of the stop, a tab still opens");
+        refuse(&mut served, spawn::REFUSALS_ALLOWED);
+        let stopped = served
+            .open_tab(Some(token.clone()), bad())
+            .expect_err("the window has stopped answering");
+        assert!(stopped.contains("too-many-refusals"), "{stopped}");
+        let stopped = served
+            .open_tab(Some(token), new_tab(&["make"]))
+            .expect_err("and not only for worktrees");
+        assert!(stopped.contains("too-many-refusals"), "{stopped}");
     }
 }

@@ -1196,12 +1196,12 @@ own — counted per caller, a loop would be eight tabs each opening eight more. 
 on git count, and a tab that closes gives its place back. Refusals are bounded as a plugin's
 are: sixteen in a row and the window stops answering that pane's `tab.new` until it closes, as
 `too-many-refusals`, with a line in the log at the sixteenth; every refusal before it is logged,
-and an allowed tab starts the count again. Requests with no token are logged sixteen in a row
-and then refused quietly, since there is no pane to stop answering. What is still to come keeps
-to the rule these start: a caller may act on its own pane and on the tabs it opened, and reading
-or typing into a pane a person opened is a grant that person answers on a card. An agent that
-reads one pane and types into another is a confused deputy waiting for a prompt injection,
-which is why that is never a default.
+including a worktree git would not make, and only a tab that opens starts the count again.
+Requests with no token are logged sixteen in a row and then refused quietly, since there is no
+pane to stop answering. What is still to come keeps to the rule these start: a caller may act
+on its own pane and on the tabs it opened, and reading or typing into a pane a person opened is
+a grant that person answers on a card. An agent that reads one pane and types into another is a
+confused deputy waiting for a prompt injection, which is why that is never a default.
 
 **The transport.** One socket per process, because every `crook` launch is its own process with
 one window. At startup the name is probed: a socket there that refuses a connection was left by
