@@ -16364,6 +16364,8 @@ mod the_agent {
     enum Said {
         Title(String),
         Look,
+        Badge(usize),
+        AskedToBadge,
     }
 
     impl crate::Desktop for Notebook {
@@ -16373,6 +16375,14 @@ mod the_agent {
 
         fn request_attention(&self) {
             self.0.borrow_mut().push(Said::Look);
+        }
+
+        fn set_badge(&self, waiting: usize) {
+            self.0.borrow_mut().push(Said::Badge(waiting));
+        }
+
+        fn ask_to_badge(&self) {
+            self.0.borrow_mut().push(Said::AskedToBadge);
         }
     }
 
@@ -16388,8 +16398,29 @@ mod the_agent {
         fn title(&self) -> Option<String> {
             self.0.borrow().iter().rev().find_map(|said| match said {
                 Said::Title(title) => Some(title.clone()),
-                Said::Look => None,
+                Said::Look | Said::Badge(_) | Said::AskedToBadge => None,
             })
+        }
+
+        /// Every count the dock's badge was given, in order.
+        fn badges(&self) -> Vec<usize> {
+            self.0
+                .borrow()
+                .iter()
+                .filter_map(|said| match said {
+                    Said::Badge(waiting) => Some(*waiting),
+                    Said::Title(_) | Said::Look | Said::AskedToBadge => None,
+                })
+                .collect()
+        }
+
+        /// How many times the desktop was asked for leave to badge the icon.
+        fn asks_to_badge(&self) -> usize {
+            self.0
+                .borrow()
+                .iter()
+                .filter(|said| **said == Said::AskedToBadge)
+                .count()
         }
     }
 
@@ -16445,19 +16476,149 @@ mod the_agent {
     }
 
     #[test]
+    fn the_dock_badge_counts_what_the_title_counts_and_comes_off_at_none() {
+        // The badge is the title's number somewhere a minimised window still
+        // shows it, so it follows the same count on the same path — every
+        // change to the window's views, no frame drawn — and it is sent only
+        // when the count moves, since the dock redraws the tile for each.
+        let mut harness = Harness::new(2);
+        let front = harness.focused_pane_id().expect("the window has a pane");
+        let behind = background_of(&harness);
+        let said = watched(&mut harness);
+        assert_eq!(
+            said.badges(),
+            [0usize; 0],
+            "an icon with nothing waiting was never given a badge to take off"
+        );
+
+        report(&mut harness, behind, AgentStatus::NeedsInput, None);
+        report(&mut harness, behind, AgentStatus::NeedsInput, Some("again"));
+        assert_eq!(said.badges(), [1], "once, however often it is asked");
+
+        // The pane in front joins the count while the window is behind
+        // something else, and leaves it when the person is back: the title's
+        // rule, which the badge does not second-guess.
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+        report(&mut harness, front, AgentStatus::NeedsInput, None);
+        assert_eq!(said.badges(), [1, 2]);
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+        assert_eq!(said.badges(), [1, 2, 1]);
+
+        report(&mut harness, behind, AgentStatus::Running, None);
+        assert_eq!(
+            said.badges(),
+            [1, 2, 1, 0],
+            "and nothing waiting is no badge"
+        );
+        assert!(
+            said.title().is_some_and(|title| !title.contains("waiting")),
+            "{:?}",
+            said.title()
+        );
+    }
+
+    #[test]
+    fn leave_to_badge_is_asked_for_with_the_first_count_and_not_again() {
+        // Crook.app's badge is drawn only once the leave has been asked for,
+        // and a pane can wait with the window in front, where no banner is
+        // posted to ask with. So the first count there is to show asks — after
+        // the badge it is for, which the answer sets again — and nothing
+        // else does: not a window with nothing waiting, and not a later count,
+        // when the answer is already the person's setting.
+        let mut harness = Harness::new(2);
+        let front = harness.focused_pane_id().expect("the window has a pane");
+        let behind = background_of(&harness);
+        let said = watched(&mut harness);
+        assert_eq!(
+            0,
+            said.asks_to_badge(),
+            "nothing waiting, nothing to ask for"
+        );
+
+        report(&mut harness, behind, AgentStatus::NeedsInput, None);
+        assert_eq!(
+            said.0.borrow().iter().rev().take(2).collect::<Vec<_>>(),
+            [&Said::AskedToBadge, &Said::Badge(1)],
+            "asked with the window in front, right after the badge it is for"
+        );
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+        report(&mut harness, front, AgentStatus::NeedsInput, None);
+        report(&mut harness, behind, AgentStatus::Running, None);
+        report(&mut harness, front, AgentStatus::Running, None);
+        report(&mut harness, behind, AgentStatus::NeedsInput, None);
+        assert_eq!(said.badges(), [1, 2, 1, 0, 1]);
+        assert_eq!(
+            1,
+            said.asks_to_badge(),
+            "once, for as long as the window is open"
+        );
+    }
+
+    #[test]
+    fn leave_to_badge_is_not_asked_for_while_notifications_are_off() {
+        // macOS asks for the badge's leave as leave to send notifications, in
+        // those words, and a person who turned Crook's off has answered that
+        // already: with the plugin off, or with every switch on its page off,
+        // the badge is set and nothing is asked. Switching one back on with a
+        // pane still waiting asks then, not with the count's next move.
+        let mut harness = Harness::new(2);
+        let behind = background_of(&harness);
+        let plugin = crook_plugin::PluginId::parse("crook/notifications").expect("a literal");
+        let toggle = |harness: &mut Harness, occasion| {
+            harness.dispatch_workspace_action(WorkspaceAction::Settings(
+                SettingsAction::ToggleNotification(occasion),
+            ));
+        };
+        harness.workspace_update(|workspace, ctx| workspace.toggle_plugin(&plugin, ctx));
+        let said = watched(&mut harness);
+
+        report(&mut harness, behind, AgentStatus::NeedsInput, None);
+        assert_eq!(said.badges(), [1], "the badge is set all the same");
+        assert_eq!(0, said.asks_to_badge(), "not with the plugin off");
+
+        toggle(&mut harness, crate::notify::Occasion::NeedsInput);
+        harness.workspace_update(|workspace, ctx| workspace.toggle_plugin(&plugin, ctx));
+        assert!(
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace
+                    .host()
+                    .is_loaded(&plugin)),
+            "the plugin is back on"
+        );
+        assert_eq!(
+            0,
+            said.asks_to_badge(),
+            "nor with the plugin on and every switch off"
+        );
+
+        toggle(&mut harness, crate::notify::Occasion::LongCommand);
+        assert_eq!(said.badges(), [1], "the count has not moved");
+        assert_eq!(
+            1,
+            said.asks_to_badge(),
+            "one switch on is notifications wanted, and the pane is still waiting"
+        );
+    }
+
+    #[test]
     fn a_window_is_named_as_it_is_watched_with_no_frame_drawn() {
         // `Shell::new` opens the window, restores the session into it and
         // only then starts watching it, all before a first frame, and no
         // frame follows the workspace afterwards. So registering the callback
         // is what names the window: its flush runs the callback for every
         // change no frame has taken, which in a window that has drawn nothing
-        // is everything it opened with.
+        // is everything it opened with — the dock's badge included, for a
+        // session that comes back with a pane already waiting, and the ask
+        // for the leave the badge is drawn with, since the notifications the
+        // window opens with are on: the prompt can come at launch.
         let mut harness = Harness::undrawn(
             2,
             Opening {
                 settings: Settings::ephemeral(),
                 channel: Channel::Dev,
-                plugins: Vec::new(),
+                plugins: vec![Box::new(crate::plugins::notifications::Notifications)],
                 withdrawn: Default::default(),
                 heard: Default::default(),
                 plugins_directory: None,
@@ -16475,9 +16636,11 @@ mod the_agent {
 
         let said = watched(&mut harness);
         assert_eq!(
-            [Said::Title(
-                "(1 waiting) bisect the flaky test — Crook".to_owned()
-            )],
+            [
+                Said::Title("(1 waiting) bisect the flaky test — Crook".to_owned()),
+                Said::Badge(1),
+                Said::AskedToBadge,
+            ],
             said.0.borrow().as_slice(),
             "named as it is watched, with nothing changed and nothing drawn since"
         );

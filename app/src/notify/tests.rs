@@ -191,3 +191,44 @@ fn panes_quiet_for_long_enough_are_forgotten() {
 
     assert_eq!(cooldown.posted.len(), 1, "the closed panes are still held");
 }
+
+#[test]
+fn a_mac_binary_outside_an_app_bundle_posts_no_banner() {
+    // `cargo run`'s binary and the one `script/install` puts on PATH: macOS
+    // delivers notifications to an application bundle and nothing else, and
+    // asking for its notification center without one throws rather than
+    // failing. Such a copy has the dock's bounce instead, and is given a
+    // badge the dock may or may not draw.
+    assert_eq!(Service::of("macos", None), Service::OutsideTheApp);
+    assert_eq!(Service::of("macos", Some("")), Service::OutsideTheApp);
+    assert!(!Service::OutsideTheApp.posts());
+    // Nor is leave to badge asked for: the center it would be asked of is the
+    // one that throws.
+    assert!(!Service::OutsideTheApp.badges_with_leave());
+}
+
+#[test]
+fn crook_app_posts_through_notification_center() {
+    assert_eq!(
+        Service::of("macos", Some("com.theguriev.crook")),
+        Service::NotificationCenter
+    );
+    assert!(Service::NotificationCenter.posts());
+    // And its dock badge is drawn only once the same leave has been asked for.
+    assert!(Service::NotificationCenter.badges_with_leave());
+}
+
+#[test]
+fn linux_posts_through_notify_send_and_windows_nowhere_yet() {
+    assert_eq!(Service::of("linux", None), Service::NotifySend);
+    assert!(Service::NotifySend.posts());
+
+    // A bundle is macOS's idea, and says nothing about anywhere else.
+    assert_eq!(
+        Service::of("windows", Some("com.theguriev.crook")),
+        Service::Nowhere
+    );
+    assert!(!Service::Nowhere.posts());
+    assert!(!Service::NotifySend.badges_with_leave());
+    assert!(!Service::Nowhere.badges_with_leave());
+}

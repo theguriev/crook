@@ -21,6 +21,13 @@ swash.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 
+# The dock icon's badge, which winit has no word for. See the workspace
+# manifest for why these bindings and not winit's own.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
+
 [dev-dependencies]
 # The two examples: `scene_to_png` encodes the offscreen render, `window` turns
 # wgpu's own diagnostics into something a terminal shows.

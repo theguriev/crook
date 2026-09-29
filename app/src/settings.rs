@@ -430,6 +430,12 @@ impl GeneralOptions {
         }
     }
 
+    /// Whether a person asked to be notified of anything at all: one of the
+    /// switches [`Self::notifies_on`] reads is on.
+    pub fn notifies_on_any(self) -> bool {
+        self.notify_on_needs_input || self.notify_on_failed || self.notify_on_long_command
+    }
+
     /// The same options, with `occasion`'s switch turned the other way.
     pub fn toggled(mut self, occasion: Occasion) -> Self {
         let switch = match occasion {
