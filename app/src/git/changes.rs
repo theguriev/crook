@@ -658,7 +658,7 @@ fn unchanged(repository: &Path, listed: &[Listed<'_>]) -> HashSet<usize> {
 ///
 /// Which is also the one way `hash-object --stdin-paths` takes a name with
 /// a newline in it, or one ending in a carriage return, as one line of its
-/// input.
+/// input — and the way a patch's headers name such a file.
 fn quoted(path: &[u8]) -> Cow<'_, [u8]> {
     let escaped = |byte: u8| !(0x20..0x7f).contains(&byte) || byte == b'"' || byte == b'\\';
     if !path.iter().any(|byte| escaped(*byte)) {
@@ -692,7 +692,9 @@ fn quoted(path: &[u8]) -> Cow<'_, [u8]> {
 ///
 /// A file nobody has added is diffed against nothing, which is every line of
 /// it added; a rename is diffed with both its names, so git can pair them. A
-/// nested repository has no diff here at all, and says so.
+/// nested repository has no diff here at all, and says so. A link nobody has
+/// added that points at a directory is the one diff written here rather
+/// than by git: see `new_link`.
 pub fn hunks(repository: &Path, base: &Base, file: &FileChange) -> Result<FileDiff, Error> {
     let mut args: Vec<&OsStr> = ["diff", "-U3"].map(OsStr::new).to_vec();
     args.extend(DIFF_FLAGS.map(OsStr::new));
@@ -706,6 +708,15 @@ pub fn hunks(repository: &Path, base: &Base, file: &FileChange) -> Result<FileDi
         // on every platform — Windows's `nul` is accepted too, and this
         // spelling is the one that means the same thing everywhere.
         Status::Untracked => {
+            let on_disk = repository.join(&file.path);
+            let is_link = std::fs::symlink_metadata(&on_disk)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink());
+            if is_link && on_disk.is_dir() {
+                let target = std::fs::read_link(&on_disk)
+                    .map_err(|error| Error::Failed(format!("Could not read the link: {error}")))?;
+                let patch = new_link(&bytes_of(&file.path), &bytes_of(&target));
+                return Ok(parse_diff(&patch, false));
+            }
             args.extend(["--no-index", "--", "/dev/null"].map(OsStr::new));
             args.push(file.path.as_os_str());
         }
@@ -738,6 +749,70 @@ pub fn hunks(repository: &Path, base: &Base, file: &FileChange) -> Result<FileDi
     }
 
     Ok(parse_diff(&read.stdout, read.cut))
+}
+
+/// The diff of a new link at `path` to `target`, as git prints one.
+///
+/// `diff --no-index` cannot give it. It follows a link to a directory, takes
+/// the link for that directory, and — asked to compare a directory with a
+/// file — goes looking inside it for a file of the other side's name, which
+/// against `/dev/null` is `link/null`, and fails on a path nobody made. A
+/// link is a file whose one line is its target, which is how git diffs one
+/// it can read, so this is that patch: the same headers, the target as the
+/// lines added, and no `index` line, which `git apply` does not need and
+/// which would take another git to hash.
+fn new_link(path: &[u8], target: &[u8]) -> Vec<u8> {
+    let old = quoted(&[b"a/", path].concat()).into_owned();
+    let new = quoted(&[b"b/", path].concat()).into_owned();
+    let mut patch = Vec::new();
+    patch.extend(b"diff --git ");
+    patch.extend(&old);
+    patch.push(b' ');
+    patch.extend(&new);
+    patch.extend(b"\nnew file mode 120000\n--- /dev/null\n+++ ");
+    patch.extend(&new);
+    // git ends a name that holds a space with a tab on this line, so that a
+    // `patch` reading to the end of the line knows where the name stops.
+    if new.contains(&b' ') {
+        patch.push(b'\t');
+    }
+
+    let ends_a_line = target.ends_with(b"\n");
+    let lines: Vec<&[u8]> = target
+        .strip_suffix(b"\n")
+        .unwrap_or(target)
+        .split(|byte| *byte == b'\n')
+        .collect();
+    match lines.len() {
+        1 => patch.extend(b"\n@@ -0,0 +1 @@\n"),
+        count => patch.extend(format!("\n@@ -0,0 +1,{count} @@\n").bytes()),
+    }
+    for line in lines {
+        patch.push(b'+');
+        patch.extend(line);
+        patch.push(b'\n');
+    }
+    if !ends_a_line {
+        patch.extend(b"\\ No newline at end of file\n");
+    }
+    patch
+}
+
+/// A path's bytes, as git would print them: the bytes themselves on Unix,
+/// and UTF-8 elsewhere, which is what git for Windows speaks.
+fn bytes_of(path: &Path) -> Cow<'_, [u8]> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        Cow::Borrowed(path.as_os_str().as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        match path.to_string_lossy() {
+            Cow::Borrowed(text) => Cow::Borrowed(text.as_bytes()),
+            Cow::Owned(text) => Cow::Owned(text.into_bytes()),
+        }
+    }
 }
 
 /// A diff as git printed it, up to the caps, read into what the column draws.

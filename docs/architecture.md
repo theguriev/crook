@@ -1059,7 +1059,8 @@ it; those files, text or binary, go through one `git hash-object --stdin-paths`,
 hashes to the id it had at the base is left out. The list never diffs a file: a diff's cost is
 whatever `diff.algorithm` somebody chose makes of the file's lines (twenty seconds for one data
 file under `histogram`), and one file it cannot read fails it, where hashing reads each file once
-and keeps a file it cannot read. Every call goes
+and keeps a file it cannot read. A new link to a directory is the one diff written by hand,
+because `diff --no-index` follows the link and fails inside the directory. Every call goes
 through `git/run.rs`'s deadline on the background pool, with `--no-ext-diff`, `--no-textconv`
 and `core.fsmonitor` off, because each of those is a program a repository's configuration names
 and git would run it for a column that only reads; the `a/` and `b/` prefixes and the spelling

@@ -630,6 +630,45 @@ fn a_file_that_became_a_link_draws_only_the_lines_of_its_two_hunks() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_new_link_to_a_directory_is_a_new_link_and_not_a_failure() {
+    // `diff --no-index` follows the link, takes it for the directory, and
+    // looks for `<link>/null` inside it: an error naming a path nobody made,
+    // for a link that reads perfectly well.
+    if without_git("a_new_link_to_a_directory_is_a_new_link_and_not_a_failure") {
+        return;
+    }
+    let scratch = ScratchDir::new("dir-link");
+    let repo = task(&scratch);
+    std::fs::create_dir_all(repo.join("shared")).expect("writable");
+    commit(&repo, "shared/in.txt", "in\n", "a directory");
+    // A space, so the patch's `+++` line needs git's tab after the name.
+    std::os::unix::fs::symlink("shared", repo.join("linked dir")).expect("a link");
+    let base = base(&repo).expect("the repository can be read");
+    let listed = files(&repo, &base).expect("the diff can be read");
+    let link = file(&listed.files, "linked dir");
+    assert_eq!(link.status, Status::Untracked);
+
+    let diff = hunks(&repo, &base, link).expect("a link that reads is not a failure");
+
+    assert_eq!(
+        diff.lines,
+        ["@@ -0,0 +1 @@", "+shared", "\\ No newline at end of file"]
+    );
+    assert_eq!(diff.first_line, Some(1));
+    assert!(
+        diff.patch.contains("new file mode 120000\n"),
+        "{}",
+        diff.patch
+    );
+    assert!(
+        applies_in_reverse(&repo, &diff.patch),
+        "git apply refuses the patch:\n{}",
+        diff.patch
+    );
+}
+
 #[test]
 fn a_line_too_long_to_draw_is_cut_for_the_column_and_copied_whole() {
     // One line of a minified bundle is shaped whole on every frame it is on
