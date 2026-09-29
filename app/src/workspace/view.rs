@@ -64,10 +64,12 @@ use crate::window_controls::WindowHandle;
 use crate::{Channel, WINDOW_CHROME};
 
 use super::action::{
-    BlockAction, BlockEdge, BlockPart, FindAction, OptionsAction, SearchAction, SettingsAction,
-    Subject, TabMenuAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
+    BlockAction, BlockEdge, BlockPart, CrashNoteAction, FindAction, OptionsAction, SearchAction,
+    SettingsAction, Subject, TabMenuAction, ThemeAction, WindowAction, WorkspaceAction,
+    WorktreeAction,
 };
 use super::block_list::block_text;
+use super::crash_note::CrashNote;
 use super::settings_page::SettingsState;
 use super::tab_context_menu::TabContextMenuState;
 use super::tab_menu::{Contents, Going, Looked, Mode as WorktreeMode, Sweep, TabMenuState};
@@ -75,7 +77,7 @@ use super::tabs_panel::drag::{Carried, PanelDrag};
 use super::tabs_panel::geometry::RowGeometry;
 use super::tabs_panel::search::SearchState;
 use super::theme_panel::{Mode, ThemePanelState};
-use super::{body, header_toolbar, tabs_panel};
+use super::{body, crash_note, header_toolbar, tabs_panel};
 
 /// How far into a panel row `--carry` presses.
 ///
@@ -692,6 +694,17 @@ pub struct Workspace {
     /// checked shows no mark, which is the same rule the check itself is
     /// under. See [`Workspace::note_newer_release`].
     newer_release: Option<String>,
+    /// The folder this run writes its log and its crash reports into, for the
+    /// About page to name and open.
+    ///
+    /// Handed over by the launch rather than looked up, for the reason the
+    /// plugins directory is: a test's window, or a snapshot's, writes no log
+    /// and must not be pointing at the folder of whoever runs it. `None` is
+    /// such a run.
+    diagnostics_folder: Option<PathBuf>,
+    /// The line under the header about a crash an earlier run left, while
+    /// nobody has dismissed it. See [`crash_note`].
+    crash_note: Option<CrashNote>,
     /// The options, kept beside [`Self::settings`] rather than read out of it
     /// on every access. A renderer reads this dozens of times per frame and
     /// wants a `Copy` snapshot, not a borrow of the thing a save is cloning.
@@ -986,6 +999,8 @@ impl Workspace {
             settings,
             channel,
             newer_release: None,
+            diagnostics_folder: None,
+            crash_note: None,
             options,
             overridden: Overridden::default(),
             menu: MenuState::default(),
@@ -1196,6 +1211,53 @@ impl Workspace {
         }
         self.newer_release = version;
         ctx.notify();
+    }
+
+    /// Where this run's log and crash reports go, and the report an earlier
+    /// run left that nobody has seen — which puts a line under the header.
+    pub fn set_diagnostics(
+        &mut self,
+        diagnostics: crate::diagnostics::Diagnostics,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.diagnostics_folder = Some(diagnostics.folder);
+        self.crash_note = diagnostics.crash.map(CrashNote::new);
+        ctx.notify();
+    }
+
+    /// The folder this run's log and crash reports are in, or `None` for a run
+    /// that writes neither.
+    pub(crate) fn diagnostics_folder(&self) -> Option<&Path> {
+        self.diagnostics_folder.as_deref()
+    }
+
+    /// The line about an earlier run's crash, while it is up.
+    pub(crate) fn crash_note(&self) -> Option<&CrashNote> {
+        self.crash_note.as_ref()
+    }
+
+    /// Answers one of the crash line's buttons.
+    ///
+    /// Both mark the report seen, so no later window mentions it. Show opens
+    /// the folder it is in and leaves the line up, since a file manager that
+    /// opened behind the window, or on another desktop, is a press somebody
+    /// will want to make again; Dismiss takes the line down.
+    fn apply_crash_note(&mut self, action: CrashNoteAction, ctx: &mut ViewContext<Self>) {
+        let Some(note) = self.crash_note.as_mut() else {
+            return;
+        };
+        note.mark_seen();
+        match action {
+            CrashNoteAction::Show => {
+                if let Some(folder) = note.report().parent() {
+                    crate::browser::open_folder(folder);
+                }
+            }
+            CrashNoteAction::Dismiss => {
+                self.crash_note = None;
+                ctx.notify();
+            }
+        }
     }
 
     /// The settings page's state.
@@ -7203,11 +7265,13 @@ impl View for Workspace {
             None => (None, body::render(self, app)),
         };
 
-        let main = Flex::column()
+        let mut main = Flex::column()
             .with_main_axis_size(MainAxisSize::Max)
-            .with_child(header_toolbar::render(self, app))
-            .with_child(Expanded::new(1., body).finish())
-            .finish();
+            .with_child(header_toolbar::render(self, app));
+        if let Some(note) = crash_note::render(self) {
+            main.add_child(note);
+        }
+        let main = main.with_child(Expanded::new(1., body).finish()).finish();
 
         // The Themes panel is a *second* sidebar, docked between the first
         // and the work — Warp's arrangement, and the only one in which the
@@ -7369,6 +7433,7 @@ impl TypedActionView for Workspace {
             WorkspaceAction::HoverRow { pane, entered } => self.hover_row(pane, entered, ctx),
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),
             WorkspaceAction::Complete(pane) => self.request_completions(pane, ctx),
+            WorkspaceAction::CrashNote(action) => self.apply_crash_note(action, ctx),
             WorkspaceAction::Run(id) => self.run_action(id, ctx),
             WorkspaceAction::RunAbout(id, subject) => {
                 // Said, then run, which is the gesture a picker's row makes

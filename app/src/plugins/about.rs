@@ -18,6 +18,12 @@
 //!
 //! The `--check-update` and `--update` flags are the same two calls without a
 //! window; see [`crate::update`].
+//!
+//! # Where to look when something went wrong
+//!
+//! **Logs and crash reports** names the folder [`crate::diagnostics`] writes
+//! into and opens it: the one answer a person asked "what happened?" needs
+//! before anything else, on a machine where nobody was watching a terminal.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -97,6 +103,14 @@ impl Plugin for About {
             }
         });
 
+        // An action rather than an answer: opening a folder decides nothing,
+        // and a plugin asking for it can do no more than a person can.
+        host.register_action(action("open-reports"), |workspace, _| {
+            if let Some(folder) = workspace.diagnostics_folder() {
+                crate::browser::open_folder(folder);
+            }
+        });
+
         let drawn = self.model.clone();
         host.add_settings_page("page", "About", 40, move |workspace, app| {
             about(workspace, drawn.borrow().clone(), app)
@@ -112,7 +126,8 @@ fn manifest() -> &'static Manifest {
         schema: Manifest::SCHEMA,
         id: PluginId::parse("crook/about").expect("a literal that parses"),
         name: "About",
-        description: "The version, the channel, where the settings live and the licence.",
+        description: "The version, the channel, where the settings and the logs live, and the \
+                      licence.",
         version: env!("CARGO_PKG_VERSION"),
         tier: Tier::Native,
         capabilities: &[],
@@ -245,6 +260,50 @@ fn update_row(
     )
 }
 
+/// Where this run's log and crash reports are, and the button that opens
+/// the folder.
+///
+/// The word "nowhere" for a run that writes neither — a snapshot, a test, a
+/// machine with no home directory — with the reason under the label, the way
+/// the settings file's row says it.
+fn reports_row(workspace: &Workspace) -> Entry {
+    let fonts = workspace.fonts();
+    let words = Words::new("Logs and crash reports").with_keywords(&[
+        "log",
+        "logs",
+        "crash",
+        "report",
+        "panic",
+        "diagnostics",
+        "bug",
+        "issue",
+        "folder",
+    ]);
+
+    match workspace.diagnostics_folder() {
+        Some(folder) => widgets::path_with_control(
+            words.with_description(
+                "Written on this machine and sent nowhere. The newest five of each are kept; \
+                 attach the ones you choose to an issue.",
+            ),
+            folder.display().to_string(),
+            widgets::text_button(
+                "Open",
+                run(workspace, "open-reports"),
+                workspace.settings_page().control(named("open-reports")),
+                fonts.ui,
+            ),
+            fonts,
+        ),
+        None => widgets::fact(
+            words.with_description("This run writes no log file and no crash report."),
+            "nowhere".to_owned(),
+            false,
+            fonts,
+        ),
+    }
+}
+
 /// What this build is, where it keeps its file, and who owns what in it.
 fn about(
     workspace: &Workspace,
@@ -315,6 +374,7 @@ fn about(
                     fonts,
                 ),
                 widgets::fact(settings_file, file, is_a_path, fonts),
+                reports_row(workspace),
                 update_row(workspace, model, app),
             ],
         ),

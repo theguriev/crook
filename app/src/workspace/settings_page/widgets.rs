@@ -1573,42 +1573,69 @@ pub(crate) fn fact(
     monospace: bool,
     fonts: super::super::view::Fonts,
 ) -> Entry {
+    fact_row(words, value, monospace, None, fonts)
+}
+
+/// A [`fact`] whose value is a path, with a control after it: a folder, and
+/// the button that opens it.
+///
+/// The value still gives way from its start and the control never does, so a
+/// path longer than the page loses its beginning rather than its button.
+pub(crate) fn path_with_control(
+    words: Words,
+    path: String,
+    control: Box<dyn Element>,
+    fonts: super::super::view::Fonts,
+) -> Entry {
+    fact_row(words, path, true, Some(control), fonts)
+}
+
+/// The row [`fact`] and [`path_with_control`] are both drawn as.
+fn fact_row(
+    words: Words,
+    value: String,
+    monospace: bool,
+    control: Option<Box<dyn Element>>,
+    fonts: super::super::view::Fonts,
+) -> Entry {
     let family = if monospace { fonts.monospace } else { fonts.ui };
     let cut = if monospace { Cut::Start } else { Cut::End };
     let value_text = value.clone();
 
+    let mut line = Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_child(
+            Text::new(words.label.clone(), fonts.ui, LABEL_SIZE)
+                .with_color(theme().text_muted)
+                .finish(),
+        )
+        .with_child(
+            Expanded::new(
+                1.,
+                Align::new(
+                    Container::new(
+                        Text::new(value, family, if monospace { 10.5 } else { LABEL_SIZE })
+                            .with_color(theme().text_primary)
+                            .with_ellipsis(cut)
+                            .finish(),
+                    )
+                    .with_margin_left(FACT_GAP)
+                    .finish(),
+                )
+                .right()
+                .finish(),
+            )
+            .finish(),
+        );
+    if let Some(control) = control {
+        line.add_child(Container::new(control).with_margin_left(LABEL_GAP).finish());
+    }
+
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(
-            Flex::row()
-                .with_main_axis_size(MainAxisSize::Max)
-                .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_child(
-                    Text::new(words.label.clone(), fonts.ui, LABEL_SIZE)
-                        .with_color(theme().text_muted)
-                        .finish(),
-                )
-                .with_child(
-                    Expanded::new(
-                        1.,
-                        Align::new(
-                            Container::new(
-                                Text::new(value, family, if monospace { 10.5 } else { LABEL_SIZE })
-                                    .with_color(theme().text_primary)
-                                    .with_ellipsis(cut)
-                                    .finish(),
-                            )
-                            .with_margin_left(FACT_GAP)
-                            .finish(),
-                        )
-                        .right()
-                        .finish(),
-                    )
-                    .finish(),
-                )
-                .finish(),
-        );
+        .with_child(line.finish());
 
     // The second line every other row in this file already has. A fact used to
     // print its label and its value and drop the description on the floor,

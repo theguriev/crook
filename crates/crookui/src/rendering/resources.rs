@@ -56,6 +56,42 @@ pub fn reset_wgpu_instance(display: Box<dyn WgpuHasDisplayHandle>) {
 /// Held across adapter selection and device creation. See [`Resources::new`].
 static OPENING: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
+/// What the last device was opened on, in the words the log gave it. See
+/// [`adapter_in_use`].
+static ADAPTER: Mutex<Option<String>> = Mutex::new(None);
+
+/// The adapter and backend the last device was opened on, or `None` before
+/// one has been.
+///
+/// For a crash report, which is written from a panic hook with no renderer to
+/// ask: the line the log got when the device opened is the first thing to
+/// scroll out of the few lines a report carries, and "which GPU, through which
+/// backend" is the first question a rendering crash raises. Waits a moment
+/// for the lock and no longer, because a hook must never wait forever on
+/// whatever the panicking thread was holding.
+pub fn adapter_in_use() -> Option<String> {
+    ADAPTER
+        .try_lock_for(std::time::Duration::from_millis(50))
+        .and_then(|adapter| adapter.clone())
+}
+
+/// One adapter as a person reads it: backend, kind, name and driver.
+fn described(info: &wgpu::AdapterInfo) -> String {
+    let mut said = format!("{:?} {:?} ({})", info.backend, info.device_type, info.name);
+    // The driver is what a rendering bug is most often really about. Both of
+    // its fields are free text a backend may leave empty, and an empty one is
+    // left out rather than printed as a dangling "driver".
+    let driver = [info.driver.as_str(), info.driver_info.as_str()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !driver.is_empty() {
+        said.push_str(&format!(", driver {driver}"));
+    }
+    said
+}
+
 /// The process-wide instance, built without a display handle if none exists.
 ///
 /// A display-less instance can still enumerate adapters and open a device —
@@ -139,13 +175,9 @@ impl Resources {
                 .await
                 .context("no usable GPU adapter was found")?;
 
-            let info = adapter.get_info();
-            log::info!(
-                "rendering with {:?} {:?} ({})",
-                info.backend,
-                info.device_type,
-                info.name
-            );
+            let adapter_said = described(&adapter.get_info());
+            log::info!("rendering with {adapter_said}");
+            *ADAPTER.lock() = Some(adapter_said);
 
             // Downlevel limits everywhere except texture size, which is raised
             // to whatever this adapter can do because real displays exceed the

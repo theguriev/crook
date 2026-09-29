@@ -634,4 +634,22 @@ mod tests {
             "left of the glyph's origin is outside it"
         );
     }
+
+    #[test]
+    fn the_adapter_a_device_opened_on_is_kept_for_a_crash_report() {
+        // A crash report is written from a panic hook, with no renderer to
+        // ask which GPU it was drawing with, so the answer has to have been
+        // written down when the device opened.
+        let Ok(resources) = Resources::new(None) else {
+            log::warn!("skipping the adapter test: no usable GPU adapter");
+            return;
+        };
+
+        let info = resources.adapter.get_info();
+        let kept = crate::rendering::adapter_in_use().expect("no adapter was kept");
+        assert!(
+            kept.contains(&format!("{:?}", info.backend)) && kept.contains(&info.name),
+            "{kept:?} does not name the backend and the adapter the device opened on"
+        );
+    }
 }

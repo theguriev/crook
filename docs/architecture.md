@@ -1739,11 +1739,14 @@ redrew yesterday's output over a shell that had never run any of it would be lyi
 state of the machine. The settings section is left out too — it is something somebody opened to
 change a setting, not work in progress.
 
-**Telemetry, crash reporting, autoupdate.** All absent. Worth noting that adding Sentry on
-macOS is not a `Cargo.toml` line: Warp's build script downloads an `xcframework` and its
-bundler wires an rpath for it, which is precisely the class of thing §3 was written to avoid.
-If crash reporting becomes necessary, prefer something that is a pure-Rust crate on all three
-platforms, and treat a build script as the cost it is.
+**Telemetry, crash reports that are sent, automatic updates.** All absent. What exists is
+local and asked for: a panic writes a report into a folder on the machine and the next window
+says so (`app/src/diagnostics`), and the updater runs when a person presses it — nothing is
+sent by either. Worth noting that adding Sentry on macOS is not a `Cargo.toml` line: Warp's
+build script downloads an `xcframework` and its bundler wires an rpath for it, which is
+precisely the class of thing §3 was written to avoid. If sending crash reports ever becomes
+necessary, prefer something that is a pure-Rust crate on all three platforms, and treat a
+build script as the cost it is.
 
 ---
 

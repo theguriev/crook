@@ -119,6 +119,21 @@ pub enum WorkspaceAction {
     /// and it is the model that knows where this session's scratch directory
     /// is. See [`crate::completion`].
     Complete(PaneId),
+    /// One of the two buttons on the line that says the last run crashed.
+    CrashNote(CrashNoteAction),
+}
+
+/// What the line under the header that reports a crash can be asked.
+///
+/// Both mark the report seen, so the next window does not mention it again;
+/// only one of them takes the line down, because a person who pressed Show
+/// may well want to press it a second time. See `crash_note`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CrashNoteAction {
+    /// Open the folder the report is in.
+    Show,
+    /// Take the line down.
+    Dismiss,
 }
 
 /// Something an action is about, as something `Copy`.

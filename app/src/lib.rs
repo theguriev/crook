@@ -46,6 +46,7 @@ pub mod agent;
 pub mod browser;
 pub mod clipboard;
 pub mod completion;
+pub mod diagnostics;
 pub mod editor;
 pub mod filename;
 pub mod git;
@@ -471,12 +472,22 @@ impl Overrides {
 /// and `--snapshot`.
 pub fn run(channel: Channel) -> Result<()> {
     attach_to_parent_console();
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    diagnostics::log_file::init();
 
     match parse_args(channel, std::env::args().skip(1))? {
         Startup::Answered => Ok(()),
         Startup::Snapshot { path, overrides } => write_snapshot(&path, overrides),
-        Startup::Window { frames, overrides } => open_window(channel, frames, overrides),
+        Startup::Window { frames, overrides } => {
+            // First, before anything that could fail or panic on the way to a
+            // window: the fonts, the GPU. Those are the failures a launch from
+            // the Dock or a `.desktop` entry has nowhere else to put.
+            let diagnostics = diagnostics::start(channel);
+            open_window(channel, frames, overrides, diagnostics).inspect_err(|error| {
+                // The binary prints it on stderr as it ends the process; this is
+                // the copy for a person who was never looking at a stderr.
+                diagnostics::log_file::note(&format!("Crook could not start: {error:#}"));
+            })
+        }
     }
 }
 
@@ -1454,11 +1465,17 @@ fn apply_overrides(
     }
 }
 
-fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> Result<()> {
+fn open_window(
+    channel: Channel,
+    frames: Option<u32>,
+    overrides: Overrides,
+    diagnostics: Option<diagnostics::Diagnostics>,
+) -> Result<()> {
     let launch = Launch {
         channel,
         frames,
         overrides,
+        diagnostics,
     };
 
     // Everything fallible happens before the event loop takes over, because
@@ -2478,13 +2495,14 @@ struct Run {
     printed: bool,
 }
 
-/// What the command line decided, as one argument.
+/// What the command line decided, and what the launch found before the
+/// window, as one argument.
 ///
-/// Three values that arrive together, are read once each, and travel from
-/// [`parse_args`] to [`Shell::new`] without anything in between looking at
-/// them. Passing them separately put `Shell::new` one argument over clippy's
-/// limit, and grouping them is the answer that says something true: they are
-/// the launch, not three unrelated parameters.
+/// Values that arrive together, are read once each, and travel from [`run`] to
+/// [`Shell::new`] without anything in between looking at them. Passing them
+/// separately put `Shell::new` over clippy's limit, and grouping them is the
+/// answer that says something true: they are the launch, not so many
+/// unrelated parameters.
 struct Launch {
     /// Which channel is running, for the settings page's About section.
     channel: Channel,
@@ -2492,6 +2510,9 @@ struct Launch {
     frames: Option<u32>,
     /// What the command line asked to start differently.
     overrides: Overrides,
+    /// Where this run's log and crash reports go, and the report an earlier
+    /// run left unread, for the About page and the line under the header.
+    diagnostics: Option<diagnostics::Diagnostics>,
 }
 
 /// Forgets what a plugin was allowed to do, and that it was switched off.
@@ -3003,6 +3024,9 @@ impl Shell {
                 // a density the command line asked for has to be in place by
                 // then or the first cycle gathers the wrong half.
                 apply_overrides(workspace, &launch.overrides, ctx);
+                if let Some(diagnostics) = launch.diagnostics.clone() {
+                    workspace.set_diagnostics(diagnostics, ctx);
+                }
                 workspace.start_git_poll(ctx);
                 workspace.start_caret_blink(ctx);
                 // Last, and not yet: the shells open after the first frame,
