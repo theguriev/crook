@@ -66,8 +66,8 @@ use crate::window_controls::WindowHandle;
 use crate::{Channel, WINDOW_CHROME};
 
 use super::action::{
-    BlockAction, BlockEdge, BlockPart, CrashNoteAction, CreatorField, EndingAction, FindAction, OptionsAction,
-    SearchAction, SettingsAction, Subject, TabMenuAction, ThemeAction, WindowAction,
+    BlockAction, BlockEdge, BlockPart, CrashNoteAction, CreatorField, EndingAction, FindAction,
+    OptionsAction, SearchAction, SettingsAction, Subject, TabMenuAction, ThemeAction, WindowAction,
     WorkspaceAction, WorktreeAction,
 };
 use super::block_list::block_text;
