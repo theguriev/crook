@@ -626,8 +626,8 @@ What it buys, immediately:
   `#![cfg_attr(feature = "release_bundle", windows_subsystem = "windows")]` must be a
   crate-level inner attribute in the *binary*; it cannot live in the library. Development
   builds keep a console for `stdout`; only bundled builds detach. Gating it on the feature
-  rather than on `debug_assertions` means the release-flags job actually exercises it whenever
-  the workflow is asked for.
+  rather than on `debug_assertions` means the release-flags job actually exercises it on every
+  pull request to `main`.
 - **Testability.** `cargo test --workspace` covers everything, because everything is in a lib.
 
 Warp has six channels (stable, preview, dev, local, oss, integration) for reasons involving a
@@ -656,9 +656,9 @@ in `script/bundle` at the exact spot.
 
 What `--check-only` does today is the part that earns its keep immediately: it type-checks the
 workspace with the release profile and the release feature set. It is one of the five the
-`Crook CI` workflow runs on all three platforms when somebody dispatches it — see
-CONTRIBUTING.md, and note that nothing dispatches it for you. Without it, "the shipped feature
-combination does not compile" is discovered at release time.
+`Crook CI` workflow runs on all three platforms, on every pull request to `main` and every push
+to it — see CONTRIBUTING.md. Without it, "the shipped feature combination does not compile" is
+discovered at release time.
 
 ---
 

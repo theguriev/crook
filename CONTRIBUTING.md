@@ -2,10 +2,10 @@
 
 ## Before you push
 
-**These five commands are the gate.** Not "run them and CI will confirm it" — CI does not run
-by itself. `.github/workflows/ci.yml` is `workflow_dispatch` only, so nothing starts when you
-push or open a pull request, and a green branch is one somebody made green here. Run them, in
-this order:
+**These five commands are the gate**, and they are run here, before you push. `Crook CI` runs
+them again on every pull request to `main`, on macOS, Linux and Windows, but it is the second
+look and not the first: it answers after the push what these answer before it, and a push to
+a branch with no pull request to `main` starts nothing at all. Run them, in this order:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -34,21 +34,30 @@ There is a sixth check, which compiles the workspace with the feature set a ship
 
 Run it if you touch a `Cargo.toml`, a feature gate, or anything under `#[cfg(...)]`.
 
-## The workflow, when you want it
+## The workflow
 
-The same five checks run on macOS, Linux and Windows as `Crook CI`, and they run when they are
-asked to:
+The same five checks run on macOS, Linux and Windows as `Crook CI`, beside `--check-only` on
+all three and the Linux release binary, built in Debian 11 and held to glibc 2.31. They start
+by themselves in two places:
+
+- **A pull request to `main`**, where they check the branch merged into the `main` it would
+  land on. A newer push to the pull request cancels the run it has made stale.
+- **Every push to `main`**, which is every merge, where they find what two pull requests that
+  were green on their own broke together. A run on `main` is never cancelled, so every merge
+  has one.
+
+A branch with no pull request to `main` starts nothing, and neither does a pull request stacked
+on another branch. When the branch it is stacked on merges and GitHub moves it onto `main`, the
+move is an `edited` event, which the workflow does not start on, so it stays unchecked until
+its next push. Either is checked when you ask:
 
 ```sh
 gh workflow run "Crook CI" --ref <branch>
 ```
 
-or the Run workflow button on the Actions tab. It is not on a push or a pull request on
-purpose: the account this repository is under has no minutes, so an automatic trigger put a
-red cross on every branch — including the ones that were merged — and a check that always
-fails is one nobody reads. The three platforms are what it is still worth asking for, since
-`crook::process::Command`, the path handling and the release feature set are the things four
-local commands on one machine cannot cover.
+or the Run workflow button on the Actions tab. The three platforms are what make it worth
+having, since `crook::process::Command`, the path handling and the release feature set are the
+things four local commands on one machine cannot cover.
 
 If `cargo metadata --locked` fails, `Cargo.lock` is out of date with a manifest. Run
 `cargo check` and commit the updated lockfile.

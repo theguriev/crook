@@ -1,24 +1,50 @@
 name: Crook CI
 
-# Asked for, never automatic. A push and a pull request used to start this, and
-# every run they started failed in three seconds with no log — the account this
-# repository is under cannot pay for minutes, so the only thing an automatic
-# trigger produced was a red cross on every branch, on work whose real gate had
-# already been run by hand. A check that always fails is worse than no check:
-# it stops meaning anything, and the day one of these jobs fails for a reason
-# nobody would look.
+# On every pull request to main, on every push to main, and when asked.
 #
-# So the gate is the four commands in CONTRIBUTING.md, run locally before a
-# push, and this is here to be started from the Actions tab or with
-# `gh workflow run "Crook CI" --ref <branch>` on a day the minutes exist.
+# A pull request's run checks the branch merged into the main it would land
+# on, on macOS, Linux and Windows, of which its author's machine is one. The
+# local gate in CONTRIBUTING.md takes one arm of every cfg!(target_os), and a
+# test that was green there has put main red on macOS before. It is also the
+# only run a pull request from outside can get, since a dispatch needs write
+# access. The run on main is for what no pull request can see: two that are
+# green on their own can break main together, as #269 and #270 did on
+# 2026-09-22, and a run on every push to main names the merge that did it.
+#
+# It was dispatch only while the account could not pay for the minutes. Every
+# run a push or a pull request started failed in three seconds with no log,
+# and a check that always fails is worse than none: it stops meaning anything.
+# The repository has been public since 2026-09-10, and a public repository's
+# runners cost it nothing.
+#
+# A push to a branch with no pull request to main still starts nothing, and
+# neither does a pull request stacked on another branch. When the branch it is
+# stacked on merges and GitHub moves it onto main, the move is the `edited`
+# action, which pull_request does not start on by default, so it waits for its
+# next push. Adding `edited` to its types would not fix that: every title edit
+# would then start a run in the pull request's group below and cancel the one
+# in progress. Ask for either with `gh workflow run "Crook CI" --ref <branch>`
+# or from the Actions tab.
+#
+# None of this replaces the gate in CONTRIBUTING.md, which is still run before
+# a push. This is the second look, on the machines the first one was not run
+# on.
 on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
-  # Supersede in-flight runs for the same ref; a second dispatch of the same
-  # branch means the first is no longer the one anyone is waiting on.
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push to a pull request supersedes its older run, as a second
+  # dispatch of a branch supersedes the first: nobody is waiting on the old
+  # one. Main is never cancelled, and its runs get a group each rather than
+  # one keyed on the ref, because by default GitHub drops a pending run when
+  # a newer one joins its group, whatever cancel-in-progress says. A merge
+  # that went unchecked could be the very one the run on main exists to name.
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -53,7 +79,7 @@ jobs:
 
       # Installs this platform's prerequisites and materializes the toolchain pinned in
       # rust-toolchain.toml. Running the real script here keeps it honest: a bootstrap that
-      # rots is discovered by whoever dispatches this rather than by the next contributor.
+      # rots is discovered by the next run of this rather than by the next contributor.
       - name: Bootstrap
         shell: bash
         run: ./script/bootstrap
@@ -190,4 +216,16 @@ jobs:
     # release's features; only a real build and link says which glibc the
     # binary needs, so this is the one place a branch can find out without a
     # tag. Nothing is uploaded.
+    #
+    # On pull requests too, not only on main. What breaks it is something a
+    # pull request brings: a dependency or a toolchain pin that wants more than
+    # glibc 2.31, a system library bootstrap installs and the image does not
+    # have, a change to script/bundle. Found here, it is fixed in the pull
+    # request that caused it; found on main, it holds up the next release,
+    # whose linux job runs this same file before it publishes anything. What
+    # it adds to a pull request's wait is small but not nothing: its one run
+    # so far (36462938516, a dispatch) took five minutes with a cold cache and
+    # was the last job to finish, 17 seconds after Checks (Windows), whose
+    # cache was warm. With a cold cache, a Checks leg took 9 to 11 minutes on
+    # main the same day.
     uses: ./.github/workflows/linux-binary.yml
