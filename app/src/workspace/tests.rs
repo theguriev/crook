@@ -42,9 +42,9 @@ use crate::theme::theme;
 use crate::window_controls::{Recorder, Request, WindowState};
 
 use super::{
-    BlockAction, Fonts, Opening, OptionsAction, QuitRequest, SettingsAction, TabMenuAction,
-    ThemeAction, WindowAction, Workspace, WorkspaceAction, WorktreeAction, tab_options_menu,
-    tabs_panel,
+    BlockAction, EndingAction, EndingButton, Fonts, Opening, OptionsAction, QuitRequest,
+    SettingsAction, TabMenuAction, ThemeAction, WindowAction, Workspace, WorkspaceAction,
+    WorktreeAction, tab_options_menu, tabs_panel,
 };
 
 /// Big enough that two tabs both reach their maximum width, so the geometry
@@ -1351,6 +1351,15 @@ impl Harness {
         self.click(at + vec2f(2., -3.), MouseButton::Left);
     }
 
+    /// The question's button the keyboard is on, while it is up.
+    fn closing_keyboard_on(&self) -> Option<EndingButton> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .closing_question()
+                .map(|question| question.chosen())
+        })
+    }
+
     /// Where a pane's session says it is working.
     fn working_directory(&self, pane: PaneId) -> Option<PathBuf> {
         self.workspace.read(&self.app, |workspace, _| {
@@ -1896,7 +1905,10 @@ fn closing_the_window_while_an_agent_is_running_asks_rather_than_quitting() {
         "End it and quit",
         "Cancel",
     ] {
-        assert!(says(&scene, phrase), "the question does not say {phrase:?}");
+        assert!(
+            card_says(&scene, phrase),
+            "the question does not say {phrase:?}"
+        );
     }
     assert!(
         !harness.pane_takes_keys(),
@@ -2040,8 +2052,11 @@ fn closing_a_pane_asks_about_that_pane_alone() {
     harness.dispatch_action(TabAction::ClosePane(panes[2]));
     assert_eq!(harness.asking_about(), Some(vec![panes[2]]));
     let scene = harness.frame();
-    assert!(says(&scene, "Closing the pane ends it."));
-    assert!(says(&scene, "cargo build"));
+    assert!(card_says(&scene, "Closing the pane ends it."));
+    assert!(
+        card_says(&scene, "cargo build"),
+        "the question does not name the pane it is about"
+    );
 
     harness.press_closing_button("End it and close");
     assert_eq!(harness.active_pane_ids(), [panes[1]]);
@@ -2184,6 +2199,108 @@ fn ending_every_agent_from_the_palette_quits_without_asking() {
 
     assert_eq!(harness.quit_requests(), 1);
     assert_eq!(harness.asking_about(), None);
+}
+
+#[test]
+fn the_keyboard_alone_can_end_them_once_it_has_moved_off_cancel() {
+    // A pane running `ssh` is working, and so is every pane with a pager, a
+    // dev server or a busy agent in it. A person with no pointer has to be
+    // able to close one — but ending it must still take a move first, so the
+    // Enter that gets rid of a box nobody read is Cancel.
+    let mut harness = Harness::new(1);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let panes = harness.active_pane_ids();
+    harness.update_session(panes[1], |session| {
+        session.running_command = Some("ssh box".to_owned());
+    });
+    assert_eq!(harness.focused_pane_id(), Some(panes[1]));
+
+    assert!(harness.press_key("w", close_chord()));
+    assert_eq!(harness.asking_about(), Some(vec![panes[1]]));
+    assert_eq!(
+        harness.closing_keyboard_on(),
+        Some(EndingButton::Cancel),
+        "the keyboard started on the button that ends them"
+    );
+    let scene = harness.frame();
+    assert!(closing_button_is_filled(&scene, "Cancel"));
+    assert!(!closing_button_is_filled(&scene, "End it and close"));
+
+    // Tab and Shift-Tab go back and forth; the arrows go the way the buttons
+    // sit, the one that ends them on the left.
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    assert!(harness.press_key("tab", Modifiers::default()));
+    assert_eq!(harness.closing_keyboard_on(), Some(EndingButton::End));
+    assert!(harness.press_key("tab", shift));
+    assert_eq!(harness.closing_keyboard_on(), Some(EndingButton::Cancel));
+    assert!(harness.press_key("left", Modifiers::default()));
+    assert_eq!(harness.closing_keyboard_on(), Some(EndingButton::End));
+    assert!(harness.press_key("right", Modifiers::default()));
+    assert_eq!(harness.closing_keyboard_on(), Some(EndingButton::Cancel));
+    assert_eq!(
+        harness.action_for("space", Modifiers::default()),
+        Some(EndingAction::Cancel.into()),
+        "Space pressed a button the keyboard was not on"
+    );
+
+    // Where the keyboard is is what the card draws as the button Enter
+    // presses.
+    assert!(harness.press_key("left", Modifiers::default()));
+    let scene = harness.frame();
+    assert!(closing_button_is_filled(&scene, "End it and close"));
+    assert!(!closing_button_is_filled(&scene, "Cancel"));
+    assert_eq!(harness.active_pane_ids(), panes, "moving ended something");
+
+    assert!(harness.press_key("enter", Modifiers::default()));
+    assert_eq!(harness.active_pane_ids(), [panes[0]]);
+    assert_eq!(harness.asking_about(), None);
+    assert_eq!(harness.quit_requests(), 0);
+}
+
+#[test]
+fn a_second_close_asks_again_with_the_keyboard_back_on_cancel() {
+    // The latest close is what the card is about, and a card that came up
+    // with the keyboard already on "End" would be one Enter from ending
+    // something nobody chose to.
+    let mut harness = Harness::new(2);
+    let tabs = harness.tab_ids();
+    for pane in harness.pane_ids() {
+        harness.update_session(pane, |session| session.status = AgentStatus::Running);
+    }
+
+    harness.dispatch_action(TabAction::Close(tabs[0]));
+    assert!(harness.press_key("tab", Modifiers::default()));
+    assert_eq!(harness.closing_keyboard_on(), Some(EndingButton::End));
+
+    harness.dispatch_workspace_action(WindowAction::Close.into());
+    assert_eq!(harness.closing_keyboard_on(), Some(EndingButton::Cancel));
+    assert!(harness.press_key("enter", Modifiers::default()));
+    assert_eq!(harness.quit_requests(), 0);
+    assert_eq!(harness.tab_ids(), tabs);
+}
+
+#[test]
+fn a_window_close_that_asks_brings_the_window_forward() {
+    // The desktop can close a window that is minimised or on another
+    // workspace. A question drawn where nobody can see it is a close that
+    // seemed to do nothing.
+    let mut harness = Harness::new(1);
+    harness.dispatch_workspace_action(WindowAction::Close.into());
+    assert_eq!(harness.quit_requests(), 1);
+    assert_eq!(
+        harness.window_requests(),
+        [],
+        "a window that closed at once was brought forward on its way out"
+    );
+
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| session.status = AgentStatus::Running);
+    harness.dispatch_workspace_action(WindowAction::Close.into());
+    assert_eq!(harness.asking_about(), Some(vec![pane]));
+    assert_eq!(harness.window_requests(), [Request::BringForward]);
 }
 
 #[test]
@@ -9178,6 +9295,42 @@ fn page_line_color(scene: &Scene, phrase: &str) -> Color {
         .unwrap_or_else(|| panic!("no glyph starts the line that says {phrase:?}"))
 }
 
+/// Whether the question a close asks says `phrase` on its card.
+///
+/// On the card, and nowhere else in the frame: the panel beside it leads each
+/// row with the pane's title, which is also the name the card gives, so
+/// [`says`] would find a name the card never drew. The card is the raised
+/// ground its header is drawn on, and its text is what was drawn over that
+/// ground — see [`text_lines_over`].
+fn card_says(scene: &Scene, phrase: &str) -> bool {
+    let header = word_in(scene, RectF::new(Vector2F::zero(), WINDOW), "still working");
+    let ground = scene
+        .layers()
+        .flat_map(|layer| layer.rects.iter())
+        .filter(|rect| {
+            rect.background == Fill::Solid(theme().surface_raised)
+                && rect.bounds.contains_point(header)
+        })
+        .map(|rect| rect.bounds)
+        .last()
+        .expect("the question's header is on no card");
+    let text: String = text_lines_over(scene, ground)
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect();
+    let bare = |text: &str| text.split_whitespace().collect::<String>();
+    bare(&text).contains(&bare(phrase))
+}
+
+/// Whether the question's button that says `label` is drawn filled, which is
+/// how the card shows the button Enter would press.
+fn closing_button_is_filled(scene: &Scene, label: &str) -> bool {
+    let at = word_in(scene, RectF::new(Vector2F::zero(), WINDOW), label) + vec2f(2., -3.);
+    visible_rects(scene).any(|(rect, bounds)| {
+        rect.background == Fill::Solid(theme().accent) && bounds.contains_point(at)
+    })
+}
+
 /// Whether the frame says `phrase`, wherever the paragraph wrapped.
 ///
 /// [`frame_text`] joins the lines it found with nothing between them, so a
@@ -12264,6 +12417,55 @@ mod shells {
             }
         }
         harness.wait_for("ctrl-c never reached the shell", back);
+    }
+
+    #[test]
+    fn the_question_a_close_asks_keeps_ctrl_c_from_the_command_it_asks_about() {
+        // The options menu leaves a running command its interrupt, because it
+        // has no Escape. The question has one, and it is asking whether to
+        // end the very program the interrupt reaches: a reflexive ctrl-c to
+        // get out of the card would stop the agent's turn it is protecting.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        await_prompt(&mut harness, pane);
+        let running = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .tabs()
+                    .pane(pane)
+                    .is_some_and(|pane| pane.session().running_command.is_some())
+            })
+        };
+
+        harness.type_into(pane, "sleep 600\n");
+        harness.wait_for("the shell never reported the command running", |harness| {
+            running(harness)
+        });
+        harness.dispatch_workspace_action(WindowAction::Close.into());
+        assert_eq!(harness.asking_about(), Some(vec![pane]));
+        harness.frame();
+
+        harness.press("c", ctrl(), "c");
+        // Long enough for the shell's own report of an interrupted command
+        // to come back, which the end of this test shows it does.
+        harness.settle(Duration::from_secs(2));
+        assert!(
+            running(&harness),
+            "ctrl-c reached the command under the question"
+        );
+        assert_eq!(harness.asking_about(), Some(vec![pane]));
+
+        // With the card gone the same key reaches it, which is what makes the
+        // wait above a wait for something that would have come.
+        assert!(harness.press_key("escape", Modifiers::default()));
+        harness.frame();
+        harness.press("c", ctrl(), "c");
+        harness.wait_for("ctrl-c never reached the command", |harness| {
+            !running(harness)
+        });
+        assert_eq!(harness.quit_requests(), 0);
     }
 
     #[test]

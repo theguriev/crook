@@ -2127,12 +2127,20 @@ impl Workspace {
         }
     }
 
-    /// Answers the question a close is waiting on.
+    /// Answers the question a close is waiting on, or moves the keyboard
+    /// between its two buttons.
     ///
     /// The question is taken down *before* the close runs, so a close that
     /// takes the last tab finds no card to keep in step on its way out, and a
     /// Cancel is nothing but the card going.
     fn answer_closing(&mut self, answer: EndingAction, ctx: &mut ViewContext<Self>) {
+        if let EndingAction::Choose(button) = answer {
+            if let Some(question) = self.closing.as_mut() {
+                question.choose(button);
+                ctx.notify();
+            }
+            return;
+        }
         let Some(question) = self.closing.take() else {
             return;
         };
@@ -4641,8 +4649,16 @@ impl Workspace {
             // The same request the last tab closing makes. There is one way to
             // end the process, and a title bar's close button is not a second
             // one — which is also why it asks on the terms a tab's × does.
+            //
+            // A close that asks also brings the window forward: the desktop
+            // can close a window that is minimised or on another workspace,
+            // and a question drawn where nobody can see it is a close that
+            // seems to have done nothing. On a window that is already in
+            // front it changes nothing.
             WindowAction::Close => {
-                if !self.ask_before(Close::Window, ctx) {
+                if self.ask_before(Close::Window, ctx) {
+                    self.window.bring_forward();
+                } else {
                     (self.quit)();
                 }
             }
@@ -5636,14 +5652,16 @@ impl Workspace {
     /// the sequence is concerned. The window delegate asks once, which is what
     /// this is for.
     pub fn action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
-        // **The question a close asks owns Escape and Enter, before even a
+        // **The question a close asks owns its keys, before even a
         // recording.** It is the one thing that can come up over anything —
         // the desktop asks a window to close whatever is showing in it — and
         // it is modal: a key that reached the recorder, the palette or a
         // field under it would be answered by something the person cannot
-        // see is still listening. Both keys are Cancel. See [`closing`].
-        if self.closing.is_some()
-            && let Some(action) = closing::action_for(keystroke)
+        // see is still listening. Escape cancels, Tab and the arrows move
+        // between its two buttons, and Enter and Space press the one the
+        // keyboard is on, which starts as Cancel. See [`closing`].
+        if let Some(question) = self.closing.as_ref()
+            && let Some(action) = closing::action_for(question, keystroke)
         {
             return Some(action);
         }

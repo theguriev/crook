@@ -36,6 +36,32 @@
 //! while somebody's hands were on the keyboard. The default button sits at
 //! the trailing edge, where the worktree face keeps its own.
 //!
+//! **The keyboard can still say yes.** Tab and Shift-Tab move it between the
+//! two buttons, the left arrow onto the one that ends them and the right
+//! arrow back onto Cancel, and Enter or Space presses whichever it is on. The
+//! button it is on is the one drawn filled — the face the worktree question
+//! gives the button its Enter presses — so the fill moves with the keyboard
+//! and says, before anything is pressed, what Enter will do. Without it a
+//! person with no pointer could never close a pane running `ssh` or a busy
+//! agent short of turning the question off; with it, ending one still takes
+//! a deliberate move first.
+//!
+//! **The panes under it hear nothing.** Any other popup leaves the focused
+//! pane its interrupt, end and suspend keys (see `Keys::Signals`), because a
+//! menu with no Escape must not make a `sleep 600` uninterruptible. This one
+//! has an Escape, and it is asking whether to end the very program those keys
+//! reach: a reflexive `ctrl-c` to get out of the card would interrupt the
+//! agent's turn it is protecting, and a second one, or `ctrl-d` at its
+//! prompt, would end it. So the focused pane gets no keys at all while it is
+//! up — see `body::panel`.
+//!
+//! **A close from the desktop brings the window forward.** A taskbar's
+//! "Close window" or a window manager's close can reach a window that is
+//! minimised or on another workspace, and a card drawn there would be a close
+//! that seemed to do nothing. A window close that asks therefore restores the
+//! window and asks for the keyboard, as far as the platform lets it — see
+//! [`WindowControls::bring_forward`](crate::window_controls::WindowControls::bring_forward).
+//!
 //! It holds the close it is waiting to do and the panes that were working
 //! when it asked, and nothing else about them: the names are read off the
 //! strip on every frame, so an agent that renames its work while the card is
@@ -64,14 +90,14 @@
 //! and answers a desktop's close at once. See `Shell::close_requested`.
 
 use crookui_core::elements::{MouseStateHandle, WINDOW_INSET};
-use crookui_core::event::Keystroke;
+use crookui_core::event::{Keystroke, Modifiers};
 use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
 use crate::tab::{Pane, PaneId, TabAction, TabStrip};
 use crate::theme::theme;
 
-use super::action::{EndingAction, WorkspaceAction};
+use super::action::{EndingAction, EndingButton, WorkspaceAction};
 use super::tab_menu::{ROW_INSET, button, divider, header, note};
 use super::view::Workspace;
 use super::window_room::WindowRoom;
@@ -172,6 +198,9 @@ pub(super) struct Question {
     cancel: MouseStateHandle,
     /// The mouse state of the button that ends them.
     end: MouseStateHandle,
+    /// The button the keyboard is on, which is the one Enter and Space press
+    /// and the one drawn filled. Cancel, until Tab or an arrow moves it.
+    chosen: EndingButton,
 }
 
 impl Question {
@@ -186,7 +215,18 @@ impl Question {
             working,
             cancel: MouseStateHandle::default(),
             end: MouseStateHandle::default(),
+            chosen: EndingButton::default(),
         })
+    }
+
+    /// The button the keyboard is on.
+    pub(super) fn chosen(&self) -> EndingButton {
+        self.chosen
+    }
+
+    /// Puts the keyboard on `button`.
+    pub(super) fn choose(&mut self, button: EndingButton) {
+        self.chosen = button;
     }
 
     /// The panes it is asking about.
@@ -210,15 +250,32 @@ impl Question {
 
 /// What a keystroke means while the question is up.
 ///
-/// Escape and Enter, both Cancel, and nothing else: the rest fall through as
-/// they would over any popup, which leaves a pane nothing but its signals.
-/// Enter is Cancel rather than nothing because a key that did nothing under a
-/// question would read as a window that had stopped answering.
-pub(super) fn action_for(keystroke: &Keystroke) -> Option<WorkspaceAction> {
-    if !keystroke.modifiers.is_empty() {
-        return None;
-    }
-    matches!(keystroke.key.as_str(), "escape" | "enter").then_some(EndingAction::Cancel.into())
+/// Escape is Cancel wherever the keyboard is. Enter and Space press the
+/// button it is on, which starts as Cancel: Enter is Cancel rather than
+/// nothing then, because a key that did nothing under a question would read
+/// as a window that had stopped answering. Tab and Shift-Tab move it to the
+/// other button, and the arrows move it the way the buttons sit — the one
+/// that ends them on the left, Cancel on the right.
+///
+/// The rest fall through as they would over any popup; the pane under the
+/// card is not listening to any of them. See the [module](self).
+pub(super) fn action_for(question: &Question, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+    let modifiers = keystroke.modifiers;
+    let bare = modifiers.is_empty();
+    let shifted = modifiers
+        == Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+    let action = match keystroke.key.as_str() {
+        "escape" if bare => EndingAction::Cancel,
+        "enter" | "space" if bare => question.chosen().answer(),
+        "tab" if bare || shifted => EndingAction::Choose(question.chosen().other()),
+        "left" if bare => EndingAction::Choose(EndingButton::End),
+        "right" if bare => EndingAction::Choose(EndingButton::Cancel),
+        _ => return None,
+    };
+    Some(action.into())
 }
 
 /// The card's first line.
@@ -339,8 +396,10 @@ pub(super) fn render(workspace: &Workspace, question: &Question) -> Box<dyn Elem
         .finish()
 }
 
-/// The button that ends them, and Cancel at the trailing edge as the one
-/// Enter presses.
+/// The button that ends them, and Cancel at the trailing edge.
+///
+/// Whichever the keyboard is on is drawn filled, as the one Enter presses:
+/// Cancel, until Tab or an arrow moves it.
 fn buttons(question: &Question, label: &str, ui: FamilyId) -> Box<dyn Element> {
     Container::new(
         Flex::row()
@@ -353,7 +412,7 @@ fn buttons(question: &Question, label: &str, ui: FamilyId) -> Box<dyn Element> {
                     button(
                         question.end.clone(),
                         label,
-                        false,
+                        question.chosen() == EndingButton::End,
                         Some(EndingAction::End.into()),
                         ui,
                     ),
@@ -366,7 +425,7 @@ fn buttons(question: &Question, label: &str, ui: FamilyId) -> Box<dyn Element> {
                     button(
                         question.cancel.clone(),
                         "Cancel",
-                        true,
+                        question.chosen() == EndingButton::Cancel,
                         Some(EndingAction::Cancel.into()),
                         ui,
                     ),

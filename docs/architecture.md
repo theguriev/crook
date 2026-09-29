@@ -1746,8 +1746,10 @@ has an agent running or waiting on a person, or a shell running a command, and p
 whose default is Cancel (`app/src/workspace/closing.rs`). The window's close includes the
 desktop's: winit's `CloseRequested` goes to the application through the window delegate rather
 than ending the event loop there. What cannot ask is anything that ends the process from outside
-— the same list that has no shutdown path above, plus macOS's Quit menu item and `cmd-q`, which
-winit turns into `applicationWillTerminate:` with no `applicationShouldTerminate:` to say no in.
+it: a `SIGTERM` or a kill, a logout that kills rather than closes, a power cut — and macOS's Quit
+menu item and `cmd-q`, which winit turns into `applicationWillTerminate:` with no
+`applicationShouldTerminate:` to say no in. A window manager's close is not one of them: it
+arrives as `CloseRequested` and asks like the rest.
 
 **Telemetry, crash reporting, autoupdate.** All absent. Worth noting that adding Sentry on
 macOS is not a `Cargo.toml` line: Warp's build script downloads an `xcframework` and its

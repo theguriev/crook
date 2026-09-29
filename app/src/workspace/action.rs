@@ -218,17 +218,51 @@ impl From<WindowAction> for WorkspaceAction {
 
 /// What the question a close asks before it ends working agents was told.
 ///
-/// Two answers, and the question itself is not one of them: it opens from
-/// the close that asked — [`WindowAction::Close`], or a tab, pane or group
-/// closing — and never from an action of its own, so there is no way to put
-/// it up with nothing to ask about. See [`closing`](super::closing).
+/// Two answers and a move between them, and the question itself is not one
+/// of them: it opens from the close that asked — [`WindowAction::Close`], or
+/// a tab, pane or group closing — and never from an action of its own, so
+/// there is no way to put it up with nothing to ask about. See
+/// [`closing`](super::closing).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum EndingAction {
-    /// Leave everything running and take the question down. Its Cancel, and
-    /// Enter, Escape and a press anywhere off it.
+    /// Leave everything running and take the question down. Its Cancel,
+    /// Escape, a press anywhere off it, and Enter or Space while the keyboard
+    /// is on Cancel.
     Cancel,
     /// End them, and go on with the close that asked.
     End,
+    /// Put the keyboard on one of the two buttons, so that Enter and Space
+    /// press it. Tab and the arrow keys.
+    Choose(EndingButton),
+}
+
+/// One of the two buttons on the question a close asks.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum EndingButton {
+    /// The one that ends them and goes on with the close.
+    End,
+    /// The one that leaves everything running, which is where the keyboard
+    /// starts.
+    #[default]
+    Cancel,
+}
+
+impl EndingButton {
+    /// The other one.
+    pub fn other(self) -> Self {
+        match self {
+            Self::End => Self::Cancel,
+            Self::Cancel => Self::End,
+        }
+    }
+
+    /// What pressing it answers.
+    pub fn answer(self) -> EndingAction {
+        match self {
+            Self::End => EndingAction::End,
+            Self::Cancel => EndingAction::Cancel,
+        }
+    }
 }
 
 impl From<EndingAction> for WorkspaceAction {

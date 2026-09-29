@@ -230,7 +230,7 @@ pub(super) fn edge_at(position: Vector2F, size: Vector2F, grab: f32) -> Option<R
 /// it must be, since building it is what the event loop calls before opening
 /// one — and what lets the headless paths hold a handle to nothing.
 ///
-/// No winit type appears in any signature here. What crosses the seam is four
+/// No winit type appears in any signature here. What crosses the seam is five
 /// verbs and two questions.
 #[derive(Clone, Default)]
 pub struct WindowControls(Rc<RefCell<State>>);
@@ -272,6 +272,24 @@ impl WindowControls {
         let state = self.0.borrow();
         if let Some(window) = state.window.as_ref() {
             window.set_minimized(true);
+        }
+    }
+
+    /// Brings the window back from wherever the desktop put it and asks for
+    /// the keyboard.
+    ///
+    /// Un-minimises it first where the platform can say it is minimised,
+    /// because every platform's focus request declines a minimised window.
+    /// As far as each desktop allows: Windows and X11 raise it, macOS makes
+    /// it key and activates the application, and Wayland gives a client no
+    /// way to do either — there, it stays where it is.
+    pub fn bring_forward(&self) {
+        let state = self.0.borrow();
+        if let Some(window) = state.window.as_ref() {
+            if window.is_minimized() == Some(true) {
+                window.set_minimized(false);
+            }
+            window.focus_window();
         }
     }
 

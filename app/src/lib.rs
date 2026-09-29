@@ -2438,7 +2438,7 @@ struct Shell {
 
 /// The real window, behind the handle the workspace holds.
 ///
-/// The whole of the seam: four verbs forwarded to the windowing layer, which
+/// The whole of the seam: five verbs forwarded to the windowing layer, which
 /// is the only crate in the workspace that knows what a window is. Everything
 /// above it — the header, the panel's title strip, the window plugin's
 /// commands — is written against [`window_controls::WindowControls`] and runs
@@ -2462,6 +2462,10 @@ impl window_controls::WindowControls for RealWindow {
 
     fn minimize(&self) {
         self.0.minimize();
+    }
+
+    fn bring_forward(&self) {
+        self.0.bring_forward();
     }
 }
 

@@ -50,6 +50,15 @@ pub trait WindowControls {
 
     /// Sends the window wherever this desktop keeps minimised windows.
     fn minimize(&self);
+
+    /// Brings the window back from wherever the desktop put it and asks for
+    /// the keyboard, as far as this desktop lets an application do that.
+    ///
+    /// What a close that asks does before it shows its question: the desktop
+    /// can close a window that is minimised or behind others, and a question
+    /// drawn in a window nobody can see is a close that seemed to do nothing.
+    /// See the workspace's `closing` module.
+    fn bring_forward(&self);
 }
 
 /// Shared ownership of one, held by the workspace across renders.
@@ -73,6 +82,8 @@ impl WindowControls for Detached {
     fn toggle_maximized(&self) {}
 
     fn minimize(&self) {}
+
+    fn bring_forward(&self) {}
 }
 
 /// A window that only remembers what it was asked.
@@ -100,6 +111,8 @@ pub enum Request {
     ToggleMaximized,
     /// Minimise it.
     Minimize,
+    /// Restore it and give it the keyboard.
+    BringForward,
 }
 
 #[cfg(test)]
@@ -126,5 +139,9 @@ impl WindowControls for Recorder {
 
     fn minimize(&self) {
         self.asked.borrow_mut().push(Request::Minimize);
+    }
+
+    fn bring_forward(&self) {
+        self.asked.borrow_mut().push(Request::BringForward);
     }
 }
