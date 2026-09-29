@@ -866,6 +866,7 @@ fn marked(program: &str) -> Options {
         login: true,
         shell: Some(PathBuf::from(program)),
         control_socket: None,
+        control_token: None,
     }
 }
 
