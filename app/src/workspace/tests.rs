@@ -18127,6 +18127,7 @@ mod desktop_notifications {
                 pane,
                 exit: Some(0),
                 took: Some(LONG_COMMAND * 6),
+                ran: true,
             },
         );
 
@@ -18283,6 +18284,7 @@ mod desktop_notifications {
             pane,
             exit: Some(2),
             took: Some(took),
+            ran: true,
         };
 
         apply(&mut harness, finished(LONG_COMMAND * 3));
@@ -22365,6 +22367,7 @@ mod sandboxed {
                         pane,
                         exit: Some(0),
                         took: None,
+                        ran: true,
                     },
                     ctx,
                 );
