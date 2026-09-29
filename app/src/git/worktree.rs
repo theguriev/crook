@@ -814,6 +814,13 @@ pub enum Skip {
     /// nobody committed. A copy there would be an untracked file, and the next
     /// `git add -A` in it would commit whatever secret the file holds.
     NotIgnored,
+    /// The way to it goes through a submodule of the new checkout, where the
+    /// main checkout has a plain directory. A file there is the submodule's,
+    /// not the repository's — and written into a submodule nobody has
+    /// initialised yet, which is every submodule of a checkout `git worktree
+    /// add` has just made, it leaves a directory `git submodule update --init`
+    /// refuses to clone into.
+    Submodule,
     /// It is bigger than one file may be.
     TooLarge {
         /// Its size.
@@ -915,6 +922,7 @@ impl Skip {
             Self::Link => "a symbolic link".to_owned(),
             Self::NotAFile => "not a file".to_owned(),
             Self::NotIgnored => "not ignored in the new checkout".to_owned(),
+            Self::Submodule => "in a submodule of the new checkout".to_owned(),
             Self::TooLarge { bytes, limit } => {
                 format!(
                     "{}, over the {} one file may be",
@@ -1031,7 +1039,7 @@ const LIMITS: Limits = Limits {
 /// Copies the ignored files the main checkout's [`INCLUDE_FILE`] names into
 /// `worktree`, which has just been made from the repository `repository` is in.
 ///
-/// **Blocking**: up to four git subprocesses and the copying. Background executor
+/// **Blocking**: up to five git subprocesses and the copying. Background executor
 /// only, and before a shell is started in `worktree` — a shell whose rc reads
 /// `.env`, through `direnv` or anything like it, reads it once, as it starts.
 /// The subprocesses are reads, under the read deadline like every other here;
@@ -1072,6 +1080,9 @@ const LIMITS: Limits = Limits {
 /// * A file the new checkout does not ignore is not copied, because there it
 ///   would be an untracked file for the next `git add -A` to commit. See
 ///   [`Skip::NotIgnored`].
+/// * A file whose way goes through a submodule of the new checkout is not
+///   copied: it would be the submodule's, and the submodule could not then be
+///   cloned over it. See [`Skip::Submodule`].
 /// * The executable bit comes with the file, and on Unix the copy has the
 ///   source's mode from the moment it exists.
 /// * Past [`MAX_INCLUDED_FILES`] or [`MAX_INCLUDED_BYTES`] nothing is copied,
@@ -1428,8 +1439,9 @@ fn source(main: &Path, relative: &Path, limits: Limits) -> Result<std::fs::Metad
 /// Each question is asked only of what the one before it left: a way through
 /// a link is [`Skip::Link`]; something already at the path — a file the
 /// branch tracks, or one a hook made — is [`Skip::Exists`], as the copy would
-/// have found it. What is left goes to one `git check-ignore --stdin` in the
-/// new checkout, and a file it does not call ignored is [`Skip::NotIgnored`].
+/// have found it; a way through a submodule is [`Skip::Submodule`]. What is
+/// left goes to one `git check-ignore --stdin` in the new checkout, and a file
+/// it does not call ignored is [`Skip::NotIgnored`].
 ///
 /// check-ignore dies on the first path it cannot take, and every other file's
 /// answer goes with it. So links are asked about before it is, since it
@@ -1454,6 +1466,15 @@ fn ignored_in(
         }
     }
 
+    let submodules = submodules_on_the_way(worktree, &asking)?;
+    let (asking, inside): (Vec<_>, Vec<_>) = asking
+        .into_iter()
+        .partition(|(relative, _)| !relative.ancestors().any(|above| submodules.contains(above)));
+    skipped.extend(
+        inside
+            .into_iter()
+            .map(|(relative, _)| (relative, Skip::Submodule)),
+    );
     if asking.is_empty() {
         return Ok(asking);
     }
@@ -1506,6 +1527,78 @@ fn ignored_in(
             .map(|(relative, _)| (relative, Skip::NotIgnored)),
     );
     Ok(kept)
+}
+
+/// The directories on the way to `asking`'s files that are submodules of
+/// `worktree` — gitlinks in its index — relative to it.
+///
+/// Only a directory that could be one is asked about, which in the common
+/// case is none and costs no git at all: one that is empty, which is how
+/// `git worktree add` leaves a submodule and no other directory of the
+/// checkout it makes, since git tracks no empty directory; or one holding a
+/// `.git`, a submodule a `post-checkout` hook went on to initialise. Which of
+/// those really are is the index's to say, not the shape of a directory — a
+/// hook can make an empty one — so one `git ls-files --stage` over them does.
+fn submodules_on_the_way(
+    worktree: &Path,
+    asking: &[(PathBuf, std::fs::Metadata)],
+) -> Result<HashSet<PathBuf>, Error> {
+    let mut looked: HashSet<&Path> = HashSet::new();
+    let mut maybe = Vec::new();
+    for (relative, _) in asking {
+        for above in relative.ancestors().skip(1) {
+            // One looked at before had every directory above it looked at
+            // with it.
+            if above.as_os_str().is_empty() || !looked.insert(above) {
+                break;
+            }
+            if could_be_a_submodule(&worktree.join(above)) {
+                maybe.push(above);
+            }
+        }
+    }
+    if maybe.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let mut args = vec![
+        OsString::from("ls-files"),
+        OsString::from("-z"),
+        OsString::from("--stage"),
+        OsString::from("--"),
+    ];
+    args.extend(maybe.into_iter().map(|directory| {
+        // Literal, so a directory called `[abc]` is that directory.
+        let mut spec = OsString::from(":(literal)");
+        spec.push(directory);
+        spec
+    }));
+    let args: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
+    let listed = run(worktree, &args, Intent::Read)?;
+    if !listed.success {
+        return Err(classify(&listed.stderr));
+    }
+
+    // Every entry is `<mode> <object> <stage>\t<path>`; a gitlink's mode is
+    // 160000.
+    Ok(listed
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter_map(|entry| {
+            let tab = entry.iter().position(|byte| *byte == b'\t')?;
+            let (head, path) = entry.split_at(tab);
+            head.starts_with(b"160000 ").then(|| path_from(&path[1..]))
+        })
+        .collect())
+}
+
+/// Whether `directory`, in a checkout git has just made, has the shape of a
+/// submodule: empty, or holding a `.git`.
+fn could_be_a_submodule(directory: &Path) -> bool {
+    if std::fs::symlink_metadata(directory.join(".git")).is_ok() {
+        return true;
+    }
+    std::fs::read_dir(directory).is_ok_and(|mut entries| entries.next().is_none())
 }
 
 /// Copies `relative` from `main` to the same place in `worktree`, making the

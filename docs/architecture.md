@@ -977,7 +977,9 @@ and `vendor/**/config.json` does. It runs on the worker that ran `git worktree a
 the tab opens, because a shell that reads `.env` as it starts reads it once. Crook adds a rule
 of its own: a file the *new* checkout does not ignore — its base branch predates the
 `.gitignore` line, or the main checkout's edit to it is uncommitted — is left out, because
-there it would be an untracked file an agent's `git add -A` commits. It never follows
+there it would be an untracked file an agent's `git add -A` commits; so is one inside a
+submodule of the new checkout, which would be the submodule's file and a directory
+`git submodule update --init` then refuses to clone into. It never follows
 a symbolic link, in either checkout, and never overwrites; past a thousand files or 256 MB it
 copies nothing — half a `node_modules` a `*` caught is worse than none — and a file over 64
 MB is left out alone. None of that can fail the checkout, which exists by then: it is logged,

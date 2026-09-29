@@ -1671,6 +1671,75 @@ fn a_file_the_new_checkout_does_not_ignore_is_not_copied() {
 }
 
 #[test]
+fn a_file_inside_a_submodule_of_the_new_checkout_is_left_out_and_the_rest_are_copied() {
+    if without_git(
+        "a_file_inside_a_submodule_of_the_new_checkout_is_left_out_and_the_rest_are_copied",
+    ) {
+        return;
+    }
+    // A base branch where `vendor` and `lib` are submodules, and a main
+    // checkout where each is a plain directory with a `.env` of its own. In
+    // the new checkout `vendor` is a submodule nobody has initialised, an
+    // empty directory, and `lib` one a `post-checkout` hook initialised, with
+    // a `.git` in it. A copy in either would be the submodule's file, and in
+    // `vendor` would leave a directory `git submodule update --init` refuses
+    // to clone into. The root `.env` still arrives: asking the index about a
+    // path in a submodule is fatal to check-ignore, and it took that file's
+    // answer with it. So does one in an empty directory a hook made, which
+    // has an uninitialised submodule's shape and is not one.
+    let scratch = ScratchDir::new("include-submodule");
+    let repo = repo_including(&scratch, ".env\n", Some(".env\n"));
+    git(&repo, &["checkout", "-q", "-b", "old"]);
+    // A gitlink is all a submodule is to the repository holding it; git
+    // leaves the directory empty and calls a path in it the submodule's
+    // without a `.gitmodules` or a repository to clone.
+    let commit = git(&repo, &["rev-parse", "HEAD"]);
+    for submodule in ["lib", "vendor"] {
+        git(
+            &repo,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{commit},{submodule}"),
+            ],
+        );
+    }
+    git(&repo, &["commit", "--no-verify", "-m", "two submodules"]);
+    git(&repo, &["checkout", "-q", "main"]);
+    write(&repo.join(".env"), "SECRET=1\n");
+    write(&repo.join("lib/.env"), "LIB=1\n");
+    write(&repo.join("made/.env"), "MADE=1\n");
+    write(&repo.join("vendor/.env"), "VENDOR=1\n");
+    let checkout = scratch.spot("from-old");
+    add(&repo, &checkout, "from-old", Some("old")).expect("git added the worktree");
+    // What the hook did.
+    write(&checkout.join("lib/.git"), "gitdir: elsewhere\n");
+    std::fs::create_dir(checkout.join("made")).expect("made the hook's directory");
+
+    let included = copy_included(&repo, &checkout);
+
+    assert!(included.refused.is_none(), "{included:?}");
+    assert_eq!(
+        contents(&checkout.join(".env")).as_deref(),
+        Some("SECRET=1\n")
+    );
+    assert_eq!(
+        contents(&checkout.join("made/.env")).as_deref(),
+        Some("MADE=1\n")
+    );
+    assert_eq!(contents(&checkout.join("lib/.env")), None);
+    assert_eq!(contents(&checkout.join("vendor/.env")), None);
+    assert_eq!(included.copied, 2);
+    assert_eq!(
+        skipped_for(&included, |skip| matches!(skip, Skip::Submodule)),
+        ["lib/.env", "vendor/.env"]
+    );
+    let problem = included.problem().expect("a file left out is said");
+    assert!(problem.contains("vendor/.env (in a submodule"), "{problem}");
+}
+
+#[test]
 fn a_file_whose_name_is_a_glob_is_asked_about_by_its_name() {
     if without_git("a_file_whose_name_is_a_glob_is_asked_about_by_its_name") {
         return;
