@@ -1080,6 +1080,60 @@ fn a_name_this_build_has_no_icon_for_draws_nothing() {
     assert_eq!(marks(&known.scene()), [Mark::Icon(Lucide::GitBranch)]);
 }
 
+/// A rule with `rows` rows around it, each holding the next.
+///
+/// A rule because it is the cheapest node there is to decode — a variant with
+/// nothing in it, one level, where a mark's fields and tone cost it three —
+/// so the deepest run of these that decodes is the deepest tree a guest can
+/// send at all. And because it paints, so whether the renderer reached the
+/// bottom is in the scene.
+fn a_rule_inside(rows: usize) -> Node {
+    (0..rows).fold(Node::Rule, |inner, _| Node::Row(vec![inner]))
+}
+
+/// How many rects the rule at the bottom of `node` painted, if it was reached.
+fn rules_painted(node: Node) -> usize {
+    rects_of(&Frame::new(node).scene(), theme().overlay_2).len()
+}
+
+#[test]
+fn a_tree_is_drawn_as_deep_as_a_guest_can_send_one_and_no_deeper() {
+    // Drawing recurses once per node, as decoding does, and a tree built on
+    // this side of the wire has no decode in front of it to refuse it. So the
+    // renderer stops too — and where it stops has to be past anything a guest
+    // can send, or it would be cutting short a tree a plugin was allowed to
+    // draw. The deepest a guest can send is found by asking the decoder, rather
+    // than worked out here, so the two limits cannot drift apart unnoticed.
+    let deepest = (0..)
+        .take_while(|&rows| {
+            let bytes = to_bytes(&a_rule_inside(rows)).expect("a tree should encode");
+            crook_plugin_api::from_bytes::<Node>(&bytes).is_ok()
+        })
+        .last()
+        .expect("a rule on its own decodes");
+    let shallow = rules_painted(a_rule_inside(1));
+    assert!(shallow > 0, "a rule in a row paints nothing to look for");
+
+    // The deepest tree a guest can send is drawn to the bottom...
+    assert_eq!(
+        rules_painted(a_rule_inside(deepest)),
+        shallow,
+        "a tree {deepest} rows deep decodes, and the renderer, which stops at \
+         {} nodes, did not draw the rule at its bottom",
+        render::DEEPEST,
+    );
+    // ...and one row deeper, which only this side of the wire can build, is
+    // where the renderer stops.
+    assert_eq!(
+        rules_painted(a_rule_inside(deepest + 1)),
+        0,
+        "a tree {} rows deep cannot be sent, and the renderer, which stops at \
+         {} nodes, drew the rule at its bottom",
+        deepest + 1,
+        render::DEEPEST,
+    );
+}
+
 #[test]
 fn a_stale_reading_greys_the_face_and_leaves_the_face_a_face() {
     // `Muted` is what a plugin says when the figure beside the mark is not

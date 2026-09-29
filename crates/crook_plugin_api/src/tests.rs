@@ -408,6 +408,81 @@ fn an_event_survives_the_wire() {
     }
 }
 
+/// Bytes for `rows` rows, each holding the next, with nothing at the bottom.
+///
+/// Built by repeating one level rather than by encoding a tree, because
+/// encoding a tree this deep recurses once per level exactly as decoding one
+/// does — and a guest does not have to build its answer that way either.
+fn rows_deep(rows: usize) -> Vec<u8> {
+    // A row holding nothing is its variant, a list of one, and the `Empty`
+    // variant in it. Taken from the encoder rather than written out as
+    // `[4, 1, 0]`, so these are still rows if a variant is ever put in ahead
+    // of `Row`.
+    let one = to_bytes(&Node::Row(vec![Node::Empty])).expect("a row encodes");
+    let (row, empty) = one.split_at(one.len() - 1);
+    let mut bytes = row.repeat(rows);
+    bytes.extend_from_slice(empty);
+    bytes
+}
+
+/// Half the megabyte Windows gives a main thread, which is the smallest stack
+/// a host decodes on.
+///
+/// A decode as deep as [`MAX_DEPTH`] allows has to fit in it, in an
+/// unoptimised build — the one tests run in, and the one whose frames are
+/// biggest — or the limit is too high to be what stands between a guest and
+/// the host's stack.
+const SMALL_STACK: usize = 512 * 1024;
+
+/// Decodes `bytes` as a tree, on a thread with a stack of `stack` bytes.
+///
+/// A thread of its own because what is being tested is whether the decode
+/// *returns*: one that runs out of stack does not panic, it aborts, and the
+/// size is chosen here rather than left to whatever the test runner gives.
+fn decoded_on_a_stack_of(stack: usize, bytes: Vec<u8>) -> Result<Node, postcard::Error> {
+    extern crate std;
+    std::thread::Builder::new()
+        .stack_size(stack)
+        .spawn(move || from_bytes::<Node>(&bytes))
+        .expect("a thread starts")
+        .join()
+        .expect("a decode returns rather than panicking")
+}
+
+#[test]
+fn a_tree_nested_deeper_than_any_stack_is_refused_rather_than_decoded() {
+    // Two bytes a level, so the megabyte a render may answer with holds half
+    // a million levels. A decode that recursed once for each of them ran out
+    // of stack long before the bottom, and that is not an `Err` anybody can
+    // catch: it is an abort, of the process, which is every window somebody
+    // has open. Take the limit out and this does not fail — it takes the test
+    // binary down, which is what it did to the terminal.
+    let bytes = rows_deep(200_000);
+    assert!(
+        bytes.len() < 1 << 20,
+        "{} bytes is more than a render may answer with",
+        bytes.len()
+    );
+
+    assert!(decoded_on_a_stack_of(SMALL_STACK, bytes).is_err());
+}
+
+#[test]
+fn a_tree_as_deep_as_the_limit_allows_decodes_and_one_row_deeper_does_not() {
+    // A row is two levels — its variant and its list — and the `Empty` at the
+    // bottom is one more, so this is the deepest run of rows the limit lets
+    // through. It decodes to exactly the tree it spells, which is also what
+    // says `rows_deep` builds what it claims to.
+    let deepest = (MAX_DEPTH - 1) / 2;
+    let tree = (0..deepest).fold(Node::Empty, |inner, _| Node::Row(vec![inner]));
+
+    assert_eq!(
+        decoded_on_a_stack_of(SMALL_STACK, rows_deep(deepest)),
+        Ok(tree)
+    );
+    assert!(decoded_on_a_stack_of(SMALL_STACK, rows_deep(deepest + 1)).is_err());
+}
+
 #[test]
 fn the_crate_version_names_the_abi() {
     // A plugin writes `crook_plugin_api = "0.8"` and Cargo resolves that to

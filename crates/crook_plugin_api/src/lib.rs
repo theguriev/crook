@@ -73,6 +73,8 @@
 
 extern crate alloc;
 
+mod depth;
+
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
@@ -1377,10 +1379,44 @@ pub fn to_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, postcard::Error> {
     postcard::to_allocvec(value)
 }
 
-/// Decodes one.
+/// Decodes one, and refuses a value nested deeper than [`MAX_DEPTH`].
+///
+/// The refusal is an `Err` like any other bytes that are not what they should
+/// be, which is the point of it: the alternative is a decode that recurses
+/// until the stack runs out, and that is an abort, not an error.
 pub fn from_bytes<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, postcard::Error> {
-    postcard::from_bytes(bytes)
+    let mut decoder = postcard::Deserializer::from_bytes(bytes);
+    T::deserialize(depth::Nested::top(&mut decoder))
 }
+
+/// How many things inside one another a decoded value may be.
+///
+/// A level is anything serde decodes by recursing into it — a variant, a
+/// list, a struct's fields, the inside of an option — so a [`Node`] inside
+/// another costs two: the variant, and the list or the fields it is held in.
+/// That lets a tree be up to sixty-four nodes deep, where the deepest any
+/// published plugin draws is six — crook-dziling's list of sounds, open — and
+/// costs fourteen.
+///
+/// **Why there is a limit at all.** A node holds nodes, and a guest's render
+/// may answer with a megabyte at two bytes a level: half a million levels fit
+/// in one answer. Decoding recurses once per level, and a decode that runs
+/// out of stack does not fail — it aborts the process, which is every window
+/// and every tab a person has open, over one plugin's answer. See
+/// [`from_bytes`], which is where this is enforced, and the `depth` module
+/// for how.
+///
+/// **Why this number.** Nine times the deepest real tree, and a small part of
+/// the smallest stack a host decodes on. Refusing a tree at this depth was
+/// measured at about 200 KiB of stack in an unoptimised build and 50 KiB in a
+/// release one, against the one megabyte Windows gives a main thread; a
+/// thousand levels would not fit in that megabyte unoptimised. The host's
+/// renderer stops at the deepest tree this lets through, so a tree built on
+/// the host's side cannot recurse without end either.
+///
+/// Not part of the wire: a value this crate encodes decodes unchanged whatever
+/// this is, until it is deeper than this — and no plugin's is.
+pub const MAX_DEPTH: usize = 128;
 
 /// Where a plugin's pictures are in its module, and how big they may be.
 ///

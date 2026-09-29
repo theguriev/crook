@@ -751,6 +751,20 @@ the log for whoever wrote the plugin. The alternative is what `Flex` does when i
 divide infinity, which is to assert in a debug build and lay out something degenerate in a
 release one, and a plugin from a store does not get to do either to somebody's window.
 
+**A tree has a floor.** A node holds nodes, and a render may answer with a megabyte at two
+bytes a level, so half a million nested `Row`s fit in one answer. `postcard` decodes by
+recursing into each and sets no limit, and the stack ran out thousands of levels down: an
+abort of the whole process, which no fuel and no bound on a read can catch. So
+`crook_plugin_api::from_bytes` counts serde's own nesting — a variant, a list, a struct's
+fields, the inside of an option — and refuses a value past `MAX_DEPTH` (128) levels. A node
+inside a node costs two, so a tree may be about sixty nodes deep; the deepest any published
+plugin draws is six. A deeper answer is refused the way any unreadable one is: the contribution
+draws nothing, the line is logged, and three in a row switch the plugin off. The renderer stops
+at the deepest tree a decode lets through, so a tree built on the host's side has the same
+floor. A counting wrapper rather than a pre-scan of the bytes, because a pre-scan is a second,
+hand-written copy of the `Node` schema that goes on compiling after a variant changes; and not
+`serde_stacker`, whose `psm` needs a build script.
+
 **Capabilities.** Declared in the manifest, granted per plugin-and-version at install in a
 host-drawn dialog, stored in `settings.json`, re-prompted on escalation, enforced at the host
 API rather than by trusting the sandbox alone. Zellij's fourteen are the starting list, adapted:
