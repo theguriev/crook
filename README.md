@@ -138,7 +138,7 @@ machine id and nothing else about this machine.
 
 ## v1 scope
 
-Nineteen features, and the page that configures them:
+Twenty features, and the page that configures them:
 
 - **Tabs.** Open, close, switch, reorder. One agent session per tab, and the tab is named
   the way a person would answer "what is that one?": what you called it, else what the agent
@@ -424,9 +424,9 @@ Nineteen features, and the page that configures them:
   it writes is a file in your themes folder, in the same format as any other.
 - **A tab's own menu.** Right-click any row and it opens over that row: pin, new group with
   tab, copy pane title, copy working directory, rename tab, rename pane, close tab, a row of
-  colours, and — inside a repository — the worktrees. **Pinning** holds a tab at the front of
-  the block it is in rather than of the whole list, which is the one place this cannot be
-  Warp's: a group is a contiguous block that says two checkouts are one piece of work, and
+  colours, and — inside a repository — show changes and the worktrees. **Pinning** holds a tab
+  at the front of the block it is in rather than of the whole list, which is the one place this
+  cannot be Warp's: a group is a contiguous block that says two checkouts are one piece of work, and
   pinning that lifted a member out of the middle would be pinning that takes a group apart. A
   drop can no more land an unpinned tab among the pinned ones than it can split a group. A
   **colour** is a stripe down the leading edge of a tab's rows, not a tinted status disc — the
@@ -436,7 +436,7 @@ Nineteen features, and the page that configures them:
   back the name the tab was opened with. A name you typed beats the one the agent chose for
   its own work, which is the whole point of typing one, and it comes back with the window. Not one of those entries is written into the menu. It is a
   [slot](docs/plugins.md), `tab.menu.entries`, and every row in it is a contribution: they
-  come from two plugins today, each entry is also a named command the palette lists and a
+  come from three plugins today, each entry is also a named command the palette lists and a
   chord can reach, and a plugin outside the binary puts a row there the same way. Escape is
   one step back — out of the submenu, then out of the menu.
 - **Git worktrees, one entry away.** Open that menu on a tab inside a
@@ -457,6 +457,26 @@ Nineteen features, and the page that configures them:
   directories of the store it leaves empty. Checkouts go in a store of Crook's own —
   neither inside the repository, where git will happily let you put one and every build and
   every search then trips over it, nor beside it in a directory somebody else laid out.
+
+- **What the agent changed, beside it.** `Show changes` — on a tab's menu, or
+  `crook/changes/toggle` from the palette — docks a **Changes** column between the tabs and the
+  work, about the focused tab's repository: what it is compared with (where the branch left the
+  base, the merge-base a pull request would compare from), the commits since then, newest
+  first, and every file that differs — committed, staged, only saved, or never added. Press a
+  file and its hunks open under it, in the theme's own added and removed colours; press it
+  again and they fold away. A shown file offers **Open** in your `$VISUAL` or `$EDITOR` at the
+  first line that changed — as Crook itself was started with them, which a launch from the
+  desktop may not share with your shell's rc file — **Copy path**, and **Copy diff**. It
+  follows you from tab to tab, reads again whenever the tab rows' git facts do and on its
+  **Refresh**, and never on a timer of its own. Every read is on the background pool under a
+  deadline, with `--no-ext-diff` and `--no-textconv` so a repository's configuration cannot
+  make it run a program, and a file's diff is read only when you open it and cut at half a
+  megabyte or three thousand lines, saying so. The list is windowed, so a five-thousand-file
+  diff costs a screenful. **It is read-only on purpose**: there is no stage, no revert and no
+  edit, because the tree it shows is one an agent is writing to, and a write from here races
+  the agent — asking the agent, or your editor, is how the work changes. An editor that draws
+  in a terminal (`vim`, `nvim`, `nano`, `hx`, `emacs -nw`) has nothing to draw in when Crook
+  starts it, so Open is offered only for one that opens a window.
 
 - **A settings page**, which opens the way a shell does: `cmd/ctrl-,` — or the View options
   menu's last entry — puts it in a **tab of its own**, listed beside the work it
@@ -528,7 +548,8 @@ Nineteen features, and the page that configures them:
   `copy-block-command`, `copy-block-output`, `copy-block-directory`, `copy-block-branch`,
   `rerun-block`, `scroll-to-block-top`, `scroll-to-block-bottom`), every entry of a tab's
   (`crook/tabs/pin-tab`, `close-tab`, `open-menu`, `view-options`,
-  `toggle-group`, `close-group`, the seven colours), the worktree list (`crook/worktrees/menu`)
+  `toggle-group`, `close-group`, the seven colours), the Changes column
+  (`crook/changes/toggle`), the worktree list (`crook/worktrees/menu`)
   and every settings page (`crook/appearance/open-page` and its three neighbours). The block
   entries act on the block the menu is up on, or — with no menu — on the one the keyboard has
   selected, so each of them is a chord as well as a row.

@@ -265,6 +265,14 @@ struct Overrides {
     themes: bool,
     /// Start with the Themes panel making a theme.
     creating: bool,
+    /// Start with the Changes column open on the directory the run was
+    /// started in, read then, with the first file that has lines showing
+    /// them.
+    ///
+    /// A way to look at a frame, like `--themes`: the column is a surface, and
+    /// a picture of it for the docs is a picture of the real thing — which is
+    /// why it reads the real repository rather than an invented one.
+    changes: bool,
     /// And press Create on it, so that what the creator says afterwards is
     /// the frame — which, against a themes folder that cannot be written,
     /// is why it was not.
@@ -719,6 +727,7 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
             "--menu" => overrides.menu = true,
             "--tab-menu" => overrides.tab_menu = true,
             "--themes" => overrides.themes = true,
+            "--changes" => overrides.changes = true,
             "--worktrees" => overrides.worktrees = true,
             "--new-worktree" => {
                 overrides.worktrees = true;
@@ -1050,6 +1059,9 @@ OPTIONS:
     --sweep-worktrees  Start with that menu part way through removing them, staged:
                        the pirate is drawn and nothing is deleted
     --themes           Start with the Themes panel open
+    --changes          Start with the Changes column open on the repository
+                       Crook was started in, with the first file that has
+                       lines to show showing them
     --new-theme        Start with the Themes panel making a theme
     --create-theme     Start with that theme's Create pressed: a folder that can
                        be written to closes the creator, one that cannot leaves
@@ -1431,6 +1443,9 @@ fn apply_overrides(
         if overrides.created {
             workspace.create_theme(ctx);
         }
+    }
+    if overrides.changes {
+        workspace.open_changes_for_snapshot(ctx);
     }
     if let Some(layout) = overrides.controls {
         workspace.override_control_layout(layout, ctx);

@@ -27,6 +27,8 @@ pub enum WorkspaceAction {
     Settings(SettingsAction),
     /// Something happened in the Themes panel.
     Theme(ThemeAction),
+    /// Something happened in the Changes column.
+    Changes(ChangesAction),
     /// The header was used as what it is: the window's title bar.
     Window(WindowAction),
     /// Something happened to the context menu a tab's secondary press opens.
@@ -464,6 +466,34 @@ pub enum ThemeAction {
     PickBackground(usize),
     /// Write the draft into the themes folder and choose it.
     Create,
+}
+
+/// What the Changes column can be asked, from inside it.
+///
+/// Showing and hiding it are not here: those are `crook/changes/toggle`, a
+/// named command, so the palette and a tab's menu reach it the same way. What
+/// is here is what its own rows and buttons do, and each is about a file by
+/// its place in the list the column is showing.
+///
+/// No variant writes anything into the repository. There is no stage, no
+/// revert and no edit, because the tree being looked at is one an agent is
+/// working in, and a write from here would race whatever the agent is in the
+/// middle of writing. Changing the work is the agent's job, or the editor's.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ChangesAction {
+    /// Take it down. What the × sends.
+    Close,
+    /// Read the repository again now, rather than at the next cycle of the
+    /// git facts.
+    Refresh,
+    /// Show this file's hunks under it, or stop showing them.
+    ToggleFile(usize),
+    /// Open this file in `$VISUAL` or `$EDITOR`, at its first changed line.
+    OpenFile(usize),
+    /// Copy this file's path, from the top of the repository.
+    CopyPath(usize),
+    /// Copy this file's diff, as a patch.
+    CopyDiff(usize),
 }
 
 /// What the settings page does that is not writing an option.

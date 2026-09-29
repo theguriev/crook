@@ -1037,6 +1037,54 @@ worktree the sweep will never touch again), gives every call two reader threads 
 with a fat `target/` cannot deadlock a pipe, and joins `log -p` to `patch-id` with a pipe of
 their own so a history's patches never pass through Crook.
 
+### What the agent changed
+
+A worktree gives an agent somewhere to work; the Changes column is how a person sees what it
+did there without leaving for another terminal to type `git log` and `git diff`. The row's
+`+214 −37` chip counts only what is not committed yet, so the moment an agent commits, the one
+thing Crook said about its work used to go blank — and checking an agent's claim against its
+diff is exactly the step a person reviewing ten agents a day skips when it costs a context
+switch.
+
+`crook/changes/toggle`, from the palette or a tab's menu, docks a column where the Themes panel
+docks — composed once in `Workspace::render`, beside the work rather than over it — about the
+focused pane's repository. `app/src/git/changes.rs` reads it: the base (the merge-base of `HEAD`
+and `merged::base_of`'s branch, which is what a pull request compares from, so the base moving
+on is not shown as the task undoing it), `git log <merge-base>..HEAD`, `git diff --name-status
+<merge-base>` against the working tree plus `git ls-files --others --exclude-standard`, and one
+file's unified diff when somebody opens that file. Every call goes through `git/run.rs`'s
+deadline on the background pool, with `--no-ext-diff`, `--no-textconv` and `core.fsmonitor` off,
+because each of those is a program a repository's configuration names and git would run it for
+a column that only reads. A single file's diff goes through `run_capped`, which stops reading one
+byte past half a megabyte and drops the pipe so git ends there, and is cut again at three
+thousand lines — both say so on screen, and "Copy diff" is not offered for a diff that is not
+whole.
+
+**It reads on beats that already exist.** On opening, when the focused pane moves to another
+repository (a walk up for `.git`, no subprocess), on its Refresh button, and at the end of every
+cycle of `GitModel` — which now emits an event per cycle, changed or not, because what the column
+shows is nothing the cycle gathers. No timer of its own; a cycle that arrives while a read is in
+flight is not a second read, and an answer is taken only if it is for the question still being
+asked.
+
+**A frame costs a screenful.** Every row — headings, commits, files, a file's hunk lines — is
+one entry of one flat list with a fixed height per kind and a running sum of heights beside it,
+rebuilt when what is listed changes. A frame binary-searches the scroll offset for the first row
+and builds rows until it passes the bottom of the box, with a spacer standing for the rest: the
+arithmetic `block_list.rs` draws a pane's output with. A diff is read once per file and kept
+while the file is folded away; a refresh reads again only the files that are open.
+
+**It is read-only, and that is the design rather than the first slice of an editor.** There is
+no stage, no revert and no in-place edit, because the tree it shows is one an agent is writing
+to: a revert that lands between the agent's read of a file and its write is one the agent
+silently undoes, and an edit made under it is an edit it did not read. "Revert this" is a thing
+to tell the agent. What the column offers instead is a way out to where the change can be made
+safely — "Open" in `$VISUAL` or `$EDITOR` at the first changed line, "Copy path", "Copy diff" —
+and "Open" only for an editor with a window of its own, since an editor that draws in the
+terminal it was started from has none when Crook starts it detached (Neovim, measured, waits for
+one for ever). No syntax highlighting: added and removed lines are the theme's `diff_added` and
+`diff_removed`.
+
 ### The agent says what it is doing
 
 The dot on a tab's row has four colours and, until this section, one real source: a bell in a

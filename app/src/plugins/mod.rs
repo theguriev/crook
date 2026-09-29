@@ -24,6 +24,7 @@
 mod about;
 mod appearance;
 pub mod blocks;
+mod changes;
 pub mod header;
 mod palette;
 pub mod pane;
@@ -58,6 +59,9 @@ pub fn defaults() -> Vec<Box<dyn Plugin>> {
         // After the plugin that declares the slot it puts a row in, which is
         // the convention this list's own doc gives rather than a requirement.
         Box::new(worktrees::Worktrees),
+        // After `crook/tabs` too, for the same reason: it puts a row in a
+        // tab's menu.
+        Box::new(changes::Changes),
         Box::new(settings::Settings),
         // The rail's order is these four, and it is the `order` each of them
         // asks for rather than this list — a plugin that adds a page cannot

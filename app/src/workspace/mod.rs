@@ -27,6 +27,7 @@ mod action;
 mod block_list;
 pub(crate) mod block_menu;
 mod body;
+mod changes_panel;
 mod controls;
 mod header_toolbar;
 mod input_element;
@@ -53,8 +54,8 @@ mod tests;
 use crate::theme::theme;
 
 pub use action::{
-    BlockAction, BlockEdge, BlockPart, OptionsAction, SearchAction, SettingsAction, Subject,
-    TabMenuAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
+    BlockAction, BlockEdge, BlockPart, ChangesAction, OptionsAction, SearchAction, SettingsAction,
+    Subject, TabMenuAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
 };
 pub use block_list::BlockList;
 pub use input_element::CommandInput;
