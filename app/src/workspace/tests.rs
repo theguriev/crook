@@ -720,6 +720,34 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.worktrees_landed())
     }
 
+    /// The branches "Delete N merged branches…" would delete.
+    fn worktree_branches_deletable(&self) -> Vec<String> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.worktree_branches_deletable()
+        })
+    }
+
+    /// Whether the menu is asking about deleting them, or deleting them.
+    fn worktree_menu_is_pruning(&self) -> bool {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.worktree_menu_is_pruning()
+        })
+    }
+
+    /// Which question about a task the menu is asking: `(discard, losing)`.
+    fn worktree_menu_finishing(&self) -> Option<(bool, bool)> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.worktree_menu_finishing()
+        })
+    }
+
+    /// Whether that question has finished looking at the checkout.
+    fn worktree_finish_is_ready(&self) -> bool {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.worktree_finish_is_ready()
+        })
+    }
+
     /// What one of the worktree menu's controls dispatches.
     fn dispatch_worktree(&mut self, action: WorktreeAction) {
         self.dispatch_workspace_action(WorkspaceAction::Worktree(action));
@@ -3929,6 +3957,18 @@ fn worktree_menu_says(scene: &Scene, needle: &str) -> bool {
     text_where(scene, |position| menu.contains_point(position)).contains(needle)
 }
 
+/// Whether the worktree menu says `sentence`, wherever its lines wrapped.
+///
+/// A wrapped paragraph draws no glyph for the space it broke at, so a
+/// sentence long enough to wrap — a branch name in it is most of a line — is
+/// compared with its spaces taken out on both sides.
+fn worktree_menu_reads(scene: &Scene, sentence: &str) -> bool {
+    let menu = worktree_menu_box(scene).expect("the menu is not up");
+    let squeezed = |text: &str| text.split_whitespace().collect::<String>();
+    squeezed(&text_where(scene, |position| menu.contains_point(position)))
+        .contains(&squeezed(sentence))
+}
+
 /// Every rect painted in `fill`, which for a tab colour is its stripe.
 fn stripes_of(scene: &Scene, fill: Color) -> Vec<RectF> {
     visible_rects(scene)
@@ -4297,6 +4337,8 @@ fn a_tabs_menu_is_the_entries_its_plugins_put_in_it() {
             "crook/tabs/rename-pane",
             "crook/tabs/close-tab",
             "crook/worktrees/menu",
+            "crook/worktrees/finish-task",
+            "crook/worktrees/discard-task",
             "crook/tabs/color",
         ],
         "the menu is not the entries its plugins contributed, in band order"
@@ -5904,6 +5946,423 @@ fn removing_the_last_checkout_leaves_no_empty_directory_in_the_store() {
         holder.display()
     );
     assert!(store.is_dir(), "the store itself went with it");
+}
+
+/// The harness's one tab working in a fresh scratch repository, with the
+/// store pointed into the scratch. `None` where there is no git.
+fn window_on_a_repository(scratch: &Scratch) -> Option<(Harness, PathBuf, PathBuf, TabId)> {
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return None;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+    Some((harness, repository, store, tab))
+}
+
+/// A checkout made through the menu the way a person starts a task, with the
+/// tab it opened still in it — the tab Finish and Discard are asked about.
+fn task_checkout(harness: &mut Harness, tab: TabId, store: &Path) -> (PathBuf, PaneId) {
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    let before = harness.pane_ids().len();
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    harness.dispatch_worktree(WorktreeAction::Create);
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > before
+    });
+
+    let pane = harness
+        .focused_pane_id()
+        .expect("the checkout did not open a pane");
+    let path = harness
+        .working_directory(pane)
+        .expect("the pane that opened does not know where it is");
+    assert!(
+        path.starts_with(store),
+        "{} is not in the store",
+        path.display()
+    );
+    (path, pane)
+}
+
+/// Commits one file on whatever `directory` has checked out, and answers
+/// the commit.
+fn commit_in(directory: &Path, file: &str, message: &str) -> String {
+    fs::write(directory.join(file), format!("{message}\n")).expect("the checkout is there");
+    git_in(directory, &["add", file]);
+    git_in(directory, &["commit", "--no-verify", "-m", message]);
+    git_in(directory, &["rev-parse", "HEAD"])
+}
+
+/// Squashes `branch` onto what `repository` has checked out, the way the
+/// forge's button does, and answers the squash.
+fn squash_in(repository: &Path, branch: &str) -> String {
+    git_in(repository, &["merge", "--squash", branch]);
+    git_in(
+        repository,
+        &[
+            "commit",
+            "--no-verify",
+            "-m",
+            &format!("{branch}, squashed"),
+        ],
+    );
+    git_in(repository, &["rev-parse", "HEAD"])
+}
+
+/// What the question about a task asks, once it has looked.
+fn ask_about_the_task(harness: &mut Harness, pane: PaneId, discard: bool) -> Rc<Scene> {
+    harness.dispatch_worktree(WorktreeAction::AskFinish { pane, discard });
+    assert_eq!(harness.worktree_menu_finishing(), Some((discard, false)));
+    harness.wait_for("the checkout to be looked at", |harness| {
+        harness.worktree_finish_is_ready()
+    });
+    harness.frame()
+}
+
+/// Waits for a task's question to be carried out and the list read again.
+fn wait_for_the_task_to_go(harness: &mut Harness) -> Rc<Scene> {
+    harness.wait_for("the task to be carried out", |harness| {
+        harness.worktree_menu_finishing().is_none() && harness.worktrees_listed().is_some()
+    });
+    harness.frame()
+}
+
+fn has_branch(repository: &Path, branch: &str) -> bool {
+    crate::git::worktree::branches(repository)
+        .expect("the repository lists")
+        .iter()
+        .any(|name| name == branch)
+}
+
+#[test]
+fn finish_and_discard_are_offered_only_on_a_tab_in_a_checkout_crook_made() {
+    // The main checkout is where tasks start, not a task; a checkout somebody
+    // made by hand elsewhere is theirs to finish.
+    let scratch = Scratch::new();
+    let Some((mut harness, _, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let main_pane = harness.pane_ids()[0];
+    let (_, pane) = task_checkout(&mut harness, tab, &store);
+    let task = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.tabs().tab_of(pane))
+        .expect("the checkout's pane is in a tab");
+
+    harness.open_tab_menu_on(task, pane);
+    let scene = harness.frame();
+    assert!(tab_menu_offers(&scene, "Finish task"));
+    assert!(tab_menu_offers(&scene, "Discard task"));
+    harness.dispatch_workspace_action(TabMenuAction::Close.into());
+
+    harness.open_tab_menu_on(tab, main_pane);
+    let scene = harness.frame();
+    assert!(tab_menu_box(&scene).is_some());
+    assert!(
+        !tab_menu_offers(&scene, "Finish task") && !tab_menu_offers(&scene, "Discard task"),
+        "the main checkout was offered as a task to finish"
+    );
+}
+
+#[test]
+fn deleting_merged_branches_names_each_with_what_proved_it_and_keeps_the_rest() {
+    // Two branches whose checkouts have gone, as every finished task's did:
+    // one the forge squashed and one it has not seen. git calls both
+    // unmerged. The menu offers the first, says why, and deletes only it.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, _, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let base = git_in(&repository, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    git_in(&repository, &["switch", "-c", "landed"]);
+    commit_in(&repository, "landed.txt", "the landed work");
+    git_in(&repository, &["switch", "-c", "unlanded", &base]);
+    commit_in(&repository, "unlanded.txt", "the open work");
+    git_in(&repository, &["switch", &base]);
+    let squash = squash_in(&repository, "landed");
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the proof to come back", |harness| {
+        harness.worktrees_landed().is_some()
+    });
+    assert_eq!(harness.worktree_branches_deletable(), vec!["landed"]);
+    assert!(
+        worktree_menu_says(&harness.frame(), "Delete 1 merged branch"),
+        "the list does not offer the branch whose work landed"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::AskDeleteLanded);
+    let scene = harness.frame();
+    for evidence in ["landed", &squash[..7], "landed, squashed"] {
+        assert!(
+            worktree_menu_says(&scene, evidence),
+            "the question does not say {evidence:?}"
+        );
+    }
+    assert!(!worktree_menu_says(&scene, "unlanded"));
+
+    harness.dispatch_worktree(WorktreeAction::DeleteLanded);
+    harness.wait_for("the branch to be deleted", |harness| {
+        !harness.worktree_menu_is_pruning() && harness.worktrees_listed().is_some()
+    });
+
+    assert!(
+        !has_branch(&repository, "landed"),
+        "the landed branch is still there"
+    );
+    assert!(
+        has_branch(&repository, "unlanded"),
+        "the open branch went too"
+    );
+    assert!(worktree_menu_says(&harness.frame(), "Deleted 1 branch."));
+}
+
+#[test]
+fn a_branch_that_moved_after_the_menu_proved_it_is_kept_and_said_to_be() {
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, _, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let base = git_in(&repository, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    git_in(&repository, &["switch", "-c", "landed"]);
+    commit_in(&repository, "landed.txt", "the landed work");
+    git_in(&repository, &["switch", &base]);
+    squash_in(&repository, "landed");
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the proof to come back", |harness| {
+        harness.worktrees_landed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::AskDeleteLanded);
+    // Somebody goes on working on it while the question is up.
+    git_in(&repository, &["switch", "landed"]);
+    let later = commit_in(&repository, "landed.txt", "and some more");
+    git_in(&repository, &["switch", &base]);
+
+    harness.dispatch_worktree(WorktreeAction::DeleteLanded);
+    harness.wait_for("the deletion to answer", |harness| {
+        !harness.worktree_menu_is_pruning() && harness.worktrees_listed().is_some()
+    });
+
+    assert_eq!(git_in(&repository, &["rev-parse", "landed"]), later);
+    assert!(
+        worktree_menu_says(&harness.frame(), "landed has moved"),
+        "the list does not say why the branch was kept"
+    );
+}
+
+#[test]
+fn finishing_a_task_whose_work_landed_closes_its_tab_removes_the_checkout_and_deletes_the_branch() {
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let (checkout, pane) = task_checkout(&mut harness, tab, &store);
+    let branch = git_in(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    commit_in(&checkout, "task.txt", "the task");
+    let squash = squash_in(&repository, &branch);
+
+    let scene = ask_about_the_task(&mut harness, pane, false);
+    assert!(worktree_menu_says(&scene, "Finish this task?"));
+    assert!(
+        worktree_menu_reads(&scene, &format!("Deletes {branch}"))
+            && worktree_menu_says(&scene, &squash[..7]),
+        "the question does not say the branch goes, and why"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::Finish);
+    let scene = wait_for_the_task_to_go(&mut harness);
+
+    assert!(!checkout.exists(), "the checkout is still there");
+    assert!(
+        !harness.pane_ids().contains(&pane),
+        "the tab working in the checkout is still open"
+    );
+    assert!(
+        !has_branch(&repository, &branch),
+        "the landed branch was kept"
+    );
+    assert!(
+        worktree_menu_reads(&scene, &format!("Deleted {branch}")),
+        "the list does not say what happened"
+    );
+}
+
+#[test]
+fn finishing_a_task_whose_work_has_not_landed_keeps_its_branch_and_says_so() {
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let base = git_in(&repository, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let (checkout, pane) = task_checkout(&mut harness, tab, &store);
+    let branch = git_in(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    commit_in(&checkout, "task.txt", "the task");
+
+    let kept = format!("{branch}: not on {base} yet.");
+    let scene = ask_about_the_task(&mut harness, pane, false);
+    assert!(
+        worktree_menu_reads(&scene, &format!("Keeps {kept}")),
+        "the question does not say the branch stays"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::Finish);
+    let scene = wait_for_the_task_to_go(&mut harness);
+
+    assert!(!checkout.exists(), "the checkout is still there");
+    assert!(
+        has_branch(&repository, &branch),
+        "an unproved branch was deleted"
+    );
+    assert!(
+        worktree_menu_reads(&scene, &format!("Kept {kept}")),
+        "the list does not say the branch was kept"
+    );
+}
+
+#[test]
+fn discarding_deletes_an_unproved_branch_only_at_its_second_question_which_names_what_goes() {
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let (checkout, pane) = task_checkout(&mut harness, tab, &store);
+    let branch = git_in(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let unfinished = commit_in(&checkout, "task.txt", "the unfinished work");
+    fs::write(checkout.join("notes.txt"), "never committed\n").expect("the checkout is there");
+
+    let scene = ask_about_the_task(&mut harness, pane, true);
+    assert!(worktree_menu_says(&scene, "Discard this task?"));
+    assert!(worktree_menu_reads(
+        &scene,
+        &format!("Deletes {branch}, and the 1 commit only it holds.")
+    ));
+
+    // The first question's button leads to the second; pressed as though it
+    // were the last, it takes nothing.
+    harness.dispatch_worktree(WorktreeAction::Discard);
+    harness.queue.run_until_parked();
+    assert!(checkout.is_dir() && has_branch(&repository, &branch));
+
+    harness.dispatch_worktree(WorktreeAction::ReviewDiscard);
+    assert_eq!(harness.worktree_menu_finishing(), Some((true, true)));
+    let scene = harness.frame();
+    assert!(worktree_menu_says(&scene, "Discard it for good?"));
+    for named in [&unfinished[..7], "the unfinished work", "notes.txt"] {
+        assert!(
+            worktree_menu_says(&scene, named),
+            "the second question does not name {named:?}"
+        );
+    }
+
+    harness.dispatch_worktree(WorktreeAction::Discard);
+    let scene = wait_for_the_task_to_go(&mut harness);
+
+    assert!(!checkout.exists(), "the checkout is still there");
+    assert!(
+        !has_branch(&repository, &branch),
+        "the discarded branch is still there"
+    );
+    assert!(worktree_menu_reads(
+        &scene,
+        &format!("Deleted {branch} and the 1 commit only it held.")
+    ));
+}
+
+#[test]
+fn finishing_leaves_a_checkout_with_uncommitted_work_where_it_is() {
+    // Finish never forces: a file nobody committed is work, and the
+    // question says so and points at Discard rather than closing the tab
+    // and finding out from git.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let (checkout, pane) = task_checkout(&mut harness, tab, &store);
+    let branch = git_in(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    commit_in(&checkout, "task.txt", "the task");
+    squash_in(&repository, &branch);
+    fs::write(checkout.join("notes.txt"), "never committed\n").expect("the checkout is there");
+
+    let scene = ask_about_the_task(&mut harness, pane, false);
+    assert!(
+        worktree_menu_reads(&scene, "There is work in it — 1 untracked."),
+        "the question does not say what is in the way"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::Finish);
+    harness.queue.run_until_parked();
+    assert!(
+        checkout.join("notes.txt").is_file(),
+        "the uncommitted file went"
+    );
+    assert!(harness.pane_ids().contains(&pane), "the tab closed anyway");
+    assert!(has_branch(&repository, &branch));
+}
+
+#[test]
+fn finishing_is_refused_while_anything_in_the_checkout_is_working() {
+    // Closing a pane ends what runs in it, and the question was about a
+    // checkout: it does not get to end an agent's turn or a build nobody was
+    // asked about.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let (checkout, pane) = task_checkout(&mut harness, tab, &store);
+    let branch = git_in(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    commit_in(&checkout, "task.txt", "the task");
+    squash_in(&repository, &branch);
+
+    for (status, command) in [
+        (AgentStatus::Running, None),
+        (AgentStatus::NeedsInput, None),
+        (AgentStatus::Idle, Some("cargo test")),
+    ] {
+        harness.update_session(pane, |session| {
+            session.status = status;
+            session.running_command = command.map(str::to_owned);
+        });
+        let scene = ask_about_the_task(&mut harness, pane, false);
+        assert!(
+            worktree_menu_says(&scene, "Not yet"),
+            "{status:?} / {command:?}: the question does not say why it cannot go"
+        );
+
+        harness.dispatch_worktree(WorktreeAction::Finish);
+        harness.queue.run_until_parked();
+        assert!(
+            checkout.is_dir() && harness.pane_ids().contains(&pane),
+            "{status:?} / {command:?}: finished while something was working"
+        );
+        assert_eq!(harness.worktree_menu_finishing(), Some((false, false)));
+        harness.dispatch_worktree(WorktreeAction::CloseMenu);
+    }
+
+    harness.update_session(pane, |session| {
+        session.status = AgentStatus::Idle;
+        session.running_command = None;
+    });
+    ask_about_the_task(&mut harness, pane, false);
+    harness.dispatch_worktree(WorktreeAction::Finish);
+    wait_for_the_task_to_go(&mut harness);
+    assert!(
+        !checkout.exists(),
+        "nothing working, and it still did not go"
+    );
 }
 
 #[test]
@@ -17597,11 +18056,11 @@ fn the_keys_are_grouped_by_the_plugin_that_registered_the_command() {
 
 #[test]
 fn the_plugins_that_registered_one_command_share_a_heading() {
-    // The fold: seven plugins register a single command each, and seven
-    // headings over seven rows would be a fence rather than a list. `Worktrees`
-    // is the test's own point — it is the name of a plugin *and* the title of
-    // the one command it registers, so a heading of its own would put the word
-    // on the frame twice.
+    // The fold: six plugins register a single command each, and six headings
+    // over six rows would be a fence rather than a list. `Worktrees` is the
+    // other half of the point: it registers three now and has a heading of
+    // its own, and the word it shares with its list's command must still be
+    // on the frame once — as the heading, not again as a row under it.
     let mut harness = Harness::new(1);
     open_keys(&mut harness, "");
     let scene = harness.frame();
@@ -17615,6 +18074,13 @@ fn the_plugins_that_registered_one_command_share_a_heading() {
         drawn_lines(&scene, "Worktrees").len(),
         1,
         "`Worktrees` is drawn as a heading as well as a row: {}",
+        frame_text(&scene)
+    );
+    assert!(
+        drawn_line(&scene, "Worktree list").is_some_and(|row| {
+            drawn_line(&scene, "Worktrees").is_some_and(|heading| heading.y() < row.y())
+        }),
+        "the worktree list's command is not under its plugin's heading: {}",
         frame_text(&scene)
     );
 }

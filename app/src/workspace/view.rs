@@ -68,9 +68,12 @@ use super::action::{
     Subject, TabMenuAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
 };
 use super::block_list::block_text;
+use super::finish::Finishing;
 use super::settings_page::SettingsState;
 use super::tab_context_menu::TabContextMenuState;
-use super::tab_menu::{Contents, Going, Looked, Mode as WorktreeMode, Sweep, TabMenuState};
+use super::tab_menu::{
+    Contents, Going, Looked, Mode as WorktreeMode, Pruning, Sweep, TabMenuState,
+};
 use super::tabs_panel::drag::{Carried, PanelDrag};
 use super::tabs_panel::geometry::RowGeometry;
 use super::tabs_panel::search::SearchState;
@@ -1288,9 +1291,40 @@ impl Workspace {
     /// The branches the menu has marked `merged`, in name order, or `None`
     /// until the proof has come back. For a test.
     pub fn worktrees_landed(&self) -> Option<Vec<String>> {
-        let mut landed: Vec<String> = self.tab_menu.landed.as_ref()?.iter().cloned().collect();
+        let mut landed: Vec<String> = self.tab_menu.landed.as_ref()?.keys().cloned().collect();
         landed.sort();
         Some(landed)
+    }
+
+    /// The branches "Delete N merged branches…" would delete, in name order.
+    /// For a test.
+    pub fn worktree_branches_deletable(&self) -> Vec<String> {
+        super::tab_menu::deletable_branches(&self.tab_menu)
+            .iter()
+            .map(|landed| landed.branch().to_owned())
+            .collect()
+    }
+
+    /// Whether the menu is asking about deleting those, or deleting them.
+    /// For a test.
+    pub fn worktree_menu_is_pruning(&self) -> bool {
+        self.tab_menu.mode == WorktreeMode::Pruning
+    }
+
+    /// Which question about a task the menu is asking — `(discard, losing)`,
+    /// where `losing` is Discard's second — or `None` when it is asking
+    /// neither. For a test.
+    pub fn worktree_menu_finishing(&self) -> Option<(bool, bool)> {
+        match self.tab_menu.mode {
+            WorktreeMode::Finishing { discard, losing } => Some((discard, losing)),
+            _ => None,
+        }
+    }
+
+    /// Whether that question has finished looking at the checkout. For a
+    /// test.
+    pub fn worktree_finish_is_ready(&self) -> bool {
+        matches!(self.tab_menu.finishing, Finishing::Ready(_))
     }
 
     /// Whether the menu is asking about removing a checkout. For a test.
@@ -2031,6 +2065,36 @@ impl Workspace {
     /// contribute at all.
     pub(crate) fn menu_tab_is_in_a_repository(&self, app: &AppContext) -> bool {
         self.menu_pane_branch(app).is_some()
+    }
+
+    /// Whether that pane is inside a checkout Crook made: somewhere under
+    /// the store it makes them in, and not the store itself.
+    ///
+    /// The question `crook/worktrees` asks before offering Finish and Discard.
+    /// A path and nothing else, because it is asked on the render path; the
+    /// question the entries open looks at the checkout properly, and says so
+    /// if this was wrong.
+    pub(crate) fn menu_pane_is_in_a_crook_checkout(&self) -> bool {
+        let (Some(directory), Some(store)) = (
+            self.menu_pane_directory(),
+            self.worktrees_directory.as_deref(),
+        ) else {
+            return false;
+        };
+        directory.starts_with(store) && directory != store
+    }
+
+    /// Which question about a task the worktree menu is asking —
+    /// `Some(false)` for Finish, `Some(true)` for Discard — or `None` when it
+    /// is asking neither, or is not up.
+    ///
+    /// Asked by the entries that open those questions, to light the row
+    /// whose question is showing and not the list's.
+    pub(crate) fn worktree_menu_task(&self) -> Option<bool> {
+        match self.tab_menu.mode {
+            WorktreeMode::Finishing { discard, .. } if self.tab_menu.is_open() => Some(discard),
+            _ => None,
+        }
     }
 
     /// Every pane in the window, with the directory it is in.
@@ -3111,6 +3175,44 @@ impl Workspace {
                 self.ask_about_tidying(landed, ctx);
             }
             WorktreeAction::Tidy => self.tidy_worktrees(ctx),
+            WorktreeAction::AskDeleteLanded => {
+                let going = super::tab_menu::deletable_branches(&self.tab_menu);
+                if going.is_empty() {
+                    return;
+                }
+                self.tab_menu.next_epoch();
+                self.tab_menu.mode = WorktreeMode::Pruning;
+                self.tab_menu.pruning = Pruning::Ready(going);
+                self.tab_menu.problem = None;
+                self.tab_menu.forget_hover_state();
+                ctx.notify();
+            }
+            WorktreeAction::DeleteLanded => self.delete_landed_branches(ctx),
+            WorktreeAction::AskFinish { pane, discard } => {
+                self.ask_about_finishing(pane, discard, ctx);
+            }
+            WorktreeAction::Finish => self.finish_task(false, ctx),
+            WorktreeAction::Discard => self.finish_task(true, ctx),
+            WorktreeAction::ReviewDiscard => {
+                // Only from Discard's first question, and only once it has
+                // something to say: the second names what the first could
+                // only count.
+                if self.tab_menu.mode
+                    == (WorktreeMode::Finishing {
+                        discard: true,
+                        losing: false,
+                    })
+                    && let Finishing::Ready(plan) = &self.tab_menu.finishing
+                    && super::finish::refusal(self, plan, true).is_none()
+                {
+                    self.tab_menu.mode = WorktreeMode::Finishing {
+                        discard: true,
+                        losing: true,
+                    };
+                    self.tab_menu.forget_hover_state();
+                    ctx.notify();
+                }
+            }
 
             WorktreeAction::Cancel => {
                 // A sweep that is removing is not walked back to the list,
@@ -3125,6 +3227,23 @@ impl Workspace {
                         *stopping = true;
                         self.tab_menu.forget_hover_state();
                         ctx.notify();
+                    }
+                    return;
+                }
+
+                // One step back from a question about a task is the menu
+                // it was asked from — the tab's own, not the worktree list —
+                // and from Discard's second question it is its first.
+                if let WorktreeMode::Finishing { discard, losing } = self.tab_menu.mode {
+                    if losing {
+                        self.tab_menu.mode = WorktreeMode::Finishing {
+                            discard,
+                            losing: false,
+                        };
+                        self.tab_menu.forget_hover_state();
+                        ctx.notify();
+                    } else {
+                        self.close_tab_menu(ctx);
                     }
                     return;
                 }
@@ -3163,7 +3282,16 @@ impl Workspace {
         let Some(directory) = directory else {
             return;
         };
+        self.open_tab_menu_at(tab, directory, ctx);
+    }
 
+    /// Opens the menu on a tab, about the repository `directory` is in, and
+    /// reads it — never as a toggle.
+    ///
+    /// The directory is handed in because the questions about a task are
+    /// about the pane whose row was pressed, which under `Panes` granularity
+    /// need not be the one the tab has focused.
+    fn open_tab_menu_at(&mut self, tab: TabId, directory: PathBuf, ctx: &mut ViewContext<Self>) {
         // The menu on a block is never up at the same time. See
         // `a_popup_is_open`.
         self.close_block_menu(ctx);
@@ -3191,6 +3319,8 @@ impl Workspace {
         self.tab_menu.selected = None;
         self.tab_menu.scroll.lock().scroll_to_top();
         self.tab_menu.sweep = Sweep::default();
+        self.tab_menu.pruning = Pruning::default();
+        self.tab_menu.finishing = Finishing::default();
         self.tab_menu.contents = Contents::Reading;
         self.tab_menu.branches.clear();
         self.tab_menu.landed = None;
@@ -3233,7 +3363,11 @@ impl Workspace {
                 }
                 Err(problem) => Contents::Failed(problem.to_string()),
             };
-            workspace.read_landed(ctx);
+            // For the list, which is what shows it. A question about a task
+            // reads its own proof, of one branch rather than of all of them.
+            if workspace.tab_menu.mode == WorktreeMode::Listing {
+                workspace.read_landed(ctx);
+            }
             ctx.notify();
         })
         .detach();
@@ -3260,12 +3394,13 @@ impl Workspace {
             return;
         };
         let worktrees = worktrees.clone();
+        let branches = self.tab_menu.branches.clone();
         let tab = self.tab_menu.tab;
         let opening = self.tab_menu.opening;
 
-        let reading = ctx
-            .background()
-            .spawn(async move { super::tab_menu::landed_branches(&directory, &worktrees) });
+        let reading = ctx.background().spawn(async move {
+            super::tab_menu::landed_branches(&directory, &worktrees, &branches)
+        });
         ctx.spawn(reading, move |workspace, landed, ctx| {
             if workspace.tab_menu.tab != tab || workspace.tab_menu.opening != opening {
                 return;
@@ -3329,8 +3464,11 @@ impl Workspace {
                     .map(|name| name.to_string_lossy().into_owned());
                 self.tab_menu.branches =
                     crate::git::worktree::branches(&directory).unwrap_or_default();
-                self.tab_menu.landed =
-                    Some(super::tab_menu::landed_branches(&directory, &worktrees));
+                self.tab_menu.landed = Some(super::tab_menu::landed_branches(
+                    &directory,
+                    &worktrees,
+                    &self.tab_menu.branches,
+                ));
                 Contents::Ready(worktrees)
             }
             Err(problem) => Contents::Failed(problem.to_string()),
@@ -3412,6 +3550,8 @@ impl Workspace {
         self.tab_menu.mode = WorktreeMode::Listing;
         self.tab_menu.selected = None;
         self.tab_menu.sweep = Sweep::default();
+        self.tab_menu.pruning = Pruning::default();
+        self.tab_menu.finishing = Finishing::default();
         self.tab_menu.contents = Contents::Reading;
         self.tab_menu.branches.clear();
         self.tab_menu.landed = None;
@@ -4383,6 +4523,202 @@ impl Workspace {
                     ctx.notify();
                 }
             }
+        })
+        .detach();
+    }
+
+    /// Deletes the branches the menu is asking about, each proved again
+    /// first, and goes back to the list saying what happened.
+    ///
+    /// One background task for all of them, because the proof is one pass
+    /// for all of them — see [`crate::git::worktree::delete_branches`] — and
+    /// each deletion after it is a moment. Like a removal, it runs to the end
+    /// whether or not the menu is still up, and says what it did only to the
+    /// menu that asked.
+    fn delete_landed_branches(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.tab_menu.mode != WorktreeMode::Pruning {
+            return;
+        }
+        let Pruning::Ready(going) = &self.tab_menu.pruning else {
+            return;
+        };
+        if going.is_empty() {
+            return;
+        }
+        let Some(repository) = self.tab_menu.pane_directory.clone() else {
+            return;
+        };
+        let going = going.clone();
+
+        self.tab_menu.next_epoch();
+        self.tab_menu.pruning = Pruning::Deleting { of: going.len() };
+        self.tab_menu.problem = None;
+        self.tab_menu.forget_hover_state();
+        self.start_chomping(ctx);
+        ctx.notify();
+
+        let tab = self.tab_menu.tab;
+        let opening = self.tab_menu.opening;
+        let deleting = ctx
+            .background()
+            .spawn(async move { crate::git::worktree::delete_branches(&repository, &going) });
+        ctx.spawn(deleting, move |workspace, deleted, ctx| {
+            let report = super::tab_menu::pruned(&deleted);
+            if workspace.tab_menu.tab != tab || workspace.tab_menu.opening != opening {
+                log::info!("branches deleted with nobody waiting: {report}");
+                return;
+            }
+            // Back to the list, read again: the rows it offered are gone.
+            if let Some(tab) = tab {
+                workspace.tab_menu.tab = None;
+                workspace.open_tab_menu(tab, ctx);
+            }
+            workspace.tab_menu.problem = Some(report);
+            ctx.notify();
+        })
+        .detach();
+    }
+
+    /// Asks about finishing the task in the checkout `pane` is in — or about
+    /// discarding it — and looks at the checkout while it asks.
+    ///
+    /// The question is a face of the worktree menu, hanging off the tab's own
+    /// menu where the worktree list would, because it is that list's kind of
+    /// question: about a checkout, answered by git on the background pool.
+    fn ask_about_finishing(&mut self, pane: PaneId, discard: bool, ctx: &mut ViewContext<Self>) {
+        let (Some(tab), Some(store)) = (self.tabs.tab_of(pane), self.worktrees_directory.clone())
+        else {
+            return;
+        };
+        let Some(directory) = self
+            .tabs
+            .pane(pane)
+            .and_then(|pane| pane.session().working_directory.clone())
+        else {
+            return;
+        };
+
+        self.open_tab_menu_at(tab, directory.clone(), ctx);
+        self.tab_menu.mode = WorktreeMode::Finishing {
+            discard,
+            losing: false,
+        };
+        self.tab_menu.finishing = Finishing::Looking;
+        let epoch = self.tab_menu.epoch;
+        ctx.notify();
+
+        let reading = ctx
+            .background()
+            .spawn(async move { super::finish::read_plan(&directory, &store) });
+        ctx.spawn(reading, move |workspace, plan, ctx| {
+            if workspace.tab_menu.epoch != epoch {
+                return;
+            }
+            workspace.tab_menu.finishing = match plan {
+                Ok(plan) => Finishing::Ready(Box::new(plan)),
+                Err(problem) => Finishing::Failed(problem),
+            };
+            ctx.notify();
+        })
+        .detach();
+    }
+
+    /// Does what the question about a task said: closes what is working in
+    /// the checkout, removes it, and deletes its branch or keeps it.
+    ///
+    /// The panes close here, before git is asked for anything, and the menu
+    /// moves to a tab in the main checkout to say how it went — see
+    /// [`super::finish`] for why in that order. Refused while the question
+    /// has a refusal on it, which is what keeps a key from doing what the
+    /// inert button would not.
+    ///
+    /// `discard` is which of the two was pressed, and it has to be the one
+    /// being asked: a Finish that arrived while Discard's second question was
+    /// up would otherwise carry out the Discard.
+    fn finish_task(&mut self, discard: bool, ctx: &mut ViewContext<Self>) {
+        let WorktreeMode::Finishing {
+            discard: asked,
+            losing,
+        } = self.tab_menu.mode
+        else {
+            return;
+        };
+        // Discard acts from its second question only, the one that named
+        // what it loses.
+        if asked != discard || (discard && !losing) {
+            return;
+        }
+        let Finishing::Ready(plan) = &self.tab_menu.finishing else {
+            return;
+        };
+        if super::finish::refusal(self, plan, discard).is_some() {
+            return;
+        }
+        let plan = (**plan).clone();
+        let closing: Vec<PaneId> = super::finish::panes_in(self, &plan)
+            .into_iter()
+            .map(|(pane, _)| pane)
+            .collect();
+
+        // Somewhere to be once they have closed, found before they do: a pane
+        // already in the main checkout, or a tab opened there. A repository
+        // whose main entry is bare has no directory to open one in, and then
+        // the window only has to be kept from closing with its last tab.
+        let landing = match super::finish::pane_in_main(self, &plan, &closing) {
+            Some(pane) => {
+                self.apply(TabAction::FocusPane(pane), ctx);
+                self.tabs.tab_of(pane)
+            }
+            None => match super::finish::main_directory(&plan) {
+                Some(directory) => {
+                    self.open_tab_in(directory, ctx);
+                    Some(self.tabs.active_id())
+                }
+                None => {
+                    if self
+                        .tabs
+                        .panes()
+                        .all(|(_, pane)| closing.contains(&pane.id()))
+                    {
+                        self.apply(TabAction::New, ctx);
+                    }
+                    None
+                }
+            },
+        };
+
+        // Both menus hang off a row that is about to close.
+        self.close_tab_context_menu(ctx);
+        for pane in &closing {
+            self.apply(TabAction::ClosePane(*pane), ctx);
+        }
+
+        let opening = landing.map(|tab| {
+            self.open_tab_menu(tab, ctx);
+            self.tab_menu.mode = WorktreeMode::Finishing { discard, losing };
+            self.tab_menu.finishing = Finishing::Working(super::finish::under_way(&plan, discard));
+            self.start_chomping(ctx);
+            ctx.notify();
+            self.tab_menu.opening
+        });
+
+        let repository = plan.main().path.clone();
+        let store = self.worktrees_directory.clone();
+        let doing = ctx.background().spawn(async move {
+            super::finish::carry_out(&repository, &plan, discard, store.as_deref())
+        });
+        ctx.spawn(doing, move |workspace, report, ctx| {
+            let Some(tab) = landing.filter(|tab| {
+                workspace.tab_menu.tab == Some(*tab) && Some(workspace.tab_menu.opening) == opening
+            }) else {
+                log::info!("a task finished with nobody waiting: {report}");
+                return;
+            };
+            // Back to the list, read again, with what happened under it.
+            workspace.tab_menu.tab = None;
+            workspace.open_tab_menu(tab, ctx);
+            workspace.tab_menu.problem = Some(report);
+            ctx.notify();
         })
         .detach();
     }
@@ -6126,6 +6462,20 @@ impl Workspace {
             // this key is standing in for removes what git lets go and leaves
             // the rest, whether it is pressed once or twice.
             ("enter", WorktreeMode::Tidying) => WorktreeAction::Tidy,
+            // Each proved again before it goes, so the press is the same
+            // kind of answer the sweep's is: one question, asked once.
+            ("enter", WorktreeMode::Pruning) => WorktreeAction::DeleteLanded,
+            ("enter", WorktreeMode::Finishing { discard: false, .. }) => WorktreeAction::Finish,
+            // Discard's first question leads to its second, which names what
+            // goes — and that one stays a click, for the reason "Remove
+            // anyway" does.
+            (
+                "enter",
+                WorktreeMode::Finishing {
+                    discard: true,
+                    losing: false,
+                },
+            ) => WorktreeAction::ReviewDiscard,
             _ => return None,
         };
         Some(action.into())
@@ -7360,7 +7710,7 @@ fn worktree_store() -> Option<PathBuf> {
 /// succeeded: a checkout git refused to remove is still in its directory, and
 /// the directories above it are not empty anyway. The branch stays, as it
 /// always has — see [`crate::git::worktree::remove`].
-fn remove_checkout(
+pub(super) fn remove_checkout(
     repository: &Path,
     path: &Path,
     force: bool,

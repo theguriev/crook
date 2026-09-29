@@ -28,6 +28,7 @@ mod block_list;
 pub(crate) mod block_menu;
 mod body;
 mod controls;
+mod finish;
 mod header_toolbar;
 mod input_element;
 mod pane_output;

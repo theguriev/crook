@@ -424,7 +424,8 @@ Nineteen features, and the page that configures them:
   it writes is a file in your themes folder, in the same format as any other.
 - **A tab's own menu.** Right-click any row and it opens over that row: pin, new group with
   tab, copy pane title, copy working directory, rename tab, rename pane, close tab, a row of
-  colours, and — inside a repository — the worktrees. **Pinning** holds a tab at the front of
+  colours, and — inside a repository — the worktrees, with Finish task and Discard task beside
+  them on a tab in a checkout Crook made. **Pinning** holds a tab at the front of
   the block it is in rather than of the whole list, which is the one place this cannot be
   Warp's: a group is a contiguous block that says two checkouts are one piece of work, and
   pinning that lifted a member out of the middle would be pinning that takes a group apart. A
@@ -454,7 +455,15 @@ Nineteen features, and the page that configures them:
   the base — merged, or squashed in by the forge, which git itself cannot tell — is marked
   `merged`, worked out from the repository alone with nothing sent anywhere, and
   `Remove 2 merged checkouts…` takes just those, on the same terms. A removal also takes the
-  directories of the store it leaves empty. Checkouts go in a store of Crook's own —
+  directories of the store it leaves empty. Deleting a *branch* is a gesture of its own, and
+  only on that proof: `Delete 4 merged branches…` names each one with the commit on the base
+  that has its work, proves it again the moment before it goes, and keeps any that moved in
+  between; a branch the proof cannot reach is never offered. On a tab in a checkout Crook made,
+  **Finish task** is the end of the task in one confirmation — it closes the tabs working
+  there, removes the checkout, and deletes the branch if its work has landed, or keeps it and
+  says `kept feat/x: not on main yet`. It will not while an agent or a command is still working
+  there. **Discard task** deletes the branch whether or not it has landed, after a second
+  question that names every commit and file that goes with it. Checkouts go in a store of Crook's own —
   neither inside the repository, where git will happily let you put one and every build and
   every search then trips over it, nor beside it in a directory somebody else laid out.
 
@@ -528,8 +537,8 @@ Nineteen features, and the page that configures them:
   `copy-block-command`, `copy-block-output`, `copy-block-directory`, `copy-block-branch`,
   `rerun-block`, `scroll-to-block-top`, `scroll-to-block-bottom`), every entry of a tab's
   (`crook/tabs/pin-tab`, `close-tab`, `open-menu`, `view-options`,
-  `toggle-group`, `close-group`, the seven colours), the worktree list (`crook/worktrees/menu`)
-  and every settings page (`crook/appearance/open-page` and its three neighbours). The block
+  `toggle-group`, `close-group`, the seven colours), the worktree list (`crook/worktrees/menu`),
+  the end of a task (`crook/worktrees/finish-task`, `discard-task`) and every settings page (`crook/appearance/open-page` and its three neighbours). The block
   entries act on the block the menu is up on, or — with no menu — on the one the keyboard has
   selected, so each of them is a chord as well as a row.
 
