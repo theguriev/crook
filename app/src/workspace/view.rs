@@ -2541,6 +2541,10 @@ impl Workspace {
     /// takes the keyboard the same way: only when a person put it there, and
     /// never from under anything that has taken the keyboard from every
     /// field — a menu, the Themes panel, a plugin's surface, the search box.
+    ///
+    /// And it gives the keyboard up the same way, to a person going somewhere
+    /// else with it — a click on a pane, a section shown, another field
+    /// pressed, the find bar opened — with its words kept.
     pub(super) fn changes_takes_keys(&self) -> bool {
         self.changes.open
             && self.changes.draft_is_focused()
@@ -2981,6 +2985,10 @@ impl Workspace {
                     return;
                 }
                 find.open();
+                // Opening the bar is asking to type into it, so a comment
+                // being typed in the Changes column lets go of the keyboard
+                // and keeps its words.
+                self.changes.focus_draft(false);
                 // Come back onto a match if the query already found some, so
                 // reopening a search shows where it left off rather than an
                 // emphasised nothing.
@@ -3268,6 +3276,11 @@ impl Workspace {
         // that merely covers it is handled by `search_takes_keys` instead.
         self.panel_search.clear();
         self.panel_search.set_focused(false);
+        // A comment being typed in the Changes column keeps its words and
+        // lets go of the keyboard, because the section a person just chose
+        // is where they mean to type: its first field has the keyboard as
+        // soon as it is drawn, see `field_with_keys`.
+        self.changes.focus_draft(false);
         self.sync_input_keys();
         // The settings re-read the keybindings file while they are showing;
         // a chain already running carries on and stops itself when the
@@ -7300,6 +7313,9 @@ impl Workspace {
                     return;
                 };
                 self.focus_field(index);
+                // A press on a field is a person leaving the comment field in
+                // the Changes column beside it, whose words stay.
+                self.changes.focus_draft(false);
                 self.sync_input_keys();
                 ctx.notify();
             }

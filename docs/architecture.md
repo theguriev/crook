@@ -1130,10 +1130,12 @@ the same text on the clipboard. The field takes the keyboard the way the tab sea
 a wish granted by `changes_takes_keys` and claimed Escape and Enter in `action_for` — and the
 pane beside it is given no keys at all while it has them (`body.rs`), since every element sees
 every keystroke and an agent with no composer would otherwise be typed into alongside the
-field. Against the agents themselves, a multi-line bracketed paste was checked to land in the
-prompt unsent in Claude Code 2.1.280 (as `[Pasted text #1 +3 lines]`) and OpenCode 1.18.33 (as
-`[Pasted ~4 lines]`); Codex 0.149.1 and Gemini CLI 0.61.0 turn bracketed paste on at start-up,
-but stopped at sign-in and a trust question here, so a paste into their prompts is not verified.
+field. A click on a pane, a section shown, another field pressed or the find bar opened takes
+the keyboard back, and the comment keeps its words. Against the agents themselves, a
+multi-line bracketed paste was checked to land in the prompt unsent in Claude Code 2.1.280 (as
+`[Pasted text #1 +3 lines]`) and OpenCode 1.18.33 (as `[Pasted ~4 lines]`); Codex 0.149.1 and
+Gemini CLI 0.61.0 turn bracketed paste on at start-up, but stopped at sign-in and a trust
+question here, so a paste into their prompts is not verified.
 
 ### The agent says what it is doing
 

@@ -23041,10 +23041,20 @@ mod changes_column {
         })
     }
 
+    /// What has been typed into the column's comment field, while one is up.
+    fn comment_typed(harness: &Harness) -> Option<String> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .changes_panel()
+                .draft_input()
+                .map(|input| input.editor().text().to_owned())
+        })
+    }
+
     /// Opens the column on the focused pane's repository, opens the README's
-    /// diff, and leaves "say why" on its added line with the pointer and the
-    /// keyboard, as a person would.
-    fn comment_on_the_added_line(harness: &mut Harness) {
+    /// diff, and presses its added line, which opens a field under it with
+    /// the keyboard in it.
+    fn open_a_comment_on_the_added_line(harness: &mut Harness) {
         harness.run_command("crook/changes/toggle");
         harness.wait_for("the column never read the repository", |harness| {
             has_read(harness)
@@ -23061,6 +23071,13 @@ mod changes_column {
         );
         // The frame the window draws before the next key, with the field in.
         harness.frame();
+    }
+
+    /// Opens the column on the focused pane's repository, opens the README's
+    /// diff, and leaves "say why" on its added line with the pointer and the
+    /// keyboard, as a person would.
+    fn comment_on_the_added_line(harness: &mut Harness) {
+        open_a_comment_on_the_added_line(harness);
         type_keys(harness, "say why");
         harness.press("enter", Modifiers::default(), "\r");
         assert!(
@@ -23455,5 +23472,94 @@ mod changes_column {
             what_the_agent_received(&mut harness, agent, &received),
             format!("\u{1b}[200~{}\u{1b}[201~", the_review(&base))
         );
+    }
+
+    #[test]
+    fn showing_a_section_or_pressing_its_field_takes_the_keyboard_from_a_comment() {
+        let scratch = Scratch::new();
+        let Some((repository, _)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(repository.clone());
+        });
+        open_a_comment_on_the_added_line(&mut harness);
+        type_keys(&mut harness, "half");
+
+        // The settings, the way the sidebar's button shows them: their search
+        // box has the keyboard as soon as it is drawn, and the comment keeps
+        // its words.
+        harness.open_settings_page();
+        assert!(
+            !comment_has_keys(&harness),
+            "the settings came up with the keyboard still in the comment"
+        );
+        harness.type_text("font");
+        assert_eq!(harness.search_text(), "font");
+        assert_eq!(comment_typed(&harness).as_deref(), Some("half"));
+
+        // Back into the comment, the way a press on it goes, and out again by
+        // a press on the settings' search box.
+        harness.dispatch_workspace_action(WorkspaceAction::Changes(ChangesAction::FocusComment));
+        assert!(comment_has_keys(&harness));
+        type_keys(&mut harness, "x");
+        let search = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .field(crate::plugins::settings::SETTINGS_SECTION, "search")
+                .0
+        });
+        harness.dispatch_workspace_action(WorkspaceAction::Settings(SettingsAction::FocusField(
+            Some(search),
+        )));
+        assert!(
+            !comment_has_keys(&harness),
+            "a press on the search box left the keyboard in the comment"
+        );
+        harness.type_text("size");
+        assert_eq!(harness.search_text(), "fontsize");
+        assert_eq!(comment_typed(&harness).as_deref(), Some("halfx"));
+    }
+
+    #[test]
+    fn opening_the_find_bar_takes_the_keyboard_from_a_comment() {
+        let scratch = Scratch::new();
+        let Some((repository, _)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        if !a_shell_these_tests_speak() {
+            return;
+        }
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(repository.clone());
+        });
+        if !harness.start_terminals_with_marks() {
+            return;
+        }
+        await_prompt(&mut harness, pane);
+        open_a_comment_on_the_added_line(&mut harness);
+        type_keys(&mut harness, "abc");
+
+        harness.dispatch_workspace_action(WorkspaceAction::Find {
+            pane,
+            action: crate::workspace::action::FindAction::Open,
+        });
+        assert!(
+            !comment_has_keys(&harness),
+            "the find bar opened with the keyboard still in the comment"
+        );
+        // The frame that draws the bar, which is what a key is typed into.
+        harness.frame();
+        type_keys(&mut harness, "qq");
+        let query = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.find(pane).map(crate::pane_find::PaneFind::query)
+        });
+        assert_eq!(query.as_deref(), Some("qq"));
+        assert_eq!(comment_typed(&harness).as_deref(), Some("abc"));
     }
 }
