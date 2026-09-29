@@ -15390,7 +15390,7 @@ mod the_frame_budget {
             workspace
                 .tabs()
                 .pane(pane)
-                .and_then(|pane| pane.session().attention)
+                .and_then(|pane| pane.session().attention.clone())
         })
     }
 
