@@ -146,17 +146,19 @@ impl Notice {
     /// A pane named `name` whose row turned to needs-input, with `session`
     /// as it stands now.
     ///
-    /// The body is the agent's question when it asked one — the message the
-    /// row shows in place of its second line, cut short — and otherwise what
+    /// The body is what the row shows in place of its second line, cut short:
+    /// the text of a notification the pane sent the way other terminals'
+    /// programs do, or else the agent's question when it asked one. Otherwise
+    /// it is what
     /// the row's "Why this status" would say turned it amber: the agent
     /// stopped to ask without saying what, the bell rang, the agent said it
     /// was done, or the command it was running ended without its saying so.
     pub fn needs_input(name: &str, session: &AgentSession) -> Self {
-        let question = session
-            .message
-            .as_deref()
-            .map(cut)
-            .filter(|question| !question.is_empty());
+        let said = match &session.attention {
+            Some(Attention::Notification(text)) => Some(text.as_str()),
+            _ => session.message.as_deref(),
+        };
+        let question = said.map(cut).filter(|question| !question.is_empty());
         let body = match question {
             Some(question) => question,
             None if session.status == AgentStatus::NeedsInput => "Waiting for you".to_owned(),

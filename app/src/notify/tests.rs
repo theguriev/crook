@@ -34,6 +34,22 @@ fn a_notification_names_crook_and_the_tab() {
 }
 
 #[test]
+fn a_notification_the_pane_sent_is_the_body_ahead_of_a_question() {
+    let notified = session(
+        AgentStatus::NeedsInput,
+        Some("run rm -rf build?"),
+        Some(Attention::Notification(
+            "Claude: needs your permission".to_owned(),
+        )),
+    );
+
+    assert_eq!(
+        Notice::needs_input("a", &notified).body,
+        "Claude: needs your permission"
+    );
+}
+
+#[test]
 fn a_tab_with_no_name_is_still_crook() {
     assert_eq!(title("   "), "Crook");
 }
@@ -41,15 +57,15 @@ fn a_tab_with_no_name_is_still_crook() {
 #[test]
 fn with_no_question_the_body_says_what_turned_the_row_amber() {
     let body = |session: &AgentSession| Notice::needs_input("a", session).body;
-    let changed = Some(Attention::StatusChange);
+    let changed = || Some(Attention::StatusChange);
 
     assert_eq!(
-        body(&session(AgentStatus::NeedsInput, None, changed)),
+        body(&session(AgentStatus::NeedsInput, None, changed())),
         "Waiting for you"
     );
     // A question of nothing but whitespace is no question.
     assert_eq!(
-        body(&session(AgentStatus::NeedsInput, Some(" \n "), changed)),
+        body(&session(AgentStatus::NeedsInput, Some(" \n "), changed())),
         "Waiting for you"
     );
     assert_eq!(
@@ -57,11 +73,11 @@ fn with_no_question_the_body_says_what_turned_the_row_amber() {
         "Rang the bell"
     );
     assert_eq!(
-        body(&session(AgentStatus::Idle, None, changed)),
+        body(&session(AgentStatus::Idle, None, changed())),
         "Done, waiting for a prompt"
     );
 
-    let mut ended = session(AgentStatus::Idle, None, changed);
+    let mut ended = session(AgentStatus::Idle, None, changed());
     ended.source = StatusSource::CommandEnded(Instant::now());
     assert_eq!(body(&ended), "Its command ended");
 }

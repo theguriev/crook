@@ -118,13 +118,21 @@ impl AgentStatus {
 /// are answered differently by the person reading them — and so that the
 /// two can never disagree: attention that is set has a cause, and attention
 /// that is cleared has none.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Attention {
     /// The shell rang the bell in a pane without the keyboard.
     Bell,
     /// The agent's status changed to something other than running, in a
     /// pane without the keyboard.
     StatusChange,
+    /// A program in a pane without the keyboard sent one of the
+    /// notifications other terminals show — OSC 9, 777 or 99 — and this is
+    /// what it said, on one line.
+    ///
+    /// The words ride with the flag for the reason the cause does: they
+    /// are what the look is being asked for, so they go when the look is
+    /// given and never linger on a row somebody has already read.
+    Notification(String),
 }
 
 /// Where a session's status came from.
@@ -204,12 +212,12 @@ pub struct AgentSession {
     pub source: StatusSource,
     /// Whether something happened here while nobody was looking, and what.
     ///
-    /// The bell in a pane without the keyboard, or a status that changed
-    /// there to anything but running: a person who walked away from a tab
-    /// wants to know its agent stopped, whatever it stopped for. Cleared by
-    /// looking — every focus change runs `attend` — because attention is a
-    /// fact about the person and not about the work, which is the whole
-    /// reason it is not folded into [`Self::status`].
+    /// The bell in a pane without the keyboard, a notification sent there,
+    /// or a status that changed there to anything but running: a person who
+    /// walked away from a tab wants to know its agent stopped, whatever it
+    /// stopped for. Cleared by looking — every focus change runs `attend` —
+    /// because attention is a fact about the person and not about the work,
+    /// which is the whole reason it is not folded into [`Self::status`].
     pub attention: Option<Attention>,
     /// Whether a person asked to be brought back here.
     ///
@@ -323,6 +331,21 @@ impl AgentSession {
             .as_deref()
             .or(self.derived_title.as_deref())
             .or(self.running_command.as_deref())
+    }
+
+    /// What the row says on its second line in place of the table's: what
+    /// a notification nobody has seen yet said, else what a waiting agent
+    /// is asking.
+    ///
+    /// The notification first, because it is the newer of the two — a
+    /// status change after it takes its place in [`Self::attention`] — and
+    /// because it is the one a look will take away: once somebody has read
+    /// it, the question the agent is still asking comes back.
+    pub fn row_message(&self) -> Option<&str> {
+        match &self.attention {
+            Some(Attention::Notification(message)) => Some(message),
+            _ => self.message.as_deref(),
+        }
     }
 
     /// Whether somebody should look here: the work asked, or the person did.

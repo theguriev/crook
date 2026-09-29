@@ -5367,7 +5367,48 @@ impl Workspace {
         }
         let was = self.shown_status(pane);
         let reported = self.update_session(pane, ctx, |session| {
-            session.attention = Some(Attention::Bell);
+            // A bell after a notification asks for the look the notification
+            // already asked for, and says less: Claude Code's
+            // `iterm2_with_bell` channel sends exactly that pair, and a bell
+            // that took the notification's place would take its words too.
+            if !matches!(session.attention, Some(Attention::Notification(_))) {
+                session.attention = Some(Attention::Bell);
+            }
+        });
+        self.tell_the_desktop(pane, was, ctx);
+        reported
+    }
+
+    /// Records that a program in a pane sent one of the notifications other
+    /// terminals show — OSC 9, 777 or 99.
+    ///
+    /// A bell with words: it asks for a look in a pane nobody is looking at,
+    /// is cleared by looking, and says on the row what it was about. It is
+    /// deliberately not a status. The program that sent it may be an agent
+    /// that has said it is running, and still is; or one on a machine with
+    /// no Crook binary, which has never said anything else, and whose row
+    /// is drawn as waiting the way a bell's is.
+    ///
+    /// The title and the body go on the row's one line together, the way
+    /// Claude Code joins them itself for OSC 9, which has room for only one.
+    fn notified(
+        &mut self,
+        pane: PaneId,
+        title: Option<&str>,
+        body: Option<&str>,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let message = match (title, body) {
+            (Some(title), Some(body)) => format!("{title}: {body}"),
+            (Some(text), None) | (None, Some(text)) => text.to_owned(),
+            (None, None) => return self.tabs.pane(pane).is_some(),
+        };
+        if self.looking_at() == Some(pane) {
+            return true;
+        }
+        let was = self.shown_status(pane);
+        let reported = self.update_session(pane, ctx, |session| {
+            session.attention = Some(Attention::Notification(message));
         });
         self.tell_the_desktop(pane, was, ctx);
         reported
@@ -5674,6 +5715,9 @@ impl Workspace {
                 StatusSource::CommandEnded(Instant::now()),
                 ctx,
             ),
+            TerminalUpdate::Notification { pane, title, body } => {
+                self.notified(*pane, title.as_deref(), body.as_deref(), ctx)
+            }
         };
 
         if !reported {

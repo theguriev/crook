@@ -4757,7 +4757,7 @@ fn clearing_waiting_takes_back_what_a_bell_asked_and_not_what_the_agent_said() {
             .pane(row)
             .expect("the row is open")
             .session();
-        (session.attention, session.marked, session.status)
+        (session.attention.clone(), session.marked, session.status)
     });
     assert_eq!(
         (None, false, AgentStatus::NeedsInput),
@@ -17186,6 +17186,192 @@ mod the_agent {
         });
 
         assert_eq!((true, false), waiting);
+    }
+
+    /// Applies a notification the way the model's subscription does.
+    fn notify(harness: &mut Harness, pane: PaneId, title: Option<&str>, body: Option<&str>) {
+        let update = TerminalUpdate::Notification {
+            pane,
+            title: title.map(str::to_owned),
+            body: body.map(str::to_owned),
+        };
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(&update, ctx);
+        });
+    }
+
+    /// What a pane's row prints on its second line in place of the table's.
+    fn row_message_of(harness: &Harness, pane: PaneId) -> Option<String> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .pane(pane)
+                .expect("the pane is open")
+                .session()
+                .row_message()
+                .map(str::to_owned)
+        })
+    }
+
+    #[test]
+    fn a_notification_where_nobody_is_looking_asks_for_a_look_and_leaves_the_status() {
+        // An OSC 9 from an agent on a machine with no Crook binary on it:
+        // the row asks for a look and says what for, and the dot keeps
+        // saying what the agent last said.
+        let mut harness = Harness::new(2);
+        let away = background_of(&harness);
+        report(&mut harness, away, AgentStatus::Running, Some(TITLE));
+
+        notify(
+            &mut harness,
+            away,
+            None,
+            Some("Claude needs your permission to use Bash"),
+        );
+
+        assert_eq!(
+            (AgentStatus::Running, true, Some(TITLE.to_owned())),
+            session_of(&harness, away),
+            "a notification is not a status"
+        );
+        let shown = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().pane(away).map(Pane::status)
+        });
+        assert_eq!(Some(AgentStatus::Running), shown);
+        assert_eq!(
+            Some("Claude needs your permission to use Bash".to_owned()),
+            row_message_of(&harness, away)
+        );
+        let scene = harness.frame();
+        assert!(frame_text(&scene).contains("1 waiting"));
+        // Cut to the row's width, from its end.
+        assert!(
+            strip_text(&scene).contains("Claude needs your permission"),
+            "the row did not say what the notification said: {}",
+            strip_text(&scene)
+        );
+
+        harness.dispatch_action(TabAction::FocusPane(away));
+        assert_eq!(
+            (AgentStatus::Running, false, Some(TITLE.to_owned())),
+            session_of(&harness, away),
+            "looking is what answers a notification"
+        );
+        assert_eq!(
+            None,
+            row_message_of(&harness, away),
+            "the message went on showing after the look it asked for"
+        );
+    }
+
+    #[test]
+    fn a_notification_in_the_pane_with_the_keyboard_is_not_an_interruption() {
+        let mut harness = Harness::new(1);
+        let here = harness.focused_pane_id().expect("the window has a pane");
+
+        notify(&mut harness, here, None, Some("tests passed"));
+
+        assert_eq!((AgentStatus::Idle, false, None), session_of(&harness, here));
+        assert_eq!(None, row_message_of(&harness, here));
+    }
+
+    #[test]
+    fn a_notifications_title_and_body_share_the_rows_line() {
+        // OSC 777 and kitty's OSC 99 name what is asking, and the row has
+        // one line for both. An idle pane that asked is drawn as waiting,
+        // the way a bell's is.
+        let mut harness = Harness::new(2);
+        let away = background_of(&harness);
+
+        notify(
+            &mut harness,
+            away,
+            Some("Claude Code"),
+            Some("Claude needs your permission to use Bash"),
+        );
+        assert_eq!(
+            Some("Claude Code: Claude needs your permission to use Bash".to_owned()),
+            row_message_of(&harness, away)
+        );
+        let shown = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().pane(away).map(Pane::status)
+        });
+        assert_eq!(Some(AgentStatus::NeedsInput), shown);
+
+        notify(&mut harness, away, Some("build"), None);
+        assert_eq!(Some("build".to_owned()), row_message_of(&harness, away));
+    }
+
+    #[test]
+    fn a_bell_after_a_notification_keeps_what_it_said() {
+        // Claude Code's `iterm2_with_bell` channel writes exactly this pair,
+        // and the bell asks for the look the notification already asked for.
+        let mut harness = Harness::new(2);
+        let away = background_of(&harness);
+
+        notify(
+            &mut harness,
+            away,
+            None,
+            Some("Claude is waiting for your input"),
+        );
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &TerminalUpdate::Bell {
+                    pane: away,
+                    while_running: true,
+                },
+                ctx,
+            );
+        });
+
+        assert_eq!(
+            Some("Claude is waiting for your input".to_owned()),
+            row_message_of(&harness, away)
+        );
+    }
+
+    #[test]
+    fn a_notification_beside_a_question_is_shown_until_it_is_seen() {
+        // The newest thing said is the one on the row; once it has been
+        // looked at, the agent's own question — still asked — comes back.
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        report_waiting_for(
+            &mut harness,
+            away,
+            AgentStatus::NeedsInput,
+            None,
+            Some("run rm -rf build?"),
+        );
+
+        notify(&mut harness, away, None, Some("still waiting"));
+        assert_eq!(
+            Some("still waiting".to_owned()),
+            row_message_of(&harness, away)
+        );
+
+        harness.dispatch_action(TabAction::Select(tabs[0]));
+        assert_eq!(
+            Some("run rm -rf build?".to_owned()),
+            row_message_of(&harness, away)
+        );
+    }
+
+    #[test]
+    fn why_this_status_says_what_the_notification_said() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        report(&mut harness, away, AgentStatus::Running, None);
+        notify(&mut harness, away, None, Some("tests passed"));
+
+        let text = explanation_of(&mut harness, tabs[0], away);
+        assert!(text.contains("Status: running"), "{text}");
+        assert!(text.contains("notification"), "{text}");
+        assert!(text.contains("tests passed"), "{text}");
+        assert!(!text.contains("bell"), "{text}");
     }
 }
 

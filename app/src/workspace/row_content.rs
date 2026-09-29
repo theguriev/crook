@@ -30,6 +30,8 @@
 //! a person comes now, and which branch the pane is on is not. The moment
 //! the agent goes back to work the message goes with it (see
 //! `AgentSession::message`), and the line says what the table says again.
+//! A notification a program sent while nobody was looking takes the same
+//! line for as long as nobody has — see `AgentSession::row_message`.
 
 use std::path::Path;
 
@@ -137,8 +139,9 @@ pub(super) struct RowFacts {
     directory: Option<String>,
     /// The branch it is on, if the directory is a repository.
     branch: Option<String>,
-    /// What the agent is waiting for, while it is waiting: the second line
-    /// while it is there, in place of whatever the table put there.
+    /// What the agent is waiting for, while it is waiting, or what a
+    /// notification nobody has seen yet said: the second line while it is
+    /// there, in place of whatever the table put there.
     message: Option<String>,
     /// Whether [`Self::command`] is the directory's own name rather than a
     /// name the session has.
@@ -170,7 +173,7 @@ impl RowFacts {
                 .and_then(|facts| facts.branch.as_ref())
                 .map(Head::label)
                 .map(str::to_owned),
-            message: session.message.clone(),
+            message: session.row_message().map(str::to_owned),
         }
     }
 

@@ -81,6 +81,7 @@ mod harvest;
 pub mod input;
 mod marks;
 pub mod mouse;
+pub mod notify;
 mod pty;
 mod rows;
 pub mod selection;
@@ -101,6 +102,7 @@ pub use crate::harvest::{BlockRows, RowCombining, StyleRun};
 pub use crate::input::{InputModes, Key, KeyboardModes, KeypadKey, Modifiers};
 pub use crate::marks::{PromptKind, ShellMark};
 pub use crate::mouse::{MouseButton, MouseEventKind, MouseModes};
+pub use crate::notify::Notification;
 pub use crate::pty::{ChildExit, Program, Pty, PtyReader, default_shell, login_arguments};
 pub use crate::rows::Rows;
 pub use crate::selection::{CellSide, SelectionKind};
@@ -450,7 +452,8 @@ impl Terminal {
     }
 
     /// Everything the child has asked for since the last call: bells, titles,
-    /// working directories, a clipboard write, the child finishing.
+    /// working directories, a clipboard write, a notification, the child
+    /// finishing.
     pub fn take_events(&mut self) -> Vec<TerminalEvent> {
         self.emulator.take_events()
     }

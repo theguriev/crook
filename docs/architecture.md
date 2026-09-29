@@ -1129,6 +1129,35 @@ the panel is drawn and never ticked), the title and the question, which of the b
 status change set `attention` and whether `marked` is set, and what the shell is running —
 on a read-only panel that hangs off the menu's corner where the worktree list does.
 
+**Other terminals' notifications ask for the same look.** OSC 6340 is spoken only by a program
+that has been told about Crook, and the ones that have not already say "look here" in three
+sequences other terminals show: OSC 9, iTerm2's; OSC 777 `notify`, rxvt's, which Ghostty
+reads; and OSC 99, kitty's. Claude Code writes one of them when it stops to ask, in whichever
+form its notification channel names, and it does so on a remote box with no Crook binary as
+readily as next door. The same watcher reads them, in `crates/crook_terminal/src/notify.rs`,
+into a `Notification` of a title and a body, putting a message `vte` split on `;` back
+together and marking one that ran past `vte`'s sixteen pieces with `…`, the way a report cut in
+the writer is. ConEmu's commands on OSC 9 — `9;4` progress, which winget among others
+writes, and the rest of `9;1` to `9;12` — are not notifications and are dropped; a kitty
+notification sent in chunks is put back together by its `i=`, and a payload in base64 is
+skipped rather than shown as it arrived. It is not a status, and the status is left as it was:
+an agent that says it is running is still running after it notifies. What it sets is
+`attention` — `Attention::Notification`, which carries the text, joined `title: body` since
+the row has one line for both — in a pane without the keyboard, exactly where a bell would:
+the row washes, counts as waiting, and prints the text on its second line in place of the
+table's, ahead of a `needs-input` message since it is the newer of the two. Whatever clears a
+bell's attention clears it — a look, an agent reporting running — and the text goes with it; a
+bell after it keeps it, because Claude Code's `iterm2_with_bell` channel sends that pair. A
+burst with no report between is handed over as its last one, beside the bell's rule. In one
+read it keeps its place among the reports and marks around it, so a status written after it —
+a `running`, or the `D` that ends a running agent — takes it away and one written before it
+does not, wherever the pty split the bytes. The watcher stops where a report and a
+notification meet, as it stops on a mark, so a report before the notification is handed over
+ahead of it rather than folded into one written after it: `needs-input`, `9;done`, `running`
+is three changes, not a notification and a `running` that changed nothing. Nothing here posts
+a desktop notification of its own; a row it turns amber is told to the desktop the way a
+bell's is.
+
 **Looking needs the window in front.** "Nobody was looking" meant "the pane without the
 keyboard", and that made the one-pane window the one that could never be waiting: its pane
 has the keyboard the whole time somebody is in another application, so an agent that stopped

@@ -291,6 +291,10 @@ Nineteen features, and the page that configures them:
   `crook --skill` prints the skill file that teaches an agent the rest — how to tell it is in
   a pane, what the four words do, where the worktrees and the plugins are — to save as
   `~/.claude/skills/crook/SKILL.md`.
+  Crook also reads the notifications other terminals show — OSC 9, 777 and 99 — as the pane
+  asking for a look, with the notification's text on the row and the status left as it was, so
+  an agent on a remote box with its notification channel set to `iterm2`, `ghostty` or `kitty`
+  lights its row with no Crook binary there.
   A status the agent never took back goes when the shell's own marks say the command ended,
   and a failure stays on the row until the next command starts. Looking at a tab clears the
   *attention* it asked for and nothing else: an agent waiting for an approval is still waiting

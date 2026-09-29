@@ -388,6 +388,40 @@ fn a_burst_of_bells_is_handed_over_as_one() {
 }
 
 #[test]
+fn a_burst_of_notifications_is_handed_over_as_the_last_one() {
+    // The bell's rule, with one difference: a notification carries words,
+    // and the ones worth showing are the last the program said.
+    let Some(shared) = session() else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    let said = |events: Vec<TerminalEvent>| {
+        events
+            .into_iter()
+            .filter_map(|event| match event {
+                TerminalEvent::Notification(notification) => notification.body,
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    shared.feed(b"\x1b]9;one\x07");
+    shared.feed(b"\x07");
+    shared.feed(b"\x1b]9;two\x07");
+    let events = shared.take_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, TerminalEvent::Bell)),
+        "the bell between them was dropped with the first notification"
+    );
+    assert_eq!(vec!["two".to_owned()], said(events));
+
+    shared.feed(b"\x1b]9;three\x07");
+    assert_eq!(vec!["three".to_owned()], said(shared.take_events()));
+}
+
+#[test]
 fn a_closed_pane_frees_its_terminal_even_while_its_reader_is_still_blocked() {
     // A `sleep 60 &` keeps the pty open after the pane is closed, so the read
     // cannot return — and the thread owns the object whose drop would return
