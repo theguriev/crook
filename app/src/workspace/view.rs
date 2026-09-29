@@ -927,10 +927,11 @@ impl Workspace {
 
         let terminals = ctx.add_model(TerminalModel::new);
         // Two channels, and they carry different things. The observation is
-        // "a grid changed, draw it again", which the model raises at most once
-        // per pane per frame interval. The subscription is the handful of
-        // things a shell does that the *strip* has to act on: rename itself,
-        // move, or finish.
+        // "every pane may look different": a theme's palette reached the
+        // shells, or one opened or failed to. The subscription is one pane at
+        // a time — the things a shell does that the *strip* has to act on,
+        // renaming itself, moving, finishing, and the most frequent of all,
+        // its grid changing, which is a frame only if the pane is on screen.
         ctx.observe(&terminals, |_, _, ctx| ctx.notify());
         ctx.subscribe_to_model(&terminals, |workspace, _, update, ctx| {
             workspace.apply_terminal_update(update, ctx);
@@ -5685,12 +5686,29 @@ impl Workspace {
     /// which is the same path `cmd-w` takes: the pane goes, its tab goes with
     /// it if it was the last pane, and the window goes if that was the last
     /// tab. There is deliberately no second way to close anything.
+    ///
+    /// A grid that changed is a frame only when [`Self::pane_is_on_screen`]
+    /// says so. Everything else here is applied whether or not anybody can see
+    /// the pane: it is about the session — what its row says, the clipboard,
+    /// the pane closing — and none of that can wait for the tab to be looked
+    /// at.
     pub(super) fn apply_terminal_update(
         &mut self,
         update: &TerminalUpdate,
         ctx: &mut ViewContext<Self>,
     ) {
         let reported = match update {
+            // The one update that is about pixels, and the gate that keeps a
+            // tab nobody is looking at from rebuilding the window every time
+            // its shell prints. Nothing else is lost by skipping it: the grid
+            // is all it changed, and the frame that brings the pane back on
+            // screen reads the snapshot the model holds *now*.
+            TerminalUpdate::Repainted(pane) => {
+                if self.pane_is_on_screen(*pane) {
+                    ctx.notify();
+                }
+                self.tabs.pane(*pane).is_some()
+            }
             TerminalUpdate::Title(pane, title) => {
                 let title = title.clone();
                 self.update_session(*pane, ctx, |session| session.derived_title = title)
@@ -5810,6 +5828,23 @@ impl Workspace {
             // thread hearing it. Nothing to write it into, and nothing wrong.
             log::debug!("a terminal reported {update:?} for a pane that has gone");
         }
+    }
+
+    /// Whether a frame draws `pane`'s output right now.
+    ///
+    /// The render's own answer, restated: `body::render` draws the active
+    /// tab's panes less the ones a zoom hides, and [`View::render`] draws no
+    /// body at all while a section of the sidebar is showing. Asked when a
+    /// repaint arrives rather than kept up to date beside the state it
+    /// follows, so there is no path — a tab switch, a split, a zoom, a close,
+    /// a restore, a plugin switched off under the section it was showing —
+    /// that can leave it saying a pane is hidden while the frame draws it.
+    pub(super) fn pane_is_on_screen(&self, pane: PaneId) -> bool {
+        self.showing_section().is_none()
+            && self
+                .tabs
+                .active()
+                .is_some_and(|tab| tab.panes().is_visible(pane))
     }
 
     /// Spends what a restore left in a pane once a command has finished
