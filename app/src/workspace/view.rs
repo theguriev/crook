@@ -5477,8 +5477,8 @@ impl Workspace {
         grouped: bool,
         directory: Option<PathBuf>,
         heading: Option<String>,
-        prepare: impl FnOnce(&mut AgentSession),
         ctx: &mut ViewContext<Self>,
+        prepare: impl FnOnce(&mut AgentSession),
     ) -> Option<(TabId, PaneId)> {
         let (anchor, grouped) = match self.tabs.get(beside) {
             Some(_) => (beside, grouped),

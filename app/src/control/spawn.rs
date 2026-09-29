@@ -438,19 +438,12 @@ fn finish(
     let cwd = directory
         .as_deref()
         .map(|directory| directory.to_string_lossy().into_owned());
-    let opened = workspace.open_worker_tab(
-        beside,
-        grouped,
-        directory,
-        heading,
-        |session| {
-            session.spawned_by = Some(lineage);
-            if title.is_some() {
-                session.custom_title = title;
-            }
-        },
-        ctx,
-    );
+    let opened = workspace.open_worker_tab(beside, grouped, directory, heading, ctx, |session| {
+        session.spawned_by = Some(lineage);
+        if title.is_some() {
+            session.custom_title = title;
+        }
+    });
     let Some((tab, pane)) = opened else {
         let refusal = Refusal::new(code::FAILED, "the tab could not be opened");
         spawns.borrow_mut().refuse(caller, &refusal);
