@@ -166,11 +166,14 @@
 //! it warns about by pressing the same key again.
 //!
 //! The creator claims the up and down arrows as well, and they move the check
-//! down the list under the field that has the keyboard — the places to start
-//! from under the name, the agents under the prompt — while the field keeps
-//! every letter. In a one-line field those two only jump the caret to an end,
-//! which Home and End still do. Tab, while there are two fields, moves the
-//! keyboard to the other one.
+//! down the list in the half that has the keyboard — the places to start from
+//! with the name, the agents with the prompt — while the field keeps every
+//! letter. In a one-line field those two only jump the caret to an end, which
+//! Home and End still do. Tab, where there are agents, moves the keyboard to
+//! the other half. The agents' half is a stop of its own while no prompt is
+//! asked for — "Shell only", or a shell the quoting is not proven in — with
+//! the picked row lit where a caret would otherwise say where the keyboard
+//! is, so that every agent is a key away and not only a click.
 //!
 //! # Reading git off the frame
 //!
@@ -476,7 +479,7 @@ pub(super) struct TabMenuState {
     /// way it was written — see [`crate::plugins::wasm::quoting_holds_in`].
     /// Where it does not, the creator asks for no prompt.
     pub(super) prompt_holds: bool,
-    /// Which of the creator's fields has the keyboard.
+    /// Which half of the creator has the keyboard.
     pub(super) field: CreatorField,
     /// The branch name the creator itself last put in the field.
     ///
@@ -1253,9 +1256,9 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
         for (index, base) in state.bases.iter().enumerate() {
             rows.add_child(check_row(
-                state,
-                Control::Base(index),
+                state.control(Control::Base(index)),
                 state.base == index,
+                false,
                 &base.label,
                 base.badge,
                 WorktreeAction::PickBase(index),
@@ -1284,10 +1287,14 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
                 .with_margin_top(10.)
                 .finish(),
         );
+        // The picked row is lit while the arrows walk this list and there is
+        // no prompt field to hold a caret: nothing else on the face would say
+        // where the keyboard is.
+        let lit = state.field == CreatorField::Agent && !state.asks_for_a_prompt();
         column.add_child(check_row(
-            state,
-            Control::Agent(0),
+            state.control(Control::Agent(0)),
             state.agent == 0,
+            lit && state.agent == 0,
             "Shell only",
             None,
             WorktreeAction::PickAgent(0),
@@ -1299,9 +1306,9 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
             // it, since that word is what the composer is about to say.
             let program = crate::agent::program(agent).unwrap_or(agent);
             column.add_child(check_row(
-                state,
-                Control::Agent(row),
+                state.control(Control::Agent(row)),
                 state.agent == row,
+                lit && state.agent == row,
                 program,
                 (program != *agent).then_some(*agent),
                 WorktreeAction::PickAgent(row),
@@ -1326,7 +1333,7 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
                     PROMPT_PLACEHOLDER,
                 )
                 .with_focus(WorkspaceAction::Worktree(WorktreeAction::Focus(
-                    CreatorField::Prompt,
+                    CreatorField::Agent,
                 )))
                 .with_edit(WorkspaceAction::Worktree(WorktreeAction::PromptEdited))
                 .finish(),
@@ -1372,12 +1379,14 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
 /// out of several, made by pressing it — and a person who has used one has
 /// used this. The check is the only difference between the picked row and the
 /// rest; the pointer lights whichever row it is over, as it does on every row
-/// in this menu. The badge sits where the list's rows put theirs, and says
-/// "this tab" for the same checkout the list says it about.
+/// in this menu, and `lit` lights it as well for a keyboard standing on it,
+/// the way the list's rows are lit for the keyboard's row. The badge sits
+/// where the list's rows put theirs, and says "this tab" for the same
+/// checkout the list says it about.
 fn check_row(
-    state: &TabMenuState,
-    control: Control,
+    control: MouseStateHandle,
     picked: bool,
+    lit: bool,
     label: &str,
     badge: Option<&'static str>,
     action: WorktreeAction,
@@ -1385,7 +1394,7 @@ fn check_row(
 ) -> Box<dyn Element> {
     let label = label.to_owned();
 
-    Hoverable::new(state.control(control), move |mouse| {
+    Hoverable::new(control, move |mouse| {
         let check: Box<dyn Element> = if picked {
             Align::new(
                 Icon::new(Lucide::Check, CHECK_SIZE)
@@ -1442,7 +1451,7 @@ fn check_row(
         Container::new(line.finish())
             .with_horizontal_padding(ROW_INSET)
             .with_vertical_padding((BASE_ROW_HEIGHT - CHECK_SLOT) / 2.)
-            .with_background_color(if mouse.is_hovered() {
+            .with_background_color(if lit || mouse.is_hovered() {
                 theme().overlay_1
             } else {
                 Color::TRANSPARENT

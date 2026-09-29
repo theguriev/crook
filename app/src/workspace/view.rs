@@ -1379,9 +1379,14 @@ impl Workspace {
     /// have while it is drawn. The prompt field's answer, as the one above is
     /// the branch field's.
     pub fn worktree_prompt_has_keys(&self) -> bool {
-        self.worktree_menu_is_creating()
-            && self.tab_menu.field == CreatorField::Prompt
-            && self.tab_menu.asks_for_a_prompt()
+        self.worktree_agents_have_keys() && self.tab_menu.asks_for_a_prompt()
+    }
+
+    /// Whether the creator's arrows walk its agents — with the letters going
+    /// to the prompt where one is asked for, and nowhere where none is. For a
+    /// test.
+    pub fn worktree_agents_have_keys(&self) -> bool {
+        self.worktree_menu_is_creating() && self.tab_menu.field == CreatorField::Agent
     }
 
     /// The agents the creator offers, as their command names, in its order.
@@ -3127,19 +3132,29 @@ impl Workspace {
                     && self.tab_menu.agent != index
                 {
                     self.tab_menu.agent = index;
+                    // A press on a row: the keyboard goes where the letters
+                    // are wanted next — the prompt that has just appeared, or
+                    // the name, since "Shell only" asks for nothing else.
+                    self.tab_menu.field = if self.tab_menu.asks_for_a_prompt() {
+                        CreatorField::Agent
+                    } else {
+                        CreatorField::Branch
+                    };
                     self.agent_picked(ctx);
                 }
             }
             WorktreeAction::MoveAgent(by) => {
                 if self.tab_menu.mode == WorktreeMode::Creating && self.tab_menu.move_agent(by) {
+                    // The arrows: the keyboard stays on the list it is
+                    // walking, "Shell only" included, so that the next arrow
+                    // walks it back.
+                    self.tab_menu.field = CreatorField::Agent;
                     self.agent_picked(ctx);
                 }
             }
             WorktreeAction::Focus(field) => {
                 let field = match field {
-                    CreatorField::Prompt if !self.tab_menu.asks_for_a_prompt() => {
-                        CreatorField::Branch
-                    }
+                    CreatorField::Agent if self.tab_menu.agents.is_empty() => CreatorField::Branch,
                     field => field,
                 };
                 if self.tab_menu.mode == WorktreeMode::Creating && self.tab_menu.field != field {
@@ -3149,11 +3164,11 @@ impl Workspace {
                 }
             }
             WorktreeAction::SwitchField => {
-                if self.tab_menu.mode == WorktreeMode::Creating && self.tab_menu.asks_for_a_prompt()
+                if self.tab_menu.mode == WorktreeMode::Creating && !self.tab_menu.agents.is_empty()
                 {
                     self.tab_menu.field = match self.tab_menu.field {
-                        CreatorField::Branch => CreatorField::Prompt,
-                        CreatorField::Prompt => CreatorField::Branch,
+                        CreatorField::Branch => CreatorField::Agent,
+                        CreatorField::Agent => CreatorField::Branch,
                     };
                     self.sync_input_keys();
                     ctx.notify();
@@ -3263,7 +3278,7 @@ impl Workspace {
         // last time, for the reason the base below is not one.
         self.tab_menu.agent = usize::from(task && !self.tab_menu.agents.is_empty());
         self.tab_menu.field = if self.tab_menu.asks_for_a_prompt() {
-            CreatorField::Prompt
+            CreatorField::Agent
         } else {
             CreatorField::Branch
         };
@@ -3316,16 +3331,11 @@ impl Workspace {
         ctx.notify();
     }
 
-    /// What picking another agent changes besides the check: the keyboard
-    /// goes to the prompt that has just appeared, or back to the name from the
-    /// one that has just gone, and the name follows whichever prompt is now
-    /// being asked for — none, for "Shell only".
+    /// What picking another agent changes besides the check and the
+    /// keyboard, which the two ways of picking move differently: the name
+    /// follows whichever prompt is now being asked for — none, for "Shell
+    /// only".
     fn agent_picked(&mut self, ctx: &mut ViewContext<Self>) {
-        self.tab_menu.field = if self.tab_menu.asks_for_a_prompt() {
-            CreatorField::Prompt
-        } else {
-            CreatorField::Branch
-        };
         self.follow_prompt();
         self.sync_input_keys();
         ctx.notify();
@@ -6416,22 +6426,20 @@ impl Workspace {
             // sentence typed into the prompt, and that is not the moment
             // somebody chose to run a line they have not read.
             ("enter", WorktreeMode::Creating) => WorktreeAction::Create,
-            // The creator's lists, one under each field: the arrows walk the
-            // one under the field with the keyboard. The field would spend
-            // these two on jumping its caret to an end, which Home and End
-            // still do, and every letter stays the field's.
+            // The creator's lists, one in each half: the arrows walk the one
+            // in the half with the keyboard. The field would spend these two
+            // on jumping its caret to an end, which Home and End still do,
+            // and every letter stays the field's.
             ("up" | "down", WorktreeMode::Creating) => {
                 let by = if keystroke.key == "up" { -1 } else { 1 };
                 match self.tab_menu.field {
-                    CreatorField::Prompt if self.tab_menu.asks_for_a_prompt() => {
-                        WorktreeAction::MoveAgent(by)
-                    }
-                    _ => WorktreeAction::MoveBase(by),
+                    CreatorField::Agent => WorktreeAction::MoveAgent(by),
+                    CreatorField::Branch => WorktreeAction::MoveBase(by),
                 }
             }
-            // To the other field, where there are two. Where there is one,
-            // Tab is the field's own, as it always was.
-            ("tab", WorktreeMode::Creating) if self.tab_menu.asks_for_a_prompt() => {
+            // To the other half, where there are agents to make one. Where
+            // there are none, Tab is the name field's own, as it always was.
+            ("tab", WorktreeMode::Creating) if !self.tab_menu.agents.is_empty() => {
                 WorktreeAction::SwitchField
             }
             ("enter", WorktreeMode::Removing { refused: false, .. }) => {

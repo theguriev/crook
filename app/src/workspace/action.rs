@@ -325,13 +325,13 @@ pub enum WorktreeAction {
     /// checkout — `0` is "Shell only", which starts nothing. What a press on
     /// one of its rows dispatches.
     PickAgent(usize),
-    /// Step the creator's agent by this many rows, clamped at both ends: the
-    /// arrows, while the prompt field has the keyboard.
+    /// Step the creator's agent by this many rows, "Shell only" included and
+    /// clamped at both ends: the arrows, while the agents have the keyboard.
     MoveAgent(isize),
-    /// Give the keyboard to one of the creator's fields: what a press on it
-    /// dispatches.
+    /// Give the keyboard to one half of the creator: what a press on one of
+    /// its fields dispatches.
     Focus(CreatorField),
-    /// Give the keyboard to the creator's other field: Tab.
+    /// Give the keyboard to the creator's other half: Tab.
     SwitchField,
     /// The prompt was typed into, so a branch name nobody has typed follows
     /// it.
@@ -342,14 +342,19 @@ pub enum WorktreeAction {
     Start,
 }
 
-/// Which of the worktree creator's two fields has the keyboard.
+/// Which half of the worktree creator has the keyboard.
+///
+/// Each half is a field and the list under it, and the arrows walk the list
+/// while the letters go to the field. The agents' half has a field only while
+/// a prompt is asked for, and it is a stop of its own without one: otherwise
+/// the only way from "Shell only" to an agent would be the pointer.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum CreatorField {
-    /// The branch name, which is the one it opens in.
+    /// The branch name and the places to start from. The one it opens in.
     #[default]
     Branch,
-    /// What the agent is asked to do.
-    Prompt,
+    /// The agents, and what the picked one is asked to do.
+    Agent,
 }
 
 /// What the menu on a block does.

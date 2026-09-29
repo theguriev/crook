@@ -69,8 +69,9 @@ impl Plugin for Worktrees {
         // switched off, like everything else it registers.
         host.claim_field("branch", Workspace::worktree_branch_has_keys);
         // The creator's second field, which is there once an agent is picked.
-        // One of the two has the keyboard at a time, and the creator says
-        // which: a press on a field, or Tab.
+        // At most one of the two has the keyboard, and the creator says which:
+        // a press on a field, or Tab. Neither does while the arrows walk the
+        // agents with no prompt to type into.
         host.claim_field("prompt", Workspace::worktree_prompt_has_keys);
 
         // A command like every other entry, and it was not always: the

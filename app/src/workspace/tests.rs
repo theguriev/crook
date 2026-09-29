@@ -786,6 +786,13 @@ impl Harness {
         })
     }
 
+    /// Whether its arrows walk the agents.
+    fn worktree_agents_have_keys(&self) -> bool {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.worktree_agents_have_keys()
+        })
+    }
+
     /// The pane opened in a checkout under `store`, once one has been.
     fn pane_under(&self, store: &Path) -> Option<PaneId> {
         self.workspace
@@ -5529,6 +5536,81 @@ fn shell_only_makes_the_worktree_it_always_made_and_types_nothing() {
         git_says(&directory, &["branch", "--show-current"]),
         Some(suggested)
     );
+}
+
+#[test]
+fn every_agent_is_a_key_away_from_shell_only() {
+    // The creator the tab's own entry opens is on "Shell only", with no
+    // prompt field and so nothing under the agents for the keyboard to be in.
+    // Tab still reaches them, the arrows walk them — back onto "Shell only"
+    // and off it again — and Tab goes back to the name, whose arrows are the
+    // places to start from again.
+    let scratch = Scratch::new();
+    let Some((mut harness, _, _)) = a_window_with_an_agent(&scratch) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    harness.workspace_update(|workspace, ctx| {
+        workspace.set_shell(Some(PathBuf::from("/bin/bash")), ctx);
+    });
+    let branch = crate::plugins::worktrees::BRANCH_FIELD;
+    // Asked for where the quoting is proven, which is not on Windows: there
+    // the agent is started with no prompt, and the list is all there is.
+    let prompts = crate::plugins::wasm::quoting_holds_in(Path::new("/bin/bash"));
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(harness.active_id()));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    assert_eq!(harness.worktree_agent(), None);
+    assert!(harness.worktree_branch_has_keys());
+    let suggested = harness.worktree_field(branch);
+
+    assert!(
+        harness.press_key("tab", Modifiers::default()),
+        "Tab did not leave the name for the agents"
+    );
+    assert!(harness.worktree_agents_have_keys());
+    assert!(!harness.worktree_branch_has_keys());
+    assert!(!harness.worktree_prompt_has_keys());
+    // A letter with no field to go to goes nowhere: not into the name, and
+    // not into the shell under the menu.
+    harness.frame();
+    harness.type_text("x");
+    assert_eq!(harness.worktree_field(branch), suggested);
+    let first = harness.pane_ids()[0];
+    assert_eq!(harness.field_text(first), "");
+
+    assert!(harness.press_key("down", Modifiers::default()));
+    assert_eq!(
+        harness.worktree_agent(),
+        Some("claude"),
+        "Down did not walk onto the agent"
+    );
+    assert!(harness.worktree_agents_have_keys());
+    assert_eq!(harness.worktree_prompt_has_keys(), prompts);
+
+    // Up onto "Shell only" keeps the keyboard on the list, so that Down is
+    // the way back.
+    assert!(harness.press_key("up", Modifiers::default()));
+    assert_eq!(harness.worktree_agent(), None);
+    assert!(
+        harness.worktree_agents_have_keys(),
+        "Up onto Shell only stranded the keyboard in the name"
+    );
+    assert!(harness.press_key("down", Modifiers::default()));
+    assert_eq!(harness.worktree_agent(), Some("claude"));
+
+    // Tab back to the name, whose arrows walk the places to start from and
+    // leave the agent where it is.
+    assert!(harness.press_key("tab", Modifiers::default()));
+    assert!(harness.worktree_branch_has_keys());
+    assert_eq!(
+        harness.action_for("down", Modifiers::default()),
+        Some(WorkspaceAction::Worktree(WorktreeAction::MoveBase(1)))
+    );
+    assert_eq!(harness.worktree_agent(), Some("claude"));
 }
 
 #[cfg(unix)]
