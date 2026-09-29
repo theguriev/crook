@@ -628,10 +628,11 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
             }
             "--title" => bail!("`--title` goes after `--agent <status>`"),
             "--message" => bail!("`--message` goes after `--agent <status>`"),
-            // Stdout is the fragment and stderr the note, so `> hooks.json`
-            // takes exactly the fragment; an agent with no hooks gets a
-            // sentence on stdout and no note, since the sentence is the
-            // whole answer.
+            // Stdout is the fragment and stderr the lead and the note, so
+            // `> hooks.json` takes exactly the fragment; an agent with no
+            // hooks gets a sentence on stdout and no note, since the sentence
+            // is the whole answer. The lead goes out first, because the
+            // plugin it names is the way that needs no merging.
             "--agent-hooks" => {
                 let agent = args.next().with_context(|| {
                     format!(
@@ -642,6 +643,9 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 let binary =
                     std::env::current_exe().context("could not find this binary's own path")?;
                 let hooks = agent::hooks_text(&agent, &binary)?;
+                if let Some(lead) = hooks.lead {
+                    eprintln!("{lead}");
+                }
                 println!("{}", hooks.text);
                 if let Some(note) = hooks.note {
                     eprintln!("{note}");
@@ -1188,7 +1192,9 @@ OPTIONS:
                        Print the hooks that make an agent say all of that by
                        itself, to merge into its settings: `claude` (Claude
                        Code), `codex`, `gemini`, `copilot` or `opencode`;
-                       `aider` has none, and this says what to do instead
+                       `aider` has none, and this says what to do instead.
+                       `claude` leads with the two commands that install the
+                       same hooks as Crook's Claude Code plugin
     --skill            Print the skill file that teaches a coding agent what it
                        can do from inside a pane, to save as SKILL.md where
                        the agent loads its skills

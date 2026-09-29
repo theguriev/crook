@@ -80,6 +80,10 @@
 //! pane, a split and a new tab all get it, because every shell Crook starts
 //! goes through [`Session::open`] and that is where it is set.
 //!
+//! [`BIN_VARIABLE`] — `CROOK_BIN` — is set there too: the path of the binary
+//! that started the pane, so a hook that has to call `crook` from a `PATH`
+//! nobody put it on can call it by that name instead.
+//!
 //! [`SOCKET_VARIABLE`](crate::control::SOCKET_VARIABLE) — `CROOK_SOCKET` — is
 //! set in the same place, and it *is* an address: where the window answers
 //! `crook pane list`. Empty when the window has no socket, rather than left
@@ -152,6 +156,17 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// same number [`PaneId::as_u64`](crate::tab::PaneId::as_u64) hands a plugin,
 /// so a script and a plugin looking at the same pane agree on its name.
 pub const PANE_ID_VARIABLE: &str = "CROOK_PANE_ID";
+
+/// The variable that names the binary this Crook is: `CROOK_BIN`, set to the
+/// absolute path of the running executable.
+///
+/// A hook runs in whatever `PATH` its agent was started with, and the binary
+/// a person is running — a Crook.app nobody linked onto `PATH`, a build under
+/// `target/` — is often on nobody's. `crook --agent-hooks` works round that
+/// by printing the path into the fragment, which a file shipped for everybody
+/// cannot do; the Claude Code plugin's hooks call `"$CROOK_BIN"` instead, and
+/// this is what makes that name the same binary the pane belongs to.
+pub const BIN_VARIABLE: &str = "CROOK_BIN";
 
 /// Setting this in the environment to anything but `0` or the empty string
 /// stops Crook injecting anything into any shell, whatever the setting says.

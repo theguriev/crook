@@ -727,6 +727,44 @@ fn test_every_shell_is_told_which_pane_it_is_in_marks_or_no_marks() {
 }
 
 #[test]
+fn test_every_shell_is_told_where_the_crook_binary_is() {
+    // A hook runs in whatever PATH its agent was started with, and a Crook.app
+    // nobody linked or a build under target/ is on nobody's: the Claude Code
+    // plugin's hooks call "$CROOK_BIN" for that reason, so every pane has to
+    // carry it — marks, no marks, a shell with no integration.
+    let home = TempDir::new("home");
+    let running = std::env::current_exe().expect("the test binary has a path");
+    for (name, enabled, program) in [
+        ("marked zsh", true, "/nowhere/zsh"),
+        ("bash with the marks off", false, "/nowhere/bash"),
+        ("a shell with no integration", true, "/nowhere/nu"),
+    ] {
+        let session = Session::with_host(
+            PaneId::next(),
+            &Options {
+                enabled,
+                login: true,
+                shell: Some(PathBuf::from(program)),
+                control_socket: None,
+                control_token: None,
+            },
+            host_at(&home),
+        );
+        let named = session_variable(session.environment(), BIN_VARIABLE)
+            .unwrap_or_else(|| panic!("{name} is not told where crook is"));
+        assert!(
+            Path::new(named).is_absolute(),
+            "{name} gets {named}, which means something else after a `cd`"
+        );
+        assert_eq!(
+            fs::canonicalize(named).ok(),
+            fs::canonicalize(&running).ok(),
+            "{name} should name the binary that is running, not {named}"
+        );
+    }
+}
+
+#[test]
 fn test_every_shell_is_told_where_its_window_answers_and_told_so_when_it_does_not() {
     // `crook pane list` asks the socket this names, and nothing else says
     // which window a pane is in. Marks or no marks, like the pane's number.
