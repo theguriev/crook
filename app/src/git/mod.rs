@@ -24,6 +24,7 @@
 
 pub mod branch;
 pub mod diff;
+pub mod merged;
 mod run;
 pub mod worktree;
 

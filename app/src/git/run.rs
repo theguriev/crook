@@ -3,9 +3,9 @@
 //!
 //! [`super::worktree`] grew this, because two of its commands write and a
 //! write runs the repository's own hooks, which are arbitrary code somebody
-//! else wrote. It lives in a module of its own so that the next thing in the
-//! git module that has to wait on git makes the same promise by spawning it
-//! the same way, rather than by a second copy of the same three hundred lines.
+//! else wrote. [`super::merged`] needs the same promise for another reason —
+//! it reads a history, and a history's honest length has no bound the way a
+//! listing's does — so the runner lives here and both spawn git through it.
 //!
 //! The deadline bounds the *call*, not only git. Killing a process does not
 //! reach what it left behind: a hook that backgrounds a helper — `direnv
@@ -17,6 +17,7 @@
 
 use std::ffi::OsStr;
 use std::path::Path;
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -64,7 +65,7 @@ static GIT_MISSING: AtomicBool = AtomicBool::new(false);
 /// only reason a local read is slow is a cold page cache — and short enough
 /// that a stall is something a person waits out rather than a hang they have to
 /// restart the app to clear.
-const READ_TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long [`super::worktree::add`] may take.
 ///
@@ -190,52 +191,19 @@ pub(super) fn run(directory: &Path, args: &[&OsStr], intent: Intent) -> Result<F
     }
     // A `current_dir` that does not exist makes `spawn` fail with `NotFound` —
     // the same error kind as a missing `git` binary. Checking first is what
-    // keeps the latch below honest: without it, one call against a directory
-    // somebody had just deleted would switch git off for the rest of the
-    // session.
+    // keeps the latch in `start` honest: without it, one call against a
+    // directory somebody had just deleted would switch git off for the rest
+    // of the session.
     if !directory.is_dir() {
         return Err(Failure::NoDirectory);
     }
 
-    let mut git = command("git");
-
-    if matches!(intent, Intent::Read) {
-        // `diff`'s treatment, for `diff`'s reason: a background read must not
-        // take `.git/index.lock`, or it races the user's own commit, and must
-        // not rewrite the index as a side effect of refreshing it. The
-        // environment variable carries the same rule into anything git itself
-        // spawns.
-        //
-        // A write gets neither, on purpose. `add` and `remove` *must* take that
-        // lock: it is how git stops two writers interleaving, and a write that
-        // skipped it would corrupt the thing the flag exists to protect.
-        git.arg("--no-optional-locks")
-            .args(["-c", "diff.autoRefreshIndex=false"])
-            .env("GIT_OPTIONAL_LOCKS", "0");
-    }
-
-    git.args(args)
-        .current_dir(directory)
-        // No command here touches a remote — `add` is handed an explicit branch
-        // and start point precisely so nothing can decide to go and fetch one —
-        // so there is no credential to be asked for. These two make that a
-        // guarantee rather than an argument: git may not prompt on a terminal,
-        // and has no terminal on stdin to prompt on.
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    let mut child = match git.spawn() {
-        Ok(child) => child,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if !GIT_MISSING.swap(true, Ordering::Relaxed) {
-                log::warn!("git is not on PATH; worktrees are off for this session");
-            }
-            return Err(Failure::GitMissing);
-        }
-        Err(error) => return Err(Failure::CouldNotRun(error)),
-    };
+    let mut child = start(
+        directory,
+        args,
+        intent,
+        [Stdio::null(), Stdio::piped(), Stdio::piped()],
+    )?;
 
     // Both pipes are drained on their own threads. Polling `try_wait` with the
     // output left unread deadlocks the moment git writes more than a pipe
@@ -304,6 +272,153 @@ pub(super) fn run(directory: &Path, args: &[&OsStr], intent: Intent) -> Result<F
     Ok(Finished {
         success: status.success(),
         stdout: stdout.unwrap_or_default(),
+        stderr: String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned(),
+    })
+}
+
+/// Starts `git <args>` in `directory`, set up the way every call here is,
+/// with `stdio` as its stdin, stdout and stderr.
+///
+/// Latches [`GIT_MISSING`] when there is no git to start.
+fn start(
+    directory: &Path,
+    args: &[&OsStr],
+    intent: Intent,
+    stdio: [Stdio; 3],
+) -> Result<Child, Failure> {
+    let mut git = command("git");
+
+    if matches!(intent, Intent::Read) {
+        // `diff`'s treatment, for `diff`'s reason: a background read must not
+        // take `.git/index.lock`, or it races the user's own commit, and must
+        // not rewrite the index as a side effect of refreshing it. The
+        // environment variable carries the same rule into anything git itself
+        // spawns.
+        //
+        // A write gets neither, on purpose. `add` and `remove` *must* take that
+        // lock: it is how git stops two writers interleaving, and a write that
+        // skipped it would corrupt the thing the flag exists to protect.
+        git.arg("--no-optional-locks")
+            .args(["-c", "diff.autoRefreshIndex=false"])
+            .env("GIT_OPTIONAL_LOCKS", "0");
+    }
+
+    git.args(args)
+        .current_dir(directory)
+        // No command here touches a remote — `add` is handed an explicit branch
+        // and start point precisely so nothing can decide to go and fetch one —
+        // so there is no credential to be asked for. These two make that a
+        // guarantee rather than an argument: git may not prompt on a terminal,
+        // and has no terminal on stdin to prompt on.
+        .env("GIT_TERMINAL_PROMPT", "0");
+
+    let [stdin, stdout, stderr] = stdio;
+    git.stdin(stdin).stdout(stdout).stderr(stderr);
+    match git.spawn() {
+        Ok(child) => Ok(child),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if !GIT_MISSING.swap(true, Ordering::Relaxed) {
+                log::warn!("git is not on PATH; worktrees are off for this session");
+            }
+            Err(Failure::GitMissing)
+        }
+        Err(error) => Err(Failure::CouldNotRun(error)),
+    }
+}
+
+/// Runs `git <upstream> | git <downstream>` in `directory`, as a read, and
+/// waits for both under one deadline.
+///
+/// For a read that is a stream through a filter — `log -p` into `patch-id` —
+/// where handing the second command the first one's output from here would
+/// mean holding all of it, and a history's patches are as many megabytes as
+/// the history is long. The two are joined by a pipe of their own, and
+/// nothing passes through this process but what the second one prints.
+///
+/// A `timeout` rather than an [`Intent`], because a pipe here only ever
+/// reads and it is the caller that knows how long its read deserves.
+///
+/// `success` is both commands', and `stderr` is the second one's. The first
+/// one's is thrown away: the only thing a caller does with a failed pipe is
+/// not believe it, and a reader thread for text nobody reads is a thread for
+/// nothing.
+pub(super) fn pipe(
+    directory: &Path,
+    upstream: &[&OsStr],
+    downstream: &[&OsStr],
+    timeout: Duration,
+) -> Result<Finished, Failure> {
+    if git_is_missing() {
+        return Err(Failure::GitMissing);
+    }
+    // See `run`: a directory that is not there must not read as a missing git.
+    if !directory.is_dir() {
+        return Err(Failure::NoDirectory);
+    }
+
+    let mut first = start(
+        directory,
+        upstream,
+        Intent::Read,
+        [Stdio::null(), Stdio::piped(), Stdio::null()],
+    )?;
+
+    // Handed over rather than lent: the command that starts the second git
+    // holds this process's copy of the pipe's read end until it is dropped,
+    // which `start` does on its way out. While that copy is open the first
+    // git never learns that the second has stopped reading — it blocks on a
+    // full pipe until the deadline kills it, rather than ending at once on a
+    // write nobody will take.
+    let feed = first.stdout.take().map_or_else(Stdio::null, Stdio::from);
+    let second = start(
+        directory,
+        downstream,
+        Intent::Read,
+        [feed, Stdio::piped(), Stdio::piped()],
+    );
+    let mut second = match second {
+        Ok(child) => child,
+        Err(failure) => {
+            let _ = first.kill();
+            let _ = first.wait();
+            return Err(failure);
+        }
+    };
+
+    let stdout = second.stdout.take().map(drain);
+    let stderr = second.stderr.take().map(drain);
+
+    let deadline = Instant::now() + timeout;
+    let waited = wait_for(&mut first, deadline, timeout).and_then(|first| {
+        wait_for(&mut second, deadline, timeout).map(|second| first.success() && second.success())
+    });
+    if waited.is_err() {
+        // The first was killed at the deadline, or the second was and this is
+        // a no-op on a process already reaped. Either way the second is not
+        // left running on half an input, and not left a zombie.
+        let _ = second.kill();
+        let _ = second.wait();
+    }
+
+    // `run`'s grace, for `run`'s reason: both have been reaped by here.
+    let drained_by = (Instant::now() + DRAIN_GRACE).min(deadline);
+    let stdout = collect(stdout, drained_by);
+    let stderr = collect(stderr, drained_by);
+
+    let success = waited?;
+    // A read is its output, and a fragment of one is not an answer.
+    let Some(stdout) = stdout else {
+        log::warn!(
+            "git {upstream:?} | git {downstream:?} in {} left its output held open past {}s",
+            directory.display(),
+            timeout.as_secs()
+        );
+        return Err(Failure::TimedOut { after: timeout });
+    };
+
+    Ok(Finished {
+        success,
+        stdout,
         stderr: String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned(),
     })
 }
