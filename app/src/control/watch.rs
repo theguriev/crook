@@ -18,6 +18,10 @@
 //! it can, the answer is no rather than yes, since a pane's output is what an
 //! agent reading it would take instructions from.
 //!
+//! A tab it opened that has closed is still its own to wait on, for as long
+//! as the window remembers who opened it — see [`REMEMBERED_CLOSED`] — and
+//! the answer is that it has closed.
+//!
 //! # Where the waiting happens
 //!
 //! Never on the window's thread. The connection's own thread blocks, on a
@@ -26,7 +30,9 @@
 //! already applies what a pane's shell did — the agent's report, a command
 //! starting, a command finishing, the pane closing — see
 //! `Workspace::apply_terminal_update`. Pushing is a lock and a notify; no
-//! poll, no timer, and nothing done at all while nobody is watching.
+//! poll, no timer, and nothing done at all while nobody is watching, but for
+//! noting which of the tabs `tab.new` opened have closed when the strip
+//! moves.
 //!
 //! A feed is bounded. A wait's holds its one answer; a stream's holds
 //! [`FOLLOW_BUFFER`] events, and a reader that falls further behind than that
@@ -54,6 +60,15 @@ use crate::workspace::Workspace;
 /// between two reads by a reader that is keeping up, and a bound on what one
 /// that is not can make the window hold for it.
 pub const FOLLOW_BUFFER: usize = 256;
+
+/// How many closed tabs `tab.new` opened the window remembers who opened, so
+/// that a wait asked after its pane has closed is answered with that rather
+/// than refused.
+///
+/// A few hundred: every worker a lead is still asking about, many times over,
+/// and three numbers each, so a window open for a week of them holds a few
+/// kilobytes. A wait on a pane older than that is refused as `no-such-pane`.
+pub const REMEMBERED_CLOSED: usize = 256;
 
 /// Where the window leaves what a kept connection is waiting for, and where
 /// that connection's thread waits for it.
@@ -204,10 +219,31 @@ impl Feed {
 /// Held by the workspace, which is where what happens to a pane is applied:
 /// see [`Self::heard`] and [`Self::settled`]. Empty — and costing a length
 /// check per update — while nobody watches.
+///
+/// It also remembers who opened the tabs `tab.new` opened, after they close:
+/// see [`REMEMBERED_CLOSED`]. That is kept whether anybody watches or not,
+/// since the wait it answers is the one asked after the pane has gone.
 #[derive(Default)]
 pub struct Watches {
     waiters: Vec<Waiter>,
     followers: Vec<Follower>,
+    /// The panes `tab.new` opened that were open when the strip last
+    /// settled.
+    spawned: Vec<Spawned>,
+    /// Those that have closed since, oldest first, at most
+    /// [`REMEMBERED_CLOSED`].
+    closed: VecDeque<Spawned>,
+}
+
+/// A pane `tab.new` opened, and who opened it: its
+/// [`Lineage`](crate::tab::Lineage) without the title.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Spawned {
+    pane: PaneId,
+    /// The pane that asked for it.
+    caller: PaneId,
+    /// The pane a person opened that the chain of asking began at.
+    root: PaneId,
 }
 
 /// One `pane.wait` that has not got there yet.
@@ -365,8 +401,13 @@ impl Watches {
 
     /// Brings every watch up to date with the strip after it moved: a pane
     /// that closed answers the waits on it and is said to have closed, and a
-    /// tab a follower's caller opened joins its stream.
+    /// tab a follower's caller opened joins its stream. A tab `tab.new`
+    /// opened that has closed is remembered, watched or not.
     pub fn settled(&mut self, strip: &TabStrip) {
+        self.remember_closed(strip);
+        if self.is_empty() {
+            return;
+        }
         self.prune();
         let open = |pane: PaneId| strip.pane(pane).is_some();
 
@@ -374,22 +415,17 @@ impl Watches {
             if open(waiter.pane) {
                 return true;
             }
-            waiter.feed.push(encode(&Waited {
-                pane_id: waiter.pane.as_u64(),
-                until: waiter.until,
-                reached: waiter.until == Until::Exited,
-                status: None,
-                message: None,
-                exit: None,
-                closed: true,
-            }));
+            waiter
+                .feed
+                .push(encode(&closed_state(waiter.pane, waiter.until)));
             false
         });
 
+        let closed = &self.closed;
         self.followers.retain_mut(|follower| {
             let now = match follower.only {
                 Some(only) => [only].into_iter().filter(|pane| open(*pane)).collect(),
-                None => watchable(strip, follower.caller),
+                None => watchable(strip, closed, follower.caller),
             };
             for gone in follower.following.iter().filter(|pane| !now.contains(pane)) {
                 follower.feed.push(encode(&PaneEvent::Closed {
@@ -409,6 +445,53 @@ impl Watches {
             false
         });
     }
+
+    /// Moves the tabs `tab.new` opened that are no longer in `strip` to the
+    /// ones remembered as closed, forgetting the oldest past
+    /// [`REMEMBERED_CLOSED`].
+    ///
+    /// Every road a pane opens or closes by settles the strip, and a tab is
+    /// given its lineage before the settle that opens it, so each is seen
+    /// open here before it is seen gone.
+    fn remember_closed(&mut self, strip: &TabStrip) {
+        let now: Vec<Spawned> = strip
+            .panes()
+            .filter_map(|(_, pane)| {
+                let lineage = pane.session().spawned_by.as_ref()?;
+                Some(Spawned {
+                    pane: pane.id(),
+                    caller: lineage.caller,
+                    root: lineage.root,
+                })
+            })
+            .collect();
+        for gone in &self.spawned {
+            if now.iter().any(|open| open.pane == gone.pane) {
+                continue;
+            }
+            if self.closed.len() >= REMEMBERED_CLOSED {
+                self.closed.pop_front();
+            }
+            self.closed.push_back(*gone);
+        }
+        self.spawned = now;
+    }
+
+    /// The closed pane numbered `number`, if it is one `tab.new` opened that
+    /// is still remembered.
+    fn remembered(&self, number: u64) -> Option<PaneId> {
+        self.closed
+            .iter()
+            .rev()
+            .map(|spawned| spawned.pane)
+            .find(|pane| pane.as_u64() == number)
+    }
+
+    /// Whether `caller` may watch `pane` without anybody's grant: see
+    /// [`observes`], which this is with the closed tabs remembered here.
+    pub fn observes(&self, strip: &TabStrip, caller: PaneId, pane: PaneId) -> bool {
+        observes(strip, &self.closed, caller, pane)
+    }
 }
 
 impl Drop for Watches {
@@ -427,38 +510,47 @@ impl Drop for Watches {
 /// Whether `caller` may watch `pane` without anybody's grant: it is the
 /// caller, or a tab the caller opened, or one opened by one of those.
 ///
-/// Up the chain of who opened what, through the panes still open; and a pane
-/// whose lineage names the caller as the root the chain began at is the
-/// caller's whichever pane in between has closed.
-pub fn observes(strip: &TabStrip, caller: PaneId, pane: PaneId) -> bool {
+/// Up the chain of who opened what, through the panes still open and the
+/// closed tabs still remembered in `closed`; and a pane whose lineage names
+/// the caller as the root the chain began at is the caller's whichever pane
+/// in between has gone.
+fn observes(strip: &TabStrip, closed: &VecDeque<Spawned>, caller: PaneId, pane: PaneId) -> bool {
+    let opener = |pane: PaneId| match strip.pane(pane) {
+        Some(open) => open
+            .session()
+            .spawned_by
+            .as_ref()
+            .map(|lineage| (lineage.caller, lineage.root)),
+        None => closed
+            .iter()
+            .find(|spawned| spawned.pane == pane)
+            .map(|spawned| (spawned.caller, spawned.root)),
+    };
     let mut at = pane;
-    // Bounded by the panes there are, since a chain of who opened what can
-    // be no longer; a lineage cannot loop, and this is what makes that a
-    // fact about the loop rather than about every future change to it.
-    for _ in 0..=strip.panes().count() {
+    // Bounded by the panes there are and were, since a chain of who opened
+    // what can be no longer; a lineage cannot loop, and this is what makes
+    // that a fact about the loop rather than about every future change to it.
+    for _ in 0..=strip.panes().count() + closed.len() {
         if at == caller {
             return true;
         }
-        let Some(lineage) = strip
-            .pane(at)
-            .and_then(|open| open.session().spawned_by.as_ref())
-        else {
+        let Some((opened_by, root)) = opener(at) else {
             return false;
         };
-        if lineage.root == caller {
+        if root == caller {
             return true;
         }
-        at = lineage.caller;
+        at = opened_by;
     }
     false
 }
 
 /// Every open pane `caller` may watch, in the panel's order.
-fn watchable(strip: &TabStrip, caller: PaneId) -> Vec<PaneId> {
+fn watchable(strip: &TabStrip, closed: &VecDeque<Spawned>, caller: PaneId) -> Vec<PaneId> {
     strip
         .panes()
         .map(|(_, pane)| pane.id())
-        .filter(|pane| observes(strip, caller, *pane))
+        .filter(|pane| observes(strip, closed, caller, *pane))
         .collect()
 }
 
@@ -476,7 +568,7 @@ fn caller(workspace: &Workspace, token: Option<&str>, app: &AppContext) -> Resul
         })
 }
 
-/// The pane a request may watch, from its token and the number it asked
+/// The open pane a request may watch, from its token and the number it asked
 /// about — or why it may not — and the caller it comes from.
 ///
 /// In this order, so that a request with no pane's token learns nothing about
@@ -488,16 +580,49 @@ pub fn observed(
     number: u64,
     app: &AppContext,
 ) -> Result<(PaneId, PaneId), Refusal> {
+    match found(workspace, token, number, app)? {
+        (caller, Found::Open(pane)) => Ok((caller, pane)),
+        (_, Found::Closed(_)) => Err(no_such_pane(number)),
+    }
+}
+
+/// A pane a request may watch.
+enum Found {
+    /// One that is open.
+    Open(PaneId),
+    /// A tab the caller opened, or one of its tabs did, that has closed and
+    /// is still remembered: see [`REMEMBERED_CLOSED`].
+    Closed(PaneId),
+}
+
+/// The pane a request may watch, open or closed, and the caller — or why it
+/// may not, in [`observed`]'s order.
+///
+/// A closed pane the caller may not watch is `no-such-pane`, as it would be
+/// were it not remembered: what a stranger learns of a pane that has gone is
+/// what `pane.list` says of it, which is nothing.
+fn found(
+    workspace: &Workspace,
+    token: Option<&str>,
+    number: u64,
+    app: &AppContext,
+) -> Result<(PaneId, Found), Refusal> {
     let caller = caller(workspace, token, app)?;
     let strip = workspace.tabs();
+    let watches = workspace.watches();
     let Some(pane) = strip
         .panes()
         .map(|(_, pane)| pane.id())
         .find(|pane| pane.as_u64() == number)
     else {
-        return Err(no_such_pane(number));
+        return match watches.remembered(number) {
+            Some(pane) if watches.observes(strip, caller, pane) => {
+                Ok((caller, Found::Closed(pane)))
+            }
+            _ => Err(no_such_pane(number)),
+        };
     };
-    if !observes(strip, caller, pane) {
+    if !watches.observes(strip, caller, pane) {
         return Err(Refusal::new(
             code::NEEDS_GRANT,
             format!(
@@ -507,7 +632,7 @@ pub fn observed(
             ),
         ));
     }
-    Ok((caller, pane))
+    Ok((caller, Found::Open(pane)))
 }
 
 /// The refusal a number no open pane has gets.
@@ -526,8 +651,14 @@ pub fn no_such_pane(number: u64) -> Refusal {
 /// With no feed — a wait of no time, or the question a kept connection asks
 /// when its time has run out — the answer is where the pane is now. With
 /// one, the answer goes into the feed: at once when the pane is already
-/// there, and otherwise when it gets there, with `null` said now to say the
-/// wait is registered.
+/// there, or has closed, and otherwise when it gets there, with `null` said
+/// now to say the wait is registered.
+///
+/// A pane that closed before the wait was asked is answered as one that
+/// closed during it would be — `exited` reached, anything else not — for as
+/// long as it is remembered: `crook pane wait 7 --until exited && …` must
+/// not depend on whether the worker ended before the lead got round to
+/// asking.
 pub fn wait(
     workspace: &mut Workspace,
     asked: &Wait,
@@ -535,12 +666,15 @@ pub fn wait(
     feed: Option<Arc<Feed>>,
     app: &AppContext,
 ) -> Result<Value, Refusal> {
-    let (_, pane) = observed(workspace, token, asked.pane, app)?;
-    let now = where_it_is(workspace, pane, asked.until, app)?;
+    let (_, found) = found(workspace, token, asked.pane, app)?;
+    let (pane, now) = match found {
+        Found::Open(pane) => (pane, where_it_is(workspace, pane, asked.until, app)?),
+        Found::Closed(pane) => (pane, closed_state(pane, asked.until)),
+    };
     let Some(feed) = feed else {
         return Ok(encode(&now));
     };
-    if now.reached {
+    if now.reached || now.closed {
         feed.push(encode(&now));
     } else {
         workspace.watches_mut().wait(pane, asked.until, feed);
@@ -624,6 +758,20 @@ fn finished(workspace: &Workspace, pane: PaneId, app: &AppContext) -> (bool, Opt
     }
 }
 
+/// A wait's answer for a pane that has closed: there is nothing left to say
+/// of it but that, which is what `exited` waits for.
+fn closed_state(pane: PaneId, until: Until) -> Waited {
+    Waited {
+        pane_id: pane.as_u64(),
+        until,
+        reached: until == Until::Exited,
+        status: None,
+        message: None,
+        exit: None,
+        closed: true,
+    }
+}
+
 /// A wait's answer for a pane that is still open.
 fn open_state(
     number: u64,
@@ -668,7 +816,7 @@ pub fn follow(
     };
     let following = match only {
         Some(pane) => vec![pane],
-        None => watchable(workspace.tabs(), caller),
+        None => watchable(workspace.tabs(), &workspace.watches().closed, caller),
     };
     let answer = Following {
         panes: following.iter().map(|pane| pane.as_u64()).collect(),

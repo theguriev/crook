@@ -71,7 +71,8 @@ pub mod code {
     /// no directory to find a repository in.
     pub const FAILED: &str = "failed";
     /// No pane with the number asked about is open in this window: it has
-    /// closed, or it never was.
+    /// closed, or it never was. A `pane.wait` on a closed tab the caller may
+    /// watch is answered instead, with the pane closed.
     pub const NO_SUCH_PANE: &str = "no-such-pane";
     /// The pane asked about is neither the caller nor one it opened, and
     /// watching it needs a grant from the person who opened it — which this

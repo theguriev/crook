@@ -1022,8 +1022,9 @@ COMMANDS:
                        it got to; fail, having printed where it is, when the
                        timeout (at most and by default 3600 seconds) passes
                        first. `finished` is the last command closed by the
-                       shell's own mark, with its exit status. --json prints
-                       the window's answer. Only your own pane and the tabs it
+                       shell's own mark, with its exit status; a tab that has
+                       already closed answers `exited`. --json prints the
+                       window's answer. Only your own pane and the tabs it
                        opened with `tab new`; not on Windows yet
     pane blocks <ID> [--last <N>]
                        Print pane ID's newest finished commands: the command,

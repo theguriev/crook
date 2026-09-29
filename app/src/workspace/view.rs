@@ -600,7 +600,7 @@ pub struct Workspace {
     /// What the control socket's `pane.wait` and `events.follow` are
     /// watching, told here what happens to a pane as it is applied — see
     /// [`Self::apply_terminal_update`] and [`Self::settle`]. Empty while
-    /// nobody watches.
+    /// nobody watches, but for who opened the closed tabs `tab.new` opened.
     watches: Watches,
     /// The system clipboard every field copies to and pastes from. One for the
     /// window: see [`Clipboard`].
@@ -5663,10 +5663,8 @@ impl Workspace {
         self.worktrees_directory.as_deref()
     }
 
-    /// What the control socket is watching, for a test that has to know a
-    /// watch has been registered before it makes something happen. Unix
-    /// only, as the socket tests are.
-    #[cfg(all(test, unix))]
+    /// What the control socket is watching, and who opened the closed tabs
+    /// it remembers. See [`crate::control::watch`].
     pub(crate) fn watches(&self) -> &Watches {
         &self.watches
     }
@@ -5762,10 +5760,10 @@ impl Workspace {
         self.sync_git(ctx);
         self.sync_terminals(ctx);
         // Every road a pane closes by, and every tab that opens, comes
-        // through here: what the control socket is watching hears of both.
-        if !self.watches.is_empty() {
-            self.watches.settled(&self.tabs);
-        }
+        // through here: what the control socket is watching hears of both,
+        // and a tab `tab.new` opened that closed is remembered for a wait
+        // asked after it.
+        self.watches.settled(&self.tabs);
         // After the strip has moved, so "which pane is being looked at" is the
         // answer for the state the frame is about to draw. Every action comes
         // through here, which is what makes looking at a pane the one and only

@@ -1151,7 +1151,7 @@ fn a_pane_watches_itself_and_the_tabs_it_opened_and_theirs_and_nobody_else() {
     });
     let observes = |window: &Window, caller, pane| {
         window.workspace.read(&window.app, |workspace, _| {
-            watch::observes(workspace.tabs(), caller, pane)
+            workspace.watches().observes(workspace.tabs(), caller, pane)
         })
     };
     assert!(observes(&window, lead, lead), "itself");
@@ -1172,6 +1172,60 @@ fn a_pane_watches_itself_and_the_tabs_it_opened_and_theirs_and_nobody_else() {
         workspace.apply(TabAction::ClosePane(worker), ctx);
     });
     assert!(observes(&window, lead, other));
+}
+
+#[test]
+fn a_closed_tab_is_remembered_as_its_openers_and_only_the_newest_are() {
+    let mut strip = crate::tab::TabStrip::new();
+    let lead = strip.focused_pane_id().expect("a pane");
+    let mut watches = watch::Watches::default();
+    // A tab opened for `caller`, the way `tab.new` opens one: its lineage
+    // written before the strip settles.
+    let open = |strip: &mut crate::tab::TabStrip, watches: &mut watch::Watches, caller| {
+        strip.apply(TabAction::New);
+        let pane = strip.focused_pane_id().expect("the new tab's pane");
+        strip.pane_mut(pane).expect("open").session_mut().spawned_by = Some(crate::tab::Lineage {
+            caller,
+            root: lead,
+            title: "the lead".to_owned(),
+        });
+        watches.settled(strip);
+        pane
+    };
+    let close = |strip: &mut crate::tab::TabStrip, watches: &mut watch::Watches, pane| {
+        strip.apply(TabAction::ClosePane(pane));
+        watches.settled(strip);
+    };
+
+    // A worker's worker, whose opener closes first and then it: the worker in
+    // the middle still watches it, through the closed one it opened.
+    let worker = open(&mut strip, &mut watches, lead);
+    let middle = open(&mut strip, &mut watches, worker);
+    let last = open(&mut strip, &mut watches, middle);
+    close(&mut strip, &mut watches, middle);
+    close(&mut strip, &mut watches, last);
+    assert!(watches.observes(&strip, lead, last), "the root's still");
+    assert!(
+        watches.observes(&strip, worker, last),
+        "and the worker's, up the chain through a pane that has gone"
+    );
+    assert!(!watches.observes(&strip, last, worker), "never down it");
+
+    // Only the newest are remembered, whatever the window has seen.
+    let mut closed = Vec::new();
+    for _ in 0..watch::REMEMBERED_CLOSED {
+        let pane = open(&mut strip, &mut watches, lead);
+        close(&mut strip, &mut watches, pane);
+        closed.push(pane);
+    }
+    assert!(
+        !watches.observes(&strip, lead, last),
+        "forgotten past {} closed tabs",
+        watch::REMEMBERED_CLOSED
+    );
+    for pane in closed {
+        assert!(watches.observes(&strip, lead, pane), "{pane:?}");
+    }
 }
 
 /// The socket, which is only Unix's.
@@ -3475,6 +3529,64 @@ mod socket {
             serde_json::from_value(reply.result.expect("an answer")).expect("a wait's answer");
         assert!(waited.reached, "{waited:?}");
         assert_eq!(waited.message.as_deref(), Some("which branch?"));
+    }
+
+    #[test]
+    fn a_wait_on_a_tab_that_closed_before_it_was_asked_says_it_closed() {
+        let mut served = Served::new(|workspace, ctx, _| {
+            workspace.apply(TabAction::New, ctx);
+        });
+        let (lead, person) = served.read(|workspace, _| {
+            let mut panes = workspace.tabs().panes().map(|(_, pane)| pane.id());
+            (panes.next().expect("a pane"), panes.next().expect("two"))
+        });
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["claude"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+        let theirs = served
+            .open_tab(Some(served.token(person)), new_tab(&["claude"]))
+            .expect("the person's pane opens one of its own");
+        let theirs = served.pane(theirs.pane_id);
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::ClosePane(worker), ctx);
+            workspace.apply(TabAction::ClosePane(theirs), ctx);
+        });
+
+        // Exited, however long it was asked to wait, and at once.
+        for timeout in [0, 600] {
+            let started = Instant::now();
+            let printed = served
+                .ask(wait(&token, worker, Until::Exited, timeout, true))
+                .expect("answered, not refused as a pane that never was");
+            assert!(started.elapsed() < Duration::from_secs(10));
+            let waited: Waited = serde_json::from_str(&printed.text).expect("--json is the answer");
+            assert!(waited.reached && waited.closed, "{waited:?}");
+            assert_eq!(printed.failure, None);
+        }
+        // Anything else is somewhere it will never get to now.
+        let printed = served
+            .ask(wait(&token, worker, Until::Idle, 600, false))
+            .expect("answered");
+        assert_eq!(printed.text, "closed");
+        assert_eq!(
+            printed.failure,
+            Some(format!("pane {} closed before it was idle", opened.pane_id))
+        );
+
+        // A closed tab somebody else's pane opened is no more the lead's than
+        // it was open, and says no more than `pane list` would: nothing.
+        let refused = served
+            .ask(wait(&token, theirs, Until::Exited, 0, false))
+            .expect_err("not the lead's");
+        assert!(refused.contains("no-such-pane"), "{refused}");
+        // Its blocks went with it.
+        let refused = served
+            .ask(read_blocks(&token, worker, None))
+            .expect_err("closed");
+        assert!(refused.contains("no-such-pane"), "{refused}");
+        assert_eq!(served.waiting(), 0, "nothing was left waiting");
     }
 
     #[test]

@@ -147,7 +147,7 @@ got to:
 - `needs-input` — its agent stopped for a person; printed with what it is asking.
 - `finished` — its command has ended, printed with the exit status: `finished: exit 0`. Only in
   a shell with command marks.
-- `exited` — the pane has closed.
+- `exited` — the pane has closed, before you asked or while you waited.
 
 A state the pane is already in answers at once. When `--timeout` (seconds; at most and by
 default 3600) passes first, or the pane closes first, it prints where the pane is and exits with

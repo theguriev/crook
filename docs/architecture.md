@@ -1212,14 +1212,16 @@ never a default.
 `pane.list` needs no token because everything in it is already on the screen; a block's output
 is more than that — it is what an agent reading it would take instructions from — so these are
 scoped the way typing will be. The caller, found by its token, may watch its own pane and the
-tabs it opened, and the tabs those opened: up the chain of lineage through the panes still open,
-or directly when a pane's lineage names the caller as the root the chain began at, so a lead
-still watches a worker's worker after the worker in between has closed. Nothing else: a pane a
+tabs it opened, and the tabs those opened: up the chain of lineage through the panes still open
+and the closed tabs the window remembers, or directly when a pane's lineage names the caller as
+the root the chain began at, so a lead still watches a worker's worker after the worker in
+between has closed. Nothing else: a pane a
 person opened, or one another pane's agent opened, is refused as `needs-grant`, with a sentence
 saying that watching it needs a grant from the person who opened it, which this version cannot
 ask for. The grant card belongs to the verb that types, and until it exists the answer is no.
 Refusals come in an order that tells a stranger nothing: no pane's token is `unauthorized`
-first, then a number no open pane has is `no-such-pane`, then `needs-grant`.
+first, then a number no open pane has is `no-such-pane`, then `needs-grant`. A closed pane is
+`no-such-pane` to everyone, except to a `pane.wait` from the pane whose tab it was (below).
 
 **`pane.wait`** answers when the pane gets to `until`: `idle` — its agent said so; the idle a
 pane starts in, before anything has reported, is not it, so a worker whose agent has not
@@ -1231,8 +1233,12 @@ command that ended before the wait was asked from being missed, and a tab that h
 from being taken for one that has finished; it is refused as `no-blocks` for a shell with no
 marks, where nothing ever says a command ended. `exited` is the pane closing by whichever road.
 A state already reached answers at once, and a pane that closes first answers at once with
-`reached: false`. A wait is at most an hour, which is also the default; `timeout: 0` answers
-with where the pane is now. The answer is `{pane_id, until, reached, status, message, exit,
+`reached: false`. A pane that closed before the wait was asked answers at once too: the window
+remembers who opened the last 256 tabs `tab.new` opened that have closed, whether anybody was
+watching or not, and a wait on one the caller may watch answers `closed: true`, `reached` for
+`exited` only — so `crook pane wait 7 --until exited && …` does not depend on whether the worker
+ended before the lead got round to asking. A wait is at most an hour, which is also the
+default; `timeout: 0` answers with where the pane is now. The answer is `{pane_id, until, reached, status, message, exit,
 closed}` — and when the time runs out, the connection asks the window once more with no time to
 wait, so a script reads the state the pane was left in rather than a bare `timeout`.
 
