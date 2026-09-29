@@ -813,11 +813,13 @@ before any frame at all.
 ### Who drives it
 
 `app/src/terminal_model.rs`, in the shape `git_model` established and `usage_model` shared
-before it left for a plugin: work off the UI thread, delivered on it, `ctx.notify` only when
-something a viewer could see actually changed. Each terminal gets an OS thread of its own
-rather than a background-pool worker, because a pty read blocks for as long as the shell is
-quiet and the pool is sized for exactly the chains that park on timers — five of them, counted
-one by one in `PARKED_WORKERS`, and a pane is not one.
+before it left for a plugin: work off the UI thread, delivered on it, and a word to the window
+only when something it draws could have changed. A changed grid is not a `notify` but a
+`TerminalUpdate::Repainted`, which the workspace weighs (below); the model's own `notify` is
+kept for the one-offs, a palette change and a shell that opened or failed to open. Each
+terminal gets an OS thread of its own rather than a background-pool worker, because a pty read
+blocks for as long as the shell is quiet and the pool is sized for exactly the chains that park
+on timers — five of them, counted one by one in `PARKED_WORKERS`, and a pane is not one.
 
 **Reading and drawing are throttled separately, and conflating them costs three orders of
 magnitude.** A pty master hands out about a kilobyte per `read` however large a buffer it is
@@ -830,21 +832,20 @@ back for it when the window is up. That thread is not a nicety: the batch that m
 window is always the *last* one of a burst, and without it the final screenful of a `cat`
 would sit invisible until the shell next said something.
 
-**And a frame is spent only on a pane somebody can see.** A grid that changed is not a
-`notify` from the model; it is a `TerminalUpdate::Repainted`, and the workspace answers it
-with a frame only when the pane is on screen — in the active tab, not hidden by a zoom, with no
-section of the sidebar over the body. It asks at the moment the repaint arrives, from its own
-state, rather than keeping a set of visible panes pushed into the model: what decides it
-changes in a tab switch, a split, a zoom, a close, a restored session and a plugin switched
-off under the section it was showing, and a push missed in any one of them would freeze a pane
-somebody is looking at. A pane nobody can see goes on being read, parsed and published, and
-everything its *row* shows — a title, a directory, a bell, an agent's status, a command
-finishing — still arrives as it happens, because the row is on screen. The frame that brings
-the pane back reads the snapshot published last, not the last one drawn. Ten thousand lines
-printed in a background tab used to rebuild the window six to eight times on an idle laptop;
-`the_frame_budget` in `app/src/workspace/tests.rs` holds it to none. What the gate cannot see
-is the window itself: nothing tells the workspace that it has been minimised or covered, so a
-window nobody is looking at still asks to draw the panes it shows.
+**And a frame is spent only on a pane somebody can see.** The workspace answers a
+`TerminalUpdate::Repainted` with a frame only when the pane is on screen — in the active tab,
+not hidden by a zoom, with no section of the sidebar over the body. It asks at the moment the
+repaint arrives, from its own state, rather than keeping a set of visible panes pushed into the
+model: what decides it changes in a tab switch, a split, a zoom, a close, a restored session
+and a plugin switched off under the section it was showing, and a push missed in any one of
+them would freeze a pane somebody is looking at. A pane nobody can see goes on being read,
+parsed and published, and everything its *row* shows — a title, a directory, a bell, an agent's
+status, a command finishing — still arrives as it happens, because the row is on screen. The
+frame that brings the pane back reads the snapshot published last, not the last one drawn. Ten
+thousand lines printed in a background tab used to rebuild the window six to eight times on an
+idle laptop; `the_frame_budget` in `app/src/workspace/tests.rs` holds it to none. What the gate
+cannot see is the window itself: nothing tells the workspace that it has been minimised or
+covered, so a window nobody is looking at still asks to draw the panes it shows.
 
 The emulator's mutex is never held across a frame. The reader takes it to parse, and again to
 build a snapshot, and publishes the `Arc` into a slot of its own; painting clones that `Arc`
