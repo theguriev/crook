@@ -4,7 +4,8 @@
 //! value with methods, and someone else has to decide which thread is allowed to
 //! block on a pty that may say nothing for hours. This is that someone, in the
 //! shape [`crate::git_model`] established — work off the UI thread, delivered
-//! on it, `ctx.notify` when something a viewer could see actually changed.
+//! on it, and a word to the window only when something it draws could have
+//! changed.
 //!
 //! # Why a thread and not the background pool
 //!
@@ -36,11 +37,26 @@
 //! window, and without someone to come back for it the final screenful of a
 //! `cat` would sit invisible until the shell next said something.
 //!
-//! There are two more filters behind that one. The reader publishes a snapshot
-//! the emulator only rebuilds when the drawn content differs, so an escape
-//! sequence that changed nothing visible hands back the same `Arc`; and
-//! [`TerminalModel::absorb`] compares that `Arc` by pointer before it notifies.
-//! A frame is only ever spent on a grid that actually changed.
+//! There are three more filters behind that one. The reader publishes a
+//! snapshot the emulator only rebuilds when the drawn content differs, so an
+//! escape sequence that changed nothing visible hands back the same `Arc`; and
+//! [`TerminalModel::absorb`] compares that `Arc` by pointer before it reports
+//! a [`TerminalUpdate::Repainted`]. A frame is only ever spent on a grid that
+//! actually changed — and only on one somebody can see, which is the third.
+//!
+//! # Only what is on screen
+//!
+//! A changed grid is reported rather than notified, and the workspace decides
+//! whether it is worth a frame. The model cannot: which panes a frame draws is
+//! the active tab's, less the one a zoom hides, less all of them while a
+//! section of the sidebar has the body — the workspace's state, which it
+//! reads at the moment the repaint arrives rather than having it pushed here
+//! from every place that state can change. A pane that is not on screen goes
+//! on being read, parsed and published exactly as before, and everything its
+//! *row* shows still arrives as it happens — a title, a bell, an agent's
+//! status, a command finishing — because those are the tab's facts and the
+//! tab is on screen. Only its grid stops costing frames, and the frame that
+//! puts it back on screen reads the latest snapshot, not the last one drawn.
 //!
 //! # The lock
 //!
@@ -206,12 +222,22 @@ impl Measured {
 
 /// Something one pane's shell did that the rest of the application cares about.
 ///
-/// Everything else a terminal reports — a repaint, a query already answered —
-/// is either handled here or is not the workspace's business. These five are:
-/// two of them rename or relocate a session, one closes a pane, and the last
-/// two are the child asking for something only the window can give it.
+/// Everything else a terminal reports — a query already answered, an exit
+/// that is about to show up as end-of-file — is either handled here or is not
+/// the workspace's business. What is here renames, relocates or closes a
+/// session, asks for something only the window can give, says what an agent
+/// is doing — or, most often by far, says a grid changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalUpdate {
+    /// What the pane draws has changed: its grid did, or its command has run
+    /// long enough to take the composer's place.
+    ///
+    /// The one update that is about pixels rather than about the session,
+    /// and the most frequent — up to once per pane per paint interval while
+    /// a shell prints. Reported rather than answered with a notify because
+    /// whether it is worth a frame is not this pane's to know: see the
+    /// module docs, "Only what is on screen".
+    Repainted(PaneId),
     /// The shell set a window title, or reset it. This is what makes a tab of
     /// shells rename itself with no rename plumbing at all.
     Title(PaneId, Option<String>),
@@ -935,8 +961,8 @@ impl TerminalModel {
         .detach();
     }
 
-    /// Takes what the reader posted, repaints if it changed anything, and waits
-    /// again.
+    /// Takes what the reader posted, reports a repaint if it changed the grid,
+    /// and waits again.
     fn absorb(&mut self, pane: PaneId, ctx: &mut ModelContext<Self>) {
         let Some(session) = self.sessions.get_mut(&pane) else {
             // The pane closed while the wait was outstanding. The chain ends
@@ -1038,7 +1064,7 @@ impl TerminalModel {
         }
 
         if changed {
-            ctx.notify();
+            ctx.emit(TerminalUpdate::Repainted(pane));
         }
         self.schedule_long_running(pane, ctx);
         for update in updates {
@@ -1089,8 +1115,9 @@ impl TerminalModel {
             }
             // Unconditionally: the block may have finished while this waited,
             // in which case the frame this draws is the one with the finished
-            // block in the list.
-            ctx.notify();
+            // block in the list. A repaint like any other, so a pane nobody can
+            // see is not drawn for this either.
+            ctx.emit(TerminalUpdate::Repainted(pane));
         })
         .detach();
     }

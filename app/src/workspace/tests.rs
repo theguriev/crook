@@ -1327,6 +1327,53 @@ impl Harness {
         }
     }
 
+    /// [`Self::wait_for`] with the half of the event loop it leaves out: a
+    /// frame is drawn whenever the window asks for one, the way the window
+    /// delegate draws one for the redraw a notify requests, and never
+    /// otherwise.
+    ///
+    /// What a budget counts is those frames. A wait that only pumped the
+    /// queue would leave every notify of a burst to pile up behind one frame
+    /// drawn at the end, and a burst would count as one render whatever it
+    /// cost the window it ran in.
+    fn wait_drawing(&mut self, what: &str, mut settled: impl FnMut(&mut Self) -> bool) {
+        self.wait_for(what, |harness| {
+            harness.draw_if_asked();
+            settled(harness)
+        });
+    }
+
+    /// [`Self::settle`], drawing as [`Self::wait_drawing`] draws — for a
+    /// budget, which is about frames that must *not* be drawn and so has to
+    /// give them the time to be asked for.
+    fn settle_drawing(&mut self, patience: std::time::Duration) {
+        let deadline = std::time::Instant::now() + patience;
+        while std::time::Instant::now() < deadline {
+            self.queue.run_until_parked();
+            self.draw_if_asked();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Draws a frame if the window has asked for one since the last.
+    fn draw_if_asked(&mut self) {
+        if self.needs_a_frame() {
+            self.frame();
+        }
+    }
+
+    /// How many times the presenter has rendered the workspace, which is the
+    /// window's one view: every render is the window rebuilt from its state.
+    fn workspace_renders(&self) -> u64 {
+        self.presenter.counts().renders(self.workspace.id())
+    }
+
+    /// How many frames the presenter has built, whether or not anything was
+    /// rendered for them.
+    fn frames_built(&self) -> u64 {
+        self.presenter.counts().frames()
+    }
+
     fn quit_requests(&self) -> usize {
         self.quit_requests.get()
     }
@@ -14541,6 +14588,316 @@ mod shells {
                 "scroll-to-bottom left the list off its own end"
             );
         }
+    }
+}
+
+/// What the window spends a frame on, counted.
+///
+/// The window is rebuilt from its state whenever something it draws changes,
+/// and these hold it to that. A pane nobody can see — in a tab behind the
+/// active one, under a zoom, under a section of the sidebar — changes nothing
+/// on screen when its grid does, and must not cost a frame however much its
+/// shell prints: that is the whole of what running a dozen agents in tabs
+/// costs a laptop that is showing one of them. What its *row* shows is another
+/// matter. A title, a bell, a status are facts about the tab, and they arrive
+/// as they happen.
+///
+/// Counts rather than times, off the presenter the harness draws with, so a
+/// budget is the same number on every machine.
+mod the_frame_budget {
+    use std::time::Duration;
+
+    use super::shells::{await_prompt, marked_shell};
+    use super::*;
+    use crate::terminal_model::TerminalUpdate;
+
+    /// How long the window is watched for frames that must not come.
+    ///
+    /// The model publishes a pane at most every sixteen milliseconds and comes
+    /// back once for the last batch of a burst, so anything a burst was going
+    /// to ask for has asked well inside this — which is long for the same
+    /// reason every patience in this file is: a loaded machine is a slow one.
+    const QUIET: Duration = Duration::from_millis(300);
+
+    /// Ten thousand lines, held back until the pane is told to print them.
+    ///
+    /// Held at a `read`, so that everything the row shows about the command —
+    /// that it is running, what a person's `preexec` retitled the tab to — has
+    /// happened before the counting starts, and what is counted is the output
+    /// alone. Held at a second one afterwards, so that no prompt comes back
+    /// to report anything either. The marker is printed in pieces because a
+    /// pty echoes the line it was typed; a `ready` the command itself
+    /// contained would be on screen before the shell had read a byte.
+    const STREAM: &str = "printf 're%sdy\\n' a; read line; seq 1 10000; read line\n";
+
+    /// The same, with a title set after the last line: one fact about the tab
+    /// at the end of ten thousand lines that are not.
+    const TITLED: &str = "printf 're%sdy\\n' a; read line; seq 1 10000; \
+                          printf '\\033]0;%s\\007' crook-behind; read line\n";
+
+    /// The pane of the tab that is not the active one.
+    fn pane_behind(harness: &Harness) -> PaneId {
+        let active = harness.active_id();
+        let behind = harness
+            .tab_ids()
+            .into_iter()
+            .find(|tab| *tab != active)
+            .expect("two tabs");
+        harness.panes_of(behind)[0]
+    }
+
+    /// Whether a whole row of `pane`'s grid says `line`.
+    ///
+    /// Whole, because the command line that prints `10000` has `10000` in
+    /// it too, and it is on screen from the moment it was typed.
+    fn printed(harness: &Harness, pane: PaneId, line: &str) -> bool {
+        harness
+            .terminal_text(pane)
+            .lines()
+            .any(|shown| shown.trim() == line)
+    }
+
+    /// Whether a pane drawn in `scene` has a row that says `line`, whole.
+    fn pane_shows(scene: &Scene, line: &str) -> bool {
+        let panes = panel_boxes(scene);
+        text_lines(scene, |at| panes.iter().any(|pane| pane.contains_point(at)))
+            .iter()
+            .any(|(_, shown)| shown == line)
+    }
+
+    /// Whether the row says the pane is running something.
+    fn running(harness: &Harness, pane: PaneId) -> bool {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .pane(pane)
+                .is_some_and(|pane| pane.session().running_command.is_some())
+        })
+    }
+
+    /// What the pane's row is asking a person to look at.
+    fn attention(harness: &Harness, pane: PaneId) -> Option<Attention> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .pane(pane)
+                .and_then(|pane| pane.session().attention)
+        })
+    }
+
+    /// Two tabs, each with a shell at its prompt, or `None` where no shell
+    /// these tests speak could be started. Answers the pane behind the active
+    /// tab.
+    fn a_shell_behind_the_active_tab() -> Option<(Harness, PaneId)> {
+        let mut harness = Harness::new(2);
+        let shown = marked_shell(&mut harness)?;
+        let hidden = pane_behind(&harness);
+        // Both, and before anything is counted: a shell's first prompt is
+        // drawn whenever its startup files finish, and the pane on screen
+        // drawing its own is a frame nobody is asking about.
+        await_prompt(&mut harness, shown);
+        await_prompt(&mut harness, hidden);
+        Some((harness, hidden))
+    }
+
+    /// Types a command built like [`STREAM`] into `pane`, and waits for it to
+    /// hold at its first `read` with the row already saying it is running.
+    fn hold(harness: &mut Harness, pane: PaneId, command: &str) {
+        harness.type_into(pane, command);
+        harness.wait_drawing("the command never started", |harness| {
+            printed(harness, pane, "ready") && running(harness, pane)
+        });
+        harness.settle_drawing(QUIET);
+    }
+
+    /// Lets the held command print, and waits for its last line.
+    fn release(harness: &mut Harness, pane: PaneId) {
+        harness.type_into(pane, "\n");
+        harness.wait_drawing("the pane never printed its last line", |harness| {
+            printed(harness, pane, "10000")
+        });
+        harness.settle_drawing(QUIET);
+    }
+
+    #[test]
+    fn ten_thousand_lines_in_a_tab_nobody_can_see_draw_nothing() {
+        // Before the gate this was six to eight renders on an idle laptop —
+        // one per frame the model published into — and each of them a whole
+        // window: every row, every plugin slot, every string shaped again.
+        let Some((mut harness, hidden)) = a_shell_behind_the_active_tab() else {
+            return;
+        };
+        hold(&mut harness, hidden, STREAM);
+        let renders = harness.workspace_renders();
+        let frames = harness.frames_built();
+
+        release(&mut harness, hidden);
+
+        assert_eq!(
+            harness.workspace_renders() - renders,
+            0,
+            "the window was rebuilt for output nobody can see"
+        );
+        assert_eq!(
+            harness.frames_built() - frames,
+            0,
+            "a frame was drawn for output nobody can see"
+        );
+    }
+
+    #[test]
+    fn going_back_to_that_tab_draws_its_last_line_in_the_first_frame() {
+        // Nothing is pumped between choosing the tab and drawing it: the frame
+        // is the tab switch's own, and what it shows is what the model holds
+        // at that moment rather than what the pane last asked to have drawn.
+        let Some((mut harness, hidden)) = a_shell_behind_the_active_tab() else {
+            return;
+        };
+        hold(&mut harness, hidden, STREAM);
+        release(&mut harness, hidden);
+
+        harness.dispatch_action(TabAction::FocusPane(hidden));
+        let scene = harness.frame();
+
+        assert!(
+            pane_shows(&scene, "10000"),
+            "the tab came back without the last thing it printed: {:?}",
+            frame_text(&scene)
+        );
+    }
+
+    #[test]
+    fn a_title_set_where_nobody_can_see_is_one_frame_for_its_row() {
+        // The row is on screen even when the pane is not, so what it shows
+        // still arrives as it happens — and costs what it costs, one frame,
+        // and not the ten thousand lines printed on the way to it.
+        let Some((mut harness, hidden)) = a_shell_behind_the_active_tab() else {
+            return;
+        };
+        hold(&mut harness, hidden, TITLED);
+        let renders = harness.workspace_renders();
+
+        harness.type_into(hidden, "\n");
+        // Off the last frame the window drew by itself, not a frame drawn to
+        // look: that is the difference between a row that is live and one
+        // that is right when somebody asks.
+        harness.wait_drawing("the row never showed the title", |harness| {
+            harness
+                .presenter
+                .scene()
+                .is_some_and(|scene| strip_text(scene).contains("crook-behind"))
+        });
+        harness.settle_drawing(QUIET);
+
+        assert_eq!(harness.workspace_renders() - renders, 1);
+    }
+
+    #[test]
+    fn the_pane_on_screen_still_draws_its_output_as_it_comes() {
+        let mut harness = Harness::new(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        await_prompt(&mut harness, pane);
+        hold(&mut harness, pane, STREAM);
+        let renders = harness.workspace_renders();
+
+        harness.type_into(pane, "\n");
+        harness.wait_drawing("the pane on screen never drew its last line", |harness| {
+            harness
+                .presenter
+                .scene()
+                .is_some_and(|scene| pane_shows(scene, "10000"))
+        });
+
+        assert!(harness.workspace_renders() > renders);
+    }
+
+    #[test]
+    fn a_tab_nobody_can_see_still_keeps_its_blocks_follows_its_cd_and_rings() {
+        // Everything but the grid still arrives from a pane nobody can see,
+        // because none of it is about the grid: a command that finished is a
+        // block in its history, a directory is what its row's branch is read
+        // from and what the session saves, and a bell is a row asking for a
+        // look.
+        let Some((mut harness, hidden)) = a_shell_behind_the_active_tab() else {
+            return;
+        };
+
+        harness.type_into(hidden, "printf 'fi%sed\\n' nish\n");
+        harness.wait_drawing("the command behind never finished", |harness| {
+            harness
+                .workspace
+                .read(&harness.app, |workspace, app| {
+                    workspace.blocks_report(hidden, app)
+                })
+                .is_some_and(|report| report.contains("finished"))
+        });
+
+        // Held at a `read`, so that no prompt comes back to say where the
+        // shell really is.
+        harness.type_into(
+            hidden,
+            "printf '\\033]7;file:///tmp\\007\\007'; read line\n",
+        );
+        harness.wait_drawing("the row never heard the cd and the bell", |harness| {
+            harness.working_directory(hidden) == Some(PathBuf::from("/tmp"))
+                && attention(harness, hidden) == Some(Attention::Bell)
+        });
+    }
+
+    /// Reports a repaint of `pane` the way the model's subscription does, and
+    /// answers whether the window asked for a frame for it.
+    fn repaint_asks_for_a_frame(harness: &mut Harness, pane: PaneId) -> bool {
+        harness.frame();
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(&TerminalUpdate::Repainted(pane), ctx);
+        });
+        harness.needs_a_frame()
+    }
+
+    #[test]
+    fn a_repaint_behind_the_active_tab_asks_for_no_frame_and_one_in_front_does() {
+        let mut harness = Harness::new(2);
+        let shown = harness.focused_pane_id().expect("the window has a pane");
+        let hidden = pane_behind(&harness);
+
+        assert!(!repaint_asks_for_a_frame(&mut harness, hidden));
+        assert!(repaint_asks_for_a_frame(&mut harness, shown));
+    }
+
+    #[test]
+    fn both_halves_of_a_split_are_on_screen_until_a_zoom_hides_one() {
+        let mut harness = Harness::new(1);
+        let first = harness.focused_pane_id().expect("the window has a pane");
+        harness.dispatch_action(TabAction::Split(Direction::Right));
+        let second = harness.focused_pane_id().expect("the split focused a pane");
+        assert_ne!(first, second);
+
+        assert!(
+            repaint_asks_for_a_frame(&mut harness, first),
+            "the pane beside the focused one is drawn too"
+        );
+        assert!(repaint_asks_for_a_frame(&mut harness, second));
+
+        harness.dispatch_action(TabAction::ZoomPane);
+        assert!(
+            !repaint_asks_for_a_frame(&mut harness, first),
+            "a zoom took the pane off screen and its output still asked for frames"
+        );
+        assert!(repaint_asks_for_a_frame(&mut harness, second));
+    }
+
+    #[test]
+    fn a_section_over_the_body_hides_every_pane_until_the_tabs_come_back() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+
+        harness.open_settings_page();
+        assert!(!repaint_asks_for_a_frame(&mut harness, pane));
+
+        harness.show_tabs();
+        assert!(repaint_asks_for_a_frame(&mut harness, pane));
     }
 }
 
