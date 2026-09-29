@@ -1250,8 +1250,11 @@ gets those and `grid: true`. A worker whose answer is meant to be read runs head
 
 **`events.follow`** answers `{panes}`, what it follows as of now, then one line per event until
 the client hangs up: `status` (only when the status or the message changed — an agent reports
-`running` around every tool it calls), `started`, `finished` with exit and duration, `opened`
-for a tab the caller opens later, `closed`, and `lagged`. With `pane` it follows that one pane,
+`running` around every tool it calls), `started`, `finished` with the command line, exit and
+duration, `opened` for a tab the caller opens later, `closed`, and `lagged`. `started` is read
+off a frame the pane's terminal published, since there is no event for a command running: one
+that starts and ends between two frames — `true`, `git status` — is never seen running, and its
+`finished` is what names it. With `pane` it follows that one pane,
 and the stream ends after the `closed` of the pane it is anchored on — the one named, or the
 caller's own. The events come from where the workspace already applies what a pane's shell did
 (`apply_terminal_update`) and from `settle`, which every road a pane opens or closes by goes

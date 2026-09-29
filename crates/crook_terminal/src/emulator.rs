@@ -69,6 +69,9 @@ pub enum TerminalEvent {
     /// fires exactly as often as the shell integration is installed and no
     /// more, which is the honest answer for something a plugin will ring on.
     CommandFinished {
+        /// The command line, when there was one: display-only, as
+        /// [`crate::Block::command`] is.
+        command: Option<String>,
         /// The status the shell reported, or `None` when it reported none.
         exit: Option<i32>,
         /// How long it ran, timed from the submit.
@@ -417,6 +420,7 @@ impl Emulator {
                 );
                 if let Some(finished) = finished {
                     self.events.push(TerminalEvent::CommandFinished {
+                        command: finished.command,
                         exit: finished.exit,
                         took: finished.took,
                     });

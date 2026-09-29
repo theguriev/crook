@@ -2867,6 +2867,7 @@ mod socket {
             workspace.apply_terminal_update(
                 &TerminalUpdate::CommandFinished {
                     pane: worker,
+                    command: Some("make test".to_owned()),
                     exit: Some(2),
                     took: Some(Duration::from_millis(1500)),
                 },
@@ -2891,6 +2892,7 @@ mod socket {
                 },
                 PaneEvent::Finished {
                     pane_id,
+                    command: Some("make test".to_owned()),
                     exit: Some(2),
                     duration_ms: Some(1500),
                 },
@@ -3325,6 +3327,28 @@ mod socket {
         assert_eq!(block.output, "the answer");
     }
 
+    /// A window whose every pane runs a real bash with Crook's command marks,
+    /// or `None` where there is no bash or the integration is opted out of.
+    fn marked_bash() -> Option<Served> {
+        let root = TempDir::new();
+        let Some(shell) = GatedShell::bash(&root) else {
+            eprintln!("skipped: no bash here");
+            return None;
+        };
+        let served = Served::with(root, shell, |_, _, _| {});
+        let marked = served.read(|workspace, app| {
+            matches!(
+                workspace.shell_standing(app).0.marks,
+                crate::shell_integration::Marks::Installed(_)
+            )
+        });
+        if !marked {
+            eprintln!("skipped: the shell integration is opted out of here");
+            return None;
+        }
+        Some(served)
+    }
+
     /// Linux only: that is where a half-close is told from a hang-up. See
     /// `server::until_closed`.
     #[cfg(target_os = "linux")]
@@ -3451,5 +3475,61 @@ mod socket {
             serde_json::from_value(reply.result.expect("an answer")).expect("a wait's answer");
         assert!(waited.reached, "{waited:?}");
         assert_eq!(waited.message.as_deref(), Some("which branch?"));
+    }
+
+    #[test]
+    fn a_command_too_quick_to_be_seen_running_is_named_by_its_finished() {
+        let Some(mut served) = marked_bash() else {
+            return;
+        };
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        served.shell.open();
+        served.pump_until("the shell never came to a prompt", |served| {
+            served.at_prompt(lead)
+        });
+
+        // Its own pane's stream, read until a command has finished.
+        let line = protocol::request_line(
+            &Verb::EventsFollow(Follow {
+                pane: Some(lead.as_u64()),
+            }),
+            Some(&token),
+        );
+        let following = served.start(move |socket| {
+            let mut client = Client::connect(&socket);
+            client.send(&line);
+            assert!(client.reply().expect("the first answer").ok);
+            let mut events = Vec::new();
+            loop {
+                let mut line = String::new();
+                match client.replies.read_line(&mut line) {
+                    Ok(0) | Err(_) => return events,
+                    Ok(_) => {}
+                }
+                let event: PaneEvent = serde_json::from_str(&line).expect("an event a line");
+                let finished = matches!(event, PaneEvent::Finished { .. });
+                events.push(event);
+                if finished {
+                    return events;
+                }
+            }
+        });
+        served.pump_until("the stream never started", |served| served.following() == 1);
+        served.run(lead, "true");
+
+        let events = served.finish(following);
+        let Some(PaneEvent::Finished {
+            pane_id,
+            command,
+            exit,
+            ..
+        }) = events.last()
+        else {
+            panic!("a command finished: {events:?}");
+        };
+        assert_eq!(*pane_id, lead.as_u64());
+        assert_eq!(command.as_deref(), Some("true"), "{events:?}");
+        assert_eq!(*exit, Some(0));
     }
 }

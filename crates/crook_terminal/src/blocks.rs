@@ -334,10 +334,15 @@ pub enum IgnoreReason {
 /// The block itself keeps all of this and more, but a listener that only wants
 /// to know something ended should not have to go looking through the finished
 /// list to find out whether the thing it was told about is the last entry in
-/// it. So the boundary hands over the two facts that are about the *command*
-/// rather than about the block: how it went, and how long it took.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+/// it. So the boundary hands over the facts that are about the *command*
+/// rather than about the block: what it was, how it went, and how long it
+/// took.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Finished {
+    /// The command line, as [`Block::command`] has it — display-only, for the
+    /// same reason — or `None` when there was none: an empty line, a
+    /// cancelled one, a shell that echoed nothing to read it from.
+    pub command: Option<String>,
     /// The status the shell reported, or `None` when it reported none.
     pub exit: Option<i32>,
     /// How long it ran, measured from the submit rather than from OSC 133 `C`,
@@ -902,6 +907,16 @@ impl BlockTracker {
                 self.open.state = state;
             }
             Transition::Close(state) => {
+                // Read before the close files it, as `started_at` is, and only
+                // for the close that is told about.
+                let command = match signal {
+                    Signal::CommandFinished => self
+                        .open
+                        .command
+                        .clone()
+                        .filter(|line| !line.trim().is_empty()),
+                    _ => None,
+                };
                 self.close(BlockState::Done, exit, term, palette);
                 self.reopen(state, term, working_directory);
                 // Only the shell saying so. A block also closes when the next
@@ -910,6 +925,7 @@ impl BlockTracker {
                 // would ring a bell for a person opening a tab.
                 if signal == Signal::CommandFinished {
                     finished = Some(Finished {
+                        command,
                         exit,
                         took: started_at.map(|at| at.elapsed()),
                     });

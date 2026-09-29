@@ -1046,11 +1046,12 @@ COMMANDS:
                        not on Windows yet
     events --follow [--pane <ID>]
                        Print a line of JSON for every change of status, every
-                       command started or finished and every pane opened or
-                       closed, in your own pane and the tabs it opened (or
-                       only pane ID), until the window ends it. A reader that
-                       falls behind is sent a `lagged` line counting what it
-                       missed. Not on Windows yet
+                       command finished (with its command line), every command
+                       seen running and every pane opened or closed, in your
+                       own pane and the tabs it opened (or only pane ID), until
+                       the window ends it. A reader that falls behind is sent
+                       a `lagged` line counting what it missed. Not on Windows
+                       yet
 
 OPTIONS:
     --install-plugin <PATH>

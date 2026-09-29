@@ -375,7 +375,12 @@ pub enum PaneEvent {
         #[serde(default)]
         message: Option<String>,
     },
-    /// A command started running in a pane.
+    /// A command was seen running in a pane.
+    ///
+    /// Seen, on a frame the pane's terminal published while it ran: one that
+    /// starts and ends between two of them — `true`, `git status` — is never
+    /// seen running and is told only by its [`Self::Finished`], which names
+    /// it too.
     Started {
         /// The pane.
         pane_id: u64,
@@ -386,6 +391,10 @@ pub enum PaneEvent {
     Finished {
         /// The pane.
         pane_id: u64,
+        /// The command line, display-only; `None` for an empty line or a
+        /// cancelled one, which a shell ends with a `D` too.
+        #[serde(default)]
+        command: Option<String>,
         /// The status it exited with, when the shell reported one.
         #[serde(default)]
         exit: Option<i32>,

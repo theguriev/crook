@@ -5326,7 +5326,9 @@ impl Workspace {
                 pane,
                 while_running,
             } => self.ring(*pane, *while_running, ctx),
-            TerminalUpdate::CommandFinished { pane, exit, took } => {
+            TerminalUpdate::CommandFinished {
+                pane, exit, took, ..
+            } => {
                 self.command_finished(*pane, *exit, *took, ctx);
                 true
             }
@@ -5420,9 +5422,15 @@ impl Workspace {
                 (*pane, watch::Heard::Status)
             }
             TerminalUpdate::Running(pane, Some(command)) => (*pane, watch::Heard::Started(command)),
-            TerminalUpdate::CommandFinished { pane, exit, took } => (
+            TerminalUpdate::CommandFinished {
+                pane,
+                command,
+                exit,
+                took,
+            } => (
                 *pane,
                 watch::Heard::Finished {
+                    command: command.as_deref(),
                     exit: *exit,
                     took: *took,
                 },

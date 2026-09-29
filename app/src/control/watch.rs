@@ -4,8 +4,9 @@
 //! a worker to stop, and reads what it did. `crook pane wait 7 --until
 //! needs-input --timeout 600` answers when pane 7's agent has stopped for a
 //! person, or when the ten minutes are up, and says which; `crook events
-//! --follow` is a line for every status, every command started and finished
-//! and every pane closed, for as long as it is left running.
+//! --follow` is a line for every status, every command finished — named, as
+//! one too quick to be seen running is told only there — and every pane
+//! closed, for as long as it is left running.
 //!
 //! # Who may watch what
 //!
@@ -245,6 +246,8 @@ pub enum Heard<'a> {
     Started(&'a str),
     /// A command finished.
     Finished {
+        /// Its command line, when there was one.
+        command: Option<&'a str>,
         /// The status it exited with, when the shell reported one.
         exit: Option<i32>,
         /// How long it ran.
@@ -341,8 +344,13 @@ impl Watches {
                 pane_id: number,
                 command: command.to_owned(),
             },
-            Heard::Finished { exit, took } => PaneEvent::Finished {
+            Heard::Finished {
+                command,
+                exit,
+                took,
+            } => PaneEvent::Finished {
                 pane_id: number,
+                command: command.map(str::to_owned),
                 exit,
                 duration_ms: took.map(millis),
             },

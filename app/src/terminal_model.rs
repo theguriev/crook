@@ -264,6 +264,9 @@ pub enum TerminalUpdate {
     CommandFinished {
         /// Which pane it ran in.
         pane: PaneId,
+        /// The command line, when there was one. Display-only: it came off
+        /// the screen, as [`crook_terminal::Block::command`] did.
+        command: Option<String>,
         /// The status the shell reported, or `None` when it reported none.
         exit: Option<i32>,
         /// How long it ran, timed from the submit.
@@ -1092,8 +1095,17 @@ impl TerminalModel {
                     pane,
                     while_running: session.snapshot.live_block.state.is_running(),
                 }),
-                TerminalEvent::CommandFinished { exit, took } => {
-                    updates.push(TerminalUpdate::CommandFinished { pane, exit, took });
+                TerminalEvent::CommandFinished {
+                    command,
+                    exit,
+                    took,
+                } => {
+                    updates.push(TerminalUpdate::CommandFinished {
+                        pane,
+                        command,
+                        exit,
+                        took,
+                    });
                 }
                 // The escape sequence says only that an answer is ready; the
                 // answer itself is a file, in a directory this session owns.

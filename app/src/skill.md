@@ -169,9 +169,10 @@ crook pane wait "$id" --until finished --timeout 110 && crook pane blocks "$id" 
 ```
 
 `crook events --follow` prints one line of JSON for every change of status, every command
-started or finished and every tab opened or closed, in your pane and the tabs it opened
-(`--pane <id>` for one), until you stop it. A reader that falls behind is sent a `lagged` line
-saying how many events it missed.
+finished — with its command line and exit status — and every tab opened or closed, in your pane
+and the tabs it opened (`--pane <id>` for one), until you stop it. A command is also sent as
+`started` when it runs long enough to be seen running; a quick one comes only as `finished`. A
+reader that falls behind is sent a `lagged` line saying how many events it missed.
 
 Only your own pane and the tabs you opened, and the tabs those opened, can be watched: a pane a
 person opened is refused with `needs-grant`, and there is no way round that from here. Like the
