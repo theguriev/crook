@@ -767,3 +767,6 @@ cccc *crook-v0.2.0-x86_64-pc-windows-msvc.zip
         assert_eq!(archive.map(|bytes| bytes.len()), Ok(10_000));
     }
 }
+
+#[cfg(all(test, unix))]
+mod glibc_floor_tests;

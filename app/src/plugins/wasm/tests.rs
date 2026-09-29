@@ -168,6 +168,35 @@ pub(crate) fn wasm_asking(
     order: i32,
     request: &Request,
 ) -> Vec<u8> {
+    let text = asking_text(manifest, slot, order, request);
+    wat::parse_str(&text).expect("the test module should assemble")
+}
+
+/// A module whose one action asks the window to run `name` — another
+/// plugin's action — for the tests about two plugins that run each other.
+///
+/// [`wasm_asking`], with an allocator that hands out the same buffer every
+/// time: a bump allocator runs its page out after some thousands of calls,
+/// and a guest that traps is switched off, which would end a loop between two
+/// of them that the host is the one supposed to end.
+pub(crate) fn wasm_running(id: &str, name: &str) -> Vec<u8> {
+    let mut manifest = manifest(id);
+    manifest.capabilities = vec![Capability::RunCommands(vec![name.to_owned()])];
+    let request = Request::Run {
+        name: name.to_owned(),
+        argument: String::new(),
+    };
+    let bump = "(global.set $next (i32.add (global.get $next) (local.get $len)))";
+    let text = asking_text(&manifest, "header.right", 10, &request);
+    assert!(
+        text.contains(bump),
+        "the module text changed under this helper"
+    );
+    wat::parse_str(text.replace(bump, "")).expect("the test module should assemble")
+}
+
+/// The text of [`wasm_asking`]'s module, before it is assembled.
+fn asking_text(manifest: &Manifest, slot: &str, order: i32, request: &Request) -> String {
     let request = to_bytes(request).expect("a request should encode");
     // Between the tree and the strings, which `module_text` lays out at 16
     // and 4096.
@@ -214,7 +243,7 @@ pub(crate) fn wasm_asking(
         text.contains("$request"),
         "the module text changed under this helper"
     );
-    wat::parse_str(&text).expect("the test module should assemble")
+    text
 }
 
 /// The text of the test module, before it is assembled.
@@ -460,6 +489,177 @@ pub(crate) fn wasm_with_a_panel(id: &str, slot: &str, order: i32) -> Vec<u8> {
         open_bytes = escaped(&open),
         open_len = open.len(),
         slot_len = slot.len(),
+        abi = crook_plugin_api::ABI_VERSION,
+    );
+
+    wat::parse_str(&text).expect("the test module should assemble")
+}
+
+/// What the guest from [`wasm_asking_where`] draws once exactly as many
+/// answers have come back as it asked for.
+pub(crate) const EVERY_ANSWER: &str = "every answer came back";
+
+/// What it draws once more have come back than it asked for.
+const AN_ANSWER_TWICE: &str = "an answer came back twice";
+
+/// Three turns' worth of deeds, so that a burst this size is not one the
+/// window serves in a single go.
+pub(crate) const BURST: u32 = 3 * runtime::DEEDS_PER_TURN;
+
+/// A module that asks where it is — `first` times from `crook_build`, and then
+/// `again` times from inside every answer, until it has asked `total` times —
+/// and draws whether every answer has come back.
+///
+/// `Where` because it is the request the window answers itself, on the thread
+/// that draws, and delivers the answer to there too: a guest that asks again
+/// from every answer is a loop with nothing in it that waits. A `total` the
+/// guest never reaches is that loop; one it does is a burst that ends.
+///
+/// An ask the sandbox has no room for comes back as ticket zero and is not
+/// counted, so `first` may be more than one call is allowed to ask for: what
+/// was not asked from `build` is asked from the answers instead.
+///
+/// Two things about it are there only so that nothing else ends the loop
+/// first. Its allocator hands out one buffer every time: a bump allocator runs
+/// a page out after a few thousand answers, and a guest that traps three times
+/// is switched off. And it registers an action nothing presses: what keeps a
+/// plugin's runtime alive after `build` is what it registered holding on to
+/// it, and a runtime that is gone serves nothing at all.
+pub(crate) fn wasm_asking_where(id: &str, first: u32, again: u32, total: u32) -> Vec<u8> {
+    asking_where(id, first, again, 0, total)
+}
+
+/// Twice as many finished commands as a plugin may have things to type, run
+/// or copy waiting, so that a burst of them is past that ceiling and not at it.
+pub(crate) const FINISHED: u32 = 2 * runtime::MAX_WAITING as u32;
+
+/// [`wasm_asking_where`]'s guest, watching commands finish and asking where
+/// it is once from each, until it has asked `total` times.
+///
+/// The shape a real plugin could have — "where was that command run?" — and
+/// the one with the most waiting before anything is served: every command a
+/// pane reports finished in one read is an event of its own in one update,
+/// and all of them are delivered before the first thing they asked for is
+/// served. Commands rather than bells because bells come one to a read: a
+/// pane hands over a burst of them as one.
+pub(crate) fn wasm_asking_where_at_every_command(id: &str, total: u32) -> Vec<u8> {
+    asking_where(id, 0, 0, 1, total)
+}
+
+/// [`wasm_asking_where`], asking `per_event` times from every event it is told
+/// of as well, and watching commands finish so that there are some.
+fn asking_where(id: &str, first: u32, again: u32, per_event: u32, total: u32) -> Vec<u8> {
+    let mut manifest = manifest(id);
+    manifest.capabilities = vec![Capability::ReadWorkingDirectory];
+    if per_event > 0 {
+        manifest.capabilities.push(Capability::WatchCommands);
+    }
+    let manifest = to_bytes(&manifest).expect("a manifest should encode");
+    let request = to_bytes(&Request::Where).expect("a request should encode");
+    let saying = |text: &str| {
+        to_bytes(&Node::Text {
+            text: text.to_owned(),
+            size: Size::Small,
+            tone: Tone::Muted,
+        })
+        .expect("a tree should encode")
+    };
+    let waiting = saying("still waiting");
+    let every = saying(EVERY_ANSWER);
+    let twice = saying(AN_ANSWER_TWICE);
+
+    let request_at = 16 + manifest.len() as u32;
+    let waiting_at = request_at + request.len() as u32;
+    let every_at = waiting_at + waiting.len() as u32;
+    let twice_at = every_at + every.len() as u32;
+    let strings_at = 4096;
+    let entry_at = strings_at + "header.right".len() as u32;
+    let action_at = entry_at + 4;
+    // A render's answer is a pointer and a length packed into one i64, and
+    // these three are constants, so they are packed here.
+    let packed = |at: u32, bytes: &[u8]| ((u64::from(at) << 32) | bytes.len() as u64) as i64;
+    // Left out rather than exported to do nothing, so that the guests which
+    // never hear of an event are the modules they were before there was one.
+    let event = if per_event > 0 {
+        format!(
+            r#"(func (export "crook_event") (param i32 i32) (result i32)
+              (call $ask (i32.const {per_event}))
+              (i32.const 0))"#,
+            per_event = per_event as i32,
+        )
+    } else {
+        String::new()
+    };
+
+    let text = format!(
+        r#"(module
+            (import "crook" "contribute"
+              (func $contribute (param i32 i32 i32 i32 i32)))
+            (import "crook" "register_action"
+              (func $register_action (param i32 i32 i32 i32)))
+            (import "crook" "request" (func $request (param i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (global $asked (mut i32) (i32.const 0))
+            (global $answered (mut i32) (i32.const 0))
+            (data (i32.const 16) "{manifest_bytes}")
+            (data (i32.const {request_at}) "{request_bytes}")
+            (data (i32.const {waiting_at}) "{waiting_bytes}")
+            (data (i32.const {every_at}) "{every_bytes}")
+            (data (i32.const {twice_at}) "{twice_bytes}")
+            (data (i32.const {strings_at}) "header.right")
+            (data (i32.const {entry_at}) "here")
+            (data (i32.const {action_at}) "poke")
+            (func (export "crook_abi_version") (result i32) (i32.const {abi}))
+            (func (export "crook_alloc") (param i32) (result i32) (i32.const 8192))
+            (func (export "crook_manifest") (result i64)
+              (i64.or (i64.shl (i64.const 16) (i64.const 32)) (i64.const {manifest_len})))
+            (func $ask (param $times i32)
+              (block $done
+                (loop $more
+                  (br_if $done (i32.eqz (local.get $times)))
+                  (br_if $done (i32.ge_u (global.get $asked) (i32.const {total})))
+                  (if (call $request (i32.const {request_at}) (i32.const {request_len}))
+                    (then
+                      (global.set $asked (i32.add (global.get $asked) (i32.const 1)))))
+                  (local.set $times (i32.sub (local.get $times) (i32.const 1)))
+                  (br $more))))
+            (func (export "crook_build") (result i32)
+              (call $contribute
+                (i32.const {strings_at}) (i32.const 12)
+                (i32.const {entry_at}) (i32.const 4)
+                (i32.const -1))
+              (call $register_action
+                (i32.const {action_at}) (i32.const 4)
+                (i32.const {action_at}) (i32.const 0))
+              (call $ask (i32.const {first}))
+              (i32.const 0))
+            (func (export "crook_render") (param i32 i32) (result i64)
+              (if (result i64) (i32.eq (global.get $answered) (i32.const {total}))
+                (then (i64.const {every}))
+                (else
+                  (if (result i64) (i32.gt_u (global.get $answered) (i32.const {total}))
+                    (then (i64.const {twice}))
+                    (else (i64.const {waiting}))))))
+            (func (export "crook_deliver") (param i32 i32 i32) (result i32)
+              (global.set $answered (i32.add (global.get $answered) (i32.const 1)))
+              (call $ask (i32.const {again}))
+              (i32.const 0))
+            {event})"#,
+        manifest_bytes = escaped(&manifest),
+        manifest_len = manifest.len(),
+        request_bytes = escaped(&request),
+        request_len = request.len(),
+        waiting_bytes = escaped(&waiting),
+        every_bytes = escaped(&every),
+        twice_bytes = escaped(&twice),
+        waiting = packed(waiting_at, &waiting),
+        every = packed(every_at, &every),
+        twice = packed(twice_at, &twice),
+        // As the guest compares them: unsigned, so `u32::MAX` is a number it
+        // never counts up to rather than a negative one it is already past.
+        total = total as i32,
+        first = first as i32,
+        again = again as i32,
         abi = crook_plugin_api::ABI_VERSION,
     );
 
@@ -1080,6 +1280,60 @@ fn a_name_this_build_has_no_icon_for_draws_nothing() {
     assert_eq!(marks(&known.scene()), [Mark::Icon(Lucide::GitBranch)]);
 }
 
+/// A rule with `rows` rows around it, each holding the next.
+///
+/// A rule because it is the cheapest node there is to decode — a variant with
+/// nothing in it, one level, where a mark's fields and tone cost it three —
+/// so the deepest run of these that decodes is the deepest tree a guest can
+/// send at all. And because it paints, so whether the renderer reached the
+/// bottom is in the scene.
+fn a_rule_inside(rows: usize) -> Node {
+    (0..rows).fold(Node::Rule, |inner, _| Node::Row(vec![inner]))
+}
+
+/// How many rects the rule at the bottom of `node` painted, if it was reached.
+fn rules_painted(node: Node) -> usize {
+    rects_of(&Frame::new(node).scene(), theme().overlay_2).len()
+}
+
+#[test]
+fn a_tree_is_drawn_as_deep_as_a_guest_can_send_one_and_no_deeper() {
+    // Drawing recurses once per node, as decoding does, and a tree built on
+    // this side of the wire has no decode in front of it to refuse it. So the
+    // renderer stops too — and where it stops has to be past anything a guest
+    // can send, or it would be cutting short a tree a plugin was allowed to
+    // draw. The deepest a guest can send is found by asking the decoder, rather
+    // than worked out here, so the two limits cannot drift apart unnoticed.
+    let deepest = (0..)
+        .take_while(|&rows| {
+            let bytes = to_bytes(&a_rule_inside(rows)).expect("a tree should encode");
+            crook_plugin_api::from_bytes::<Node>(&bytes).is_ok()
+        })
+        .last()
+        .expect("a rule on its own decodes");
+    let shallow = rules_painted(a_rule_inside(1));
+    assert!(shallow > 0, "a rule in a row paints nothing to look for");
+
+    // The deepest tree a guest can send is drawn to the bottom...
+    assert_eq!(
+        rules_painted(a_rule_inside(deepest)),
+        shallow,
+        "a tree {deepest} rows deep decodes, and the renderer, which stops at \
+         {} nodes, did not draw the rule at its bottom",
+        render::DEEPEST,
+    );
+    // ...and one row deeper, which only this side of the wire can build, is
+    // where the renderer stops.
+    assert_eq!(
+        rules_painted(a_rule_inside(deepest + 1)),
+        0,
+        "a tree {} rows deep cannot be sent, and the renderer, which stops at \
+         {} nodes, drew the rule at its bottom",
+        deepest + 1,
+        render::DEEPEST,
+    );
+}
+
 #[test]
 fn a_stale_reading_greys_the_face_and_leaves_the_face_a_face() {
     // `Muted` is what a plugin says when the figure beside the mark is not
@@ -1332,6 +1586,7 @@ fn a_row(worktree: bool) -> crate::git::GitFacts {
     crate::git::GitFacts {
         branch: Some(crate::git::Head::Branch("side".to_owned())),
         diff: None,
+        since_base: None,
         worktree,
     }
 }

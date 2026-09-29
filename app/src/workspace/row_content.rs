@@ -30,17 +30,21 @@
 //! a person comes now, and which branch the pane is on is not. The moment
 //! the agent goes back to work the message goes with it (see
 //! `AgentSession::message`), and the line says what the table says again.
+//! A notification a program sent while nobody was looking takes the same
+//! line for as long as nobody has — see `AgentSession::row_message`.
 
 use std::path::Path;
 
-use crookui_core::elements::Padding;
+use crookui_core::elements::{MouseStateHandle, Padding};
 use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::prelude::*;
 
-use crate::git::{self, DiffStats, GitFacts, Head};
+use crate::git::{self, DiffStats, GitFacts, Head, SinceBase};
 use crate::settings::{Granularity, PrimaryInfo, Subtitle, TabOptions, resolve_subtitle};
-use crate::tab::{AgentSession, Pane, PaneId, Tab};
+use crate::tab::{AgentSession, Pane, PaneId, PullRequestCheck, Tab};
 use crate::theme::theme;
+
+use super::action::WorkspaceAction;
 
 /// The height a metadata line is pinned to, whether or not it has chips in it.
 ///
@@ -137,8 +141,9 @@ pub(super) struct RowFacts {
     directory: Option<String>,
     /// The branch it is on, if the directory is a repository.
     branch: Option<String>,
-    /// What the agent is waiting for, while it is waiting: the second line
-    /// while it is there, in place of whatever the table put there.
+    /// What the agent is waiting for, while it is waiting, or what a
+    /// notification nobody has seen yet said: the second line while it is
+    /// there, in place of whatever the table put there.
     message: Option<String>,
     /// Whether [`Self::command`] is the directory's own name rather than a
     /// name the session has.
@@ -157,20 +162,10 @@ impl RowFacts {
         facts: Option<&GitFacts>,
         home: Option<&Path>,
     ) -> Self {
-        // A name the session has, else the directory's own — `agent 3` is the
-        // last resort it always was, and now reaches only a pane with no name,
-        // no program and nowhere to be.
-        let named = session.name().map(str::to_owned);
-        let label = session
-            .working_directory
-            .as_deref()
-            .and_then(|directory| git::directory_label(directory, home));
-        let command_is_the_directory = named.is_none() && label.is_some();
+        let (command, command_is_the_directory) = command_of(session, home);
 
         Self {
-            command: named
-                .or(label)
-                .unwrap_or_else(|| session.display_title().to_owned()),
+            command,
             command_is_the_directory,
             directory: session
                 .working_directory
@@ -180,7 +175,7 @@ impl RowFacts {
                 .and_then(|facts| facts.branch.as_ref())
                 .map(Head::label)
                 .map(str::to_owned),
-            message: session.message.clone(),
+            message: session.row_message().map(str::to_owned),
         }
     }
 
@@ -268,14 +263,49 @@ impl RowFacts {
     }
 }
 
+/// What a row calls a session: the name it has, else its directory's.
+///
+/// The row's "Command / Conversation" fact, and what a desktop notification
+/// names the pane by: a banner that named it any other way — the `agent 1`
+/// a shell at a prompt was born as, while its row says `app` — would name a
+/// tab nobody can find.
+pub(super) fn row_name(session: &AgentSession, home: Option<&Path>) -> String {
+    command_of(session, home).0
+}
+
+/// [`row_name`], and whether it is the directory's own name rather than a
+/// name the session has.
+///
+/// A name the session has, else the directory's own — `agent 3` is the last
+/// resort it always was, and now reaches only a pane with no name, no
+/// program and nowhere to be.
+fn command_of(session: &AgentSession, home: Option<&Path>) -> (String, bool) {
+    if let Some(name) = session.name() {
+        return (name.to_owned(), false);
+    }
+    match session
+        .working_directory
+        .as_deref()
+        .and_then(|directory| git::directory_label(directory, home))
+    {
+        Some(label) => (label, true),
+        None => (session.display_title().to_owned(), false),
+    }
+}
+
 /// The chips a row is allowed to draw, after the toggles have had their say.
 ///
 /// Resolved before the row is built rather than inside it, because "is there
 /// anything to show" decides whether the metadata line reserves a gap.
 #[derive(Default)]
 pub(super) struct Chips {
-    diff: Option<DiffStats>,
+    diff: Option<DiffChip>,
     pull_request: Option<String>,
+    /// What makes the pull request chip a link: the pane it opens the pull
+    /// request of, and the chip's own mouse state. `None` on the card, which
+    /// is torn down the moment the pointer leaves the row for it and so has
+    /// nothing a press could land on.
+    link: Option<(PaneId, MouseStateHandle)>,
 }
 
 impl Chips {
@@ -285,23 +315,26 @@ impl Chips {
         options: TabOptions,
     ) -> Self {
         Self {
-            // A clean tree draws no chip at all, not a `0` — Warp filters the
-            // same way one layer up, which is why the "0" token its formatter
-            // can produce is unreachable from a row.
             diff: options
                 .show_diff_stats
-                .then(|| facts.and_then(|facts| facts.diff))
-                .flatten()
-                .filter(|diff| !diff.is_empty()),
-            // Always `None` today: nothing populates `pull_request`, because
-            // Crook has no forge to ask. The toggle is still live — it governs
-            // whether the slot appears when there *is* a link — and the menu
-            // says so on screen rather than leaving a chip that can never
-            // appear to be discovered.
+                .then(|| facts.and_then(DiffChip::of))
+                .flatten(),
+            // What the agent said its pull request is, when it has said —
+            // see `AgentSession::pull_request`. Crook asks no forge for one.
             pull_request: options
                 .show_pr_link
                 .then(|| session.pull_request_label())
                 .flatten(),
+            link: None,
+        }
+    }
+
+    /// The same chips, with the pull request one made a link that opens
+    /// `pane`'s pull request.
+    pub(super) fn linked(self, pane: PaneId, state: MouseStateHandle) -> Self {
+        Self {
+            link: Some((pane, state)),
+            ..self
         }
     }
 
@@ -312,11 +345,15 @@ impl Chips {
     /// settings govern the row, and the card is what the row could not fit.
     pub(super) fn everything(session: &AgentSession, facts: Option<&GitFacts>) -> Self {
         Self {
-            diff: facts
-                .and_then(|facts| facts.diff)
-                .filter(|diff| !diff.is_empty()),
+            diff: facts.and_then(DiffChip::of),
             pull_request: session.pull_request_label(),
+            link: None,
         }
+    }
+
+    /// Whether these chips draw the pull request as a link.
+    pub(super) fn has_link(&self) -> bool {
+        self.pull_request.is_some() && self.link.is_some()
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -324,7 +361,13 @@ impl Chips {
     }
 
     /// The chips, in Warp's order: diff stats first, then the pull request.
-    pub(super) fn render(&self, ui: FamilyId) -> Option<Box<dyn Element>> {
+    ///
+    /// In the card the diff chip may give up the words at its end — see
+    /// [`Room::Card`] — which only a chip laid out against a width can do, so
+    /// there it is flexible and the caller has to hand this a bounded one. On
+    /// the row it is measured free, as it always was, and its wording is what
+    /// keeps it in bounds.
+    pub(super) fn render(&self, room: Room, ui: FamilyId) -> Option<Box<dyn Element>> {
         if self.is_empty() {
             return None;
         }
@@ -332,27 +375,231 @@ impl Chips {
         let mut row = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(4.);
-        if let Some(diff) = self.diff {
-            row.add_child(diff_chip(diff, ui));
+        if let Some(diff) = &self.diff {
+            let chip = diff_chip(diff, room, ui);
+            row.add_child(match room {
+                Room::Row => chip,
+                Room::Card => Shrinkable::new(1., chip).finish(),
+            });
         }
         if let Some(label) = self.pull_request.clone() {
-            row.add_child(pill(
-                Text::new(label, ui, 10.)
-                    .with_color(theme().text_muted)
-                    .finish(),
-            ));
+            row.add_child(match self.link.clone() {
+                Some((pane, state)) => pull_request_link(label, pane, state, ui),
+                None => pill(
+                    pull_request_text(label, theme().text_muted, ui),
+                    theme().overlay_1,
+                ),
+            });
         }
         Some(row.finish())
     }
 }
 
+/// What the diff chip counts.
+///
+/// `git diff --shortstat HEAD` alone goes blank the moment an agent commits —
+/// exactly when there is most to look at. So a branch with commits of its own
+/// counts from where it left its base instead, and says how many commits that
+/// is; everywhere else — the base itself, a detached `HEAD`, a branch with
+/// nothing committed yet — the chip is the plain count it always was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum DiffChip {
+    /// The working tree against `HEAD`: `+12 -3`.
+    Uncommitted(DiffStats),
+    /// A branch's commits and every line since it left its base, committed or
+    /// not: `2 commits, +40 -3 since main`.
+    SinceBase(SinceBase),
+}
+
+impl DiffChip {
+    /// The chip `facts` support, if any.
+    ///
+    /// A clean tree draws no chip at all, not a `0` — Warp filters the same
+    /// way one layer up, which is why the "0" token its formatter can produce
+    /// is unreachable from a row. Committed work always draws one: two commits
+    /// whose lines cancel out are still two commits.
+    pub(super) fn of(facts: &GitFacts) -> Option<Self> {
+        if let Some(since) = &facts.since_base {
+            return Some(Self::SinceBase(since.clone()));
+        }
+        facts
+            .diff
+            .filter(|diff| !diff.is_empty())
+            .map(Self::Uncommitted)
+    }
+
+    /// The chip's text, piece by piece, each in its own colour.
+    ///
+    /// The numbers are [`DiffStats::tokens`], which omits a side that is zero,
+    /// so a count since the base is `2 commits, +40` when nothing was removed —
+    /// and `2 commits` alone when no line differs from the base, rather than a
+    /// `0` that would read as "nothing happened".
+    fn pieces(&self, room: Room) -> Vec<Piece> {
+        let (stats, since) = match self {
+            Self::Uncommitted(stats) => (*stats, None),
+            Self::SinceBase(since) => (since.diff, Some(since)),
+        };
+        // Not `is_empty`, which counts files too: a branch whose only change
+        // is a binary or a mode has a file and no lines, and the `0` its
+        // tokens would say is not what two commits are worth.
+        let lines = stats.lines_added > 0 || stats.lines_removed > 0;
+        let numbers = (lines || since.is_none()).then(|| stats.tokens());
+
+        let mut pieces = Vec::new();
+        if let Some(since) = since {
+            let noun = if since.commits == 1 {
+                "commit"
+            } else {
+                "commits"
+            };
+            let comma = if numbers.is_some() { "," } else { "" };
+            pieces.push(Piece::words(format!("{} {noun}{comma}", since.commits)));
+        }
+        pieces.extend(numbers.into_iter().flatten().map(Piece::number));
+        if let (Some(since), Room::Card) = (since, room) {
+            pieces.push(Piece {
+                gives_way: true,
+                ..Piece::words(format!("since {}", since.base))
+            });
+        }
+        pieces
+    }
+}
+
+/// Where a chip is drawn, which decides how much of it is said.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(super) enum Room {
+    /// A row's metadata line, which the chip shares with the branch.
+    ///
+    /// The line is about 170 pixels in a 248-pixel panel, and a whole `2
+    /// commits, +40 -3 since main` is most of it — the branch beside it would
+    /// be cut to its mark. So the row leaves the base out: the branch is on the
+    /// same line to say what the commits are on, and the card says what they
+    /// are counted from. What is left is never cut, as the plain chip never was:
+    /// the numbers are what the chip is for, and the branch is what gives way.
+    Row,
+    /// The hover card, which has the room the row does not — and says the
+    /// base, since that is what the row left out. In a window narrow enough to
+    /// narrow the card, the base's name is what gives way, cut with a mark,
+    /// before the numbers do.
+    Card,
+}
+
+/// One run of a chip's text.
+struct Piece {
+    text: String,
+    tint: Tint,
+    /// Whether it is cut, with a mark, when the chip has less room than it
+    /// needs: only the base's name, which only the card says.
+    gives_way: bool,
+}
+
+impl Piece {
+    fn words(text: String) -> Self {
+        Self {
+            text,
+            tint: Tint::Words,
+            gives_way: false,
+        }
+    }
+
+    /// A signed count, coloured by its sign, as the plain chip always was.
+    fn number(text: String) -> Self {
+        let tint = if text.starts_with('+') {
+            Tint::Added
+        } else if text.starts_with('-') {
+            Tint::Removed
+        } else {
+            Tint::Words
+        };
+        Self {
+            text,
+            tint,
+            gives_way: false,
+        }
+    }
+}
+
+/// A piece's colour and weight.
+#[derive(Copy, Clone)]
+enum Tint {
+    /// Muted and regular, for what is only there to say what a number counts.
+    Words,
+    /// Lines added.
+    Added,
+    /// Lines removed.
+    Removed,
+}
+
+/// The pull request chip on a row: a pill that lights under the pointer and
+/// opens the pull request when pressed.
+///
+/// The row under it focuses the pane on a press, so the row's own handler
+/// stands aside while this is hovered — the close button's arrangement, and
+/// for its reason.
+fn pull_request_link(
+    label: String,
+    pane: PaneId,
+    state: MouseStateHandle,
+    ui: FamilyId,
+) -> Box<dyn Element> {
+    Hoverable::new(state, move |state| {
+        let hovered = state.is_hovered();
+        pill(
+            pull_request_text(
+                label.clone(),
+                if hovered {
+                    theme().text_primary
+                } else {
+                    theme().text_muted
+                },
+                ui,
+            ),
+            if hovered {
+                theme().overlay_3
+            } else {
+                theme().overlay_1
+            },
+        )
+    })
+    .on_click(move |_, ctx, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::OpenPullRequest(pane));
+    })
+    .finish()
+}
+
+/// The widest a pull request chip's label is drawn, in pixels.
+///
+/// About `github.example.com #12` at the chip's size: room for any
+/// github.com label and most hosts, and narrow enough that the chip beside a
+/// diff count leaves the row's own text some of the line. The metadata line
+/// lays a chip out at its natural width and gives way only on the left, so
+/// without this a long label pushed the row's text to nothing and the chip
+/// past the panel's edge.
+pub(super) const PULL_REQUEST_LABEL_WIDTH: f32 = 100.;
+
+/// A pull request chip's label, cut at [`PULL_REQUEST_LABEL_WIDTH`].
+///
+/// At the start, when it is cut: the end of a host is the part that says
+/// whose it is, and the number is the part that says which.
+fn pull_request_text(label: String, color: Color, ui: FamilyId) -> Box<dyn Element> {
+    ConstrainedBox::new(
+        Text::new(label, ui, 10.)
+            .with_color(color)
+            .with_ellipsis(Cut::Start)
+            .finish(),
+    )
+    .with_max_width(PULL_REQUEST_LABEL_WIDTH)
+    .finish()
+}
+
 /// A chip's box: Warp's `render_badge_container`.
 ///
-/// It has no hover state, unlike Warp's, because Crook's chips are not
-/// clickable — there is no code-review panel to open and no browser call to
-/// make — and a box that lights up under the pointer and then does nothing is a
-/// worse lie than one that does not.
-fn pill(content: Box<dyn Element>) -> Box<dyn Element> {
+/// Lit under the pointer only when a press on it does something, which is
+/// the pull request's and no other: the diff count has no code-review panel
+/// to open, and a box that lights up under the pointer and then does nothing
+/// is a worse lie than one that does not.
+fn pill(content: Box<dyn Element>, background: Color) -> Box<dyn Element> {
     Container::new(content)
         .with_padding(Padding {
             top: 1.,
@@ -360,39 +607,42 @@ fn pill(content: Box<dyn Element>) -> Box<dyn Element> {
             bottom: 1.,
             right: 4.,
         })
-        .with_background_color(theme().overlay_1)
+        .with_background_color(background)
         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(3.)))
         .finish()
 }
 
-/// `+12 -3`, each token in its own colour.
-fn diff_chip(diff: DiffStats, ui: FamilyId) -> Box<dyn Element> {
+/// `+12 -3`, or `2 commits, +40 -3` and in the card `… since main`, each
+/// piece in its own colour.
+fn diff_chip(chip: &DiffChip, room: Room, ui: FamilyId) -> Box<dyn Element> {
     let mut row = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
 
-    for (index, token) in diff.tokens().into_iter().enumerate() {
+    for (index, piece) in chip.pieces(room).into_iter().enumerate() {
         if index > 0 {
             row.add_child(Text::new(" ", ui, 10.).finish());
         }
 
-        let color = if token.starts_with('+') {
-            theme().diff_added
-        } else if token.starts_with('-') {
-            theme().diff_removed
-        } else {
-            theme().text_muted
+        let (color, weight) = match piece.tint {
+            Tint::Words => (theme().text_muted, Weight::Normal),
+            Tint::Added => (theme().diff_added, Weight::Semibold),
+            Tint::Removed => (theme().diff_removed, Weight::Semibold),
         };
-        row.add_child(
-            Text::new(token, ui, 10.)
-                .with_color(color)
-                .with_style(Properties {
-                    weight: Weight::Semibold,
-                    ..Default::default()
-                })
-                .finish(),
-        );
+        let text = Text::new(piece.text, ui, 10.)
+            .with_color(color)
+            .with_style(Properties {
+                weight,
+                ..Default::default()
+            });
+        // Flexible, which only the card can afford: it lays the chip out
+        // against a width, where the row measures it free.
+        row.add_child(if piece.gives_way {
+            Shrinkable::new(1., text.with_ellipsis(Cut::End).finish()).finish()
+        } else {
+            text.finish()
+        });
     }
 
-    pill(row.finish())
+    pill(row.finish(), theme().overlay_1)
 }
 
 /// How heavy the branch mark's stroke is, in Lucide's 24-unit grid.
@@ -556,6 +806,18 @@ fn detail_section(
         ));
     }
 
+    // Where the work came from, when it was not a person: a tab another
+    // pane's agent opened is one nobody in the room asked for by hand, and
+    // the card is where a row says what it could not fit.
+    if let Some(lineage) = &session.spawned_by {
+        column.add_child(
+            Text::new(format!("opened by {}", lineage.title), ui, 12.)
+                .with_color(theme().text_muted)
+                .with_ellipsis(Cut::End)
+                .finish(),
+        );
+    }
+
     let mut footer = Flex::row()
         .with_main_axis_size(MainAxisSize::Max)
         .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
@@ -565,14 +827,66 @@ fn detail_section(
                 .with_color(theme().text_muted)
                 .finish(),
         );
-    if let Some(chips) = Chips::everything(session, facts).render(ui) {
-        footer.add_child(chips);
+    if let Some(chips) = Chips::everything(session, facts).render(Room::Card, ui) {
+        // Flexible, so the chips are laid out against what the status leaves
+        // of a card a narrow window has narrowed — which is what lets the
+        // base's name give way rather than the chip running off the card.
+        // The padding keeps the two apart when it does.
+        footer.add_child(
+            Shrinkable::new(1., Container::new(chips).with_padding_left(4.).finish()).finish(),
+        );
     }
     column.add_child(footer.finish());
+
+    // The whole address, where there is room for it. The chip is a label,
+    // and a label can be made to look like anything; this is where the link
+    // goes, readable before anybody presses it. Cut at the end, which keeps
+    // the host.
+    if let Some(pull_request) = &session.pull_request {
+        column.add_child(
+            Text::new(pull_request.url.clone(), ui, 10.)
+                .with_color(theme().text_muted)
+                .with_ellipsis(Cut::End)
+                .finish(),
+        );
+    }
+
+    // What the last "Check pull request" found, until the next press: the
+    // card is where a row says what it had no room for, and a state the row
+    // never shows is the plainest case of that.
+    if let Some(check) = session
+        .pull_request
+        .as_ref()
+        .and_then(|pull_request| pull_request.check.as_ref())
+    {
+        column.add_child(
+            Text::new(check.summary(), ui, 10.)
+                .with_color(check_color(check))
+                .with_ellipsis(Cut::End)
+                .finish(),
+        );
+    }
 
     Container::new(column.finish())
         .with_uniform_padding(CARD_SECTION_PADDING)
         .finish()
+}
+
+/// The colour a check's line is printed in: the diff's red for anything that
+/// failed — a check, or the asking — its green for a pull request whose
+/// checks all passed, and muted for the rest, which is waiting or has
+/// nothing to judge.
+fn check_color(check: &PullRequestCheck) -> Color {
+    match check {
+        PullRequestCheck::Failed(_) => theme().diff_removed,
+        PullRequestCheck::Answered(found) if found.checks.failing > 0 => theme().diff_removed,
+        PullRequestCheck::Answered(found)
+            if found.checks.total() > 0 && found.checks.pending == 0 =>
+        {
+            theme().diff_added
+        }
+        _ => theme().text_muted,
+    }
 }
 
 /// The fixed-height metadata line: text on the left, chips pushed to the right.
@@ -598,7 +912,7 @@ pub(super) fn metadata_line(
         None => Empty::new().finish(),
     });
 
-    if let Some(chips) = chips.render(ui) {
+    if let Some(chips) = chips.render(Room::Row, ui) {
         // The padding is part of the right element's natural width, so
         // SpaceBetween keeps a 4px gap even when the left text has collapsed
         // to nothing.
@@ -747,5 +1061,87 @@ mod naming_tests {
         // An empty branch is a read that produced nothing, not a branch.
         let blank = on(Some("   "));
         assert!(!blank.is_branch && blank.text == "~/work/crook");
+    }
+}
+
+#[cfg(test)]
+mod chip_tests {
+    use super::*;
+
+    /// What a chip says in `room`, spaced the way it is drawn.
+    fn said(chip: &DiffChip, room: Room) -> String {
+        chip.pieces(room)
+            .into_iter()
+            .map(|piece| piece.text)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// A branch with `commits` of its own and a clean tree on top of them.
+    fn committed(commits: u32, lines_added: u32, lines_removed: u32) -> GitFacts {
+        GitFacts {
+            branch: Some(Head::Branch("agent/task".to_owned())),
+            diff: Some(DiffStats::default()),
+            since_base: Some(SinceBase {
+                base: "main".to_owned(),
+                commits,
+                diff: DiffStats {
+                    files_changed: 1,
+                    lines_added,
+                    lines_removed,
+                },
+            }),
+            worktree: false,
+        }
+    }
+
+    /// The row the item was about: everything committed, nothing left for
+    /// `--shortstat HEAD` to count, and a chip all the same.
+    #[test]
+    fn a_branch_that_committed_everything_still_has_a_chip() {
+        let chip = DiffChip::of(&committed(2, 40, 3)).expect("committed work draws a chip");
+
+        assert_eq!(said(&chip, Room::Card), "2 commits, +40 -3 since main");
+        assert_eq!(said(&chip, Room::Row), "2 commits, +40 -3");
+    }
+
+    #[test]
+    fn one_commit_is_a_commit_and_a_side_that_is_zero_is_left_out() {
+        let chip = DiffChip::of(&committed(1, 12, 0)).expect("committed work draws a chip");
+
+        assert_eq!(said(&chip, Room::Card), "1 commit, +12 since main");
+    }
+
+    /// Two commits whose lines cancel out are still two commits — and not
+    /// `0`, which would read as nothing having happened.
+    #[test]
+    fn commits_whose_lines_cancel_out_are_counted_without_a_zero() {
+        let chip = DiffChip::of(&committed(3, 0, 0)).expect("committed work draws a chip");
+
+        assert_eq!(said(&chip, Room::Row), "3 commits");
+        assert_eq!(said(&chip, Room::Card), "3 commits since main");
+    }
+
+    /// The base itself, a detached head, a branch with nothing committed:
+    /// everywhere there is no count since the base, the chip is the plain count.
+    #[test]
+    fn with_nothing_committed_since_the_base_the_chip_is_what_it_always_was() {
+        let dirty = GitFacts {
+            diff: Some(DiffStats {
+                files_changed: 2,
+                lines_added: 12,
+                lines_removed: 3,
+            }),
+            ..GitFacts::default()
+        };
+        let chip = DiffChip::of(&dirty).expect("a dirty tree draws a chip");
+        assert_eq!(said(&chip, Room::Row), "+12 -3");
+        assert_eq!(said(&chip, Room::Card), "+12 -3");
+
+        let clean = GitFacts {
+            diff: Some(DiffStats::default()),
+            ..GitFacts::default()
+        };
+        assert_eq!(DiffChip::of(&clean), None, "a clean tree drew a chip");
     }
 }

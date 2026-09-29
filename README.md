@@ -79,9 +79,55 @@ the same thing whenever they are rendered again and the find still counts three:
 curl -fsSL https://raw.githubusercontent.com/theguriev/crook/main/script/install | sh
 ```
 
-macOS on both architectures and Linux on x86_64. It reads the latest release, checks the archive
-against the `SHA256SUMS` published beside it, and puts the binary in `~/.local/bin`, or somewhere
-else with `--to`. Windows is a `.zip` on the [releases page](https://github.com/theguriev/crook/releases).
+macOS on both architectures, and Linux on x86_64 with glibc 2.31 or newer: Debian 11, Ubuntu
+20.04, RHEL 9 and anything since. It reads the latest release, checks the archive against the
+`SHA256SUMS` published beside it, and puts the binary in `~/.local/bin`, or somewhere else with
+`--to`. Windows is a `.zip` on the [releases page](https://github.com/theguriev/crook/releases).
+
+The Linux binary is built in a Debian 11 container so that it starts on all of those, and
+`script/glibc-floor` stops a release whose binary would need a newer glibc before it is
+published. v0.1.13 was built on Ubuntu 24.04 instead: it needs glibc 2.39, and on anything older
+it does not start, with ``version `GLIBC_2.39' not found``.
+
+### Linux, in the launcher
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/theguriev/crook/main/script/install | sh -s -- --desktop
+```
+
+`--desktop` also installs Crook's desktop entry, its icons and its AppStream record under
+`~/.local/share`, which is what puts it in the application menu and lets `xdg-terminal-exec` —
+what a launcher's *Open in terminal* and a `Terminal=true` entry ask for — start it. The Linux
+archive carries all three under `share/`, laid out the way a package installs them. Nothing that
+is not Crook's is written: which terminal your desktop opens is yours to say, so
+`xdg-terminals.list` and `mimeapps.list` are left alone and the installer prints the one command
+that puts Crook first.
+
+A launcher starts Crook the way it starts any terminal, with the flags the entry advertises:
+
+```sh
+crook -e htop -d 10                     # a window whose one pane runs htop, and closes with it
+crook --working-directory ~/src/crook   # a window whose shells start there; --cwd is the same
+crook --title notes --app-id notes      # its name, and the app_id / WM_CLASS a window rule matches
+```
+
+Everything after `-e` is the command, as in xterm, and `crook -- htop -d 10` says the same. It is
+typed into the pane's shell as an `exec`, so it runs on the `PATH` your profile built and, when it
+exits, the pane closes the way it does when a shell exits. `-e` is not available on Windows, whose
+shells have no `exec`. The line it types has to fit what a terminal keeps of a line typed before its
+shell is reading, which is 4095 bytes on Linux and about a thousand on macOS; a longer command is
+refused rather than cut short.
+
+**A window opened with `-e` or `--working-directory` is a launcher's.** It is a quick terminal
+beside your work rather than the work: it opens fresh instead of as the last window, and nothing it
+does is written to the session file, so closing it leaves the agent tabs your next ordinary launch
+comes back to exactly as they were. `--title` and `--app-id` alone open an ordinary window.
+
+That covers every window a launcher opens with a directory, including one that always names a
+directory. Omarchy's terminal key is one: it runs `xdg-terminal-exec --dir=…` with the focused
+terminal's directory, or your home when there is none. So once Crook is xdg-terminal-exec's first
+choice, the windows that key opens start fresh and never save the session. To get your tabs back,
+open Crook from the application menu or run a plain `crook`.
 
 ### macOS, from the browser
 
@@ -136,6 +182,39 @@ timer and no background poll, which is the same rule the store is written under:
 goes out when you run one of these, or press one of those buttons, and carries no version, no
 machine id and nothing else about this machine.
 
+## When something goes wrong
+
+Every window Crook opens writes a log file, and a panic writes a crash report, into one folder
+on this machine:
+
+| platform | folder |
+| --- | --- |
+| Linux | `~/.local/state/crook` — `$XDG_STATE_HOME/crook` when that is set |
+| macOS | `~/Library/Logs/Crook` |
+| Windows | `%LOCALAPPDATA%\crook` |
+
+`logs/` holds `crook-<channel>-<when>.log`, `<when>` being the launch in UTC: the lines the
+terminal gets, filtered the same way (`RUST_LOG` still decides), written whether or not a
+terminal is attached. `crashes/` holds `crook-<channel>-<when>.txt`, `<when>` being the panic:
+the version and platform, where it panicked and with what message, a backtrace, the GPU it was
+drawing with, and the last 200 lines of the log. A shipped build's backtrace names functions but
+not files and lines on Linux and macOS, and names nothing on Windows, whose names are in a
+`crook.pdb` the download does not carry — there the report's `Where` line is the place to start.
+The newest five of each are kept, and a log another Crook window is still writing is never
+removed. **Settings → About → Logs and crash reports** names the folder and opens it, and after
+a crash the next window says so in one line under the header: *Show* opens the folder,
+*Dismiss* puts the line away, and neither brings back a report that line was about.
+
+**Nothing in that folder leaves this machine.** Crook never sends, uploads or reads any of it
+back to anyone. To report a problem, [open an issue](https://github.com/theguriev/crook/issues)
+and attach the crash report, or paste the log lines from around the time it went wrong — having
+read them first, since a log can name folders and files of yours.
+
+What it cannot catch is a native crash: a segfault in a GPU driver, an access violation, an
+abort inside a system library ends the process without running any of Crook's code, so it
+leaves no report. The log file is still there up to its last line, and the system's own crash
+reporter — `coredumpctl`, Console.app, the Event Viewer — has the rest.
+
 ## v1 scope
 
 Twenty features, and the page that configures them:
@@ -149,6 +228,12 @@ Twenty features, and the page that configures them:
   secondary click, on the empty space the list leaves — says what a row of them shows: which
   fact it leads with, what its second line says, which chips it carries, whether hovering it
   opens a card, and the tab's number, which is the one `cmd-4` means once the tabs are named.
+  The diff chip counts what is not committed yet — `+12 -3` — until the branch has commits of
+  its own, and from then on counts from where the branch left its base: `2 commits, +40 -3`,
+  committed and uncommitted lines together, with `since main` added on the card, which has the
+  room to say what they are counted from. So a tab whose agent has just committed everything
+  still says what it did, rather than going blank at the moment there is most to look at. The
+  base itself and a detached checkout keep the plain count.
   One more row is the Appearance page's alone: **Status marks**, which turns the dot into a
   glyph per state in the same colour — a play mark, a bell, a crossed ring, a hollow one — for
   an eye the colour says nothing to, or a screenshot in greyscale.
@@ -172,6 +257,48 @@ Twenty features, and the page that configures them:
   and shows the slot it will drop into, and a group whose last tab leaves it goes away by
   itself. A group is not a split screen — the tabs in it are still one at a time, and splitting
   a tab is still `cmd-d` (`ctrl-shift-d` off macOS), asked for on purpose.
+
+  **The window comes back the way it was closed**: the tabs with their names, pins, colours
+  and groups, the splits, the directory each shell was in — and, for a pane that was running a
+  coding agent, that agent's name. Every Crook update is a restart and a restart ends every
+  process in the window, so a pane that had Claude Code in it comes back as a shell in the same
+  directory with `claude --continue` waiting in its command line, **unsent**: nothing runs
+  until you press Enter. Codex is offered `codex resume --last` and Gemini CLI `gemini --resume
+  latest`, each the most recent conversation in that directory, and Copilot its `copilot
+  --resume` picker, since its most recent is the repository's rather than the worktree's. Two
+  panes of one agent in one directory are offered its picker instead (`claude --resume`,
+  `codex resume`), because the directory names one conversation and they had two; Gemini CLI
+  has no picker on its command line, so two of its panes in one directory are offered nothing.
+  Any command that runs in a pane first, even a `cd`, ends the offer there; clearing the line,
+  with ctrl-c or otherwise, does not, and the next restart offers it again. **Resume
+  every agent** in the palette (`resume-agents`) sends every line a restore typed that you
+  have not touched, in one press. What is remembered is the program's name and nothing after
+  it, so a prompt typed on the command line never reaches the file, and it needs the shell
+  integration, which is what says what a pane is running. A line of your own goes in
+  `settings.json` under `resume_lines`, keyed by program — `{"claude": "claude --continue
+  --model opus"}` — and an empty one offers nothing. OpenCode and aider have no line until you
+  give them one: OpenCode's `--continue` reaches across a repository's worktrees, and aider's
+  `--restore-chat-history` is left for you to choose. No output comes back, and no process
+  does.
+  **Closing asks first when it would end something still working.** The window's close — the
+  desktop's close button, `alt-f4`, the palette's Close the window — a row's ×, a group's and
+  `cmd-w` (`ctrl-shift-w`) on a pane all end whatever runs in the panes they take, so while an
+  agent in one of them is running or waiting on you, or its shell is running a command, a card
+  says how many, names up to three, and offers **End them and quit** (or **End them and close**)
+  beside **Cancel**. Cancel is the default: Enter and Escape both press it, and so does a click
+  anywhere off the card. Tab or the arrow keys move to the other button, and Enter or Space then
+  presses whichever is filled — once the keyboard has been still for a second, so a Tab and a
+  Space typed on after a stray close cannot end anything. While the card is up the pane under it
+  hears no keys at all, so a `ctrl-c` meant for the card cannot interrupt the agent it is asking
+  about. A window close that asks restores a minimised window and, if the window is not the one
+  being typed in, asks the desktop for attention rather than taking the keyboard: a flashing
+  taskbar button, a bouncing dock icon, an urgent window, or on Wayland an activation request
+  the compositor may answer by focusing it. A close with nothing working in it goes at once, as
+  it always did.
+  **Ask before ending working agents**, on the Appearance page, turns the question off, and
+  **End all agents and quit** in the palette quits without it once. Nothing can ask when the
+  system ends Crook itself — a `SIGTERM`, a logout — and on macOS the Quit menu item and `cmd-q`
+  are that case too: AppKit ends the application before the window hears about either.
 - **The window's own title bar.** There is no strip of system chrome above Crook. The window is
   opened with the application's frame, so the header *is* the title bar: dragging its empty
   space moves the window and a double click maximises it. On macOS that surface carries
@@ -275,24 +402,101 @@ Twenty features, and the page that configures them:
   you know whether to come now or later without switching to the tab; `--message -` reads it
   from stdin, a hook's JSON `message` or the whole line. No socket and no pane id — the
   terminal it has *is* the pane — so it works from a hook, over `ssh` and inside a container,
-  and every other terminal drops the sequence unread. `crook --agent-hooks claude` prints the
-  hooks that make Claude Code say all of it by itself: running when a prompt is sent and
-  around every tool, needing input whenever it stops to ask — with the notification's own
-  text as the message — idle when it is done; merge them into `~/.claude/settings.json`.
+  and every other terminal drops the sequence unread. A hook with no terminal of its own —
+  every hook Claude Code runs — writes to the terminal of the program that ran it: the same
+  pane. Claude Code says all of it by itself — running when a prompt is sent and around every
+  tool, needing input whenever it stops to ask, with the notification's own text as the
+  message, idle when it is done — once Crook's plugin is installed:
+  `claude plugin marketplace add theguriev/crook`, then `claude plugin install crook@crook`,
+  with a Crook newer than 0.1.13. That is Claude Code writing its own settings, not anyone
+  merging JSON; the plugin's hooks call `$CROOK_BIN`, do nothing in any other terminal, and
+  exit 0 even when a report fails, so a Crook that cannot be reached is a line in Claude
+  Code's debug log rather than a notice on every prompt; it carries the skill below too.
+  `crook --agent-hooks claude` prints those two commands, then the same hooks as JSON for a
+  person who would rather merge them into `~/.claude/settings.json` by hand.
   `codex`, `gemini` and `copilot` print the same for Codex CLI, Gemini CLI and GitHub
   Copilot CLI in each one's own hooks file, `opencode` prints the plugin OpenCode loads
   instead, and `aider`, which has no hooks, gets a sentence saying what to do instead.
+  `--pull-request <url>` beside any status says which pull request the work is, and the row
+  carries it as a chip that opens it — https only, capped, on a sequence of its own,
+  `OSC 6342` — until the pane moves to another branch (a rebase is not a move); the Claude
+  Code and Codex hooks send the address a `gh pr create` printed, with no second hook and no
+  `jq`. Crook asks no forge to find it. The chip reads `PR #123` for github.com and names the
+  host anywhere else, and the hover card prints the whole address, since any program in the
+  pane can write the sequence.
+  **Check pull request** on the row's menu is the one place Crook asks the network about your
+  work: it runs your own `gh pr view <url> --json state,statusCheckRollup` once, on that
+  press, under a deadline — no token of Crook's, no timer, no poll — and the hover card says
+  open, merged or closed and how the checks stand until you press again, or that `gh` could
+  not be found, is not signed in, or could not reach GitHub. `gh` is looked for on Crook's
+  `PATH` and then where Homebrew, MacPorts, gh's own package and `~/.local/bin` put it, so a
+  Crook opened from the Dock finds it too.
   `crook --skill` prints the skill file that teaches an agent the rest — how to tell it is in
   a pane, what the four words do, where the worktrees and the plugins are — to save as
   `~/.claude/skills/crook/SKILL.md`.
+  **And the window answers.** `crook pane list` asks the window a pane is in what it has open
+  and prints a row per pane: its number (the one in `CROOK_PANE_ID`, the focused one marked
+  `*`), what its agent said, its title, group, branch and directory, and under it what a
+  waiting agent is waiting for; `--json` prints the window's own array, for a script or
+  another agent. It goes over a Unix socket in a directory only you can enter, named in every
+  pane's `CROOK_SOCKET` — never a network port — and it only reads. Outside a pane it asks
+  the one Crook that is running and refuses to guess among several. Not on Windows yet.
+  **And an agent can fan its work out where you can see it.** From inside a pane,
+  `crook tab new --worktree fix-x --in-my-group -- claude "fix the flaky test"` opens a tab
+  beside it — in a new worktree on `fix-x` from the pane's `HEAD`, folded into the pane's group —
+  without taking your keyboard, and runs the command at the new shell's first prompt, every word
+  as itself; it prints the new pane's number for `crook pane list` to watch. A pane is known by
+  the secret in its own `CROOK_TOKEN`, so a script that is not in a pane can list but cannot
+  open anything; eight tabs may be open on behalf of one pane you opened, a worker's own workers
+  counted in, and the new row's card says which pane opened it. `sh`, `bash`, `zsh` and `fish`
+  only.
+  **And wait for it, and read what it did.** `crook pane wait 7 --until needs-input --timeout
+  600` blocks until pane 7's agent stops for a person — or is `idle`, or its command has
+  `finished`, or the pane has `exited`, even before you asked — and prints where it got to,
+  failing when the time runs out first; `crook pane blocks 7 --last 1` prints its newest
+  finished command with what it printed, its exit status, how long it took and where, the end of
+  a long output kept and marked cut; `crook events --follow` is a line of JSON for every status,
+  every command finished (named, with its exit status) or seen running, and every tab opened and
+  closed, and a reader that falls behind is told how many it missed rather than held for. A
+  pane may watch itself and the tabs it opened, and nothing a person opened: that needs a grant
+  Crook cannot ask for yet. A command still running has not finished, and an interactive agent
+  is one live screen with no finished command to read: `pane blocks` says so rather than
+  printing nothing, and a worker whose answer is meant to be read runs headless, `claude -p`.
+  Crook also reads the notifications other terminals show — OSC 9, 777 and 99 — as the pane
+  asking for a look, with the notification's text on the row and the status left as it was, so
+  an agent on a remote box with its notification channel set to `iterm2`, `ghostty` or `kitty`
+  lights its row with no Crook binary there.
   A status the agent never took back goes when the shell's own marks say the command ended,
   and a failure stays on the row until the next command starts. Looking at a tab clears the
   *attention* it asked for and nothing else: an agent waiting for an approval is still waiting
-  after you glance at it. A row that is waiting for you is washed amber, the header counts them
-  in a chip that goes to the next one when pressed, and `cmd-j` (`ctrl-shift-j` off macOS) does
-  the same from the keyboard, round the list in the panel's order. The window is named after
-  the tab it shows, with that count in front — `(1 waiting) bisect the flaky test — Crook` —
-  so a switcher or a taskbar tells three Crooks apart and says which one stopped for you.
+  after you glance at it. Looking means the pane has the keyboard *and* the window is the one
+  in front: in a window behind another application even the pane with the keyboard is nobody's,
+  so the agent in the only pane you have is waiting like any other when it stops to ask, and
+  coming back to the window is the glance. A row that is waiting for you is washed amber, the
+  header counts them in a chip that goes to the next one when pressed, and `cmd-j`
+  (`ctrl-shift-j` off macOS) does the same from the keyboard, round the list in the panel's
+  order. The window is named after the tab it shows, with that count in front —
+  `(1 waiting) bisect the flaky test — Crook` — so a switcher or a taskbar tells three Crooks
+  apart and says which one stopped for you. When one more starts waiting while the window is
+  behind something else, Crook asks the desktop to point at it: the dock icon bounces once on
+  macOS, the urgency hint goes up on X11, an activation request goes to a Wayland compositor
+  that takes them and the taskbar button flashes on Windows — a request for a look, not a
+  notification, and it is taken back when the window comes to the front. On Linux, and on macOS
+  from Crook.app, a pane whose row turns amber while the window is behind something else — its
+  agent stops to ask or says it is done, or a program rings the bell — also posts a desktop
+  notification, titled `Crook — <tab>` with the agent's question under it, at most once every
+  thirty seconds for a pane nobody has come back to, through `notify-send` on the session bus or
+  a Mac's Notification Center (which asks you once, the first time a pane waits for you or
+  Crook has something to post) and nowhere else; the **Notifications** settings page turns it
+  off, the question included, and turns on the same for an agent that failed or a command that
+  ran ten seconds or more. A click on one does not bring the pane forward. Windows posts none
+  yet, and nor does a Mac binary outside Crook.app, since macOS delivers only to an app.
+  Crook.app also puts the waiting count on its dock icon as a badge, under the same permission
+  as the notifications and its Badges switch, so with notifications off there may be none; a Mac
+  binary outside Crook.app is given the count too, and whether the dock shows it is unverified.
+  A program that turns on focus reporting (`?1004`) is told `CSI I` and `CSI O` as the keyboard
+  reaches its pane and leaves it, the window's own focus included, so an agent can tell whether
+  anybody is watching.
 - **A shell in every pane.** A real pseudo-terminal and a real xterm-compatible emulator:
   colour, bold and italic faces, underline and strikeout, the alternate screen, ten thousand
   lines of scrollback, `SIGWINCH` on resize, and titles and working directories the shell
@@ -372,7 +576,10 @@ Twenty features, and the page that configures them:
   OSC 133 marks that say where a prompt starts, where a command starts and how it ended. There
   is nothing to install and nothing to configure: Crook writes a scratch `ZDOTDIR`, `--rcfile`
   or `vendor_conf.d` stub, chains onto whatever hooks are already there, never touches
-  `~/.zshrc`, and removes the stub when the pane closes. Set `CROOK_NO_SHELL_INTEGRATION` to
+  `~/.zshrc`, and removes the stub when the pane closes. The stubs sit in a directory only you
+  can read — `$XDG_RUNTIME_DIR/crook`, or `crook-<uid>` in the temporary directory, and on
+  Windows `crook-shell-integration` in your own `%TEMP%` — and a pane whose directory is
+  someone else's runs without the marks rather than use it. Set `CROOK_NO_SHELL_INTEGRATION` to
   anything but `0` to turn it off. It reaches only shells Crook itself starts — not the far
   side of an `ssh`, not a container, and not a shell it has no snippet for (`pwsh`, `nu`,
   `ksh`, `tcsh`) — and on those machines `crook --shell-integration zsh` prints the same text
@@ -381,7 +588,12 @@ Twenty features, and the page that configures them:
   `crook --shell <path>` starts another shell in every pane, for trying one out. Marks or no
   marks, every shell Crook starts has `TERM_PROGRAM=Crook` and `CROOK_PANE_ID` set to the
   pane's number — what WezTerm's `WEZTERM_PANE` is — so a script or an agent can tell it is
-  inside Crook and which pane, and name a log file after it.
+  inside Crook and which pane, and name a log file after it — and `CROOK_SOCKET`, where the
+  window answers `crook pane list`, with `CROOK_TOKEN`, the pane's own secret that
+  `crook tab new`, `crook pane wait`, `crook pane blocks` and `crook events` send to say which
+  pane is asking. `CROOK_BIN` is beside them: the absolute path of the `crook` binary the pane
+  belongs to, so a hook can call it from a `PATH` it is not on — a Crook.app nobody linked, a
+  build under `target/`.
 
   It also **answers**, which is what makes Tab work. Command marks are an announcement and
   completion is a question, so there is a second channel beside them: Crook writes the line
@@ -444,9 +656,37 @@ Twenty features, and the page that configures them:
   ones other tabs are in, and the rest. Choosing one opens a tab there — or brings forward the tab
   already in it, because two agents editing one checkout is exactly what a worktree exists to
   prevent. `New worktree…` asks for a branch name, fills one in that nothing is using, shows
-  where the checkout will go, and opens a tab in it — folded into a group with the tab that
-  asked for it. Removal is offered only for a checkout
-  that is not locked, not the main one, and not one a tab is working in; it says what it will
+  where the checkout will go, and asks where the branch starts: this tab's own branch, already
+  picked, the repository's default branch (`origin/HEAD`, else `init.defaultBranch`, else
+  `main` or `master`) one arrow below it, and every other local branch after that. Then it
+  opens a tab in it — folded into a group with the tab that asked for it. Under all that it
+  offers **an agent to start there**: the coding agents it finds installed (`claude`, `codex`,
+  `gemini`, `copilot`, `opencode`, `aider` — looked for on `PATH`, never run to ask), with
+  `Shell only` first and picked, which makes exactly the worktree it always made. Pick one and a
+  prompt field appears; the branch is named after the prompt as you type it
+  (`worktree/fix-the-login-bug`) until you type a name of your own. Create, or Enter from either
+  field, opens the tab with the agent's line — `claude 'fix the login bug'`, the prompt quoted
+  as one word for the shell — **in the composer, unsent**, for you to read and send; `Start`
+  sends it for you. Tab moves the keyboard between the name and the agents, and the arrows walk
+  the list on whichever side has it, so every agent is a Tab and an arrow away from `Shell
+  only`. `New task…` in the palette (`crook/worktrees/new-task`) is the same creator with the
+  first agent found already picked and the keyboard in the prompt, so a task is a sentence and
+  Enter; it ships with no chord, and `{ "key": "cmd+shift+n", "command":
+  "crook/worktrees/new-task" }` (`ctrl+shift+n` off macOS) is one that nothing else takes. In a
+  shell whose quoting Crook has not proven — anything but sh, dash, bash, zsh and fish, and
+  every shell on Windows for now — the line is the agent's name alone and there is no prompt
+  field. A repository with a [`.worktreeinclude`](https://code.claude.com/docs/en/worktrees) at
+  the root of its main checkout — Claude Code's file, in `.gitignore` syntax — gets the files it
+  names copied in before that tab's shell starts, so the `.env` an agent's first run needs is
+  there: only files git ignores (a tracked file is already in the checkout), and only where the
+  new checkout ignores it too, so an agent's `git add -A` cannot commit it; never into one of
+  its submodules, never through a symbolic link, never over a file already there, nothing at all
+  past a thousand files or 256 MB, and no single file over 64 MB. What did not arrive is said on
+  the new tab's worktree menu. A checkout made that way is locked (`crook: <branch>`) until no
+  pane in the window is working in it any more, or the window closes, so `git worktree remove`,
+  `prune` and other tools' tidy-ups leave it alone. Removal is offered only for a checkout that
+  nobody else has locked, not the main one, and not one a tab is working in; it says what it
+  will
   delete first, and it never deletes the branch. One row down, `Remove 3 free checkouts…`
   does the same to all of them at once — it looks in each one first, names the branches that
   will actually go, and leaves anything with work in it exactly where it is. That row is there
@@ -506,14 +746,16 @@ Twenty features, and the page that configures them:
 - **A settings page**, which opens the way a shell does: `cmd/ctrl-,` — or the View options
   menu's last entry — puts it in a **tab of its own**, listed beside the work it
   configures, splittable next to that work, and closed by the same × and the same close chord
-  (`cmd-w`, `ctrl-shift-w` off macOS) as any other pane. Four pages: Appearance, Shell,
-  Keyboard Shortcuts and About — and a plugin's page arrives on the same rail beside them.
+  (`cmd-w`, `ctrl-shift-w` off macOS) as any other pane. Five pages: Appearance, Shell,
+  Notifications, Keyboard Shortcuts and About — and a plugin's page arrives on the same rail
+  beside them.
   Every option on it is one the application actually reads; there is nothing there that does
   not do something. Changes apply on the click and are
   written to `<config>/crook/settings.json`, which is the same eight keys that menu writes, the
   status marks, the theme, the light and dark pair it follows the desktop between, the
-  terminal's type size, whether the tabs come back, and — set in the file rather than on the
-  page — its font family.
+  terminal's type size, whether the tabs come back, which stops post a notification, and —
+  set in the file rather than on the page — its font family and the line each agent is resumed
+  with.
   The type size is also on `cmd/ctrl-plus`, `-minus` and `-0`, and every pane resizes with it:
   a pane's columns and rows are its box divided by a cell, so the ptys follow.
   It is the one pane with no shell under it and no field: every control on it is a click.
@@ -545,7 +787,7 @@ Twenty features, and the page that configures them:
   page tells you where it is.
 
 - **Everything the window does has a name, and most of it has a key.** The window registers
-  fifty-one commands of its own and ships chords for thirty-seven; the other fourteen are
+  fifty-two commands of its own and ships chords for thirty-seven; the other fifteen are
   reached by name, from the palette or from a chord of your own. That split is deliberate — a
   shipped chord is a key taken away from the shell in every pane, forever, so it is spent on
   what is pressed often and not on what is done once a week.
@@ -571,13 +813,15 @@ Twenty features, and the page that configures them:
   Without a chord, by name: `split-left` and `split-up`, `grow-pane`, `shrink-pane` and
   `even-panes`, a block's menu (`open-block-menu`) and every entry of it (`copy-block`,
   `copy-block-command`, `copy-block-output`, `copy-block-directory`, `copy-block-branch`,
-  `rerun-block`, `scroll-to-block-top`, `scroll-to-block-bottom`), every entry of a tab's
+  `rerun-block`, `scroll-to-block-top`, `scroll-to-block-bottom`), `resume-agents` (the
+  agents a restart ended — see Tabs), every entry of a tab's
   (`crook/tabs/pin-tab`, `close-tab`, `open-menu`, `view-options`,
   `toggle-group`, `close-group`, the seven colours), the Changes column
   (`crook/changes/toggle`), the worktree list (`crook/worktrees/menu`)
-  and every settings page (`crook/appearance/open-page` and its three neighbours). The block
-  entries act on the block the menu is up on, or — with no menu — on the one the keyboard has
-  selected, so each of them is a chord as well as a row.
+  and its task creator (`crook/worktrees/new-task`), and every settings page
+  (`crook/appearance/open-page` and its four neighbours). The block entries act on the block
+  the menu is up on, or — with no menu — on the one the keyboard has selected, so each of them
+  is a chord as well as a row.
 
 - **The menus can be walked.** A tab's context menu opens with `crook/tabs/open-menu`, the
   arrows move down it, Enter runs the row and Escape takes it down. The worktree list inside
@@ -715,6 +959,12 @@ Build time: a C toolchain (rustc shells out to `cc` to link) and `pkg-config`.
 ```sh
 sudo apt-get install -y build-essential pkg-config
 ```
+
+A binary needs the glibc it was linked against, or a newer one, so what you build starts on your
+distribution and on the ones after it, not on older ones. That is why a release is built in a
+Debian 11 container (`.github/workflows/linux-binary.yml`) rather than on a current system.
+`./script/glibc-floor 2.31 dist/linux/crook` says whether a build of yours would start everywhere a
+release does.
 
 Run time: the X11, Wayland, EGL and mesa shared objects that `winit` and `wgpu` `dlopen` when
 the window is created. These are *not* build dependencies — the workspace compiles without

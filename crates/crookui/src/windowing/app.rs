@@ -36,6 +36,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use crate::rendering::init_wgpu_instance;
 
 use super::chrome::{RESIZE_GRAB, WindowChrome, WindowControls, edge_at};
+use super::dock;
 use super::event::InputState;
 use super::window::Window;
 
@@ -51,6 +52,17 @@ pub struct WindowOptions {
     pub chrome: WindowChrome,
     /// Whether the window may be see-through where the scene is.
     pub transparent: bool,
+    /// What a Linux desktop calls the window: Wayland's `app_id` and X11's
+    /// `WM_CLASS`, which are the same fact under two names.
+    ///
+    /// It is what a window rule matches, what a dock groups by, and what a
+    /// `.desktop` file's `StartupWMClass` ties the window to, so the default
+    /// is one name for every channel: the dev build says it is the dev build
+    /// in its *title*, which is what a person reads, and a rule that stopped
+    /// matching because they ran a different build of the same application
+    /// would be a rule nobody could debug. macOS and Windows have no such
+    /// field and never read it.
+    pub app_id: String,
 }
 
 impl Default for WindowOptions {
@@ -61,6 +73,7 @@ impl Default for WindowOptions {
             min_size: vec2f(480., 192.),
             chrome: WindowChrome::default(),
             transparent: true,
+            app_id: "crook".to_owned(),
         }
     }
 }
@@ -68,8 +81,8 @@ impl Default for WindowOptions {
 /// What the window asks of the application above it.
 ///
 /// This is the whole seam between the platform layer and the application:
-/// three methods, no winit types, no wgpu types. A headless test double
-/// implements it in a dozen lines.
+/// six methods, three of them with a default, no winit types, no wgpu types. A
+/// headless test double implements it in a dozen lines.
 pub trait WindowDelegate: 'static {
     /// Lays out and paints the frame to draw.
     ///
@@ -87,6 +100,43 @@ pub trait WindowDelegate: 'static {
 
     /// Runs after each frame reaches the screen.
     fn frame_drawn(&mut self);
+
+    /// The window's own close was asked for: its close button, the desktop's
+    /// shortcut for closing a window, a window manager closing it.
+    ///
+    /// Return `true` to leave the event loop now. An application that has
+    /// something to ask first returns `false`, puts its question on screen —
+    /// which asks for its own frame, as any change does — and leaves later
+    /// through [`Proxy::exit`], or not at all if the answer was no.
+    ///
+    /// The default leaves at once, which is right for a window with nothing
+    /// in it to lose. It is not asked when the operating system ends the
+    /// process itself: that does not come through the window.
+    fn close_requested(&mut self) -> bool {
+        true
+    }
+
+    /// The window has just taken the keyboard: a click on it, the desktop's
+    /// switcher, or the desktop answering a request for attention by focusing
+    /// it.
+    ///
+    /// Not an [`Event`], because nothing in the element tree is under it and
+    /// nothing is drawn differently for it. What it is for is knowing that the
+    /// next few keys may have been typed at whatever had the keyboard before.
+    /// The default does nothing with that.
+    fn focused(&mut self) {}
+
+    /// Runs once, as the event loop stops, whatever stopped it.
+    ///
+    /// The one place an application hears that it is ending. Only some of
+    /// the ways a window closes pass through the application first — the
+    /// window manager's close and macOS's Quit go straight to the platform,
+    /// and Quit ends the process without [`run`] ever returning — and every
+    /// one of them passes through here.
+    ///
+    /// Nothing is drawn after it, so work done here is work the person
+    /// waits for with the window up and unanswering: bound it.
+    fn exiting(&mut self) {}
 }
 
 /// A `Send + Sync` handle for reaching the main thread from anywhere.
@@ -116,6 +166,57 @@ impl Proxy {
     /// frame is only paying for a message, as with the input method's area.
     pub fn set_title(&self, title: String) {
         self.send(CrookEvent::SetTitle(title));
+    }
+
+    /// Asks the desktop to point at the window: a bounce of the dock icon, an
+    /// urgency hint, a flash of the taskbar button — whichever the platform
+    /// has.
+    ///
+    /// For something in the window that wants a person who is somewhere
+    /// else, so it does nothing while the window has the focus. It is not a
+    /// notification: it says nothing but "this window", and the platform
+    /// decides how. The request is over when the window next gains the focus,
+    /// which is the look it asked for — taken back then on the desktop that
+    /// needs it, X11 — so the caller has nothing to undo.
+    pub fn request_attention(&self) {
+        self.send(CrookEvent::RequestAttention);
+    }
+
+    /// Puts `waiting` on the application's dock icon as a badge, or takes
+    /// the badge off at zero.
+    ///
+    /// The count of panes waiting for a person, the number the window's
+    /// title starts with, somewhere it is seen with the window out of sight.
+    /// It is set here and drawn by the dock, which for an application with a
+    /// bundle identifier — Crook.app — draws it only after the application
+    /// has asked Notification Center for leave to badge, and only while the
+    /// person's Badges switch allows it. Asking is the caller's, with
+    /// [`Self::show_badge_again`] once the answer is yes. For a binary
+    /// started from a shell, which has no identifier to ask as, it is set all
+    /// the same, and whether the dock draws it is not established.
+    ///
+    /// macOS only, and nothing is sent anywhere else: a Linux desktop has no
+    /// badge its docks agree on, and a Windows taskbar's overlay icon is a
+    /// picture rather than a number. Sending the same count twice is
+    /// harmless; a caller that sends one only when it changes saves the
+    /// dock a redraw.
+    pub fn set_badge(&self, waiting: usize) {
+        if cfg!(target_os = "macos") {
+            self.send(CrookEvent::SetBadge(waiting));
+        }
+    }
+
+    /// Sets the dock icon's badge again as it stands, for a dock that may
+    /// have dropped it while the application had no leave to badge.
+    ///
+    /// For the moment that leave arrives, which is on a queue of the
+    /// system's: whatever count [`Self::set_badge`] last sent is the one
+    /// shown, since both go through the event loop in the order they were
+    /// sent. Nothing when there is no badge, and nothing is sent off macOS.
+    pub fn show_badge_again(&self) {
+        if cfg!(target_os = "macos") {
+            self.send(CrookEvent::ShowBadgeAgain);
+        }
     }
 
     /// Says where the text being composed is, so the platform can put an input
@@ -168,8 +269,11 @@ pub struct Platform {
 /// Everything that reaches the main thread from somewhere else.
 ///
 /// A handful of variants rather than Warp's thirty, because Crook has one
-/// window and no menu bar, no global hotkeys and no notifications. Adding one
-/// is how any future off-thread capability should arrive.
+/// window and no menu bar, no global hotkeys and no notifications — asking
+/// for attention is not one: it names only the window, and the desktop says
+/// it however it says it; nor is the dock's badge, a number on the icon. The
+/// application posts its notifications itself. Adding one is how any future
+/// off-thread capability should arrive.
 enum CrookEvent {
     /// Poll a foreground task.
     RunTask(ManuallyDrop<Runnable>),
@@ -184,6 +288,12 @@ enum CrookEvent {
     },
     /// Name the window.
     SetTitle(String),
+    /// Ask the desktop to point at the window.
+    RequestAttention,
+    /// Put this many waiting panes on the dock icon's badge.
+    SetBadge(usize),
+    /// Set the dock icon's badge again, as it stands.
+    ShowBadgeAgain,
     /// Leave the event loop.
     Exit,
 }
@@ -227,6 +337,7 @@ pub fn run(
         window: None,
         controls,
         input: InputState::default(),
+        attention_requested: false,
         replay_requested_redraw: false,
         frame_retry: None,
     };
@@ -243,6 +354,10 @@ struct App {
     window: Option<Window>,
     controls: WindowControls,
     input: InputState,
+
+    /// Whether the desktop has been asked to point at the window since it
+    /// last had the focus, so that gaining it can take the request back.
+    attention_requested: bool,
 
     /// Whether the redraw now pending is the one the hover replay itself asked
     /// for. Without it, a delegate that repaints in response to the replay
@@ -276,6 +391,10 @@ impl ApplicationHandler<CrookEvent> for App {
         {
             window.request_redraw();
         }
+    }
+
+    fn exiting(&mut self, _: &ActiveEventLoop) {
+        self.delegate.exiting();
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -342,6 +461,15 @@ impl ApplicationHandler<CrookEvent> for App {
                     window.set_title(&title);
                 }
             }
+            CrookEvent::RequestAttention => {
+                if let Some(window) = self.window.as_mut()
+                    && window.request_attention()
+                {
+                    self.attention_requested = true;
+                }
+            }
+            CrookEvent::SetBadge(waiting) => dock::set_badge(dock::label(waiting).as_deref()),
+            CrookEvent::ShowBadgeAgain => dock::show_again(),
             CrookEvent::Exit => event_loop.exit(),
         }
     }
@@ -357,8 +485,13 @@ impl ApplicationHandler<CrookEvent> for App {
         }
 
         match event {
+            // The application's to answer rather than this loop's: a window
+            // with work in it asks before that work is ended, and the answer
+            // comes back as an `Exit` on the proxy — or never, if it was no.
             WindowEvent::CloseRequested => {
-                event_loop.exit();
+                if self.delegate.close_requested() {
+                    event_loop.exit();
+                }
                 return;
             }
 
@@ -374,6 +507,24 @@ impl ApplicationHandler<CrookEvent> for App {
             WindowEvent::RedrawRequested => {
                 self.redraw(event_loop);
                 return;
+            }
+
+            // Taking the keyboard is the look a request for attention asked
+            // for, so the request is over — whichever asked, a close's
+            // question or a pane waiting. Taken back here rather than left to
+            // the application, because only X11 needs taking back — it keeps
+            // its urgency hint until somebody removes it — and nothing above
+            // this line should have to know which desktop it is on. It is also
+            // the moment the application's next keys stop being certainly its
+            // own. Then on to the delegate as an event, like losing the
+            // keyboard, because the workspace keeps whether the window is in
+            // front.
+            WindowEvent::Focused(true) => {
+                self.controls.focused();
+                if std::mem::take(&mut self.attention_requested) {
+                    self.with_window(|window| window.withdraw_attention_request());
+                }
+                self.delegate.focused();
             }
 
             _ => {}

@@ -30,7 +30,9 @@
 //! * the repository's worktrees, each of which opens a tab in it *in the group
 //!   the tab the menu was opened on belongs to* — or brings forward the pane
 //!   already there;
-//! * a way to make one, which asks for a branch name and nothing else;
+//! * a way to make one, which asks for a branch name and where it starts, and
+//!   locks the checkout it makes until no pane in the window is working in it
+//!   or the window closes;
 //! * a way to remove one, offered only for a checkout nothing is working in;
 //! * a way to remove all of those at once, for the day a repository has eight
 //!   of them and seven are finished;
@@ -102,9 +104,60 @@
 //!
 //! herdr's shape, which is the tool this was modelled on: there a worktree is
 //! not a thing you administer but a workspace with a git checkout behind it,
-//! and creating one *opens* it. What is deliberately not taken is its
-//! `--base`: a worktree made from anything other than the head you are looking
-//! at is a question a menu cannot ask well.
+//! and creating one *opens* it.
+//!
+//! # Where a new branch starts
+//!
+//! herdr's `--base` was left out at first, on the grounds that a worktree made
+//! from anything but the head you are looking at was a question a menu could
+//! not ask well. Leaving it out answered it instead, and wrongly: a creator
+//! opened from a tab on a feature branch cut every new branch from that
+//! feature, and an agent's work stacked on another's without anybody having
+//! said so. Most of them should start from the repository's default branch.
+//!
+//! So the creator asks, under the name, as a list of places to start from —
+//! the tab's own `HEAD`, then the default branch (see
+//! [`crate::git::worktree::default_branch`]), then every other local branch.
+//! `HEAD` is picked when it opens, so a person who does not look gets a branch
+//! from the commit they got one from before there was a question; the default
+//! branch is one arrow away. Not quite the same branch: every new one is made
+//! with no upstream now, where `branch.autoSetupMerge` set to `always` or
+//! `inherit` used to give one made from `HEAD` an upstream (see
+//! [`crate::git::worktree::add`]).
+//!
+//! The whole list rather than those two and a filter, because the filter
+//! would be a second field with a caret of its own in a popup whose promise is
+//! a name and a press, and every letter typed here belongs to the name: the
+//! list is short in practice, the two rows that matter lead it, and it scrolls
+//! past a few rows rather than growing the popup.
+//!
+//! # Starting an agent in it
+//!
+//! One agent, one worktree, and the creator is where the two meet: under the
+//! places to start from it lists the coding agents it found installed, with
+//! "Shell only" first and picked, and a prompt field that appears once an
+//! agent is picked. What it does with them is type one line — `claude 'fix
+//! the login bug'` — into the new tab's composer after the checkout opens,
+//! and leave it there. The line is quoted by the host, never spliced (see
+//! [`crate::agent::launch_line`]), and it is not sent: a line a person has
+//! not seen is a line nobody chose to run, and a pane's composer is where a
+//! person already reads a line before pressing Enter on it. The one way to
+//! have it run straight away is the Start button, which is a press for
+//! exactly that.
+//!
+//! The branch follows the prompt — `worktree/fix-the-login-bug` — for as long
+//! as the field still holds a name the creator put there; the first letter
+//! somebody types into it is the end of that. "New task…" in the palette is
+//! this same creator opened with the first agent found already picked and the
+//! keyboard in the prompt, which is what makes a task one sentence and a
+//! press; the tab's own "New worktree…" opens it on "Shell only", which makes
+//! exactly the worktree it always made and types nothing.
+//!
+//! Which agents are installed is a look for their programs on `PATH`, made on
+//! the background pool with the repository's reads when the menu opens —
+//! never a program started to ask, and never anything on the frame. A shell
+//! the host's quoting is not proven in gets the agent's bare name and no
+//! prompt field, rather than a line that means something else there.
 //!
 //! # The two keys
 //!
@@ -120,12 +173,25 @@
 //! * **Enter** is the button that face leads with: Create in the creator,
 //!   where the name is selected the moment it opens so making a worktree is a
 //!   name and a press, and Remove in the confirmation, which is a question
-//!   already asked once and answered with the pointer that opened it.
+//!   already asked once and answered with the pointer that opened it. Create
+//!   in the prompt field too, and never Start: Enter is the key a person
+//!   presses at the end of a sentence, and that is not the moment they chose
+//!   to run a line they have not read yet.
 //!
 //! Enter stops at the second question. When git refuses over local work the
 //! button becomes "Remove anyway", and that one stays a click: a person who
 //! pressed Enter and got a warning back should not be able to delete the work
 //! it warns about by pressing the same key again.
+//!
+//! The creator claims the up and down arrows as well, and they move the check
+//! down the list in the half that has the keyboard — the places to start from
+//! with the name, the agents with the prompt — while the field keeps every
+//! letter. In a one-line field those two only jump the caret to an end, which
+//! Home and End still do. Tab, where there are agents, moves the keyboard to
+//! the other half. The agents' half is a stop of its own while no prompt is
+//! asked for — "Shell only", or a shell the quoting is not proven in — with
+//! the picked row lit where a caret would otherwise say where the keyboard
+//! is, so that every agent is a key away and not only a click.
 //!
 //! # Reading git off the frame
 //!
@@ -147,7 +213,7 @@ use crate::git::worktree::{Local, Worktree};
 use crate::tab::TabId;
 use crate::theme::theme;
 
-use super::action::{WorkspaceAction, WorktreeAction};
+use super::action::{CreatorField, WorkspaceAction, WorktreeAction};
 use super::view::Workspace;
 use super::window_room::WindowRoom;
 
@@ -179,6 +245,28 @@ const LABEL_GAP: f32 = 8.;
 
 /// What the branch field says before anything is typed into it.
 const BRANCH_PLACEHOLDER: &str = "branch";
+
+/// What the prompt field says before anything is typed into it.
+pub(super) const PROMPT_PLACEHOLDER: &str = "what it should do";
+
+/// How many places to start from the creator shows before the list scrolls.
+///
+/// Six, for the reason the sweep names six branches: a face that stays one
+/// screenful. The two rows that are right most of the time lead the list, so
+/// a repository with forty branches costs a scroll — or a few presses of an
+/// arrow — only to the person who wants one of the other thirty-eight.
+const BASE_ROWS: usize = 6;
+
+/// One place-to-start row's height: the 16px check slot and 2px above and
+/// below it, which is the options menu's check row.
+const BASE_ROW_HEIGHT: f32 = 20.;
+
+/// The check slot on a place-to-start row, and the check inside it — the
+/// options menu's sizes, because a row with a check on it here says what one
+/// says there.
+const CHECK_SLOT: f32 = 16.;
+/// See [`CHECK_SLOT`].
+const CHECK_SIZE: f32 = 13.;
 
 /// What the menu is doing.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -296,6 +384,21 @@ impl Sweep {
     }
 }
 
+/// One place the creator can start a new branch from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Base {
+    /// What its row says: a branch's name, or the head the tab is sitting on.
+    pub(super) label: String,
+    /// What [`crate::git::worktree::add`] is handed. `None` for the tab's own
+    /// `HEAD`, which is what `add` starts from when it is handed nothing, and
+    /// a full ref name — `refs/heads/main` — for everything else, so that a
+    /// tag sharing a branch's name cannot be what git picks.
+    pub(super) reference: Option<String>,
+    /// The word on the right of the row, for the two rows that are more than
+    /// a branch: the tab's own, and the default.
+    pub(super) badge: Option<&'static str>,
+}
+
 /// One checkout a tidy-up would remove.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Going {
@@ -329,8 +432,18 @@ pub(super) enum Control {
     TidyLanded,
     /// The creator's branch field.
     Branch,
+    /// One of the creator's places to start from, by its index in
+    /// [`TabMenuState::bases`].
+    Base(usize),
+    /// One of the creator's agents, by its row: `0` is "Shell only".
+    Agent(usize),
+    /// The creator's prompt field.
+    Prompt,
     /// The creator's and the confirmation's "Cancel".
     Cancel,
+    /// The creator's "Start", which runs the agent's line rather than
+    /// leaving it in the composer.
+    Start,
     /// The button that does the thing.
     Confirm,
 }
@@ -357,6 +470,47 @@ pub(super) struct TabMenuState {
     /// suggestion must step over. Empty when the read failed, which costs a
     /// worse suggestion and nothing else.
     pub(super) branches: Vec<String>,
+    /// The branch new work in the repository usually starts from, as a full
+    /// ref, as of when the menu opened.
+    ///
+    /// `None` where the repository names none or the read failed, which costs
+    /// the creator one row and nothing else — the same bargain the branches
+    /// above strike.
+    pub(super) default_branch: Option<String>,
+    /// Where the creator's branch can start from, the tab's own `HEAD` first.
+    ///
+    /// Made when the creator opens, out of what the menu read when *it*
+    /// opened, and kept rather than made again every frame because
+    /// [`Self::base`] is an index into it.
+    pub(super) bases: Vec<Base>,
+    /// Which of [`Self::bases`] is picked: the tab's own `HEAD` until somebody
+    /// picks another, which is where this creator started every branch before
+    /// it had anything to ask.
+    pub(super) base: usize,
+    /// How far the places to start from are scrolled, in a repository with
+    /// more branches than [`BASE_ROWS`].
+    pub(super) base_scroll: ScrollStateHandle,
+    /// The coding agents the creator can start, as of when the menu opened:
+    /// the ones [`crate::agent::found_on`] found installed, in its order.
+    pub(super) agents: Vec<&'static str>,
+    /// Which to start in the new checkout, as a row of the creator's list:
+    /// `0` is "Shell only", and every other row is one of [`Self::agents`].
+    pub(super) agent: usize,
+    /// Whether the window's shell reads a line with a quoted prompt in it the
+    /// way it was written — see [`crate::plugins::wasm::quoting_holds_in`].
+    /// Where it does not, the creator asks for no prompt.
+    pub(super) prompt_holds: bool,
+    /// Which half of the creator has the keyboard.
+    pub(super) field: CreatorField,
+    /// The branch name the creator itself last put in the field.
+    ///
+    /// While the field still says exactly this, nobody has typed a name of
+    /// their own, and the name goes on following the prompt; the moment it
+    /// says anything else, it is theirs and is left alone.
+    pub(super) branch_offered: Option<String>,
+    /// Whether the menu was opened to start a task, and goes into the
+    /// creator the moment the repository has been read.
+    pub(super) task: bool,
     /// What the repository is called: the name of its main checkout's
     /// directory, which is what a person calls it.
     pub(super) repository: Option<String>,
@@ -422,8 +576,9 @@ pub(super) struct TabMenuState {
     /// of the list rather than on a row somebody would have to find, which is
     /// how every list in this window that can be walked behaves.
     ///
-    /// Only [`Mode::Listing`] reads it: the other three modes are one question
-    /// with two buttons, and Enter already answers them.
+    /// Only [`Mode::Listing`] reads it. The creator's arrows move
+    /// [`Self::base`] instead, and the other two modes are one question with
+    /// two buttons, which Enter already answers.
     pub(super) selected: Option<usize>,
     /// How far the list of checkouts is scrolled, in a window too short for
     /// them all.
@@ -505,35 +660,53 @@ impl TabMenuState {
         let next = Some(next as usize);
         let moved = self.selected != next;
         self.selected = next;
-        if moved {
-            self.scroll_selection_into_view(count);
+        if moved && let Some(at) = next {
+            scroll_into_view(&self.scroll, at, count);
         }
         moved
     }
 
-    /// Brings the keyboard's row inside the list's viewport.
+    /// Steps the creator's place to start from `by` places, and reports
+    /// whether it moved.
     ///
-    /// The rows are one height, so a row's top is arithmetic on what the
-    /// last layout measured: the content the scroll holds divided by the
-    /// count. Before any layout the measurement is zero and says nothing,
-    /// and a list that fits has nothing to move.
-    fn scroll_selection_into_view(&self, count: usize) {
-        let Some(at) = self.selected else {
-            return;
-        };
-        let mut scroll = self.scroll.lock();
-        let viewport = scroll.viewport();
-        if viewport <= 0. || !scroll.is_scrollable() {
-            return;
+    /// Clamped, for [`Self::move_selection`]'s reason. There is no "nothing
+    /// picked" to land from: the tab's own `HEAD` is picked from the moment
+    /// the creator opens, because a worktree has to start somewhere.
+    pub(super) fn move_base(&mut self, by: isize) -> bool {
+        let count = self.bases.len();
+        if count == 0 {
+            return false;
         }
-        let row = (scroll.max_offset() + viewport) / count as f32;
-        let top = at as f32 * row;
-        let offset = scroll.offset();
-        if top < offset {
-            scroll.scroll_to(top);
-        } else if top + row > offset + viewport {
-            scroll.scroll_to(top + row - viewport);
+        let next = (self.base as isize + by).clamp(0, count as isize - 1) as usize;
+        let moved = self.base != next;
+        self.base = next;
+        if moved {
+            scroll_into_view(&self.base_scroll, next, count);
         }
+        moved
+    }
+
+    /// The agent the creator would start, or `None` for "Shell only".
+    pub(super) fn picked_agent(&self) -> Option<&'static str> {
+        let index = self.agent.checked_sub(1)?;
+        self.agents.get(index).copied()
+    }
+
+    /// Whether the creator is asking for a prompt: an agent is picked, and
+    /// the shell reads the line a prompt would be put on.
+    pub(super) fn asks_for_a_prompt(&self) -> bool {
+        self.prompt_holds && self.picked_agent().is_some()
+    }
+
+    /// Steps the creator's agent `by` rows, "Shell only" included, and
+    /// reports whether it moved. Clamped, for [`Self::move_selection`]'s
+    /// reason.
+    pub(super) fn move_agent(&mut self, by: isize) -> bool {
+        let last = self.agents.len() as isize;
+        let next = (self.agent as isize + by).clamp(0, last) as usize;
+        let moved = self.agent != next;
+        self.agent = next;
+        moved
     }
 
     /// Forgets every hover and press the menu was holding.
@@ -546,6 +719,91 @@ impl TabMenuState {
             state.lock().reset_interaction_state();
         }
     }
+}
+
+/// Brings row `at` of a scrolled list of `count` rows inside its viewport.
+///
+/// The rows are one height, so a row's top is arithmetic on what the last
+/// layout measured: the content the scroll holds divided by the count. Before
+/// any layout the measurement is zero and says nothing, and a list that fits
+/// has nothing to move.
+fn scroll_into_view(scroll: &ScrollStateHandle, at: usize, count: usize) {
+    let mut scroll = scroll.lock();
+    let viewport = scroll.viewport();
+    if viewport <= 0. || !scroll.is_scrollable() {
+        return;
+    }
+    let row = (scroll.max_offset() + viewport) / count as f32;
+    let top = at as f32 * row;
+    let offset = scroll.offset();
+    if top < offset {
+        scroll.scroll_to(top);
+    } else if top + row > offset + viewport {
+        scroll.scroll_to(top + row - viewport);
+    }
+}
+
+/// Where a new branch can start, in the order the creator offers them.
+///
+/// The tab's own `HEAD` first, labelled the way its row in the list is, which
+/// is where the creator started every branch before it asked. The default
+/// branch second, one arrow away, because it is the answer that is right most
+/// of the time. Then every other local branch in git's order, for the branch
+/// that is meant to stack on another.
+///
+/// Nothing is offered twice. The tab's own branch is its first row and not
+/// also a later one, and a default branch that *is* the tab's own branch —
+/// the tab is on `main` — is that first row too. A remote default is not the
+/// local branch of the same name: `origin/main` and a `main` somebody last
+/// pulled a week ago are two different places to start, and both are offered.
+///
+/// Pure, and given the menu's answers rather than the workspace, so the rule
+/// can be read in one place and is the same on every frame that draws it.
+pub(super) fn bases(
+    worktrees: &[Worktree],
+    directory: Option<&Path>,
+    branches: &[String],
+    default_branch: Option<&str>,
+) -> Vec<Base> {
+    let head = holding(worktrees, directory).and_then(|index| worktrees.get(index));
+    let head_branch = head.and_then(|worktree| worktree.branch.as_deref());
+    let head_reference = head_branch.map(|branch| format!("refs/heads/{branch}"));
+
+    let mut bases = vec![Base {
+        label: head.map_or_else(|| "HEAD".to_owned(), branch_label),
+        reference: None,
+        badge: Some("this tab"),
+    }];
+    if let Some(default) =
+        default_branch.filter(|default| Some(*default) != head_reference.as_deref())
+    {
+        bases.push(Base {
+            label: short_ref(default).to_owned(),
+            reference: Some(default.to_owned()),
+            badge: Some("default"),
+        });
+    }
+    for branch in branches {
+        let reference = format!("refs/heads/{branch}");
+        if Some(branch.as_str()) == head_branch || Some(reference.as_str()) == default_branch {
+            continue;
+        }
+        bases.push(Base {
+            label: branch.clone(),
+            reference: Some(reference),
+            badge: None,
+        });
+    }
+    bases
+}
+
+/// A ref as a person names it: `main` for `refs/heads/main`, `origin/main`
+/// for `refs/remotes/origin/main`, and anything else whole.
+fn short_ref(reference: &str) -> &str {
+    reference
+        .strip_prefix("refs/heads/")
+        .or_else(|| reference.strip_prefix("refs/remotes/"))
+        .unwrap_or(reference)
 }
 
 /// The whole popup.
@@ -677,19 +935,33 @@ fn listing(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
 
 /// Whether a checkout is one this menu may take away.
 ///
-/// Never the main checkout, never one somebody is working in, never a locked
-/// one, and never one git has already noticed is not there. git refuses all
-/// four, and an × that always fails is worse than no × at all — the locked
-/// case especially, because Crook's own agent worktrees are locked by the
-/// session that holds them, and that lock is exactly what stops one agent
-/// tidying away another's work.
+/// Never the main checkout, never one somebody is working in, never one
+/// somebody else has locked, and never one git has already noticed is not
+/// there. git refuses all four, and an × that always fails is worse than no ×
+/// at all — the locked case especially, because a lock is somebody saying an
+/// agent is working in there, which is exactly what stops one agent tidying
+/// away another's work.
+///
+/// A lock Crook took is the exception, and the reason is the second
+/// conjunct. A window takes its own lock off a checkout once none of its
+/// panes is working in it, and the rest when it closes, so Crook's lock on a
+/// checkout nothing in the window is working in is one a Crook that crashed
+/// or was killed left behind — and holding the checkout against Crook's own
+/// menu for ever would make the lock a trap rather than a statement. Removing
+/// it takes that lock off first. The prefix cannot say which Crook took it,
+/// so a second Crook window's checkout reads the same; that is the one thing
+/// this cannot tell apart, and it is no more than the menu offered before
+/// there was a lock.
 ///
 /// One function rather than the same four conjuncts written twice, because
 /// the × on a row and the row that sweeps all of them have to mean the same
 /// thing by "free": a person who has read what the × is offered for should not
 /// have to find out that the other one goes further.
 fn removable(worktree: &Worktree, occupied: bool) -> bool {
-    !worktree.is_main && !occupied && worktree.locked.is_none() && worktree.prunable.is_none()
+    !worktree.is_main
+        && !occupied
+        && !worktree.is_locked_by_another()
+        && worktree.prunable.is_none()
 }
 
 /// Every free checkout, as its path and the name the list calls it by.
@@ -798,7 +1070,9 @@ fn worktree_row(
         Some("this tab")
     } else if elsewhere {
         Some("open")
-    } else if worktree.locked.is_some() {
+    } else if worktree.is_locked_by_another() {
+        // Crook's own lock says nothing here: with no pane in the checkout it
+        // is one left behind, and the row offers the × instead.
         Some("locked")
     } else if worktree.prunable.is_some() {
         // Registered, and its directory is gone. Saying so is the difference
@@ -1056,13 +1330,17 @@ fn sweep_row(
     .finish()
 }
 
-/// Making one: a branch name, and where it would go.
+/// Making one: a branch name, where it would go, where it starts, and which
+/// agent to start in it.
 ///
-/// One field, because there is one question. herdr asks the same one and
-/// derives the directory rather than asking for it, which is right: a person
-/// choosing a branch name has said everything that distinguishes one worktree
-/// from another, and a directory they have to invent as well is a second
-/// chance to get it wrong.
+/// One field for the worktree, because there is one thing to type. herdr asks
+/// the same question and derives the directory rather than asking for it,
+/// which is right: a person choosing a branch name has said everything that
+/// distinguishes one worktree from another, and a directory they have to
+/// invent as well is a second chance to get it wrong. Where the branch starts
+/// is a pick rather than a field — see the module's own account of it — and
+/// it is already made when the creator opens. The second field is the agent's
+/// prompt, and it is there only once an agent is picked.
 fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     let state = workspace.tab_menu();
 
@@ -1085,6 +1363,9 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
                     state.control(Control::Branch),
                     BRANCH_PLACEHOLDER,
                 )
+                .with_focus(WorkspaceAction::Worktree(WorktreeAction::Focus(
+                    CreatorField::Branch,
+                )))
                 .finish(),
             )
             .with_horizontal_padding(ROW_INSET)
@@ -1110,6 +1391,107 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
         );
     }
 
+    // Under the path, because the name and where it goes are one answer and
+    // this is a second question.
+    if !state.bases.is_empty() {
+        column.add_child(
+            Container::new(header("Start from", ui))
+                .with_margin_top(10.)
+                .finish(),
+        );
+        let mut rows = Flex::column()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+        for (index, base) in state.bases.iter().enumerate() {
+            rows.add_child(check_row(
+                state.control(Control::Base(index)),
+                state.base == index,
+                false,
+                &base.label,
+                base.badge,
+                WorktreeAction::PickBase(index),
+                ui,
+            ));
+        }
+        // Its own height up to a few rows, and scrolled past that: a scroll
+        // is handed a bounded height here and measures its rows unbounded,
+        // so a short list is its own size and only a long one gives way.
+        column.add_child(
+            ConstrainedBox::new(
+                Scrollable::new(state.base_scroll.clone(), rows.finish())
+                    .with_scrollbar(theme().overlay_3)
+                    .finish(),
+            )
+            .with_max_height(BASE_ROWS as f32 * BASE_ROW_HEIGHT)
+            .finish(),
+        );
+    }
+
+    // Absent where no agent was found, which leaves the creator exactly what
+    // it was before it could start one.
+    if !state.agents.is_empty() {
+        column.add_child(
+            Container::new(header("Agent", ui))
+                .with_margin_top(10.)
+                .finish(),
+        );
+        // The picked row is lit while the arrows walk this list and there is
+        // no prompt field to hold a caret: nothing else on the face would say
+        // where the keyboard is.
+        let lit = state.field == CreatorField::Agent && !state.asks_for_a_prompt();
+        column.add_child(check_row(
+            state.control(Control::Agent(0)),
+            state.agent == 0,
+            lit && state.agent == 0,
+            "Shell only",
+            None,
+            WorktreeAction::PickAgent(0),
+            ui,
+        ));
+        for (index, agent) in state.agents.iter().enumerate() {
+            let row = index + 1;
+            // The program's own name, and the word that will be typed beside
+            // it, since that word is what the composer is about to say.
+            let program = crate::agent::program(agent).unwrap_or(agent);
+            column.add_child(check_row(
+                state.control(Control::Agent(row)),
+                state.agent == row,
+                lit && state.agent == row,
+                program,
+                (program != *agent).then_some(*agent),
+                WorktreeAction::PickAgent(row),
+                ui,
+            ));
+        }
+    }
+
+    // Under the agents, because it is what the picked one is asked; and only
+    // once one is picked, since a prompt with nothing to hear it is a field
+    // that does nothing.
+    if state.asks_for_a_prompt()
+        && let Some(prompt) = workspace.worktree_prompt()
+    {
+        column.add_child(
+            Container::new(
+                super::text_field::TextField::new(
+                    prompt.clone(),
+                    workspace.clipboard().clone(),
+                    workspace.fonts(),
+                    state.control(Control::Prompt),
+                    PROMPT_PLACEHOLDER,
+                )
+                .with_focus(WorkspaceAction::Worktree(WorktreeAction::Focus(
+                    CreatorField::Agent,
+                )))
+                .with_edit(WorkspaceAction::Worktree(WorktreeAction::PromptEdited))
+                .finish(),
+            )
+            .with_horizontal_padding(ROW_INSET)
+            .with_margin_top(6.)
+            .finish(),
+        );
+    }
+
     if let Some(problem) = &state.problem {
         column.add_child(note(problem.as_str(), ui));
     }
@@ -1121,13 +1503,113 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
         column.add_child(busy_line(state, "Checking it out…", None, ui));
     }
 
-    column.add_child(buttons(
+    // Start only where there is an agent to start. Create stays the button
+    // the face leads with — the one Enter presses — and leaves the agent's
+    // line in the composer for a person to read first.
+    let start = state
+        .picked_agent()
+        .map(|_| ("Start", Some(WorktreeAction::Start)));
+    column.add_child(button_row(
         workspace,
+        start,
         "Create",
         Some(WorktreeAction::Create),
         ui,
     ));
     column.finish()
+}
+
+/// One choice of several in the creator — a place to start from, or an
+/// agent: a check slot, the name, and a badge for a row that is more than its
+/// name.
+///
+/// The options menu's check row, because it is the same control — one choice
+/// out of several, made by pressing it — and a person who has used one has
+/// used this. The check is the only difference between the picked row and the
+/// rest; the pointer lights whichever row it is over, as it does on every row
+/// in this menu, and `lit` lights it as well for a keyboard standing on it,
+/// the way the list's rows are lit for the keyboard's row. The badge sits
+/// where the list's rows put theirs, and says "this tab" for the same
+/// checkout the list says it about.
+fn check_row(
+    control: MouseStateHandle,
+    picked: bool,
+    lit: bool,
+    label: &str,
+    badge: Option<&'static str>,
+    action: WorktreeAction,
+    ui: FamilyId,
+) -> Box<dyn Element> {
+    let label = label.to_owned();
+
+    Hoverable::new(control, move |mouse| {
+        let check: Box<dyn Element> = if picked {
+            Align::new(
+                Icon::new(Lucide::Check, CHECK_SIZE)
+                    .with_color(theme().text_primary)
+                    .finish(),
+            )
+            .finish()
+        } else {
+            Empty::new().finish()
+        };
+
+        let mut line = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(
+                Container::new(
+                    ConstrainedBox::new(check)
+                        .with_width(CHECK_SLOT)
+                        .with_height(CHECK_SLOT)
+                        .finish(),
+                )
+                .with_margin_right(8.)
+                .finish(),
+            )
+            // Cut with a mark where it runs out, for the reason a worktree
+            // row's label is: branches are named at the length people name
+            // them, and the popup is 260 wide.
+            .with_child(
+                Expanded::new(
+                    1.,
+                    Align::new(
+                        Container::new(
+                            Text::new(label.clone(), ui, LABEL_SIZE)
+                                .with_color(theme().text_primary)
+                                .with_ellipsis(Cut::End)
+                                .finish(),
+                        )
+                        .with_margin_right(LABEL_GAP)
+                        .finish(),
+                    )
+                    .left()
+                    .finish(),
+                )
+                .finish(),
+            );
+        if let Some(badge) = badge {
+            line.add_child(
+                Text::new(badge, ui, PATH_SIZE)
+                    .with_color(theme().text_muted)
+                    .finish(),
+            );
+        }
+
+        Container::new(line.finish())
+            .with_horizontal_padding(ROW_INSET)
+            .with_vertical_padding((BASE_ROW_HEIGHT - CHECK_SLOT) / 2.)
+            .with_background_color(if lit || mouse.is_hovered() {
+                theme().overlay_1
+            } else {
+                Color::TRANSPARENT
+            })
+            .finish()
+    })
+    .on_click(move |_, ctx, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::Worktree(action));
+    })
+    .finish()
 }
 
 /// How many of the branches going are named before the list gives up counting.
@@ -1402,6 +1884,20 @@ fn buttons(
     action: Option<WorktreeAction>,
     ui: FamilyId,
 ) -> Box<dyn Element> {
+    button_row(workspace, None, label, action, ui)
+}
+
+/// [`buttons`], with a second way to do the thing between the two: the
+/// creator's Start, which is Create and then the agent's line run rather than
+/// left in the composer. A button of the quiet kind, since it is not the one
+/// Enter presses; inert while git is working, like the one beside it.
+fn button_row(
+    workspace: &Workspace,
+    middle: Option<(&str, Option<WorktreeAction>)>,
+    label: &str,
+    action: Option<WorktreeAction>,
+    ui: FamilyId,
+) -> Box<dyn Element> {
     let state = workspace.tab_menu();
 
     let (cancel, cancels) = match &state.sweep {
@@ -1415,38 +1911,70 @@ fn buttons(
     };
     let action = action.filter(|_| !state.working);
 
-    Container::new(
-        Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_spacing(8.)
-            .with_child(
-                Expanded::new(
-                    1.,
-                    button(state.control(Control::Cancel), cancel, false, cancels, ui),
-                )
-                .finish(),
-            )
-            .with_child(
-                Expanded::new(
-                    1.,
-                    button(state.control(Control::Confirm), label, true, action, ui),
-                )
-                .finish(),
+    let mut row = Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(8.)
+        .with_child(
+            Expanded::new(
+                1.,
+                button(
+                    state.control(Control::Cancel),
+                    cancel,
+                    false,
+                    cancels.map(WorkspaceAction::Worktree),
+                    ui,
+                ),
             )
             .finish(),
-    )
-    .with_horizontal_padding(ROW_INSET)
-    .with_margin_top(10.)
-    .finish()
+        );
+    if let Some((middle, pressed)) = middle {
+        let pressed = pressed.filter(|_| !state.working);
+        row.add_child(
+            Expanded::new(
+                1.,
+                button(
+                    state.control(Control::Start),
+                    middle,
+                    false,
+                    pressed.map(WorkspaceAction::Worktree),
+                    ui,
+                ),
+            )
+            .finish(),
+        );
+    }
+    row.add_child(
+        Expanded::new(
+            1.,
+            button(
+                state.control(Control::Confirm),
+                label,
+                true,
+                action.map(WorkspaceAction::Worktree),
+                ui,
+            ),
+        )
+        .finish(),
+    );
+
+    Container::new(row.finish())
+        .with_horizontal_padding(ROW_INSET)
+        .with_margin_top(10.)
+        .finish()
 }
 
-/// One of the two buttons.
-fn button(
+/// One of a question's buttons.
+///
+/// Also the face of the question a close asks before it ends agents that
+/// are still working — see [`closing`](super::closing) — which is why it
+/// takes any action rather than the worktree menu's own: two questions that
+/// looked different would be two things a person has to learn to read.
+pub(super) fn button(
     state: MouseStateHandle,
     label: &str,
     primary: bool,
-    action: Option<WorktreeAction>,
+    action: Option<WorkspaceAction>,
     ui: FamilyId,
 ) -> Box<dyn Element> {
     let label = label.to_owned();
@@ -1490,7 +2018,7 @@ fn button(
     match action {
         Some(action) => control
             .on_click(move |_, ctx, _| {
-                ctx.dispatch_typed_action(WorkspaceAction::Worktree(action));
+                ctx.dispatch_typed_action(action);
             })
             .finish(),
         None => control.finish(),
@@ -1542,7 +2070,10 @@ fn branch_label(worktree: &Worktree) -> String {
 }
 
 /// The line at the top of whichever face the menu is showing.
-fn header(title: impl Into<std::borrow::Cow<'static, str>>, ui: FamilyId) -> Box<dyn Element> {
+pub(super) fn header(
+    title: impl Into<std::borrow::Cow<'static, str>>,
+    ui: FamilyId,
+) -> Box<dyn Element> {
     Container::new(
         Text::new(title, ui, PATH_SIZE)
             .with_color(theme().text_muted)
@@ -1671,7 +2202,7 @@ fn pellet(color: Color) -> Box<dyn Element> {
 }
 
 /// A line of explanation, or of apology, wrapped to the popup's width.
-fn note(text: impl AsRef<str>, ui: FamilyId) -> Box<dyn Element> {
+pub(super) fn note(text: impl AsRef<str>, ui: FamilyId) -> Box<dyn Element> {
     Container::new(
         Paragraph::new(text.as_ref().to_owned(), ui, PATH_SIZE)
             .with_color(theme().text_muted)
@@ -1684,7 +2215,7 @@ fn note(text: impl AsRef<str>, ui: FamilyId) -> Box<dyn Element> {
 }
 
 /// The hairline between the worktrees and the way to another.
-fn divider() -> Box<dyn Element> {
+pub(super) fn divider() -> Box<dyn Element> {
     Container::new(
         ConstrainedBox::new(Empty::new().finish())
             .with_height(1.)

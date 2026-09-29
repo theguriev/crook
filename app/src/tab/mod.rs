@@ -25,12 +25,14 @@
 //! hold one level down: the `pane` module is the strip's shape again, over
 //! panes.
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use crook_terminal::AgentReport;
 
+use crate::forge::{CheckError, Found};
+use crate::git::BranchAtWork;
 use crate::settings::Granularity;
 
 mod group;
@@ -118,13 +120,21 @@ impl AgentStatus {
 /// are answered differently by the person reading them — and so that the
 /// two can never disagree: attention that is set has a cause, and attention
 /// that is cleared has none.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Attention {
     /// The shell rang the bell in a pane without the keyboard.
     Bell,
     /// The agent's status changed to something other than running, in a
     /// pane without the keyboard.
     StatusChange,
+    /// A program in a pane without the keyboard sent one of the
+    /// notifications other terminals show — OSC 9, 777 or 99 — and this is
+    /// what it said, on one line.
+    ///
+    /// The words ride with the flag for the reason the cause does: they
+    /// are what the look is being asked for, so they go when the look is
+    /// given and never linger on a row somebody has already read.
+    Notification(String),
 }
 
 /// Where a session's status came from.
@@ -144,6 +154,88 @@ pub enum StatusSource {
     /// The command the agent was ended and took its last report back, at
     /// this instant. See `Emulator::settle_agent` in `crook_terminal`.
     CommandEnded(Instant),
+}
+
+/// The pull request a session's work belongs to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequest {
+    /// Its address, which passed `crook_terminal::agent::pull_request_url` on
+    /// the way in — https, and nothing in it a link opener could be tricked by.
+    pub url: String,
+    /// The branch the pane was on when the agent said it, read then — the
+    /// branch being rebased, when a rebase had `HEAD` detached — and the
+    /// repository it is a branch of.
+    ///
+    /// What the pull request is dropped against: a pane that has moved to
+    /// another branch, or into another repository, is doing other work, and a
+    /// link to the last branch's pull request on its row would be a claim
+    /// about the new one — see [`PullRequest::is_left_for`]. Read from
+    /// `HEAD` at the moment of the report rather than taken from the row's
+    /// git facts, which are up to a poll old — an agent that makes a branch,
+    /// pushes it and opens its pull request inside one poll would otherwise
+    /// have it recorded against the branch it started on, and dropped the
+    /// moment the poll caught up.
+    pub branch: Option<BranchAtWork>,
+    /// What the last "Check pull request" press found, until the next one.
+    pub check: Option<PullRequestCheck>,
+}
+
+impl PullRequest {
+    /// A pull request at `url`, reported while the pane was on `branch`,
+    /// not yet checked.
+    pub fn new(url: String, branch: Option<BranchAtWork>) -> Self {
+        Self {
+            url,
+            branch,
+            check: None,
+        }
+    }
+
+    /// Whether a pane whose work is now on `now` has left the branch this
+    /// pull request was reported on — and so whether it should go.
+    ///
+    /// Another branch has. So has another repository, whatever its `HEAD`
+    /// says — a submodule, checked out detached as one usually is, or a
+    /// repository with a branch of the same name — and so has no repository
+    /// at all. A detached `HEAD` in the same repository is not known to have:
+    /// a checkout of a commit to look at it, a bisect, names no other branch,
+    /// and a pull request dropped then is dropped for good, because nothing
+    /// says it again when the branch comes back — the hook reports the
+    /// address `gh pr create` printed, and a branch coming back runs no `gh
+    /// pr create`. A rebase's detached `HEAD` does not get here as one at
+    /// all: [`crate::git::branch_at_work`] reads it as the branch being
+    /// rebased.
+    pub fn is_left_for(&self, now: Option<&BranchAtWork>) -> bool {
+        match (self.branch.as_ref(), now) {
+            (None, None) => false,
+            (Some(then), Some(now)) if then.is_same_repository(now) => {
+                !now.head.is_detached() && now.head != then.head
+            }
+            _ => true,
+        }
+    }
+}
+
+/// Where a press of "Check pull request" has got to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PullRequestCheck {
+    /// `gh` has been asked and has not answered.
+    Asking,
+    /// It answered.
+    Answered(Found),
+    /// It could not, and this is why.
+    Failed(CheckError),
+}
+
+impl PullRequestCheck {
+    /// The line the card prints for it.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Asking => "Checking\u{2026}".to_owned(),
+            Self::Answered(found) => found.summary(),
+            Self::Failed(error) => error.to_string(),
+        }
+    }
 }
 
 /// The agent session a pane is a window onto.
@@ -204,12 +296,12 @@ pub struct AgentSession {
     pub source: StatusSource,
     /// Whether something happened here while nobody was looking, and what.
     ///
-    /// The bell in a pane without the keyboard, or a status that changed
-    /// there to anything but running: a person who walked away from a tab
-    /// wants to know its agent stopped, whatever it stopped for. Cleared by
-    /// looking — every focus change runs `attend` — because attention is a
-    /// fact about the person and not about the work, which is the whole
-    /// reason it is not folded into [`Self::status`].
+    /// The bell in a pane without the keyboard, a notification sent there,
+    /// or a status that changed there to anything but running: a person who
+    /// walked away from a tab wants to know its agent stopped, whatever it
+    /// stopped for. Cleared by looking — every focus change runs `attend` —
+    /// because attention is a fact about the person and not about the work,
+    /// which is the whole reason it is not folded into [`Self::status`].
     pub attention: Option<Attention>,
     /// Whether a person asked to be brought back here.
     ///
@@ -233,23 +325,62 @@ pub struct AgentSession {
     /// a directory deleted out from under it — in which case a row falls back
     /// to the session title.
     pub working_directory: Option<PathBuf>,
-    /// The pull request this session's work belongs to, as a URL.
+    /// The pull request this session's work belongs to, as its agent said.
     ///
-    /// **Nothing populates this yet, and that is deliberate.** Warp's PR link
-    /// comes out of `gh pr view` — a subprocess with a five-second timeout, an
-    /// authentication state and a whole failure taxonomy — and Crook has no
-    /// forge integration to put behind it. The field exists so the row and the
-    /// "Show: PR link" toggle are written against real data rather than a
-    /// placeholder: the toggle governs whether the slot appears *when there is
-    /// a link*, and today there never is. The menu says so on screen rather
-    /// than leaving a dead chip to be discovered.
-    pub pull_request: Option<String>,
+    /// Written by the agent, over its own terminal — `crook --agent running
+    /// --pull-request <url>`, or the hook after a `gh pr create` — and by
+    /// nothing else. Warp's PR link comes out of `gh pr view` run for every
+    /// row on a timer; Crook asks no forge to find one, because the agent that
+    /// opened the pull request already knows which it is. It goes when the
+    /// pane's branch does — see [`PullRequest::branch`] — and the "Show: PR
+    /// link" toggle governs whether the row's chip shows it.
+    pub pull_request: Option<PullRequest>,
 
     /// The command the pane is running, or `None` at a prompt.
     ///
     /// Reported off the open block's OSC 133 marks. It is a *name*, not state:
     /// the dot already says whether something is running, and this says what.
+    /// Written through [`Self::set_running_command`].
     pub running_command: Option<String>,
+    /// The agent this pane was running when the window it came back from
+    /// was closed, by its program's name, until anything runs here.
+    ///
+    /// Set by a restore and by nothing else, and only for a pane whose
+    /// directory came back: the process is gone, but the conversation is
+    /// still on disk, keyed by that directory, and this is what lets the
+    /// pane offer it back. Kept until a command runs — the resume line, or
+    /// whatever a person runs instead, seen running or only seen finishing
+    /// (see [`Self::command_finished`]) — so that a window closed again before
+    /// anybody pressed Enter still remembers what it was offering, rather
+    /// than the first save after the restore writing the agent out of the
+    /// file.
+    pub restored_agent: Option<String>,
+
+    /// Which pane opened this one through `crook tab new`, when one did.
+    ///
+    /// `None` for every pane a person opened. It is what the row's card and
+    /// its "Why this status" say — a tab nobody in the room opened is one a
+    /// person should be able to trace — and what the spawn budget is counted
+    /// by: see [`crate::control::spawn`]. Not saved with the session: the
+    /// pane it names is gone when the window is, and the pane that comes back
+    /// in its place was opened by the restore.
+    pub spawned_by: Option<Lineage>,
+}
+
+/// Where a pane opened by `crook tab new` came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Lineage {
+    /// The pane that asked for it.
+    pub caller: PaneId,
+    /// The pane a person opened that the chain of asking began at: the
+    /// caller itself, or the root the caller's own lineage names. What the
+    /// budget is counted against, so that a worker opening workers spends its
+    /// root's tabs rather than a budget of its own.
+    pub root: PaneId,
+    /// What the caller's row was called when it asked, for the card. Kept
+    /// rather than looked up, because the caller can close and its worker is
+    /// still the one it opened.
+    pub title: String,
 }
 
 /// Where a session starts when nobody named a directory.
@@ -265,18 +396,47 @@ pub struct AgentSession {
 /// every other Mac terminal opens. The cost is that `cd / && crook` starts in
 /// `~` instead of `/`; the thing it buys is that a tab in a Dock-launched
 /// Crook no longer says it is working in the root of the disk.
+///
+/// Unless the directory was named: `--working-directory /` — a file
+/// manager's "Open terminal here" on the root of the disk — says in so many
+/// words where to start, and is no Dock launch. See [`start_in`].
 fn starting_directory() -> Option<PathBuf> {
-    resolve_starting_directory(std::env::current_dir().ok(), std::env::home_dir())
+    resolve_starting_directory(
+        std::env::current_dir().ok(),
+        std::env::home_dir(),
+        DIRECTORY_WAS_NAMED.load(Ordering::Relaxed),
+    )
 }
 
-/// The rule itself, with both of its inputs handed in so it can be tested.
+/// Whether the directory Crook runs in is one the command line named.
+static DIRECTORY_WAS_NAMED: AtomicBool = AtomicBool::new(false);
+
+/// Moves Crook into the directory the command line named, and says it was
+/// named, so every session starts in it even when it is the root of a disk.
+///
+/// One function rather than a move and a flag set beside it, so that the two
+/// cannot come apart: the move without the flag opens `--working-directory /`
+/// in the home directory, and nothing that opens a window is run by a test
+/// that would notice. Once, by the window a launcher opened with
+/// `--working-directory`, before its first pane starts.
+pub(crate) fn start_in(directory: &Path) -> std::io::Result<()> {
+    std::env::set_current_dir(directory)?;
+    DIRECTORY_WAS_NAMED.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+/// The rule itself, with its inputs handed in so it can be tested.
 ///
 /// A root directory has no parent, which is the whole of the test: `/` on Unix
 /// and `C:\` on Windows both answer `None` there, and neither is a place
-/// somebody meant to start working in.
-fn resolve_starting_directory(here: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+/// somebody meant to start working in — unless they `named` it.
+fn resolve_starting_directory(
+    here: Option<PathBuf>,
+    home: Option<PathBuf>,
+    named: bool,
+) -> Option<PathBuf> {
     let here = here?;
-    if here.parent().is_none() {
+    if here.parent().is_none() && !named {
         return home.or(Some(here));
     }
     Some(here)
@@ -297,7 +457,56 @@ impl AgentSession {
             working_directory: starting_directory(),
             pull_request: None,
             running_command: None,
+            spawned_by: None,
+            restored_agent: None,
         }
+    }
+
+    /// The coding agent this pane is running, or was running when the window
+    /// it came back from was closed, by its program's name — `claude`, never
+    /// the prompt typed after it.
+    ///
+    /// What the session file remembers of a pane's process, and all it
+    /// remembers: see [`crate::session`].
+    pub fn agent(&self) -> Option<&str> {
+        self.running_command
+            .as_deref()
+            .and_then(crate::agent::program_of)
+            .or(self.restored_agent.as_deref())
+    }
+
+    /// Records what the pane is running, answering whether that changed the
+    /// agent it names — which is when the session file has something new to
+    /// say.
+    ///
+    /// Any command at all ends [`Self::restored_agent`]: the conversation it
+    /// named has been resumed, or the person has done something else with the
+    /// pane, and either way the pane is no longer offering it.
+    pub fn set_running_command(&mut self, command: Option<String>) -> bool {
+        let before = self.agent().map(str::to_owned);
+        if command.is_some() {
+            self.restored_agent = None;
+        }
+        self.running_command = command;
+        before.as_deref() != self.agent()
+    }
+
+    /// Ends [`Self::restored_agent`] because a command finished in the pane,
+    /// answering whether that changed the agent it names.
+    ///
+    /// [`Self::set_running_command`] alone is not enough. What a pane is
+    /// running is read off it at rest, so a command that starts and ends
+    /// between two reads — `cd`, `ls`, `git status` — is never seen running,
+    /// and a pane that ran only commands like those would go on naming the
+    /// agent, against whatever directory the `cd` left it in. The shell marks
+    /// the end of every command, however quick, and that mark is what calls
+    /// this — the mark of a command, that is: the one a shell sends for a line
+    /// that ran nothing, ctrl-c at the prompt or an empty Enter, does not. An
+    /// agent the pane is running now stays named.
+    pub fn command_finished(&mut self) -> bool {
+        let before = self.agent().map(str::to_owned);
+        self.restored_agent = None;
+        before.as_deref() != self.agent()
     }
 
     /// What the tab bar should print: what a person called it, else the
@@ -323,6 +532,21 @@ impl AgentSession {
             .as_deref()
             .or(self.derived_title.as_deref())
             .or(self.running_command.as_deref())
+    }
+
+    /// What the row says on its second line in place of the table's: what
+    /// a notification nobody has seen yet said, else what a waiting agent
+    /// is asking.
+    ///
+    /// The notification first, because it is the newer of the two — a
+    /// status change after it takes its place in [`Self::attention`] — and
+    /// because it is the one a look will take away: once somebody has read
+    /// it, the question the agent is still asking comes back.
+    pub fn row_message(&self) -> Option<&str> {
+        match &self.attention {
+            Some(Attention::Notification(message)) => Some(message),
+            _ => self.message.as_deref(),
+        }
     }
 
     /// Whether somebody should look here: the work asked, or the person did.
@@ -353,37 +577,99 @@ impl AgentSession {
     /// The count in the header and the tab the "next waiting" chord goes to:
     /// something happened here unseen, the person marked it to come back to,
     /// or the agent said it needs input and is still saying so. `active` is
-    /// whether the pane is the one being looked at, and a pane that is can
+    /// whether the pane is the one being looked at — the one with the
+    /// keyboard, in a window that has the desktop's — and a pane that is can
     /// wait for nobody.
     pub fn is_waiting(&self, active: bool) -> bool {
         !active && (self.asks_for_a_look() || self.status == AgentStatus::NeedsInput)
     }
 
-    /// What a pull-request chip says: `PR #123`, or the raw URL when the number
-    /// cannot be read out of it.
+    /// Whether closing this pane would end work somebody has not finished
+    /// with: the agent says it is running or waiting on a person, or the
+    /// shell has a command open.
     ///
-    /// Warp's `github_pr_display_text_from_url`, rule for rule — split on
-    /// `/pull/`, take everything up to the next delimiter, require it to be a
-    /// positive run of digits. Showing the URL when that fails beats showing
-    /// nothing: a link nobody can label is still a link somebody can follow.
-    pub fn pull_request_label(&self) -> Option<String> {
-        let url = self.pull_request.as_deref()?.trim();
-        if url.is_empty() {
-            return None;
-        }
-
-        let number = url
-            .rsplit_once("/pull/")
-            .map(|(_, tail)| tail.split(['/', '?', '#']).next().unwrap_or_default())
-            .filter(|number| !number.is_empty())
-            .filter(|number| number.bytes().all(|byte| byte.is_ascii_digit()))
-            .filter(|number| number.parse::<u64>().is_ok_and(|number| number > 0));
-
-        Some(match number {
-            Some(number) => format!("PR #{number}"),
-            None => url.to_owned(),
-        })
+    /// Both, because each misses what the other sees. An agent started
+    /// without `crook --agent-hooks` reports nothing and is still a command
+    /// running; an agent in a shell with no command marks — one Crook has no
+    /// snippet for, or one with the marks switched off — reports its status
+    /// and opens no block. A build or an `ssh` session is work too, for the
+    /// same reason a conversation is: the pane's pty ends it.
+    ///
+    /// [`Self::status`] and never [`Self::shown_status`], which turns a bell
+    /// in an idle shell into a waiting dot. A shell at its prompt that rang
+    /// is not something a close can take away from anyone. A failed agent has
+    /// stopped, and so has one that went idle.
+    pub fn is_working(&self) -> bool {
+        matches!(self.status, AgentStatus::Running | AgentStatus::NeedsInput)
+            || self.running_command.is_some()
     }
+
+    /// What a pull-request chip says: `PR #123` for a pull request on
+    /// github.com, and the host with the number — `gitlab.com #42` — for
+    /// anything else. See [`pull_request_label`].
+    pub fn pull_request_label(&self) -> Option<String> {
+        pull_request_label(&self.pull_request.as_ref()?.url)
+    }
+}
+
+/// What a pull-request chip says for `url`, or `None` for an empty one.
+///
+/// The number is Warp's `github_pr_display_text_from_url` rule — split the
+/// path on `/pull/`, take everything up to the next `/`, require a positive
+/// run of digits — or, for a forge that spells a pull request otherwise
+/// (GitLab's `/-/merge_requests/42`, Bitbucket's `/pull-requests/42`), the
+/// path's last segment when that is one.
+///
+/// `PR #<n>` alone only for github.com. Anywhere else the chip names the
+/// host, because the address is whatever a program in the pane wrote to its
+/// terminal, and any program can write one: a bare `PR #12` for
+/// `https://github.com.example.net/o/r/pull/12` would be a link that reads
+/// as the agent's own and opens somebody else's server. The host is the one
+/// a browser goes to, read as the URL standard reads an https address: after
+/// any `user@`, and ended by a `\` as well as by a `/` — so
+/// `https://attacker.example\@github.com/o/r/pull/12` is attacker.example's,
+/// with `@github.com` the start of its path. Warp's fallback when it finds no
+/// number is the whole address; this is the host, since an address is wider
+/// than a row — the card prints the whole of it.
+pub fn pull_request_label(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let (authority, rest) = after_scheme.split_at(
+        after_scheme
+            .find(['/', '\\', '?', '#'])
+            .unwrap_or(after_scheme.len()),
+    );
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let path = rest.split(['?', '#']).next().unwrap_or_default();
+
+    // Digits and nothing else: `parse` alone would take `+12`.
+    let positive = |number: &&str| {
+        number.bytes().all(|byte| byte.is_ascii_digit())
+            && number.parse::<u64>().is_ok_and(|number| number > 0)
+    };
+    let pull = path
+        .rsplit_once("/pull/")
+        .map(|(_, tail)| tail.split('/').next().unwrap_or_default())
+        .filter(positive);
+    let number = pull.or_else(|| {
+        path.trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .filter(positive)
+    });
+
+    Some(if host.is_empty() {
+        url.to_owned()
+    } else if let Some(number) = pull.filter(|_| host.eq_ignore_ascii_case("github.com")) {
+        format!("PR #{number}")
+    } else if let Some(number) = number {
+        format!("{host} #{number}")
+    } else {
+        host.to_owned()
+    })
 }
 
 /// One tab: an identity and the panes it shows.
@@ -636,6 +922,21 @@ pub enum TabAction {
     /// agents in one rectangle, which is a different claim — that they are two
     /// halves of one screen — and it is the wrong one.
     NewInGroupOf(TabId),
+    /// Open a tab beside `tab` — at the end of its group, making a group of
+    /// the two when `grouped` and it has none, and after its block otherwise —
+    /// and leave the active tab as it is.
+    ///
+    /// What `crook tab new` opens. A tab an agent asked for is not one a
+    /// person switched to: selecting it would move the keyboard out from
+    /// under whoever is typing, and the rest of their line would land in the
+    /// worker's field. It goes last in the most-recently-used order, since
+    /// nobody has used it.
+    NewBeside {
+        /// The tab it opens beside.
+        tab: TabId,
+        /// Whether it joins that tab's group.
+        grouped: bool,
+    },
     /// Put a tab somewhere else in the list: into a group, out of one, or at
     /// another place among its neighbours.
     ///
@@ -1366,9 +1667,29 @@ impl TabStrip {
         TabEffect::Changed
     }
 
-    /// Opens a tab in `anchor`'s group, making one of the two when it has no
-    /// group yet.
-    fn new_in_group_of(&mut self, anchor: TabId) -> TabEffect {
+    /// Where a tab opened after the tab at `index` goes.
+    ///
+    /// Past the rest of that tab's group when it is in one, because a tab
+    /// that belongs to nothing cannot be dropped into the middle of tabs that
+    /// belong together — Warp's `clamp_to_unpinned_region` is the same move
+    /// for its own reason — and at the end when there is no such tab.
+    fn slot_after(&self, index: Option<usize>) -> usize {
+        let at = match index {
+            Some(index) => match self.tabs[index].group().and_then(|id| self.run_of(id)) {
+                Some(run) => run.end,
+                None => index + 1,
+            },
+            None => self.tabs.len(),
+        };
+        // And through the clamp every other move goes through, so that
+        // opening a tab from a pinned one puts it after the pins rather than
+        // among them.
+        self.slot_for(None, self.tabs.get(at).map(Tab::id), false)
+    }
+
+    /// Opens a tab at the end of `anchor`'s group, making one of the two when
+    /// it has none, and selects it when `select` says to.
+    fn new_in_group_of(&mut self, anchor: TabId, select: bool) -> TabEffect {
         let Some(index) = self.index_of(anchor) else {
             return TabEffect::Unchanged;
         };
@@ -1405,7 +1726,13 @@ impl TabStrip {
         // it in the middle of checkouts made before it.
         let at = self.run_of(group).map_or(index + 1, |run| run.end);
         self.tabs.insert(at, tab);
-        self.repair(Some(id));
+        if select {
+            self.repair(Some(id));
+        } else {
+            // Last in the order of use, for the reason `NewBeside` gives.
+            self.mru.push(id);
+            self.repair(None);
+        }
         TabEffect::Changed
     }
 
@@ -1460,28 +1787,33 @@ impl TabStrip {
                 let tab = Tab::new(format!("agent {}", self.opened));
                 let id = tab.id();
                 // After the active tab, which is where a person who just
-                // branched off what they were doing expects to find it — and
-                // past the rest of its group when it is in one, because a tab
-                // that belongs to nothing cannot be dropped into the middle of
-                // tabs that belong together. Warp's `clamp_to_unpinned_region`
-                // is the same move for its own reason.
-                let at = match self.index_of(self.active) {
-                    Some(index) => match self.tabs[index].group().and_then(|id| self.run_of(id)) {
-                        Some(run) => run.end,
-                        None => index + 1,
-                    },
-                    None => self.tabs.len(),
-                };
-                // And through the clamp every other move goes through, so that
-                // opening a tab from a pinned one puts it after the pins rather
-                // than among them.
-                let at = self.slot_for(None, self.tabs.get(at).map(Tab::id), false);
+                // branched off what they were doing expects to find it.
+                let at = self.slot_after(self.index_of(self.active));
                 self.tabs.insert(at, tab);
                 self.repair(Some(id));
                 TabEffect::Changed
             }
 
-            TabAction::NewInGroupOf(anchor) => self.new_in_group_of(anchor),
+            TabAction::NewInGroupOf(anchor) => self.new_in_group_of(anchor, true),
+
+            TabAction::NewBeside { tab, grouped: true } => self.new_in_group_of(tab, false),
+
+            TabAction::NewBeside {
+                tab: anchor,
+                grouped: false,
+            } => {
+                let Some(index) = self.index_of(anchor) else {
+                    return TabEffect::Unchanged;
+                };
+                self.opened += 1;
+                let tab = Tab::new(format!("agent {}", self.opened));
+                let id = tab.id();
+                let at = self.slot_after(Some(index));
+                self.tabs.insert(at, tab);
+                self.mru.push(id);
+                self.repair(None);
+                TabEffect::Changed
+            }
 
             TabAction::MoveTab { tab, group, before } => self.move_tab(tab, group, before),
 
@@ -1750,8 +2082,23 @@ mod starting_directory_tests {
             resolve_starting_directory(
                 Some(PathBuf::from("/")),
                 Some(PathBuf::from("/Users/eugen")),
+                false,
             ),
             Some(PathBuf::from("/Users/eugen")),
+        );
+    }
+
+    /// Unless somebody said so: `crook --working-directory /`, which is what
+    /// a file manager's "Open terminal here" runs on the root of the disk.
+    #[test]
+    fn the_root_of_the_disk_is_where_a_named_directory_starts() {
+        assert_eq!(
+            resolve_starting_directory(
+                Some(PathBuf::from("/")),
+                Some(PathBuf::from("/Users/eugen")),
+                true,
+            ),
+            Some(PathBuf::from("/")),
         );
     }
 
@@ -1760,10 +2107,16 @@ mod starting_directory_tests {
     #[test]
     fn a_real_directory_is_left_alone() {
         let here = PathBuf::from("/Users/eugen/work/connectly-frontend");
-        assert_eq!(
-            resolve_starting_directory(Some(here.clone()), Some(PathBuf::from("/Users/eugen"))),
-            Some(here),
-        );
+        for named in [false, true] {
+            assert_eq!(
+                resolve_starting_directory(
+                    Some(here.clone()),
+                    Some(PathBuf::from("/Users/eugen")),
+                    named,
+                ),
+                Some(here.clone()),
+            );
+        }
     }
 
     /// A machine with no readable home is not a reason to have no directory at
@@ -1771,10 +2124,30 @@ mod starting_directory_tests {
     #[test]
     fn the_root_survives_when_there_is_no_home() {
         assert_eq!(
-            resolve_starting_directory(Some(PathBuf::from("/")), None),
+            resolve_starting_directory(Some(PathBuf::from("/")), None, false),
             Some(PathBuf::from("/")),
         );
-        assert_eq!(resolve_starting_directory(None, None), None);
+        assert_eq!(resolve_starting_directory(None, None, false), None);
+    }
+
+    /// What `--working-directory` does, as `open_window` calls it: the move,
+    /// and the word that the root it moved to was meant. Into the directory
+    /// the tests already run in, because the working directory is the whole
+    /// test binary's; and the only test that calls it, so the flag is read
+    /// before anything else could have set it.
+    #[test]
+    fn a_named_directory_is_moved_into_and_remembered_as_named() {
+        let here = std::env::current_dir().expect("the tests run somewhere");
+
+        assert!(start_in(&here.join("not a directory anybody made")).is_err());
+        assert!(
+            !DIRECTORY_WAS_NAMED.load(Ordering::Relaxed),
+            "a move that failed said Crook was where it was sent"
+        );
+
+        start_in(&here).expect("the directory the tests run in");
+        assert_eq!(std::env::current_dir().ok(), Some(here));
+        assert!(DIRECTORY_WAS_NAMED.load(Ordering::Relaxed));
     }
 }
 

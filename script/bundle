@@ -22,7 +22,8 @@
 #
 # --archive is what makes a release downloadable: one .tar.gz (.zip on Windows)
 # named for the version and the target triple, plus the SHA-256 a person can
-# check it against.
+# check it against. The Linux one carries share/ as well — the desktop entry,
+# the icons and the AppStream record — beside the binary.
 #
 # TODO: replace the build path below with cargo-dist (https://opensource.axo.dev/cargo-dist/).
 # It generates the release matrix and emits .tar.gz / .zip / .msi / .dmg / .deb / .rpm from a
@@ -224,6 +225,27 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE"
 cp "$OUT_DIR/$BIN_FILE" "$STAGE/$BIN_FILE"
 cp LICENSE-MIT LICENSE-ISC-lucide README.md "$STAGE/"
+
+# A Linux desktop finds an application by three kinds of file under share/: the
+# entry a launcher lists and xdg-terminal-exec reads, the icon it is drawn
+# with, and the AppStream record a software centre shows. They travel laid out
+# the way they are installed, so a package copies share/ as it is and
+# `script/install --desktop` copies it under ~/.local/share. The updater takes
+# `<stem>/crook` out of the archive and nothing else, so none of this can reach
+# a binary that replaces itself.
+if [ "$PLATFORM" = linux ]; then
+  mkdir -p "$STAGE/share/applications" "$STAGE/share/metainfo"
+  cp packaging/linux/crook.desktop "$STAGE/share/applications/crook.desktop"
+  cp packaging/linux/id.crook.Crook.metainfo.xml "$STAGE/share/metainfo/"
+  # hicolor's sizes, out of the macOS iconset, whose @2x files are the sizes
+  # in between: the 32x32@2x image is the 64-pixel icon.
+  for icon in 16:16x16 32:32x32 64:32x32@2x 128:128x128 256:256x256 512:512x512; do
+    size=${icon%%:*}
+    mkdir -p "$STAGE/share/icons/hicolor/${size}x$size/apps"
+    cp "assets/Crook.iconset/icon_${icon#*:}.png" \
+      "$STAGE/share/icons/hicolor/${size}x$size/apps/crook.png"
+  done
+fi
 
 case "$ARCHIVE_FORMAT" in
   tar.gz)

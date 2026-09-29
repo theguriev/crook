@@ -6,7 +6,11 @@
 //! else wrote. [`super::merged`] needs the same promise for another reason —
 //! it reads a history, and a history's honest length has no bound the way a
 //! listing's does — so the runner lives here and both spawn git through it.
-//! [`super::changes`] is the third, and the one that asked for
+//! So does [`super::diff`]'s count since the base, which runs on the tab
+//! strip's gather chain every fifteen seconds, where a git that never came
+//! back would stop every row's branch and count from updating again.
+//!
+//! [`super::changes`] is another, and the one that asked for
 //! [`run_capped`]: the diff of a single file is as long as the file is.
 //!
 //! The deadline bounds the *call*, not only git. Killing a process does not
@@ -67,7 +71,7 @@ static GIT_MISSING: AtomicBool = AtomicBool::new(false);
 /// only reason a local read is slow is a cold page cache — and short enough
 /// that a stall is something a person waits out rather than a hang they have to
 /// restart the app to clear.
-pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long [`super::worktree::add`] may take.
 ///
@@ -77,7 +81,7 @@ pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// whatever the user wrote. Killing an honest checkout halfway leaves a
 /// half-written directory *and* a registered worktree — strictly worse than
 /// having waited.
-const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How long [`super::worktree::remove`] may take.
 ///
@@ -122,7 +126,7 @@ pub(super) fn git_is_missing() -> bool {
 pub(super) enum Intent {
     /// `worktree list`, `status`: answers a question and changes nothing.
     Read,
-    /// `worktree add`: writes the repository.
+    /// `worktree add`, `lock`, `unlock`: writes the repository.
     Write,
     /// `worktree remove`: writes the repository, and deletes a directory tree
     /// first, which is the one thing here whose honest duration has no bound
@@ -174,6 +178,10 @@ thread_local! {
 pub(super) struct Finished {
     /// Whether git exited zero.
     pub(super) success: bool,
+    /// The code it exited with, for the commands whose non-zero exit is an
+    /// answer — `check-ignore` exits 1 for "none of them". `None` when a
+    /// signal ended it.
+    pub(super) code: Option<i32>,
     /// stdout, as bytes, because paths come out of it.
     pub(super) stdout: Vec<u8>,
     /// stderr, as text, because messages come out of it.
@@ -316,6 +324,7 @@ fn run_with(
 
     Ok(Finished {
         success: status.success(),
+        code: status.code(),
         stdout: stdout.unwrap_or_default(),
         stderr: String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned(),
     })
@@ -439,7 +448,8 @@ fn start(
         // and start point precisely so nothing can decide to go and fetch one —
         // so there is no credential to be asked for. These two make that a
         // guarantee rather than an argument: git may not prompt on a terminal,
-        // and has no terminal on stdin to prompt on.
+        // and has no terminal on stdin to prompt on — a pipe, when there is
+        // input, is no terminal either.
         .env("GIT_TERMINAL_PROMPT", "0");
 
     let [stdin, stdout, stderr] = stdio;
@@ -468,7 +478,7 @@ fn start(
 /// A `timeout` rather than an [`Intent`], because a pipe here only ever
 /// reads and it is the caller that knows how long its read deserves.
 ///
-/// `success` is both commands', and `stderr` is the second one's. The first
+/// `success` is both commands', and `code` and `stderr` are the second one's. The first
 /// one's is thrown away: the only thing a caller does with a failed pipe is
 /// not believe it, and a reader thread for text nobody reads is a thread for
 /// nothing.
@@ -520,7 +530,8 @@ pub(super) fn pipe(
 
     let deadline = Instant::now() + timeout;
     let waited = wait_for(&mut first, deadline, timeout).and_then(|first| {
-        wait_for(&mut second, deadline, timeout).map(|second| first.success() && second.success())
+        wait_for(&mut second, deadline, timeout)
+            .map(|second| (first.success() && second.success(), second.code()))
     });
     if waited.is_err() {
         // The first was killed at the deadline, or the second was and this is
@@ -535,7 +546,7 @@ pub(super) fn pipe(
     let stdout = collect(stdout, drained_by);
     let stderr = collect(stderr, drained_by);
 
-    let success = waited?;
+    let (success, code) = waited?;
     // A read is its output, and a fragment of one is not an answer.
     let Some(stdout) = stdout else {
         log::warn!(
@@ -548,6 +559,7 @@ pub(super) fn pipe(
 
     Ok(Finished {
         success,
+        code,
         stdout,
         stderr: String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned(),
     })

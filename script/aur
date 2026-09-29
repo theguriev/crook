@@ -22,6 +22,10 @@
 #      copied in, committed as `crook-bin X.Y.Z-1` and pushed. That needs an
 #      AUR account whose SSH key is this machine's.
 #
+# The AUR repository keeps crook.desktop beside the PKGBUILD, and this one keeps
+# it in packaging/linux/, where the release archive and `script/install
+# --desktop` take it from too: one entry, copied in on the way out.
+#
 # Arch only: makepkg is the one tool that reads a PKGBUILD the way the AUR's
 # users will. Nothing is installed; the build is thrown away.
 
@@ -41,6 +45,7 @@ command -v makepkg >/dev/null || fail "makepkg is needed, which means Arch"
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 package="$root/packaging/aur/crook-bin"
+entry="$root/packaging/linux/crook.desktop"
 archive="crook-v$version-x86_64-unknown-linux-gnu.tar.gz"
 release="https://github.com/theguriev/crook/releases/download/v$version"
 
@@ -59,7 +64,7 @@ actual=$(sha256sum "$scratch/$archive" | awk '{ print $1 }')
 echo "==> Setting the PKGBUILD to $version-1"
 sed -i -e "s/^pkgver=.*/pkgver=$version/" -e "s/^pkgrel=.*/pkgrel=1/" "$package/PKGBUILD"
 
-cp "$package/PKGBUILD" "$package/crook.desktop" "$scratch/"
+cp "$package/PKGBUILD" "$entry" "$scratch/"
 (
   cd "$scratch"
   sums=$(makepkg -g 2>/dev/null)
@@ -98,7 +103,7 @@ fi
 
 echo "==> Pushing crook-bin $version-1 to the AUR"
 git clone -q ssh://aur@aur.archlinux.org/crook-bin.git "$scratch/aur"
-cp "$package/PKGBUILD" "$package/.SRCINFO" "$package/crook.desktop" "$scratch/aur/"
+cp "$package/PKGBUILD" "$package/.SRCINFO" "$entry" "$scratch/aur/"
 (
   cd "$scratch/aur"
   git add PKGBUILD .SRCINFO crook.desktop

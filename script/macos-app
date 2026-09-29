@@ -32,8 +32,9 @@ BINARY=""
 IDENTITY="${MACOS_SIGNING_IDENTITY:-}"
 OUT_DIR="dist/macos"
 # Reverse-DNS, and stable forever: macOS keys a saved window position, a
-# TCC permission and a Launch Services registration on this string, so
-# changing it makes every Mac treat the next release as a different program.
+# TCC permission, the leave to post notifications and a Launch Services
+# registration on this string, so changing it makes every Mac treat the next
+# release as a different program.
 BUNDLE_ID="${CROOK_BUNDLE_ID:-com.theguriev.crook}"
 
 usage() {
@@ -101,6 +102,13 @@ fi
 # LSMinimumSystemVersion is 11.0 because that is the floor Rust's own
 # aarch64-apple-darwin target sets; claiming anything older would be a promise
 # the binary does not keep.
+#
+# Notifications need nothing here beyond CFBundleIdentifier, which is what
+# Notification Center files an application under. No NSUserNotificationAlertStyle:
+# banners, which go by themselves, are the default style, and the key is how the
+# deprecated NSUserNotification API asked for alerts that stay until dismissed
+# instead. No entitlement either: only a push from a server needs one, and
+# Crook's banners are posted by the app itself.
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

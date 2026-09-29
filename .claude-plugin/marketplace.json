@@ -1,0 +1,15 @@
+{
+  "name": "crook",
+  "description": "Crook, a terminal whose unit of work is an agent: the plugin that connects Claude Code to it.",
+  "owner": {
+    "name": "Eugen Guriev",
+    "url": "https://github.com/theguriev"
+  },
+  "plugins": [
+    {
+      "name": "crook",
+      "source": "./packaging/claude-code",
+      "description": "Reports Claude Code's status to the Crook tab it runs in, and carries Crook's skill. Does nothing in any other terminal."
+    }
+  ]
+}
