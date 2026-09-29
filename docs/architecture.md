@@ -1140,16 +1140,16 @@ close-on-exec, so no shell a pane starts inherits them.
 
 **What it exposes, and what the later verbs will need.** What the panel shows, per pane: its
 number and its tab's, its title and its tab's, its group, whether it is the focused one, the
-agent's status and message, its directory and its branch — nothing a pane printed and nothing of
-its input. All of that is already on the screen, in the session file, and in the shells' own
-process entries, every one of them this user's to read, so a socket only this user can reach
-that only reads gives nobody anything new — and there is deliberately no token, since one that
-authorised nothing would be a promise with nothing behind it. The verbs after this one change
-what a program can do quietly, and they will carry authority by *lineage*: a caller names its
-pane with a per-pane token handed to that pane's environment (never the pane's number, which is
-not a secret), may act on its own pane and on the tabs it opened, and reading or typing into a
-pane a person opened is a grant that person answers on a card. An agent that reads one pane and
-types into another is a confused deputy waiting for a prompt injection, which is why that is
+agent's status and message, its directory and its branch — nothing of a pane's scrollback and
+nothing of its input. All of that is already on the screen, in the session file, and in the
+shells' own process entries, every one of them this user's to read, so a socket only this user
+can reach that only reads gives nobody anything new — and there is deliberately no token, since
+one that authorised nothing would be a promise with nothing behind it. The verbs after this one
+change what a program can do quietly, and they will carry authority by *lineage*: a caller names
+its pane with a per-pane token handed to that pane's environment (never the pane's number, which
+is not a secret), may act on its own pane and on the tabs it opened, and reading or typing into
+a pane a person opened is a grant that person answers on a card. An agent that reads one pane
+and types into another is a confused deputy waiting for a prompt injection, which is why that is
 never a default.
 
 **The transport.** One socket per process, because every `crook` launch is its own process with
@@ -1191,6 +1191,11 @@ was one; both are refused rather than looked around, since either way the window
 cannot be asked. Outside every pane it takes the one live socket in this user's directory when
 there is exactly one, and refuses when there are several, naming them: each window is its own
 process, and choosing the newest would be a guess that hands a script another window's panes.
+What it prints carries no control character. A pane's directory arrives percent-decoded from the
+OSC 7 its shell printed, so `%1b` in it is an ESC, and a listing that printed what it was given
+would replay a pane's escape sequence into the terminal the listing runs in; the table writes
+every control character out as its escape, and `--json` escapes the DEL and C1 characters a JSON
+encoder leaves as they are.
 
 ### The command line is an input field
 

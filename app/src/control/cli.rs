@@ -17,6 +17,17 @@
 //! one live socket in this user's directory is taken when there is exactly
 //! one, and several are refused by name: every window is its own process, and
 //! the newest is a guess that hands a script another window's panes.
+//!
+//! # Nothing it prints is a control character
+//!
+//! What a window says about a pane came, in part, from the pane: its
+//! directory from the OSC 7 its shell printed, percent-decoded, so `%1b` in it
+//! is an ESC; its title from what the program in it set. Anything that can
+//! print into one pane could otherwise put an escape sequence in the listing,
+//! and `crook pane list` would replay it into the terminal it runs in —
+//! retitle that pane, rewrite the rows above, set the clipboard. So the table
+//! writes every control character out as its escape, and the JSON escapes the
+//! ones a JSON encoder leaves as they are.
 
 use std::path::Path;
 
@@ -92,13 +103,15 @@ pub fn table(panes: &[PaneEntry], home: Option<&Path>) -> String {
                     true => format!("{}*", pane.pane_id),
                     false => pane.pane_id.to_string(),
                 },
-                pane.status.clone(),
-                pane.title.clone(),
-                pane.group.clone().unwrap_or_else(dash),
-                pane.branch.clone().unwrap_or_else(dash),
+                printable(&pane.status),
+                printable(&pane.title),
+                pane.group.as_deref().map(printable).unwrap_or_else(dash),
+                pane.branch.as_deref().map(printable).unwrap_or_else(dash),
                 pane.cwd
                     .as_deref()
-                    .map(|directory| crate::git::user_friendly_path(Path::new(directory), home))
+                    .map(|directory| {
+                        printable(&crate::git::user_friendly_path(Path::new(directory), home))
+                    })
                     .unwrap_or_else(dash),
             ]
         })
@@ -133,10 +146,51 @@ pub fn table(panes: &[PaneEntry], home: Option<&Path>) -> String {
     for (pane, row) in panes.iter().zip(&rows) {
         lines.push(line(row.each_ref().map(String::as_str)));
         if let Some(message) = &pane.message {
-            lines.push(format!("{indent}{message}"));
+            lines.push(format!("{indent}{}", printable(message)));
         }
     }
     lines.join("\n")
+}
+
+/// `text` with every control character written out as its escape — `\u{1b}`
+/// for an ESC, `\n` for a newline — so that it prints as what it is rather
+/// than doing what it says, and a row stays one line.
+///
+/// Written out rather than dropped, so that a person reading the table sees
+/// what a pane tried. See the module docs for why.
+fn printable(text: &str) -> String {
+    let mut printable = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_control() {
+            printable.extend(character.escape_default());
+        } else {
+            printable.push(character);
+        }
+    }
+    printable
+}
+
+/// What `crook pane list --json` prints, from the window's `result`.
+///
+/// Pretty, as `--plugins --json` is: a person reads the output of a command
+/// they typed before a script does, and a parser reads either. The encoder
+/// escapes the C0 controls in a string and leaves DEL and C1 as they are, and
+/// a terminal that reads C1 out of UTF-8 may act on a `U+009B` as a CSI; those
+/// are escaped here, as `\u009b`, which any parser reads back as the same
+/// character. Outside a string, pretty JSON holds no control character but its
+/// newlines, so nothing else is touched.
+pub fn json(result: &serde_json::Value) -> String {
+    let pretty =
+        serde_json::to_string_pretty(result).expect("a value that was just parsed encodes");
+    let mut json = String::with_capacity(pretty.len());
+    for character in pretty.chars() {
+        if character.is_control() && character != '\n' {
+            json.push_str(&format!("\\u{:04x}", u32::from(character)));
+        } else {
+            json.push(character);
+        }
+    }
+    json
 }
 
 /// The socket half, which only Unix has.
@@ -242,11 +296,7 @@ pub mod unix {
     pub fn listing(socket: &Path, json: bool, home: Option<&Path>) -> Result<String> {
         let result = ask(socket, Verb::PaneList)?;
         if json {
-            // Pretty, as `--plugins --json` is: a person reads the output of a
-            // command they typed before a script does, and a parser reads
-            // either.
-            return Ok(serde_json::to_string_pretty(&result)
-                .expect("a value that was just parsed encodes"));
+            return Ok(super::json(&result));
         }
         let panes: Vec<PaneEntry> =
             serde_json::from_value(result).context("the window's answer is not a list of panes")?;

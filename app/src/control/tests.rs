@@ -218,6 +218,60 @@ fn the_table_marks_the_focused_pane_and_puts_a_question_under_its_title() {
     );
 }
 
+/// Every control character a pane could have planted in what the window
+/// says about it: a retitle and a line erase over OSC 7's percent-decoding, a
+/// C1 CSI, a carriage return, a newline, and a DEL.
+fn planted() -> Vec<PaneEntry> {
+    let mut panes = two_panes();
+    panes[0].cwd = Some("/tmp/\u{1b}]2;approved\u{7}".to_owned());
+    panes[0].title = "\u{1b}]52;c;cm0gLXJmIH4=\u{7}".to_owned();
+    panes[0].branch = Some("main\r".to_owned());
+    panes[1].group = Some("atlas\u{9b}2J".to_owned());
+    panes[1].message = Some("run\u{1b}[1A\u{1b}[2K this?\nyes\u{7f}".to_owned());
+    panes
+}
+
+#[test]
+fn the_table_writes_out_what_a_pane_planted_in_it_rather_than_sending_it_to_the_terminal() {
+    let table = cli::table(&planted(), None);
+    assert!(
+        !table
+            .chars()
+            .any(|character| character.is_control() && character != '\n'),
+        "the terminal `crook pane list` runs in is sent no control character: {table:?}"
+    );
+    assert_eq!(
+        table.lines().count(),
+        4,
+        "a newline in a message is not a row of its own:\n{table}"
+    );
+    // Written out rather than dropped: what the pane tried is on the screen
+    // for the person reading it.
+    for written in [
+        r"/tmp/\u{1b}]2;approved\u{7}",
+        r"\u{9b}2J",
+        r"\r",
+        r"\n",
+        r"\u{7f}",
+    ] {
+        assert!(table.contains(written), "{written}:\n{table}");
+    }
+}
+
+#[test]
+fn the_json_escapes_every_control_character_and_still_reads_back_as_what_the_window_sent() {
+    let sent = serde_json::to_value(planted()).expect("encodes");
+    let json = cli::json(&sent);
+    assert!(
+        !json
+            .chars()
+            .any(|character| character.is_control() && character != '\n'),
+        "not even the C1 and DEL a JSON encoder leaves as they are: {json:?}"
+    );
+    let read: Value = serde_json::from_str(&json).expect("still JSON");
+    assert_eq!(read, sent, "and still the same value");
+}
+
 /// A window with no display, carrying nothing but the tab strip.
 struct Window {
     queue: Arc<LocalQueue>,
