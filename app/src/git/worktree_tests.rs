@@ -1616,13 +1616,16 @@ fn a_file_the_new_checkout_does_not_ignore_is_not_copied() {
     if without_git("a_file_the_new_checkout_does_not_ignore_is_not_copied") {
         return;
     }
-    // A base branch from before `.env` was ignored, which the creator's base
-    // picker makes a click away. The main checkout ignores the `.env`; the
-    // new checkout has no `.gitignore` saying so, and a copy there would be
-    // an untracked file for an agent's `git add -A` to commit. Beside it, a
-    // file the old branch tracks and the main checkout ignores: it is in the
-    // new checkout already, as the branch has it, which is the rule working
-    // and nothing to say.
+    // A base branch from before the secret was ignored, which the creator's
+    // base picker makes a click away. The main checkout ignores it; the new
+    // checkout has no `.gitignore` saying so, and a copy there would be an
+    // untracked file for an agent's `git add -A` to commit. Beside it, a file
+    // the old branch tracks and the main checkout ignores: it is in the new
+    // checkout already, as the branch has it, which is the rule working and
+    // nothing to say. The secret's name is one no global excludes file will
+    // have heard of: `copy_included` runs git with this machine's own
+    // configuration, and one that ignores `.env` everywhere — plenty do —
+    // would have the new checkout ignore it after all.
     let scratch = ScratchDir::new("include-not-ignored-there");
     let repo = repo_with_a_commit(&scratch, "repo");
     git(&repo, &["checkout", "-q", "-b", "old"]);
@@ -1630,21 +1633,21 @@ fn a_file_the_new_checkout_does_not_ignore_is_not_copied() {
     git(&repo, &["add", "local.json"]);
     git(&repo, &["commit", "--no-verify", "-m", "tracked here"]);
     git(&repo, &["checkout", "-q", "main"]);
-    write(&repo.join(".gitignore"), ".env\nlocal.json\n");
-    write(&repo.join(INCLUDE_FILE), ".env\nlocal.json\n");
+    write(&repo.join(".gitignore"), "secret.crook-test\nlocal.json\n");
+    write(&repo.join(INCLUDE_FILE), "secret.crook-test\nlocal.json\n");
     git(&repo, &["add", "."]);
     git(
         &repo,
         &["commit", "--no-verify", "-m", "ignore and include"],
     );
-    write(&repo.join(".env"), "SECRET=1\n");
+    write(&repo.join("secret.crook-test"), "SECRET=1\n");
     write(&repo.join("local.json"), "the main checkout's\n");
     let checkout = scratch.spot("from-old");
     add(&repo, &checkout, "from-old", Some("old")).expect("git added the worktree");
 
     let included = copy_included(&repo, &checkout);
 
-    assert_eq!(contents(&checkout.join(".env")), None);
+    assert_eq!(contents(&checkout.join("secret.crook-test")), None);
     assert_eq!(
         contents(&checkout.join("local.json")).as_deref(),
         Some("the branch's\n")
@@ -1653,14 +1656,17 @@ fn a_file_the_new_checkout_does_not_ignore_is_not_copied() {
     assert!(included.refused.is_none(), "{included:?}");
     assert_eq!(
         skipped_for(&included, |skip| matches!(skip, Skip::NotIgnored)),
-        [".env"]
+        ["secret.crook-test"]
     );
     assert_eq!(
         skipped_for(&included, |skip| matches!(skip, Skip::Exists)),
         ["local.json"]
     );
     let problem = included.problem().expect("a file left out is said");
-    assert!(problem.contains(".env (not ignored"), "{problem}");
+    assert!(
+        problem.contains("secret.crook-test (not ignored"),
+        "{problem}"
+    );
     assert!(!problem.contains("local.json"), "{problem}");
 }
 
