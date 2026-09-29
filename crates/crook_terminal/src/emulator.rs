@@ -66,13 +66,6 @@ use crate::snapshot::{self, Palette, Snapshot, TerminalSize};
 /// point. Nothing a child prints can pass for one, either. Turning a stream of
 /// these into bytes is the writer's job, and framing them is how it keeps a
 /// submit apart from the output around it.
-///
-/// A replay makes the blocks its stream's own emulator made only when every
-/// read is fed as the [`Fed::Output`] it was. Where a read ends is part of what
-/// an emulator makes of it: a directory the shell reports is applied when the
-/// read it came in is over, so a mark later in that same read still settles
-/// against the directory before it, and a replay that joined two reads into
-/// one could file a block under a different directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fed<'a> {
     /// Output from the child: one read's worth, exactly as it was read.
@@ -185,11 +178,12 @@ impl EventListener for EventProxy {
 /// an escape sequence, and it buys a correct OSC parser instead of a hand-
 /// rolled scanner that has to get chunk boundaries right.
 ///
-/// The two are not read the same way. A working directory is position-
-/// independent — it means the same thing wherever in the chunk it appeared — so
-/// it is simply collected. A command boundary means *the cursor is here, now*,
-/// so [`Self::terminated`] stops the watcher on one and [`Emulator::advance`]
-/// feeds the real parser only up to that point before reading the cursor.
+/// The two are not read the same way. A working directory does not care where
+/// the cursor is, so it is simply collected, and applied before the next mark
+/// the watcher stops on: the block that mark opens is filed under it. A
+/// command boundary means *the cursor is here, now*, so [`Self::terminated`]
+/// stops the watcher on one and [`Emulator::advance`] feeds the real parser
+/// only up to that point before reading the cursor.
 #[derive(Default)]
 struct OscWatcher {
     working_directory: Option<PathBuf>,
@@ -403,7 +397,7 @@ impl Emulator {
     /// mark, the grid is advanced only as far as the watcher got, and the mark
     /// is then applied while the cursor still stands where the shell left it.
     /// Feeding the whole chunk first and looking for marks afterwards — which
-    /// is all OSC 7 needs — would put every boundary wherever the end of the
+    /// is all a title needs — would put every boundary wherever the end of the
     /// chunk happened to land, and a mark split across two calls to this method
     /// would land nowhere at all. `vte` keeps the state that spans the split, so
     /// a mark arriving one byte at a time works exactly as one arriving whole.
@@ -447,6 +441,12 @@ impl Emulator {
                 // alone applies the report after the loop, too late for a `D`
                 // that ends the very command the report was about.
                 self.apply_agent_report();
+                // A directory too, and for the same reason: bash and zsh print
+                // `D`, the directory and the next `A` back to back, and the
+                // block that `A` opens is filed under whatever directory it
+                // sees. Applied after the loop, it would file `pwd` after a
+                // `cd` under the directory the `cd` left.
+                self.apply_working_directory();
                 self.settle_agent(mark);
                 let finished = self.blocks.mark(
                     mark,
@@ -838,13 +838,7 @@ impl Emulator {
         }
 
         self.apply_agent_report();
-
-        if let Some(directory) = self.osc_watcher.working_directory.take()
-            && self.working_directory.as_deref() != Some(directory.as_path())
-        {
-            self.working_directory = Some(directory.clone());
-            self.events.push(TerminalEvent::WorkingDirectory(directory));
-        }
+        self.apply_working_directory();
 
         // Last, because it closes the open block: a working directory reported
         // on the way out belongs to the block that is still open.
@@ -868,6 +862,23 @@ impl Emulator {
         {
             self.agent = reported.status;
             self.events.push(TerminalEvent::Agent(reported));
+        }
+    }
+
+    /// Moves a pending working directory onto `self.working_directory`,
+    /// emitting the change.
+    ///
+    /// Kept out of the OSC parser for the reason [`Self::apply_agent_report`]
+    /// is: a directory and the prompt mark after it can arrive in one read,
+    /// and the block the mark opens has to be filed under that directory.
+    /// Idempotent the same way — it takes the pending directory, so the call
+    /// from [`Self::drain`] after one from [`Self::advance`] finds nothing.
+    fn apply_working_directory(&mut self) {
+        if let Some(directory) = self.osc_watcher.working_directory.take()
+            && self.working_directory.as_deref() != Some(directory.as_path())
+        {
+            self.working_directory = Some(directory.clone());
+            self.events.push(TerminalEvent::WorkingDirectory(directory));
         }
     }
 

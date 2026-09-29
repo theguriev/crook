@@ -715,13 +715,10 @@ answers again. And the stream it takes is made of `Fed` items, so that the one b
 `Terminal::submit` hands the emulator out of band can travel with the output as an item of
 its own. It is not spliced into the child's bytes, because a submit falls between two reads
 and a read can end inside an escape sequence: bytes spliced in there would end the sequence.
-A replay makes the blocks the stream's own emulator made only when each read is fed as the
-item it was, since a directory the shell reports is applied when its read is over and a mark
-later in the same read still sees the one before. The link is a trait object rather than a
-type parameter because no keystroke passes through it: a write goes through the writer the
-link handed out once and output through the reader it handed out once, both of them boxed
-trait objects before the link existed, so the box costs one indirect call per resize and per
-child poll.
+The link is a trait object rather than a type parameter because no keystroke passes through
+it: a write goes through the writer the link handed out once and output through the reader
+it handed out once, both of them boxed trait objects before the link existed, so the box
+costs one indirect call per resize and per child poll.
 
 ### Which shell, and how it is started
 

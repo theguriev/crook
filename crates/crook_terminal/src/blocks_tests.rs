@@ -512,22 +512,21 @@ fn test_a_submit_fed_between_two_halves_of_a_sequence_leaves_the_sequence_whole(
 }
 
 #[test]
-fn test_a_replay_fed_in_its_reads_files_each_block_under_its_own_directory() {
-    // What a replay has to keep besides the bytes. A directory the shell
-    // reports is applied when the read it came in is over, so a mark later in
-    // that same read still sees the one before it: fold `cd`'s report and the
-    // next prompt into one read and `pwd` is filed under the old directory.
-    // Fed in the reads it arrived in, each block lands where it did.
+fn test_a_block_is_filed_under_the_directory_reported_before_it_however_the_reads_were_cut() {
+    // What bash's and zsh's integration print when a command is over: `D`,
+    // then the directory from the prompt hook, then the prompt's own `A`, back
+    // to back, so one read holding all three is the usual case rather than
+    // the odd one. The block that `A` opens has to be filed under the
+    // directory reported before it, or `pwd` after a `cd` is filed under the
+    // directory the `cd` left, and so is the next command, and the one after.
+    // Every cut of that read has to agree, and so does a mirror fed it.
     let first = format!("\x1b]7;file:///a\x07{A}$ {B}");
-    let cd = format!("cd /b\r\n{C}\x1b]133;D;0\x07");
-    let prompt = format!("{A}$ {B}");
+    let cd = format!("cd /b\r\n{C}\x1b]133;D;0\x07\x1b]7;file:///b\x07{A}$ {B}");
     let pwd = format!("pwd\r\n{C}/b\r\n\x1b]133;D;0\x07{A}$ {B}");
     let stream = [
         Fed::Output(first.as_bytes()),
         Fed::Submitted("cd /b"),
         Fed::Output(cd.as_bytes()),
-        Fed::Output(b"\x1b]7;file:///b\x07"),
-        Fed::Output(prompt.as_bytes()),
         Fed::Submitted("pwd"),
         Fed::Output(pwd.as_bytes()),
     ];
@@ -545,7 +544,25 @@ fn test_a_replay_fed_in_its_reads_files_each_block_under_its_own_directory() {
         ],
         filed
     );
-    assert_eq!(everything(&mut direct), everything(&mut mirrored(&stream)));
+    let expected = everything(&mut direct);
+    assert_eq!(expected, everything(&mut mirrored(&stream)));
+
+    for split in 0..=cd.len() {
+        let (before, after) = cd.as_bytes().split_at(split);
+        let cut = [
+            Fed::Output(first.as_bytes()),
+            Fed::Submitted("cd /b"),
+            Fed::Output(before),
+            Fed::Output(after),
+            Fed::Submitted("pwd"),
+            Fed::Output(pwd.as_bytes()),
+        ];
+        assert_eq!(
+            expected,
+            everything(&mut lived(&cut)),
+            "cut at byte {split}"
+        );
+    }
 }
 
 #[test]
