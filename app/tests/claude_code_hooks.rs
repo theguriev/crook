@@ -211,7 +211,8 @@ fn run_as_a_hook(command: &str, agent: Agent) -> Ran {
 }
 
 /// The report `command`'s `--agent` arguments make of [`INPUT`]: the status
-/// after `--agent`, with the title or the message `-` reads from stdin.
+/// after `--agent`, with the title or the message `-` reads from stdin, and no
+/// pull request, since [`INPUT`] names none.
 fn expected_report(command: &str) -> String {
     let (_, arguments) = command
         .split_once("--agent ")
@@ -231,6 +232,10 @@ fn expected_report(command: &str) -> String {
         match flag {
             "--title" => title = Some(TITLE),
             "--message" => message = Some(MESSAGE),
+            // Read for the address a `gh pr create` printed, and INPUT is no
+            // such call's: the report is the status alone, as it is for
+            // every tool that opens no pull request.
+            "--pull-request" => {}
             other => panic!("{command}: {other} is not a flag `--agent` takes"),
         }
     }
