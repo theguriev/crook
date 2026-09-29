@@ -6537,6 +6537,71 @@ fn a_press_over_a_checkout_that_changed_since_its_question_asks_again() {
 }
 
 #[test]
+fn finish_is_carried_out_over_a_push_or_a_commit_on_the_branch_it_keeps() {
+    // Finish keeps a branch that has not landed whatever it holds, so its
+    // question says nothing about the branch's commits. A push from another
+    // terminal, or a commit on the branch, leaves every word of it as it was,
+    // and the press is carried out rather than refused over a change the
+    // question does not show. Discard's questions name those commits, so for
+    // Discard the same change is one to ask about again.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let base = git_in(&repository, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let (checkout, pane) = task_checkout(&mut harness, tab, &store);
+    let branch = git_in(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    commit_in(&checkout, "task.txt", "the task");
+    let asked = super::finish::read_plan(&checkout, &store).expect("the checkout is looked at");
+    ask_about_the_task(&mut harness, pane, false);
+
+    // What `git push` leaves behind, without a remote to push to.
+    git_in(
+        &repository,
+        &[
+            "update-ref",
+            &format!("refs/remotes/origin/{branch}"),
+            &branch,
+        ],
+    );
+    let pushed = super::finish::read_plan(&checkout, &store).expect("the checkout is looked at");
+    git_in(
+        &checkout,
+        &["commit", "--no-verify", "--allow-empty", "-m", "one more"],
+    );
+    let committed = super::finish::read_plan(&checkout, &store).expect("the checkout is looked at");
+    for (now, what) in [(&pushed, "a push"), (&committed, "a commit")] {
+        assert!(
+            asked.holds_the_same(now, false),
+            "{what} refuses Finish's press, though it changes nothing its question says"
+        );
+        assert!(
+            !asked.holds_the_same(now, true),
+            "{what} lets Discard's press go ahead, though it changed the commits its question names"
+        );
+    }
+
+    harness.dispatch_worktree(WorktreeAction::Finish);
+    harness.wait_for("the press to be carried out or refused", |harness| {
+        harness.worktree_menu_finishing().is_none() || harness.worktree_finish_is_ready()
+    });
+    assert!(
+        harness.worktree_menu_finishing().is_none(),
+        "the press was refused over a change its question does not show"
+    );
+    let scene = wait_for_the_task_to_go(&mut harness);
+    assert!(!checkout.exists(), "the checkout is still there");
+    assert!(
+        has_branch(&repository, &branch),
+        "an unproved branch was deleted"
+    );
+    assert!(
+        worktree_menu_reads(&scene, &format!("Kept {branch}: not on {base} yet.")),
+        "the list does not say the branch was kept"
+    );
+}
+
+#[test]
 fn a_press_taken_back_while_it_looks_again_does_nothing() {
     // Escape during the second look is the press taken back: the look lands
     // nowhere, and the question it was about is the one showing again.

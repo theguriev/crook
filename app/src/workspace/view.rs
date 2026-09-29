@@ -4702,7 +4702,7 @@ impl Workspace {
                     workspace.tab_menu.forget_hover_state();
                 }
                 Again::CarryOut => {
-                    if !fresh.holds_the_same(&shown) {
+                    if !shown.holds_the_same(&fresh, discard) {
                         workspace.tab_menu.problem = Some(
                             "It changed while the question was up, so nothing was done. This is \
                              what it holds now."

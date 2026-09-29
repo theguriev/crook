@@ -60,11 +60,11 @@
 //!
 //! * when a pane in the checkout stops working, so that the question shows
 //!   what it left behind;
-//! * when a button is pressed, before any pane closes: a checkout that holds
-//!   anything the question did not say is asked about again, as it is now,
-//!   and nothing is done — so Discard's second question is about the files
-//!   and commits its press takes, and Finish does not close a tab over a
-//!   checkout git will then refuse to remove;
+//! * when a button is pressed, before any pane closes: a checkout the
+//!   question no longer describes ([`Plan::holds_the_same`]) is asked about
+//!   again, as it is now, and nothing is done — so Discard's second question
+//!   is about the files and commits its press takes, and Finish does not
+//!   close a tab over a checkout git will then refuse to remove;
 //! * and once the panes have closed, just before git is asked: whatever
 //!   appeared in between — a process nobody could see, a moment's race —
 //!   keeps the checkout and the branch where they are.
@@ -177,20 +177,39 @@ impl Plan {
     }
 
     /// Whether `fresh`, a second look at the same checkout, would ask the same
-    /// question this one did: the checkout as it was, holding the same work,
-    /// its branch on the same commit and proved or not the same way, and the
-    /// same commits only it holds.
+    /// question this one did — Discard's if `discard`, Finish's if not — and
+    /// so whether a press of it may be carried out on what `fresh` found.
+    ///
+    /// Finish's question says where the checkout is, whether it is locked,
+    /// how much is loose in it, which branch it is on, and whether that has
+    /// landed on the base and what proved it. A branch that has not landed
+    /// is kept whatever it holds, so the commit it is on and the commits only
+    /// it holds are nothing Finish says or does anything with: a push from
+    /// another terminal, or a commit on it, changes no word of the question,
+    /// and refusing the press over one would tell a person about a change
+    /// they cannot see. A landed branch's tip is in its proof, which is
+    /// compared.
+    ///
+    /// Discard's questions name those commits and the loose files, and its
+    /// press deletes the branch only from the tip they were counted from, so
+    /// for Discard all of it is compared.
     ///
     /// The other checkouts are left out: one made or removed beside this one
-    /// changes nothing this question says.
-    pub(super) fn holds_the_same(&self, fresh: &Plan) -> bool {
-        self.checkout() == fresh.checkout()
+    /// changes nothing either question says.
+    pub(super) fn holds_the_same(&self, fresh: &Plan, discard: bool) -> bool {
+        let (was, is) = (self.checkout(), fresh.checkout());
+        let finish_says_the_same = was.path == is.path
+            && was.branch == is.branch
+            && was.locked == is.locked
             && self.local == fresh.local
-            && self.loose == fresh.loose
             && self.base == fresh.base
-            && self.tip == fresh.tip
-            && self.landed == fresh.landed
-            && self.lost == fresh.lost
+            && self.landed == fresh.landed;
+        finish_says_the_same
+            && (!discard
+                || (was == is
+                    && self.loose == fresh.loose
+                    && self.tip == fresh.tip
+                    && self.lost == fresh.lost))
     }
 }
 
