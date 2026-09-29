@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use crook_terminal::{Program, PtyReader, Terminal, TerminalOptions, TerminalSize};
 
 use super::launch::{HostEnv, Launch, plain, plan};
-use super::scratch::sweep;
+#[cfg(unix)]
+use super::scratch::{Refusal, root_for};
+use super::scratch::{Root, sweep};
 use super::*;
 use crate::tab::PaneId;
 
@@ -835,7 +837,8 @@ fn test_the_opt_out_leaves_the_shell_exactly_as_it_was() {
 
 #[test]
 fn test_the_sweep_removes_directories_no_session_owns_and_leaves_ours() {
-    let root = TempDir::new("sweep");
+    let parent = TempDir::new("sweep");
+    let root = Root::open(&parent.path().join("root")).expect("a fresh root should open");
     let ours = root.path().join("9999-0");
     let abandoned = root.path().join("1-0");
     fs::create_dir_all(&ours).expect("a directory should be creatable");
@@ -844,13 +847,341 @@ fn test_the_sweep_removes_directories_no_session_owns_and_leaves_ours() {
     // Zero, because a test cannot wait a week and cannot backdate a directory
     // without a dependency. What is being checked is which directories the
     // sweep is willing to touch, not the calendar.
-    sweep(root.path(), "9999-", Duration::ZERO);
+    sweep(&root, "9999-", Duration::ZERO);
 
     assert!(ours.exists(), "this process's own directories are in use");
     assert!(
         !abandoned.exists(),
         "a directory left behind by a killed Crook has to be collectable, or \
          the temporary directory grows for ever"
+    );
+}
+
+/// A zsh, bash or fish that is not installed, with the marks on. The launch is
+/// decided from the name, so the whole arrangement is exercised without one.
+#[cfg(unix)]
+fn marked(program: &str) -> Options {
+    Options {
+        enabled: true,
+        login: true,
+        shell: Some(PathBuf::from(program)),
+        control_socket: None,
+    }
+}
+
+/// The permission bits of `path` itself — not of what a link there leads to —
+/// in the octal a person reads them in.
+#[cfg(unix)]
+fn mode(path: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let found = fs::symlink_metadata(path)
+        .unwrap_or_else(|error| panic!("{} should be there: {error}", path.display()));
+    format!("{:o}", found.permissions().mode() & 0o777)
+}
+
+/// Who owns `path`. For a directory the suite made, that is the uid it runs
+/// as, read off the file system rather than asked of the code under test.
+#[cfg(unix)]
+fn owner(path: &Path) -> u32 {
+    use std::os::unix::fs::MetadataExt as _;
+
+    fs::symlink_metadata(path)
+        .unwrap_or_else(|error| panic!("{} should be there: {error}", path.display()))
+        .uid()
+}
+
+/// Why a root was turned down for a process running as `me`, or `None` when
+/// it was taken. An error that is not a [`Refusal`] — a directory that could
+/// not be made at all — fails the test, since no test here is about one.
+#[cfg(unix)]
+fn refusal(root: &Path, me: u32) -> Option<Refusal> {
+    let error = Root::open_as(root, me).err()?;
+    let refusal = error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<Refusal>())
+        .copied();
+    assert!(
+        refusal.is_some(),
+        "{} failed for some other reason: {error}",
+        root.display()
+    );
+    refusal
+}
+
+/// `path` and everything under it, each directory before what is in it.
+#[cfg(unix)]
+fn everything_under(path: &Path) -> Vec<PathBuf> {
+    let mut found = vec![path.to_path_buf()];
+    let mut next = 0;
+    while let Some(path) = found.get(next).cloned() {
+        next += 1;
+        if let Ok(entries) = fs::read_dir(&path) {
+            found.extend(entries.flatten().map(|entry| entry.path()));
+        }
+    }
+    found
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_fresh_scratch_root_and_everything_crook_writes_in_it_are_the_users_alone() {
+    // What any other user on the machine could read before: the stubs, and
+    // `complete.in`, which is the command line as far as the caret. The root
+    // this replaces was drwxr-xr-x in /tmp.
+    let home = TempDir::new("home");
+    let parent = TempDir::new("private");
+    let root = parent.path().join("root");
+
+    // Three panes in one root, so the second and third open a root the first
+    // one made — which is what every pane after the first does. fish is the
+    // one whose file sits two directories down.
+    for program in ["/nowhere/zsh", "/nowhere/bash", "/nowhere/fish"] {
+        let session = Session::in_root(PaneId::next(), &marked(program), host_at(&home), &root);
+        assert!(session.marks(), "{program} should have been installed");
+        session
+            .write_completion_request("1\ngit ch")
+            .expect("a marked session takes a request")
+            .expect("the request should be writable");
+        let scratch = session
+            .scratch()
+            .expect("a marked session has a scratch directory")
+            .to_path_buf();
+
+        assert_eq!(mode(&root), "700", "the root, after {program}");
+        let everything = everything_under(&scratch);
+        assert!(
+            everything.iter().any(|path| path.ends_with("complete.in")),
+            "{everything:?}"
+        );
+        for path in &everything {
+            let expected = if path.is_dir() { "700" } else { "600" };
+            assert_eq!(mode(path), expected, "{}", path.display());
+        }
+
+        drop(session);
+        assert!(
+            !scratch.exists(),
+            "closing the pane still takes its directory with it"
+        );
+    }
+    assert!(root.is_dir(), "and leaves the root for the next one");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_scratch_root_that_is_a_link_or_a_file_is_refused_and_left_alone() {
+    use std::os::unix::fs::DirBuilderExt as _;
+
+    let home = TempDir::new("home");
+    let parent = TempDir::new("link");
+    // Where the link leads would pass on its own: a directory, the suite's,
+    // 700. The link is what is wrong. It is what another user plants in /tmp
+    // under the name Crook is about to use, pointing wherever they like — at
+    // a directory they can read, or at one of this user's own for the sweep
+    // to empty.
+    let target = parent.path().join("target");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&target)
+        .expect("a directory should be creatable");
+    let link = parent.path().join("link");
+    std::os::unix::fs::symlink(&target, &link).expect("a link should be creatable");
+    let file = parent.path().join("file");
+    fs::write(&file, "").expect("a file should be writable");
+
+    let me = owner(&target);
+    assert_eq!(refusal(&link, me), Some(Refusal::Link));
+    assert_eq!(refusal(&file, me), Some(Refusal::NotADirectory));
+
+    let session = Session::in_root(
+        PaneId::next(),
+        &marked("/nowhere/zsh"),
+        host_at(&home),
+        &link,
+    );
+    assert!(
+        !session.marks(),
+        "a refused root is a pane without marks, which is what an unwritable \
+         temporary directory has always been"
+    );
+    assert!(session.scratch().is_none());
+    assert_eq!(
+        session_variable(session.environment(), "CROOK_SCRATCH"),
+        None,
+        "and the shell is not pointed into it"
+    );
+    assert_eq!(
+        fs::read_dir(&target).map(Iterator::count).ok(),
+        Some(0),
+        "nothing was made where the link leads"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_scratch_root_other_users_can_enter_is_refused() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = TempDir::new("home");
+    let parent = TempDir::new("open");
+    let root = parent.path().join("root");
+    fs::create_dir(&root).expect("a directory should be creatable");
+    let me = owner(&root);
+
+    // Set rather than asked for at creation, so the umask the suite runs
+    // under cannot narrow it behind the test's back. 755 is what the root
+    // this replaces came out as under the usual umask; 710 is one bit, which
+    // is enough for a group to walk into a directory whose names it can guess.
+    for bits in [0o755, 0o710] {
+        fs::set_permissions(&root, fs::Permissions::from_mode(bits))
+            .expect("the mode should be settable");
+        assert_eq!(refusal(&root, me), Some(Refusal::Open(bits)), "{bits:o}");
+    }
+
+    let session = Session::in_root(
+        PaneId::next(),
+        &marked("/nowhere/bash"),
+        host_at(&home),
+        &root,
+    );
+    assert!(!session.marks());
+    assert_eq!(
+        fs::read_dir(&root).map(Iterator::count).ok(),
+        Some(0),
+        "nothing was put in it"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_scratch_root_another_user_owns_is_refused() {
+    // A test cannot give a directory away without being root, so the
+    // directory stays the suite's and the process asks as somebody else. To a
+    // uid one higher this is another user's 700 directory, which is exactly
+    // what `mkdir -m 700 /tmp/crook-1000`, run first by someone else, leaves.
+    let parent = TempDir::new("owner");
+    let root = parent.path().join("root");
+    let me = owner(parent.path());
+
+    assert_eq!(
+        refusal(&root, me),
+        None,
+        "made fresh, it is the suite's own"
+    );
+    assert_eq!(mode(&root), "700", "and private from the start");
+    assert_eq!(refusal(&root, me.wrapping_add(1)), Some(Refusal::Owner(me)));
+    assert_eq!(
+        refusal(&root, me),
+        None,
+        "while to its owner it opens again, the way it does for every pane \
+         after the first"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_the_scratch_root_is_in_the_runtime_directory_only_when_that_is_the_users() {
+    use std::ffi::OsStr;
+    use std::os::unix::fs::DirBuilderExt as _;
+
+    let parent = TempDir::new("where");
+    let runtime = parent.path().join("runtime");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&runtime)
+        .expect("a directory should be creatable");
+    let link = parent.path().join("runtime-link");
+    std::os::unix::fs::symlink(&runtime, &link).expect("a link should be creatable");
+    let missing = parent.path().join("missing");
+    let temp = parent.path().join("tmp");
+    let me = owner(&runtime);
+
+    assert_eq!(
+        root_for(Some(runtime.as_os_str()), &temp, me),
+        runtime.join("crook")
+    );
+
+    let fallback = temp.join(format!("crook-{me}"));
+    for (case, runtime) in [
+        ("unset", None),
+        ("empty", Some(OsStr::new(""))),
+        // The directory the suite runs in, which is its own: refused for
+        // being relative, and for nothing else.
+        ("relative", Some(OsStr::new("."))),
+        ("missing", Some(missing.as_os_str())),
+        ("a link to one that would do", Some(link.as_os_str())),
+    ] {
+        assert_eq!(root_for(runtime, &temp, me), fallback, "{case}");
+    }
+
+    let someone_else = me.wrapping_add(1);
+    assert_eq!(
+        root_for(Some(runtime.as_os_str()), &temp, someone_else),
+        temp.join(format!("crook-{someone_else}")),
+        "another user's runtime directory is not this one's, and two users in \
+         one temporary directory are never handed the same name"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_completion_request_is_replaced_whole_under_a_shell_still_reading_the_last() {
+    let home = TempDir::new("home");
+    let parent = TempDir::new("request");
+    let session = Session::in_root(
+        PaneId::next(),
+        &marked("/nowhere/bash"),
+        host_at(&home),
+        &parent.path().join("root"),
+    );
+    let scratch = session
+        .scratch()
+        .expect("a marked session has a scratch directory")
+        .to_path_buf();
+    let request = scratch.join("complete.in");
+    let ask = |text| {
+        session
+            .write_completion_request(text)
+            .expect("a marked session takes a request")
+            .expect("the request should be writable");
+    };
+
+    ask("1\ngit ch");
+    // The shell, one line into the first request when the second Tab comes.
+    let mut shell = fs::File::open(&request).expect("the request should be readable");
+    let mut serial = [0; 2];
+    shell
+        .read_exact(&mut serial)
+        .expect("the serial should be readable");
+    ask("2\ngit");
+    let mut line = String::new();
+    shell
+        .read_to_string(&mut line)
+        .expect("the line should be readable");
+
+    assert_eq!(
+        format!("{}{line}", String::from_utf8_lossy(&serial)),
+        "1\ngit ch",
+        "a shell part way through the first request reads the rest of the \
+         first — not the first's number over the second's line"
+    );
+    assert_eq!(
+        fs::read_to_string(&request).ok().as_deref(),
+        Some("2\ngit"),
+        "and the next to open it reads the second whole"
+    );
+    assert_eq!(mode(&request), "600");
+    let beside: Vec<_> = fs::read_dir(&scratch)
+        .expect("the scratch should be listable")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains("complete"))
+        .collect();
+    assert_eq!(
+        beside,
+        ["complete.in"],
+        "the name it was written under first is gone"
     );
 }
 

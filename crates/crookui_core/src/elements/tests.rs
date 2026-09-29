@@ -1371,3 +1371,66 @@ fn a_control_scrolled_out_of_the_box_is_neither_drawn_nor_clickable() {
         "the same button, scrolled into view, takes the click"
     );
 }
+
+#[test]
+fn a_view_that_notified_three_times_is_rendered_once_by_the_next_frame() {
+    // The count is of renders, not of notifies: three changes between two
+    // frames are one tree built, which is the number a budget has to be
+    // written in — a frame is what a person pays for.
+    let mut harness = Harness::new(|_| marker(10., 10.));
+    harness.build_scene(vec2f(100., 50.));
+    let root = harness.root.id();
+    let before = harness.presenter.counts().clone();
+
+    for _ in 0..3 {
+        harness.root.update(&mut harness.app, |_, ctx| ctx.notify());
+    }
+    harness.build_scene(vec2f(100., 50.));
+
+    let after = harness.presenter.counts();
+    assert_eq!(after.renders(root) - before.renders(root), 1);
+    assert_eq!(after.frames() - before.frames(), 1);
+}
+
+#[test]
+fn a_frame_nothing_invalidated_is_counted_and_renders_nothing() {
+    let mut harness = Harness::new(|_| marker(10., 10.));
+    let root = harness.root.id();
+
+    harness.build_scene(vec2f(100., 50.));
+    assert_eq!(
+        harness.presenter.counts().renders(root),
+        1,
+        "the first frame renders the root it has never drawn"
+    );
+
+    harness.build_scene(vec2f(100., 50.));
+    harness.build_scene(vec2f(100., 50.));
+    let counts = harness.presenter.counts();
+    assert_eq!(
+        counts.renders(root),
+        1,
+        "a frame is laid out and painted from the trees it kept"
+    );
+    assert_eq!(counts.frames(), 3);
+}
+
+#[test]
+fn a_removed_view_takes_its_render_count_with_it() {
+    let mut harness = Harness::new(|_| marker(10., 10.));
+    let window_id = harness.window_id;
+    let child = harness
+        .app
+        .add_view(window_id, |_| TestView::new(|_| marker(10., 10.)));
+    let child_id = child.id();
+    harness.build_scene(vec2f(100., 50.));
+    assert_eq!(harness.presenter.counts().renders(child_id), 1);
+
+    drop(child);
+    // The drop lands at the next flush, and the presenter hears of it with
+    // the next frame's invalidation.
+    harness.app.update(|_| {});
+    harness.build_scene(vec2f(100., 50.));
+
+    assert_eq!(harness.presenter.counts().renders(child_id), 0);
+}

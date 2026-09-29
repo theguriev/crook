@@ -50,10 +50,10 @@ description of something that was never built.
     behind `tab`; the plugin still asks for exactly one chord, the one that opens the box.
   - The settings pages come from a slot. `crook/settings` owns the rail; every page belongs
     to the plugin whose feature it configures — `crook/appearance`, `crook/shell`,
-    `crook/shortcuts`, `crook/about` — so disabling a plugin takes its page off the rail with
-    the rest of it, and removing a plugin takes it off for good. The rail was five pages while
-    `crook/usage` was in the box and is four without it, and not a line of `crook/settings`
-    knew either number. `--settings <name>` matches a page's title, so a plugin's page is as
+    `crook/notifications`, `crook/shortcuts`, `crook/about` — so disabling a plugin takes its
+    page off the rail with the rest of it, and removing a plugin takes it off for good. The
+    rail was five pages while `crook/usage` was in the box, four without it, and five again
+    with `crook/notifications`, and not a line of `crook/settings` knew any of those numbers. `--settings <name>` matches a page's title, so a plugin's page is as
     reachable as one of Crook's.
   - The **Plugins page** is a list beside a card, which is VS Code's shape: a field and every
     plugin this Crook has — in the box or installed as a file — on the left, and on the right
@@ -751,6 +751,20 @@ the log for whoever wrote the plugin. The alternative is what `Flex` does when i
 divide infinity, which is to assert in a debug build and lay out something degenerate in a
 release one, and a plugin from a store does not get to do either to somebody's window.
 
+**A tree has a floor.** A node holds nodes, and a render may answer with a megabyte at two
+bytes a level, so half a million nested `Row`s fit in one answer. `postcard` decodes by
+recursing into each and sets no limit, and the stack ran out thousands of levels down: an
+abort of the whole process, which no fuel and no bound on a read can catch. So
+`crook_plugin_api::from_bytes` counts serde's own nesting — a variant, a list, a struct's
+fields, the inside of an option — and refuses a value past `MAX_DEPTH` (128) levels. A node
+inside a node costs two, so a tree may be about sixty nodes deep; the deepest any published
+plugin draws is six. A deeper answer is refused the way any unreadable one is: the contribution
+draws nothing, the line is logged, and three in a row switch the plugin off. The renderer stops
+at the deepest tree a decode lets through, so a tree built on the host's side has the same
+floor. A counting wrapper rather than a pre-scan of the bytes, because a pre-scan is a second,
+hand-written copy of the `Node` schema that goes on compiling after a variant changes; and not
+`serde_stacker`, whose `psm` needs a build script.
+
 **Capabilities.** Declared in the manifest, granted per plugin-and-version at install in a
 host-drawn dialog, stored in `settings.json`, re-prompted on escalation, enforced at the host
 API rather than by trusting the sandbox alone. Zellij's fourteen are the starting list, adapted:
@@ -809,6 +823,27 @@ a row and it stops being asked at all until Crook is restarted — far more than
 reason to ask before somebody allows it, and few enough that the loop stops being free. One
 allowed request resets the count, because a plugin nobody has answered for yet is in the
 ordinary state and not in a bad one.
+
+**So is what the window does for one.** Where the active pane is, what Crook can do, typing a
+line and running a command are answered by the window itself, on the thread that draws, and
+the answer is delivered there too — so a plugin that asks again from inside every answer would
+be served for as long as it kept asking, and the window would freeze until it was killed. So
+one plugin is served thirty-two of those in one of the window's turns — one update and
+everything it sets off, which counts a chain that runs through another plugin's action and back
+as well — and then the window draws before it carries on. Thirty-two is as many requests as the
+sandbox holds for a guest at once, so everything one call asked for is served in the turn it
+asked, and only a chain of answers that keep asking ever waits. What waits is left where it
+was, in order, and served on the next turn: a request taken and never answered is a plugin
+waiting for the rest of the session. A plugin whose turns run out sixteen times in a row, the
+count refusals get, stops being served until Crook is restarted; one whose chain ends starts
+the count again. A plugin with more than sixty-four lines to type, commands to run or things to
+copy waiting at once stops being served straight away: that is twice a turn's worth, a queue
+that is growing rather than being served, and each thing in it may be a megabyte. Asking where
+the pane is, what Crook can do or what a command printed is not counted. None of it carries
+anything to keep, and the first two are all an event may ask for — and events arrive in
+batches, every command a pane reports finished in one read delivered before the first thing
+they asked for is served, so a plugin that asks once from each has as many waiting as there
+were commands, through nothing it did.
 
 **Isolation.** Fuel-metered execution (wasmi has it) with a per-call deadline; a trap or an
 exhausted budget drops that contribution and counts toward self-disable; memory capped per

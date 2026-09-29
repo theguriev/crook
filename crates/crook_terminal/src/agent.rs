@@ -133,7 +133,7 @@ pub fn report(status: AgentReport, title: Option<&str>, message: Option<&str>) -
 /// How many parameters of an OSC sequence `vte` keeps. Its own
 /// `MAX_OSC_PARAMS`, which it does not export: every `;` past the fifteenth
 /// starts a piece that is dropped on the floor.
-const MAX_PIECES: usize = 16;
+pub(crate) const MAX_PIECES: usize = 16;
 
 /// How many pieces `text` is once `vte` has split it on `;`.
 fn pieces(text: &str) -> usize {

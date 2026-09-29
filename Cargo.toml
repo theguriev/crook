@@ -59,6 +59,40 @@ futures-lite = "2.6"
 # resolve on every platform, so it costs the graph nothing.
 getrandom = "0.2"
 log = "0.4"
+# macOS's own frameworks, for the two things winit does not say to the dock and
+# Notification Center: the badge with the count of waiting panes, and a banner.
+# The 0.6 family `arboard` and `wgpu` already resolve, not winit's 0.5, so the
+# graph gains one crate — the UserNotifications bindings, generated like the
+# rest and with no build script (`build = false`) — and every one of them only
+# on macOS. They link Apple's frameworks, which ship with the system the way
+# AppKit and Metal do; nothing is found with `pkg-config` or compiled from C.
+# Features are named one by one, because the default is every class the
+# framework has.
+block2 = { version = "0.6", default-features = false, features = ["std"] }
+objc2 = { version = "0.6", default-features = false, features = ["std"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSApplication",
+  "NSDockTile",
+  "NSResponder",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSBundle",
+  "NSError",
+  "NSString",
+  "NSUUID",
+] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+  "std",
+  "bitflags",
+  "block2",
+  "UNNotificationContent",
+  "UNNotificationRequest",
+  "UNNotificationSound",
+  "UNNotificationTrigger",
+  "UNUserNotificationCenter",
+] }
 parking_lot = "0.12"
 # Encoding an offscreen render so a human, or CI, can look at it: `--snapshot`,
 # the examples, and the renderer's own tests.
