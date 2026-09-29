@@ -44,7 +44,15 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 ///
 /// See the module docs: this is what makes a second poll chain unrepresentable
 /// rather than merely unlikely.
-struct Ticket;
+///
+/// It also carries what the chain remembers from one cycle to the next: each
+/// repository's base, which is up to three subprocesses to find and almost
+/// never changes. On the ticket rather than behind a lock on the model,
+/// because only the cycle holding the ticket ever reads or writes it, and
+/// there is only ever one.
+struct Ticket {
+    bases: git::Bases,
+}
 
 /// Everything the tab strip knows about the repositories its sessions sit in.
 pub struct GitModel {
@@ -64,9 +72,10 @@ pub struct GitModel {
     /// Whether anything on screen is showing diff stats.
     ///
     /// The cheap half — walking up for `.git` and reading `HEAD` — always runs.
-    /// The subprocess only runs when a chip would print its answer, which is
-    /// Warp's `needs_git_status_for_chip_ui` rule: do not pay for git when
-    /// nothing displays git.
+    /// The subprocesses — the diff, and the count since the base on a branch —
+    /// only run when a chip would print their answer, which is Warp's
+    /// `needs_git_status_for_chip_ui` rule: do not pay for git when nothing
+    /// displays git.
     wants_diff: Arc<AtomicBool>,
 
     /// Cuts the sleeping cycle's wait short.
@@ -92,6 +101,8 @@ pub struct GitModel {
     idle_ticket: Option<Ticket>,
 }
 
+// The event is the end of a cycle, emitted whether it found anything new or
+// not: the Changes column re-reads on it. See `finish` for why.
 impl Entity for GitModel {
     type Event = ();
 }
@@ -108,7 +119,9 @@ impl GitModel {
             wants_diff: Arc::new(AtomicBool::new(false)),
             wake: None,
             poked: Arc::new(AtomicBool::new(false)),
-            idle_ticket: Some(Ticket),
+            idle_ticket: Some(Ticket {
+                bases: git::Bases::default(),
+            }),
         }
     }
 
@@ -214,13 +227,8 @@ impl GitModel {
                             .unwrap_or_else(PoisonError::into_inner)
                             .clone();
                         let with_diff = wants_diff.load(Ordering::Relaxed);
-                        let gathered: Vec<_> = dirs
-                            .into_iter()
-                            .map(|dir| {
-                                let facts = gather(&dir, with_diff);
-                                (dir, facts)
-                            })
-                            .collect();
+                        let mut ticket = ticket;
+                        let gathered = gather_all(dirs, with_diff, &mut ticket.bases);
 
                         (ticket, gathered)
                     })
@@ -255,6 +263,12 @@ impl GitModel {
         if changed {
             ctx.notify();
         }
+        // And every cycle says it ran, changed or not, which is the beat the
+        // Changes column re-reads on: what it shows — commits, files — is
+        // nothing gathered here, so "the facts changed" is no sign of it
+        // having changed, and a column with a timer of its own would be a
+        // second poll chain on a window that promises one.
+        ctx.emit(());
 
         self.spawn_cycle(ticket, self.next_delay(), ctx);
     }
@@ -310,13 +324,34 @@ impl GitModel {
     }
 }
 
-/// Reads one directory, skipping the subprocess when nothing shows its answer.
-fn gather(dir: &Path, with_diff: bool) -> GitFacts {
+/// Reads every directory a cycle serves, skipping the subprocesses when
+/// nothing shows their answer.
+///
+/// `bases` is the one the ticket carries, so a repository's base is looked up
+/// by the first cycle that needs it and read back by every one after. A cycle
+/// that ran the subprocesses then forgets the repositories none of its
+/// directories asked about; one that did not has asked nothing, and
+/// forgetting after it would throw every base away for the sake of a toggle.
+fn gather_all(
+    dirs: Vec<PathBuf>,
+    with_diff: bool,
+    bases: &mut git::Bases,
+) -> Vec<(PathBuf, GitFacts)> {
+    let gathered = dirs
+        .into_iter()
+        .map(|dir| {
+            let facts = if with_diff {
+                git::gather(&dir, bases)
+            } else {
+                git::facts_without_diff(&dir)
+            };
+            (dir, facts)
+        })
+        .collect();
     if with_diff {
-        git::gather(dir)
-    } else {
-        git::facts_without_diff(dir)
+        bases.forget_unasked();
     }
+    gathered
 }
 
 #[cfg(test)]
@@ -337,6 +372,7 @@ mod tests {
         GitFacts {
             branch: Some(Head::Branch(branch.to_owned())),
             diff: Some(DiffStats::default()),
+            since_base: None,
             worktree: false,
         }
     }
@@ -503,6 +539,53 @@ mod tests {
                 "the poke latched, so the model gathers without pausing"
             );
         });
+    }
+
+    #[test]
+    fn a_cycle_that_finds_nothing_new_still_says_it_finished() {
+        // The Changes column re-reads on the cycle rather than on a timer of
+        // its own, and what it re-reads — commits, files — is nothing this
+        // model gathers. A cycle whose facts matched the last one notifies
+        // nobody, so the event is the only thing that says it ran.
+        struct Heard(usize);
+        impl Entity for Heard {
+            type Event = ();
+        }
+
+        let outside =
+            std::env::temp_dir().join(format!("crook-git-model-cycle-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&outside);
+
+        let (queue, mut app) = app();
+        let model = app.update(|ctx| ctx.add_model(GitModel::new));
+        let heard = app.update(|ctx| {
+            ctx.add_model(|ctx| {
+                ctx.subscribe_to_model(&model, |heard: &mut Heard, _, _, _| heard.0 += 1);
+                Heard(0)
+            })
+        });
+        app.update(|ctx| {
+            model.update(ctx, |model, ctx| {
+                model.track(vec![outside.clone()], ctx);
+                // What the gather is about to find, so it finds nothing new.
+                model.record(outside.clone(), GitFacts::default(), ctx);
+                model.start(ctx);
+            });
+        });
+
+        let deadline = std::time::Instant::now() + DELIVERY_TIMEOUT;
+        loop {
+            queue.run_until_parked();
+            if app.read(|ctx| heard.as_ref(ctx).0) > 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a cycle that changed nothing said nothing"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]

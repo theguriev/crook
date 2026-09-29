@@ -217,7 +217,7 @@ reporter — `coredumpctl`, Console.app, the Event Viewer — has the rest.
 
 ## v1 scope
 
-Nineteen features, and the page that configures them:
+Twenty features, and the page that configures them:
 
 - **Tabs.** Open, close, switch, reorder. One agent session per tab, and the tab is named
   the way a person would answer "what is that one?": what you called it, else what the agent
@@ -228,6 +228,12 @@ Nineteen features, and the page that configures them:
   secondary click, on the empty space the list leaves — says what a row of them shows: which
   fact it leads with, what its second line says, which chips it carries, whether hovering it
   opens a card, and the tab's number, which is the one `cmd-4` means once the tabs are named.
+  The diff chip counts what is not committed yet — `+12 -3` — until the branch has commits of
+  its own, and from then on counts from where the branch left its base: `2 commits, +40 -3`,
+  committed and uncommitted lines together, with `since main` added on the card, which has the
+  room to say what they are counted from. So a tab whose agent has just committed everything
+  still says what it did, rather than going blank at the moment there is most to look at. The
+  base itself and a detached checkout keep the plain count.
   One more row is the Appearance page's alone: **Status marks**, which turns the dot into a
   glyph per state in the same colour — a play mark, a bell, a crossed ring, a hollow one — for
   an eye the colour says nothing to, or a screenshot in greyscale.
@@ -630,10 +636,10 @@ Nineteen features, and the page that configures them:
   it writes is a file in your themes folder, in the same format as any other.
 - **A tab's own menu.** Right-click any row and it opens over that row: pin, new group with
   tab, copy pane title, copy working directory, rename tab, rename pane, close tab, a row of
-  colours, and — inside a repository — the worktrees, with Finish task and Discard task beside
-  them on a tab in a checkout Crook made. **Pinning** holds a tab at the front of
-  the block it is in rather than of the whole list, which is the one place this cannot be
-  Warp's: a group is a contiguous block that says two checkouts are one piece of work, and
+  colours, and — inside a repository — show changes and the worktrees, with Finish task and
+  Discard task beside them on a tab in a checkout Crook made. **Pinning** holds a tab at the
+  front of the block it is in rather than of the whole list, which is the one place this cannot
+  be Warp's: a group is a contiguous block that says two checkouts are one piece of work, and
   pinning that lifted a member out of the middle would be pinning that takes a group apart. A
   drop can no more land an unpinned tab among the pinned ones than it can split a group. A
   **colour** is a stripe down the leading edge of a tab's rows, not a tinted status disc — the
@@ -643,7 +649,7 @@ Nineteen features, and the page that configures them:
   back the name the tab was opened with. A name you typed beats the one the agent chose for
   its own work, which is the whole point of typing one, and it comes back with the window. Not one of those entries is written into the menu. It is a
   [slot](docs/plugins.md), `tab.menu.entries`, and every row in it is a contribution: they
-  come from two plugins today, each entry is also a named command the palette lists and a
+  come from three plugins today, each entry is also a named command the palette lists and a
   chord can reach, and a plugin outside the binary puts a row there the same way. Escape is
   one step back — out of the submenu, then out of the menu.
 - **Git worktrees, one entry away.** Open that menu on a tab inside a
@@ -702,6 +708,51 @@ Nineteen features, and the page that configures them:
   Crook's own — neither inside the repository, where git will happily let you put one and every
   build and every search then trips over it, nor beside it in a directory somebody else laid
   out.
+
+- **What the agent changed, beside it.** `Show changes` — on a tab's menu, or
+  `crook/changes/toggle` from the palette — docks a **Changes** column between the tabs and the
+  work, about the focused tab's repository: what it is compared with (where the branch left the
+  base, the merge-base a pull request would compare from), the commits since then, newest
+  first, and every file that differs — committed, staged, only saved, or never added. Press a
+  file and its hunks open under it, in the theme's own added and removed colours; press it
+  again and they fold away. A shown file offers **Open** in your `$VISUAL` or `$EDITOR` — as
+  Crook itself was started with them, which a launch from the desktop may not share with your
+  shell's rc file — at the first line that changed for an editor Crook knows how to tell a line
+  (VS Code and its forks, Sublime Text, Zed, the JetBrains IDEs, Kate, gVim, Emacs, gedit…) and
+  at the top of the file for any other, **Copy path**, and **Copy diff**. It
+  follows you from tab to tab, reads again whenever the tab rows' git facts do and on its
+  **Refresh**, and never on a timer of its own. Every read is on the background pool under a
+  deadline, with `--no-ext-diff` and `--no-textconv` so a repository's configuration cannot
+  make it run a program, and a file's diff is read only when you open it and cut at half a
+  megabyte or three thousand lines, saying so. The list is windowed, so a five-thousand-file
+  diff costs a screenful. **It is read-only on purpose**: there is no stage, no revert and no
+  edit, because the tree it shows is one an agent is writing to, and a write from here races
+  the agent — asking the agent, or your editor, is how the work changes. An editor that draws
+  in a terminal (`vim`, `nvim`, `nano`, `hx`, `emacs -nw`) has nothing to draw in when Crook
+  starts it, so Open is offered only for one that opens a window.
+  **Asking the agent is one press.** Press a changed line — or a hunk's header — and type a
+  comment in the field that opens under it: Enter keeps it, Escape drops it, one line each.
+  Comments belong to the tab (and the repository and base it is looking at), live in memory
+  only — a restart or closing the tab loses them — and follow their line while the agent keeps
+  writing: a refresh moves each one to the line that still says what it said, and drops the
+  ones whose line is gone, saying which (one not found in a long diff that was cut short is
+  kept, and listed where the diff stops with its ×). A comment still being typed when a
+  refresh takes its line keeps its words and the keyboard, moved to the top of the column until
+  a refresh finds the line again, and Enter there adds nothing — so nothing typed for the
+  comment reaches the agent. **Send N comments to the agent**, at the top
+  of the column, makes them one message — `Review of <branch> since <base>:`, then each comment
+  as `path:line`, the line quoted, and what you said — pastes it into the tab's agent as one
+  bracketed paste **with no Enter**, and puts the keyboard there: you read it, and you send it.
+  The agent is the tab's pane whose agent has reported a status and has not exited back to its
+  shell's prompt, else the focused one — an agent started in a line the shell says nothing
+  about (bash's `( … )`, or any line in a shell without Crook's marks) counts once it has
+  reported since that line. It is never pasted into a shell prompt, where its lines
+  would be commands, nor into a program that has not turned bracketed paste on, where every
+  line would arrive as its own Enter; the column says so and keeps the comments. **Copy
+  review** puts the same text on the clipboard, for an agent in another tool. Checked by hand
+  to take a multi-line bracketed paste into the prompt unsent: Claude Code 2.1.280 and OpenCode
+  1.18.33. Codex 0.149.1 and Gemini CLI 0.61.0 turn bracketed paste on when they start, but a
+  paste into their prompts is not verified.
 
 - **A settings page**, which opens the way a shell does: `cmd/ctrl-,` — or the View options
   menu's last entry — puts it in a **tab of its own**, listed beside the work it
@@ -776,12 +827,12 @@ Nineteen features, and the page that configures them:
   `rerun-block`, `scroll-to-block-top`, `scroll-to-block-bottom`), `resume-agents` (the
   agents a restart ended — see Tabs), every entry of a tab's
   (`crook/tabs/pin-tab`, `close-tab`, `open-menu`, `view-options`,
-  `toggle-group`, `close-group`, the seven colours), the worktree list (`crook/worktrees/menu`)
-  and its task creator (`crook/worktrees/new-task`), the end of a task
-  (`crook/worktrees/finish-task`, `discard-task`) and every settings page
-  (`crook/appearance/open-page` and its four neighbours). The block entries act on the block the
-  menu is up on, or — with no menu — on the one the keyboard has selected, so each of them is a
-  chord as well as a row.
+  `toggle-group`, `close-group`, the seven colours), the Changes column
+  (`crook/changes/toggle`), the worktree list (`crook/worktrees/menu`) and its task creator
+  (`crook/worktrees/new-task`), the end of a task (`crook/worktrees/finish-task`,
+  `discard-task`) and every settings page (`crook/appearance/open-page` and its four
+  neighbours). The block entries act on the block the menu is up on, or — with no menu — on the
+  one the keyboard has selected, so each of them is a chord as well as a row.
 
 - **The menus can be walked.** A tab's context menu opens with `crook/tabs/open-menu`, the
   arrows move down it, Enter runs the row and Escape takes it down. The worktree list inside

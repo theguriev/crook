@@ -6,6 +6,12 @@
 //! else wrote. [`super::merged`] needs the same promise for another reason —
 //! it reads a history, and a history's honest length has no bound the way a
 //! listing's does — so the runner lives here and both spawn git through it.
+//! So does [`super::diff`]'s count since the base, which runs on the tab
+//! strip's gather chain every fifteen seconds, where a git that never came
+//! back would stop every row's branch and count from updating again.
+//!
+//! [`super::changes`] is another, and the one that asked for
+//! [`run_capped`]: the diff of a single file is as long as the file is.
 //!
 //! The deadline bounds the *call*, not only git. Killing a process does not
 //! reach what it left behind: a hook that backgrounds a helper — `direnv
@@ -190,12 +196,24 @@ pub(super) struct Finished {
 /// those can outlive git by as long as whatever a hook backgrounded cares to
 /// live — see `collect`.
 pub(super) fn run(directory: &Path, args: &[&OsStr], intent: Intent) -> Result<Finished, Failure> {
-    run_feeding(directory, args, intent, None)
+    run_with(directory, args, intent, None)
 }
 
-/// [`run`], with `input` written to git's stdin when there is one — and stdin
-/// closed at once when there is not, so nothing can wait on it.
-pub(super) fn run_feeding(
+/// [`run`], as a read, with `input` on git's stdin.
+///
+/// For a question too long for a command line: `hash-object --stdin-paths`
+/// is handed every file [`super::changes`] has to hash, and a few thousand
+/// paths is past what Windows lets one command line hold.
+pub(super) fn run_fed(
+    directory: &Path,
+    args: &[&OsStr],
+    input: Vec<u8>,
+) -> Result<Finished, Failure> {
+    run_with(directory, args, Intent::Read, Some(input))
+}
+
+/// [`run`] and [`run_fed`], which differ only in what git's stdin is.
+fn run_with(
     directory: &Path,
     args: &[&OsStr],
     intent: Intent,
@@ -225,6 +243,21 @@ pub(super) fn run_feeding(
         [stdin, Stdio::piped(), Stdio::piped()],
     )?;
 
+    // Written on a thread of its own and never joined, like the readers.
+    // git answers as it reads, so a write waiting here for git to take the
+    // rest would be waiting on a git blocked writing an answer nobody was
+    // reading yet. The pipe closes when the thread ends, which is the end of
+    // the input to git; and a git that stops reading — it failed, or the
+    // deadline killed it — ends the write with a broken pipe rather than
+    // leaving the thread blocked in it.
+    if let Some(input) = input
+        && let Some(mut pipe) = child.stdin.take()
+    {
+        std::thread::spawn(move || {
+            let _ = std::io::Write::write_all(&mut pipe, &input);
+        });
+    }
+
     // Both pipes are drained on their own threads. Polling `try_wait` with the
     // output left unread deadlocks the moment git writes more than a pipe
     // buffer — `status --ignored` in a repository with a fat `target/` does
@@ -232,9 +265,6 @@ pub(super) fn run_feeding(
     // a lie about what happened.
     let stdout = child.stdout.take().map(drain);
     let stderr = child.stderr.take().map(drain);
-    if let (Some(input), Some(stdin)) = (input, child.stdin.take()) {
-        feed(stdin, input);
-    }
 
     let timeout = intent.timeout();
     let deadline = Instant::now() + timeout;
@@ -297,6 +327,91 @@ pub(super) fn run_feeding(
         code: status.code(),
         stdout: stdout.unwrap_or_default(),
         stderr: String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned(),
+    })
+}
+
+/// What [`run_capped`] read.
+pub(super) struct Capped {
+    /// stdout, at most the cap.
+    pub(super) stdout: Vec<u8>,
+    /// stderr, as text.
+    pub(super) stderr: String,
+    /// git's exit code, which is `None` when it was stopped by a signal —
+    /// the broken pipe a cut answer leaves it writing into, most often.
+    pub(super) code: Option<i32>,
+    /// Whether git had more to say than the cap let through.
+    pub(super) cut: bool,
+}
+
+/// Runs `git <args>` in `directory` as a read whose answer can be larger than
+/// anybody should hold, keeping at most `cap` bytes of it.
+///
+/// For the diff of one file, which is as long as the file is: a lockfile, a
+/// vendored library, a generated bundle is megabytes of patch that nobody is
+/// going to read in a side column. [`run`] reads a pipe to its end, so the
+/// whole of it would be held and then thrown away; here the reader stops one
+/// byte past the cap and drops its end of the pipe, git's next write fails —
+/// `SIGPIPE`, or `EPIPE` where that is ignored — and git ends without
+/// writing the rest. A hundred-megabyte diff costs the cap and a moment.
+///
+/// The exit status is handed back as a code rather than judged, because
+/// what counts as success is the caller's to say: `diff --no-index` exits 1
+/// to mean "there were differences", and a cut answer is one git was
+/// stopped from finishing on purpose.
+pub(super) fn run_capped(directory: &Path, args: &[&OsStr], cap: usize) -> Result<Capped, Failure> {
+    if git_is_missing() {
+        return Err(Failure::GitMissing);
+    }
+    // See `run`: a directory that is not there must not read as a missing git.
+    if !directory.is_dir() {
+        return Err(Failure::NoDirectory);
+    }
+
+    let mut child = start(
+        directory,
+        args,
+        Intent::Read,
+        [Stdio::null(), Stdio::piped(), Stdio::piped()],
+    )?;
+
+    // One past the cap, so that an answer of exactly the cap is not taken for
+    // a cut one. The `Take` owns the pipe and goes with the reader's thread,
+    // which is what closes this end of it the moment the limit is reached.
+    let limit = u64::try_from(cap).unwrap_or(u64::MAX).saturating_add(1);
+    let stdout = child
+        .stdout
+        .take()
+        .map(|pipe| drain(std::io::Read::take(pipe, limit)));
+    let stderr = child.stderr.take().map(drain);
+
+    let deadline = Instant::now() + READ_TIMEOUT;
+    let waited = wait_for(&mut child, deadline, READ_TIMEOUT);
+    // `run`'s grace, for `run`'s reason.
+    let drained_by = (Instant::now() + DRAIN_GRACE).min(deadline);
+    let stdout = collect(stdout, drained_by);
+    let stderr = collect(stderr, drained_by);
+
+    let status = waited?;
+    // A read is its output, and a fragment of one is not an answer — which a
+    // cut is not: it is the first `cap` bytes, and says so.
+    let Some(mut stdout) = stdout else {
+        log::warn!(
+            "git {args:?} in {} left its output held open past {}s",
+            directory.display(),
+            READ_TIMEOUT.as_secs()
+        );
+        return Err(Failure::TimedOut {
+            after: READ_TIMEOUT,
+        });
+    };
+    let cut = stdout.len() > cap;
+    stdout.truncate(cap);
+
+    Ok(Capped {
+        stdout,
+        stderr: String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned(),
+        code: status.code(),
+        cut,
     })
 }
 
@@ -473,24 +588,6 @@ fn drain<R: std::io::Read + Send + 'static>(mut pipe: R) -> Receiver<Vec<u8>> {
         let _ = sender.send(bytes);
     });
     receiver
-}
-
-/// Writes `input` to git's stdin on a thread of its own, then closes it.
-///
-/// Not on the calling thread, for the deadline's sake: a write into a pipe
-/// git is not reading blocks, and it would block before [`wait_for`] had
-/// started counting. Not joined, for [`drain`]'s reason. Once git exits, or is
-/// killed at its deadline, the pipe has no reader and the write fails rather
-/// than blocks, so the thread ends with the command — nothing git runs for
-/// the one command that is fed, `check-ignore`, inherits the pipe to keep it
-/// open.
-fn feed(mut stdin: std::process::ChildStdin, input: Vec<u8>) {
-    std::thread::spawn(move || {
-        use std::io::Write as _;
-        // Ignored: a git that stopped reading has exited or failed, and says
-        // so in its exit status, which is what the caller reads.
-        let _ = stdin.write_all(&input);
-    });
 }
 
 /// How long a reader is given once git itself has been reaped.

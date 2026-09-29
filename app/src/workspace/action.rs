@@ -28,6 +28,8 @@ pub enum WorkspaceAction {
     Settings(SettingsAction),
     /// Something happened in the Themes panel.
     Theme(ThemeAction),
+    /// Something happened in the Changes column.
+    Changes(ChangesAction),
     /// The header was used as what it is: the window's title bar.
     Window(WindowAction),
     /// The question a close asks before it ends agents that are still
@@ -638,6 +640,60 @@ pub enum ThemeAction {
     PickBackground(usize),
     /// Write the draft into the themes folder and choose it.
     Create,
+}
+
+/// What the Changes column can be asked, from inside it.
+///
+/// Showing and hiding it are not here: those are `crook/changes/toggle`, a
+/// named command, so the palette and a tab's menu reach it the same way. What
+/// is here is what its own rows and buttons do, and each is about a file by
+/// its place in the list the column is showing.
+///
+/// No variant writes anything into the repository. There is no stage, no
+/// revert and no edit, because the tree being looked at is one an agent is
+/// working in, and a write from here would race whatever the agent is in the
+/// middle of writing. Changing the work is the agent's job, or the editor's —
+/// which is what the comments are for: they are how "change this" reaches
+/// the agent, and [`Self::Send`] is the only thing here that writes anywhere
+/// but the clipboard, into the agent's prompt and never past it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ChangesAction {
+    /// Take it down. What the × sends.
+    Close,
+    /// Read the repository again now, rather than at the next cycle of the
+    /// git facts.
+    Refresh,
+    /// Show this file's hunks under it, or stop showing them.
+    ToggleFile(usize),
+    /// Open this file in `$VISUAL` or `$EDITOR`, at its first changed line.
+    OpenFile(usize),
+    /// Copy this file's path, from the top of the repository.
+    CopyPath(usize),
+    /// Copy this file's diff, as a patch.
+    CopyDiff(usize),
+    /// Open the field a comment is typed in, under line `line` of the file
+    /// at `file`'s hunks, with the keyboard in it.
+    Comment {
+        /// The file, by its place in the list.
+        file: usize,
+        /// The line, by its place in the file's hunks.
+        line: usize,
+    },
+    /// Put the keyboard back in the comment field. What a press on it sends.
+    FocusComment,
+    /// Keep what was typed as a comment, and take the field down. Enter.
+    AddComment,
+    /// Take the field down, and what was typed with it. Escape.
+    CancelComment,
+    /// Take this comment away, by its id. Its ×.
+    RemoveComment(u64),
+    /// Paste the review into the tab's agent, without pressing Enter, and
+    /// put the keyboard there so the person can read it and send it.
+    Send,
+    /// Put the review on the clipboard, for an agent somewhere else.
+    CopyReview,
+    /// Take away what the review last said.
+    DismissNote,
 }
 
 /// What the settings page does that is not writing an option.

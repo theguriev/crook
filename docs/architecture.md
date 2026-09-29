@@ -1248,6 +1248,28 @@ not as it was when the first opened; and once the panes have closed, just before
 when anything new the press would take — ignored files included, which either removal deletes
 without git saying a word — keeps both the checkout and the branch.
 
+**A row counts the work, not only what is left to commit.** The diff chip used to be `git diff
+--shortstat HEAD` alone, the working tree against the last commit — so the moment an agent
+committed everything its row went blank, at exactly the moment there was most to look at. The
+15-second gather in `app/src/git_model.rs` now also asks, for a pane on a branch that is not
+the base, `git rev-list --count <base>..HEAD`, and when that is not zero `git diff --shortstat
+--merge-base <base>`: the working tree against where the branch left the base, committed and
+uncommitted work as one number. The chip then reads `2 commits, +40 -3`, and the hover card
+adds `since main`. The row leaves the base's name out because its metadata line shares about
+170 pixels with the branch, and the chip is never cut — the branch gives way to it, as it always
+did; the card, when a narrow window narrows it, gives up the base's name before the numbers.
+The base is `merged.rs`'s, found once per repository — by the common git directory, so every
+worktree of one shares it — and carried from cycle to cycle with the gather's ticket, so a
+refresh adds at most two subprocesses for each directory a pane sits in, and none while nothing
+shows the chip. Only the base is shared: the gather runs per directory, not per checkout, so
+two panes in different directories of one checkout each pay for the count, as they already did
+for the diff. A lookup that found no base is kept only for the branch that asked, because a
+repository made a minute ago has no `main` until its first commit, and one no gather has asked
+about for a whole cycle is forgotten. The base itself — a local `main` against `origin/main`
+as much as against `main` — a detached `HEAD`, an unborn branch and a repository with no base
+keep the plain count, and so does the plugin API's `Where`, whose `added` and `removed` are
+still what is not committed yet.
+
 **A removal takes its empty directories with it.** `git worktree remove` deletes the checkout
 and nothing above it, so the store kept a directory per repository after its last checkout
 went. After any removal Crook deletes the directories of its own store the checkout leaves
@@ -1277,7 +1299,132 @@ through `app/src/git/run.rs`, which puts a timeout on every call (a removal's is
 because it deletes whatever was built in the checkout and a kill halfway through leaves a
 worktree the sweep will never touch again), gives every call two reader threads so a repository
 with a fat `target/` cannot deadlock a pipe, and joins `log -p` to `patch-id` with a pipe of
-their own so a history's patches never pass through Crook.
+their own so a history's patches never pass through Crook. The row's count since the base, in
+`app/src/git/diff.rs`, spawns its two through the same runner.
+
+### What the agent changed
+
+A worktree gives an agent somewhere to work; the Changes column is how a person sees what it
+did there without leaving for another terminal to type `git log` and `git diff`. The row's
+`+214 −37` chip counts only what is not committed yet, so the moment an agent commits, the one
+thing Crook said about its work used to go blank — and checking an agent's claim against its
+diff is exactly the step a person reviewing ten agents a day skips when it costs a context
+switch.
+
+`crook/changes/toggle`, from the palette or a tab's menu, docks a column where the Themes panel
+docks — composed once in `Workspace::render`, beside the work rather than over it — about the
+focused pane's repository. `app/src/git/changes.rs` reads it: the base (the merge-base of `HEAD`
+and `merged::base_of`'s branch, which is what a pull request compares from, so the base moving
+on is not shown as the task undoing it), `git log <merge-base>..HEAD`, `git diff --raw
+<merge-base>` against the working tree plus `git ls-files --others --exclude-standard`, and one
+file's unified diff when somebody opens that file. A read never refreshes the index, so a file
+whose bytes are what they were but whose mtime moved — a formatter that changed nothing, `touch`,
+a test run writing the same snapshot picture — is one `--raw` calls modified without having read
+it; those files, text or binary, go through one `git hash-object --stdin-paths`, and a file that
+hashes to the id it had at the base is left out. The list never diffs a file: a diff's cost is
+whatever `diff.algorithm` somebody chose makes of the file's lines (twenty seconds for one data
+file under `histogram`), and one file it cannot read fails it, where hashing reads each file once
+and keeps a file it cannot read. A new link to a directory is the one diff written by hand,
+because `diff --no-index` follows the link and fails inside the directory. Every call goes
+through `git/run.rs`'s deadline on the background pool, with `--no-ext-diff`, `--no-textconv`
+and `core.fsmonitor` off, because each of those is a program a repository's configuration names
+and git would run it for a column that only reads; the `a/` and `b/` prefixes and the spelling
+of a blank context line are pinned too, so `diff.noprefix` cannot make "Copy diff" hand on a
+patch `git apply` refuses. A single file's diff goes through `run_capped`, which stops reading
+one byte past half a megabyte and drops the pipe so git ends there, and is cut again at three
+thousand lines — both say so on screen, and "Copy diff" is not offered for a diff that is not
+whole.
+
+**It reads on beats that already exist.** On opening, when the focused pane moves to another
+repository (a walk up for `.git`, no subprocess), on its Refresh button, and at the end of every
+cycle of `GitModel` — which now emits an event per cycle, changed or not, because what the column
+shows is nothing the cycle gathers. No timer of its own; a cycle that arrives while a read is in
+flight is not a second read, and an answer is taken only if it is for the question still being
+asked.
+
+**A frame costs a screenful.** Every row — headings, commits, files, a file's hunk lines — is
+one entry of one flat list with a fixed height per kind and a running sum of heights beside it,
+rebuilt when what is listed changes. A frame binary-searches the scroll offset for the first row
+and builds rows until it passes the bottom of the box, with a spacer standing for the rest: the
+arithmetic `block_list.rs` draws a pane's output with. A file's diff is read when the file is
+opened and kept while it is folded away, until the next refresh: that reads again the files
+that are open and drops the folded ones' diffs, which are read again when they are opened. A
+line of a diff is kept to 256 bytes for drawing, because a line is shaped whole on every frame
+before it is cut to the column, and one line of a minified bundle is milliseconds of that;
+"Copy diff" copies the patch with its lines whole.
+
+**It is read-only, and that is the design rather than the first slice of an editor.** There is
+no stage, no revert and no in-place edit, because the tree it shows is one an agent is writing
+to: a revert that lands between the agent's read of a file and its write is one the agent
+silently undoes, and an edit made under it is an edit it did not read. "Revert this" is a thing
+to tell the agent. What the column offers instead is a way out to where the change can be made
+safely — "Open" in `$VISUAL` or `$EDITOR` at the first changed line (at the top of the file for
+an editor not known to take a line, since one that does not reads `+12` as a file to open),
+"Copy path", "Copy diff" — and "Open" only for an editor with a window of its own, since an
+editor that draws in the terminal it was started from has none when Crook starts it detached
+(Neovim, measured, waits for one for ever). No syntax highlighting: added and removed lines are
+the theme's `diff_added` and `diff_removed`.
+
+**What a person finds goes to the agent as words.** A press on a changed line or a hunk header
+opens a one-line `TextField` under it, and Enter keeps what was typed as a comment.
+`changes_panel/review.rs` holds them: per tab, repository and base, in memory only, because a
+review is minutes of reading about a diff that is itself moving. A comment remembers its line by
+what the line says, marker included, and by its number — counted from the hunk header, on the
+new side for an added line and the old side for a removed one. Every refresh reads again the
+diff of each file with a comment on it, folded or not, so nothing is sent about a diff nobody
+read again; the comment moves to the line that says the same thing nearest to where it was (a
+header by the function name after its numbers, which move), and one whose line is gone is
+dropped and named — unless the read was cut short (`MAX_DIFF_LINES`, `MAX_DIFF_BYTES`), which
+proves nothing about the lines past the cut: that comment is kept with its last line and number
+until a read finds the line or a whole one does not. It is listed where the diff stops, under
+the line it was last found on and with its ×, rather than only counted, since not being in the
+part that was read is all that is known of it — pushed past the cut, or deleted from above it —
+and the person has to be able to see what will be sent and take it out.
+`Send N comments to the agent` composes one message — a heading, then
+`path:line`, the quoted line and the comment for each, in the order the diff reads, with no
+newline at the end — and hands it to `TerminalHandle::paste_bracketed`, the terminal model's
+paste behind a check that the program asked for bracketed paste, made under the same lock as the
+write. Without the markers `crook_terminal::input::paste` turns every newline into the Enter key,
+so a program that has not asked is refused rather than handed a review a line at a time. The
+pane is the one in the tab whose agent has reported (`StatusSource::Agent`), whose shell is not
+listening, and which works in the reviewed repository, else the focused one; a pane whose shell
+is listening is refused, because a review's quoted lines are commands there (bash 5.3 turns
+bracketed paste on at its prompt, so the whole review would sit in its line editor one Enter
+from running), and `> +x` is a redirection that writes a file into the tree this column
+promises not to touch. Whether it is listening (`a_shell_is_listening`) is the shell's word
+first, and not the report's, because a report outlives its agent: the hooks say `idle` when a
+session ends, and `Emulator::settle_agent` takes back only a report of running or waiting when
+the command ends. So marks saying the shell is at its prompt (`AtPrompt`, `Done`) refuse the
+paste whatever the pane last heard from an agent, and a command running (`C`) or a full-screen
+program never does. What the marks leave open is a line handed to the shell and not answered
+(`Submitted`), and that the report decides: an agent that reported since the line was handed
+over is running under it. bash runs no DEBUG trap for a top-level `( … )`, so an agent started
+in one never gets a `C`, and a shell without Crook's marks stays `Submitted` from its first
+line on. Short of such a report, a shell that reports marks is taken to be still reading the
+line — an open quote, a here-document — and one that reports nothing is judged by its
+composer. Which of the two a shell is, its open block says: only a mark closes the session's
+first, and a reflow, which forgets where the prompt ended, keeps that. A paste that
+went clears the comments and focuses the pane the ordinary way, so the person reads it in the
+agent's own prompt and presses Enter; any refusal keeps them and says why, and `Copy review` is
+the same text on the clipboard. The field takes the keyboard the way the tab search box does, as
+a wish granted by `changes_takes_keys` and claimed Escape and Enter in `action_for` — and the
+pane beside it is given no keys at all while it has them (`body.rs`), since every element sees
+every keystroke and an agent with no composer would otherwise be typed into alongside the
+field. A click on a pane, a section shown, another field pressed, the find bar opened, Enter or
+Escape takes the keyboard back, and so does the column moving to another repository or tab,
+which takes the field with it; a read coming home never does. A read that takes the field's
+line away — the line gone, pushed past the cut, or a read that failed — keeps the field, its
+words and the keyboard and moves it to the top of the column under the reason (`Adrift`); Enter
+there adds nothing. Its file is read again on every refresh, folded or not, and a read that
+finds the line puts the field back under it and shows the file, since most of what sets a field
+adrift — one timed-out read, a line past the cut — says nothing about the line. Dropped
+instead, the field would hand the keyboard back to the focused pane
+— usually the agent being commented on — and the rest of the comment, and its Enter, would be
+typed into it. Against the agents themselves, a multi-line bracketed paste was checked to land
+in the prompt unsent in Claude Code 2.1.280 (as `[Pasted text #1 +3 lines]`) and OpenCode
+1.18.33 (as `[Pasted ~4 lines]`); Codex 0.149.1 and Gemini CLI 0.61.0 turn bracketed paste on at
+start-up, but stopped at sign-in and a trust question here, so a paste into their prompts is not
+verified.
 
 ### The agent says what it is doing
 

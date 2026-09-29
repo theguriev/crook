@@ -71,8 +71,9 @@ impl WindowControlInsets {
 /// pad itself out of the way of something sitting over the panel.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct LayoutInsets {
-    /// Logical pixels the tabs panel must leave free before its first control.
-    /// Always zero when there is no panel.
+    /// Logical pixels the column at the window's left edge must leave free
+    /// before its first control: the tabs panel, or with the tabs hidden a
+    /// docked column. Always zero when there is no column there.
     pub panel_left: f32,
     /// Logical pixels the header must leave free at its left edge.
     pub header_left: f32,

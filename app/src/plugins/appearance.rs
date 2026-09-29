@@ -468,9 +468,12 @@ fn rows_category(workspace: &Workspace) -> Vec<Entry> {
     rows.push(widgets::row(
         Words::new("Show the diff stats chip")
             .with_description(
-                "Added and removed lines in the row's repository. Expanded rows only.",
+                "Added and removed lines in the row's repository, and the commits since the \
+                 base once a branch has some. Expanded rows only.",
             )
-            .with_keywords(&["diff", "stats", "added", "removed", "lines", "git", "chip"]),
+            .with_keywords(&[
+                "diff", "stats", "added", "removed", "lines", "git", "chip", "commits",
+            ]),
         expanded,
         widgets::switch(
             options.show_diff_stats,

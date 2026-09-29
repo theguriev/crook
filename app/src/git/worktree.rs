@@ -41,7 +41,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use super::merged::{Landed, merged};
-use super::run::{Failure, Intent, run, run_feeding};
+use super::run::{Failure, Intent, run, run_fed};
 pub(crate) use super::run::{READ_TIMEOUT, WRITE_TIMEOUT};
 
 // MARK: - What a repository has
@@ -1817,7 +1817,7 @@ fn ignored_in(
         input.extend_from_slice(&bytes_of(relative));
         input.push(0);
     }
-    let answered = run_feeding(
+    let answered = run_fed(
         worktree,
         &[
             OsStr::new("check-ignore"),
@@ -1831,8 +1831,7 @@ fn ignored_in(
             OsStr::new("-z"),
             OsStr::new("--stdin"),
         ],
-        Intent::Read,
-        Some(input),
+        input,
     )?;
     // 1 is "none of them is ignored", which is an answer; 128 is a failure.
     if !answered.success && answered.code != Some(1) {
@@ -2735,7 +2734,7 @@ fn attribute<'a>(field: &'a [u8], name: &str) -> Option<&'a [u8]> {
 /// On Windows there is no such conversion to make — git writes UTF-8 and
 /// `PathBuf` holds UTF-16 — so lossy is the only route, and is exact for every
 /// path git can produce there.
-fn path_from(bytes: &[u8]) -> PathBuf {
+pub(super) fn path_from(bytes: &[u8]) -> PathBuf {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt as _;
