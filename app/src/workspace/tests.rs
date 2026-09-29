@@ -852,30 +852,59 @@ impl Harness {
     ///
     /// By the text on the row, found where it was drawn: the list is filtered
     /// and reordered by what is registered, so its rows have no fixed places.
+    ///
+    /// Scrolled to first when the list's clip has it out of sight, the way a
+    /// person would reach it. A scene has no occlusion, so a row past the
+    /// bottom of the list still has its glyphs in the frame, and a press where
+    /// they are lands on whatever is drawn there instead. That is the footer
+    /// on macOS, where the traffic lights' strip moves the list down: with
+    /// `crook/changes` in the box the probe is the last of sixteen rows,
+    /// its line fell under "1 update in the registry", and the press selected
+    /// nothing — the card stayed on the first built-in.
     fn click_plugin(&mut self, name: &str) {
-        let scene = self.frame();
-        // The column the list is in, taken from its own field: the card is to
-        // the right of it and shares baselines with it, so a line built from
-        // both columns is a line neither of them drew.
-        let column = settings_field_boxes(&scene)
-            .into_iter()
-            .next()
-            .expect("the Plugins section has a field of its own");
+        // Far more turns of the wheel than a list this long can need; running
+        // out of them is a row the scroll never brings back, not a slow one.
+        for _ in 0..64 {
+            let scene = self.frame();
+            // The column the list is in, taken from its own field: the card is
+            // to the right of it and shares baselines with it, so a line built
+            // from both columns is a line neither of them drew.
+            let column = settings_field_boxes(&scene)
+                .into_iter()
+                .next()
+                .expect("the Plugins section has a field of its own");
 
-        // The row's name, or the name with the word a row may end in — the
-        // version an update would bring, "installed" — run on after it: the
-        // two share a baseline, so they are one line to `text_lines`.
-        let lines = text_lines(&scene, |at| {
-            at.x() >= column.min_x() && at.x() <= column.max_x()
-        });
-        let row = lines
-            .iter()
-            .find(|(_, line)| line.trim() == name)
-            .or_else(|| lines.iter().find(|(_, line)| line.trim().starts_with(name)))
-            .unwrap_or_else(|| panic!("no row in the plugin list says {name:?}"));
+            // The row's name, or the name with the word a row may end in —
+            // the version an update would bring, "installed" — run on after
+            // it: the two share a baseline, so they are one line to
+            // `text_lines`.
+            let lines = text_lines(&scene, |at| {
+                at.x() >= column.min_x() && at.x() <= column.max_x()
+            });
+            let (at, _) = lines
+                .iter()
+                .find(|(_, line)| line.trim() == name)
+                .or_else(|| lines.iter().find(|(_, line)| line.trim().starts_with(name)))
+                .unwrap_or_else(|| panic!("no row in the plugin list says {name:?}"));
+            let press = *at + vec2f(4., 4.);
 
-        self.click(row.0 + vec2f(4., 4.), MouseButton::Left);
-        self.frame();
+            let Some(list) = clip_of_line_at(&scene, *at)
+                .filter(|list| !(list.contains_point(*at) && list.contains_point(press)))
+            else {
+                self.click(press, MouseButton::Left);
+                self.frame();
+                return;
+            };
+            // Negative is towards the user: the list moves up, and what was
+            // under its bottom edge comes into view.
+            let towards = if press.y() > list.max_y() { -1. } else { 1. };
+            self.dispatch(Event::ScrollWheel {
+                position: center(list),
+                delta: ScrollDelta::Lines(vec2f(0., towards)),
+                modifiers: Modifiers::default(),
+            });
+        }
+        panic!("scrolling the plugin list never brought {name:?}'s row into view");
     }
 
     /// Which plugin the store is downloading, straight from its model.
@@ -1542,6 +1571,23 @@ fn strip_text(scene: &Scene) -> String {
 /// Callers that care filter by position first.
 fn text_lines(scene: &Scene, keep: impl Fn(Vector2F) -> bool) -> Vec<(Vector2F, String)> {
     lines_of(scene.layers().flat_map(|layer| layer.glyphs.iter()), keep)
+}
+
+/// The scissor of the layer that drew the line [`text_lines`] placed at `at`,
+/// if that layer had one.
+///
+/// What says whether a line found there is on screen at all: `text_lines`
+/// reads every glyph the frame holds, and a scroll view's clip keeps the ones
+/// past its edge from being drawn, not from being in the scene.
+fn clip_of_line_at(scene: &Scene, at: Vector2F) -> Option<RectF> {
+    scene
+        .layers()
+        .find(|layer| {
+            layer.glyphs.iter().any(|glyph| {
+                (glyph.position.x() - at.x()).abs() < 0.5 && glyph.position.y().round() == at.y()
+            })
+        })
+        .and_then(|layer| layer.clip_bounds)
 }
 
 /// The text drawn on `ground` and over it, one line at a time.
@@ -19000,6 +19046,36 @@ mod sandboxed {
             .collect();
         glyphs.sort_by(|left, right| left.0.total_cmp(&right.0));
         glyphs.into_iter().map(|(_, character)| character).collect()
+    }
+
+    #[test]
+    fn the_last_row_opens_its_card_under_the_traffic_lights_strip() {
+        // The frame every card test above is drawn in on macOS, and the one
+        // place it can be looked at from anywhere else. The strip over the
+        // list moves it down, the update footer takes the bottom of the
+        // column, and the probe — the last row — starts past the list's edge,
+        // under "1 update in the registry". Pressing where its glyphs are hit
+        // the footer and left the card on the first built-in; the row is
+        // reached by scrolling to it, and the card it opens is the probe's.
+        let scratch = Scratch::new("under-the-strip");
+        install(
+            scratch.path(),
+            "eugen.probe",
+            &wasm("eugen/probe", "header.right", 10),
+        );
+        let mut harness = Harness::with_opening(
+            1,
+            opening(&scratch, Default::default(), registry_offering("0.2.0")),
+        );
+        harness.override_controls(ControlLayout::MacOs);
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+
+        let scene = harness.frame();
+        let text = frame_text(&scene);
+        assert!(says(&scene, "1 update in the registry"), "{text}");
+        assert!(says(&scene, "Update to 0.2.0"), "{text}");
+        assert!(!says(&scene, "crook/window"), "{text}");
     }
 
     #[test]
