@@ -6,6 +6,8 @@
 //! else wrote. [`super::merged`] needs the same promise for another reason —
 //! it reads a history, and a history's honest length has no bound the way a
 //! listing's does — so the runner lives here and both spawn git through it.
+//! [`super::changes`] is the third, and the one that asked for
+//! [`run_capped`]: the diff of a single file is as long as the file is.
 //!
 //! The deadline bounds the *call*, not only git. Killing a process does not
 //! reach what it left behind: a hook that backgrounds a helper — `direnv
@@ -273,6 +275,91 @@ pub(super) fn run(directory: &Path, args: &[&OsStr], intent: Intent) -> Result<F
         success: status.success(),
         stdout: stdout.unwrap_or_default(),
         stderr: String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned(),
+    })
+}
+
+/// What [`run_capped`] read.
+pub(super) struct Capped {
+    /// stdout, at most the cap.
+    pub(super) stdout: Vec<u8>,
+    /// stderr, as text.
+    pub(super) stderr: String,
+    /// git's exit code, which is `None` when it was stopped by a signal —
+    /// the broken pipe a cut answer leaves it writing into, most often.
+    pub(super) code: Option<i32>,
+    /// Whether git had more to say than the cap let through.
+    pub(super) cut: bool,
+}
+
+/// Runs `git <args>` in `directory` as a read whose answer can be larger than
+/// anybody should hold, keeping at most `cap` bytes of it.
+///
+/// For the diff of one file, which is as long as the file is: a lockfile, a
+/// vendored library, a generated bundle is megabytes of patch that nobody is
+/// going to read in a side column. [`run`] reads a pipe to its end, so the
+/// whole of it would be held and then thrown away; here the reader stops one
+/// byte past the cap and drops its end of the pipe, git's next write fails —
+/// `SIGPIPE`, or `EPIPE` where that is ignored — and git ends without
+/// writing the rest. A hundred-megabyte diff costs the cap and a moment.
+///
+/// The exit status is handed back as a code rather than judged, because
+/// what counts as success is the caller's to say: `diff --no-index` exits 1
+/// to mean "there were differences", and a cut answer is one git was
+/// stopped from finishing on purpose.
+pub(super) fn run_capped(directory: &Path, args: &[&OsStr], cap: usize) -> Result<Capped, Failure> {
+    if git_is_missing() {
+        return Err(Failure::GitMissing);
+    }
+    // See `run`: a directory that is not there must not read as a missing git.
+    if !directory.is_dir() {
+        return Err(Failure::NoDirectory);
+    }
+
+    let mut child = start(
+        directory,
+        args,
+        Intent::Read,
+        [Stdio::null(), Stdio::piped(), Stdio::piped()],
+    )?;
+
+    // One past the cap, so that an answer of exactly the cap is not taken for
+    // a cut one. The `Take` owns the pipe and goes with the reader's thread,
+    // which is what closes this end of it the moment the limit is reached.
+    let limit = u64::try_from(cap).unwrap_or(u64::MAX).saturating_add(1);
+    let stdout = child
+        .stdout
+        .take()
+        .map(|pipe| drain(std::io::Read::take(pipe, limit)));
+    let stderr = child.stderr.take().map(drain);
+
+    let deadline = Instant::now() + READ_TIMEOUT;
+    let waited = wait_for(&mut child, deadline, READ_TIMEOUT);
+    // `run`'s grace, for `run`'s reason.
+    let drained_by = (Instant::now() + DRAIN_GRACE).min(deadline);
+    let stdout = collect(stdout, drained_by);
+    let stderr = collect(stderr, drained_by);
+
+    let status = waited?;
+    // A read is its output, and a fragment of one is not an answer — which a
+    // cut is not: it is the first `cap` bytes, and says so.
+    let Some(mut stdout) = stdout else {
+        log::warn!(
+            "git {args:?} in {} left its output held open past {}s",
+            directory.display(),
+            READ_TIMEOUT.as_secs()
+        );
+        return Err(Failure::TimedOut {
+            after: READ_TIMEOUT,
+        });
+    };
+    let cut = stdout.len() > cap;
+    stdout.truncate(cap);
+
+    Ok(Capped {
+        stdout,
+        stderr: String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned(),
+        code: status.code(),
+        cut,
     })
 }
 

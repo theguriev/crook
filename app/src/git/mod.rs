@@ -23,6 +23,7 @@
 //! thread and wants everything a row can hold.
 
 pub mod branch;
+pub mod changes;
 pub mod diff;
 pub mod merged;
 mod run;

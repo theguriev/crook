@@ -860,7 +860,7 @@ fn attribute<'a>(field: &'a [u8], name: &str) -> Option<&'a [u8]> {
 /// On Windows there is no such conversion to make — git writes UTF-8 and
 /// `PathBuf` holds UTF-16 — so lossy is the only route, and is exact for every
 /// path git can produce there.
-fn path_from(bytes: &[u8]) -> PathBuf {
+pub(super) fn path_from(bytes: &[u8]) -> PathBuf {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt as _;
