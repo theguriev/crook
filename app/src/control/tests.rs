@@ -274,6 +274,11 @@ fn the_json_escapes_every_control_character_and_still_reads_back_as_what_the_win
 
 /// A window with no display, carrying nothing but the tab strip.
 struct Window {
+    /// The queue standing in for the event loop, which only a test with a
+    /// socket in front of the window has to pump: everything else reads the
+    /// strip straight off the workspace. The app's foreground holds it too,
+    /// so leaving it out elsewhere drops nothing it needs.
+    #[cfg(unix)]
     queue: Arc<LocalQueue>,
     app: App,
     workspace: ViewHandle<Workspace>,
@@ -309,6 +314,7 @@ impl Window {
             )
         });
         Self {
+            #[cfg(unix)]
             queue,
             app,
             workspace,
@@ -668,6 +674,35 @@ mod socket {
             "closed at the deadline, not by the client's own timeout"
         );
         answering.join().expect("the connection's thread");
+    }
+
+    #[test]
+    fn a_connection_that_sends_a_byte_before_each_read_runs_out_is_still_closed_at_its_deadline() {
+        let deadline = Duration::from_millis(400);
+        let (client, answering) = conversation(answering(two_panes()), deadline);
+        // A byte well inside the time any one read waits, and never a
+        // newline: a read timeout set once would be met every time, and the
+        // connection held for as long as the bytes kept coming.
+        let mut writer = client.stream.try_clone().expect("a second handle");
+        let drips = 50;
+        let started = Instant::now();
+        let dripping = thread::spawn(move || {
+            for _ in 0..drips {
+                if writer.write_all(b"x").is_err() {
+                    return;
+                }
+                thread::sleep(deadline / 4);
+            }
+        });
+
+        answering.join().expect("the connection's thread");
+        let took = started.elapsed();
+        assert!(
+            took < deadline * drips / 8,
+            "closed at its deadline, not when the client ran out of bytes: {took:?}"
+        );
+        dripping.join().expect("the writer");
+        drop(client);
     }
 
     #[test]
