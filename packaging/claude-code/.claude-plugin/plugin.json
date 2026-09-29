@@ -1,0 +1,17 @@
+{
+  "name": "crook",
+  "displayName": "Crook",
+  "description": "Tells the Crook tab Claude Code runs in what it is doing, and teaches Claude what a Crook pane can do. Does nothing in any other terminal.",
+  "author": {
+    "name": "Eugen Guriev",
+    "url": "https://github.com/theguriev"
+  },
+  "repository": "https://github.com/theguriev/crook",
+  "license": "MIT",
+  "keywords": [
+    "crook",
+    "terminal",
+    "status",
+    "hooks"
+  ]
+}

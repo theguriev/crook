@@ -108,6 +108,64 @@ pub fn current_branch(dir: &Path) -> Option<Head> {
     discover(dir).and_then(|layout| read_head(&layout.git_dir))
 }
 
+/// The branch the work in a directory is on, and the repository it is a
+/// branch of. See [`branch_at_work`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchAtWork {
+    /// The repository's [`RepoLayout::common_dir`]: the one every linked
+    /// worktree of it shares, and a submodule, which is a repository of its
+    /// own, does not. A branch name alone is not a branch — `feat` is one in
+    /// a great many repositories.
+    pub repository: PathBuf,
+    /// What `HEAD` says, with a rebase's detached one read as the branch
+    /// being rebased.
+    pub head: Head,
+}
+
+impl BranchAtWork {
+    /// Whether `other` is in the same repository, however the path to it was
+    /// spelled.
+    ///
+    /// The paths as found are the whole answer unless they differ. A pane's
+    /// directory is the shell's `$PWD`, links and all, and [`discover`] keeps
+    /// the spelling it reached a repository by — so a link to a checkout and
+    /// the checkout itself find one repository under two names. Only then
+    /// are both resolved — once, for a pane that really has moved, since its
+    /// pull request goes.
+    pub fn is_same_repository(&self, other: &Self) -> bool {
+        self.repository == other.repository
+            || matches!(
+                (
+                    std::fs::canonicalize(&self.repository),
+                    std::fs::canonicalize(&other.repository),
+                ),
+                (Ok(mine), Ok(theirs)) if mine == theirs
+            )
+    }
+}
+
+/// The branch the work in `dir` is on: [`current_branch`], except that a
+/// `HEAD` a rebase detached is the branch being rebased, as `git status`
+/// says it is — see [`branch::rebasing`] — and with the repository it is in.
+///
+/// For what goes with a branch rather than with a commit — a pull request —
+/// where a rebase to bring a branch up to date is not leaving it. A row's
+/// own label keeps [`current_branch`]'s reading, which shows the commit the
+/// rebase has reached.
+pub fn branch_at_work(dir: &Path) -> Option<BranchAtWork> {
+    let layout = discover(dir)?;
+    let head = match read_head(&layout.git_dir)? {
+        head @ Head::Detached { .. } => {
+            branch::rebasing(&layout.git_dir).map_or(head, Head::Branch)
+        }
+        branch => branch,
+    };
+    Some(BranchAtWork {
+        repository: layout.common_dir,
+        head,
+    })
+}
+
 /// Every branch the repository `dir` sits in has, in name order.
 ///
 /// Cheap in the same way [`current_branch`] is — it reads files and spawns

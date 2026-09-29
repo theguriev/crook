@@ -131,6 +131,29 @@ fn appearance(workspace: &Workspace) -> Vec<Category> {
         ui,
     );
 
+    // Beside "Bring the tabs back", because the two are one pair of facts
+    // about the window's life: what comes back when it opens, and what it
+    // asks before it goes. The row says what counts as working, since that
+    // is the thing a person turning it off needs to know they are giving up.
+    let ask = widgets::row(
+        Words::new("Ask before ending working agents")
+            .with_description(
+                "Closing the window, a tab or a pane asks first while an agent in it is running \
+                 or waiting, or a command is.",
+            )
+            .with_keywords(&[
+                "quit", "close", "confirm", "exit", "running", "warn", "agents", "question", "end",
+                "kill",
+            ]),
+        true,
+        widgets::switch(
+            workspace.general().ask_before_ending_agents,
+            Some(SettingsAction::ToggleAskBeforeEnding.into()),
+            state.control(named("ask-before-ending")),
+        ),
+        ui,
+    );
+
     // The one control on the page that is a way back: the panel's own menu
     // cannot offer it, since a hidden panel has no menu, and this page is
     // reachable by its chord with the column gone.
@@ -152,7 +175,7 @@ fn appearance(workspace: &Workspace) -> Vec<Category> {
     vec![
         widgets::category("Theme", theme_category(workspace)),
         widgets::category("Text", text_category(workspace)),
-        widgets::category("Tabs", vec![panel, granularity, density, restore]),
+        widgets::category("Tabs", vec![panel, granularity, density, restore, ask]),
         widgets::category("Rows", rows_category(workspace)),
     ]
 }
@@ -429,7 +452,8 @@ fn rows_category(workspace: &Workspace) -> Vec<Entry> {
     rows.push(widgets::row(
         Words::new("Show the PR link chip")
             .with_description(
-                "Crook has no forge integration yet, so no session has a link to show.",
+                "The pull request the agent in a pane said it opened, as a chip that opens \
+                 it. Crook asks no forge for it.",
             )
             .with_keywords(&["pull", "request", "github", "forge", "link", "chip"]),
         expanded,
