@@ -3720,4 +3720,101 @@ mod socket {
         assert_eq!(command.as_deref(), Some("true"), "{events:?}");
         assert_eq!(*exit, Some(0));
     }
+
+    #[test]
+    fn an_empty_line_sent_from_the_field_is_not_the_command_that_finished_last() {
+        let Some(mut served) = marked_bash() else {
+            return;
+        };
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        served.shell.open();
+        served.run(lead, "echo the answer");
+        served.pump_until("the shell never came back to a prompt", |served| {
+            served.at_prompt(lead)
+        });
+        let filed = |served: &Served| {
+            served.read(|workspace, app| {
+                workspace
+                    .terminal_blocks(lead, app)
+                    .map_or(0, |history| history.len())
+            })
+        };
+        let before = filed(&served);
+
+        // Enter in the empty field: what the field hands the terminal then,
+        // which bash ends with a bare `D` and nothing run.
+        let sent = served.read(|workspace, app| {
+            workspace
+                .terminal(lead, app)
+                .is_some_and(|(terminal, _)| terminal.submit(""))
+        });
+        assert!(sent, "the empty line reached the shell");
+        served.pump_until("the empty line never became a block", |served| {
+            served.at_prompt(lead) && filed(served) > before
+        });
+        // A block of its own, so what follows is read past one that is there.
+        let newest = served.read(|workspace, app| {
+            let history = workspace.terminal_blocks(lead, app).expect("a shell");
+            let block = history.get(history.len() - 1).expect("a block");
+            (block.command.clone(), block.exit)
+        });
+        assert_eq!(newest, (None, None));
+
+        let read = served
+            .ask(read_blocks(&token, lead, Some(1)))
+            .expect("read");
+        let [block] = &read.blocks[..] else {
+            panic!("the command, not the empty line: {read:#?}");
+        };
+        assert_eq!(block.command.as_deref(), Some("echo the answer"));
+        assert_eq!(block.exit, Some(0));
+        assert_eq!(block.output, "the answer");
+        let printed = served
+            .ask(wait(&token, lead, Until::Finished, 0, false))
+            .expect("answered");
+        assert_eq!(printed.text, "finished: exit 0");
+        assert_eq!(printed.failure, None);
+    }
+
+    #[test]
+    fn a_wait_for_a_command_to_finish_is_not_answered_by_an_empty_line() {
+        // Marked, so that `finished` is a thing to wait for; the shells stay
+        // at their gate, and what they would say is said for them.
+        let Some(mut served) = marked_bash() else {
+            return;
+        };
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["make", "test"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+        let asking = served.start(wait(&token, worker, Until::Finished, 600, false));
+        served.pump_until("the wait was never registered", |served| {
+            served.waiting() == 1
+        });
+
+        // The `D` a shell ends an empty line with, from the field or typed at
+        // the prompt: no command, no status, and nothing started.
+        let finished = |command: Option<&str>, exit, took| TerminalUpdate::CommandFinished {
+            pane: worker,
+            command: command.map(str::to_owned),
+            exit,
+            took,
+        };
+        served.update(|workspace, ctx| {
+            workspace.apply_terminal_update(&finished(None, None, None), ctx);
+        });
+        assert_eq!(served.waiting(), 1, "an empty line is not a command");
+
+        served.update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &finished(Some("make test"), Some(2), Some(Duration::from_secs(1))),
+                ctx,
+            );
+        });
+        let printed = served.finish(asking).expect("answered");
+        assert_eq!(printed.text, "finished: exit 2");
+    }
 }

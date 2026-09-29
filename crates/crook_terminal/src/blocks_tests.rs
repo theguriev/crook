@@ -1,5 +1,5 @@
 use super::*;
-use crate::emulator::Emulator;
+use crate::emulator::{Emulator, TerminalEvent};
 use crate::snapshot::{SnapshotCell, TerminalSize};
 
 /// OSC 133 prompt start.
@@ -164,6 +164,51 @@ fn test_a_command_that_finishes_without_starting_closes_the_block() {
     assert_eq!(None, block.exit);
     assert_eq!(None, block.started_at);
     assert_eq!("$", block.rows.to_text());
+}
+
+#[test]
+fn test_an_empty_line_sent_from_the_field_starts_nothing() {
+    // Enter in an empty field submits an empty line, and the shell ends it
+    // with a bare `D` and nothing between: the block above, reached by the
+    // application's submit rather than by a keystroke the shell read. It ran
+    // nothing either, so it has no start to time from — a start is what says
+    // a command ran, to anything counting commands.
+    for line in ["", "   "] {
+        let mut emulator = emulator();
+        emulator.advance(format!("{A}$ {B}").as_bytes());
+        let _ = emulator.take_events();
+
+        emulator.command_submitted(line);
+        assert_eq!(None, emulator.live_block().started_at, "{line:?}");
+        emulator.advance(b"\r\n\x1b]133;D\x07");
+
+        let [block] = emulator.blocks() else {
+            panic!("{line:?} lost the block");
+        };
+        assert_eq!(
+            (None, None, None),
+            (block.command.as_deref(), block.exit, block.started_at),
+            "{line:?}"
+        );
+        assert_eq!(None, block.duration(), "{line:?}");
+        let events = emulator.take_events();
+        assert!(
+            matches!(
+                &events[..],
+                [TerminalEvent::CommandFinished {
+                    command: None,
+                    exit: None,
+                    took: None,
+                }]
+            ),
+            "{line:?}: {events:?}"
+        );
+
+        // And the command sent after it is timed from its own submit.
+        emulator.advance(format!("{A}$ {B}").as_bytes());
+        emulator.command_submitted("true");
+        assert!(emulator.live_block().started_at.is_some(), "{line:?}");
+    }
 }
 
 #[test]

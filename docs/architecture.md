@@ -1229,7 +1229,8 @@ pane starts in, before anything has reported, is not it, so a worker whose agent
 started is not taken for one that has finished — `needs-input`, `finished` or `exited`.
 `finished` is a state and not an event: nothing is running, no line is waiting for the shell's
 first prompt (a tab `tab.new` just opened has not run its command yet), and a command has been
-closed by the shell's own `D`, whose exit status the answer carries. That is what keeps a
+closed by the shell's own `D`, whose exit status the answer carries — a command's, not an empty
+line's, which a shell ends with a `D` too. That is what keeps a
 command that ended before the wait was asked from being missed, and a tab that has not started
 from being taken for one that has finished; it is refused as `no-blocks` for a shell with no
 marks, where nothing ever says a command ended. `exited` is the pane closing by whichever road.
@@ -1251,7 +1252,8 @@ written down a socket: the last 4096 rows of a block are read, the last 64 KiB o
 and 512 KiB in all, spent newest first; cut from the front, at a line, and marked `truncated`,
 because the end of what a command printed is where its errors and its summary are. Only
 commands' blocks count — one the shell ran, sent or started or ended with a status — and not
-what a shell printed on its own before its first prompt or between two. A command still running
+what a shell printed on its own before its first prompt or between two, nor an empty line sent
+from the field, which the block tracker gives no start. A command still running
 has not finished, whatever the pane draws it as: a build on the primary screen, a full-screen
 program on the alternate one, an agent's interactive TUI. With nothing finished such a pane is
 refused as `no-blocks` with a sentence saying which — wait `--until finished` for a command,

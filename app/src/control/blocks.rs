@@ -167,9 +167,11 @@ pub fn read(
 ///
 /// Not what a shell printed on its own, before its first prompt — a login
 /// banner, a startup file's line — or between two, which the history keeps as
-/// a block too: nothing ran there, and nothing finished. A tab whose first
-/// command is still running has no command's block yet, whatever its shell
-/// said while it started.
+/// a block too: nothing ran there, and nothing finished. Nor an empty line,
+/// sent from the field or typed, which the shell ends with a bare `D`: it has
+/// no command and no status, and the tracker gives it no start either (see
+/// [`Block::started_at`]). A tab whose first command is still running has no
+/// command's block yet, whatever its shell said while it started.
 pub fn is_command(block: &Block) -> bool {
     block.command.is_some() || block.exit.is_some() || block.started_at.is_some()
 }

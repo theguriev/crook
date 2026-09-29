@@ -218,7 +218,8 @@ pub enum Until {
     /// The pane has closed: its shell ended, or somebody closed it.
     Exited,
     /// Nothing is running in it, nothing is waiting to be sent to it, and a
-    /// command has finished there — its shell said so with OSC 133 `D`.
+    /// command has finished there — its shell said so with OSC 133 `D`. An
+    /// empty line is not a command, though a shell ends one with a `D` too.
     Finished,
 }
 

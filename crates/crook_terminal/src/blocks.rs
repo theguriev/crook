@@ -189,6 +189,10 @@ pub struct Block {
     /// Where the shell said it was when the block opened, if it had said.
     pub working_directory: Option<PathBuf>,
     /// When the command started running, which is the `C` mark or the submit.
+    ///
+    /// `None` when nothing ran: an empty line, typed or submitted, which a
+    /// shell ends with a bare `D` and no `C`, and what a shell printed on its
+    /// own before a prompt.
     pub started_at: Option<Instant>,
     /// When it finished.
     pub finished_at: Option<Instant>,
@@ -350,7 +354,8 @@ pub struct Finished {
     /// for started when they pressed Enter.
     ///
     /// `None` when the block was already open when Crook started watching, so
-    /// there is no beginning to measure from.
+    /// there is no beginning to measure from, and when nothing ran in it: see
+    /// [`Block::started_at`].
     pub took: Option<Duration>,
 }
 
@@ -864,7 +869,8 @@ impl BlockTracker {
                 // line is not a command: recording one would give a block a
                 // header it never had, and would stop the echoed line being
                 // read when a real command follows.
-                if let Some(command) = command.filter(|line| !line.trim().is_empty()) {
+                let sent = command.filter(|line| !line.trim().is_empty());
+                if let Some(command) = sent {
                     self.open.command = Some(command.to_owned());
                 }
                 if state == BlockState::Executing && self.open.command.is_none() {
@@ -874,9 +880,19 @@ impl BlockTracker {
                 // what [`BlockState::is_running`] is: what a person waits for
                 // starts when they press Enter, and a shell that took a moment
                 // to report the start was busy for that moment too.
-                if matches!(state, BlockState::Submitted | BlockState::Executing)
-                    && self.open.started_at.is_none()
-                {
+                //
+                // Not from an empty one, since nothing starts: the shell ends
+                // an empty line with a bare `D` and runs nothing between, so
+                // its block has no command and no status, and a start would be
+                // the one thing saying a command ran there. Anything counting
+                // finished commands reads it that way — a lead asking for a
+                // worker's last one among them.
+                let starts = match state {
+                    BlockState::Submitted => sent.is_some(),
+                    BlockState::Executing => true,
+                    _ => false,
+                };
+                if starts && self.open.started_at.is_none() {
                     self.open.started_at = Some(Instant::now());
                 }
                 // And where it is running, for a block that opened before the

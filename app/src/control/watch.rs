@@ -280,13 +280,14 @@ pub enum Heard<'a> {
     Status,
     /// A command started running.
     Started(&'a str),
-    /// A command finished.
+    /// A command finished — or an empty line did, which a shell ends with a
+    /// `D` as well.
     Finished {
         /// Its command line, when there was one.
         command: Option<&'a str>,
         /// The status it exited with, when the shell reported one.
         exit: Option<i32>,
-        /// How long it ran.
+        /// How long it ran, when something started.
         took: Option<Duration>,
     },
 }
@@ -352,7 +353,18 @@ impl Watches {
                 (Until::NeedsInput, Heard::Status) => {
                     (session.status == AgentStatus::NeedsInput, None)
                 }
-                (Until::Finished, Heard::Finished { exit, .. }) => (true, exit),
+                // A command's end, and not an empty line's: a shell ends one
+                // of those with a `D` too, with no command, no status and no
+                // start — which is how [`blocks::is_command`] tells a filed
+                // block from a command's, and `took` is what a start comes to.
+                (
+                    Until::Finished,
+                    Heard::Finished {
+                        command,
+                        exit,
+                        took,
+                    },
+                ) if command.is_some() || exit.is_some() || took.is_some() => (true, exit),
                 _ => (false, None),
             };
             if reached {
