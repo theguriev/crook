@@ -3324,4 +3324,132 @@ mod socket {
         assert_eq!(block.exit, Some(4));
         assert_eq!(block.output, "the answer");
     }
+
+    /// Linux only: that is where a half-close is told from a hang-up. See
+    /// `server::until_closed`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_client_that_closes_its_half_after_asking_is_answered_and_one_that_leaves_is_let_go() {
+        let (handed, feeds) = std::sync::mpsc::channel::<Arc<Feed>>();
+        let answer: Answer = Arc::new(move |request: Request, feed: Option<Arc<Feed>>, _| {
+            if let Some(feed) = feed {
+                let _ = handed.send(feed);
+            }
+            match request.verb {
+                Verb::EventsFollow(_) => Ok(json!({ "panes": [7] })),
+                _ => Ok(Value::Null),
+            }
+        });
+        let waiting = protocol::request_line(
+            &Verb::PaneWait(Wait {
+                pane: 7,
+                until: Until::Idle,
+                timeout: Some(60),
+            }),
+            Some("c0ffee"),
+        );
+        // Long enough for the watch to have read the end of the request,
+        // which it once took for the client leaving.
+        let settle = || thread::sleep(Duration::from_millis(200));
+
+        // A wait: asked, the client's half closed, and answered afterwards.
+        let (mut client, answering) = conversation(answer.clone(), Duration::from_secs(5));
+        client.send(&waiting);
+        client
+            .stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("the client closes its half");
+        let feed = feeds
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the wait reached the window");
+        settle();
+        assert!(feed.is_open(), "a half-close is not a hang-up");
+        feed.push(json!({ "reached": true }));
+        let reply = client.reply().expect("answered, not hung up on");
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.result, Some(json!({ "reached": true })));
+        answering.join().expect("the connection's thread");
+
+        // A stream: its first answer, an event after the half-close, its end.
+        let (mut client, answering) = conversation(answer.clone(), Duration::from_secs(5));
+        client.send(&protocol::request_line(
+            &Verb::EventsFollow(Follow::default()),
+            Some("c0ffee"),
+        ));
+        client
+            .stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("the client closes its half");
+        assert!(client.reply().expect("the first answer").ok);
+        let feed = feeds
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the stream reached the window");
+        settle();
+        feed.push(serde_json::to_value(PaneEvent::Closed { pane_id: 7 }).expect("encodes"));
+        feed.end();
+        let mut line = String::new();
+        client.replies.read_line(&mut line).expect("an event");
+        assert_eq!(
+            serde_json::from_str::<PaneEvent>(&line).expect("an event a line"),
+            PaneEvent::Closed { pane_id: 7 }
+        );
+        line.clear();
+        assert_eq!(client.replies.read_line(&mut line).ok(), Some(0), "{line}");
+        answering.join().expect("the connection's thread");
+
+        // Half-closed and then gone: let go of then, not a minute later.
+        let (mut client, answering) = conversation(answer, Duration::from_secs(5));
+        client.send(&waiting);
+        client
+            .stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("the client closes its half");
+        let feed = feeds
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the wait reached the window");
+        settle();
+        let started = Instant::now();
+        drop(client);
+        answering.join().expect("the connection's thread");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(!feed.is_open(), "and its feed hung up");
+    }
+
+    /// Linux only, as the one above.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_wait_asked_by_a_client_that_closed_its_half_is_answered_by_the_window() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        served.report(lead, AgentStatus::NeedsInput, Some("which branch?"));
+
+        // What `printf '%s\n' "$request" | nc -N -U "$CROOK_SOCKET"` does.
+        let line = protocol::request_line(
+            &Verb::PaneWait(Wait {
+                pane: lead.as_u64(),
+                until: Until::NeedsInput,
+                timeout: Some(5),
+            }),
+            Some(&token),
+        );
+        let reply = served.ask(move |socket| {
+            let mut client = Client::connect(&socket);
+            client.send(&line);
+            client
+                .stream
+                .shutdown(std::net::Shutdown::Write)
+                .expect("the client closes its half");
+            client.reply()
+        });
+        let reply = reply.expect("answered, not closed on");
+        let waited: Waited =
+            serde_json::from_value(reply.result.expect("an answer")).expect("a wait's answer");
+        assert!(waited.reached, "{waited:?}");
+        assert_eq!(waited.message.as_deref(), Some("which branch?"));
+    }
 }

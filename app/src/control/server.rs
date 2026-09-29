@@ -46,6 +46,15 @@
 //! killed at its own timeout, an agent's tool call cut short — and end the
 //! wait then rather than when its time is up. The connection answers nothing
 //! else, and closes when the wait or the stream is over.
+//!
+//! A client that closes its half after its request — what `nc -N` does, and
+//! what [`converse`] takes as the end of a request — has not hung up: it is
+//! still reading. On Linux the end of what it says is told apart from its
+//! leaving by `poll`, and its wait is answered; elsewhere nothing that blocks
+//! tells the two apart — macOS's `poll` says `POLLHUP` for both — so there
+//! the end of what the client says is taken for its leaving, and a client of
+//! a kept verb keeps its half open until the reply comes. See
+//! [`until_closed`].
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, Permissions};
@@ -452,7 +461,8 @@ impl Drop for Place {
 ///
 /// A blank line is skipped rather than refused, the way a shell skips one. A
 /// last line with no newline before the end is still a request: the client
-/// said all it had to say and closed its half.
+/// said all it had to say and closed its half. Closing it is no hang-up, on
+/// Linux, for a verb that keeps the connection either — see the module docs.
 pub fn converse(stream: &UnixStream, deadline: Instant, answer: &Ask, place: &mut Place) {
     let mut reader = BufReader::new(Timed { stream, deadline });
     loop {
@@ -654,7 +664,10 @@ fn stream_to(stream: &UnixStream, id: Option<Value>, first: Value, deadline: Ins
 /// A read of the connection, blocked for as long as the client says nothing —
 /// which after its one request is for as long as it is there. Whatever it
 /// sends is read and let go; its end of the connection closing, or the
-/// connection being shut down when the verb is over, returns the read.
+/// connection being shut down when the verb is over, returns the read. A
+/// read that returns the end of what the client says is not yet the client
+/// gone — it may only have closed its half — and [`until_closed`] waits for
+/// the rest.
 fn watch_for_hangup(stream: &UnixStream, feed: &Arc<Feed>) {
     let Ok(watched) = stream.try_clone() else {
         return;
@@ -672,7 +685,10 @@ fn watch_for_hangup(stream: &UnixStream, feed: &Arc<Feed>) {
             let mut watched = &watched;
             loop {
                 match watched.read(&mut ignored) {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        until_closed(watched);
+                        break;
+                    }
                     Ok(_) => {}
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                     Err(_) => break,
@@ -684,6 +700,64 @@ fn watch_for_hangup(stream: &UnixStream, feed: &Arc<Feed>) {
         log::debug!("no watch for a kept connection's client hanging up: {error}");
     }
 }
+
+/// Returns once the connection is closed both ways — the client gone, or the
+/// connection shut down here when its verb is over — having been called when
+/// the client has said all it will say.
+///
+/// A client that closes only its half after its request is still reading,
+/// and its wait is still to be answered. `poll` tells the two apart on Linux:
+/// asked for nothing, it reports only `POLLHUP`, which a Unix socket raises
+/// once neither way is open, and an error; the peer's half-close is
+/// `POLLRDHUP` and `POLLIN`, which are not asked for and wake nothing.
+#[cfg(target_os = "linux")]
+fn until_closed(stream: &UnixStream) {
+    use std::ffi::c_ulong;
+    use std::os::fd::AsRawFd;
+
+    /// `struct pollfd`.
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    // Declared rather than depended on, as `euid` declares `geteuid`:
+    // `nfds_t` is an `unsigned long` in glibc and musl alike.
+    unsafe extern "C" {
+        fn poll(fds: *mut PollFd, count: c_ulong, timeout: i32) -> i32;
+    }
+
+    let mut watched = PollFd {
+        fd: stream.as_raw_fd(),
+        events: 0,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: one `pollfd`, which lives across the call, and a count of
+        // one. The descriptor is `stream`'s, open for as long as it is
+        // borrowed.
+        let polled = unsafe { poll(&mut watched, 1, -1) };
+        if polled > 0 {
+            return;
+        }
+        // No timeout was given, so nothing but a signal returns it empty.
+        if polled < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return;
+        }
+    }
+}
+
+/// Everywhere but Linux, at once: the end of what the client says is taken
+/// for the client leaving.
+///
+/// Nothing that blocks tells a half-close from a close there — macOS's `poll`
+/// raises `POLLHUP` for either, from the same end-of-file its `kqueue` sees —
+/// and a watch that never took the client for gone would hold a killed
+/// client's wait for its whole hour. So a client of a kept verb keeps its
+/// half open until the reply comes; see the module docs.
+#[cfg(not(target_os = "linux"))]
+fn until_closed(_: &UnixStream) {}
 
 /// Writes one reply, by the connection's deadline.
 fn send(stream: &UnixStream, deadline: Instant, reply: &Reply) -> io::Result<()> {

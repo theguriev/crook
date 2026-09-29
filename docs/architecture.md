@@ -1267,7 +1267,12 @@ one that blocks. A stream's feed holds 256 events, and a reader that falls furth
 the oldest and is sent `{"event":"lagged","dropped":N}` where they were, rather than the window
 holding everything for a client that is not reading. A second thread per kept connection blocks
 on a read of it, to see the client hang up — a script killed at its own timeout, an agent's tool
-call cut short — and ends the wait then rather than an hour later. The connection answers
+call cut short — and ends the wait then rather than an hour later. A client that only closes its
+half after the request — `nc -N` — is still reading: on Linux the read's end is followed by a
+`poll` that asks for nothing, which only a close of both ways wakes, and the wait is answered;
+elsewhere nothing that blocks tells the two apart — macOS's `poll` says `POLLHUP` for both — so
+the end of what the client says is taken for its leaving, and a client of a kept verb keeps its
+half open until the reply comes. The connection answers
 nothing after the verb, and closes when it is over; a window that closes ends every feed, and a
 wait still open is refused as `gone`.
 
