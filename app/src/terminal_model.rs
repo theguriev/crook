@@ -271,6 +271,9 @@ pub enum TerminalUpdate {
         exit: Option<i32>,
         /// How long it ran, timed from the submit.
         took: Option<Duration>,
+        /// Whether anything ran: `false` for the bare `D` of a line that ran
+        /// nothing, ctrl-c at the prompt or an empty Enter.
+        ran: bool,
     },
     /// The shell answered a completion request, and this is what it said.
     ///
@@ -1015,8 +1018,13 @@ impl TerminalModel {
                     pane,
                     while_running: session.snapshot.live_block.state.is_running(),
                 }),
-                TerminalEvent::CommandFinished { exit, took } => {
-                    updates.push(TerminalUpdate::CommandFinished { pane, exit, took });
+                TerminalEvent::CommandFinished { exit, took, ran } => {
+                    updates.push(TerminalUpdate::CommandFinished {
+                        pane,
+                        exit,
+                        took,
+                        ran,
+                    });
                 }
                 // The escape sequence says only that an answer is ready; the
                 // answer itself is a file, in a directory this session owns.

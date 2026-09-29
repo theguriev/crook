@@ -1217,8 +1217,12 @@ fn test_a_notification_and_a_report_keep_their_order_in_one_read() {
             .take_events()
             .into_iter()
             .map(|event| match event {
-                TerminalEvent::CommandFinished { exit, .. } => {
-                    TerminalEvent::CommandFinished { exit, took: None }
+                TerminalEvent::CommandFinished { exit, ran, .. } => {
+                    TerminalEvent::CommandFinished {
+                        exit,
+                        took: None,
+                        ran,
+                    }
                 }
                 other => other,
             })

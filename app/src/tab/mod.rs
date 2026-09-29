@@ -257,7 +257,21 @@ pub struct AgentSession {
     ///
     /// Reported off the open block's OSC 133 marks. It is a *name*, not state:
     /// the dot already says whether something is running, and this says what.
+    /// Written through [`Self::set_running_command`].
     pub running_command: Option<String>,
+    /// The agent this pane was running when the window it came back from
+    /// was closed, by its program's name, until anything runs here.
+    ///
+    /// Set by a restore and by nothing else, and only for a pane whose
+    /// directory came back: the process is gone, but the conversation is
+    /// still on disk, keyed by that directory, and this is what lets the
+    /// pane offer it back. Kept until a command runs — the resume line, or
+    /// whatever a person runs instead, seen running or only seen finishing
+    /// (see [`Self::command_finished`]) — so that a window closed again before
+    /// anybody pressed Enter still remembers what it was offering, rather
+    /// than the first save after the restore writing the agent out of the
+    /// file.
+    pub restored_agent: Option<String>,
 }
 
 /// Where a session starts when nobody named a directory.
@@ -305,7 +319,55 @@ impl AgentSession {
             working_directory: starting_directory(),
             pull_request: None,
             running_command: None,
+            restored_agent: None,
         }
+    }
+
+    /// The coding agent this pane is running, or was running when the window
+    /// it came back from was closed, by its program's name — `claude`, never
+    /// the prompt typed after it.
+    ///
+    /// What the session file remembers of a pane's process, and all it
+    /// remembers: see [`crate::session`].
+    pub fn agent(&self) -> Option<&str> {
+        self.running_command
+            .as_deref()
+            .and_then(crate::agent::program_of)
+            .or(self.restored_agent.as_deref())
+    }
+
+    /// Records what the pane is running, answering whether that changed the
+    /// agent it names — which is when the session file has something new to
+    /// say.
+    ///
+    /// Any command at all ends [`Self::restored_agent`]: the conversation it
+    /// named has been resumed, or the person has done something else with the
+    /// pane, and either way the pane is no longer offering it.
+    pub fn set_running_command(&mut self, command: Option<String>) -> bool {
+        let before = self.agent().map(str::to_owned);
+        if command.is_some() {
+            self.restored_agent = None;
+        }
+        self.running_command = command;
+        before.as_deref() != self.agent()
+    }
+
+    /// Ends [`Self::restored_agent`] because a command finished in the pane,
+    /// answering whether that changed the agent it names.
+    ///
+    /// [`Self::set_running_command`] alone is not enough. What a pane is
+    /// running is read off it at rest, so a command that starts and ends
+    /// between two reads — `cd`, `ls`, `git status` — is never seen running,
+    /// and a pane that ran only commands like those would go on naming the
+    /// agent, against whatever directory the `cd` left it in. The shell marks
+    /// the end of every command, however quick, and that mark is what calls
+    /// this — the mark of a command, that is: the one a shell sends for a line
+    /// that ran nothing, ctrl-c at the prompt or an empty Enter, does not. An
+    /// agent the pane is running now stays named.
+    pub fn command_finished(&mut self) -> bool {
+        let before = self.agent().map(str::to_owned);
+        self.restored_agent = None;
+        before.as_deref() != self.agent()
     }
 
     /// What the tab bar should print: what a person called it, else the

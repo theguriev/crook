@@ -67,6 +67,9 @@ const DISABLED_PLUGINS_KEY: &str = "disabled_plugins";
 /// The key the things a person has allowed a plugin to do are stored under.
 const PLUGIN_GRANTS_KEY: &str = "plugin_grants";
 
+/// The key the lines a person gave their agents' resumes are stored under.
+const RESUME_LINES_KEY: &str = "resume_lines";
+
 /// The keys the two halves of the desktop-following pair are stored under.
 const LIGHT_THEME_KEY: &str = "light_theme";
 /// See [`LIGHT_THEME_KEY`].
@@ -296,8 +299,9 @@ pub struct GeneralOptions {
     ///
     /// On, because it is what makes a terminal a place rather than a fresh
     /// start every morning, and because what comes back is only the *shape* —
-    /// tabs, splits and the directories their shells were in. No output is
-    /// restored and no process is: see [`crate::session`].
+    /// tabs, splits and the directories their shells were in, and the name of
+    /// an agent a pane was running, whose resume line is offered unsent. No
+    /// output is restored and no process is: see [`crate::session`].
     pub restore_session: bool,
     /// Whether a pane's shell is started as a *login* shell.
     ///
@@ -569,6 +573,17 @@ pub struct Settings {
     /// know: it is a plugin that has been uninstalled, and forgetting the
     /// grant would mean asking again for something already answered.
     plugin_grants: BTreeMap<String, Vec<String>>,
+    /// The line each agent is resumed with in a restored pane, by the
+    /// agent's program name, where a person has said something other than
+    /// the built-in one.
+    ///
+    /// Only what a person wrote, never the built-in lines copied in: an
+    /// agent's flags drift from release to release, and a file that held
+    /// this build's spelling would go on offering it after the build that
+    /// knew better had shipped. An empty line is an agent a person wants
+    /// offered nothing for. Set in the file rather than on the page — see
+    /// [`Settings::resume_line`].
+    resume_lines: BTreeMap<String, String>,
     /// The name of the theme to open in.
     ///
     /// A name rather than the palette itself, and that is the whole design: a
@@ -613,6 +628,7 @@ impl Settings {
                 general: GeneralOptions::default(),
                 disabled_plugins: Vec::new(),
                 plugin_grants: BTreeMap::new(),
+                resume_lines: BTreeMap::new(),
                 theme: crate::theme::DEFAULT_NAME.to_owned(),
                 light_theme: crate::theme::DEFAULT_LIGHT_NAME.to_owned(),
                 dark_theme: crate::theme::DEFAULT_NAME.to_owned(),
@@ -636,6 +652,7 @@ impl Settings {
             general: GeneralOptions::default(),
             disabled_plugins: Vec::new(),
             plugin_grants: BTreeMap::new(),
+            resume_lines: BTreeMap::new(),
             theme: crate::theme::DEFAULT_NAME.to_owned(),
             light_theme: crate::theme::DEFAULT_LIGHT_NAME.to_owned(),
             dark_theme: crate::theme::DEFAULT_NAME.to_owned(),
@@ -725,6 +742,23 @@ impl Settings {
             })
             .unwrap_or_default();
 
+        // Read the way the grants are: one unusable entry costs that agent's
+        // line and not everybody's. Trimmed, because a line is typed into a
+        // shell and the space around it means nothing there — and an empty
+        // one is kept, because it is how a person says "offer nothing".
+        let resume_lines = document
+            .get(RESUME_LINES_KEY)
+            .and_then(Value::as_object)
+            .map(|agents| {
+                agents
+                    .iter()
+                    .filter_map(|(program, line)| {
+                        Some((program.trim().to_owned(), line.as_str()?.trim().to_owned()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let light_theme = named_theme(&document, LIGHT_THEME_KEY, crate::theme::DEFAULT_LIGHT_NAME);
         let dark_theme = named_theme(&document, DARK_THEME_KEY, crate::theme::DEFAULT_NAME);
 
@@ -735,6 +769,7 @@ impl Settings {
             general,
             disabled_plugins,
             plugin_grants,
+            resume_lines,
             theme,
             light_theme,
             dark_theme,
@@ -861,6 +896,23 @@ impl Settings {
         }
     }
 
+    /// The line a restored pane that was running `program` is offered, in
+    /// the `resume` form, or `None` when there is nothing to offer.
+    ///
+    /// A person's own line for the agent, from `resume_lines` in the file,
+    /// when there is one: it replaces the [`Resume::Last`] line, and an empty
+    /// one turns both off. Otherwise, and for the picker whatever the file
+    /// says, the agent's built-in line — see [`crate::agent::resume_line`].
+    ///
+    /// [`Resume::Last`]: crate::agent::Resume::Last
+    pub fn resume_line(&self, program: &str, resume: crate::agent::Resume) -> Option<String> {
+        match (self.resume_lines.get(program), resume) {
+            (Some(line), _) if line.is_empty() => None,
+            (Some(line), crate::agent::Resume::Last) => Some(line.clone()),
+            _ => crate::agent::resume_line(program, resume).map(str::to_owned),
+        }
+    }
+
     /// The options that are not the tab strip's.
     pub fn general(&self) -> GeneralOptions {
         self.general
@@ -961,6 +1013,22 @@ impl Settings {
                                 ),
                             )
                         })
+                        .collect(),
+                ),
+            );
+        }
+        // Written back only when a person has written one, for the reason
+        // the grants are — and so that a build's own lines are never frozen
+        // into the file: see `Settings::resume_lines`.
+        if self.resume_lines.is_empty() {
+            document.remove(RESUME_LINES_KEY);
+        } else {
+            document.insert(
+                RESUME_LINES_KEY.to_owned(),
+                Value::Object(
+                    self.resume_lines
+                        .iter()
+                        .map(|(program, line)| (program.clone(), Value::String(line.clone())))
                         .collect(),
                 ),
             );
@@ -2029,6 +2097,85 @@ mod tests {
         // file they opened to read.
         let text = fs::read_to_string(scratch.settings_file()).expect("readable");
         assert!(!text.contains("disabled_plugins"), "{text}");
+    }
+
+    #[test]
+    fn test_an_agent_is_resumed_with_its_own_line_until_a_person_writes_another() {
+        use crate::agent::Resume;
+
+        let scratch = ScratchDirectory::new("resume-lines");
+        let settings = Settings::load(scratch.settings_file());
+        assert_eq!(
+            settings.resume_line("claude", Resume::Last).as_deref(),
+            Some("claude --continue")
+        );
+
+        fs::write(
+            scratch.settings_file(),
+            r#"{"resume_lines": {"claude": "  claude --continue --model opus ",
+                                 "codex": "", "opencode": "opencode --continue",
+                                 "gemini": 7}}"#,
+        )
+        .expect("the file should be writable");
+        let settings = Settings::load(scratch.settings_file());
+
+        assert_eq!(
+            settings.resume_line("claude", Resume::Last).as_deref(),
+            Some("claude --continue --model opus"),
+            "the person's line replaces the built-in one"
+        );
+        assert_eq!(
+            settings.resume_line("claude", Resume::Pick).as_deref(),
+            Some("claude --resume"),
+            "and the picker is still the agent's own"
+        );
+        assert_eq!(
+            settings.resume_line("codex", Resume::Last),
+            None,
+            "an empty line is an agent offered nothing"
+        );
+        assert_eq!(settings.resume_line("codex", Resume::Pick), None);
+        assert_eq!(
+            settings.resume_line("opencode", Resume::Last).as_deref(),
+            Some("opencode --continue"),
+            "an agent with no line of its own can be given one"
+        );
+        assert_eq!(
+            settings.resume_line("gemini", Resume::Last).as_deref(),
+            Some("gemini --resume latest"),
+            "a value that is not a line costs only itself"
+        );
+    }
+
+    #[test]
+    fn test_resume_lines_are_kept_through_a_save_and_never_written_unasked() {
+        use crate::agent::Resume;
+
+        let scratch = ScratchDirectory::new("resume-lines-save");
+        let mut settings = Settings::load(scratch.settings_file());
+        settings.set_theme("Midnight");
+        settings.save_blocking().expect("the save should succeed");
+        let text = fs::read_to_string(scratch.settings_file()).expect("readable");
+        assert!(
+            !text.contains(RESUME_LINES_KEY),
+            "the built-in lines were copied into the file, where the next build's \
+             corrections would never reach them: {text}"
+        );
+
+        fs::write(
+            scratch.settings_file(),
+            r#"{"resume_lines": {"claude": "claude --continue --model opus"}}"#,
+        )
+        .expect("the file should be writable");
+        let mut settings = Settings::load(scratch.settings_file());
+        settings.set_theme("Midnight");
+        settings.save_blocking().expect("the save should succeed");
+        assert_eq!(
+            Settings::load(scratch.settings_file())
+                .resume_line("claude", Resume::Last)
+                .as_deref(),
+            Some("claude --continue --model opus")
+        );
     }
 
     #[test]

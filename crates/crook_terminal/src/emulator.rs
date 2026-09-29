@@ -75,6 +75,11 @@ pub enum TerminalEvent {
         exit: Option<i32>,
         /// How long it ran, timed from the submit.
         took: Option<Duration>,
+        /// Whether a command ran: the block had a command line, or the shell
+        /// said one started. `false` for the bare `D` of a line that ran
+        /// nothing — ctrl-c at the prompt, or an empty Enter — which is still
+        /// a boundary, and still reported.
+        ran: bool,
     },
     /// The child asked the terminal to close.
     Exit,
@@ -471,6 +476,7 @@ impl Emulator {
                     self.events.push(TerminalEvent::CommandFinished {
                         exit: finished.exit,
                         took: finished.took,
+                        ran: finished.ran,
                     });
                 }
             }

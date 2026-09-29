@@ -594,6 +594,14 @@ pub struct Workspace {
     /// of its own, with its own undo stack and its own history, which is what
     /// makes two panes of the same tab two places to work rather than one.
     inputs: HashMap<PaneId, TextInput>,
+    /// The resume line a restore typed into each pane's field, while nothing
+    /// has run in that pane since.
+    ///
+    /// What makes "Resume every agent" send only what Crook put there: a
+    /// field whose text is no longer the line recorded here is one a person
+    /// has taken over, and it is theirs to send. See
+    /// [`Self::resume_every_agent`].
+    resume_offers: HashMap<PaneId, String>,
     /// The system clipboard every field copies to and pastes from. One for the
     /// window: see [`Clipboard`].
     clipboard: Clipboard,
@@ -997,6 +1005,7 @@ impl Workspace {
             git,
             terminals,
             inputs: HashMap::new(),
+            resume_offers: HashMap::new(),
             clipboard: Clipboard::new(),
             divider_drag: DividerDrag::new(),
             session_saves: Arc::default(),
@@ -4119,6 +4128,54 @@ impl Workspace {
         }
     }
 
+    /// Sends every resume line a restore left in a composer that nobody has
+    /// touched since, as though Enter had been pressed in each.
+    ///
+    /// Only those. A field whose text is not the line the restore typed is
+    /// one a person has started editing — a flag added, the line cleared, a
+    /// different command — and a press meant for "the agents Crook brought
+    /// back" must not send what somebody is halfway through writing. A pane
+    /// whose shell has not opened yet keeps its line and its offer, for a
+    /// press once it has.
+    fn resume_every_agent(&mut self, ctx: &mut ViewContext<Self>) {
+        for pane in self.waiting_resumes() {
+            let Some((terminal, _)) = self.terminal(pane, ctx) else {
+                continue;
+            };
+            let Some(input) = self.inputs.get(&pane) else {
+                continue;
+            };
+            // The field's own Enter: the line leaves the field for the
+            // shell's history as well as the shell, which is where a person
+            // pressing Up afterwards expects to find it.
+            let Some(sent) = input.apply(crate::input_keys::Intent::Submit, &self.clipboard) else {
+                continue;
+            };
+            self.resume_offers.remove(&pane);
+            if terminal.submit(&sent)
+                && let Some(blocks) = self.pane_blocks(pane)
+            {
+                blocks.apply(ScrollCause::Submit);
+            }
+        }
+        ctx.notify();
+    }
+
+    /// The panes whose fields still hold their resume line exactly as a
+    /// restore typed it, in the strip's order.
+    fn waiting_resumes(&self) -> Vec<PaneId> {
+        self.tabs
+            .panes()
+            .map(|(_, pane)| pane.id())
+            .filter(|pane| {
+                self.resume_offers
+                    .get(pane)
+                    .zip(self.inputs.get(pane))
+                    .is_some_and(|(line, input)| input.editor().text() == line)
+            })
+            .collect()
+    }
+
     /// Makes the worktree the creator describes, and opens a pane in it.
     fn create_worktree(&mut self, ctx: &mut ViewContext<Self>) {
         if self.tab_menu.working {
@@ -5653,10 +5710,26 @@ impl Workspace {
                 reported
             }
             TerminalUpdate::Running(pane, command) => {
+                let starts = command.is_some();
                 let command = command.clone();
-                self.update_session(*pane, ctx, |session| {
-                    session.running_command = command;
-                })
+                let mut changed_agent = false;
+                let reported = self.update_session(*pane, ctx, |session| {
+                    changed_agent = session.set_running_command(command);
+                });
+                // Whatever runs, the line a restore offered here is spent:
+                // it was sent, or the person did something else first.
+                if starts {
+                    self.resume_offers.remove(pane);
+                }
+                // The agent a pane runs is what the next window offers back,
+                // and every Crook update is a restart: an agent that started
+                // since the last save would not be in the file the restart
+                // reads. Only on a change of agent, though, and not on every
+                // command, which would be a write per `ls`.
+                if changed_agent {
+                    self.save_session(ctx);
+                }
+                reported
             }
             TerminalUpdate::Closed(pane) => {
                 if self.apply(TabAction::ClosePane(*pane), ctx) == TabEffect::CloseWindow {
@@ -5677,7 +5750,19 @@ impl Workspace {
                 pane,
                 while_running,
             } => self.ring(*pane, *while_running, ctx),
-            TerminalUpdate::CommandFinished { pane, exit, took } => {
+            TerminalUpdate::CommandFinished {
+                pane,
+                exit,
+                took,
+                ran,
+            } => {
+                // Only a line that ran something: ctrl-c at the prompt and an
+                // empty Enter are marked too, and neither moves the pane on
+                // from what a restore brought back. The plugins hear both,
+                // since what they are told is that the shell said so.
+                if *ran {
+                    self.spend_restored_agent(*pane, ctx);
+                }
                 self.command_finished(*pane, *exit, *took, ctx);
                 self.tell_the_desktop_a_command_ended(*pane, *exit, *took, ctx);
                 true
@@ -5724,6 +5809,33 @@ impl Workspace {
             // The pane closed between the shell saying something and the main
             // thread hearing it. Nothing to write it into, and nothing wrong.
             log::debug!("a terminal reported {update:?} for a pane that has gone");
+        }
+    }
+
+    /// Spends what a restore left in a pane once a command has finished
+    /// there: the offer of its resume line, and the agent's name.
+    ///
+    /// The `Running` update spends them too, but only for a command it saw
+    /// running, and it reads the pane at rest: `cd`, `ls` or `git status`
+    /// can start and end between two reads. The shell's end-of-command mark
+    /// arrives for every command, however quick, so this is what makes a
+    /// `cd` out of the directory end the agent's claim on the pane — which is
+    /// what keeps the file from naming the agent against a directory its
+    /// conversation was never had in. A pane whose agent changed is saved
+    /// straight away, for the reason the `Running` update saves one.
+    ///
+    /// Called only for a mark with a command behind it. The same mark ends a
+    /// line that ran nothing, and a person who pressed ctrl-c to clear the
+    /// offered line for now has not moved on from it.
+    fn spend_restored_agent(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        self.resume_offers.remove(&pane);
+        let forgotten = self
+            .tabs
+            .pane_mut(pane)
+            .is_some_and(|pane| pane.session_mut().command_finished());
+        if forgotten {
+            ctx.notify();
+            self.save_session(ctx);
         }
     }
 
@@ -6329,6 +6441,14 @@ impl Workspace {
                 self.block_target()?;
                 return Some(WorkspaceAction::Block(BlockAction::ScrollTo(edge)));
             }
+            // Declined with nothing to send, like every command here that
+            // has nothing to act on, so a chord bound to it reaches the shell.
+            Binding::ResumeAgents => {
+                if self.waiting_resumes().is_empty() {
+                    return None;
+                }
+                return Some(WorkspaceAction::ResumeAgents);
+            }
         };
 
         Some(WorkspaceAction::Tab(tab))
@@ -6676,6 +6796,7 @@ impl Workspace {
             self.inputs.entry(*id).or_insert_with(TextInput::for_pane);
         }
         self.interactions.retain(|id, _| open.contains(id));
+        self.resume_offers.retain(|id, _| open.contains(id));
         // A closed pane's half-written command line goes with it. Keeping it
         // would mean a later pane inheriting somebody else's history the first
         // time an id was reused.
@@ -7541,9 +7662,49 @@ impl Workspace {
     pub fn restore(&mut self, strip: TabStrip, ctx: &mut ViewContext<Self>) {
         self.tabs = strip;
         self.sync_interactions();
+        self.offer_resumes(ctx);
         self.sync_git(ctx);
         self.sync_input_keys();
         ctx.notify();
+    }
+
+    /// Types each restored agent's resume line into its pane's field, unsent.
+    ///
+    /// Unsent because the process is gone and a new one is a thing a person
+    /// starts: a restore that ran `claude --continue` in every pane by itself
+    /// would be a window that spends somebody's budget on the way up, in
+    /// panes they have not looked at yet. What a restore can do is have the
+    /// line ready, the way "Run again" does for a block — Enter in one pane,
+    /// or "Resume every agent" for all of them. See
+    /// [`crate::session::resume_offers`] for which line each pane gets.
+    fn offer_resumes(&mut self, ctx: &mut ViewContext<Self>) {
+        let offers = crate::session::resume_offers(&self.tabs, |program, resume| {
+            self.settings.resume_line(program, resume)
+        });
+        for (pane, line) in offers {
+            self.type_into_input(pane, &line, ctx);
+            self.resume_offers.insert(pane, line);
+        }
+    }
+
+    /// Takes a restore's resume line back out of a pane's field, if the field
+    /// still holds it exactly as the restore typed it.
+    ///
+    /// For a launch that types into the pane itself — `--run`, `--type` —
+    /// and so needs the field empty: the line would otherwise be the front
+    /// half of whatever it typed. The agent stays named. A command the launch
+    /// runs spends it the way any command does, and a line it only types
+    /// leaves the pane what it was.
+    pub fn withdraw_resume_offer(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        let Some(line) = self.resume_offers.remove(&pane) else {
+            return;
+        };
+        if let Some(input) = self.inputs.get(&pane)
+            && input.editor().text() == line
+        {
+            input.abandon();
+            ctx.notify();
+        }
     }
 }
 
@@ -7762,6 +7923,7 @@ impl TypedActionView for Workspace {
             WorkspaceAction::HoverRow { pane, entered } => self.hover_row(pane, entered, ctx),
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),
             WorkspaceAction::Complete(pane) => self.request_completions(pane, ctx),
+            WorkspaceAction::ResumeAgents => self.resume_every_agent(ctx),
             WorkspaceAction::Run(id) => self.run_action(id, ctx),
             WorkspaceAction::RunAbout(id, subject) => {
                 // Said, then run, which is the gesture a picker's row makes

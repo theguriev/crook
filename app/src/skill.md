@@ -83,6 +83,22 @@ forward the tab already in it; `New worktree…` asks for a branch name and open
 checkout under Crook's own store, folded into a group with the tab that asked. There is no
 command-line flag for any of this; tell the person where the menu is.
 
+## After Crook restarts
+
+Every Crook update is a restart, and a restart ends every process in the window, an agent's
+included. The window comes back with each pane's shell in the directory it was in. A pane that
+was running Claude Code, Codex, Gemini CLI or Copilot comes back with that agent's resume line
+typed into its command line and not sent: `claude --continue`, `codex resume --last`, `gemini
+--resume latest` or Copilot's picker `copilot --resume` — and the agent's picker (`claude
+--resume`, `codex resume`) where two panes of one agent shared a directory, or nothing for
+Gemini CLI, which has no picker. OpenCode and aider come back with an empty command line
+unless the person has given them a line under `resume_lines` in `settings.json`. Only the
+agent's program name is remembered, never the prompt typed after it, and no output comes back.
+Nothing runs until the person presses Enter in the pane, or chooses "Resume every agent" in
+the palette, which sends every line Crook typed and nobody has edited. A resumed conversation
+is in the same directory as before; the shell, its environment and anything that was running
+in the background are new.
+
 ## Where things are
 
 - The command palette (shift-cmd-p, or ctrl-shift-p off macOS) is one box for every command,

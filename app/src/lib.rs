@@ -464,6 +464,12 @@ impl Overrides {
             || self.block_menu.is_some()
             || self.scroll_blocks.is_some()
     }
+
+    /// Whether this run types into the focused pane's field: `--run`, which
+    /// sends what it types, and `--type`, which leaves it there.
+    fn types_into_the_field(&self) -> bool {
+        !self.run.is_empty() || self.type_text.is_some()
+    }
 }
 
 /// Runs Crook.
@@ -1347,6 +1353,40 @@ fn resolve_fonts(font_db: &CosmicFontDb, monospace: Option<&str>) -> Result<Font
                 .context("no usable monospace font")?,
         },
     })
+}
+
+/// Opens a window's strip on what the session file describes, and then on
+/// what the command line asked for on top of it.
+///
+/// One function rather than three steps in [`Shell::new`] because the order
+/// is the point, and a test can hold a function to it:
+///
+/// - The restore first. The overrides open a settings page in whatever strip
+///   is there, and a session that describes nothing leaves the strip a fresh
+///   window's, which is what every launch had before there was a file to
+///   read.
+/// - The overrides next. See [`apply_overrides`].
+/// - Last, for `--run` and `--type`, the focused pane's resume line taken back
+///   out of its field. Both type into that field as though it were empty, and
+///   a restore may have left an agent's resume line there: typed after it,
+///   `--run 'git status'` would send `claude --continuegit status`. After the
+///   overrides, because the pane they type into is the one focused once those
+///   have run; after the restore, because until then there is no line.
+fn restore_and_override(
+    workspace: &mut Workspace,
+    session: &crate::session::Session,
+    overrides: &Overrides,
+    ctx: &mut ViewContext<Workspace>,
+) {
+    if let Some(strip) = session.restore() {
+        workspace.restore(strip, ctx);
+    }
+    apply_overrides(workspace, overrides, ctx);
+    if overrides.types_into_the_field()
+        && let Some(pane) = workspace.tabs().focused_pane_id()
+    {
+        workspace.withdraw_resume_offer(pane, ctx);
+    }
 }
 
 /// Puts the workspace into the state the command line asked to start in.
@@ -3182,21 +3222,14 @@ impl Shell {
         app.update(|ctx| {
             workspace.update(ctx, |workspace, ctx| {
                 // First of all, because everything below it works on whatever
-                // strip is there: the overrides open a settings page in it,
-                // the git poll reads its directories, and `start_terminals`
-                // opens a shell in every pane it holds.
-                //
-                // A session that describes nothing leaves the strip a fresh
-                // window's, which is what every launch had before there was a
-                // file to read.
-                if let Some(strip) = session.restore() {
-                    workspace.restore(strip, ctx);
-                }
-                // Before the polls, not after: `start_git_poll` decides
-                // whether to pay for `git diff` from the density it finds, and
-                // a density the command line asked for has to be in place by
-                // then or the first cycle gathers the wrong half.
-                apply_overrides(workspace, &launch.overrides, ctx);
+                // strip is there: the git poll reads its directories, and
+                // `start_terminals` opens a shell in every pane it holds. The
+                // overrides have to be in place by then as well:
+                // `start_git_poll` decides whether to pay for `git diff` from
+                // the density it finds, and a density the command line asked
+                // for that arrived later would leave the first cycle
+                // gathering the wrong half.
+                restore_and_override(workspace, &session, &launch.overrides, ctx);
                 // This window is on a desktop, which is the one place a
                 // notification is for: a snapshot and a test keep the silent
                 // one the workspace opens with.
@@ -4302,6 +4335,36 @@ mod tests {
                 ..Overrides::default()
             }
             .wants_shells()
+        );
+    }
+
+    #[test]
+    fn a_run_that_types_into_the_field_is_told_apart_from_one_that_does_not() {
+        // The two flags a restored resume line is taken out of the field
+        // for, because both type after whatever the field already holds.
+        assert!(!Overrides::default().types_into_the_field());
+        assert!(
+            Overrides {
+                run: vec!["git status".to_owned()],
+                ..Overrides::default()
+            }
+            .types_into_the_field()
+        );
+        assert!(
+            Overrides {
+                type_text: Some("x".to_owned()),
+                ..Overrides::default()
+            }
+            .types_into_the_field()
+        );
+        // Selecting output types nothing, and leaves the field's line alone.
+        assert!(
+            !Overrides {
+                select_output: Some("x".to_owned()),
+                find_output: Some("x".to_owned()),
+                ..Overrides::default()
+            }
+            .types_into_the_field()
         );
     }
 
