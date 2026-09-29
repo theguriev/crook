@@ -92,6 +92,24 @@ pub fn current_branch(dir: &Path) -> Option<Head> {
     discover(dir).and_then(|layout| read_head(&layout.git_dir))
 }
 
+/// The branch the work in `dir` is on: [`current_branch`], except that a
+/// `HEAD` a rebase detached is the branch being rebased, as `git status`
+/// says it is — see [`branch::rebasing`].
+///
+/// For what goes with a branch rather than with a commit — a pull request —
+/// where a rebase to bring a branch up to date is not leaving it. A row's
+/// own label keeps [`current_branch`]'s reading, which shows the commit the
+/// rebase has reached.
+pub fn branch_at_work(dir: &Path) -> Option<Head> {
+    let layout = discover(dir)?;
+    match read_head(&layout.git_dir)? {
+        head @ Head::Detached { .. } => {
+            Some(branch::rebasing(&layout.git_dir).map_or(head, Head::Branch))
+        }
+        branch => Some(branch),
+    }
+}
+
 /// Every branch the repository `dir` sits in has, in name order.
 ///
 /// Cheap in the same way [`current_branch`] is — it reads files and spawns

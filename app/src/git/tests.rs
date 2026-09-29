@@ -94,8 +94,22 @@ fn without_git(test: &str) -> bool {
 /// `core.hooksPath` or `core.autocrlf` set would otherwise see these tests
 /// fail for reasons that have nothing to do with the code.
 fn git(dir: &Path, args: &[&str]) -> String {
+    let output = git_output(dir, args);
+
+    assert!(
+        output.status.success(),
+        "git {args:?} in {} failed: {}",
+        dir.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// [`git`], for a command that is expected to fail — a rebase that stops on
+/// a conflict — handing back whatever it did.
+fn git_output(dir: &Path, args: &[&str]) -> std::process::Output {
     let nowhere = dir.join("no-such-gitconfig");
-    let output = command("git")
+    command("git")
         .args(["-c", "init.defaultBranch=main"])
         .args(["-c", "commit.gpgsign=false"])
         .args(["-c", "core.autocrlf=false"])
@@ -110,15 +124,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
         .env("GIT_COMMITTER_EMAIL", "tests@crook.invalid")
         .stdin(Stdio::null())
         .output()
-        .expect("git is installed; the caller checked");
-
-    assert!(
-        output.status.success(),
-        "git {args:?} in {} failed: {}",
-        dir.display(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        .expect("git is installed; the caller checked")
 }
 
 /// A repository at `<scratch>/<name>` with one commit of a three-line file.
@@ -332,6 +338,96 @@ fn a_detached_head_reads_as_the_short_sha_git_itself_would_print() {
         head.label(),
         git(&repo, &["rev-parse", "--short=7", "HEAD"])
     );
+}
+
+#[test]
+fn a_rebase_in_progress_is_the_branch_it_is_rebasing() {
+    // Both backends' files, as git writes them: `HEAD` a bare object id and
+    // the branch's full ref in `head-name`.
+    let scratch = ScratchDir::new("rebasing");
+    for backend in ["rebase-merge", "rebase-apply"] {
+        let repo = scratch.dir(backend);
+        let git_dir = repo.join(".git");
+        write(
+            &git_dir.join("HEAD"),
+            "1a22cb92d4e5f60718293a4b5c6d7e8f90123456\n",
+        );
+        write(
+            &git_dir.join(backend).join("head-name"),
+            "refs/heads/feat/pr-on-the-row\n",
+        );
+
+        assert_eq!(
+            branch::rebasing(&git_dir).as_deref(),
+            Some("feat/pr-on-the-row"),
+            "{backend}"
+        );
+        assert_eq!(
+            branch_at_work(&repo),
+            Some(Head::Branch("feat/pr-on-the-row".to_owned())),
+            "{backend}"
+        );
+        // The row's own label still says where the rebase has got to.
+        assert!(current_branch(&repo).is_some_and(|head| head.is_detached()));
+    }
+}
+
+#[test]
+fn a_detached_head_with_no_branch_being_rebased_is_still_detached() {
+    let scratch = ScratchDir::new("rebasing-detached");
+    let repo = scratch.dir("repo");
+    let git_dir = repo.join(".git");
+    write(
+        &git_dir.join("HEAD"),
+        "1a22cb92d4e5f60718293a4b5c6d7e8f90123456\n",
+    );
+    assert!(branch_at_work(&repo).is_some_and(|head| head.is_detached()));
+
+    // What git writes when the thing being rebased was a detached head.
+    write(
+        &git_dir.join("rebase-merge").join("head-name"),
+        "detached HEAD\n",
+    );
+    assert_eq!(branch::rebasing(&git_dir), None);
+    assert!(branch_at_work(&repo).is_some_and(|head| head.is_detached()));
+
+    // And a branch is itself, whatever a stale file says.
+    write(&git_dir.join("HEAD"), "ref: refs/heads/main\n");
+    write(
+        &git_dir.join("rebase-merge").join("head-name"),
+        "refs/heads/feat\n",
+    );
+    assert_eq!(branch_at_work(&repo), Some(Head::Branch("main".to_owned())));
+}
+
+#[test]
+fn a_rebase_stopped_on_a_conflict_is_still_on_its_branch() {
+    if without_git("a_rebase_stopped_on_a_conflict_is_still_on_its_branch") {
+        return;
+    }
+    // The case a pull request has to live through: its branch brought up to
+    // date with main, stopped on a conflict for as long as it takes to fix.
+    let scratch = ScratchDir::new("rebase-conflict");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    git(&repo, &["checkout", "-b", "feat"]);
+    write(&repo.join("tracked.txt"), "feat\ntwo\nthree\n");
+    git(&repo, &["commit", "--no-verify", "-am", "feat"]);
+    git(&repo, &["checkout", "main"]);
+    write(&repo.join("tracked.txt"), "main\ntwo\nthree\n");
+    git(&repo, &["commit", "--no-verify", "-am", "main"]);
+    git(&repo, &["checkout", "feat"]);
+
+    let rebase = git_output(&repo, &["rebase", "main"]);
+    assert!(!rebase.status.success(), "the rebase was meant to stop");
+
+    assert!(
+        current_branch(&repo).is_some_and(|head| head.is_detached()),
+        "git no longer detaches HEAD for a rebase, and this test proves nothing"
+    );
+    assert_eq!(branch_at_work(&repo), Some(Head::Branch("feat".to_owned())));
+
+    git(&repo, &["rebase", "--abort"]);
+    assert_eq!(branch_at_work(&repo), Some(Head::Branch("feat".to_owned())));
 }
 
 #[test]

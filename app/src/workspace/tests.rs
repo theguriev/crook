@@ -3081,6 +3081,126 @@ fn the_pull_request_goes_when_the_panes_branch_changes() {
 }
 
 #[test]
+fn the_pull_request_stays_through_a_rebase_of_its_branch() {
+    // A rebase detaches HEAD for as long as it runs, and the agent fixing a
+    // conflict changes counts the git model reports all the while. The branch
+    // is being brought up to date, not left, and nothing would say the pull
+    // request again when the rebase puts HEAD back: its push runs no
+    // `gh pr create`.
+    let scratch = Scratch::new();
+    let repository = scratch.path().join("repository");
+    let git_dir = repository.join(".git");
+    fs::create_dir_all(&git_dir).unwrap();
+    let head = git_dir.join("HEAD");
+    fs::write(&head, "ref: refs/heads/feat\n").unwrap();
+
+    let mut harness = Harness::new(1);
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    report_pull_request(&mut harness, pane, PULL_REQUEST);
+
+    let sha = "1a22cb92d4e5f60718293a4b5c6d7e8f90123456";
+    fs::write(&head, format!("{sha}\n")).unwrap();
+    fs::create_dir_all(git_dir.join("rebase-merge")).unwrap();
+    fs::write(
+        git_dir.join("rebase-merge").join("head-name"),
+        "refs/heads/feat\n",
+    )
+    .unwrap();
+    harness.record_git(pane, "1a22cb9", Some(seeded_diff()));
+    assert!(
+        pull_request_of(&harness, pane).is_some(),
+        "a rebase took the pull request off its own branch's row"
+    );
+
+    // Said again mid-rebase, it is still the branch's, not the commit's.
+    report_pull_request(&mut harness, pane, PULL_REQUEST);
+    assert_eq!(
+        pull_request_of(&harness, pane).and_then(|pull_request| pull_request.branch),
+        Some(Head::Branch("feat".to_owned()))
+    );
+
+    // `git rebase --continue` puts HEAD back, and the link is where it was.
+    fs::remove_dir_all(git_dir.join("rebase-merge")).unwrap();
+    fs::write(&head, "ref: refs/heads/feat\n").unwrap();
+    harness.record_git(pane, "feat", None);
+    assert!(pull_request_of(&harness, pane).is_some());
+
+    // A commit checked out with no rebase names no other branch either.
+    fs::write(&head, format!("{sha}\n")).unwrap();
+    harness.record_git(pane, "1a22cb9", None);
+    assert!(pull_request_of(&harness, pane).is_some());
+
+    // Another branch does.
+    fs::write(&head, "ref: refs/heads/main\n").unwrap();
+    harness.record_git(pane, "main", None);
+    assert_eq!(pull_request_of(&harness, pane), None);
+
+    // And so does a rebase of another branch, which checked that one out
+    // first: the detached HEAD is read as the branch being rebased, and it
+    // is not this one's.
+    fs::write(&head, "ref: refs/heads/feat\n").unwrap();
+    report_pull_request(&mut harness, pane, PULL_REQUEST);
+    fs::write(&head, format!("{sha}\n")).unwrap();
+    fs::create_dir_all(git_dir.join("rebase-merge")).unwrap();
+    fs::write(
+        git_dir.join("rebase-merge").join("head-name"),
+        "refs/heads/other\n",
+    )
+    .unwrap();
+    harness.record_git(pane, "1a22cb9", None);
+    assert_eq!(
+        pull_request_of(&harness, pane),
+        None,
+        "a rebase of another branch kept this one's pull request"
+    );
+}
+
+#[test]
+fn a_long_label_is_cut_on_the_chip_and_the_card_has_the_whole_address() {
+    // Not github.com, so the chip names the host — and a host can be as long
+    // as an address can, which a chip laid out at its natural width carried
+    // past the row's edge.
+    const LONG: &str = "https://gitlab.merge-requests.a-rather-long-subdomain.example.com/group/project/-/merge_requests/42";
+    let mut harness = Harness::seeded();
+    let pane = harness.pane_ids()[0];
+    harness.seed(pane, Some(seeded_diff()));
+    harness.set_options(TabOptions {
+        density: Density::Expanded,
+        ..harness.options()
+    });
+    report_pull_request(&mut harness, pane, LONG);
+
+    let scene = harness.frame();
+    let row = tab_boxes(&scene)[0];
+    let chips = chip_boxes(&scene);
+    assert_eq!(chips.len(), 2, "{chips:?}");
+    let chip = chips[1];
+    assert!(
+        chip.width() <= crate::workspace::row_content::PULL_REQUEST_LABEL_WIDTH + 8.5,
+        "the chip is {} wide",
+        chip.width()
+    );
+    assert!(
+        chip.max_x() <= row.max_x() && chips[0].min_x() >= row.min_x(),
+        "the chips {chips:?} spill out of the row {row:?}"
+    );
+    let text = strip_text(&scene);
+    assert!(text.contains("#42"), "the number was cut: {text}");
+    assert!(
+        !text.contains("PR #42"),
+        "a GitLab host read as github.com: {text}"
+    );
+
+    assert!(
+        card_text(&mut harness).contains(LONG.get(..40).unwrap()),
+        "the card does not say where the link goes"
+    );
+}
+
+#[test]
 fn the_menu_offers_the_pull_request_only_on_a_row_that_has_one() {
     let mut harness = Harness::seeded();
     let tab = harness.active_id();

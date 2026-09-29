@@ -5140,7 +5140,8 @@ impl Workspace {
     ///
     /// Against the branch the pane is on *now*, read from `HEAD` rather than
     /// from the git facts a row prints, which are up to a poll old — see
-    /// [`PullRequest::branch`]. The same address said again keeps what the
+    /// [`PullRequest::branch`] — and read as the branch being rebased while a
+    /// rebase has `HEAD` detached. The same address said again keeps what the
     /// last check found, since that answer is still about it; a new one
     /// starts unchecked.
     fn pull_request_reported(
@@ -5153,7 +5154,7 @@ impl Workspace {
             .tabs
             .pane(pane)
             .and_then(|pane| pane.session().working_directory.as_deref())
-            .and_then(crate::git::current_branch);
+            .and_then(crate::git::branch_at_work);
         self.update_session(pane, ctx, |session| match &mut session.pull_request {
             Some(known) if known.url == url => known.branch = branch,
             _ => session.pull_request = Some(PullRequest::new(url, branch)),
@@ -5167,7 +5168,8 @@ impl Workspace {
     /// each, and usually none at all — whenever the git model says a branch
     /// or a count changed, and whenever a pane moves. Not on a clock: a branch
     /// switch is what the git model's own gather notices, and this rides on
-    /// it.
+    /// it. What counts as leaving is [`PullRequest::is_left_for`]'s: another
+    /// branch, or no repository — not a rebase, and not a detached `HEAD`.
     fn forget_moved_pull_requests(&mut self) {
         let moved: Vec<PaneId> = self
             .tabs
@@ -5178,8 +5180,8 @@ impl Workspace {
                     let now = session
                         .working_directory
                         .as_deref()
-                        .and_then(crate::git::current_branch);
-                    now != pull_request.branch
+                        .and_then(crate::git::branch_at_work);
+                    pull_request.is_left_for(now.as_ref())
                 })
             })
             .map(|(_, pane)| pane.id())

@@ -154,11 +154,13 @@ pub struct PullRequest {
     /// Its address, which passed `crook_terminal::agent::pull_request_url` on
     /// the way in — https, and nothing in it a link opener could be tricked by.
     pub url: String,
-    /// The branch the pane was on when the agent said it, read then.
+    /// The branch the pane was on when the agent said it, read then — the
+    /// branch being rebased, when a rebase had `HEAD` detached.
     ///
     /// What the pull request is dropped against: a pane that has moved to
     /// another branch is doing other work, and a link to the last branch's
-    /// pull request on its row would be a claim about the new one. Read from
+    /// pull request on its row would be a claim about the new one — see
+    /// [`PullRequest::is_left_for`]. Read from
     /// `HEAD` at the moment of the report rather than taken from the row's
     /// git facts, which are up to a poll old — an agent that makes a branch,
     /// pushes it and opens its pull request inside one poll would otherwise
@@ -177,6 +179,24 @@ impl PullRequest {
             url,
             branch,
             check: None,
+        }
+    }
+
+    /// Whether a pane whose work is now on `now` has left the branch this
+    /// pull request was reported on — and so whether it should go.
+    ///
+    /// Another branch has, and so has leaving the repository, which is no
+    /// branch at all. A detached `HEAD` is not known to have: a checkout of a
+    /// commit to look at it, a bisect, names no other branch, and a pull
+    /// request dropped then is dropped for good, because nothing says it
+    /// again when the branch comes back — the hook reports the address `gh pr
+    /// create` printed, and a branch coming back runs no `gh pr create`. A
+    /// rebase's detached `HEAD` does not get here as one at all:
+    /// `git::branch_at_work` reads it as the branch being rebased.
+    pub fn is_left_for(&self, now: Option<&Head>) -> bool {
+        match now {
+            Some(Head::Detached { .. }) => false,
+            now => now != self.branch.as_ref(),
         }
     }
 }
@@ -415,31 +435,69 @@ impl AgentSession {
         !active && (self.asks_for_a_look() || self.status == AgentStatus::NeedsInput)
     }
 
-    /// What a pull-request chip says: `PR #123`, or the raw URL when the number
-    /// cannot be read out of it.
-    ///
-    /// Warp's `github_pr_display_text_from_url`, rule for rule — split on
-    /// `/pull/`, take everything up to the next delimiter, require it to be a
-    /// positive run of digits. Showing the URL when that fails beats showing
-    /// nothing: a link nobody can label is still a link somebody can follow.
+    /// What a pull-request chip says: `PR #123` for a pull request on
+    /// github.com, and the host with the number — `gitlab.com #42` — for
+    /// anything else. See [`pull_request_label`].
     pub fn pull_request_label(&self) -> Option<String> {
-        let url = self.pull_request.as_ref()?.url.trim();
-        if url.is_empty() {
-            return None;
-        }
-
-        let number = url
-            .rsplit_once("/pull/")
-            .map(|(_, tail)| tail.split(['/', '?', '#']).next().unwrap_or_default())
-            .filter(|number| !number.is_empty())
-            .filter(|number| number.bytes().all(|byte| byte.is_ascii_digit()))
-            .filter(|number| number.parse::<u64>().is_ok_and(|number| number > 0));
-
-        Some(match number {
-            Some(number) => format!("PR #{number}"),
-            None => url.to_owned(),
-        })
+        pull_request_label(&self.pull_request.as_ref()?.url)
     }
+}
+
+/// What a pull-request chip says for `url`, or `None` for an empty one.
+///
+/// The number is Warp's `github_pr_display_text_from_url` rule — split the
+/// path on `/pull/`, take everything up to the next `/`, require a positive
+/// run of digits — or, for a forge that spells a pull request otherwise
+/// (GitLab's `/-/merge_requests/42`, Bitbucket's `/pull-requests/42`), the
+/// path's last segment when that is one.
+///
+/// `PR #<n>` alone only for github.com. Anywhere else the chip names the
+/// host, because the address is whatever a program in the pane wrote to its
+/// terminal, and any program can write one: a bare `PR #12` for
+/// `https://github.com.example.net/o/r/pull/12` would be a link that reads
+/// as the agent's own and opens somebody else's server. The host is the one
+/// after any `user@`, which is where a browser goes. Warp's fallback when it
+/// finds no number is the whole address; this is the host, since an address
+/// is wider than a row — the card prints the whole of it.
+pub fn pull_request_label(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let (authority, rest) = after_scheme.split_at(
+        after_scheme
+            .find(['/', '?', '#'])
+            .unwrap_or(after_scheme.len()),
+    );
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let path = rest.split(['?', '#']).next().unwrap_or_default();
+
+    // Digits and nothing else: `parse` alone would take `+12`.
+    let positive = |number: &&str| {
+        number.bytes().all(|byte| byte.is_ascii_digit())
+            && number.parse::<u64>().is_ok_and(|number| number > 0)
+    };
+    let pull = path
+        .rsplit_once("/pull/")
+        .map(|(_, tail)| tail.split('/').next().unwrap_or_default())
+        .filter(positive);
+    let number = pull.or_else(|| {
+        path.trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .filter(positive)
+    });
+
+    Some(if host.is_empty() {
+        url.to_owned()
+    } else if let Some(number) = pull.filter(|_| host.eq_ignore_ascii_case("github.com")) {
+        format!("PR #{number}")
+    } else if let Some(number) = number {
+        format!("{host} #{number}")
+    } else {
+        host.to_owned()
+    })
 }
 
 /// One tab: an identity and the panes it shows.

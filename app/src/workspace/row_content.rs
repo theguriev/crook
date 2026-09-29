@@ -359,9 +359,7 @@ impl Chips {
             row.add_child(match self.link.clone() {
                 Some((pane, state)) => pull_request_link(label, pane, state, ui),
                 None => pill(
-                    Text::new(label, ui, 10.)
-                        .with_color(theme().text_muted)
-                        .finish(),
+                    pull_request_text(label, theme().text_muted, ui),
                     theme().overlay_1,
                 ),
             });
@@ -385,13 +383,15 @@ fn pull_request_link(
     Hoverable::new(state, move |state| {
         let hovered = state.is_hovered();
         pill(
-            Text::new(label.clone(), ui, 10.)
-                .with_color(if hovered {
+            pull_request_text(
+                label.clone(),
+                if hovered {
                     theme().text_primary
                 } else {
                     theme().text_muted
-                })
-                .finish(),
+                },
+                ui,
+            ),
             if hovered {
                 theme().overlay_3
             } else {
@@ -402,6 +402,31 @@ fn pull_request_link(
     .on_click(move |_, ctx, _| {
         ctx.dispatch_typed_action(WorkspaceAction::OpenPullRequest(pane));
     })
+    .finish()
+}
+
+/// The widest a pull request chip's label is drawn, in pixels.
+///
+/// About `github.example.com #12` at the chip's size: room for any
+/// github.com label and most hosts, and narrow enough that the chip beside a
+/// diff count leaves the row's own text some of the line. The metadata line
+/// lays a chip out at its natural width and gives way only on the left, so
+/// without this a long label pushed the row's text to nothing and the chip
+/// past the panel's edge.
+pub(super) const PULL_REQUEST_LABEL_WIDTH: f32 = 100.;
+
+/// A pull request chip's label, cut at [`PULL_REQUEST_LABEL_WIDTH`].
+///
+/// At the start, when it is cut: the end of a host is the part that says
+/// whose it is, and the number is the part that says which.
+fn pull_request_text(label: String, color: Color, ui: FamilyId) -> Box<dyn Element> {
+    ConstrainedBox::new(
+        Text::new(label, ui, 10.)
+            .with_color(color)
+            .with_ellipsis(Cut::Start)
+            .finish(),
+    )
+    .with_max_width(PULL_REQUEST_LABEL_WIDTH)
     .finish()
 }
 
@@ -628,6 +653,19 @@ fn detail_section(
         footer.add_child(chips);
     }
     column.add_child(footer.finish());
+
+    // The whole address, where there is room for it. The chip is a label,
+    // and a label can be made to look like anything; this is where the link
+    // goes, readable before anybody presses it. Cut at the end, which keeps
+    // the host.
+    if let Some(pull_request) = &session.pull_request {
+        column.add_child(
+            Text::new(pull_request.url.clone(), ui, 10.)
+                .with_color(theme().text_muted)
+                .with_ellipsis(Cut::End)
+                .finish(),
+        );
+    }
 
     // What the last "Check pull request" found, until the next press: the
     // card is where a row says what it had no room for, and a state the row
