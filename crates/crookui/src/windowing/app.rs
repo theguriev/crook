@@ -483,17 +483,6 @@ impl ApplicationHandler<CrookEvent> for App {
                 return;
             }
 
-            // Losing the keyboard is nothing to anyone here; taking it is the
-            // end of any attention the window asked for, and the moment the
-            // application's next keys stop being certainly its own.
-            WindowEvent::Focused(focused) => {
-                if focused {
-                    self.controls.focused();
-                    self.delegate.focused();
-                }
-                return;
-            }
-
             // Reconfiguring the swapchain here would cost one `configure` per
             // resize event; flagging it costs one per frame instead. A scale
             // change is a resize too, because the swapchain is sized in
@@ -508,15 +497,22 @@ impl ApplicationHandler<CrookEvent> for App {
                 return;
             }
 
-            // The look a request for attention asked for, so the request is
-            // over. Taken back here rather than left to the application,
-            // because only X11 needs taking back — it keeps its urgency hint
-            // until somebody removes it — and nothing above this line should
-            // have to know which desktop it is on. Then on to the delegate
-            // like any other focus change.
-            WindowEvent::Focused(true) if self.attention_requested => {
-                self.attention_requested = false;
-                self.with_window(|window| window.withdraw_attention_request());
+            // Taking the keyboard is the look a request for attention asked
+            // for, so the request is over — whichever asked, a close's
+            // question or a pane waiting. Taken back here rather than left to
+            // the application, because only X11 needs taking back — it keeps
+            // its urgency hint until somebody removes it — and nothing above
+            // this line should have to know which desktop it is on. It is also
+            // the moment the application's next keys stop being certainly its
+            // own. Then on to the delegate as an event, like losing the
+            // keyboard, because the workspace keeps whether the window is in
+            // front.
+            WindowEvent::Focused(true) => {
+                self.controls.focused();
+                if std::mem::take(&mut self.attention_requested) {
+                    self.with_window(|window| window.withdraw_attention_request());
+                }
+                self.delegate.focused();
             }
 
             _ => {}
