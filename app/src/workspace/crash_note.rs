@@ -1,10 +1,10 @@
 //! The line under the header that says the last run ended in a panic.
 //!
 //! One line, drawn only in the window after a crash and only until somebody
-//! answers it: *Show* opens the folder the report is in, and *Dismiss* takes
-//! the line down. Either one renames the report to its seen name — see
-//! [`crate::diagnostics::crash`] — so the next window says nothing about a
-//! crash somebody has already been told of.
+//! answers it: *Show* opens the folder the reports are in, and *Dismiss*
+//! takes the line down. Either one renames every report the line is about to
+//! its seen name — see [`crate::diagnostics::crash`] — so the next window
+//! says nothing about a crash somebody has already been told of.
 //!
 //! It is under the header rather than in a corner or over the work, because
 //! it is not urgent and it is not in the way: the header is the one strip of
@@ -32,42 +32,48 @@ use super::view::Workspace;
 /// What the line says.
 pub(crate) const SAID: &str = "Crook stopped unexpectedly last time.";
 
-/// The report the line is about, and the state of its two buttons.
+/// The reports the line is about, and the state of its two buttons.
 ///
 /// On the workspace rather than in the element tree for the reason every
 /// mouse state is: the tree is rebuilt on every frame, and a press is half a
 /// gesture.
 pub(crate) struct CrashNote {
-    /// The report, where it is now: its name changes when it is seen.
-    report: PathBuf,
+    /// The reports the launch found unseen, where they are now: a name
+    /// changes when it is seen. Never empty.
+    reports: Vec<PathBuf>,
     show: MouseStateHandle,
     dismiss: MouseStateHandle,
 }
 
 impl CrashNote {
-    /// A line about `report`.
-    pub(crate) fn new(report: PathBuf) -> Self {
-        Self {
-            report,
+    /// A line about `reports`, or none when there are none to be told of.
+    pub(crate) fn new(reports: Vec<PathBuf>) -> Option<Self> {
+        (!reports.is_empty()).then(|| Self {
+            reports,
             show: MouseStateHandle::default(),
             dismiss: MouseStateHandle::default(),
-        }
+        })
     }
 
-    /// The report, where it is now.
-    pub(crate) fn report(&self) -> &Path {
-        &self.report
+    /// The folder the reports are in, which is what Show opens.
+    pub(crate) fn folder(&self) -> Option<&Path> {
+        self.reports.last().and_then(|report| report.parent())
     }
 
-    /// Records that the report has been looked at, by renaming it.
+    /// Records that the reports have been looked at, by renaming them.
     ///
-    /// A folder that will not take the rename is a line in the log and the
-    /// same line in the next window, which is the right way round: a report
-    /// that could not be marked is one nobody has been told about for sure.
+    /// All of them, since the line spoke for all of them; and only them, so a
+    /// report another window wrote since this one opened is still offered to
+    /// the next. A folder that will not take a rename is a line in the log and
+    /// the same line in the next window, which is the right way round: a
+    /// report that could not be marked is one nobody has been told about for
+    /// sure.
     pub(crate) fn mark_seen(&mut self) {
-        match crate::diagnostics::crash::mark_seen(&self.report) {
-            Ok(seen) => self.report = seen,
-            Err(error) => log::warn!("could not mark {} as seen: {error}", self.report.display()),
+        for report in &mut self.reports {
+            match crate::diagnostics::crash::mark_seen(report) {
+                Ok(seen) => *report = seen,
+                Err(error) => log::warn!("could not mark {} as seen: {error}", report.display()),
+            }
         }
     }
 }

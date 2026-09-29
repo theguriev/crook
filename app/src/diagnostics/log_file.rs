@@ -23,7 +23,10 @@
 //! returned to whoever opened it, and after that the logger behaves exactly as
 //! it did with no file: a write that fails is dropped, and stderr never
 //! notices. The file stops growing at eight megabytes, so a plugin that logs
-//! in a loop fills a few megabytes rather than a disk.
+//! in a loop fills a few megabytes rather than a disk; and the recent lines
+//! keep the first few kilobytes of each, so a plugin that logs a megabyte at
+//! a time costs neither the memory of two hundred of them nor a crash report
+//! too large to attach to an issue.
 
 use std::collections::VecDeque;
 use std::fs::File;
@@ -40,6 +43,14 @@ use crate::settings::ensure_directory;
 
 /// How many of the latest lines are kept for a crash report.
 pub const RECENT: usize = 200;
+
+/// How much of one line the recent lines keep.
+///
+/// A plugin's `log` import takes a string as long as anything a plugin may
+/// hand the host, a megabyte, and a line of Crook's own is a few dozen bytes.
+/// Enough for any message a person would read to the end, and small enough
+/// that [`RECENT`] of them are under a megabyte.
+pub const LINE_BYTES: usize = 4 * 1024;
 
 /// How far one launch's log file may grow.
 ///
@@ -140,7 +151,8 @@ impl Tee {
             most: self.most_bytes,
         };
         // What was said before there was a file, so the file is the whole of
-        // this run rather than the part of it after the window was asked for.
+        // this run rather than the part of it after the window was asked for
+        // (a line past `LINE_BYTES` as the recent lines kept it, clipped).
         // Under the file's lock, which every line takes before the recent
         // lines' — see `keep` — so a line logged meanwhile is written once,
         // after these, rather than twice or not at all.
@@ -151,7 +163,13 @@ impl Tee {
         *open = Some(sink);
         drop(open);
 
-        super::prune(directory, &super::prefix(channel), ".log", super::KEPT);
+        super::prune(
+            directory,
+            &super::prefix(channel),
+            ".log",
+            super::KEPT,
+            &path,
+        );
         Ok(path)
     }
 
@@ -256,12 +274,26 @@ fn line(level: Level, target: &str, message: std::fmt::Arguments<'_>) -> String 
 }
 
 /// Keeps `line` as the newest of the recent lines, dropping the oldest past
-/// [`RECENT`].
+/// [`RECENT`], and the part of it past [`LINE_BYTES`].
 fn remember(recent: &mut VecDeque<String>, line: String) {
     if recent.len() == RECENT {
         recent.pop_front();
     }
-    recent.push_back(line);
+    recent.push_back(clipped(line));
+}
+
+/// `line` cut to its first [`LINE_BYTES`], saying how much more there was,
+/// and still ending in a newline.
+fn clipped(line: String) -> String {
+    let said = line.strip_suffix('\n').unwrap_or(&line);
+    if said.len() <= LINE_BYTES {
+        return line;
+    }
+    let mut end = LINE_BYTES;
+    while !said.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{} [… {} bytes more]\n", &said[..end], said.len() - end)
 }
 
 /// Takes `lock`, a poisoned one included: a thread that panicked while

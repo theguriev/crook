@@ -147,14 +147,17 @@ on this machine:
 | macOS | `~/Library/Logs/Crook` |
 | Windows | `%LOCALAPPDATA%\crook` |
 
-`logs/` holds `crook-<channel>-<when>.log`: the lines the terminal gets, filtered the same way
-(`RUST_LOG` still decides), written whether or not a terminal is attached. `crashes/` holds
-`crook-<channel>-<when>.txt`: the version and platform, where it panicked and with what message,
-a backtrace — function names only in a shipped build, which carries no line numbers — the GPU it
-was drawing with, and the last 200 lines of the log. The newest five of each are kept.
-**Settings → About → Logs and crash reports** names the folder and opens it, and after a crash
-the next window says so in one line under the header: *Show* opens the folder, *Dismiss* puts
-the line away, and neither brings it back on a later launch.
+`logs/` holds `crook-<channel>-<when>.log`, `<when>` being the launch in UTC: the lines the
+terminal gets, filtered the same way (`RUST_LOG` still decides), written whether or not a
+terminal is attached. `crashes/` holds `crook-<channel>-<when>.txt`, `<when>` being the panic:
+the version and platform, where it panicked and with what message, a backtrace, the GPU it was
+drawing with, and the last 200 lines of the log. A shipped build's backtrace names functions but
+not files and lines on Linux and macOS, and names nothing on Windows, whose names are in a
+`crook.pdb` the download does not carry — there the report's `Where` line is the place to start.
+The newest five of each are kept, and a log another Crook window is still writing is never
+removed. **Settings → About → Logs and crash reports** names the folder and opens it, and after
+a crash the next window says so in one line under the header: *Show* opens the folder,
+*Dismiss* puts the line away, and neither brings back a report that line was about.
 
 **Nothing in that folder leaves this machine.** Crook never sends, uploads or reads any of it
 back to anyone. To report a problem, [open an issue](https://github.com/theguriev/crook/issues)

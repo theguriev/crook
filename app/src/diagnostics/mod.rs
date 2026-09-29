@@ -11,7 +11,7 @@
 //! # Nothing here is sent anywhere
 //!
 //! Every byte stays in [`folder`], and nothing in Crook reads it back except
-//! to tell the next window that a report is waiting — see
+//! to tell the next window that reports are waiting — see
 //! [`crash::unseen`]. A person reads a file, decides what of it to share,
 //! and shares it themselves. That is what keeps the README's promise of no
 //! telemetry and no network until asked.
@@ -29,7 +29,8 @@
 //! goes. A *native* crash — a segfault in a GPU driver, an access violation,
 //! an abort from inside a system library — never runs Rust code on the way
 //! down, so it leaves no report; the log file is what is left of it, up to
-//! the last line that was written.
+//! the last line that was written — which is why no launch prunes a log
+//! another window still has open.
 
 pub mod crash;
 pub mod log_file;
@@ -63,9 +64,10 @@ pub struct Diagnostics {
     /// The folder the logs and the crash reports are both under, which is
     /// what the About page names and opens.
     pub folder: PathBuf,
-    /// The newest crash report of this channel nobody has looked at yet, if
-    /// there is one.
-    pub crash: Option<PathBuf>,
+    /// The crash reports of this channel nobody has looked at yet, oldest
+    /// first: what the line under the header is about, and what answering it
+    /// marks seen. Empty when there are none.
+    pub crashes: Vec<PathBuf>,
 }
 
 /// Where this machine keeps Crook's logs and crash reports.
@@ -89,7 +91,7 @@ pub fn folder() -> Option<PathBuf> {
 }
 
 /// Starts this run's diagnostics: opens the log file, installs the panic
-/// hook, and looks for a report an earlier run left.
+/// hook, and looks for the reports earlier runs left.
 ///
 /// `None` only on a machine with no home directory to put anything in, and
 /// then nothing is written — stderr carries on as it always did. A log file
@@ -97,29 +99,34 @@ pub fn folder() -> Option<PathBuf> {
 /// hook is installed regardless, since a report is a file of its own.
 pub fn start(channel: Channel) -> Option<Diagnostics> {
     let folder = folder()?;
-    let started = stamp(chrono::Local::now());
 
-    match log_file::open(&folder.join(LOGS), channel, &started) {
+    match log_file::open(&folder.join(LOGS), channel, &stamp(chrono::Utc::now())) {
         Ok(path) => log::info!("this run's log is {}", path.display()),
         Err(error) => log::warn!("this run keeps no log file: {error:#}"),
     }
 
-    let crashes = folder.join(CRASHES);
-    // Looked for before the hook is in, so the report found can never be one
-    // this run wrote.
-    let crash = crash::unseen(&crashes, channel);
-    crash::install(crashes, channel, started);
-    Some(Diagnostics { folder, crash })
+    let directory = folder.join(CRASHES);
+    // Looked for before the hook is in, so no report found can be one this
+    // run wrote.
+    let crashes = crash::unseen(&directory, channel);
+    crash::install(directory, channel);
+    Some(Diagnostics { folder, crashes })
 }
 
-/// A moment as the files of one launch are named with it.
+/// A moment as a file is named with it: a log file with the moment its launch
+/// began, a crash report with the moment of the panic.
 ///
 /// Second resolution in an order-preserving spelling, the way the session's
 /// backups are named: a name that sorts as a date is what lets the pruning
 /// tell the oldest file by name alone, and a name survives a copy of the
-/// folder where a modification time does not.
-pub fn stamp(at: chrono::DateTime<chrono::Local>) -> String {
-    at.format("%Y%m%d-%H%M%S").to_string()
+/// folder where a modification time does not. In UTC, whatever zone `at` is
+/// in, and marked so: a laptop that flew west, or a clock that went back an
+/// hour for the winter, would otherwise name a later launch as an earlier one,
+/// and the pruning would take it for the oldest.
+pub fn stamp<Zone: chrono::TimeZone>(at: chrono::DateTime<Zone>) -> String {
+    at.with_timezone(&chrono::Utc)
+        .format("%Y%m%dT%H%M%SZ")
+        .to_string()
 }
 
 /// The start every file of `channel` is named with.
@@ -131,25 +138,51 @@ fn prefix(channel: Channel) -> String {
     format!("crook-{}-", channel.name())
 }
 
-/// Creates `<stem>.<extension>` in `directory`, or, when another launch in the
-/// same second got there first, `<stem>-2.<extension>` and on.
+/// Creates `<stem>.<extension>` in `directory`, or, when another file got
+/// that name in the same second, `<stem>_02.<extension>` and on.
 ///
 /// Created rather than opened, so that two processes started together never
-/// write one file between them.
+/// write one file between them. The second file's mark is an underscore and
+/// two digits because of how names sort: `_` comes after the `.` of the first
+/// name and `02` before `10`, so a later file of the same second is a newer
+/// one to [`prune`] and [`crash::unseen`] as well.
+///
+/// The file is held for as long as it is open, so that no other launch's
+/// [`prune`] removes a log a window is still writing: on Windows by not
+/// sharing the right to delete it, and elsewhere by an advisory lock, which a
+/// person reading the file with anything else does not notice.
 fn fresh(directory: &Path, stem: &str, extension: &str) -> io::Result<(PathBuf, File)> {
     /// A bound, so a folder that answers every name with "exists" is an
-    /// error rather than a loop.
+    /// error rather than a loop — and under a hundred, so every mark is two
+    /// digits.
     const ATTEMPTS: usize = 64;
+
+    let mut options = File::options();
+    options.write(true).create_new(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        /// `FILE_SHARE_READ | FILE_SHARE_WRITE`: everything std shares but
+        /// `FILE_SHARE_DELETE`.
+        const SHARED: u32 = 0x1 | 0x2;
+        options.share_mode(SHARED);
+    }
 
     let mut taken = None;
     for attempt in 1..=ATTEMPTS {
         let name = match attempt {
             1 => format!("{stem}.{extension}"),
-            _ => format!("{stem}-{attempt}.{extension}"),
+            _ => format!("{stem}_{attempt:02}.{extension}"),
         };
         let path = directory.join(name);
-        match File::options().write(true).create_new(true).open(&path) {
-            Ok(file) => return Ok((path, file)),
+        match options.open(&path) {
+            Ok(file) => {
+                // A file system with no locks is one where a live log can be
+                // pruned, as before; it is not a reason to have no log.
+                #[cfg(unix)]
+                let _ = file.try_lock();
+                return Ok((path, file));
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => taken = Some(error),
             Err(error) => return Err(error),
         }
@@ -158,19 +191,39 @@ fn fresh(directory: &Path, stem: &str, extension: &str) -> io::Result<(PathBuf, 
 }
 
 /// Removes every file in `directory` named `<prefix>…<suffix>` but the newest
-/// `kept`.
+/// `kept`, and never `made`, the file the caller has just created, or one
+/// another process is still writing.
 ///
-/// Newest by name, which is newest by start time: see [`stamp`]. A file that
-/// will not go is left, quietly — the next launch tries again, and a few files
-/// nobody can delete are not a problem this can solve.
-fn prune(directory: &Path, prefix: &str, suffix: &str, kept: usize) {
+/// Newest by name: see [`stamp`]. `made` is spared by name because a clock
+/// set back can still stamp it older than the rest, and a file is not pruned
+/// by its own creation; one in use is spared because Crook is a process per
+/// window, and the log of a window opened this morning is the one worth
+/// having if a driver takes that window down tonight. A file that will not go
+/// is left, quietly — the next launch tries again, and a few files nobody can
+/// delete are not a problem this can solve.
+fn prune(directory: &Path, prefix: &str, suffix: &str, kept: usize, made: &Path) {
     for stale in named(directory, prefix, suffix)
         .into_iter()
         .rev()
         .skip(kept)
     {
-        let _ = fs::remove_file(stale);
+        if stale != made && !in_use(&stale) {
+            let _ = fs::remove_file(stale);
+        }
     }
+}
+
+/// Whether another open file holds `path` the way [`fresh`] does.
+///
+/// Never asked on Windows. The hold there is the missing right to delete, and
+/// the removal that asks for it is refused by itself; and a lock there is
+/// mandatory, so even a moment's lock taken to ask would refuse the other
+/// window's next line.
+fn in_use(path: &Path) -> bool {
+    if cfg!(windows) {
+        return false;
+    }
+    File::open(path).is_ok_and(|file| matches!(file.try_lock(), Err(fs::TryLockError::WouldBlock)))
 }
 
 /// Every file in `directory` named `<prefix>…<suffix>`, oldest first.
@@ -218,5 +271,35 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{FixedOffset, TimeZone as _};
+
+    use super::stamp;
+
+    #[test]
+    fn a_later_moment_is_a_later_name_whatever_zone_the_clock_was_in() {
+        // Crook opened in Berlin at six in the evening, and again after a
+        // flight, in New York at one in the afternoon — an hour later. Named
+        // in local time, the second launch sorted before the first, and with
+        // five files after it the pruning took it for the oldest as it was
+        // made.
+        let berlin = FixedOffset::east_opt(2 * 3600)
+            .expect("an offset")
+            .with_ymd_and_hms(2026, 9, 29, 18, 0, 0)
+            .single()
+            .expect("a moment");
+        let new_york = FixedOffset::west_opt(4 * 3600)
+            .expect("an offset")
+            .with_ymd_and_hms(2026, 9, 29, 13, 0, 0)
+            .single()
+            .expect("a moment");
+
+        assert_eq!(stamp(berlin), "20260929T160000Z");
+        assert_eq!(stamp(new_york), "20260929T170000Z");
+        assert!(stamp(berlin) < stamp(new_york));
     }
 }

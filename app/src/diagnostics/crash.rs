@@ -5,30 +5,43 @@
 //! which build, on what, where it panicked and with what message, the
 //! backtrace, the GPU it was drawing with, and the last lines of the log. The
 //! report goes into a file of its own under
-//! [`folder`](super::folder)`/crashes`, and the newest five per channel are
-//! kept.
+//! [`folder`](super::folder)`/crashes`, named with the moment of the panic
+//! rather than the launch's start, so a window left open for days that
+//! panics tonight writes the newest report and not one the pruning takes for
+//! the oldest. The newest five per channel are kept.
 //!
 //! # The next launch, and "seen"
 //!
-//! A report nobody has looked at is one the next window mentions, once, with
-//! a line under the header — see `workspace::crash_note`. Looking at it or
-//! dismissing it renames the file to `….seen.txt` ([`mark_seen`]), and a seen
-//! report is never offered again. The name rather than a settings key, so
-//! the answer lives beside the thing it is about: a report deleted by hand
-//! takes its "seen" with it, and a settings file copied to a new machine does
-//! not carry the old one's.
+//! The reports nobody has looked at are what the next window mentions, once,
+//! with a line under the header — see `workspace::crash_note`. Looking at
+//! them or dismissing the line renames every report it was about to
+//! `….seen.txt` ([`mark_seen`]), and a seen report is never offered again.
+//! Every one, because a launch that panicked twice, or two launches that
+//! both did, are one line: answering it must not leave the other report to
+//! say "Crook stopped unexpectedly last time" after a run that ended well.
+//! And only those, because a report another window writes while the line is
+//! up is one nobody has been told of yet.
+//!
+//! The name rather than a settings key, so the answer lives beside the thing
+//! it is about: a report deleted by hand takes its "seen" with it, and a
+//! settings file copied to a new machine does not carry the old one's.
 //!
 //! Every panic writes one, on whatever thread. One off the main thread need
 //! not end the process — a pane's reader can die and leave the window up — but
 //! it leaves a window that has lost a part of itself, which is a bug worth the
 //! same report; the report names the thread.
 //!
-//! # Function names only
+//! # Function names, where there are any
 //!
 //! A shipped build is stripped of its debug information (`strip =
 //! "debuginfo"` in the workspace manifest), so its backtrace names functions
-//! and not the files and lines they are in. It is still the part of a report
-//! that says where to look, and a development build's has the lines as well.
+//! and not the files and lines they are in — on Linux and macOS, where the
+//! names stay in the binary. A Windows build keeps them in a `crook.pdb`
+//! beside the `.exe` it was linked into, and the download carries the `.exe`
+//! alone, so a shipped Windows build's backtrace has no names at all; its
+//! report's `Where` line is the one that says where to look, and the heading
+//! over the backtrace says so. A development build's has the lines as well,
+//! on every platform.
 
 use std::io::Write as _;
 use std::panic::PanicHookInfo;
@@ -45,6 +58,15 @@ const REPORT: &str = ".txt";
 
 /// What a report is renamed to end in once somebody has looked at it.
 const SEEN: &str = ".seen.txt";
+
+/// The heading over the backtrace, saying what a shipped build's can name.
+/// See the module's documentation.
+const BACKTRACE: &str = if cfg!(windows) {
+    "Backtrace (a shipped Windows build names nothing here, since the names are in a\n\
+     crook.pdb the download does not carry; the Where line above is the place to start):\n"
+} else {
+    "Backtrace (a shipped build carries function names, not files and lines):\n"
+};
 
 /// One panic, in the terms a report writes it down in.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,21 +107,21 @@ impl Panic {
     }
 }
 
-/// Installs the hook that writes a report of every panic into `directory`,
-/// named after `started`, the moment this launch began.
+/// Installs the hook that writes a report of every panic into `directory`.
 ///
 /// Chained to the hook that was there, which runs first: the message on
 /// stderr is the one a person at a terminal has always had, and nothing here
 /// can delay it or take it away.
-pub fn install(directory: PathBuf, channel: Channel, started: String) {
+pub fn install(directory: PathBuf, channel: Channel) {
     let before = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         before(info);
 
+        let at = super::stamp(chrono::Utc::now());
         let panic = Panic::of(info);
         let adapter = crookui::rendering::adapter_in_use();
         let text = report(channel, &panic, adapter.as_deref(), &log_file::recent());
-        match write(&directory, channel, &started, &text) {
+        match write(&directory, channel, &at, &text) {
             Ok(path) => log_file::note(&format!(
                 "panicked at {}: {}; the report is {}",
                 panic.location.as_deref().unwrap_or("an unknown place"),
@@ -154,7 +176,8 @@ pub fn report(channel: Channel, panic: &Panic, adapter: Option<&str>, recent: &[
     }
 
     text.push_str(&format!("\nMessage:\n{}\n", panic.message));
-    text.push_str("\nBacktrace (a shipped build carries function names, not files and lines):\n");
+    text.push('\n');
+    text.push_str(BACKTRACE);
     text.push_str(&panic.backtrace);
     if !panic.backtrace.ends_with('\n') {
         text.push('\n');
@@ -175,33 +198,36 @@ fn target() -> String {
     format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
 }
 
-/// Writes `text` as a new report of `channel` in `directory`, and prunes the
-/// channel's reports to the newest [`KEPT`](super::KEPT). Returns the file.
-pub fn write(
-    directory: &Path,
-    channel: Channel,
-    started: &str,
-    text: &str,
-) -> anyhow::Result<PathBuf> {
+/// Writes `text` as a new report of `channel` in `directory`, named with
+/// `at`, the moment of the panic as [`super::stamp`] spells it, and prunes the
+/// channel's reports to the newest [`KEPT`](super::KEPT) — never the one just
+/// written. Returns the file.
+pub fn write(directory: &Path, channel: Channel, at: &str, text: &str) -> anyhow::Result<PathBuf> {
     ensure_directory(directory)?;
-    let stem = format!("{}{started}", super::prefix(channel));
+    let stem = format!("{}{at}", super::prefix(channel));
     let (path, mut file) = super::fresh(directory, &stem, "txt")?;
     file.write_all(text.as_bytes())?;
-    super::prune(directory, &super::prefix(channel), REPORT, super::KEPT);
+    // Closed now: a report is written whole and once, so it needs no hold
+    // against other launches' pruning, and its name is what spares it from
+    // this one's, on a file system with locks or without.
+    drop(file);
+    super::prune(
+        directory,
+        &super::prefix(channel),
+        REPORT,
+        super::KEPT,
+        &path,
+    );
     Ok(path)
 }
 
-/// The newest report of `channel` in `directory` that nobody has looked at,
-/// if there is one.
-///
-/// Newest by name, which is newest by the launch that wrote it; see
-/// [`super::stamp`]. The older unseen ones are not lost — they are in the
-/// folder a Show opens, beside it.
-pub fn unseen(directory: &Path, channel: Channel) -> Option<PathBuf> {
+/// Every report of `channel` in `directory` that nobody has looked at,
+/// oldest first; see [`super::stamp`] for why a name is its age.
+pub fn unseen(directory: &Path, channel: Channel) -> Vec<PathBuf> {
     super::named(directory, &super::prefix(channel), REPORT)
         .into_iter()
-        .rev()
-        .find(|path| !is_seen(path))
+        .filter(|path| !is_seen(path))
+        .collect()
 }
 
 /// Marks a report as looked at, by its name, and returns where it is now.

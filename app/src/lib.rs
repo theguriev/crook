@@ -2510,8 +2510,8 @@ struct Launch {
     frames: Option<u32>,
     /// What the command line asked to start differently.
     overrides: Overrides,
-    /// Where this run's log and crash reports go, and the report an earlier
-    /// run left unread, for the About page and the line under the header.
+    /// Where this run's log and crash reports go, and the reports earlier
+    /// runs left unread, for the About page and the line under the header.
     diagnostics: Option<diagnostics::Diagnostics>,
 }
 

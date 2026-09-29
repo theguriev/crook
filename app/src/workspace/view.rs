@@ -1213,15 +1213,15 @@ impl Workspace {
         ctx.notify();
     }
 
-    /// Where this run's log and crash reports go, and the report an earlier
-    /// run left that nobody has seen — which puts a line under the header.
+    /// Where this run's log and crash reports go, and the reports earlier
+    /// runs left that nobody has seen — which put a line under the header.
     pub fn set_diagnostics(
         &mut self,
         diagnostics: crate::diagnostics::Diagnostics,
         ctx: &mut ViewContext<Self>,
     ) {
         self.diagnostics_folder = Some(diagnostics.folder);
-        self.crash_note = diagnostics.crash.map(CrashNote::new);
+        self.crash_note = CrashNote::new(diagnostics.crashes);
         ctx.notify();
     }
 
@@ -1238,10 +1238,10 @@ impl Workspace {
 
     /// Answers one of the crash line's buttons.
     ///
-    /// Both mark the report seen, so no later window mentions it. Show opens
-    /// the folder it is in and leaves the line up, since a file manager that
-    /// opened behind the window, or on another desktop, is a press somebody
-    /// will want to make again; Dismiss takes the line down.
+    /// Both mark the reports seen, so no later window mentions them. Show
+    /// opens the folder they are in and leaves the line up, since a file
+    /// manager that opened behind the window, or on another desktop, is a
+    /// press somebody will want to make again; Dismiss takes the line down.
     fn apply_crash_note(&mut self, action: CrashNoteAction, ctx: &mut ViewContext<Self>) {
         let Some(note) = self.crash_note.as_mut() else {
             return;
@@ -1249,7 +1249,7 @@ impl Workspace {
         note.mark_seen();
         match action {
             CrashNoteAction::Show => {
-                if let Some(folder) = note.report().parent() {
+                if let Some(folder) = note.folder() {
                     crate::browser::open_folder(folder);
                 }
             }
