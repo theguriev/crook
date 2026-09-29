@@ -1,5 +1,5 @@
 {
-  "description": "Tell the Crook tab Claude Code runs in what it is doing: running when a prompt is sent and around every tool, needs-input with the notification's text whenever it stops to ask, idle when it is done. Each command does nothing unless it runs in a Crook pane with the crook binary reachable ($CROOK_BIN, else crook on PATH), and exits 0 even when the report fails, so a Crook that cannot be reached is a line in Claude Code's debug log rather than a notice on every prompt and tool call.",
+  "description": "Tell the Crook tab Claude Code runs in what it is doing: running when a prompt is sent and around every tool, needs-input with the notification's text whenever it stops to ask, idle when it is done, and the pull request a `gh pr create` opened. Each command does nothing unless it runs in a Crook pane with the crook binary reachable ($CROOK_BIN, else crook on PATH), and exits 0 even when the report fails, so a Crook that cannot be reached is a line in Claude Code's debug log rather than a notice on every prompt and tool call.",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent running || exit 0"
+            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent running --pull-request - || exit 0"
           }
         ]
       }

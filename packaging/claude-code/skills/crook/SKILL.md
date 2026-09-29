@@ -64,6 +64,19 @@ branch, since what you are asking is what decides whether the person comes now. 
 moment you report anything else. `--message -` reads it from standard input, for a hook
 that is handed a notification's text there.
 
+`--pull-request` says which pull request your work is, beside any status, once you have
+opened one:
+
+```sh
+crook --agent running --pull-request "https://github.com/owner/repo/pull/123"
+```
+
+The row links to it, and its menu can ask the person's own `gh` what state it is in. Only an
+`https://` address is taken. Say it once, when you open the pull request; the row drops it
+when the pane's branch changes. The Claude Code and Codex hooks below already report the
+address `gh pr create` prints, so an agent running under them need not; under the others,
+report it yourself.
+
 The report is one escape sequence (`OSC 6340`) written to the terminal the command runs in,
 not to standard output, so it works from a hook whose output belongs to someone else. A
 command with no terminal of its own, such as a hook Claude Code starts in a session of its
@@ -73,10 +86,10 @@ pane over `ssh` and from inside a container, and every other terminal drops it u
 status never taken back goes when the shell's own marks say the command ended.
 
 Claude Code reports all of this by itself once Crook's plugin is installed: running when a
-prompt is sent and around every tool, needing input on every notification, idle on stop. It
-carries this file too, and its hooks do nothing outside Crook. A person installs it with two
-commands, which change their Claude Code settings, so give them to the person rather than
-running them:
+prompt is sent and around every tool, needing input on every notification, idle on stop, and
+the pull request after a `gh pr create`. It carries this file too, and its hooks do nothing
+outside Crook. A person installs it with two commands, which change their Claude Code
+settings, so give them to the person rather than running them:
 
 ```sh
 claude plugin marketplace add theguriev/crook

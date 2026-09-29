@@ -1395,6 +1395,140 @@ mod tests {
         assert_eq!(
             PR,
             given_pull_request(&format!("  {PR}\n")).expect("the ends are trimmed")
+        );
+    }
+
+    #[test]
+    fn the_hook_finds_the_address_gh_pr_create_printed() {
+        let created = claude_post_tool_use(
+            "git push -u origin HEAD && gh pr create --fill --base main",
+            &format!("{PR}\n"),
+            "Creating pull request for feat/x into main in theguriev/crook\n",
+        );
+        assert_eq!(Some(PR.to_owned()), pull_request_from_hook(&created));
+
+        // Codex hands over the output the model saw, as one string.
+        let codex = json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": "gh pr create --title 'x' --body 'y'" },
+            "tool_response": format!("Exit code: 0\nOutput:\n{PR}\n"),
+        })
+        .to_string();
+        assert_eq!(Some(PR.to_owned()), pull_request_from_hook(&codex));
+
+        // A pull request that already existed is still the branch's pull
+        // request, and gh names it on stderr.
+        let existed = claude_post_tool_use(
+            "gh pr create --fill",
+            "",
+            &format!(
+                "a pull request for branch \"x\" into branch \"main\" already exists:\n{PR}\n"
+            ),
+        );
+        assert_eq!(Some(PR.to_owned()), pull_request_from_hook(&existed));
+
+        // `gh pr new` is the same command, and a gh named by its path is gh.
+        let aliased = claude_post_tool_use("/usr/bin/gh pr new -f", PR, "");
+        assert_eq!(Some(PR.to_owned()), pull_request_from_hook(&aliased));
+
+        // A script with no JSON pipes gh's own output.
+        assert_eq!(
+            Some(PR.to_owned()),
+            pull_request_from_hook(&format!("{PR}\n"))
+        );
+    }
+
+    #[test]
+    fn the_hook_says_nothing_without_a_new_pull_request_in_it() {
+        // Every other command, including one that prints a pull request's
+        // address without making one.
+        for (command, stdout) in [
+            ("cargo test", "test result: ok"),
+            ("gh pr view 398 --json url -q .url", PR),
+            ("gh pr list", &format!("398\tfeat\t{PR}")[..]),
+            ("echo pr create", PR),
+        ] {
+            assert_eq!(
+                None,
+                pull_request_from_hook(&claude_post_tool_use(command, stdout, "")),
+                "{command}"
+            );
+        }
+        // `gh pr create` that failed, and printed no address.
+        assert_eq!(
+            None,
+            pull_request_from_hook(&claude_post_tool_use(
+                "gh pr create --fill",
+                "",
+                "pull request create failed: GraphQL: No commits between main and x\n",
+            ))
+        );
+        // `git push` in the same command prints GitHub's offer to make one,
+        // which is an address and not a pull request.
+        assert_eq!(
+            None,
+            pull_request_from_hook(&claude_post_tool_use(
+                "git push -u origin x && gh pr create --fill",
+                "",
+                "remote: Create a pull request for 'x' on GitHub by visiting:\nremote:      https://github.com/o/r/pull/new/x\n",
+            ))
+        );
+        // A hook input for something that is not a tool at all.
+        assert_eq!(None, pull_request_from_hook(r#"{"prompt": "open a PR"}"#));
+        assert_eq!(None, pull_request_from_hook(""));
+        // And a piped line that holds no https address.
+        assert_eq!(
+            None,
+            pull_request_from_hook("http://github.com/o/r/pull/1\n")
+        );
+    }
+
+    #[test]
+    fn a_hook_input_that_does_not_parse_is_not_read_as_piped_text() {
+        // An output cut in the middle of an emoji leaves half a surrogate
+        // pair, which JSON can escape and serde will not read. Taken as piped
+        // text, the last https word in it — a link any tool printed, braces
+        // and all — would become the pull request with no `gh pr create` in
+        // sight.
+        let cut = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"cargo test"},"tool_response":{"stdout":"see https://docs.rs/x \ud83d"}}"#;
+        assert!(serde_json::from_str::<Value>(cut).is_err(), "serde read it");
+        assert_eq!(None, pull_request_from_hook(cut));
+
+        // Nor with the command and a pull request's address in it: the
+        // input cannot be read, so neither can be trusted to be what it
+        // looks like.
+        let created = format!(
+            r#"{{"tool_input":{{"command":"gh pr create --fill"}},"tool_response":{{"stdout":"{PR}\n\ud83d"}}}}"#
+        );
+        assert!(serde_json::from_str::<Value>(&created).is_err());
+        assert_eq!(None, pull_request_from_hook(&created));
+        assert_eq!(None, pull_request_from_hook(&format!("  {{ {PR}")));
+
+        // Piped text is still piped text.
+        assert_eq!(
+            Some(PR.to_owned()),
+            pull_request_from_hook(&format!("Creating pull request\n{PR}\n"))
+        );
+    }
+
+    #[test]
+    fn the_hooks_look_for_a_pull_request_after_every_tool() {
+        // One hook after each tool, as there always was, now handed the
+        // tool's input on stdin: a second hook on Bash alone would be a
+        // second process for every command the agent runs.
+        for agent in ["claude", "codex"] {
+            let printed = hooks_text(agent, Path::new("/usr/bin/crook")).unwrap();
+            let parsed: Value = serde_json::from_str(&printed.text).unwrap();
+            assert_eq!(
+                "'/usr/bin/crook' --agent running --pull-request -",
+                parsed["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+                    .as_str()
+                    .unwrap(),
+                "{agent}"
+            );
+        }
+    }
 
     /// The Claude Code plugin's hooks, as the repository ships them.
     const PLUGIN_HOOKS: &str = include_str!("../../packaging/claude-code/hooks/hooks.json");
@@ -1605,135 +1739,6 @@ crook=${BIN_VARIABLE}; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0;
     }
 
     #[test]
-    fn the_hook_finds_the_address_gh_pr_create_printed() {
-        let created = claude_post_tool_use(
-            "git push -u origin HEAD && gh pr create --fill --base main",
-            &format!("{PR}\n"),
-            "Creating pull request for feat/x into main in theguriev/crook\n",
-        );
-        assert_eq!(Some(PR.to_owned()), pull_request_from_hook(&created));
-
-        // Codex hands over the output the model saw, as one string.
-        let codex = json!({
-            "hook_event_name": "PostToolUse",
-            "tool_name": "Bash",
-            "tool_input": { "command": "gh pr create --title 'x' --body 'y'" },
-            "tool_response": format!("Exit code: 0\nOutput:\n{PR}\n"),
-        })
-        .to_string();
-        assert_eq!(Some(PR.to_owned()), pull_request_from_hook(&codex));
-
-        // A pull request that already existed is still the branch's pull
-        // request, and gh names it on stderr.
-        let existed = claude_post_tool_use(
-            "gh pr create --fill",
-            "",
-            &format!(
-                "a pull request for branch \"x\" into branch \"main\" already exists:\n{PR}\n"
-            ),
-        );
-        assert_eq!(Some(PR.to_owned()), pull_request_from_hook(&existed));
-
-        // `gh pr new` is the same command, and a gh named by its path is gh.
-        let aliased = claude_post_tool_use("/usr/bin/gh pr new -f", PR, "");
-        assert_eq!(Some(PR.to_owned()), pull_request_from_hook(&aliased));
-
-        // A script with no JSON pipes gh's own output.
-        assert_eq!(
-            Some(PR.to_owned()),
-            pull_request_from_hook(&format!("{PR}\n"))
-        );
-    }
-
-    #[test]
-    fn the_hook_says_nothing_without_a_new_pull_request_in_it() {
-        // Every other command, including one that prints a pull request's
-        // address without making one.
-        for (command, stdout) in [
-            ("cargo test", "test result: ok"),
-            ("gh pr view 398 --json url -q .url", PR),
-            ("gh pr list", &format!("398\tfeat\t{PR}")[..]),
-            ("echo pr create", PR),
-        ] {
-            assert_eq!(
-                None,
-                pull_request_from_hook(&claude_post_tool_use(command, stdout, "")),
-                "{command}"
-            );
-        }
-        // `gh pr create` that failed, and printed no address.
-        assert_eq!(
-            None,
-            pull_request_from_hook(&claude_post_tool_use(
-                "gh pr create --fill",
-                "",
-                "pull request create failed: GraphQL: No commits between main and x\n",
-            ))
-        );
-        // `git push` in the same command prints GitHub's offer to make one,
-        // which is an address and not a pull request.
-        assert_eq!(
-            None,
-            pull_request_from_hook(&claude_post_tool_use(
-                "git push -u origin x && gh pr create --fill",
-                "",
-                "remote: Create a pull request for 'x' on GitHub by visiting:\nremote:      https://github.com/o/r/pull/new/x\n",
-            ))
-        );
-        // A hook input for something that is not a tool at all.
-        assert_eq!(None, pull_request_from_hook(r#"{"prompt": "open a PR"}"#));
-        assert_eq!(None, pull_request_from_hook(""));
-        // And a piped line that holds no https address.
-        assert_eq!(
-            None,
-            pull_request_from_hook("http://github.com/o/r/pull/1\n")
-        );
-    }
-
-    #[test]
-    fn a_hook_input_that_does_not_parse_is_not_read_as_piped_text() {
-        // An output cut in the middle of an emoji leaves half a surrogate
-        // pair, which JSON can escape and serde will not read. Taken as piped
-        // text, the last https word in it — a link any tool printed, braces
-        // and all — would become the pull request with no `gh pr create` in
-        // sight.
-        let cut = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"cargo test"},"tool_response":{"stdout":"see https://docs.rs/x \ud83d"}}"#;
-        assert!(serde_json::from_str::<Value>(cut).is_err(), "serde read it");
-        assert_eq!(None, pull_request_from_hook(cut));
-
-        // Nor with the command and a pull request's address in it: the
-        // input cannot be read, so neither can be trusted to be what it
-        // looks like.
-        let created = format!(
-            r#"{{"tool_input":{{"command":"gh pr create --fill"}},"tool_response":{{"stdout":"{PR}\n\ud83d"}}}}"#
-        );
-        assert!(serde_json::from_str::<Value>(&created).is_err());
-        assert_eq!(None, pull_request_from_hook(&created));
-        assert_eq!(None, pull_request_from_hook(&format!("  {{ {PR}")));
-
-        // Piped text is still piped text.
-        assert_eq!(
-            Some(PR.to_owned()),
-            pull_request_from_hook(&format!("Creating pull request\n{PR}\n"))
-        );
-    }
-
-    #[test]
-    fn the_hooks_look_for_a_pull_request_after_every_tool() {
-        // One hook after each tool, as there always was, now handed the
-        // tool's input on stdin: a second hook on Bash alone would be a
-        // second process for every command the agent runs.
-        for agent in ["claude", "codex"] {
-            let printed = hooks_text(agent, Path::new("/usr/bin/crook")).unwrap();
-            let parsed: Value = serde_json::from_str(&printed.text).unwrap();
-            assert_eq!(
-                "'/usr/bin/crook' --agent running --pull-request -",
-                parsed["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-                    .as_str()
-                    .unwrap(),
-                "{agent}"
-            );
-
     fn the_claude_hooks_lead_with_the_commands_that_install_the_plugin_the_repository_ships() {
         let marketplace: Value =
             serde_json::from_str(MARKETPLACE).expect("the marketplace is JSON");

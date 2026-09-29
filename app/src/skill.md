@@ -86,11 +86,10 @@ pane over `ssh` and from inside a container, and every other terminal drops it u
 status never taken back goes when the shell's own marks say the command ended.
 
 Claude Code reports all of this by itself once Crook's plugin is installed: running when a
-prompt is sent and around every tool, needing input on every notification, idle on stop, and the pull request after a
-`gh pr create`. It
-carries this file too, and its hooks do nothing outside Crook. A person installs it with two
-commands, which change their Claude Code settings, so give them to the person rather than
-running them:
+prompt is sent and around every tool, needing input on every notification, idle on stop, and
+the pull request after a `gh pr create`. It carries this file too, and its hooks do nothing
+outside Crook. A person installs it with two commands, which change their Claude Code
+settings, so give them to the person rather than running them:
 
 ```sh
 claude plugin marketplace add theguriev/crook

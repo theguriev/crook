@@ -91,7 +91,11 @@ fn is_openable(url: &str) -> bool {
 fn spawn(url: &OsStr) -> io::Result<()> {
     #[cfg(test)]
     if OPENED
-        .with_borrow_mut(|opened| opened.as_mut().map(|opened| opened.push(url.to_string_lossy().into_owned())))
+        .with_borrow_mut(|opened| {
+            opened
+                .as_mut()
+                .map(|opened| opened.push(url.to_string_lossy().into_owned()))
+        })
         .is_some()
     {
         return Ok(());
