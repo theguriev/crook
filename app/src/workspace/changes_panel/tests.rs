@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::git::changes::{Commits, FileChange};
+use crate::tab::TabId;
 
 /// An overview of a task on `main` whose files are `paths`, all modified.
 fn overview(paths: &[&str]) -> Overview {
@@ -32,11 +33,16 @@ fn overview(paths: &[&str]) -> Overview {
     }
 }
 
-/// A column that is up and has read `overview`.
+/// A column that is up and has read `overview`, for a tab of its own.
 fn showing(overview: Overview) -> ChangesPanelState {
+    showing_for(TabId::next(), overview)
+}
+
+/// A column that is up and has read `overview`, for `tab`.
+fn showing_for(tab: TabId, overview: Overview) -> ChangesPanelState {
     let mut state = ChangesPanelState::default();
     let epoch = state
-        .open(Some(overview.repository.clone()), None)
+        .open(Some(tab), Some(overview.repository.clone()), None)
         .expect("there is somewhere to read");
     state
         .land(epoch, Ok(overview))
@@ -125,11 +131,12 @@ fn a_diff_that_could_not_be_read_is_asked_for_again_next_time() {
 #[test]
 fn an_answer_to_a_question_nobody_is_asking_any_more_is_dropped() {
     let mut state = ChangesPanelState::default();
+    let tab = Some(TabId::next());
     let first = state
-        .open(Some(PathBuf::from("/work/one")), None)
+        .open(tab, Some(PathBuf::from("/work/one")), None)
         .expect("somewhere to read");
     let second = state
-        .retarget(Some(PathBuf::from("/work/two")))
+        .retarget(tab, Some(PathBuf::from("/work/two")))
         .expect("somewhere to read");
 
     assert!(
@@ -146,7 +153,7 @@ fn a_diff_asked_for_in_another_repository_is_not_shown_in_this_one() {
     let read = state.toggle(0).expect("asked");
 
     let epoch = state
-        .retarget(Some(PathBuf::from("/work/elsewhere")))
+        .retarget(state.tab, Some(PathBuf::from("/work/elsewhere")))
         .expect("somewhere to read");
     state.land(epoch, Ok(overview(&["a.rs"])));
 
@@ -426,4 +433,687 @@ fn an_editor_nobody_taught_this_the_line_for_is_handed_the_path_alone() {
             "{named} was told a line it may not read: {arguments:?}"
         );
     }
+}
+
+// --- review --------------------------------------------------------------------
+
+/// A diff of one hunk: a line of context, one removed and two added.
+fn a_hunk() -> FileDiff {
+    diff_of(&[
+        "@@ -10,3 +10,4 @@ fn main() {",
+        "     let a = 1;",
+        "-    let b = 2;",
+        "+    let b = 3;",
+        "+    let c = 4;",
+        "     done();",
+    ])
+}
+
+/// A diff whose drawn lines are `lines`.
+fn diff_of(lines: &[&str]) -> FileDiff {
+    let lines: Vec<String> = lines.iter().map(|line| (*line).to_owned()).collect();
+    FileDiff {
+        patch: lines.join("\n"),
+        first_line: None,
+        lines,
+        binary: false,
+        cut: false,
+    }
+}
+
+/// A column showing `path`'s diff, read from `diff`.
+fn showing_diff(path: &str, diff: FileDiff) -> ChangesPanelState {
+    let mut state = showing(overview(&[path]));
+    let read = state.toggle(0).expect("the first press asks for the diff");
+    assert!(state.land_hunks(Path::new(path), read.ticket, Ok(diff)));
+    state
+}
+
+/// Leaves `text` as a comment on line `line` of file `file`, the way the
+/// field would: a press on the line, the words, Enter.
+fn comment(state: &mut ChangesPanelState, file: usize, line: usize, text: &str) {
+    assert!(
+        state.start_comment(file, line),
+        "line {line} took no comment"
+    );
+    state
+        .draft_input()
+        .expect("a press on a line opens a field under it")
+        .edit(|editor| editor.paste(text));
+    assert!(state.add_comment(), "Enter did not add {text:?}");
+}
+
+/// The comments, as where they are and what they say.
+fn said(state: &ChangesPanelState) -> Vec<(usize, String)> {
+    state
+        .comments()
+        .iter()
+        .map(|comment| (comment.anchor.at, comment.text.clone()))
+        .collect()
+}
+
+/// The same file read again, as a refresh reads it.
+fn refresh_with(state: &mut ChangesPanelState, paths: &[&str], diff: FileDiff) {
+    let epoch = state.refresh().expect("nothing is being read");
+    let again = state
+        .land(epoch, Ok(overview(paths)))
+        .expect("the answer is current");
+    let read = again
+        .into_iter()
+        .find(|read| read.file.path == Path::new("a.rs"))
+        .expect("a file shown or commented on is read again");
+    state.land_hunks(Path::new("a.rs"), read.ticket, Ok(diff));
+}
+
+#[test]
+fn lines_are_numbered_from_their_hunk_header_on_the_side_they_are_on() {
+    let places = review::places(&a_hunk().lines);
+    assert_eq!(
+        places,
+        [
+            Some(review::Place::Hunk(10)),
+            None,
+            Some(review::Place::Removed(11)),
+            Some(review::Place::Added(11)),
+            Some(review::Place::Added(12)),
+            None,
+        ]
+    );
+}
+
+#[test]
+fn a_comment_is_drawn_under_its_line_and_its_cross_takes_it_away() {
+    let mut state = showing_diff("a.rs", a_hunk());
+
+    comment(&mut state, 0, 3, "why three?");
+    assert_eq!(said(&state), [(3, "why three?".to_owned())]);
+    let id = state.comments()[0].id;
+    // The heading, the file, its buttons, then the hunk: line 3 is the
+    // eighth row, and the comment is the row under it.
+    assert_eq!(
+        state.rows()[7..10],
+        [Row::Line(0, 3), Row::Comment(0, id), Row::Line(0, 4)]
+    );
+    assert!(
+        state.draft_input().is_none(),
+        "the field stayed up after Enter"
+    );
+
+    assert!(state.remove_comment(id));
+    assert!(state.comments().is_empty());
+    assert!(!state.rows().contains(&Row::Comment(0, id)));
+}
+
+#[test]
+fn a_comment_left_empty_or_cancelled_is_not_kept() {
+    let mut state = showing_diff("a.rs", a_hunk());
+
+    assert!(state.start_comment(0, 3));
+    assert!(state.rows().contains(&Row::Draft(0)));
+    assert!(!state.add_comment(), "an empty comment was added");
+    assert!(state.comments().is_empty());
+
+    assert!(state.start_comment(0, 3));
+    state
+        .draft_input()
+        .expect("the field is up")
+        .edit(|editor| editor.paste("never mind"));
+    state.cancel_comment();
+    assert!(state.comments().is_empty(), "Escape kept the comment");
+    assert!(!state.rows().contains(&Row::Draft(0)));
+}
+
+#[test]
+fn only_a_changed_line_or_a_hunk_header_takes_a_comment() {
+    let mut state = showing_diff("a.rs", a_hunk());
+
+    assert!(
+        !state.start_comment(0, 1),
+        "a line of context took a comment"
+    );
+    assert!(
+        !state.start_comment(0, 5),
+        "a line of context took a comment"
+    );
+    assert!(state.start_comment(0, 0), "the hunk's header took none");
+    assert!(state.start_comment(0, 2), "a removed line took none");
+}
+
+#[test]
+fn a_refresh_moves_a_comment_with_its_line() {
+    let mut state = showing_diff("a.rs", a_hunk());
+    comment(&mut state, 0, 3, "why three?");
+    comment(&mut state, 0, 0, "the whole hunk");
+
+    // The agent wrote two lines above the one commented on, which moves it
+    // down the diff and down the file.
+    refresh_with(
+        &mut state,
+        &["a.rs"],
+        diff_of(&[
+            "@@ -10,3 +10,6 @@ fn main() {",
+            "     let a = 1;",
+            "+    let x = 0;",
+            "+    let y = 0;",
+            "-    let b = 2;",
+            "+    let b = 3;",
+            "+    let c = 4;",
+            "     done();",
+        ]),
+    );
+
+    let why = &state.comments()[0];
+    assert_eq!(why.anchor.at, 5, "the comment stayed where its line was");
+    assert_eq!(why.anchor.place, review::Place::Added(13));
+    // The header's numbers changed and its function did not: the hunk is
+    // the same hunk.
+    assert_eq!(state.comments()[1].anchor.at, 0);
+    assert!(
+        state.rows().contains(&Row::Comment(0, why.id)),
+        "{:?}",
+        state.rows()
+    );
+    assert_eq!(state.note(), None, "a comment that moved was said dropped");
+}
+
+#[test]
+fn a_refresh_drops_a_comment_whose_line_is_gone_and_says_so() {
+    let mut state = showing_diff("a.rs", a_hunk());
+    comment(&mut state, 0, 3, "why three?");
+    comment(&mut state, 0, 4, "and c?");
+
+    // The agent took the comment's advice before it was sent.
+    refresh_with(
+        &mut state,
+        &["a.rs"],
+        diff_of(&[
+            "@@ -10,3 +10,3 @@ fn main() {",
+            "     let a = 1;",
+            "-    let b = 2;",
+            "+    let c = 4;",
+            "     done();",
+        ]),
+    );
+
+    assert_eq!(said(&state), [(3, "and c?".to_owned())]);
+    assert_eq!(
+        state.note(),
+        Some("Dropped the comment on a.rs:11: that line is no longer in the diff.")
+    );
+}
+
+/// What has been typed into the comment field, while one is up.
+fn typed(state: &ChangesPanelState) -> Option<String> {
+    state
+        .draft_input()
+        .map(|input| input.editor().text().to_owned())
+}
+
+/// Opens the field on line `line` of the first file and types `text` into
+/// it, leaving it open.
+fn typing(state: &mut ChangesPanelState, line: usize, text: &str) {
+    assert!(state.start_comment(0, line), "line {line} took no comment");
+    state
+        .draft_input()
+        .expect("a press on a line opens a field under it")
+        .edit(|editor| editor.paste(text));
+}
+
+#[test]
+fn a_comment_being_typed_on_a_line_that_is_gone_keeps_its_words_and_is_not_added() {
+    let mut state = showing_diff("a.rs", a_hunk());
+    typing(&mut state, 4, "and c");
+
+    refresh_with(
+        &mut state,
+        &["a.rs"],
+        diff_of(&[
+            "@@ -10,3 +10,3 @@ fn main() {",
+            "-    let b = 2;",
+            "+    let b = 3;",
+        ]),
+    );
+    // Kept, words and keyboard: a field that went away under a person's
+    // typing would hand the rest of it to the pane.
+    assert_eq!(state.adrift(), Some(Adrift::Gone));
+    assert_eq!(typed(&state).as_deref(), Some("and c"));
+    assert!(state.draft_is_focused(), "a read took the keyboard away");
+    assert!(
+        !state.rows().contains(&Row::Draft(0)),
+        "the field is drawn under some other line"
+    );
+
+    // Enter adds nothing, and says so.
+    assert!(!state.add_comment(), "a comment on no line was added");
+    assert!(state.comments().is_empty());
+    assert_eq!(typed(&state), None, "Enter left the field up");
+    assert!(
+        state.note().is_some_and(|note| note.contains("not added")),
+        "{:?}",
+        state.note()
+    );
+}
+
+#[test]
+fn a_comment_being_typed_is_kept_when_its_file_goes_or_a_read_fails() {
+    // The file stopped differing.
+    let mut state = showing(overview(&["a.rs", "b.rs"]));
+    let read = state.toggle(0).expect("asked");
+    state.land_hunks(Path::new("a.rs"), read.ticket, Ok(a_hunk()));
+    typing(&mut state, 3, "why");
+    let epoch = state.refresh().expect("nothing is being read");
+    state.land(epoch, Ok(overview(&["b.rs"])));
+    assert_eq!(state.adrift(), Some(Adrift::Gone));
+    assert_eq!(typed(&state).as_deref(), Some("why"));
+    assert!(state.draft_is_focused());
+
+    // The list could not be read — once, on a slow machine, with the line
+    // very likely still there.
+    let mut state = showing_diff("a.rs", a_hunk());
+    typing(&mut state, 3, "why");
+    let epoch = state.refresh().expect("nothing is being read");
+    state.land(epoch, Err(Error::TimedOut));
+    assert_eq!(state.adrift(), Some(Adrift::Unread));
+    assert_eq!(typed(&state).as_deref(), Some("why"));
+    assert!(state.draft_is_focused());
+
+    // The diff could not be read, and the lines the field was among went.
+    let mut state = showing_diff("a.rs", a_hunk());
+    typing(&mut state, 3, "why");
+    let epoch = state.refresh().expect("nothing is being read");
+    let again = state
+        .land(epoch, Ok(overview(&["a.rs"])))
+        .expect("the answer is current");
+    assert_eq!(state.adrift(), None, "a list that still has the file");
+    state.land_hunks(
+        Path::new("a.rs"),
+        again[0].ticket,
+        Err("git fell over".to_owned()),
+    );
+    assert_eq!(state.adrift(), Some(Adrift::Unread));
+    assert_eq!(typed(&state).as_deref(), Some("why"));
+
+    // Folding the file is a person's own gesture, and leaves a field adrift
+    // where it is: at the top, not under the file.
+    state.toggle(0);
+    assert_eq!(typed(&state).as_deref(), Some("why"));
+}
+
+/// Whether the comment field is back under line `line` of the first file,
+/// with its words and the keyboard, and Enter there adds `text` on it.
+fn back_under(state: &mut ChangesPanelState, line: usize, text: &str) {
+    assert_eq!(
+        state.adrift(),
+        None,
+        "a read that found the line left it adrift"
+    );
+    assert!(
+        state.is_expanded(Path::new("a.rs")),
+        "the field's line is not showing"
+    );
+    let at = state
+        .rows()
+        .iter()
+        .position(|row| *row == Row::Line(0, line))
+        .unwrap_or_else(|| panic!("line {line} is not drawn: {:?}", state.rows()));
+    assert_eq!(
+        state.rows().get(at + 1),
+        Some(&Row::Draft(0)),
+        "the field is not under its line: {:?}",
+        state.rows()
+    );
+    assert_eq!(typed(state).as_deref(), Some(text));
+    assert!(state.draft_is_focused(), "coming back took the keyboard");
+    assert!(
+        state.add_comment(),
+        "Enter on a field back on its line added nothing"
+    );
+    assert_eq!(said(state), [(line, text.to_owned())]);
+}
+
+#[test]
+fn a_comment_being_typed_goes_back_under_its_line_when_a_read_finds_it_again() {
+    // A read of the diff failed, and the next one did not.
+    let mut state = showing_diff("a.rs", a_hunk());
+    typing(&mut state, 3, "why");
+    let epoch = state.refresh().expect("nothing is being read");
+    let again = state
+        .land(epoch, Ok(overview(&["a.rs"])))
+        .expect("the answer is current");
+    state.land_hunks(
+        Path::new("a.rs"),
+        again[0].ticket,
+        Err("git fell over".to_owned()),
+    );
+    assert_eq!(state.adrift(), Some(Adrift::Unread));
+    refresh_with(&mut state, &["a.rs"], a_hunk());
+    back_under(&mut state, 3, "why");
+
+    // A read of the list timed out, which folds every file, and the next
+    // one did not: the field's file is read again all the same.
+    let mut state = showing_diff("a.rs", a_hunk());
+    typing(&mut state, 3, "why");
+    let epoch = state.refresh().expect("nothing is being read");
+    state.land(epoch, Err(Error::TimedOut));
+    assert_eq!(state.adrift(), Some(Adrift::Unread));
+    assert!(!state.is_expanded(Path::new("a.rs")));
+    refresh_with(&mut state, &["a.rs"], a_hunk());
+    back_under(&mut state, 3, "why");
+
+    // The line was pushed past the cut, and then a whole read found it
+    // further down.
+    let mut state = showing_diff("a.rs", a_hunk());
+    typing(&mut state, 3, "why");
+    refresh_with(
+        &mut state,
+        &["a.rs"],
+        cut(diff_of(&[
+            "@@ -10,3 +10,4000 @@ fn main() {",
+            "     let a = 1;",
+            "+    let x = 0;",
+        ])),
+    );
+    assert_eq!(state.adrift(), Some(Adrift::PastCut));
+    refresh_with(
+        &mut state,
+        &["a.rs"],
+        diff_of(&[
+            "@@ -10,3 +10,5 @@ fn main() {",
+            "     let a = 1;",
+            "+    let x = 0;",
+            "-    let b = 2;",
+            "+    let b = 3;",
+            "+    let c = 4;",
+            "     done();",
+        ]),
+    );
+    back_under(&mut state, 4, "why");
+
+    // The file left the list, and came back with the line in it.
+    let mut state = showing_diff("a.rs", a_hunk());
+    typing(&mut state, 3, "why");
+    let epoch = state.refresh().expect("nothing is being read");
+    state.land(epoch, Ok(overview(&[])));
+    assert_eq!(state.adrift(), Some(Adrift::Gone));
+    refresh_with(&mut state, &["a.rs"], a_hunk());
+    back_under(&mut state, 3, "why");
+}
+
+/// `diff`, cut short where it ends.
+fn cut(mut diff: FileDiff) -> FileDiff {
+    diff.cut = true;
+    diff
+}
+
+/// The rows under the note where the first file's cut read stops.
+fn under_the_cut(state: &ChangesPanelState) -> &[Row] {
+    let rows = state.rows();
+    let at = rows
+        .iter()
+        .position(|row| matches!(row, Row::Note(note) if note.starts_with("Cut short here")))
+        .unwrap_or_else(|| panic!("the diff is not cut: {rows:?}"));
+    &rows[at + 1..]
+}
+
+/// What is listed under the cut for the one comment `id` a cut read did not
+/// find: the note, the line it was last found on, and the comment with its ×.
+fn listed_under_the_cut(id: u64) -> [Row; 3] {
+    [
+        Row::Note("1 comment not found in the part that was read:".to_owned()),
+        Row::Quoted(0, id),
+        Row::Comment(0, id),
+    ]
+}
+
+#[test]
+fn a_comment_on_a_line_pushed_past_the_cut_is_kept_and_listed_where_the_cut_is() {
+    let mut state = showing_diff("a.rs", a_hunk());
+    comment(&mut state, 0, 3, "why three?");
+    let id = state.comments()[0].id;
+
+    // The agent wrote enough above the line to push it past where the
+    // diff is cut short: not found, and not gone either.
+    refresh_with(
+        &mut state,
+        &["a.rs"],
+        cut(diff_of(&[
+            "@@ -10,3 +10,4000 @@ fn main() {",
+            "     let a = 1;",
+            "+    let x = 0;",
+            "+    let y = 0;",
+        ])),
+    );
+    assert_eq!(
+        state.comments().len(),
+        1,
+        "a comment past the cut was dropped"
+    );
+    assert!(state.comments()[0].past_cut);
+    assert_eq!(
+        state.note(),
+        None,
+        "a comment past the cut was said dropped"
+    );
+    assert_eq!(
+        under_the_cut(&state),
+        listed_under_the_cut(id),
+        "a comment past the cut is not listed where the cut is"
+    );
+    assert_eq!(
+        state
+            .rows()
+            .iter()
+            .filter(|row| **row == Row::Comment(0, id))
+            .count(),
+        1,
+        "a comment past the cut is drawn under some other line too: {:?}",
+        state.rows()
+    );
+    assert!(
+        state
+            .review(Some("feat/review"))
+            .is_some_and(|review| review.contains("> +    let b = 3;\nwhy three?")),
+        "a comment past the cut is not sent"
+    );
+
+    // A read that finds it again puts it back under its line…
+    refresh_with(
+        &mut state,
+        &["a.rs"],
+        diff_of(&[
+            "@@ -10,3 +10,5 @@ fn main() {",
+            "     let a = 1;",
+            "+    let x = 0;",
+            "-    let b = 2;",
+            "+    let b = 3;",
+            "+    let c = 4;",
+            "     done();",
+        ]),
+    );
+    assert_eq!(said(&state), [(4, "why three?".to_owned())]);
+    assert!(!state.comments()[0].past_cut);
+    assert!(state.rows().contains(&Row::Comment(0, id)));
+    assert!(!state.rows().contains(&Row::Quoted(0, id)));
+
+    // …and one that is cut, and then one that is whole and without it,
+    // drops it.
+    let without = diff_of(&["@@ -10,3 +10,3 @@ fn main() {", "-    let b = 2;"]);
+    refresh_with(&mut state, &["a.rs"], cut(without.clone()));
+    assert_eq!(state.comments().len(), 1);
+    refresh_with(&mut state, &["a.rs"], without);
+    assert!(state.comments().is_empty());
+    assert!(
+        state
+            .note()
+            .is_some_and(|note| note.contains("no longer in the diff")),
+        "{:?}",
+        state.note()
+    );
+}
+
+#[test]
+fn a_comment_a_cut_read_did_not_find_can_be_seen_and_taken_out_before_it_is_sent() {
+    let mut state = showing_diff("a.rs", a_hunk());
+    comment(&mut state, 0, 3, "why three?");
+    let id = state.comments()[0].id;
+
+    // The agent deleted the line, and the read shows the hunk it was in
+    // without it — then stops short further down. Nothing in a read like
+    // this tells a line that went from one pushed past the cut, so the
+    // comment is kept; and shown, since it would otherwise be sent about a
+    // line that may be gone with no way to see it or take it out.
+    refresh_with(
+        &mut state,
+        &["a.rs"],
+        cut(diff_of(&[
+            "@@ -10,3 +10,3 @@ fn main() {",
+            "     let a = 1;",
+            "-    let b = 2;",
+            "+    let c = 4;",
+            "     done();",
+            "@@ -200,2 +200,4000 @@ fn later() {",
+            "+    more();",
+        ])),
+    );
+    assert!(state.comments()[0].past_cut);
+    assert_eq!(under_the_cut(&state), listed_under_the_cut(id));
+
+    assert!(state.remove_comment(id), "its × took nothing out");
+    assert_eq!(
+        state.review(Some("feat/review")),
+        None,
+        "a comment that was taken out is still sent"
+    );
+    assert!(
+        under_the_cut(&state).is_empty(),
+        "{:?}",
+        under_the_cut(&state)
+    );
+}
+
+#[test]
+fn a_file_that_no_longer_differs_takes_its_comments_with_it() {
+    let mut state = showing(overview(&["a.rs", "b.rs"]));
+    let read = state.toggle(0).expect("asked");
+    state.land_hunks(Path::new("a.rs"), read.ticket, Ok(a_hunk()));
+    comment(&mut state, 0, 3, "why three?");
+
+    let epoch = state.refresh().expect("nothing is being read");
+    let again = state
+        .land(epoch, Ok(overview(&["b.rs"])))
+        .expect("the answer is current");
+
+    assert!(again.is_empty(), "a file that is gone was read again");
+    assert!(state.comments().is_empty());
+    assert!(
+        state.note().is_some_and(|note| note.contains("a.rs:11")),
+        "{:?}",
+        state.note()
+    );
+}
+
+#[test]
+fn a_folded_file_with_comments_is_read_again_on_a_refresh() {
+    let mut state = showing_diff("a.rs", a_hunk());
+    comment(&mut state, 0, 3, "why three?");
+    state.toggle(0);
+
+    let epoch = state.refresh().expect("nothing is being read");
+    let again = state
+        .land(epoch, Ok(overview(&["a.rs"])))
+        .expect("the answer is current");
+    assert_eq!(
+        again
+            .iter()
+            .map(|read| read.file.path.as_path())
+            .collect::<Vec<_>>(),
+        [Path::new("a.rs")],
+        "a comment on a folded file would be sent about a diff nobody read again"
+    );
+}
+
+#[test]
+fn each_tab_has_its_own_review_and_finds_it_again() {
+    let first = TabId::next();
+    let second = TabId::next();
+    let mut state = showing_for(first, overview(&["a.rs"]));
+    let read = state.toggle(0).expect("asked");
+    state.land_hunks(Path::new("a.rs"), read.ticket, Ok(a_hunk()));
+    comment(&mut state, 0, 3, "why three?");
+
+    let epoch = state
+        .retarget(Some(second), Some(PathBuf::from("/work/repo")))
+        .expect("somewhere to read");
+    state.land(epoch, Ok(overview(&["a.rs"])));
+    assert!(
+        state.comments().is_empty(),
+        "another tab on the same repository showed the first tab's comments"
+    );
+
+    let epoch = state
+        .retarget(Some(first), Some(PathBuf::from("/work/repo")))
+        .expect("somewhere to read");
+    state.land(epoch, Ok(overview(&["a.rs"])));
+    assert_eq!(said(&state), [(3, "why three?".to_owned())]);
+
+    state.forget_tabs(|tab| tab == second);
+    assert!(
+        state.comments().is_empty(),
+        "a closed tab's comments were kept"
+    );
+}
+
+#[test]
+fn the_message_names_each_line_by_path_and_number_and_quotes_it() {
+    let mut state = showing(overview(&["src/a.rs", "src/b.rs"]));
+    for (index, path) in ["src/a.rs", "src/b.rs"].into_iter().enumerate() {
+        let read = state.toggle(index).expect("asked");
+        state.land_hunks(Path::new(path), read.ticket, Ok(a_hunk()));
+    }
+    // Made out of order: the message is in the order of the files and their
+    // lines, which is the order a person reads the diff in.
+    comment(&mut state, 1, 0, "  this whole hunk goes  ");
+    comment(&mut state, 0, 4, "and c?");
+    comment(&mut state, 0, 2, "put b back");
+
+    assert_eq!(
+        state.review(Some("feat/review")).as_deref(),
+        Some(
+            "Review of feat/review since main:\n\
+             \n\
+             src/a.rs:11 (removed; numbered as before the change)\n\
+             > -    let b = 2;\n\
+             put b back\n\
+             \n\
+             src/a.rs:12\n\
+             > +    let c = 4;\n\
+             and c?\n\
+             \n\
+             src/b.rs:10\n\
+             > @@ -10,3 +10,4 @@ fn main() {\n\
+             this whole hunk goes"
+        )
+    );
+}
+
+#[test]
+fn there_is_no_review_without_a_comment() {
+    let state = showing_diff("a.rs", a_hunk());
+    assert_eq!(state.review(Some("feat/review")), None);
+}
+
+#[test]
+fn a_review_that_went_is_cleared_and_one_that_did_not_is_kept() {
+    let mut state = showing_diff("a.rs", a_hunk());
+    comment(&mut state, 0, 3, "why three?");
+
+    state.say("Nothing is running there.".to_owned());
+    assert_eq!(
+        state.comments().len(),
+        1,
+        "a refused send took the comments"
+    );
+
+    state.sent();
+    assert!(state.comments().is_empty());
 }

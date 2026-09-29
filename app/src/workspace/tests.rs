@@ -14798,7 +14798,9 @@ mod shells {
     /// A headless runner and an X session with nothing serving the selection
     /// both have none, and there is nothing to assert about a copy on a machine
     /// where a copy cannot happen — [`crate::clipboard`] says so at length.
-    fn working_clipboard(harness: &Harness) -> Option<(Clipboard, MutexGuard<'static, ()>)> {
+    pub(super) fn working_clipboard(
+        harness: &Harness,
+    ) -> Option<(Clipboard, MutexGuard<'static, ()>)> {
         // **One at a time.** These are the tests that put text on the
         // *machine's* clipboard, and on macOS that is one `NSPasteboard`
         // shared by every thread in the process: two of them reading and
@@ -28105,8 +28107,11 @@ mod changes_column {
     //! The Changes column in the real view tree: where it is, what a frame
     //! of it builds, and what a press on it asks git for.
 
+    use super::shells::{a_shell_these_tests_speak, await_prompt};
     use super::*;
     use crate::git::changes::{Against, Base, Commits, FileChange, Overview, Status};
+    use crate::tab::StatusSource;
+    use crate::workspace::ChangesAction;
     use crate::workspace::changes_panel::PANEL_WIDTH;
 
     /// The column, by its ground: the one surface-filled box its width.
@@ -28427,5 +28432,1100 @@ mod changes_column {
             tab_menu_offers(&harness.frame(), "Hide changes"),
             "the entry does not say pressing it again hides the column"
         );
+    }
+
+    // --- the review ---------------------------------------------------------------
+
+    /// A repository on a branch called `task`, cut from the one it was made
+    /// on, with one line added to its README and not committed. Answers the
+    /// repository and the name of the branch it was cut from, or `None`
+    /// where there is no git to make one with.
+    fn a_task(scratch: &Scratch) -> Option<(PathBuf, String)> {
+        let repository = scratch_repository(&scratch.path().join("repository"))?;
+        let base = git_in(&repository, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        git_in(&repository, &["checkout", "--quiet", "-b", "task"]);
+        fs::write(
+            repository.join("README"),
+            "worktree test\nwhat the agent added\n",
+        )
+        .expect("writable");
+        Some((repository, base))
+    }
+
+    /// The message a review of [`a_task`] with the one comment "say why" on
+    /// its added line makes — written out rather than asked of the code
+    /// that makes it, so a change to what is sent is a change to this test.
+    fn the_review(base: &str) -> String {
+        format!(
+            "Review of task since {base}:\n\
+             \n\
+             README:2\n\
+             > +what the agent added\n\
+             say why"
+        )
+    }
+
+    /// Clicks the column on the first letter of `text`, wherever on its line
+    /// that is: two buttons side by side are one line of text.
+    fn click_column_text(harness: &mut Harness, text: &str) {
+        let scene = harness.frame();
+        let column = column_box(&scene).expect("the column is not up");
+        let mut rows: HashMap<i32, Vec<(Vector2F, char)>> = HashMap::new();
+        for glyph in scene.layers().flat_map(|layer| layer.glyphs.iter()) {
+            if let Some(character) = char::from_u32(glyph.glyph_key.glyph_id)
+                && column.contains_point(glyph.position)
+            {
+                rows.entry(glyph.position.y().round() as i32)
+                    .or_default()
+                    .push((glyph.position, character));
+            }
+        }
+        let wanted: Vec<char> = text.chars().collect();
+        let at = rows
+            .into_values()
+            .find_map(|mut row| {
+                row.sort_by(|left, right| left.0.x().total_cmp(&right.0.x()));
+                let characters: Vec<char> = row.iter().map(|(_, character)| *character).collect();
+                let start = characters
+                    .windows(wanted.len())
+                    .position(|window| window == wanted.as_slice())?;
+                Some(row[start].0)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "the column does not say {text:?}: {:?}",
+                    column_lines(&scene)
+                )
+            });
+        harness.click(vec2f(at.x() + 4., at.y() - 3.), MouseButton::Left);
+    }
+
+    /// Types `text` a key at a time, the way a person does.
+    fn type_keys(harness: &mut Harness, text: &str) {
+        for character in text.chars() {
+            harness.press(
+                &character.to_lowercase().to_string(),
+                Modifiers::default(),
+                &character.to_string(),
+            );
+        }
+    }
+
+    /// Whether the column's comment field has the keyboard.
+    fn comment_has_keys(harness: &Harness) -> bool {
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.changes_takes_keys())
+    }
+
+    /// How many comments the column is showing.
+    fn comment_count(harness: &Harness) -> usize {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.changes_panel().comments().len()
+        })
+    }
+
+    /// What the review last said.
+    fn review_note(harness: &Harness) -> Option<String> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.changes_panel().note().map(str::to_owned)
+        })
+    }
+
+    /// What has been typed into the column's comment field, while one is up.
+    fn comment_typed(harness: &Harness) -> Option<String> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .changes_panel()
+                .draft_input()
+                .map(|input| input.editor().text().to_owned())
+        })
+    }
+
+    /// Opens the column on the focused pane's repository, opens the README's
+    /// diff, and presses its added line, which opens a field under it with
+    /// the keyboard in it.
+    fn open_a_comment_on_the_added_line(harness: &mut Harness) {
+        harness.run_command("crook/changes/toggle");
+        harness.wait_for("the column never read the repository", |harness| {
+            has_read(harness)
+        });
+        click_column_text(harness, "README");
+        harness.wait_for("the file's hunks never arrived", |harness| {
+            frame_text(&harness.frame()).contains("+what the agent added")
+        });
+
+        click_column_text(harness, "+what the agent added");
+        assert!(
+            comment_has_keys(harness),
+            "a press on the line did not put the keyboard in a field under it"
+        );
+        // The frame the window draws before the next key, with the field in.
+        harness.frame();
+    }
+
+    /// Opens the column on the focused pane's repository, opens the README's
+    /// diff, and leaves "say why" on its added line with the pointer and the
+    /// keyboard, as a person would.
+    fn comment_on_the_added_line(harness: &mut Harness) {
+        open_a_comment_on_the_added_line(harness);
+        type_keys(harness, "say why");
+        harness.press("enter", Modifiers::default(), "\r");
+        assert!(
+            !comment_has_keys(harness),
+            "the field kept the keyboard after Enter"
+        );
+        assert_eq!(comment_count(harness), 1, "Enter kept no comment");
+    }
+
+    #[test]
+    fn a_comment_typed_under_a_line_is_drawn_there_and_counted_at_the_top() {
+        let scratch = Scratch::new();
+        let Some((repository, _)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(repository.clone());
+        });
+
+        comment_on_the_added_line(&mut harness);
+        let scene = harness.frame();
+        let lines = column_lines(&scene);
+        let at = |text: &str| {
+            lines
+                .iter()
+                .position(|(_, line)| line.contains(text))
+                .unwrap_or_else(|| panic!("the column does not say {text:?}: {lines:?}"))
+        };
+        assert_eq!(
+            at("say why"),
+            at("+what the agent added") + 1,
+            "the comment is not under its line: {lines:?}"
+        );
+        assert!(
+            at("Send 1 comment to the agent") < at("README"),
+            "the review's button is not at the top of the column: {lines:?}"
+        );
+
+        // Escape throws a second one away, words and all.
+        click_column_text(&mut harness, "+what the agent added");
+        harness.frame();
+        type_keys(&mut harness, "no");
+        harness.press("escape", Modifiers::default(), "");
+        assert!(!comment_has_keys(&harness));
+        assert!(
+            harness.a_pane_field_has_keys(),
+            "the pane did not get the keyboard back"
+        );
+        assert_eq!(comment_count(&harness), 1, "Escape kept the comment");
+
+        // And a field left open when the column closes takes nothing with it
+        // but itself: the keyboard goes back to the pane, and the comment
+        // that was kept is still there when the column comes back.
+        click_column_text(&mut harness, "+what the agent added");
+        assert!(!harness.a_pane_field_has_keys());
+        harness.run_command("crook/changes/toggle");
+        assert!(
+            harness.a_pane_field_has_keys(),
+            "closing the column left the keyboard nowhere"
+        );
+        harness.run_command("crook/changes/toggle");
+        harness.wait_for("the column never read the repository again", |harness| {
+            has_read(harness)
+        });
+        assert_eq!(
+            comment_count(&harness),
+            1,
+            "closing the column lost the review"
+        );
+    }
+
+    #[test]
+    fn copy_review_puts_the_review_on_the_clipboard_and_keeps_the_comments() {
+        let scratch = Scratch::new();
+        let Some((repository, base)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let mut harness = Harness::new(1);
+        let Some((clipboard, _held)) = super::shells::working_clipboard(&harness) else {
+            return;
+        };
+        let pane = harness.pane_ids()[0];
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(repository.clone());
+        });
+        comment_on_the_added_line(&mut harness);
+
+        click_column_text(&mut harness, "Copy review");
+        assert_eq!(clipboard.read(), Some(the_review(&base)));
+        assert_eq!(comment_count(&harness), 1, "a copy took the comments");
+    }
+
+    #[test]
+    fn a_review_goes_to_the_pane_with_the_agent_in_it_else_to_the_focused_one() {
+        let scratch = Scratch::new();
+        let mut harness = Harness::new(1);
+        harness.dispatch_action(TabAction::Split(Direction::Right));
+        let [left, right] = harness.active_pane_ids()[..] else {
+            panic!("a split tab has two panes");
+        };
+        let here = scratch.path().to_path_buf();
+        for pane in [left, right] {
+            harness.update_session(pane, |session| {
+                session.working_directory = Some(here.clone());
+            });
+        }
+        let chosen = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace.review_pane(&here, app)
+            })
+        };
+        let agent = |harness: &mut Harness, pane: PaneId| {
+            harness.update_session(pane, |session| {
+                session.source = StatusSource::Agent(std::time::Instant::now());
+            });
+        };
+        assert_eq!(harness.focused_pane_id(), Some(right));
+
+        assert_eq!(
+            chosen(&harness),
+            Some(right),
+            "with no agent, not the focused pane"
+        );
+        agent(&mut harness, left);
+        assert_eq!(chosen(&harness), Some(left), "not the pane the agent is in");
+        agent(&mut harness, right);
+        assert_eq!(
+            chosen(&harness),
+            Some(right),
+            "with an agent in both, not the one in front"
+        );
+
+        // An agent at work in some other checkout is not this review's.
+        harness.update_session(right, |session| {
+            session.source = StatusSource::NoReport;
+        });
+        harness.update_session(left, |session| {
+            session.working_directory = Some(here.join("elsewhere"));
+        });
+        assert_eq!(chosen(&harness), Some(right));
+    }
+
+    /// Two panes on [`a_task`], each with a shell that reports its commands,
+    /// and the first running a stand-in for an agent: a program that turns
+    /// bracketed paste on — the way Claude Code, Codex and the rest do —
+    /// and then writes every byte it is given to `received`, untouched.
+    ///
+    /// Answers the two panes, the stand-in's first, or `None` on a machine
+    /// with no shell these tests can speak to.
+    fn an_agent_beside_a_shell(
+        harness: &mut Harness,
+        repository: &Path,
+        received: &Path,
+        bracketed: bool,
+    ) -> Option<(PaneId, PaneId)> {
+        if !a_shell_these_tests_speak() {
+            return None;
+        }
+        harness.dispatch_action(TabAction::Split(Direction::Right));
+        let [agent, shell] = harness.active_pane_ids()[..] else {
+            panic!("a split tab has two panes");
+        };
+        // Before the shells start, so they start there: a shell reports
+        // where it is, and one started anywhere else would move the column.
+        for pane in [agent, shell] {
+            harness.update_session(pane, |session| {
+                session.working_directory = Some(repository.to_path_buf());
+            });
+        }
+        if !harness.start_terminals_with_marks() {
+            return None;
+        }
+        await_prompt(harness, agent);
+        await_prompt(harness, shell);
+
+        // `cat` in the terminal's own line mode: it gets nothing of a line
+        // until the line ends, and a line ended by an Enter nobody meant to
+        // press is a newline in the file. The word it prints is spelled in
+        // two halves so that the echo of the command line is not it.
+        let mode = if bracketed { "\\033[?2004h" } else { "" };
+        harness.type_into(
+            agent,
+            &format!(
+                "printf '{mode}RE%s\\n' ADY; cat > '{}'\n",
+                received.display()
+            ),
+        );
+        harness.wait_for("the stand-in never started", |harness| {
+            harness.terminal_text(agent).contains("READY") && received.exists()
+        });
+        harness.update_session(agent, |session| {
+            session.source = StatusSource::Agent(std::time::Instant::now());
+            session.status = AgentStatus::Running;
+        });
+        Some((agent, shell))
+    }
+
+    /// Ends the stand-in's input — the rest of its line, then the end of the
+    /// file — waits for it to exit, and answers everything it was given.
+    ///
+    /// A ^D hands `cat` a line typed so far without a newline, and on a line
+    /// with nothing in it is the end of the file: a review pasted without
+    /// Enter takes two, and nothing pasted takes one. Never more than it
+    /// takes, because a ^D left over reaches the shell at its prompt, and
+    /// bash 3.2 — macOS's — exits on it. So the second goes only once the
+    /// first has handed `cat` something and `cat` has written it.
+    fn what_the_agent_received(harness: &mut Harness, agent: PaneId, received: &Path) -> String {
+        let written = |path: &Path| fs::metadata(path).map_or(0, |metadata| metadata.len());
+        let before = written(received);
+        harness.type_into(agent, "\u{4}");
+        let mut exited = false;
+        harness.wait_for(
+            "the stand-in neither exited nor took the rest of its line",
+            |harness| {
+                exited =
+                    live_block_of(harness, agent).state == crook_terminal::BlockState::AtPrompt;
+                exited || written(received) > before
+            },
+        );
+        if !exited {
+            harness.type_into(agent, "\u{4}");
+        }
+        await_prompt(harness, agent);
+        fs::read_to_string(received).expect("the stand-in wrote its file")
+    }
+
+    #[test]
+    fn send_pastes_the_review_into_the_agent_s_pane_without_enter_and_puts_the_keyboard_there() {
+        let scratch = Scratch::new();
+        let Some((repository, base)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let received = scratch.path().join("received");
+        let mut harness = Harness::new(1);
+        let Some((agent, shell)) =
+            an_agent_beside_a_shell(&mut harness, &repository, &received, true)
+        else {
+            return;
+        };
+
+        // Typed with the agent's pane in front: every key goes to the field
+        // and none of them to the program beside it.
+        harness.dispatch_action(TabAction::FocusPane(agent));
+        comment_on_the_added_line(&mut harness);
+
+        // A refresh reads everything again and sends nothing, and neither
+        // does anything else but the press.
+        harness.dispatch_workspace_action(WorkspaceAction::Changes(ChangesAction::Refresh));
+        harness.wait_for("the refresh never came home", |harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                !workspace.changes_panel().is_reading()
+            })
+        });
+        assert_eq!(comment_count(&harness), 1, "the refresh lost the comment");
+        harness.dispatch_action(TabAction::FocusPane(shell));
+        harness.settle(std::time::Duration::from_millis(200));
+        assert_eq!(
+            fs::read_to_string(&received).expect("the stand-in made its file"),
+            "",
+            "the agent was sent something before the press"
+        );
+
+        click_column_text(&mut harness, "Send 1 comment to the agent");
+        assert_eq!(
+            harness.focused_pane_id(),
+            Some(agent),
+            "the keyboard was not put where the review went"
+        );
+        assert_eq!(comment_count(&harness), 0, "the sent comments stayed");
+        assert!(
+            review_note(&harness).is_some_and(|note| note.contains("press Enter")),
+            "the column does not say where the review went: {:?}",
+            review_note(&harness)
+        );
+
+        // Exactly the review, between the two markers, with nothing after:
+        // an Enter would be a newline here, and so would a line typed into
+        // the field that leaked through to the program.
+        assert_eq!(
+            what_the_agent_received(&mut harness, agent, &received),
+            format!("\u{1b}[200~{}\u{1b}[201~", the_review(&base))
+        );
+    }
+
+    #[test]
+    fn send_keeps_the_comments_and_sends_nothing_to_a_prompt_or_to_a_program_without_bracketed_paste()
+     {
+        let scratch = Scratch::new();
+        let Some((repository, _)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let received = scratch.path().join("received");
+        let mut harness = Harness::new(1);
+        let Some((agent, shell)) =
+            an_agent_beside_a_shell(&mut harness, &repository, &received, false)
+        else {
+            return;
+        };
+
+        // The shell's pane, with the agent's status taken back: nothing in
+        // the tab says an agent is anywhere, so the review is for the pane in
+        // front — which is at a prompt, where its lines would be commands.
+        harness.update_session(agent, |session| {
+            session.source = StatusSource::NoReport;
+        });
+        harness.dispatch_action(TabAction::FocusPane(shell));
+        comment_on_the_added_line(&mut harness);
+        click_column_text(&mut harness, "Send 1 comment to the agent");
+        assert!(
+            review_note(&harness).is_some_and(|note| note.contains("shell prompt")),
+            "{:?}",
+            review_note(&harness)
+        );
+        assert_eq!(
+            comment_count(&harness),
+            1,
+            "a refused send took the comments"
+        );
+        harness.settle(std::time::Duration::from_millis(200));
+        assert!(
+            !harness.terminal_text(shell).contains("Review of"),
+            "the review reached the shell"
+        );
+
+        // The stand-in again, which this time never asked for the markers:
+        // without them each line of the review would be an Enter.
+        harness.update_session(agent, |session| {
+            session.source = StatusSource::Agent(std::time::Instant::now());
+        });
+        click_column_text(&mut harness, "Send 1 comment to the agent");
+        assert!(
+            review_note(&harness).is_some_and(|note| note.contains("bracketed paste")),
+            "{:?}",
+            review_note(&harness)
+        );
+        assert_eq!(
+            comment_count(&harness),
+            1,
+            "a refused send took the comments"
+        );
+        assert_eq!(
+            harness.focused_pane_id(),
+            Some(shell),
+            "a refused send moved the keyboard"
+        );
+        assert_eq!(what_the_agent_received(&mut harness, agent, &received), "");
+    }
+
+    #[test]
+    fn a_shell_an_agent_exited_to_is_not_sent_the_review_nor_chosen_over_the_focused_pane() {
+        let scratch = Scratch::new();
+        let Some((repository, base)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let received = scratch.path().join("received");
+        let mut harness = Harness::new(1);
+        let Some((agent, shell)) =
+            an_agent_beside_a_shell(&mut harness, &repository, &received, true)
+        else {
+            return;
+        };
+
+        // What an agent's SessionEnd hook leaves in the pane it ran in: its
+        // last word, idle, over a shell back at its prompt — a report the
+        // shell ending the command never takes back. And beside it, the
+        // stand-in as an agent that says nothing of itself.
+        harness.update_session(shell, |session| {
+            session.source = StatusSource::Agent(std::time::Instant::now());
+            session.status = AgentStatus::Idle;
+        });
+        harness.update_session(agent, |session| {
+            session.source = StatusSource::NoReport;
+        });
+
+        harness.dispatch_action(TabAction::FocusPane(shell));
+        comment_on_the_added_line(&mut harness);
+        click_column_text(&mut harness, "Send 1 comment to the agent");
+        assert!(
+            review_note(&harness).is_some_and(|note| note.contains("shell prompt")),
+            "{:?}",
+            review_note(&harness)
+        );
+        assert_eq!(
+            comment_count(&harness),
+            1,
+            "a refused send took the comments"
+        );
+        harness.settle(std::time::Duration::from_millis(200));
+        assert!(
+            !harness.terminal_text(shell).contains("Review of"),
+            "the review reached the shell"
+        );
+
+        // With the stand-in in front, it is the one the review goes to, and
+        // not the shell of an agent that is gone.
+        harness.dispatch_action(TabAction::FocusPane(agent));
+        click_column_text(&mut harness, "Send 1 comment to the agent");
+        assert_eq!(
+            comment_count(&harness),
+            0,
+            "the review did not go: {:?}",
+            review_note(&harness)
+        );
+        assert_eq!(harness.focused_pane_id(), Some(agent));
+        assert_eq!(
+            what_the_agent_received(&mut harness, agent, &received),
+            format!("\u{1b}[200~{}\u{1b}[201~", the_review(&base))
+        );
+    }
+
+    #[test]
+    fn a_shell_listens_at_its_prompt_and_not_under_an_agent_that_reported_since_its_line() {
+        use std::time::{Duration, Instant};
+
+        use crook_terminal::{
+            BlockState, Emulator, LiveBlock, Palette, PromptEnd, Rgb, Snapshot, TerminalSize,
+        };
+
+        use crate::workspace::view::a_shell_is_listening;
+
+        let pane = |live_block: LiveBlock, alt_screen: bool| Snapshot {
+            revision: 1,
+            columns: 0,
+            rows: 0,
+            cells: Vec::new(),
+            combining: Vec::new(),
+            cursor: None,
+            foreground: Rgb::new(0, 0, 0),
+            background: Rgb::new(0, 0, 0),
+            display_offset: 0,
+            history_len: 0,
+            alt_screen,
+            live_block,
+            title: None,
+        };
+        // A shell handed `(claude)` by the composer, as its emulator has it:
+        // one that has drawn a marked prompt, or one that has printed a
+        // plain one, and then `lines` of output under the line.
+        let handed = |marked: bool, lines: usize| {
+            let mut emulator = Emulator::new(TerminalSize::new(80, 24), 1000, Palette::default());
+            emulator.advance(if marked {
+                b"\x1b]133;A\x07$ \x1b]133;B\x07"
+            } else {
+                b"$ "
+            });
+            emulator.command_submitted("(claude)");
+            emulator.advance("agent\r\n".repeat(lines).as_bytes());
+            // The column opening beside the pane narrows it, and the reflow
+            // that follows forgets where the prompt ended.
+            emulator.resize(TerminalSize::new(60, 24));
+            emulator.snapshot()
+        };
+
+        let marked = handed(true, 40);
+        assert_eq!(marked.live_block.state, BlockState::Submitted);
+        assert_eq!(
+            marked.live_block.prompt_end, None,
+            "the premise: a reflow forgets where the prompt ended"
+        );
+        assert!(
+            !crate::pane_surface::of(&marked, Instant::now()).composer,
+            "the premise: the block has outgrown the pane, and has no composer to go by"
+        );
+        let handed_over = marked
+            .live_block
+            .started_at
+            .expect("a submit starts the block's clock");
+        let before = handed_over
+            .checked_sub(Duration::from_millis(1))
+            .expect("the clock has run a millisecond");
+        let since = handed_over + Duration::from_millis(1);
+        let now = handed_over + Duration::from_secs(60);
+
+        // A shell that reports marks, handed a line it has not answered, may
+        // be reading the rest of it — until an agent reports from under the
+        // line. bash runs no DEBUG trap for a top-level `( … )`, so that is
+        // how an agent started in one looks for as long as it runs.
+        assert!(
+            a_shell_is_listening(&marked, None, now),
+            "a shell reading the rest of a line would take the paste"
+        );
+        assert!(
+            a_shell_is_listening(&marked, Some(before), now),
+            "a report from before the line counted as one from under it"
+        );
+        assert!(
+            !a_shell_is_listening(&marked, Some(since), now),
+            "an agent under a `( … )` line was taken for its shell"
+        );
+
+        // A shell that reports no marks is in Submitted from its first line
+        // to its last: a report from under the line decides, and without one
+        // the composer does. Its reports are compared with its own line.
+        let plain = handed(false, 0);
+        let grown = handed(false, 40);
+        assert_eq!(grown.live_block.state, BlockState::Submitted);
+        assert!(
+            grown.live_block.top_row < 0,
+            "the premise: the block has grown past the pane's top"
+        );
+        let since = |snapshot: &Snapshot| {
+            snapshot.live_block.started_at.expect("submitted") + Duration::from_millis(1)
+        };
+        assert!(
+            !a_shell_is_listening(&grown, Some(since(&grown)), now),
+            "an agent whose output outgrew a shell with no marks was taken for the shell"
+        );
+        assert!(!a_shell_is_listening(&plain, Some(since(&plain)), now));
+        assert!(
+            a_shell_is_listening(&plain, None, now),
+            "the composer of a shell with no marks would take the paste"
+        );
+        assert!(
+            !a_shell_is_listening(&grown, None, now),
+            "a grid with no composer is whatever runs there, asked only about bracketed paste"
+        );
+        let since = since(&marked);
+        let listening = |block: LiveBlock, reported: Option<Instant>| {
+            a_shell_is_listening(&pane(block, false), reported, now)
+        };
+
+        // The shell's own word that it is at its prompt beats any agent's,
+        // since an agent's last report outlives it.
+        let at_prompt = LiveBlock {
+            state: BlockState::AtPrompt,
+            prompt_end: Some(PromptEnd { row: 0, column: 2 }),
+            ..LiveBlock::default()
+        };
+        assert!(
+            listening(at_prompt.clone(), Some(since)),
+            "the prompt an agent exited to would take the paste"
+        );
+        assert!(listening(
+            LiveBlock {
+                state: BlockState::Done,
+                ..LiveBlock::default()
+            },
+            None
+        ));
+
+        // So does its word that a command is running, from the first
+        // moment, while the composer is still drawn.
+        let started = LiveBlock {
+            state: BlockState::Executing,
+            started_at: Some(now),
+            ..LiveBlock::default()
+        };
+        assert!(
+            crate::pane_surface::of(&pane(started.clone(), false), now).composer,
+            "the premise: a command this new still has its composer"
+        );
+        assert!(
+            !listening(started, None),
+            "a command that had just started was taken for its shell"
+        );
+
+        // A full-screen program is never a shell, whatever the marks under
+        // it last said.
+        assert!(!a_shell_is_listening(&pane(at_prompt, true), None, now));
+
+        // And a shell that has exited is refused as the prompt it was at: a
+        // paste there reaches nobody, and would clear the comments as sent.
+        assert!(listening(
+            LiveBlock {
+                state: BlockState::Terminated,
+                ..LiveBlock::default()
+            },
+            Some(since)
+        ));
+    }
+
+    /// The open block of `pane`'s shell.
+    fn live_block_of(harness: &Harness, pane: PaneId) -> crook_terminal::LiveBlock {
+        harness
+            .workspace
+            .read(&harness.app, |workspace, app| {
+                workspace
+                    .terminal(pane, app)
+                    .map(|(_, snapshot)| snapshot.live_block.clone())
+            })
+            .expect("the pane has a shell")
+    }
+
+    /// Starts the stand-in of [`an_agent_beside_a_shell`] in `pane` the way a
+    /// person starts an agent, by handing `line` to the pane's composer, and
+    /// waits for it to say it is ready.
+    fn start_through_the_composer(
+        harness: &mut Harness,
+        pane: PaneId,
+        line: &str,
+        received: &Path,
+    ) {
+        // A frame first: Enter reaches the composer through the tree the
+        // last frame laid out.
+        harness.frame();
+        harness.type_field(pane, line);
+        harness.press("enter", Modifiers::default(), "\r");
+        harness.wait_for("the stand-in never started", |harness| {
+            harness.terminal_text(pane).contains("READY") && received.exists()
+        });
+    }
+
+    #[test]
+    fn an_agent_started_in_a_bash_subshell_line_is_sent_the_review_once_it_has_reported() {
+        use crate::shell_integration::{Marks, Shell, Standing};
+
+        // bash runs no DEBUG trap for a top-level `( … )`, so a line like
+        // `(cd app && claude)` never says `C`: its block stays Submitted for
+        // as long as the agent runs, which is also how bash still reading the
+        // rest of a line looks. The agent reporting is what tells them apart.
+        if Standing::current().marks != Marks::Installed(Shell::Bash) {
+            eprintln!("skipping: the shell here is not bash");
+            return;
+        }
+        let scratch = Scratch::new();
+        let Some((repository, base)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let received = scratch.path().join("received");
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(repository.clone());
+        });
+        if !harness.start_terminals_with_marks() {
+            return;
+        }
+        await_prompt(&mut harness, pane);
+
+        start_through_the_composer(
+            &mut harness,
+            pane,
+            &format!(
+                "(printf '\\033[?2004hRE%s\\n' ADY; cat > '{}')",
+                received.display()
+            ),
+            &received,
+        );
+        let block = live_block_of(&harness, pane);
+        assert_eq!(
+            block.state,
+            crook_terminal::BlockState::Submitted,
+            "the premise: bash said nothing of the `( … )` line starting"
+        );
+        assert!(block.id.get() > 0, "the premise: the shell reports marks");
+
+        // With nothing reported from under it, the line may as well be one
+        // bash is still reading, and the review is kept.
+        comment_on_the_added_line(&mut harness);
+        click_column_text(&mut harness, "Send 1 comment to the agent");
+        assert!(
+            review_note(&harness).is_some_and(|note| note.contains("shell prompt")),
+            "{:?}",
+            review_note(&harness)
+        );
+        assert_eq!(comment_count(&harness), 1);
+
+        // What Claude Code's Stop hook says while it waits for the next
+        // instruction, which is when a review is sent.
+        harness.update_session(pane, |session| {
+            session.source = StatusSource::Agent(std::time::Instant::now());
+            session.status = AgentStatus::Idle;
+        });
+        click_column_text(&mut harness, "Send 1 comment to the agent");
+        assert_eq!(
+            comment_count(&harness),
+            0,
+            "the review did not go: {:?}",
+            review_note(&harness)
+        );
+        assert_eq!(
+            what_the_agent_received(&mut harness, pane, &received),
+            format!("\u{1b}[200~{}\u{1b}[201~", the_review(&base))
+        );
+    }
+
+    #[test]
+    fn an_agent_in_a_shell_that_reports_no_marks_is_sent_the_review_once_it_has_reported() {
+        // Such a shell's one block is Submitted from the first line the
+        // composer hands it to the end of the session, whatever is running:
+        // only a report from under the line says an agent is there.
+        if !a_shell_these_tests_speak() {
+            return;
+        }
+        let scratch = Scratch::new();
+        let Some((repository, base)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let received = scratch.path().join("received");
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(repository.clone());
+        });
+        if !harness.start_terminals() {
+            return;
+        }
+
+        start_through_the_composer(
+            &mut harness,
+            pane,
+            &format!(
+                "printf '\\033[?2004hRE%s\\n' ADY; cat > '{}'",
+                received.display()
+            ),
+            &received,
+        );
+        let block = live_block_of(&harness, pane);
+        assert_eq!(block.state, crook_terminal::BlockState::Submitted);
+        assert_eq!(block.id.get(), 0, "the premise: the shell reports no marks");
+
+        // The agent reports, after the line that started it. Whether the
+        // composer is still drawn by now or the block has grown past the
+        // pane's top — the column opening beside it narrows the pane, which
+        // can be enough — that report says an agent is what runs there.
+        harness.update_session(pane, |session| {
+            session.source = StatusSource::Agent(std::time::Instant::now());
+            session.status = AgentStatus::Running;
+        });
+        comment_on_the_added_line(&mut harness);
+        click_column_text(&mut harness, "Send 1 comment to the agent");
+        assert_eq!(
+            comment_count(&harness),
+            0,
+            "the review did not go: {:?}",
+            review_note(&harness)
+        );
+
+        // No prompt comes back to wait for in a shell that marks none: the
+        // stand-in's file, closed with everything in it, is the end.
+        harness.type_into(pane, "\u{4}\u{4}");
+        harness.wait_for("the stand-in never wrote what it was given", |_| {
+            fs::read_to_string(&received).is_ok_and(|text| text.ends_with("\u{1b}[201~"))
+        });
+        assert_eq!(
+            fs::read_to_string(&received).expect("the stand-in wrote its file"),
+            format!("\u{1b}[200~{}\u{1b}[201~", the_review(&base))
+        );
+    }
+
+    #[test]
+    fn typing_on_after_a_refresh_took_the_line_away_reaches_the_field_and_not_the_agent() {
+        let scratch = Scratch::new();
+        let Some((repository, _)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let received = scratch.path().join("received");
+        let mut harness = Harness::new(1);
+        let Some((agent, _)) = an_agent_beside_a_shell(&mut harness, &repository, &received, true)
+        else {
+            return;
+        };
+
+        // The agent in front, which is where a person reading its work is.
+        harness.dispatch_action(TabAction::FocusPane(agent));
+        open_a_comment_on_the_added_line(&mut harness);
+        type_keys(&mut harness, "abc");
+
+        // The agent rewrites the very line being commented on, and a refresh
+        // brings that home in the middle of the comment.
+        fs::write(
+            repository.join("README"),
+            "worktree test\nwhat the agent wrote instead\n",
+        )
+        .expect("writable");
+        harness.dispatch_workspace_action(WorkspaceAction::Changes(ChangesAction::Refresh));
+        harness.wait_for("the refresh never brought the new line", |harness| {
+            frame_text(&harness.frame()).contains("+what the agent wrote instead")
+        });
+        assert!(
+            comment_has_keys(&harness),
+            "a refresh took the keyboard from the comment with nobody asking"
+        );
+
+        type_keys(&mut harness, "xyz");
+        assert_eq!(comment_typed(&harness).as_deref(), Some("abcxyz"));
+        harness.press("enter", Modifiers::default(), "\r");
+        assert_eq!(
+            comment_count(&harness),
+            0,
+            "a comment on a line that is gone was added"
+        );
+        assert!(
+            review_note(&harness).is_some_and(|note| note.contains("not added")),
+            "{:?}",
+            review_note(&harness)
+        );
+        assert_eq!(
+            what_the_agent_received(&mut harness, agent, &received),
+            "",
+            "typing meant for the comment reached the agent"
+        );
+    }
+
+    #[test]
+    fn a_comment_field_a_refresh_set_adrift_goes_back_under_its_line_with_what_was_typed() {
+        let scratch = Scratch::new();
+        let Some((repository, _)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(repository.clone());
+        });
+        let adrift = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.changes_panel().adrift().is_some()
+            })
+        };
+        let refresh_until = |harness: &mut Harness, line: &str| {
+            harness.dispatch_workspace_action(WorkspaceAction::Changes(ChangesAction::Refresh));
+            harness.wait_for("the refresh never brought the line", |harness| {
+                frame_text(&harness.frame()).contains(line)
+            });
+        };
+        open_a_comment_on_the_added_line(&mut harness);
+        type_keys(&mut harness, "abc");
+
+        // The agent rewrites the line, and a refresh takes it away…
+        fs::write(
+            repository.join("README"),
+            "worktree test\nwhat the agent wrote instead\n",
+        )
+        .expect("writable");
+        refresh_until(&mut harness, "+what the agent wrote instead");
+        assert!(adrift(&harness), "the field stayed on a line that is gone");
+        type_keys(&mut harness, "def");
+
+        // …then writes it back, and the next refresh finds it: the field is
+        // under it again, with everything typed and the keyboard, and Enter
+        // there adds the comment.
+        fs::write(
+            repository.join("README"),
+            "worktree test\nwhat the agent added\n",
+        )
+        .expect("writable");
+        refresh_until(&mut harness, "+what the agent added");
+        assert!(
+            !adrift(&harness),
+            "a refresh that found the line left it adrift"
+        );
+        assert!(
+            comment_has_keys(&harness),
+            "coming back took the keyboard from the field"
+        );
+        type_keys(&mut harness, "ghi");
+        harness.press("enter", Modifiers::default(), "\r");
+        assert_eq!(
+            comment_count(&harness),
+            1,
+            "Enter on the field back under its line added nothing: {:?}",
+            review_note(&harness)
+        );
+        assert!(
+            frame_text(&harness.frame()).contains("abcdefghi"),
+            "the comment is not what was typed into the field"
+        );
+    }
+
+    #[test]
+    fn showing_a_section_or_pressing_its_field_takes_the_keyboard_from_a_comment() {
+        let scratch = Scratch::new();
+        let Some((repository, _)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(repository.clone());
+        });
+        open_a_comment_on_the_added_line(&mut harness);
+        type_keys(&mut harness, "half");
+
+        // The settings, the way the sidebar's button shows them: their search
+        // box has the keyboard as soon as it is drawn, and the comment keeps
+        // its words.
+        harness.open_settings_page();
+        assert!(
+            !comment_has_keys(&harness),
+            "the settings came up with the keyboard still in the comment"
+        );
+        harness.type_text("font");
+        assert_eq!(harness.search_text(), "font");
+        assert_eq!(comment_typed(&harness).as_deref(), Some("half"));
+
+        // Back into the comment, the way a press on it goes, and out again by
+        // a press on the settings' search box.
+        harness.dispatch_workspace_action(WorkspaceAction::Changes(ChangesAction::FocusComment));
+        assert!(comment_has_keys(&harness));
+        type_keys(&mut harness, "x");
+        let search = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .field(crate::plugins::settings::SETTINGS_SECTION, "search")
+                .0
+        });
+        harness.dispatch_workspace_action(WorkspaceAction::Settings(SettingsAction::FocusField(
+            Some(search),
+        )));
+        assert!(
+            !comment_has_keys(&harness),
+            "a press on the search box left the keyboard in the comment"
+        );
+        harness.type_text("size");
+        assert_eq!(harness.search_text(), "fontsize");
+        assert_eq!(comment_typed(&harness).as_deref(), Some("halfx"));
+    }
+
+    #[test]
+    fn opening_the_find_bar_takes_the_keyboard_from_a_comment() {
+        let scratch = Scratch::new();
+        let Some((repository, _)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        if !a_shell_these_tests_speak() {
+            return;
+        }
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(repository.clone());
+        });
+        if !harness.start_terminals_with_marks() {
+            return;
+        }
+        await_prompt(&mut harness, pane);
+        open_a_comment_on_the_added_line(&mut harness);
+        type_keys(&mut harness, "abc");
+
+        harness.dispatch_workspace_action(WorkspaceAction::Find {
+            pane,
+            action: crate::workspace::action::FindAction::Open,
+        });
+        assert!(
+            !comment_has_keys(&harness),
+            "the find bar opened with the keyboard still in the comment"
+        );
+        // The frame that draws the bar, which is what a key is typed into.
+        harness.frame();
+        type_keys(&mut harness, "qq");
+        let query = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.find(pane).map(crate::pane_find::PaneFind::query)
+        });
+        assert_eq!(query.as_deref(), Some("qq"));
+        assert_eq!(comment_typed(&harness).as_deref(), Some("abc"));
     }
 }

@@ -397,9 +397,16 @@ fn panel(
     // program they would reach: a reflexive `ctrl-c` to get out of the card
     // would interrupt the very agent it is there to protect. See
     // [`closing`](super::closing).
+    //
+    // A comment being typed in the Changes column takes all of it, the three
+    // included. Every element sees every keystroke, so without this a
+    // program with no composer — the agent the comment is about — would be
+    // typed into letter for letter alongside the field; and Ctrl-C there is
+    // a person's habit in a text box, not an interrupt aimed at the agent.
     let keys = match (is_focused, workspace.a_popup_is_open()) {
         (false, _) => Keys::None,
         (true, true) if workspace.closing_question().is_some() => Keys::None,
+        (true, _) if workspace.changes_takes_keys() => Keys::None,
         (true, true) => Keys::Signals,
         (true, false) => Keys::All,
     };

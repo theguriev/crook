@@ -1316,6 +1316,67 @@ editor that draws in the terminal it was started from has none when Crook starts
 (Neovim, measured, waits for one for ever). No syntax highlighting: added and removed lines are
 the theme's `diff_added` and `diff_removed`.
 
+**What a person finds goes to the agent as words.** A press on a changed line or a hunk header
+opens a one-line `TextField` under it, and Enter keeps what was typed as a comment.
+`changes_panel/review.rs` holds them: per tab, repository and base, in memory only, because a
+review is minutes of reading about a diff that is itself moving. A comment remembers its line by
+what the line says, marker included, and by its number — counted from the hunk header, on the
+new side for an added line and the old side for a removed one. Every refresh reads again the
+diff of each file with a comment on it, folded or not, so nothing is sent about a diff nobody
+read again; the comment moves to the line that says the same thing nearest to where it was (a
+header by the function name after its numbers, which move), and one whose line is gone is
+dropped and named — unless the read was cut short (`MAX_DIFF_LINES`, `MAX_DIFF_BYTES`), which
+proves nothing about the lines past the cut: that comment is kept with its last line and number
+until a read finds the line or a whole one does not. It is listed where the diff stops, under
+the line it was last found on and with its ×, rather than only counted, since not being in the
+part that was read is all that is known of it — pushed past the cut, or deleted from above it —
+and the person has to be able to see what will be sent and take it out.
+`Send N comments to the agent` composes one message — a heading, then
+`path:line`, the quoted line and the comment for each, in the order the diff reads, with no
+newline at the end — and hands it to `TerminalHandle::paste_bracketed`, the terminal model's
+paste behind a check that the program asked for bracketed paste, made under the same lock as the
+write. Without the markers `crook_terminal::input::paste` turns every newline into the Enter key,
+so a program that has not asked is refused rather than handed a review a line at a time. The
+pane is the one in the tab whose agent has reported (`StatusSource::Agent`), whose shell is not
+listening, and which works in the reviewed repository, else the focused one; a pane whose shell
+is listening is refused, because a review's quoted lines are commands there (bash 5.3 turns
+bracketed paste on at its prompt, so the whole review would sit in its line editor one Enter
+from running), and `> +x` is a redirection that writes a file into the tree this column
+promises not to touch. Whether it is listening (`a_shell_is_listening`) is the shell's word
+first, and not the report's, because a report outlives its agent: the hooks say `idle` when a
+session ends, and `Emulator::settle_agent` takes back only a report of running or waiting when
+the command ends. So marks saying the shell is at its prompt (`AtPrompt`, `Done`) refuse the
+paste whatever the pane last heard from an agent, and a command running (`C`) or a full-screen
+program never does. What the marks leave open is a line handed to the shell and not answered
+(`Submitted`), and that the report decides: an agent that reported since the line was handed
+over is running under it. bash runs no DEBUG trap for a top-level `( … )`, so an agent started
+in one never gets a `C`, and a shell without Crook's marks stays `Submitted` from its first
+line on. Short of such a report, a shell that reports marks is taken to be still reading the
+line — an open quote, a here-document — and one that reports nothing is judged by its
+composer. Which of the two a shell is, its open block says: only a mark closes the session's
+first, and a reflow, which forgets where the prompt ended, keeps that. A paste that
+went clears the comments and focuses the pane the ordinary way, so the person reads it in the
+agent's own prompt and presses Enter; any refusal keeps them and says why, and `Copy review` is
+the same text on the clipboard. The field takes the keyboard the way the tab search box does, as
+a wish granted by `changes_takes_keys` and claimed Escape and Enter in `action_for` — and the
+pane beside it is given no keys at all while it has them (`body.rs`), since every element sees
+every keystroke and an agent with no composer would otherwise be typed into alongside the
+field. A click on a pane, a section shown, another field pressed, the find bar opened, Enter or
+Escape takes the keyboard back, and so does the column moving to another repository or tab,
+which takes the field with it; a read coming home never does. A read that takes the field's
+line away — the line gone, pushed past the cut, or a read that failed — keeps the field, its
+words and the keyboard and moves it to the top of the column under the reason (`Adrift`); Enter
+there adds nothing. Its file is read again on every refresh, folded or not, and a read that
+finds the line puts the field back under it and shows the file, since most of what sets a field
+adrift — one timed-out read, a line past the cut — says nothing about the line. Dropped
+instead, the field would hand the keyboard back to the focused pane
+— usually the agent being commented on — and the rest of the comment, and its Enter, would be
+typed into it. Against the agents themselves, a multi-line bracketed paste was checked to land
+in the prompt unsent in Claude Code 2.1.280 (as `[Pasted text #1 +3 lines]`) and OpenCode
+1.18.33 (as `[Pasted ~4 lines]`); Codex 0.149.1 and Gemini CLI 0.61.0 turn bracketed paste on at
+start-up, but stopped at sign-in and a trust question here, so a paste into their prompts is not
+verified.
+
 ### The agent says what it is doing
 
 The dot on a tab's row has four colours and, until this section, one real source: a bell in a

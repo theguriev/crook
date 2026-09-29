@@ -115,6 +115,17 @@ use crate::shell_integration;
 use crate::tab::{AgentStatus, PaneId};
 use crate::theme::theme;
 
+/// What [`TerminalHandle::paste_bracketed`] came to.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BracketedPaste {
+    /// Written, between the markers.
+    Sent,
+    /// Not written: the program has not asked for bracketed paste.
+    NotAsked,
+    /// The write to the pty failed.
+    Failed,
+}
+
 /// The longest a pane goes between repaints while its shell is talking.
 ///
 /// Sixteen milliseconds: one display refresh, which is the fastest a repaint
@@ -1412,6 +1423,34 @@ impl TerminalHandle {
                 Err(error) => {
                     log::debug!("could not paste into a shell: {error}");
                     false
+                }
+            }
+        })
+    }
+
+    /// Puts pasted text into the program only if it has asked for bracketed
+    /// paste, and says which of those happened.
+    ///
+    /// [`Self::paste`] when it has, from the same path: markers around the
+    /// text, and the bytes that could end the bracket taken out. When it has
+    /// not, nothing is written — because without the markers every newline
+    /// goes as the Enter key, and a message of several lines would arrive as
+    /// that many submissions, the first of them half a thought. The caller
+    /// has something better to do with the text than that.
+    ///
+    /// One lock for the question and the write, so a program that turns the
+    /// mode off between them cannot be written to as though it had not.
+    pub fn paste_bracketed(&self, text: &str) -> BracketedPaste {
+        self.drive(|terminal| {
+            if !terminal.emulator().bracketed_paste() {
+                return BracketedPaste::NotAsked;
+            }
+            terminal.scroll_to_bottom();
+            match terminal.paste(text) {
+                Ok(()) => BracketedPaste::Sent,
+                Err(error) => {
+                    log::debug!("could not paste into a shell: {error}");
+                    BracketedPaste::Failed
                 }
             }
         })
