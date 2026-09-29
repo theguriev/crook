@@ -4708,19 +4708,19 @@ impl Workspace {
                     // Held once its pane is in it, and from then on until no
                     // pane in the window is.
                     workspace.held.opened(&path);
-                    // Only to somebody still waiting on the creator. A menu
-                    // popping up over whatever they have moved on to would be
-                    // an interruption about a question they have stopped
-                    // asking, and the log already has it.
-                    if answering && let Some(problem) = included.problem() {
-                        workspace.say_what_a_checkout_lacks(problem, ctx);
-                    }
                     // `open_tab_in…` makes the new tab's pane the focused
                     // one, so that is the pane the line is for.
                     if let Some(line) = launch
                         && let Some(pane) = workspace.tabs.focused_pane_id()
                     {
                         workspace.hand_line_to(pane, &line, send, ctx);
+                    }
+                    // Only to somebody still waiting on the creator. A menu
+                    // popping up over whatever they have moved on to would be
+                    // an interruption about a question they have stopped
+                    // asking, and the log already has it.
+                    if answering && let Some(problem) = included.problem() {
+                        workspace.say_what_a_checkout_lacks(problem, ctx);
                     }
                 }
                 Err(problem) => {
