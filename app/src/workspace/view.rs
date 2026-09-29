@@ -1441,6 +1441,22 @@ impl Workspace {
         }
     }
 
+    /// Where the creator offers to start a branch from: what each row says,
+    /// the ref it would hand git — `None` for the tab's own `HEAD` — and the
+    /// badge on its right, which is what marks the default branch. For a test.
+    pub fn worktree_bases(&self) -> Vec<(String, Option<String>, Option<&'static str>)> {
+        self.tab_menu
+            .bases
+            .iter()
+            .map(|base| (base.label.clone(), base.reference.clone(), base.badge))
+            .collect()
+    }
+
+    /// Which of them is picked, while the creator is up. For a test.
+    pub fn worktree_base(&self) -> Option<usize> {
+        (self.tab_menu.mode == WorktreeMode::Creating).then_some(self.tab_menu.base)
+    }
+
     /// Whether the menu is asking about removing a checkout. For a test.
     pub fn worktree_menu_is_confirming(&self) -> bool {
         matches!(self.tab_menu.mode, WorktreeMode::Removing { .. })
@@ -3379,6 +3395,17 @@ impl Workspace {
                         editor.select_all();
                     });
                 }
+                // Starting from the tab's own `HEAD`, every time the creator
+                // opens: a pick left over from the last worktree would start
+                // this one somewhere nobody chose for it.
+                self.tab_menu.bases = super::tab_menu::bases(
+                    self.tab_menu.worktrees(),
+                    self.tab_menu.pane_directory.as_deref(),
+                    &self.tab_menu.branches,
+                    self.tab_menu.default_branch.as_deref(),
+                );
+                self.tab_menu.base = 0;
+                self.tab_menu.base_scroll.lock().scroll_to_top();
                 self.tab_menu.problem = None;
                 self.tab_menu.mode = WorktreeMode::Creating;
                 self.tab_menu.forget_hover_state();
@@ -3387,6 +3414,20 @@ impl Workspace {
             }
 
             WorktreeAction::Create => self.create_worktree(ctx),
+            WorktreeAction::PickBase(index) => {
+                if self.tab_menu.mode == WorktreeMode::Creating
+                    && index < self.tab_menu.bases.len()
+                    && self.tab_menu.base != index
+                {
+                    self.tab_menu.base = index;
+                    ctx.notify();
+                }
+            }
+            WorktreeAction::MoveBase(by) => {
+                if self.tab_menu.mode == WorktreeMode::Creating && self.tab_menu.move_base(by) {
+                    ctx.notify();
+                }
+            }
             WorktreeAction::AskRemove(index) => self.ask_about_removing(index, ctx),
             WorktreeAction::Remove { force } => self.remove_worktree(force, ctx),
             WorktreeAction::MoveSelection(by) => {
@@ -3502,6 +3543,8 @@ impl Workspace {
         self.tab_menu.sweep = Sweep::default();
         self.tab_menu.contents = Contents::Reading;
         self.tab_menu.branches.clear();
+        self.tab_menu.default_branch = None;
+        self.tab_menu.bases.clear();
         self.tab_menu.problem = None;
         self.tab_menu.working = false;
         self.tab_menu.store = self.worktrees_directory.clone();
@@ -3518,9 +3561,13 @@ impl Workspace {
             // the creator offers, and a suggestion made without them is worse
             // than one made with them and far better than no menu at all.
             let branches = crate::git::worktree::branches(&directory).unwrap_or_default();
+            // Here, with the rest, rather than when the creator opens: the
+            // creator is a face of a menu that has already read everything it
+            // shows, and it would otherwise open on a list still being read.
+            let default = crate::git::worktree::default_branch(&directory, &branches);
             // Named, because the branches are read with their own error
             // swallowed and nothing else in the block says what this one is.
-            Ok::<_, crate::git::worktree::Error>((worktrees, branches))
+            Ok::<_, crate::git::worktree::Error>((worktrees, branches, default))
         });
 
         ctx.spawn(reading, move |workspace, listed, ctx| {
@@ -3531,12 +3578,13 @@ impl Workspace {
                 return;
             }
             workspace.tab_menu.contents = match listed {
-                Ok((worktrees, branches)) => {
+                Ok((worktrees, branches, default)) => {
                     workspace.tab_menu.repository = worktrees
                         .first()
                         .and_then(|worktree| worktree.path.file_name())
                         .map(|name| name.to_string_lossy().into_owned());
                     workspace.tab_menu.branches = branches;
+                    workspace.tab_menu.default_branch = default;
                     Contents::Ready(worktrees)
                 }
                 Err(problem) => Contents::Failed(problem.to_string()),
@@ -3599,6 +3647,8 @@ impl Workspace {
                     .map(|name| name.to_string_lossy().into_owned());
                 self.tab_menu.branches =
                     crate::git::worktree::branches(&directory).unwrap_or_default();
+                self.tab_menu.default_branch =
+                    crate::git::worktree::default_branch(&directory, &self.tab_menu.branches);
                 Contents::Ready(worktrees)
             }
             Err(problem) => Contents::Failed(problem.to_string()),
@@ -3682,6 +3732,8 @@ impl Workspace {
         self.tab_menu.sweep = Sweep::default();
         self.tab_menu.contents = Contents::Reading;
         self.tab_menu.branches.clear();
+        self.tab_menu.default_branch = None;
+        self.tab_menu.bases.clear();
         self.tab_menu.problem = None;
         self.tab_menu.working = false;
         self.tab_menu.chomp = 0;
@@ -4318,6 +4370,13 @@ impl Workspace {
             ctx.notify();
             return;
         };
+        // `None` for the tab's own `HEAD`, which is `add`'s own default and
+        // so the commit this started every branch from before it asked.
+        let base = self
+            .tab_menu
+            .bases
+            .get(self.tab_menu.base)
+            .and_then(|base| base.reference.clone());
 
         self.tab_menu.working = true;
         self.tab_menu.problem = None;
@@ -4330,7 +4389,7 @@ impl Workspace {
             let path = path.clone();
             let held = self.held.clone();
             async move {
-                crate::git::worktree::add(&repository, &path, &branch, None)?;
+                crate::git::worktree::add(&repository, &path, &branch, base.as_deref())?;
                 // Locked here, before the answer lands and the tab opens, so
                 // there is no moment in which an agent is working in a
                 // checkout nothing else has been told about. And handed in
@@ -7004,6 +7063,11 @@ impl Workspace {
             // reached there.
             ("n", WorktreeMode::Listing) => WorktreeAction::StartCreating,
             ("enter", WorktreeMode::Creating) => WorktreeAction::Create,
+            // The creator's other list: where the branch starts. The field
+            // would spend these two on jumping its caret to an end, which
+            // Home and End still do, and every letter stays the name's.
+            ("up", WorktreeMode::Creating) => WorktreeAction::MoveBase(-1),
+            ("down", WorktreeMode::Creating) => WorktreeAction::MoveBase(1),
             ("enter", WorktreeMode::Removing { refused: false, .. }) => {
                 WorktreeAction::Remove { force: false }
             }

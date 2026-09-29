@@ -716,6 +716,41 @@ impl Harness {
         })
     }
 
+    /// Where the creator offers to start a branch from: what each row says,
+    /// the ref it would hand git — `None` for the tab's own `HEAD` — and its
+    /// badge.
+    fn worktree_bases(&self) -> Vec<(String, Option<String>, Option<&'static str>)> {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.worktree_bases())
+    }
+
+    /// Which of those is picked, while the creator is up.
+    fn worktree_base(&self) -> Option<usize> {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.worktree_base())
+    }
+
+    /// The sentence the worktree menu is showing under its controls, if any.
+    ///
+    /// Read from the state the note is drawn from, not from the frame: a
+    /// sentence that wraps inside the 260px popup is two runs of glyphs, and
+    /// "says X" over those would be a question about where the line broke.
+    fn worktree_problem(&self) -> Option<String> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.tab_menu().problem.clone()
+        })
+    }
+
+    /// Puts `name` in the creator's branch field, replacing what is there.
+    fn name_the_worktree(&mut self, name: &str) {
+        self.workspace_update(|workspace, _| {
+            workspace
+                .worktree_branch()
+                .expect("crook/worktrees is on, so the creator has its field")
+                .edit(|editor| editor.set_text(name));
+        });
+    }
+
     /// How many worktrees the menu has read, if it has finished reading.
     fn worktrees_listed(&self) -> Option<usize> {
         self.workspace
@@ -5783,6 +5818,301 @@ fn the_creator_answers_enter_with_its_button_and_escape_with_cancel() {
         .find(|directory| directory.starts_with(&store))
         .expect("enter did not check anything out");
     assert!(opened.is_dir(), "{} was not checked out", opened.display());
+}
+
+#[test]
+fn the_creator_offers_the_tabs_own_head_and_the_default_branch_and_starts_from_the_head() {
+    // The question the menu used to decline to ask. A tab on a feature branch
+    // made every worktree opened from it a branch *of that feature*, silently;
+    // the creator now says where the branch starts, offers the repository's
+    // default branch right under the tab's own, and changes nothing until
+    // somebody picks.
+    let scratch = Scratch::new();
+    let Some((repository, first)) = repository_on_a_feature_branch(&scratch.path().join("repo"))
+    else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| {
+        workspace.set_worktrees_directory(scratch.path().join("store"));
+    });
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "feature", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(harness.active_id()));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+
+    // In the creator's order and not git's: the default branch under the
+    // tab's own, and the branch that sorts before it after both.
+    let bases = harness.worktree_bases();
+    assert_eq!(
+        bases.first(),
+        Some(&("feature".to_owned(), None, Some("this tab"))),
+        "the tab's own HEAD is not the first place offered: {bases:?}"
+    );
+    assert_eq!(
+        bases.get(1),
+        Some(&(
+            first.clone(),
+            Some(format!("refs/heads/{first}")),
+            Some("default")
+        )),
+        "the default branch is not offered right under it: {bases:?}"
+    );
+    assert_eq!(
+        bases.get(2),
+        Some(&(
+            SORTS_FIRST.to_owned(),
+            Some(format!("refs/heads/{SORTS_FIRST}")),
+            None
+        )),
+        "the other branches do not follow the two: {bases:?}"
+    );
+    assert_eq!(bases.len(), 3, "a place is offered twice: {bases:?}");
+    assert_eq!(
+        harness.worktree_base(),
+        Some(0),
+        "the creator did not start from the tab's own HEAD, which is what it did before it asked"
+    );
+
+    let scene = harness.frame();
+    assert!(
+        worktree_menu_says(&scene, "this tab") && worktree_menu_says(&scene, "default"),
+        "the rows do not say which is the tab's and which is the default"
+    );
+
+    // A press on a row picks it, the way a press on a row of the options
+    // menu does.
+    harness.click(
+        center(worktree_row_saying(&scene, &first)),
+        MouseButton::Left,
+    );
+    assert_eq!(
+        harness.worktree_base(),
+        Some(1),
+        "a press on the default branch's row did not pick it"
+    );
+    assert!(
+        harness.worktree_menu_is_creating(),
+        "picking a base left the creator"
+    );
+}
+
+#[test]
+fn a_worktree_made_with_the_default_branch_picked_starts_there_and_not_at_the_tabs_head() {
+    // The pick reaching git. The tab is on `feature`, one commit past the
+    // default branch; the checkout that comes out has to be at the default
+    // branch's commit, which it can only be if the pick was handed to
+    // `worktree::add` rather than dropped for `HEAD` on the way.
+    let scratch = Scratch::new();
+    let Some((repository, first)) = repository_on_a_feature_branch(&scratch.path().join("repo"))
+    else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "feature", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(harness.active_id()));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+
+    // One arrow down is the default branch, and not whichever branch git
+    // happens to list first: the fixture has one that sorts before it.
+    assert_eq!(
+        harness
+            .worktree_bases()
+            .get(1)
+            .map(|(label, _, badge)| (label.clone(), *badge)),
+        Some((first.clone(), Some("default"))),
+        "the default branch is not one arrow down"
+    );
+
+    // The arrows walk the bases while the name field keeps the letters, and
+    // stop at the ends the way the list's arrows do.
+    assert!(harness.press_key("down", Modifiers::default()));
+    assert_eq!(harness.worktree_base(), Some(1));
+    assert!(harness.press_key("up", Modifiers::default()));
+    assert!(harness.press_key("up", Modifiers::default()));
+    assert_eq!(
+        harness.worktree_base(),
+        Some(0),
+        "up from the first base went somewhere"
+    );
+    assert!(harness.press_key("down", Modifiers::default()));
+    assert_eq!(harness.worktree_base(), Some(1));
+
+    let before = harness.pane_ids().len();
+    assert!(harness.press_key("enter", Modifiers::default()));
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > before
+    });
+
+    let opened = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.pane_directories())
+        .into_iter()
+        .map(|(_, directory)| directory)
+        .find(|directory| directory.starts_with(&store))
+        .expect("no pane was opened in the new checkout");
+    let head = git_says(&opened, &["rev-parse", "HEAD"]).expect("the checkout has a HEAD");
+    assert_eq!(
+        Some(head.clone()),
+        git_says(&repository, &["rev-parse", &first]),
+        "the checkout did not start at the default branch"
+    );
+    assert_ne!(
+        Some(head.clone()),
+        git_says(&repository, &["rev-parse", "feature"]),
+        "the checkout started at the tab's own HEAD anyway"
+    );
+    assert_ne!(
+        Some(head),
+        git_says(&repository, &["rev-parse", SORTS_FIRST]),
+        "the checkout started at the branch git lists first"
+    );
+}
+
+#[test]
+fn the_creator_refuses_a_blank_name_itself_and_a_dash_name_through_add() {
+    // Two names no branch can have, and which refusal a person reads for
+    // each. A blank one never reaches git: `checkout_for` has no checkout to
+    // name without it, so the creator stops with its own sentence, and
+    // `worktree::add`'s empty-name refusal guards other callers only. A name
+    // beginning with a dash does reach `add`, which has to refuse it before
+    // git runs — with the default branch picked, `-m` used to rename the
+    // tab's own branch to one called `refs/heads/<default>` and then blame
+    // the base.
+    let scratch = Scratch::new();
+    let Some((repository, _)) = repository_on_a_feature_branch(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| {
+        workspace.set_worktrees_directory(scratch.path().join("store"));
+    });
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "feature", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(harness.active_id()));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    let panes = harness.pane_ids().len();
+    let branches = git_says(&repository, &["branch", "--format=%(refname)"]);
+
+    // Spaces are trimmed away, which leaves the same blank name.
+    for blank in ["", "   "] {
+        harness.name_the_worktree(blank);
+        assert!(harness.press_key("enter", Modifiers::default()));
+        assert_eq!(
+            harness.worktree_problem().as_deref(),
+            Some("A worktree needs a branch name."),
+            "a name of {blank:?} was not refused by the creator itself"
+        );
+        assert!(
+            !harness.worktree_menu_is_busy(),
+            "a name of {blank:?} was handed to git"
+        );
+    }
+
+    // The base picked is what made `-m` dangerous: from `HEAD`, git refused
+    // `HEAD` as the new name and nothing changed.
+    assert!(harness.press_key("down", Modifiers::default()));
+    assert_eq!(harness.worktree_base(), Some(1));
+    harness.name_the_worktree("-m");
+    assert!(harness.press_key("enter", Modifiers::default()));
+    harness.wait_for("add to answer", |harness| !harness.worktree_menu_is_busy());
+    assert_eq!(
+        harness.worktree_problem().as_deref(),
+        Some("-m cannot name a branch: it begins with a dash"),
+        "the creator did not say what was wrong with -m"
+    );
+
+    assert_eq!(
+        git_says(&repository, &["symbolic-ref", "--short", "HEAD"]).as_deref(),
+        Some("feature"),
+        "the tab's own branch was renamed"
+    );
+    assert_eq!(
+        git_says(&repository, &["branch", "--format=%(refname)"]),
+        branches,
+        "a refused name changed the repository's branches"
+    );
+    assert_eq!(
+        harness.pane_ids().len(),
+        panes,
+        "a refused name opened a pane"
+    );
+    assert!(
+        harness.worktree_menu_is_creating(),
+        "a refused name took the creator down, and the name with it"
+    );
+}
+
+/// The branch [`repository_on_a_feature_branch`] adds so that git's own order
+/// and the creator's differ: it sorts before any name a first branch has, so
+/// in a plain list of branches it would be the row under the tab's own.
+const SORTS_FIRST: &str = "0-sorts-first";
+
+/// A [`scratch_repository`] with a `feature` branch one commit past its first
+/// one, and `feature` checked out — and the first branch's name, which is
+/// whatever this machine's git calls a new repository's first branch, and so
+/// the repository's default branch however this machine answers that.
+///
+/// Beside them, [`SORTS_FIRST`], on a commit of its own. Without it the
+/// default branch would be the second row by alphabet alone, and a test that
+/// found it there would pass whether or not the creator put it there.
+fn repository_on_a_feature_branch(directory: &Path) -> Option<(PathBuf, String)> {
+    let repository = scratch_repository(directory)?;
+    let first = git_says(&repository, &["symbolic-ref", "--short", "HEAD"])?;
+    git_says(&repository, &["switch", "--quiet", "-c", SORTS_FIRST])?;
+    fs::write(repository.join("ELSEWHERE"), "somewhere else\n").ok()?;
+    git_says(&repository, &["add", "-A"])?;
+    git_says(&repository, &["commit", "--quiet", "-m", "elsewhere"])?;
+    git_says(&repository, &["switch", "--quiet", "-c", "feature", &first])?;
+    fs::write(repository.join("FEATURE"), "one commit ahead\n").ok()?;
+    git_says(&repository, &["add", "-A"])?;
+    git_says(&repository, &["commit", "--quiet", "-m", "two"])?;
+    Some((repository, first))
+}
+
+/// What git prints in `directory`, trimmed, or `None` where it failed.
+fn git_says(directory: &Path, args: &[&str]) -> Option<String> {
+    let output = crate::process::command("git")
+        .args(args)
+        .current_dir(directory)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 #[test]

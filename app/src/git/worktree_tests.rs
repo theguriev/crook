@@ -457,6 +457,168 @@ fn an_added_worktree_is_on_its_own_branch_from_the_base_it_was_given() {
 }
 
 #[test]
+fn an_added_worktree_starts_at_the_base_it_was_given_rather_than_at_head() {
+    if without_git("an_added_worktree_starts_at_the_base_it_was_given_rather_than_at_head") {
+        return;
+    }
+    let scratch = ScratchDir::new("add-from-base");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    // A branch one commit ahead of the `HEAD` the repository has out, so a
+    // worktree that quietly started from `HEAD` is a different commit from one
+    // that started where it was told to.
+    git(&repo, &["switch", "--quiet", "-c", "side"]);
+    write(&repo.join("side.txt"), "side\n");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "--no-verify", "-m", "side"]);
+    git(&repo, &["switch", "--quiet", "main"]);
+    let checkout = scratch.spot("from-side");
+
+    add(&repo, &checkout, "stacked", Some("refs/heads/side")).expect("git added the worktree");
+
+    let side = git(&repo, &["rev-parse", "side"]);
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), side);
+    assert_eq!(git(&repo, &["rev-parse", "stacked"]), side);
+    assert_ne!(git(&repo, &["rev-parse", "HEAD"]), side);
+    assert!(checkout.join("side.txt").is_file());
+}
+
+#[test]
+fn a_base_beginning_with_a_dash_is_refused_before_git_sees_it() {
+    if without_git("a_base_beginning_with_a_dash_is_refused_before_git_sees_it") {
+        return;
+    }
+    let scratch = ScratchDir::new("add-dash-base");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    // `-` is not an option to git once it is past `--`: it is `@{-1}`, the
+    // branch checked out before this one. So a base of `-` handed through
+    // would succeed, from a commit nobody picked — which is why this sets a
+    // previous branch up first.
+    git(&repo, &["switch", "--quiet", "-c", "before"]);
+    git(&repo, &["switch", "--quiet", "main"]);
+
+    for base in ["-", "--orphan", "-b"] {
+        let checkout = scratch.spot("dashed");
+        match add(&repo, &checkout, "dashed", Some(base)) {
+            Err(Error::InvalidBase { base: refused }) => assert_eq!(refused, base),
+            other => panic!("{base:?} was not refused: {other:?}"),
+        }
+        assert!(!checkout.exists(), "{base:?} checked something out");
+        assert!(
+            !branches(&repo)
+                .expect("git answered")
+                .contains(&"dashed".to_owned()),
+            "{base:?} made a branch"
+        );
+    }
+}
+
+#[test]
+fn a_branch_name_beginning_with_a_dash_is_refused_before_git_sees_it() {
+    if without_git("a_branch_name_beginning_with_a_dash_is_refused_before_git_sees_it") {
+        return;
+    }
+    let scratch = ScratchDir::new("add-dash-branch");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    git(&repo, &["branch", "side"]);
+    git(&repo, &["switch", "--quiet", "-c", "feature"]);
+    // `worktree add -b <name>` makes the branch by running
+    // `git branch <name> <base> --no-track`, with nothing between the two to
+    // say the name is not an option. So `-m` is `git branch -m <base>`: the
+    // branch checked out here renamed to the base before the worktree step
+    // fails — and a full ref, which every base the creator offers is, is a
+    // name `git branch` accepts.
+    for branch in ["-m", "-M", "-u", "-c", "-", ""] {
+        let checkout = scratch.spot("dashed");
+        match add(&repo, &checkout, branch, Some("refs/heads/side")) {
+            Err(Error::InvalidBranch { branch: refused }) => assert_eq!(refused, branch),
+            other => panic!("{branch:?} was not refused: {other:?}"),
+        }
+        assert!(!checkout.exists(), "{branch:?} checked something out");
+        assert_eq!(
+            git(&repo, &["symbolic-ref", "--short", "HEAD"]),
+            "feature",
+            "{branch:?} moved the branch this checkout is on"
+        );
+        assert_eq!(
+            branches(&repo).expect("git answered"),
+            ["feature", "main", "side"],
+            "{branch:?} changed the branches"
+        );
+        assert_eq!(
+            git(
+                &repo,
+                &["for-each-ref", "--format=%(upstream)", "refs/heads"]
+            ),
+            "",
+            "{branch:?} gave a branch an upstream"
+        );
+    }
+}
+
+#[test]
+fn a_base_that_names_nothing_is_reported_as_the_base() {
+    if without_git("a_base_that_names_nothing_is_reported_as_the_base") {
+        return;
+    }
+    let scratch = ScratchDir::new("add-missing-base");
+    let repo = repo_with_a_commit(&scratch, "repo");
+
+    let error = add(
+        &repo,
+        &scratch.spot("nowhere"),
+        "from-nowhere",
+        Some("refs/heads/gone"),
+    )
+    .expect_err("there is no such branch");
+
+    match error {
+        Error::InvalidBase { base } => assert_eq!(base, "refs/heads/gone"),
+        other => panic!("expected InvalidBase, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_branch_started_from_a_remote_branch_does_not_track_it() {
+    if without_git("a_branch_started_from_a_remote_branch_does_not_track_it") {
+        return;
+    }
+    let scratch = ScratchDir::new("add-no-track");
+    let upstream = repo_with_a_commit(&scratch, "upstream");
+    git(scratch.path(), &["clone", "--quiet", "upstream", "clone"]);
+    let clone = scratch.path().join("clone");
+    let checkout = scratch.spot("from-origin");
+
+    add(
+        &clone,
+        &checkout,
+        "agent-work",
+        Some("refs/remotes/origin/main"),
+    )
+    .expect("git added the worktree");
+
+    // git's own default would make `origin/main` the new branch's upstream,
+    // and a branch called `agent-work` whose upstream is `main` is one a bare
+    // `git push` refuses and a `git pull` merges main into. Started from the
+    // tab's own `HEAD` a branch gets none under git's own default, and
+    // starting it from somewhere else is not a reason to acquire one.
+    let upstream_of = command("git")
+        .args(["rev-parse", "--abbrev-ref", "agent-work@{upstream}"])
+        .current_dir(&clone)
+        .stdin(Stdio::null())
+        .output()
+        .expect("git is installed; the caller checked");
+    assert!(
+        !upstream_of.status.success(),
+        "the branch tracks {}",
+        String::from_utf8_lossy(&upstream_of.stdout).trim()
+    );
+    assert_eq!(
+        git(&checkout, &["rev-parse", "HEAD"]),
+        git(&upstream, &["rev-parse", "main"])
+    );
+}
+
+#[test]
 fn adding_a_branch_that_is_already_checked_out_says_where_it_is_checked_out() {
     if without_git("adding_a_branch_that_is_already_checked_out_says_where_it_is_checked_out") {
         return;
@@ -1067,6 +1229,10 @@ fn each_fatal_git_prints_for_a_worktree_is_recognised() {
         Error::MissingButRegistered { path } => assert_eq!(path, PathBuf::from("../gone")),
         other => panic!("expected MissingButRegistered, got {other:?}"),
     }
+    match classify("fatal: invalid reference: refs/heads/gone\n") {
+        Error::InvalidBase { base } => assert_eq!(base, "refs/heads/gone"),
+        other => panic!("expected InvalidBase, got {other:?}"),
+    }
     match classify(
         "fatal: '../w2' contains modified or untracked files, use --force to delete it\n",
     ) {
@@ -1280,6 +1446,124 @@ fn every_branch_is_listed_whether_or_not_it_is_checked_out() {
     listed.sort();
 
     assert_eq!(listed, ["busy", "main", "sitting/idle"]);
+}
+
+// --- where new work starts ------------------------------------------------------
+
+#[test]
+fn the_default_branch_is_the_one_origin_head_names() {
+    if without_git("the_default_branch_is_the_one_origin_head_names") {
+        return;
+    }
+    let scratch = ScratchDir::new("default-origin");
+    let upstream = repo_with_a_commit(&scratch, "upstream");
+    git(&upstream, &["branch", "trunk"]);
+    git(scratch.path(), &["clone", "--quiet", "upstream", "clone"]);
+    let clone = scratch.path().join("clone");
+    // Pointed somewhere other than the branch the clone has out, so the answer
+    // cannot have come from `HEAD` or from a local `main`.
+    git(
+        &clone,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/trunk",
+        ],
+    );
+
+    let branches = branches(&clone).expect("git answered");
+
+    assert_eq!(
+        default_branch(&clone, &branches).as_deref(),
+        Some("refs/remotes/origin/trunk")
+    );
+}
+
+#[test]
+fn an_origin_head_that_points_at_nothing_is_passed_over() {
+    if without_git("an_origin_head_that_points_at_nothing_is_passed_over") {
+        return;
+    }
+    let scratch = ScratchDir::new("default-dangling");
+    repo_with_a_commit(&scratch, "upstream");
+    git(scratch.path(), &["clone", "--quiet", "upstream", "clone"]);
+    let clone = scratch.path().join("clone");
+    // What a `fetch --prune` leaves when the branch the remote's HEAD named
+    // was deleted: a symbolic ref to a ref that is not there, which `add`
+    // would refuse as an invalid reference.
+    git(
+        &clone,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/gone",
+        ],
+    );
+
+    let branches = branches(&clone).expect("git answered");
+
+    assert_eq!(
+        default_branch(&clone, &branches).as_deref(),
+        Some("refs/heads/main")
+    );
+}
+
+#[test]
+fn without_an_origin_the_default_branch_is_the_configured_one_when_it_exists() {
+    if without_git("without_an_origin_the_default_branch_is_the_configured_one_when_it_exists") {
+        return;
+    }
+    let scratch = ScratchDir::new("default-configured");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    git(&repo, &["branch", "trunk"]);
+    // Set in the repository, which outranks whatever the machine running the
+    // suite has in its own configuration.
+    git(&repo, &["config", "init.defaultBranch", "trunk"]);
+
+    assert_eq!(
+        default_branch(&repo, &branches(&repo).expect("git answered")).as_deref(),
+        Some("refs/heads/trunk")
+    );
+}
+
+#[test]
+fn a_default_branch_is_only_ever_one_that_exists() {
+    let branches = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    // The remote's own answer wins over everything local.
+    assert_eq!(
+        choose_default(
+            Some("refs/remotes/origin/main"),
+            Some("trunk"),
+            &branches(&["trunk"])
+        )
+        .as_deref(),
+        Some("refs/remotes/origin/main")
+    );
+    // Configured, and there.
+    assert_eq!(
+        choose_default(None, Some("trunk"), &branches(&["main", "trunk"])).as_deref(),
+        Some("refs/heads/trunk")
+    );
+    // Configured and not there — `init.defaultBranch` is a machine-wide
+    // setting and says nothing about a repository cloned before it was set —
+    // so the two usual names, in that order.
+    assert_eq!(
+        choose_default(None, Some("trunk"), &branches(&["master", "main"])).as_deref(),
+        Some("refs/heads/main")
+    );
+    assert_eq!(
+        choose_default(None, None, &branches(&["feature", "master"])).as_deref(),
+        Some("refs/heads/master")
+    );
+    // Nothing that looks like a default is nothing, not a guess.
+    assert_eq!(choose_default(None, None, &branches(&["feature"])), None);
+    assert_eq!(choose_default(Some(""), Some(""), &[]), None);
 }
 
 /// The name Crook would offer for the next worktree of `repo`, read the way
