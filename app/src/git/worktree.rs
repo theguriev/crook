@@ -33,7 +33,7 @@
 //! only git.
 
 use std::collections::HashSet;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 

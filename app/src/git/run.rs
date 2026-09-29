@@ -218,7 +218,12 @@ pub(super) fn run_feeding(
     } else {
         Stdio::null()
     };
-    let mut child = start(directory, args, intent, [stdin, Stdio::piped(), Stdio::piped()])?;
+    let mut child = start(
+        directory,
+        args,
+        intent,
+        [stdin, Stdio::piped(), Stdio::piped()],
+    )?;
 
     // Both pipes are drained on their own threads. Polling `try_wait` with the
     // output left unread deadlocks the moment git writes more than a pipe
@@ -358,7 +363,7 @@ fn start(
 /// A `timeout` rather than an [`Intent`], because a pipe here only ever
 /// reads and it is the caller that knows how long its read deserves.
 ///
-/// `success` is both commands', and `stderr` is the second one's. The first
+/// `success` is both commands', and `code` and `stderr` are the second one's. The first
 /// one's is thrown away: the only thing a caller does with a failed pipe is
 /// not believe it, and a reader thread for text nobody reads is a thread for
 /// nothing.
@@ -410,7 +415,8 @@ pub(super) fn pipe(
 
     let deadline = Instant::now() + timeout;
     let waited = wait_for(&mut first, deadline, timeout).and_then(|first| {
-        wait_for(&mut second, deadline, timeout).map(|second| first.success() && second.success())
+        wait_for(&mut second, deadline, timeout)
+            .map(|second| (first.success() && second.success(), second.code()))
     });
     if waited.is_err() {
         // The first was killed at the deadline, or the second was and this is
@@ -425,7 +431,7 @@ pub(super) fn pipe(
     let stdout = collect(stdout, drained_by);
     let stderr = collect(stderr, drained_by);
 
-    let success = waited?;
+    let (success, code) = waited?;
     // A read is its output, and a fragment of one is not an answer.
     let Some(stdout) = stdout else {
         log::warn!(
@@ -438,6 +444,7 @@ pub(super) fn pipe(
 
     Ok(Finished {
         success,
+        code,
         stdout,
         stderr: String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned(),
     })
