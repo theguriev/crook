@@ -32,10 +32,34 @@
 //! thread, [`MAX_CONNECTIONS`] at once, which reads its lines against one
 //! [`DEADLINE`] for the whole connection and asks the window through
 //! [`Answer`]. Nothing here runs on the window's thread.
+//!
+//! # Connections that are kept
+//!
+//! A `pane.wait` with time to wait and an `events.follow` keep their
+//! connection for as long as the wait or the stream lasts — see
+//! [`protocol::Verb::keeps_connection`]. Such a connection gives its place
+//! among the [`MAX_CONNECTIONS`] back and takes one of [`MAX_KEPT`] instead:
+//! a lead waiting on each of its eight workers must not leave its own
+//! `crook pane list` turned away as `busy`. Its thread blocks on a
+//! [`Feed`] the window pushes into, and a second thread blocks on a read of
+//! the connection, whose only use is to see the client hang up — a script
+//! killed at its own timeout, an agent's tool call cut short — and end the
+//! wait then rather than when its time is up. The connection answers nothing
+//! else, and closes when the wait or the stream is over.
+//!
+//! A client that closes its half after its request — what `nc -N` does, and
+//! what [`converse`] takes as the end of a request — has not hung up: it is
+//! still reading. On Linux the end of what it says is told apart from its
+//! leaving by `poll`, and its wait is answered; elsewhere nothing that blocks
+//! tells the two apart — macOS's `poll` says `POLLHUP` for both — so there
+//! the end of what the client says is taken for its leaving, and a client of
+//! a kept verb keeps its half open until the reply comes. See
+//! [`until_closed`].
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, Permissions};
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::Shutdown;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -46,7 +70,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::Value;
 
-use super::protocol::{self, MAX_LINE, Refusal, Reply, Request, code};
+use super::protocol::{self, MAX_LINE, PaneEvent, Refusal, Reply, Request, Verb, Wait, code};
+use super::watch::{Feed, Next};
 
 /// The name of the directory the sockets live in, under the runtime or the
 /// temporary directory.
@@ -78,6 +103,16 @@ const REPLY_MARGIN: Duration = Duration::from_millis(250);
 /// cost it a refusal rather than the machine a thousand threads.
 pub const MAX_CONNECTIONS: usize = 8;
 
+/// How many connections are kept open at once for a wait or a stream of
+/// events, beside the [`MAX_CONNECTIONS`] answered. The next is refused as
+/// `busy`.
+///
+/// Thirty-two: a lead waiting on every tab its budget allows, and following
+/// them, is nine, and a window with a few leads is still well inside it. Each
+/// is two threads — one waiting on the window, one on the client — so this is
+/// what bounds them.
+pub const MAX_KEPT: usize = 32;
+
 /// How old a refusing socket must be before a starting Crook sweeps it.
 ///
 /// A socket is refused between being bound and being listened on, which is
@@ -95,9 +130,13 @@ const NAMES: usize = 16;
 /// immediately would spin a core until one was freed.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
-/// How the window is asked: a request, and the deadline the answer has to
-/// arrive by. Run on a connection's thread.
-pub type Answer = Arc<dyn Fn(Request, Instant) -> Result<Value, Refusal> + Send + Sync>;
+/// How the window is asked: a request, the feed a kept connection waits on —
+/// see [`protocol::Verb::keeps_connection`] — and the deadline the answer has
+/// to arrive by. Run on a connection's thread.
+pub type Answer = Arc<Ask>;
+
+/// The question [`Answer`] asks.
+pub type Ask = dyn Fn(Request, Option<Arc<Feed>>, Instant) -> Result<Value, Refusal> + Send + Sync;
 
 /// The user this process runs as.
 pub fn euid() -> u32 {
@@ -313,13 +352,13 @@ pub fn sweep(directory: &Path, stale_after: Duration) {
 
 /// Accepts until the socket is dropped.
 fn listen(listener: &UnixListener, closing: &AtomicBool, answer: &Answer) {
-    let open = Arc::new(AtomicUsize::new(0));
+    let lanes = Arc::new(Lanes::default());
     for accepted in listener.incoming() {
         if closing.load(Ordering::Acquire) {
             return;
         }
         match accepted {
-            Ok(stream) => admit(stream, &open, answer),
+            Ok(stream) => admit(stream, &lanes, answer),
             Err(error) => {
                 log::debug!("the control socket could not accept a connection: {error}");
                 thread::sleep(ACCEPT_BACKOFF);
@@ -329,9 +368,8 @@ fn listen(listener: &UnixListener, closing: &AtomicBool, answer: &Answer) {
 }
 
 /// Gives a connection a thread of its own, or refuses it as `busy`.
-fn admit(stream: UnixStream, open: &Arc<AtomicUsize>, answer: &Answer) {
-    if open.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
-        open.fetch_sub(1, Ordering::AcqRel);
+fn admit(stream: UnixStream, lanes: &Arc<Lanes>, answer: &Answer) {
+    let Some(mut place) = Place::take(lanes) else {
         // Written here, on the listener: a connection just accepted has an
         // empty buffer, so a line this short cannot block.
         let _ = send(
@@ -348,30 +386,73 @@ fn admit(stream: UnixStream, open: &Arc<AtomicUsize>, answer: &Answer) {
             ),
         );
         return;
-    }
+    };
 
     let deadline = Instant::now() + DEADLINE;
-    let leaving = Leaving(open.clone());
     let answer = answer.clone();
     let started = thread::Builder::new()
         .name("crook-control-connection".to_owned())
-        .spawn(move || {
-            converse(&stream, deadline, &*answer);
-            drop(leaving);
-        });
-    // A thread the OS would not start took the closure with it, and the guard
-    // inside it has already given the place back.
+        .spawn(move || converse(&stream, deadline, &*answer, &mut place));
+    // A thread the OS would not start took the closure with it, and the place
+    // inside it has already been given back.
     if let Err(error) = started {
         log::warn!("the control socket could not answer a connection: {error}");
     }
 }
 
-/// Gives a connection's place back when its thread ends, however it ends.
-struct Leaving(Arc<AtomicUsize>);
+/// How many connections are open, by what they are open for.
+#[derive(Debug, Default)]
+pub struct Lanes {
+    /// Connections being answered: at most [`MAX_CONNECTIONS`].
+    answered: AtomicUsize,
+    /// Connections kept for a wait or a stream: at most [`MAX_KEPT`].
+    kept: AtomicUsize,
+}
 
-impl Drop for Leaving {
+/// A connection's place in one of the [`Lanes`], given back when it is
+/// dropped — however the connection's thread ends.
+#[derive(Debug)]
+pub struct Place {
+    lanes: Arc<Lanes>,
+    kept: bool,
+}
+
+impl Place {
+    /// A place among the connections answered, or `None` when they are full.
+    pub fn take(lanes: &Arc<Lanes>) -> Option<Self> {
+        if lanes.answered.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
+            lanes.answered.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(Self {
+            lanes: lanes.clone(),
+            kept: false,
+        })
+    }
+
+    /// Moves this place to the connections kept, giving the one it had back,
+    /// or says there is no room there.
+    fn keep(&mut self) -> bool {
+        if self.kept {
+            return true;
+        }
+        if self.lanes.kept.fetch_add(1, Ordering::AcqRel) >= MAX_KEPT {
+            self.lanes.kept.fetch_sub(1, Ordering::AcqRel);
+            return false;
+        }
+        self.lanes.answered.fetch_sub(1, Ordering::AcqRel);
+        self.kept = true;
+        true
+    }
+}
+
+impl Drop for Place {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        let lane = match self.kept {
+            true => &self.lanes.kept,
+            false => &self.lanes.answered,
+        };
+        lane.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -380,12 +461,9 @@ impl Drop for Leaving {
 ///
 /// A blank line is skipped rather than refused, the way a shell skips one. A
 /// last line with no newline before the end is still a request: the client
-/// said all it had to say and closed its half.
-pub fn converse(
-    stream: &UnixStream,
-    deadline: Instant,
-    answer: &(dyn Fn(Request, Instant) -> Result<Value, Refusal> + Send + Sync),
-) {
+/// said all it had to say and closed its half. Closing it is no hang-up, on
+/// Linux, for a verb that keeps the connection either — see the module docs.
+pub fn converse(stream: &UnixStream, deadline: Instant, answer: &Ask, place: &mut Place) {
     let mut reader = BufReader::new(Timed { stream, deadline });
     loop {
         let mut line = Vec::new();
@@ -414,6 +492,12 @@ pub fn converse(
 
         if !line.iter().all(u8::is_ascii_whitespace) {
             let (id, request) = protocol::read(&line);
+            if let Ok(request) = &request
+                && request.verb.keeps_connection()
+            {
+                keep(stream, id, request.clone(), deadline, answer, place);
+                return;
+            }
             // A verb that waits on git is given its own time, for this reply
             // only: the reading goes on against the connection's deadline, so
             // a line after a slow one finds that time has run out and the
@@ -431,7 +515,7 @@ pub fn converse(
             // still has some left to say so in: see `REPLY_MARGIN`.
             let answer_by = replying_by.checked_sub(REPLY_MARGIN).unwrap_or(replying_by);
             let reply = match request {
-                Ok(request) => match answer(request, answer_by) {
+                Ok(request) => match answer(request, None, answer_by) {
                     Ok(result) => Reply::answered(id, result),
                     Err(refusal) => Reply::refused(id, refusal),
                 },
@@ -446,6 +530,234 @@ pub fn converse(
         }
     }
 }
+
+/// Answers a verb that keeps its connection — a wait, or a stream of
+/// events — and closes the connection when it is over.
+///
+/// The window is asked by the connection's deadline, as for any question, and
+/// handed a [`Feed`] to answer into from then on. A wait's answer is the one
+/// item the window pushes, or, when its time runs out first, what the window
+/// says the pane is doing when asked again with no time to wait; a stream's is
+/// the window's first answer and then every item as it comes.
+fn keep(
+    stream: &UnixStream,
+    id: Option<Value>,
+    request: Request,
+    deadline: Instant,
+    answer: &Ask,
+    place: &mut Place,
+) {
+    let asked_at = Instant::now();
+    if !place.keep() {
+        let refusal = Refusal::new(
+            code::BUSY,
+            format!(
+                "this Crook is keeping {MAX_KEPT} waits and event streams open already; try \
+                 again when one has ended"
+            ),
+        );
+        let _ = send(stream, deadline, &Reply::refused(id, refusal));
+        return;
+    }
+    let feed = Arc::new(Feed::for_verb(&request.verb));
+    watch_for_hangup(stream, &feed);
+
+    let answer_by = deadline.checked_sub(REPLY_MARGIN).unwrap_or(deadline);
+    match answer(request.clone(), Some(feed.clone()), answer_by) {
+        Err(refusal) => {
+            let _ = send(stream, deadline, &Reply::refused(id, refusal));
+        }
+        Ok(first) => match &request.verb {
+            Verb::PaneWait(asked) => {
+                let until = asked_at + asked.timeout();
+                wait_on(stream, id, &request, asked, until, &feed, answer);
+            }
+            _ => stream_to(stream, id, first, deadline, &feed),
+        },
+    }
+    feed.hang_up();
+    // Ends the connection for the client, and returns the read the hang-up
+    // watch is parked in.
+    let _ = stream.shutdown(Shutdown::Both);
+}
+
+/// Waits for a wait's answer until `until`, and writes it.
+fn wait_on(
+    stream: &UnixStream,
+    id: Option<Value>,
+    request: &Request,
+    asked: &Wait,
+    until: Instant,
+    feed: &Feed,
+    answer: &Ask,
+) {
+    let result = match feed.next(Some(until)) {
+        Next::Item(result) => Ok(result),
+        // Where the pane is now, asked as a wait of no time: the answer a
+        // script reads is then the state it was left in, not a bare
+        // "timeout" it has to ask about again.
+        Next::TimedOut => {
+            let now = Request {
+                verb: Verb::PaneWait(Wait {
+                    timeout: Some(0),
+                    ..asked.clone()
+                }),
+                token: request.token.clone(),
+            };
+            let deadline = Instant::now() + DEADLINE;
+            let answer_by = deadline.checked_sub(REPLY_MARGIN).unwrap_or(deadline);
+            let result = answer(now, None, answer_by);
+            let reply = match result {
+                Ok(result) => Reply::answered(id, result),
+                Err(refusal) => Reply::refused(id, refusal),
+            };
+            let _ = send(stream, deadline, &reply);
+            return;
+        }
+        Next::Ended => Err(Refusal::new(
+            code::GONE,
+            "the window closed before the pane got there",
+        )),
+        // Nobody left to tell.
+        Next::HungUp | Next::Lagged(_) => return,
+    };
+    let reply = match result {
+        Ok(result) => Reply::answered(id, result),
+        Err(refusal) => Reply::refused(id, refusal),
+    };
+    let _ = send(stream, Instant::now() + DEADLINE, &reply);
+}
+
+/// Writes the window's first answer, then every event the feed is given,
+/// until the window ends it or the client hangs up.
+///
+/// A write blocks while the client is not reading, for as long as it is not:
+/// that is what the feed's bound is for, and a client that hangs up fails the
+/// write it is blocked in.
+fn stream_to(stream: &UnixStream, id: Option<Value>, first: Value, deadline: Instant, feed: &Feed) {
+    if send(stream, deadline, &Reply::answered(id, first)).is_err() {
+        return;
+    }
+    if stream.set_write_timeout(None).is_err() {
+        return;
+    }
+    let mut stream = stream;
+    loop {
+        let line = match feed.next(None) {
+            Next::Item(event) => {
+                let mut line = event.to_string();
+                line.push('\n');
+                line
+            }
+            Next::Lagged(dropped) => PaneEvent::Lagged { dropped }.line(),
+            Next::Ended | Next::HungUp | Next::TimedOut => return,
+        };
+        if stream.write_all(line.as_bytes()).is_err() {
+            return;
+        }
+    }
+}
+
+/// Starts the thread that sees a kept connection's client hang up, and hangs
+/// its feed up when it does.
+///
+/// A read of the connection, blocked for as long as the client says nothing —
+/// which after its one request is for as long as it is there. Whatever it
+/// sends is read and let go; its end of the connection closing, or the
+/// connection being shut down when the verb is over, returns the read. A
+/// read that returns the end of what the client says is not yet the client
+/// gone — it may only have closed its half — and [`until_closed`] waits for
+/// the rest.
+fn watch_for_hangup(stream: &UnixStream, feed: &Arc<Feed>) {
+    let Ok(watched) = stream.try_clone() else {
+        return;
+    };
+    // The connection's deadline set a timeout on reads, and a read that timed
+    // out would be taken for the client leaving.
+    if watched.set_read_timeout(None).is_err() {
+        return;
+    }
+    let feed = feed.clone();
+    let started = thread::Builder::new()
+        .name("crook-control-hangup".to_owned())
+        .spawn(move || {
+            let mut ignored = [0u8; 256];
+            let mut watched = &watched;
+            loop {
+                match watched.read(&mut ignored) {
+                    Ok(0) => {
+                        until_closed(watched);
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            feed.hang_up();
+        });
+    if let Err(error) = started {
+        log::debug!("no watch for a kept connection's client hanging up: {error}");
+    }
+}
+
+/// Returns once the connection is closed both ways — the client gone, or the
+/// connection shut down here when its verb is over — having been called when
+/// the client has said all it will say.
+///
+/// A client that closes only its half after its request is still reading,
+/// and its wait is still to be answered. `poll` tells the two apart on Linux:
+/// asked for nothing, it reports only `POLLHUP`, which a Unix socket raises
+/// once neither way is open, and an error; the peer's half-close is
+/// `POLLRDHUP` and `POLLIN`, which are not asked for and wake nothing.
+#[cfg(target_os = "linux")]
+fn until_closed(stream: &UnixStream) {
+    use std::ffi::c_ulong;
+    use std::os::fd::AsRawFd;
+
+    /// `struct pollfd`.
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    // Declared rather than depended on, as `euid` declares `geteuid`:
+    // `nfds_t` is an `unsigned long` in glibc and musl alike.
+    unsafe extern "C" {
+        fn poll(fds: *mut PollFd, count: c_ulong, timeout: i32) -> i32;
+    }
+
+    let mut watched = PollFd {
+        fd: stream.as_raw_fd(),
+        events: 0,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: one `pollfd`, which lives across the call, and a count of
+        // one. The descriptor is `stream`'s, open for as long as it is
+        // borrowed.
+        let polled = unsafe { poll(&mut watched, 1, -1) };
+        if polled > 0 {
+            return;
+        }
+        // No timeout was given, so nothing but a signal returns it empty.
+        if polled < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return;
+        }
+    }
+}
+
+/// Everywhere but Linux, at once: the end of what the client says is taken
+/// for the client leaving.
+///
+/// Nothing that blocks tells a half-close from a close there — macOS's `poll`
+/// raises `POLLHUP` for either, from the same end-of-file its `kqueue` sees —
+/// and a watch that never took the client for gone would hold a killed
+/// client's wait for its whole hour. So a client of a kept verb keeps its
+/// half open until the reply comes; see the module docs.
+#[cfg(not(target_os = "linux"))]
+fn until_closed(_: &UnixStream) {}
 
 /// Writes one reply, by the connection's deadline.
 fn send(stream: &UnixStream, deadline: Instant, reply: &Reply) -> io::Result<()> {

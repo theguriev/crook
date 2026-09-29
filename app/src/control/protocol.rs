@@ -70,13 +70,42 @@ pub mod code {
     /// The window tried and could not: git refused the worktree, the pane has
     /// no directory to find a repository in.
     pub const FAILED: &str = "failed";
+    /// No pane with the number asked about is open in this window: it has
+    /// closed, or it never was. A `pane.wait` on a closed tab the caller may
+    /// watch is answered instead, with the pane closed.
+    pub const NO_SUCH_PANE: &str = "no-such-pane";
+    /// The pane asked about is neither the caller nor one it opened, and
+    /// watching it needs a grant from the person who opened it — which this
+    /// window cannot ask for yet.
+    pub const NEEDS_GRANT: &str = "needs-grant";
+    /// The pane has no finished command to read or wait for: the first one
+    /// is still running, a full-screen program or an agent's TUI has the
+    /// pane, or its shell reports no command marks and so never finishes one.
+    pub const NO_BLOCKS: &str = "no-blocks";
 }
+
+/// The longest a `pane.wait` may wait, in seconds, and how long one that
+/// names no timeout does.
+///
+/// An hour. A wait holds a thread and a place among the connections kept open
+/// — see `server::MAX_KEPT` — for as long as it lasts, so it has to end at a
+/// time somebody chose rather than when the pane happens to get there; an hour
+/// is past any turn an agent takes, and a caller that wants longer asks again,
+/// which is also the moment it finds out the pane is still there.
+pub const MAX_WAIT_SECS: u64 = 60 * 60;
+
+/// The most finished blocks one `pane.blocks` answers with.
+///
+/// A hundred is far more than an agent reading what a worker did wants, and
+/// it bounds the walk the window makes between two frames to build them.
+pub const MAX_BLOCKS: usize = 100;
 
 /// What a request can ask for.
 ///
-/// Two verbs: one that reads and one that opens a tab. Every one is a promise
-/// that is hard to take back, which is why each is added on purpose and none
-/// by a pattern.
+/// Five verbs: one that lists, one that opens a tab, and three that watch a
+/// pane the caller may watch — itself, and the tabs it opened. Every one is a
+/// promise that is hard to take back, which is why each is added on purpose
+/// and none by a pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verb {
     /// Every pane of the window, as a list of [`PaneEntry`].
@@ -84,27 +113,63 @@ pub enum Verb {
     /// A tab opened beside the caller's, running a command: see [`NewTab`].
     /// Answered with an [`Opened`].
     TabNew(NewTab),
+    /// An answer when a pane gets somewhere, or when the time runs out: see
+    /// [`Wait`]. Answered with a [`Waited`].
+    PaneWait(Wait),
+    /// A pane's finished commands, with what they printed: see
+    /// [`ReadBlocks`]. Answered with a [`BlocksRead`].
+    PaneBlocks(ReadBlocks),
+    /// A line for everything that happens to the panes the caller may watch,
+    /// for as long as the connection stays open: see [`Follow`]. Answered
+    /// with a [`Following`], and then a [`PaneEvent`] a line.
+    EventsFollow(Follow),
 }
 
 impl Verb {
     /// Every verb's name, in the order a refusal names them.
-    pub const NAMES: [&str; 2] = ["pane.list", "tab.new"];
+    pub const NAMES: [&str; 5] = [
+        "pane.list",
+        "tab.new",
+        "pane.wait",
+        "pane.blocks",
+        "events.follow",
+    ];
 
     /// Its name on the wire: a noun and a verb, joined by a dot.
     pub fn name(&self) -> &'static str {
         match self {
             Self::PaneList => Self::NAMES[0],
             Self::TabNew(_) => Self::NAMES[1],
+            Self::PaneWait(_) => Self::NAMES[2],
+            Self::PaneBlocks(_) => Self::NAMES[3],
+            Self::EventsFollow(_) => Self::NAMES[4],
         }
     }
 
     /// Its arguments on the wire, or `None` for a verb that takes none.
     fn args(&self) -> Option<Value> {
+        let encoded = match self {
+            Self::PaneList => return None,
+            Self::TabNew(asked) => serde_json::to_value(asked),
+            Self::PaneWait(asked) => serde_json::to_value(asked),
+            Self::PaneBlocks(asked) => serde_json::to_value(asked),
+            Self::EventsFollow(asked) => serde_json::to_value(asked),
+        };
+        Some(encoded.expect("a verb's arguments are numbers, strings and booleans"))
+    }
+
+    /// Whether the connection is kept for this verb after it is asked: a
+    /// wait with time to wait, and a stream of events.
+    ///
+    /// Such a connection answers nothing after it, holds a place of its own
+    /// rather than one of the few a question is answered in — see
+    /// `server::MAX_KEPT` — and ends early when the client hangs up. A wait
+    /// of no time at all is a question like any other.
+    pub fn keeps_connection(&self) -> bool {
         match self {
-            Self::PaneList => None,
-            Self::TabNew(asked) => {
-                Some(serde_json::to_value(asked).expect("a new tab is strings and a boolean"))
-            }
+            Self::PaneWait(asked) => !asked.timeout().is_zero(),
+            Self::EventsFollow(_) => true,
+            Self::PaneList | Self::TabNew(_) | Self::PaneBlocks(_) => false,
         }
     }
 
@@ -126,8 +191,241 @@ impl Verb {
                     + crate::git::worktree::WRITE_TIMEOUT
                     + Duration::from_secs(10),
             ),
+            // The wait, and time on either side of it: to be asked, and to
+            // be asked once more what the pane is doing when the wait runs
+            // out — see `server`'s kept connections. A wait of no time is a
+            // question like any other.
+            Self::PaneWait(asked) if self.keeps_connection() => {
+                Some(asked.timeout() + Duration::from_secs(10))
+            }
             _ => None,
         }
+    }
+}
+
+/// What a pane is waited for: one of the four words `crook pane wait
+/// --until` takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Until {
+    /// The agent in it said it is idle — or its command ended after it had
+    /// said something else. The idle a pane starts in, before anything has
+    /// reported, is not it: a worker whose agent has not started yet has not
+    /// finished either.
+    Idle,
+    /// The agent in it has stopped for a person.
+    NeedsInput,
+    /// The pane has closed: its shell ended, or somebody closed it.
+    Exited,
+    /// Nothing is running in it, nothing is waiting to be sent to it, and a
+    /// command has finished there — its shell said so with OSC 133 `D`. An
+    /// empty line is not a command, though a shell ends one with a `D` too.
+    Finished,
+}
+
+impl Until {
+    /// Every word, in the order a refusal names them.
+    pub const WORDS: [&str; 4] = ["idle", "needs-input", "exited", "finished"];
+
+    /// Its word on the wire and on the command line.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Idle => Self::WORDS[0],
+            Self::NeedsInput => Self::WORDS[1],
+            Self::Exited => Self::WORDS[2],
+            Self::Finished => Self::WORDS[3],
+        }
+    }
+
+    /// The condition a word names, if it names one.
+    pub fn from_word(word: &str) -> Option<Self> {
+        [Self::Idle, Self::NeedsInput, Self::Exited, Self::Finished]
+            .into_iter()
+            .find(|until| until.word() == word)
+    }
+}
+
+/// What `pane.wait` asks for: a pane, what to wait for, and for how long.
+///
+/// Unknown fields refused, as [`NewTab`]'s are, and for the same reason.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Wait {
+    /// The pane's number, as `pane.list` gives it.
+    pub pane: u64,
+    /// What it is waited for.
+    pub until: Until,
+    /// For how many seconds, at most [`MAX_WAIT_SECS`], which is also what
+    /// none means. Zero answers at once with where the pane is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+}
+
+impl Wait {
+    /// How long the wait is.
+    pub fn timeout(&self) -> Duration {
+        Duration::from_secs(self.timeout.unwrap_or(MAX_WAIT_SECS))
+    }
+}
+
+/// What `pane.wait` answers: whether the pane got there, and where it is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Waited {
+    /// The pane waited on.
+    pub pane_id: u64,
+    /// What it was waited for.
+    pub until: Until,
+    /// Whether it got there. `false` when the time ran out first, or when the
+    /// pane closed first and was not waited on for that.
+    pub reached: bool,
+    /// What its agent last said, in `pane.list`'s words; `None` once it has
+    /// closed.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// What the agent is waiting for, while it waits.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// For `finished`: the status the command exited with, when the shell
+    /// reported one.
+    #[serde(default)]
+    pub exit: Option<i32>,
+    /// Whether the pane has closed.
+    pub closed: bool,
+}
+
+/// What `pane.blocks` asks for: a pane, and how many of its newest finished
+/// commands.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadBlocks {
+    /// The pane's number, as `pane.list` gives it.
+    pub pane: u64,
+    /// How many, from 1 to [`MAX_BLOCKS`]; every one the pane holds, up to
+    /// that, when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<usize>,
+}
+
+/// What `pane.blocks` answers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlocksRead {
+    /// The pane read.
+    pub pane_id: u64,
+    /// Its newest finished commands, oldest first.
+    pub blocks: Vec<BlockEntry>,
+    /// Whether something is running in the pane now — a command, a
+    /// full-screen program, an agent's TUI — whose output is in none of these
+    /// blocks yet.
+    pub running: bool,
+}
+
+/// One finished command, as `pane.blocks` answers for it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockEntry {
+    /// The command line, as the shell echoed it. Display-only: it came off
+    /// the screen, and anything that can print can put anything there.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// The status it exited with, when the shell reported one.
+    #[serde(default)]
+    pub exit: Option<i32>,
+    /// Where the shell said it was when the command started.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// How long it ran, in milliseconds, when both ends are known.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// What it printed, as a copy of the block's output would read — its
+    /// end, when there was more than an answer carries.
+    pub output: String,
+    /// Whether `output` is only the end of what it printed.
+    pub truncated: bool,
+}
+
+/// What `events.follow` asks for: every pane the caller may watch, or one.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Follow {
+    /// Only this pane, by its number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<u64>,
+}
+
+/// The first line `events.follow` answers with, before the events.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Following {
+    /// The panes followed as of now, in the panel's order. A tab the caller
+    /// opens later joins with an `opened` event.
+    pub panes: Vec<u64>,
+}
+
+/// One line of an `events.follow` stream.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "kebab-case")]
+pub enum PaneEvent {
+    /// A pane the caller may watch has opened: a tab it asked for.
+    Opened {
+        /// The new pane.
+        pane_id: u64,
+    },
+    /// What a pane's agent says has changed.
+    Status {
+        /// The pane.
+        pane_id: u64,
+        /// One of the four words `crook --agent` takes.
+        status: String,
+        /// What it is waiting for, while it waits.
+        #[serde(default)]
+        message: Option<String>,
+    },
+    /// A command was seen running in a pane.
+    ///
+    /// Seen, on a frame the pane's terminal published while it ran: one that
+    /// starts and ends between two of them — `true`, `git status` — is never
+    /// seen running and is told only by its [`Self::Finished`], which names
+    /// it too.
+    Started {
+        /// The pane.
+        pane_id: u64,
+        /// The command line, display-only.
+        command: String,
+    },
+    /// A command in a pane finished: its shell said so with OSC 133 `D`.
+    Finished {
+        /// The pane.
+        pane_id: u64,
+        /// The command line, display-only; `None` for an empty line or a
+        /// cancelled one, which a shell ends with a `D` too.
+        #[serde(default)]
+        command: Option<String>,
+        /// The status it exited with, when the shell reported one.
+        #[serde(default)]
+        exit: Option<i32>,
+        /// How long it ran, in milliseconds, when that is known.
+        #[serde(default)]
+        duration_ms: Option<u64>,
+    },
+    /// A pane closed. When it is the pane the stream was asked about — the
+    /// caller's own, or the one named — it is the last line.
+    Closed {
+        /// The pane.
+        pane_id: u64,
+    },
+    /// The reader fell behind and this many events were dropped, the oldest
+    /// first, rather than kept for it without bound.
+    Lagged {
+        /// How many.
+        dropped: u64,
+    },
+}
+
+impl PaneEvent {
+    /// The event as it is written: one line of JSON and its newline.
+    pub fn line(&self) -> String {
+        let mut line =
+            serde_json::to_string(self).expect("an event is numbers and strings, which encode");
+        line.push('\n');
+        line
     }
 }
 
@@ -375,6 +673,46 @@ fn request_of(request: &Map<String, Value>) -> Result<Request, Refusal> {
                 .map_err(|error| malformed(&format!("`tab.new`'s args: {error}")))?;
             Verb::TabNew(asked)
         }
+        "pane.wait" => {
+            let Some(args) = args else {
+                return Err(malformed(
+                    "`pane.wait` needs `args` naming its `pane` and what it waits `until`",
+                ));
+            };
+            let asked = Wait::deserialize(args)
+                .map_err(|error| malformed(&format!("`pane.wait`'s args: {error}")))?;
+            if asked.timeout.is_some_and(|timeout| timeout > MAX_WAIT_SECS) {
+                return Err(Refusal::new(
+                    code::BAD_REQUEST,
+                    format!("a wait is at most {MAX_WAIT_SECS} seconds; wait again after it"),
+                ));
+            }
+            Verb::PaneWait(asked)
+        }
+        "pane.blocks" => {
+            let Some(args) = args else {
+                return Err(malformed("`pane.blocks` needs `args` naming its `pane`"));
+            };
+            let asked = ReadBlocks::deserialize(args)
+                .map_err(|error| malformed(&format!("`pane.blocks`'s args: {error}")))?;
+            if asked
+                .last
+                .is_some_and(|last| last == 0 || last > MAX_BLOCKS)
+            {
+                return Err(Refusal::new(
+                    code::BAD_REQUEST,
+                    format!("`last` is from 1 to {MAX_BLOCKS}"),
+                ));
+            }
+            Verb::PaneBlocks(asked)
+        }
+        "events.follow" => match args {
+            None => Verb::EventsFollow(Follow::default()),
+            Some(args) => Verb::EventsFollow(
+                Follow::deserialize(args)
+                    .map_err(|error| malformed(&format!("`events.follow`'s args: {error}")))?,
+            ),
+        },
         name => {
             return Err(Refusal::new(
                 code::UNKNOWN_VERB,

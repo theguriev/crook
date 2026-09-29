@@ -189,6 +189,10 @@ pub struct Block {
     /// Where the shell said it was when the block opened, if it had said.
     pub working_directory: Option<PathBuf>,
     /// When the command started running, which is the `C` mark or the submit.
+    ///
+    /// `None` when nothing ran: an empty line, typed or submitted, which a
+    /// shell ends with a bare `D` and no `C`, and what a shell printed on its
+    /// own before a prompt.
     pub started_at: Option<Instant>,
     /// When it finished.
     pub finished_at: Option<Instant>,
@@ -335,10 +339,14 @@ pub enum IgnoreReason {
 /// to know something ended should not have to go looking through the finished
 /// list to find out whether the thing it was told about is the last entry in
 /// it. So the boundary hands over the facts that are about the *command*
-/// rather than about the block: whether there was one, how it went, and how
-/// long it took.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+/// rather than about the block: what it was, whether there was one, how it
+/// went, and how long it took.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Finished {
+    /// The command line, as [`Block::command`] has it — display-only, for the
+    /// same reason — or `None` when there was none: an empty line, a
+    /// cancelled one, a shell that echoed nothing to read it from.
+    pub command: Option<String>,
     /// The status the shell reported, or `None` when it reported none.
     pub exit: Option<i32>,
     /// How long it ran, measured from the submit rather than from OSC 133 `C`,
@@ -346,7 +354,8 @@ pub struct Finished {
     /// for started when they pressed Enter.
     ///
     /// `None` when the block was already open when Crook started watching, so
-    /// there is no beginning to measure from.
+    /// there is no beginning to measure from, and when nothing ran in it: see
+    /// [`Block::started_at`].
     pub took: Option<Duration>,
     /// Whether a command ran behind this boundary: the block has a command
     /// line, or the shell said one started with `C`.
@@ -873,7 +882,8 @@ impl BlockTracker {
                 // line is not a command: recording one would give a block a
                 // header it never had, and would stop the echoed line being
                 // read when a real command follows.
-                if let Some(command) = command.filter(|line| !line.trim().is_empty()) {
+                let sent = command.filter(|line| !line.trim().is_empty());
+                if let Some(command) = sent {
                     self.open.command = Some(command.to_owned());
                 }
                 if state == BlockState::Executing && self.open.command.is_none() {
@@ -883,9 +893,19 @@ impl BlockTracker {
                 // what [`BlockState::is_running`] is: what a person waits for
                 // starts when they press Enter, and a shell that took a moment
                 // to report the start was busy for that moment too.
-                if matches!(state, BlockState::Submitted | BlockState::Executing)
-                    && self.open.started_at.is_none()
-                {
+                //
+                // Not from an empty one, since nothing starts: the shell ends
+                // an empty line with a bare `D` and runs nothing between, so
+                // its block has no command and no status, and a start would be
+                // the one thing saying a command ran there. Anything counting
+                // finished commands reads it that way — a lead asking for a
+                // worker's last one among them.
+                let starts = match state {
+                    BlockState::Submitted => sent.is_some(),
+                    BlockState::Executing => true,
+                    _ => false,
+                };
+                if starts && self.open.started_at.is_none() {
                     self.open.started_at = Some(Instant::now());
                 }
                 // And where it is running, for a block that opened before the
@@ -916,6 +936,16 @@ impl BlockTracker {
                 self.open.state = state;
             }
             Transition::Close(state) => {
+                // Read before the close files it, as `started_at` is, and only
+                // for the close that is told about.
+                let command = match signal {
+                    Signal::CommandFinished => self
+                        .open
+                        .command
+                        .clone()
+                        .filter(|line| !line.trim().is_empty()),
+                    _ => None,
+                };
                 self.close(BlockState::Done, exit, term, palette);
                 self.reopen(state, term, working_directory);
                 // Only the shell saying so. A block also closes when the next
@@ -924,6 +954,7 @@ impl BlockTracker {
                 // would ring a bell for a person opening a tab.
                 if signal == Signal::CommandFinished {
                     finished = Some(Finished {
+                        command,
                         exit,
                         took: started_at.map(|at| at.elapsed()),
                         ran,

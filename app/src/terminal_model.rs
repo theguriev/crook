@@ -293,6 +293,9 @@ pub enum TerminalUpdate {
     CommandFinished {
         /// Which pane it ran in.
         pane: PaneId,
+        /// The command line, when there was one. Display-only: it came off
+        /// the screen, as [`crook_terminal::Block::command`] did.
+        command: Option<String>,
         /// The status the shell reported, or `None` when it reported none.
         exit: Option<i32>,
         /// How long it ran, timed from the submit.
@@ -696,6 +699,13 @@ impl TerminalModel {
     #[cfg(all(test, unix))]
     pub fn token(&self, pane: PaneId) -> Option<&str> {
         self.sessions.get(&pane)?.token.as_deref()
+    }
+
+    /// Whether a pane's shell reports command marks, or `None` when the pane
+    /// has no shell running. A shell without them is one open block for the
+    /// whole session: nothing in it ever finishes.
+    pub fn marks(&self, pane: PaneId) -> Option<bool> {
+        self.sessions.get(&pane).map(|session| session.marks)
     }
 
     /// The running terminal in a pane, for the element that draws it.
@@ -1131,9 +1141,15 @@ impl TerminalModel {
                     pane,
                     while_running: session.snapshot.live_block.state.is_running(),
                 }),
-                TerminalEvent::CommandFinished { exit, took, ran } => {
+                TerminalEvent::CommandFinished {
+                    command,
+                    exit,
+                    took,
+                    ran,
+                } => {
                     updates.push(TerminalUpdate::CommandFinished {
                         pane,
+                        command,
                         exit,
                         took,
                         ran,

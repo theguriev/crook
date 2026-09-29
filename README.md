@@ -330,6 +330,18 @@ Nineteen features, and the page that configures them:
   open anything; eight tabs may be open on behalf of one pane you opened, a worker's own workers
   counted in, and the new row's card says which pane opened it. `sh`, `bash`, `zsh` and `fish`
   only.
+  **And wait for it, and read what it did.** `crook pane wait 7 --until needs-input --timeout
+  600` blocks until pane 7's agent stops for a person — or is `idle`, or its command has
+  `finished`, or the pane has `exited`, even before you asked — and prints where it got to,
+  failing when the time runs out first; `crook pane blocks 7 --last 1` prints its newest
+  finished command with what it printed, its exit status, how long it took and where, the end of
+  a long output kept and marked cut; `crook events --follow` is a line of JSON for every status,
+  every command finished (named, with its exit status) or seen running, and every tab opened and
+  closed, and a reader that falls behind is told how many it missed rather than held for. A
+  pane may watch itself and the tabs it opened, and nothing a person opened: that needs a grant
+  Crook cannot ask for yet. A command still running has not finished, and an interactive agent
+  is one live screen with no finished command to read: `pane blocks` says so rather than
+  printing nothing, and a worker whose answer is meant to be read runs headless, `claude -p`.
   Crook also reads the notifications other terminals show — OSC 9, 777 and 99 — as the pane
   asking for a look, with the notification's text on the row and the status left as it was, so
   an agent on a remote box with its notification channel set to `iterm2`, `ghostty` or `kitty`
@@ -458,7 +470,8 @@ Nineteen features, and the page that configures them:
   pane's number — what WezTerm's `WEZTERM_PANE` is — so a script or an agent can tell it is
   inside Crook and which pane, and name a log file after it — and `CROOK_SOCKET`, where the
   window answers `crook pane list`, with `CROOK_TOKEN`, the pane's own secret that
-  `crook tab new` sends to say which pane is asking.
+  `crook tab new`, `crook pane wait`, `crook pane blocks` and `crook events` send to say which
+  pane is asking.
 
   It also **answers**, which is what makes Tab work. Command marks are an announcement and
   completion is a question, so there is a second channel beside them: Crook writes the line

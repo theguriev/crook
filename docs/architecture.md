@@ -1339,9 +1339,11 @@ day and why a plugin that wants to do more starts from a status that is already 
 A status travels one way, from the program to the row. The other direction — a script or an
 agent asking a running Crook what is open, or asking it to open something — is a question whose
 answer has to come back, and it goes over a socket: `crook pane list` asks the window its pane
-is in and prints every pane that window has, and `crook tab new` asks it to open a tab beside
-the pane and run a command there. They are the first two verbs of `docs/plugins.md`'s Phase 4.
-The code is `app/src/control/`.
+is in and prints every pane that window has, `crook tab new` asks it to open a tab beside the
+pane and run a command there, and `crook pane wait`, `crook pane blocks` and `crook events
+--follow` let that pane watch the tabs it opened — wait for one to stop, read what its commands
+printed, hear everything that happens to them. They are the first verbs of `docs/plugins.md`'s
+Phase 4. The code is `app/src/control/`.
 
 **Why control is a socket when status is an OSC.** The three reasons above are reasons against
 a socket *for reporting*. Control turns the third one round. A request written into the pane
@@ -1426,11 +1428,96 @@ are: sixteen in a row and the window stops answering that pane's `tab.new` until
 including a worktree git would not make, and only a tab that opens starts the count again —
 never once the pane is stopped, since a worktree agreed to before the stop can still open after
 it and must not lift it. Requests with no token are logged sixteen in a row and then refused
-quietly, since there is no pane to stop answering. What is still to come keeps to the rule these
+quietly, since there is no pane to stop answering. What comes after keeps to the rule these
 start: a caller may act on its own pane and on the tabs it opened, and reading or typing into a
 pane a person opened is a grant that person answers on a card. An agent that reads one pane and
 types into another is a confused deputy waiting for a prompt injection, which is why that is
 never a default.
+
+**Watching what it opened: authority by lineage.** `pane.wait`, `pane.blocks` and
+`events.follow` read what a pane's agent says, what its commands printed and when they ended.
+`pane.list` needs no token because everything in it is already on the screen; a block's output
+is more than that — it is what an agent reading it would take instructions from — so these are
+scoped the way typing will be. The caller, found by its token, may watch its own pane and the
+tabs it opened, and the tabs those opened: up the chain of lineage through the panes still open
+and the closed tabs the window remembers, or directly when a pane's lineage names the caller as
+the root the chain began at, so a lead still watches a worker's worker after the worker in
+between has closed. Nothing else: a pane a
+person opened, or one another pane's agent opened, is refused as `needs-grant`, with a sentence
+saying that watching it needs a grant from the person who opened it, which this version cannot
+ask for. The grant card belongs to the verb that types, and until it exists the answer is no.
+Refusals come in an order that tells a stranger nothing: no pane's token is `unauthorized`
+first, then a number no open pane has is `no-such-pane`, then `needs-grant`. A closed pane is
+`no-such-pane` to everyone, except to a `pane.wait` from a pane that may watch it — the one that
+opened it, or any pane up that chain (below).
+
+**`pane.wait`** answers when the pane gets to `until`: `idle` — its agent said so; the idle a
+pane starts in, before anything has reported, is not it, so a worker whose agent has not
+started is not taken for one that has finished — `needs-input`, `finished` or `exited`.
+`finished` is a state and not an event: nothing is running, no line is waiting for the shell's
+first prompt (a tab `tab.new` just opened has not run its command yet), and a command has been
+closed by the shell's own `D`, whose exit status the answer carries — a command's, not an empty
+line's, which a shell ends with a `D` too. That is what keeps a
+command that ended before the wait was asked from being missed, and a tab that has not started
+from being taken for one that has finished; it is refused as `no-blocks` for a shell with no
+marks, where nothing ever says a command ended. `exited` is the pane closing by whichever road.
+A state already reached answers at once, and a pane that closes first answers at once with
+`reached: false`. A pane that closed before the wait was asked answers at once too: the window
+remembers who opened the last 256 tabs `tab.new` opened that have closed, whether anybody was
+watching or not, and a wait on one the caller may watch answers `closed: true`, `reached` for
+`exited` only — so `crook pane wait 7 --until exited && …` does not depend on whether the worker
+ended before the lead got round to asking. A wait is at most an hour, which is also the
+default; `timeout: 0` answers with where the pane is now. The answer is `{pane_id, until, reached, status, message, exit,
+closed}` — and when the time runs out, the connection asks the window once more with no time to
+wait, so a script reads the state the pane was left in rather than a bare `timeout`.
+
+**`pane.blocks`** answers the newest `last` finished commands, a hundred at most and all of
+them up to that by default: the command (display-only, as `Block.command` warns), exit status,
+directory, duration, and output — the text a copy of the block's output gives, through the same
+region a drag over it makes. Every part is capped, since it is built between two frames and
+written down a socket: the last 4096 rows of a block are read, the last 64 KiB of those kept,
+and 512 KiB in all, spent newest first; cut from the front, at a line, and marked `truncated`,
+because the end of what a command printed is where its errors and its summary are. Only
+commands' blocks count — one the shell ran, sent or started or ended with a status — and not
+what a shell printed on its own before its first prompt or between two, nor an empty line sent
+from the field, which the block tracker gives no start. A command still running
+has not finished, whatever the pane draws it as: a build on the primary screen, a full-screen
+program on the alternate one, an agent's interactive TUI. With nothing finished such a pane is
+refused as `no-blocks` with a sentence saying which — wait `--until finished` for a command,
+and a screen is never a block — rather than answered with an empty list that reads as "nothing
+ran"; with finished commands from before, it gets those and `running: true`. A worker whose
+answer is meant to be read runs headless.
+
+**`events.follow`** answers `{panes}`, what it follows as of now, then one line per event until
+the client hangs up: `status` (only when the status or the message changed — an agent reports
+`running` around every tool it calls), `started`, `finished` with the command line, exit and
+duration, `opened` for a tab the caller opens later, `closed`, and `lagged`. `started` is read
+off a frame the pane's terminal published, since there is no event for a command running: one
+that starts and ends between two frames — `true`, `git status` — is never seen running, and its
+`finished` is what names it. With `pane` it follows that one pane,
+and the stream ends after the `closed` of the pane it is anchored on — the one named, or the
+caller's own. The events come from where the workspace already applies what a pane's shell did
+(`apply_terminal_update`) and from `settle`, which every road a pane opens or closes by goes
+through: no poll, no timer, and nothing done at all while nobody watches.
+
+**Kept connections.** A wait with time to wait, and a stream, keep their connection, and neither
+fits a five-second deadline or one of the eight places a question is answered in: a lead
+waiting on each of its eight workers would leave its own `pane list` refused as `busy`. Such a
+connection moves to a lane of its own, thirty-two at once and the next refused as `busy`. Before
+it asks, its thread makes a bounded feed; the window registers the feed beside what was asked
+and pushes into it on the main thread — a lock and a notify — and the connection's thread is the
+one that blocks. A stream's feed holds 256 events, and a reader that falls further behind loses
+the oldest and is sent `{"event":"lagged","dropped":N}` where they were, rather than the window
+holding everything for a client that is not reading. A second thread per kept connection blocks
+on a read of it, to see the client hang up — a script killed at its own timeout, an agent's tool
+call cut short — and ends the wait then rather than an hour later. A client that only closes its
+half after the request — `nc -N` — is still reading: on Linux the read's end is followed by a
+`poll` that asks for nothing, which only a close of both ways wakes, and the wait is answered;
+elsewhere nothing that blocks tells the two apart — macOS's `poll` says `POLLHUP` for both — so
+the end of what the client says is taken for its leaving, and a client of a kept verb keeps its
+half open until the reply comes. The connection answers
+nothing after the verb, and closes when it is over; a window that closes ends every feed, and a
+wait still open is refused as `gone`.
 
 **The transport.** One socket per process, because every `crook` launch is its own process with
 one window. At startup the name is probed: a socket there that refuses a connection was left by
@@ -1456,6 +1543,9 @@ owner-only named pipe with `PIPE_REJECT_REMOTE_CLIENTS` is the route when it com
 **The protocol.** Newline-delimited JSON, one object a line each way. A request is
 `{"v":1,"verb":"pane.list"}`, or
 `{"v":1,"verb":"tab.new","token":"…","args":{"command":["claude","…"],"worktree":"fix-x","in_my_group":true,"title":"…"}}`,
+or `{"v":1,"verb":"pane.wait","token":"…","args":{"pane":7,"until":"needs-input","timeout":600}}`,
+`{"v":1,"verb":"pane.blocks","token":"…","args":{"pane":7,"last":1}}`,
+`{"v":1,"verb":"events.follow","token":"…","args":{"pane":7}}`,
 with an optional `id` of any JSON value the reply echoes and an optional `min_version`. An
 argument a verb does not take is refused as `bad-request` rather than ignored, since ignoring a
 misspelt `worktree` would open an agent in the caller's own checkout. A reply is
@@ -1467,7 +1557,9 @@ newer than the window, so a script written against a later verb is told to updat
 than handed a half-understood answer. A verb is a promise that is hard to take back, so within a
 version verbs and fields are only ever added, and a field that changes meaning is a new version.
 The codes are `bad-request`, `too-long`, `unknown-verb`, `version`, `busy`, `timeout`, `gone`,
-`unauthorized`, `budget`, `too-many-refusals`, `unsupported-shell` and `failed`.
+`unauthorized`, `budget`, `too-many-refusals`, `unsupported-shell`, `failed`, `no-such-pane`,
+`needs-grant` and `no-blocks`. An `events.follow` stream's lines after the first reply are
+events, `{"event":"status","pane_id":7,"status":"needs-input","message":"…"}`, not replies.
 
 **The CLI is the other end.** `crook pane list` prints a table, and `--json` prints the window's
 own array with every field in it, so a field a newer window adds reaches a script through an
@@ -1479,14 +1571,20 @@ there is exactly one, and refuses when there are several, naming them: each wind
 process, and choosing the newest would be a guess that hands a script another window's panes.
 `crook tab new [--worktree B] [--in-my-group] [--title T] [--json] -- CMD…` prints the new
 pane's number, or the window's answer with `--json`; the `--` is required, since a command is
-the part of the line most likely to hold a word that starts with a dash. Every request carries
-`$CROOK_TOKEN` when there is one, and the CLI refuses nothing on the token's account: the window
-is the one place that knows what a token is worth.
+the part of the line most likely to hold a word that starts with a dash.
+`crook pane wait <ID> --until <STATE> [--timeout <SECS>]` prints where the pane got to and exits
+with a failure, having printed where it is, when it did not get there, so `&&` after it reads
+the way it looks; `crook pane blocks <ID> [--last <N>]` prints each block as its command line,
+its output and a line of how it ended; both take `--json`. `crook events --follow [--pane <ID>]`
+prints the events as one JSON object a line, always, since what reads a stream is a program.
+Every request carries `$CROOK_TOKEN` when there is one, and the CLI refuses nothing on the
+token's account: the window is the one place that knows what a token is worth.
 What it prints carries no control character. A pane's directory arrives percent-decoded from the
 OSC 7 its shell printed, so `%1b` in it is an ESC, and a listing that printed what it was given
 would replay a pane's escape sequence into the terminal the listing runs in; the table writes
 every control character out as its escape, and `--json` escapes the DEL and C1 characters a JSON
-encoder leaves as they are.
+encoder leaves as they are. A block's output printed as text keeps its newlines and writes out
+every other control character the same way, and an event line is escaped as `--json` is.
 
 ### The command line is an input field
 

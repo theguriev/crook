@@ -6,12 +6,12 @@
 //! stopped. Every one of those is a fact the session already holds — see
 //! [`AgentSession`] — and this is the one place they are read out in words.
 //! herdr answers the same question with `herdr agent explain <target>`;
-//! Crook's socket answers `pane list` and `tab new` and nothing about one
-//! row's status yet — see [`crate::control`] — so the answer is an entry on
-//! the row's own menu, "Why this status", contributed by
-//! [`crook/tabs`](crate::plugins::tabs). A tab another pane opened says so
-//! here too, since who started the work is the first thing a person asks
-//! about a row they did not open.
+//! Crook's socket lists the panes, opens tabs and lets a pane watch the tabs
+//! it opened, and explains no row's status yet — see [`crate::control`] — so
+//! the answer is an entry on the row's own menu, "Why this status",
+//! contributed by [`crook/tabs`](crate::plugins::tabs). A tab another pane
+//! opened says so here too, since who started the work is the first thing a
+//! person asks about a row they did not open.
 //!
 //! # Where it hangs
 //!

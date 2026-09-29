@@ -1,5 +1,5 @@
 use super::*;
-use crate::emulator::{Emulator, Fed};
+use crate::emulator::{Emulator, Fed, TerminalEvent};
 use crate::snapshot::{SnapshotCell, TerminalSize};
 
 /// OSC 133 prompt start.
@@ -173,7 +173,7 @@ fn announced_runs(emulator: &mut Emulator) -> Vec<bool> {
         .take_events()
         .into_iter()
         .filter_map(|event| match event {
-            crate::emulator::TerminalEvent::CommandFinished { ran, .. } => Some(ran),
+            TerminalEvent::CommandFinished { ran, .. } => Some(ran),
             _ => None,
         })
         .collect()
@@ -212,6 +212,52 @@ fn test_a_command_end_says_whether_anything_ran_behind_it() {
 
     emulator.advance(format!("{A}$ {B}echo hi\r\n{C}hi\r\n\x1b]133;D;0\x07").as_bytes());
     assert_eq!(vec![true], announced_runs(&mut emulator), "a command");
+}
+
+#[test]
+fn test_an_empty_line_sent_from_the_field_starts_nothing() {
+    // Enter in an empty field submits an empty line, and the shell ends it
+    // with a bare `D` and nothing between: the block above, reached by the
+    // application's submit rather than by a keystroke the shell read. It ran
+    // nothing either, so it has no start to time from — a start is what says
+    // a command ran, to anything counting commands.
+    for line in ["", "   "] {
+        let mut emulator = emulator();
+        emulator.advance(format!("{A}$ {B}").as_bytes());
+        let _ = emulator.take_events();
+
+        emulator.command_submitted(line);
+        assert_eq!(None, emulator.live_block().started_at, "{line:?}");
+        emulator.advance(b"\r\n\x1b]133;D\x07");
+
+        let [block] = emulator.blocks() else {
+            panic!("{line:?} lost the block");
+        };
+        assert_eq!(
+            (None, None, None),
+            (block.command.as_deref(), block.exit, block.started_at),
+            "{line:?}"
+        );
+        assert_eq!(None, block.duration(), "{line:?}");
+        let events = emulator.take_events();
+        assert!(
+            matches!(
+                &events[..],
+                [TerminalEvent::CommandFinished {
+                    command: None,
+                    exit: None,
+                    took: None,
+                    ran: false,
+                }]
+            ),
+            "{line:?}: {events:?}"
+        );
+
+        // And the command sent after it is timed from its own submit.
+        emulator.advance(format!("{A}$ {B}").as_bytes());
+        emulator.command_submitted("true");
+        assert!(emulator.live_block().started_at.is_some(), "{line:?}");
+    }
 }
 
 #[test]

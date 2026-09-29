@@ -840,6 +840,33 @@ fn test_a_running_status_settles_when_its_end_is_in_the_same_read() {
 }
 
 #[test]
+fn test_a_finished_command_is_reported_with_its_own_command_line() {
+    // What ended, not only how: a command that starts and ends between two
+    // snapshots is never seen running, and this is the one place that still
+    // names it.
+    let mut emulator = emulator();
+    let finished = |emulator: &mut Emulator, bytes: &[u8]| {
+        emulator.advance(bytes);
+        let events = emulator.take_events();
+        match &events[..] {
+            [TerminalEvent::CommandFinished { command, exit, .. }] => (command.clone(), *exit),
+            other => panic!("one command finished: {other:?}"),
+        }
+    };
+    let first = b"\x1b]133;A\x07$ \x1b]133;B\x07true\r\n\x1b]133;C\x07\x1b]133;D;0\x07";
+    assert_eq!(
+        (Some("true".to_owned()), Some(0)),
+        finished(&mut emulator, first)
+    );
+    // The next names its own, not the one before it.
+    let second = b"\x1b]133;A\x07$ \x1b]133;B\x07false\r\n\x1b]133;C\x07\x1b]133;D;1\x07";
+    assert_eq!(
+        (Some("false".to_owned()), Some(1)),
+        finished(&mut emulator, second)
+    );
+}
+
+#[test]
 fn test_a_failure_outlives_its_command_and_goes_with_the_next_one() {
     let mut emulator = emulator();
     emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07claude\r\n\x1b]133;C\x07");
@@ -1261,13 +1288,14 @@ fn test_a_notification_and_a_report_keep_their_order_in_one_read() {
             .take_events()
             .into_iter()
             .map(|event| match event {
-                TerminalEvent::CommandFinished { exit, ran, .. } => {
-                    TerminalEvent::CommandFinished {
-                        exit,
-                        took: None,
-                        ran,
-                    }
-                }
+                TerminalEvent::CommandFinished {
+                    command, exit, ran, ..
+                } => TerminalEvent::CommandFinished {
+                    command,
+                    exit,
+                    took: None,
+                    ran,
+                },
                 other => other,
             })
             .collect()

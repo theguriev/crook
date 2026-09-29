@@ -31,6 +31,7 @@ use crookui_core::geometry::{RectF, vec2f};
 use crookui_core::prelude::*;
 
 use crate::clipboard::Clipboard;
+use crate::control::watch::{self, Watches};
 use crate::editor::Selection;
 use crate::git::GitFacts;
 use crate::git_model::GitModel;
@@ -599,6 +600,11 @@ pub struct Workspace {
     /// kept here to know it is still the line the field holds. See
     /// [`Self::run_at_first_prompt`].
     first_lines: HashMap<PaneId, String>,
+    /// What the control socket's `pane.wait` and `events.follow` are
+    /// watching, told here what happens to a pane as it is applied — see
+    /// [`Self::apply_terminal_update`] and [`Self::settle`]. Empty while
+    /// nobody watches, but for who opened the closed tabs `tab.new` opened.
+    watches: Watches,
     /// The resume line a restore typed into each pane's field, while nothing
     /// has run in that pane since.
     ///
@@ -1012,6 +1018,7 @@ impl Workspace {
             terminals,
             inputs: HashMap::new(),
             first_lines: HashMap::new(),
+            watches: Watches::default(),
             resume_offers: HashMap::new(),
             clipboard: Clipboard::new(),
             divider_drag: DividerDrag::new(),
@@ -3990,7 +3997,7 @@ impl Workspace {
     }
 
     /// One block's rows from `from` onwards, as a copy of them would read.
-    fn block_rows_text(
+    pub(crate) fn block_rows_text(
         &self,
         pane: PaneId,
         block: BlockId,
@@ -5165,7 +5172,7 @@ impl Workspace {
     }
 
     /// The commands that have finished in a pane, oldest first.
-    pub(super) fn terminal_blocks(
+    pub(crate) fn terminal_blocks(
         &self,
         pane: PaneId,
         app: &AppContext,
@@ -5707,11 +5714,15 @@ impl Workspace {
     /// the pane: it is about the session — what its row says, the clipboard,
     /// the pane closing — and none of that can wait for the tab to be looked
     /// at.
-    pub(super) fn apply_terminal_update(
+    ///
+    /// Whatever is watched from the control socket is told here too, after
+    /// the session has taken it in — see [`Self::tell_watches`].
+    pub(crate) fn apply_terminal_update(
         &mut self,
         update: &TerminalUpdate,
         ctx: &mut ViewContext<Self>,
     ) {
+        let said = self.agent_said(update);
         let reported = match update {
             // The one update that is about pixels, and the gate that keeps a
             // tab nobody is looking at from rebuilding the window every time
@@ -5788,6 +5799,7 @@ impl Workspace {
                 exit,
                 took,
                 ran,
+                ..
             } => {
                 // Only a line that ran something: ctrl-c at the prompt and an
                 // empty Enter are marked too, and neither moves the pane on
@@ -5846,6 +5858,71 @@ impl Workspace {
             // The pane closed between the shell saying something and the main
             // thread hearing it. Nothing to write it into, and nothing wrong.
             log::debug!("a terminal reported {update:?} for a pane that has gone");
+        }
+        self.tell_watches(update, said);
+    }
+
+    /// What a pane's agent had said before `update`, when `update` is a report
+    /// that could change it and something is watching.
+    fn agent_said(&self, update: &TerminalUpdate) -> Option<(AgentStatus, Option<String>)> {
+        if self.watches.is_empty() {
+            return None;
+        }
+        let (TerminalUpdate::Agent { pane, .. } | TerminalUpdate::AgentSettled(pane)) = update
+        else {
+            return None;
+        };
+        let session = self.tabs.pane(*pane)?.session();
+        Some((session.status, session.message.clone()))
+    }
+
+    /// Tells what the control socket is watching about `update`, now that the
+    /// session has taken it in.
+    ///
+    /// A status is told only when it changed — an agent reports `running`
+    /// around every tool it calls, and a stream of the same word is noise —
+    /// and `before` is what it was. A command starting and a command finishing
+    /// are told as they come. A pane closing is not here: a pane closes by
+    /// more roads than its shell ending, and every one of them comes through
+    /// [`Self::settle`].
+    fn tell_watches(
+        &mut self,
+        update: &TerminalUpdate,
+        before: Option<(AgentStatus, Option<String>)>,
+    ) {
+        if self.watches.is_empty() {
+            return;
+        }
+        let (pane, heard) = match update {
+            TerminalUpdate::Agent { pane, .. } | TerminalUpdate::AgentSettled(pane) => {
+                let Some(session) = self.tabs.pane(*pane).map(Pane::session) else {
+                    return;
+                };
+                let now = (session.status, session.message.clone());
+                if before.as_ref() == Some(&now) {
+                    return;
+                }
+                (*pane, watch::Heard::Status)
+            }
+            TerminalUpdate::Running(pane, Some(command)) => (*pane, watch::Heard::Started(command)),
+            TerminalUpdate::CommandFinished {
+                pane,
+                command,
+                exit,
+                took,
+                ..
+            } => (
+                *pane,
+                watch::Heard::Finished {
+                    command: command.as_deref(),
+                    exit: *exit,
+                    took: *took,
+                },
+            ),
+            _ => return,
+        };
+        if let Some(session) = self.tabs.pane(pane).map(Pane::session) {
+            self.watches.heard(pane, session, heard);
         }
     }
 
@@ -6114,6 +6191,31 @@ impl Workspace {
         self.worktrees_directory.as_deref()
     }
 
+    /// What the control socket is watching, and who opened the closed tabs
+    /// it remembers. See [`crate::control::watch`].
+    pub(crate) fn watches(&self) -> &Watches {
+        &self.watches
+    }
+
+    /// What the control socket is watching, to register a watch in. See
+    /// [`crate::control::watch`].
+    pub(crate) fn watches_mut(&mut self) -> &mut Watches {
+        &mut self.watches
+    }
+
+    /// Whether a pane opened by `crook tab new` still has its line waiting
+    /// for the shell's first prompt: the command it was opened for has not
+    /// been sent yet. See [`Self::run_at_first_prompt`].
+    pub(crate) fn waits_for_first_prompt(&self, pane: PaneId) -> bool {
+        self.first_lines.contains_key(&pane)
+    }
+
+    /// Whether a pane's shell reports command marks, or `None` when the pane
+    /// has no shell running.
+    pub(crate) fn shell_marks(&self, pane: PaneId, app: &AppContext) -> Option<bool> {
+        self.terminals.as_ref(app).marks(pane)
+    }
+
     /// Opens a tab whose shell starts in `directory`, in `tab`'s group.
     ///
     /// What the worktree menu opens into, and **it is a tab and not a pane**.
@@ -6185,6 +6287,11 @@ impl Workspace {
         self.sync_interactions();
         self.sync_git(ctx);
         self.sync_terminals(ctx);
+        // Every road a pane closes by, and every tab that opens, comes
+        // through here: what the control socket is watching hears of both,
+        // and a tab `tab.new` opened that closed is remembered for a wait
+        // asked after it.
+        self.watches.settled(&self.tabs);
         // After the strip has moved, so "which pane is being looked at" is the
         // answer for the state the frame is about to draw. Every action comes
         // through here, which is what makes looking at a pane the one and only
@@ -6851,7 +6958,7 @@ impl Workspace {
     /// Both or neither: an element that had a handle and no snapshot would have
     /// nothing to paint, and one that had a snapshot and no handle could not
     /// resize the pty it was measuring.
-    pub(super) fn terminal(
+    pub(crate) fn terminal(
         &self,
         pane: PaneId,
         app: &AppContext,

@@ -183,14 +183,20 @@ fn a_request_the_versions_cannot_agree_on_is_refused_as_a_version() {
 #[test]
 fn crook_pane_takes_list_and_json_and_refuses_anything_else() {
     let arguments = |words: &[&str]| {
-        cli::list_arguments(words.iter().map(|word| (*word).to_owned()))
+        cli::pane_arguments(words.iter().map(|word| (*word).to_owned()))
             .map_err(|error| error.to_string())
     };
-    assert_eq!(arguments(&["list"]), Ok(false));
-    assert_eq!(arguments(&["list", "--json"]), Ok(true));
+    assert_eq!(
+        arguments(&["list"]),
+        Ok(cli::PaneCommand::List { json: false })
+    );
+    assert_eq!(
+        arguments(&["list", "--json"]),
+        Ok(cli::PaneCommand::List { json: true })
+    );
     for (words, said) in [
         (&[][..], "needs a verb"),
-        (&["lsit"][..], "takes list, not lsit"),
+        (&["lsit"][..], "takes list, wait or blocks, not lsit"),
         (&["list", "--json", "--json"][..], "given twice"),
         (&["list", "--tsv"][..], "unrecognised argument --tsv"),
     ] {
@@ -756,8 +762,9 @@ fn a_question_to_a_window_that_has_closed_is_refused_as_gone_at_once() {
     let inbox = Arc::new(Inbox::default());
     let asking = inbox.clone();
     let started = Instant::now();
-    let asked =
-        std::thread::spawn(move || asking.ask(listing(), Instant::now() + Duration::from_secs(5)));
+    let asked = std::thread::spawn(move || {
+        asking.ask(listing(), None, Instant::now() + Duration::from_secs(5))
+    });
     std::thread::sleep(Duration::from_millis(50));
     inbox.close();
     let refusal = asked
@@ -773,7 +780,7 @@ fn a_question_to_a_window_that_has_closed_is_refused_as_gone_at_once() {
 
     // And one asked after it closed is refused before it is queued.
     let refusal = inbox
-        .ask(listing(), Instant::now() + Duration::from_secs(5))
+        .ask(listing(), None, Instant::now() + Duration::from_secs(5))
         .expect_err("closed");
     assert_eq!(refusal.code, code::GONE);
 }
@@ -782,9 +789,443 @@ fn a_question_to_a_window_that_has_closed_is_refused_as_gone_at_once() {
 fn a_question_nobody_answers_is_refused_as_a_timeout() {
     let inbox = Inbox::default();
     let refusal = inbox
-        .ask(listing(), Instant::now() + Duration::from_millis(50))
+        .ask(listing(), None, Instant::now() + Duration::from_millis(50))
         .expect_err("no window is serving this inbox");
     assert_eq!(refusal.code, code::TIMEOUT);
+}
+
+#[test]
+fn a_wait_a_read_of_blocks_and_a_follow_come_back_off_the_wire_as_they_went_on() {
+    let token = Some("c0ffee");
+    for verb in [
+        Verb::PaneWait(protocol::Wait {
+            pane: 7,
+            until: protocol::Until::NeedsInput,
+            timeout: Some(600),
+        }),
+        Verb::PaneWait(protocol::Wait {
+            pane: 7,
+            until: protocol::Until::Finished,
+            timeout: None,
+        }),
+        Verb::PaneBlocks(protocol::ReadBlocks {
+            pane: 7,
+            last: Some(1),
+        }),
+        Verb::EventsFollow(protocol::Follow { pane: None }),
+        Verb::EventsFollow(protocol::Follow { pane: Some(7) }),
+    ] {
+        let line = protocol::request_line(&verb, token);
+        let (_, request) = protocol::read(line.trim_end().as_bytes());
+        let request = request.unwrap_or_else(|refusal| panic!("{line}: {refusal:?}"));
+        assert_eq!(request.verb, verb, "{line}");
+        assert_eq!(request.token.as_deref(), token);
+    }
+
+    for (line, said) in [
+        (
+            r#"{"v":1,"verb":"pane.wait"}"#,
+            "needs `args` naming its `pane`",
+        ),
+        (
+            r#"{"v":1,"verb":"pane.wait","args":{"pane":7,"until":"done"}}"#,
+            "unknown variant",
+        ),
+        (
+            r#"{"v":1,"verb":"pane.wait","args":{"pane":7,"until":"idle","timeout":3601}}"#,
+            "at most 3600 seconds",
+        ),
+        (
+            r#"{"v":1,"verb":"pane.wait","args":{"pane":7,"until":"idle","follow":true}}"#,
+            "unknown field",
+        ),
+        (
+            r#"{"v":1,"verb":"pane.blocks","args":{"pane":7,"last":0}}"#,
+            "from 1 to 100",
+        ),
+        (
+            r#"{"v":1,"verb":"pane.blocks","args":{"pane":7,"last":101}}"#,
+            "from 1 to 100",
+        ),
+        (
+            r#"{"v":1,"verb":"events.follow","args":{"panes":[7]}}"#,
+            "unknown field",
+        ),
+    ] {
+        let (_, request) = protocol::read(line.as_bytes());
+        let refusal = request.expect_err(line);
+        assert_eq!(refusal.code, code::BAD_REQUEST, "{line}");
+        assert!(
+            refusal.message.contains(said),
+            "{line}: {}",
+            refusal.message
+        );
+    }
+
+    // Only a wait with time to wait, and a stream, keep their connection.
+    let wait = |timeout| {
+        Verb::PaneWait(protocol::Wait {
+            pane: 7,
+            until: protocol::Until::Idle,
+            timeout,
+        })
+    };
+    assert!(wait(Some(5)).keeps_connection());
+    assert!(wait(None).keeps_connection());
+    assert!(!wait(Some(0)).keeps_connection());
+    assert!(Verb::EventsFollow(protocol::Follow::default()).keeps_connection());
+    assert!(
+        !Verb::PaneBlocks(protocol::ReadBlocks {
+            pane: 7,
+            last: None
+        })
+        .keeps_connection()
+    );
+    assert!(!Verb::PaneList.keeps_connection());
+}
+
+#[test]
+fn crook_pane_wait_and_blocks_take_a_pane_and_their_flags_and_refuse_anything_else() {
+    let arguments = |words: &[&str]| {
+        cli::pane_arguments(words.iter().map(|word| (*word).to_owned()))
+            .map_err(|error| error.to_string())
+    };
+    assert_eq!(
+        arguments(&["wait", "7", "--until", "needs-input", "--timeout", "600"]),
+        Ok(cli::PaneCommand::Wait {
+            asked: protocol::Wait {
+                pane: 7,
+                until: protocol::Until::NeedsInput,
+                timeout: Some(600),
+            },
+            json: false,
+        })
+    );
+    // The pane among the flags is still the pane.
+    assert_eq!(
+        arguments(&["wait", "--json", "--until", "finished", "12"]),
+        Ok(cli::PaneCommand::Wait {
+            asked: protocol::Wait {
+                pane: 12,
+                until: protocol::Until::Finished,
+                timeout: None,
+            },
+            json: true,
+        })
+    );
+    assert_eq!(
+        arguments(&["blocks", "7", "--last", "1", "--json"]),
+        Ok(cli::PaneCommand::Blocks {
+            asked: protocol::ReadBlocks {
+                pane: 7,
+                last: Some(1),
+            },
+            json: true,
+        })
+    );
+    assert_eq!(
+        arguments(&["blocks", "7"]),
+        Ok(cli::PaneCommand::Blocks {
+            asked: protocol::ReadBlocks {
+                pane: 7,
+                last: None
+            },
+            json: false,
+        })
+    );
+    for (words, said) in [
+        (&["wait", "--until", "idle"][..], "needs a pane"),
+        (&["wait", "7"][..], "what to wait --until"),
+        (
+            &["wait", "7", "--until", "done"][..],
+            "takes idle, needs-input, exited, finished, not done",
+        ),
+        (&["wait", "7", "--until"][..], "`--until` needs a value"),
+        (
+            &["wait", "7", "--until", "idle", "--timeout", "soon"][..],
+            "whole number of seconds",
+        ),
+        (
+            &["wait", "7", "8", "--until", "idle"][..],
+            "one pane at a time",
+        ),
+        (&["wait", "seven", "--until", "idle"][..], "not seven"),
+        (
+            &["wait", "7", "--until", "idle", "--until", "idle"][..],
+            "given twice",
+        ),
+        (
+            &["wait", "7", "--until", "idle", "--forever"][..],
+            "unrecognised argument --forever",
+        ),
+        (&["blocks"][..], "needs a pane"),
+        (
+            &["blocks", "7", "--last", "all"][..],
+            "whole number of blocks",
+        ),
+        (
+            &["blocks", "7", "--tail", "3"][..],
+            "unrecognised argument --tail",
+        ),
+    ] {
+        let refusal = arguments(words).expect_err("refused");
+        assert!(refusal.contains(said), "{words:?}: {refusal}");
+    }
+}
+
+#[test]
+fn crook_events_needs_follow_and_takes_one_pane() {
+    let arguments = |words: &[&str]| {
+        cli::events_arguments(words.iter().map(|word| (*word).to_owned()))
+            .map_err(|error| error.to_string())
+    };
+    assert_eq!(
+        arguments(&["--follow"]),
+        Ok(protocol::Follow { pane: None })
+    );
+    assert_eq!(
+        arguments(&["--pane", "7", "--follow"]),
+        Ok(protocol::Follow { pane: Some(7) })
+    );
+    for (words, said) in [
+        (&[][..], "needs --follow"),
+        (&["--pane", "7"][..], "needs --follow"),
+        (&["--follow", "--follow"][..], "given twice"),
+        (&["--follow", "--pane"][..], "`--pane` needs a value"),
+        (&["--follow", "--pane", "all"][..], "not all"),
+        (&["--follow", "7"][..], "unrecognised argument 7"),
+    ] {
+        let refusal = arguments(words).expect_err("refused");
+        assert!(refusal.contains(said), "{words:?}: {refusal}");
+    }
+}
+
+#[test]
+fn a_feed_holds_at_most_its_buffer_and_tells_a_slow_reader_how_many_it_dropped() {
+    let feed = watch::Feed::new(watch::FOLLOW_BUFFER);
+    let pushed = watch::FOLLOW_BUFFER * 10;
+    for number in 0..pushed {
+        feed.push(json!(number));
+        assert!(
+            feed.held() <= watch::FOLLOW_BUFFER,
+            "a reader that takes nothing makes the window hold no more than the buffer"
+        );
+    }
+
+    // The gap first, where it is, then what was kept, newest last and in
+    // the order it was pushed.
+    let dropped = pushed - watch::FOLLOW_BUFFER;
+    assert_eq!(feed.next(None), watch::Next::Lagged(dropped as u64));
+    for number in dropped..pushed {
+        assert_eq!(feed.next(None), watch::Next::Item(json!(number)));
+    }
+    assert_eq!(
+        feed.next(Some(Instant::now() + Duration::from_millis(20))),
+        watch::Next::TimedOut
+    );
+
+    // Ended: what is held is still taken, and then it says so.
+    feed.push(json!("last"));
+    feed.end();
+    feed.push(json!("after the end"));
+    assert_eq!(feed.next(None), watch::Next::Item(json!("last")));
+    assert_eq!(feed.next(None), watch::Next::Ended);
+    assert!(!feed.is_open());
+
+    // Hung up: what it held is let go of at once.
+    let feed = watch::Feed::new(4);
+    feed.push(json!(1));
+    feed.hang_up();
+    assert_eq!(feed.held(), 0);
+    assert_eq!(feed.next(None), watch::Next::HungUp);
+}
+
+#[test]
+fn a_block_that_printed_more_than_an_answer_carries_is_cut_from_the_front_at_a_line() {
+    let short = "one\ntwo";
+    assert_eq!(blocks::tail(short, 64), (short, false));
+
+    let long: String = (0..1000).map(|line| format!("line {line}\n")).collect();
+    let (kept, cut) = blocks::tail(&long, 100);
+    assert!(cut);
+    assert!(kept.len() <= 100, "{}", kept.len());
+    assert!(long.ends_with(kept), "the end is what is kept");
+    assert!(kept.starts_with("line "), "from a whole line: {kept:?}");
+
+    // One line longer than the cap on its own is cut where a character
+    // starts rather than dropped.
+    let wide = "é".repeat(100);
+    let (kept, cut) = blocks::tail(&wide, 51);
+    assert!(cut);
+    assert_eq!(kept, "é".repeat(25));
+}
+
+#[test]
+fn a_wait_says_where_the_pane_got_to_and_fails_when_it_did_not() {
+    let waited =
+        |until, reached, status: Option<&str>, message: Option<&str>, closed| protocol::Waited {
+            pane_id: 7,
+            until,
+            reached,
+            status: status.map(str::to_owned),
+            message: message.map(str::to_owned),
+            exit: None,
+            closed,
+        };
+    let ten = Duration::from_secs(10);
+    let printed = cli::waited_text(
+        &waited(
+            protocol::Until::NeedsInput,
+            true,
+            Some("needs-input"),
+            Some("run rm -rf build?"),
+            false,
+        ),
+        ten,
+    );
+    assert_eq!(printed.text, "needs-input: run rm -rf build?");
+    assert_eq!(printed.failure, None);
+
+    let finished = protocol::Waited {
+        exit: Some(3),
+        ..waited(protocol::Until::Finished, true, Some("idle"), None, false)
+    };
+    assert_eq!(cli::waited_text(&finished, ten).text, "finished: exit 3");
+
+    let exited = waited(protocol::Until::Exited, true, None, None, true);
+    assert_eq!(cli::waited_text(&exited, ten).text, "exited");
+    assert_eq!(cli::waited_text(&exited, ten).failure, None);
+
+    let ran_out = cli::waited_text(
+        &waited(protocol::Until::Idle, false, Some("running"), None, false),
+        ten,
+    );
+    assert_eq!(ran_out.text, "running");
+    assert_eq!(
+        ran_out.failure.as_deref(),
+        Some("pane 7 was not idle within 10 seconds; it is running")
+    );
+
+    let closed = cli::waited_text(
+        &waited(protocol::Until::Finished, false, None, None, true),
+        ten,
+    );
+    assert_eq!(closed.text, "closed");
+    assert_eq!(
+        closed.failure.as_deref(),
+        Some("pane 7 closed before it was finished")
+    );
+}
+
+#[test]
+fn a_pane_watches_itself_and_the_tabs_it_opened_and_theirs_and_nobody_else() {
+    let (mut window, ids) = busy_window();
+    let [lead, other, worker, stranger] = ids[..] else {
+        panic!("four panes: {ids:?}");
+    };
+    let pane = |number: u64| {
+        window.workspace.read(&window.app, |workspace, _| {
+            workspace
+                .tabs()
+                .panes()
+                .map(|(_, pane)| pane.id())
+                .find(|pane| pane.as_u64() == number)
+                .expect("open")
+        })
+    };
+    let (lead, other, worker, stranger) = (pane(lead), pane(other), pane(worker), pane(stranger));
+    let lineage = |caller, root| crate::tab::Lineage {
+        caller,
+        root,
+        title: "the lead".to_owned(),
+    };
+    // The lead opened the worker, and the worker opened the other half of
+    // the lead's split — a stand-in for a tab of its own.
+    window.workspace.update(&mut window.app, |workspace, ctx| {
+        workspace.update_session(worker, ctx, |session| {
+            session.spawned_by = Some(lineage(lead, lead));
+        });
+        workspace.update_session(other, ctx, |session| {
+            session.spawned_by = Some(lineage(worker, lead));
+        });
+    });
+    let observes = |window: &Window, caller, pane| {
+        window.workspace.read(&window.app, |workspace, _| {
+            workspace.watches().observes(workspace.tabs(), caller, pane)
+        })
+    };
+    assert!(observes(&window, lead, lead), "itself");
+    assert!(observes(&window, lead, worker), "a tab it opened");
+    assert!(observes(&window, lead, other), "a tab its tab opened");
+    assert!(observes(&window, worker, other), "the worker's own");
+    assert!(observes(&window, worker, worker));
+    assert!(
+        !observes(&window, worker, lead),
+        "a worker does not watch its lead: the lead is a pane a person opened"
+    );
+    assert!(!observes(&window, lead, stranger), "a pane a person opened");
+    assert!(!observes(&window, other, worker), "nor up the chain");
+
+    // The middle of the chain closing leaves the lead the root of what is
+    // left, and the worker's own gone with its claim.
+    window.workspace.update(&mut window.app, |workspace, ctx| {
+        workspace.apply(TabAction::ClosePane(worker), ctx);
+    });
+    assert!(observes(&window, lead, other));
+}
+
+#[test]
+fn a_closed_tab_is_remembered_as_its_openers_and_only_the_newest_are() {
+    let mut strip = crate::tab::TabStrip::new();
+    let lead = strip.focused_pane_id().expect("a pane");
+    let mut watches = watch::Watches::default();
+    // A tab opened for `caller`, the way `tab.new` opens one: its lineage
+    // written before the strip settles.
+    let open = |strip: &mut crate::tab::TabStrip, watches: &mut watch::Watches, caller| {
+        strip.apply(TabAction::New);
+        let pane = strip.focused_pane_id().expect("the new tab's pane");
+        strip.pane_mut(pane).expect("open").session_mut().spawned_by = Some(crate::tab::Lineage {
+            caller,
+            root: lead,
+            title: "the lead".to_owned(),
+        });
+        watches.settled(strip);
+        pane
+    };
+    let close = |strip: &mut crate::tab::TabStrip, watches: &mut watch::Watches, pane| {
+        strip.apply(TabAction::ClosePane(pane));
+        watches.settled(strip);
+    };
+
+    // A worker's worker, whose opener closes first and then it: the worker in
+    // the middle still watches it, through the closed one it opened.
+    let worker = open(&mut strip, &mut watches, lead);
+    let middle = open(&mut strip, &mut watches, worker);
+    let last = open(&mut strip, &mut watches, middle);
+    close(&mut strip, &mut watches, middle);
+    close(&mut strip, &mut watches, last);
+    assert!(watches.observes(&strip, lead, last), "the root's still");
+    assert!(
+        watches.observes(&strip, worker, last),
+        "and the worker's, up the chain through a pane that has gone"
+    );
+    assert!(!watches.observes(&strip, last, worker), "never down it");
+
+    // Only the newest are remembered, whatever the window has seen.
+    let mut closed = Vec::new();
+    for _ in 0..watch::REMEMBERED_CLOSED {
+        let pane = open(&mut strip, &mut watches, lead);
+        close(&mut strip, &mut watches, pane);
+        closed.push(pane);
+    }
+    assert!(
+        !watches.observes(&strip, lead, last),
+        "forgotten past {} closed tabs",
+        watch::REMEMBERED_CLOSED
+    );
+    for pane in closed {
+        assert!(watches.observes(&strip, lead, pane), "{pane:?}");
+    }
 }
 
 /// The socket, which is only Unix's.
@@ -798,7 +1239,7 @@ mod socket {
     use std::thread;
 
     use super::super::protocol::{MAX_LINE, Opened, Refusal};
-    use super::super::server::{self, Answer, Socket, converse};
+    use super::super::server::{self, Answer, Lanes, Place, Socket, converse};
     use super::*;
 
     /// A directory that removes itself, short enough that a socket's path in
@@ -833,9 +1274,9 @@ mod socket {
     /// A window that answers `pane.list` with these, refuses every tab, and
     /// never looks at a tab strip.
     fn answering(panes: Vec<PaneEntry>) -> Answer {
-        Arc::new(move |request: Request, _| match request.verb {
+        Arc::new(move |request: Request, _, _| match request.verb {
             Verb::PaneList => Ok(serde_json::to_value(&panes).expect("encodes")),
-            Verb::TabNew(_) => Err(Refusal::new(code::UNAUTHORIZED, "not in this test")),
+            _ => Err(Refusal::new(code::UNAUTHORIZED, "not in this test")),
         })
     }
 
@@ -888,9 +1329,21 @@ mod socket {
     /// A conversation with no listener in front of it, and the thread
     /// answering it.
     fn conversation(answer: Answer, deadline: Duration) -> (Client, thread::JoinHandle<()>) {
+        conversation_in(&Arc::new(Lanes::default()), answer, deadline)
+    }
+
+    /// The same, holding a place in `lanes`, as the listener gives each
+    /// connection one.
+    fn conversation_in(
+        lanes: &Arc<Lanes>,
+        answer: Answer,
+        deadline: Duration,
+    ) -> (Client, thread::JoinHandle<()>) {
         let (client, window) = UnixStream::pair().expect("a pair");
-        let answering =
-            thread::spawn(move || converse(&window, Instant::now() + deadline, &*answer));
+        let mut place = Place::take(lanes).expect("a place among the connections answered");
+        let answering = thread::spawn(move || {
+            converse(&window, Instant::now() + deadline, &*answer, &mut place);
+        });
         (Client::on(client), answering)
     }
 
@@ -1004,7 +1457,7 @@ mod socket {
         let inbox = Arc::new(Inbox::default());
         let asking = inbox.clone();
         let (mut client, answering) = conversation(
-            Arc::new(move |request, deadline| asking.ask(request, deadline)),
+            Arc::new(move |request, feed, deadline| asking.ask(request, feed, deadline)),
             Duration::from_millis(600),
         );
         client.send(&protocol::request_line(&Verb::PaneList, None));
@@ -1241,7 +1694,7 @@ mod socket {
         let root = TempDir::new();
         let socket = Socket::open_in(
             &root.sockets(),
-            Arc::new(|_, _| {
+            Arc::new(|_, _, _| {
                 Err(Refusal::new(
                     code::TIMEOUT,
                     "the window did not answer in time",
@@ -1605,9 +2058,146 @@ mod socket {
         fn tab_count(&self) -> usize {
             self.read(|workspace, _| workspace.tabs().len())
         }
+
+        /// Starts asking from a thread of its own and hands the thread back,
+        /// for a question the window answers only once the test has made
+        /// something happen: see [`Self::finish`].
+        fn start<T: Send + 'static>(
+            &self,
+            asking: impl FnOnce(PathBuf) -> T + Send + 'static,
+        ) -> thread::JoinHandle<T> {
+            let socket = self.socket();
+            thread::spawn(move || asking(socket))
+        }
+
+        /// Runs the window's side until a question [`Self::start`]ed has its
+        /// answer, and hands the answer back.
+        fn finish<T>(&mut self, asking: thread::JoinHandle<T>) -> T {
+            self.pump_until("the window never answered", |_| asking.is_finished());
+            asking.join().expect("the asking thread")
+        }
+
+        fn update<T>(
+            &mut self,
+            update: impl FnOnce(&mut Workspace, &mut ViewContext<Workspace>) -> T,
+        ) -> T {
+            self.window.workspace.update(&mut self.window.app, update)
+        }
+
+        /// What a pane's agent says, through the call the terminal model's
+        /// subscription makes when an agent reports over its OSC.
+        fn report(&mut self, pane: PaneId, status: AgentStatus, message: Option<&str>) {
+            let update = TerminalUpdate::Agent {
+                pane,
+                status,
+                title: None,
+                message: message.map(str::to_owned),
+            };
+            self.update(|workspace, ctx| workspace.apply_terminal_update(&update, ctx));
+        }
+
+        /// How many waits the window holds that have not got there.
+        fn waiting(&self) -> usize {
+            self.read(|workspace, _| workspace.watches().waiting())
+        }
+
+        /// How many streams of events the window is feeding.
+        fn following(&self) -> usize {
+            self.read(|workspace, _| workspace.watches().following())
+        }
+
+        /// Whether a pane's shell is sitting at a prompt it marked.
+        fn at_prompt(&self, pane: PaneId) -> bool {
+            self.read(|workspace, app| {
+                workspace.terminal(pane, app).is_some_and(|(_, snapshot)| {
+                    snapshot.live_block.state == crook_terminal::BlockState::AtPrompt
+                })
+            })
+        }
+
+        /// Types `line` into a marked shell at its prompt, round the field,
+        /// and waits for the block it makes to close.
+        fn run(&mut self, pane: PaneId, line: &str) {
+            self.pump_until("the shell never came to a prompt", |served| {
+                served.at_prompt(pane)
+            });
+            let typed = format!("{line}\r");
+            self.update(|workspace, ctx| workspace.type_into(pane, &typed, ctx));
+            self.pump_until("the command never became a block", |served| {
+                served.read(|workspace, app| {
+                    workspace.terminal_blocks(pane, app).is_some_and(|history| {
+                        history
+                            .iter()
+                            .any(|block| block.command.as_deref() == Some(line))
+                    })
+                })
+            });
+        }
     }
 
+    use super::super::protocol::{BlocksRead, Follow, PaneEvent, ReadBlocks, Until, Wait, Waited};
+    use super::super::watch::{self, Feed};
     use crate::tab::{Lineage, PaneId};
+    use crate::terminal_model::TerminalUpdate;
+
+    /// `crook pane wait`, as the command line asks it from inside a pane.
+    fn wait(
+        token: &str,
+        pane: PaneId,
+        until: Until,
+        timeout: u64,
+        json: bool,
+    ) -> impl FnOnce(PathBuf) -> Result<cli::Printed, String> + Send + 'static {
+        let token = token.to_owned();
+        let asked = Wait {
+            pane: pane.as_u64(),
+            until,
+            timeout: Some(timeout),
+        };
+        move |socket| {
+            cli::unix::wait(&socket, Some(&token), asked, json).map_err(|error| error.to_string())
+        }
+    }
+
+    /// `crook pane blocks --json`, read back.
+    fn read_blocks(
+        token: &str,
+        pane: PaneId,
+        last: Option<usize>,
+    ) -> impl FnOnce(PathBuf) -> Result<BlocksRead, String> + Send + 'static {
+        let token = token.to_owned();
+        let asked = ReadBlocks {
+            pane: pane.as_u64(),
+            last,
+        };
+        move |socket| {
+            cli::unix::read_blocks(&socket, Some(&token), asked, true, None)
+                .map(|json| serde_json::from_str(&json).expect("the answer is blocks"))
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    /// `crook events --follow`, until the window ends it: what it said, as
+    /// events, or the refusal.
+    fn follow(
+        token: Option<&str>,
+        pane: Option<PaneId>,
+    ) -> impl FnOnce(PathBuf) -> Result<Vec<PaneEvent>, String> + Send + 'static {
+        let token = token.map(str::to_owned);
+        let asked = Follow {
+            pane: pane.map(PaneId::as_u64),
+        };
+        move |socket| {
+            let mut out = Vec::new();
+            cli::unix::follow(&socket, token.as_deref(), asked, &mut out)
+                .map_err(|error| error.to_string())?;
+            let out = String::from_utf8(out).expect("the output is text");
+            Ok(out
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("each line is an event"))
+                .collect())
+        }
+    }
 
     /// The one pane a new window opens with.
     fn first_pane(served: &Served) -> PaneId {
@@ -2122,5 +2712,1111 @@ mod socket {
             .open_tab(Some(token), new_tab(&["make"]))
             .expect_err("the stopped pane was answered again");
         assert!(stopped.contains("too-many-refusals"), "{stopped}");
+    }
+
+    #[test]
+    fn a_wait_answers_when_the_pane_it_waits_on_stops_for_a_person() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["claude"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+
+        // Long, so that an answer at the end of it — where the pane is when
+        // the time runs out, which is needs-input by then too — cannot pass
+        // for the one the report should have given at once.
+        let asking = served.start(wait(&token, worker, Until::NeedsInput, 120, false));
+        served.pump_until("the wait was never registered", |served| {
+            served.waiting() == 1
+        });
+        // What the lead's own agent says, and the worker getting to work,
+        // answer nothing: it is the worker stopping that is waited for.
+        served.report(lead, AgentStatus::NeedsInput, Some("mine"));
+        served.report(worker, AgentStatus::Running, None);
+        assert_eq!(served.waiting(), 1, "not answered by the wrong report");
+
+        served.report(
+            worker,
+            AgentStatus::NeedsInput,
+            Some("may I run the tests?"),
+        );
+        assert_eq!(served.waiting(), 0, "answered the moment it was said");
+        let printed = served.finish(asking).expect("answered");
+        assert_eq!(printed.text, "needs-input: may I run the tests?");
+        assert_eq!(printed.failure, None);
+    }
+
+    #[test]
+    fn a_wait_that_runs_out_answers_with_where_the_pane_is_and_fails() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["claude"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+
+        let started = Instant::now();
+        let printed = served
+            .ask(wait(&token, worker, Until::Idle, 1, true))
+            .expect("answered, not refused");
+        let took = started.elapsed();
+        assert!(
+            took >= Duration::from_secs(1),
+            "waited its second: {took:?}"
+        );
+        assert!(
+            took < server::DEADLINE,
+            "and no longer than its own timeout and a question: {took:?}"
+        );
+
+        let waited: Waited = serde_json::from_str(&printed.text).expect("--json is the answer");
+        assert!(
+            !waited.reached,
+            "a worker whose agent has said nothing is idle by default, and that is not the \
+             idle it is waited for: {waited:?}"
+        );
+        assert_eq!(waited.status.as_deref(), Some("idle"));
+        assert!(!waited.closed);
+        assert_eq!(
+            printed.failure.as_deref(),
+            Some(
+                format!(
+                    "pane {} was not idle within 1 seconds; it is idle",
+                    opened.pane_id
+                )
+                .as_str()
+            )
+        );
+
+        // Once it has said so, a wait of no time says so at once.
+        served.report(worker, AgentStatus::Running, None);
+        served.report(worker, AgentStatus::Idle, None);
+        let printed = served
+            .ask(wait(&token, worker, Until::Idle, 0, false))
+            .expect("answered");
+        assert_eq!((printed.text.as_str(), printed.failure), ("idle", None));
+    }
+
+    #[test]
+    fn a_pane_watches_itself_without_anybodys_grant() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+
+        let printed = served
+            .ask(wait(&token, lead, Until::NeedsInput, 0, false))
+            .expect("its own pane is its own to watch");
+        assert_eq!(printed.text, "idle");
+        assert!(
+            printed.failure.is_some(),
+            "and it is not waiting for anybody"
+        );
+
+        served.report(lead, AgentStatus::NeedsInput, Some("which branch?"));
+        let printed = served
+            .ask(wait(&token, lead, Until::NeedsInput, 0, false))
+            .expect("answered");
+        assert_eq!(printed.text, "needs-input: which branch?");
+        assert_eq!(printed.failure, None);
+    }
+
+    #[test]
+    fn watching_a_pane_a_person_opened_needs_a_grant_and_without_a_token_nothing_may_be_watched() {
+        let mut served = Served::new(|workspace, ctx, _| {
+            workspace.apply(TabAction::New, ctx);
+        });
+        let (lead, person) = served.read(|workspace, _| {
+            let mut panes = workspace.tabs().panes().map(|(_, pane)| pane.id());
+            (panes.next().expect("a pane"), panes.next().expect("two"))
+        });
+        let token = served.token(lead);
+
+        let refusals = [
+            served
+                .ask(wait(&token, person, Until::Idle, 0, false))
+                .map(|_| ()),
+            served
+                .ask(wait(&token, person, Until::Idle, 5, false))
+                .map(|_| ()),
+            served.ask(read_blocks(&token, person, None)).map(|_| ()),
+            served.ask(follow(Some(&token), Some(person))).map(|_| ()),
+        ];
+        for refused in refusals {
+            let refused = refused.expect_err("a person's pane is theirs to open up");
+            assert!(refused.contains("needs-grant"), "{refused}");
+            assert!(refused.contains("grant from the person"), "{refused}");
+        }
+
+        let strangers = [
+            served
+                .ask(move |socket| {
+                    cli::unix::wait(
+                        &socket,
+                        None,
+                        Wait {
+                            pane: lead.as_u64(),
+                            until: Until::Idle,
+                            timeout: Some(0),
+                        },
+                        false,
+                    )
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+                })
+                .expect_err("no token"),
+            served.ask(follow(None, None)).expect_err("no token"),
+            served
+                .ask(wait("0", lead, Until::Idle, 0, false))
+                .expect_err("a token no pane holds"),
+        ];
+        for refused in strangers {
+            assert!(refused.contains("unauthorized"), "{refused}");
+            assert!(refused.contains("CROOK_TOKEN"), "{refused}");
+        }
+
+        let nobody = served
+            .ask(move |socket| {
+                cli::unix::read_blocks(
+                    &socket,
+                    Some(&token),
+                    ReadBlocks {
+                        pane: 999_999,
+                        last: None,
+                    },
+                    false,
+                    None,
+                )
+                .map_err(|error| error.to_string())
+            })
+            .expect_err("no such pane");
+        assert!(nobody.contains("no-such-pane"), "{nobody}");
+        assert_eq!(served.waiting() + served.following(), 0);
+    }
+
+    #[test]
+    fn a_stream_carries_a_status_a_command_and_its_end_in_order_and_ends_when_its_pane_closes() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["make", "test"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+
+        let following = served.start(follow(Some(&token), Some(worker)));
+        served.pump_until("the stream never started", |served| served.following() == 1);
+        served.report(worker, AgentStatus::NeedsInput, Some("may I?"));
+        // Said again, the same: a status that did not change is no event.
+        served.report(worker, AgentStatus::NeedsInput, Some("may I?"));
+        // Another pane's: not the one followed.
+        served.report(lead, AgentStatus::Running, None);
+        served.update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &TerminalUpdate::Running(worker, Some("make test".to_owned())),
+                ctx,
+            );
+            workspace.apply_terminal_update(
+                &TerminalUpdate::CommandFinished {
+                    pane: worker,
+                    command: Some("make test".to_owned()),
+                    exit: Some(2),
+                    took: Some(Duration::from_millis(1500)),
+                    ran: true,
+                },
+                ctx,
+            );
+            workspace.apply(TabAction::ClosePane(worker), ctx);
+        });
+
+        let events = served.finish(following).expect("followed until it closed");
+        let pane_id = opened.pane_id;
+        assert_eq!(
+            events,
+            vec![
+                PaneEvent::Status {
+                    pane_id,
+                    status: "needs-input".to_owned(),
+                    message: Some("may I?".to_owned()),
+                },
+                PaneEvent::Started {
+                    pane_id,
+                    command: "make test".to_owned(),
+                },
+                PaneEvent::Finished {
+                    pane_id,
+                    command: Some("make test".to_owned()),
+                    exit: Some(2),
+                    duration_ms: Some(1500),
+                },
+                PaneEvent::Closed { pane_id },
+            ]
+        );
+        assert_eq!(served.following(), 0, "and let go of when it ended");
+    }
+
+    #[test]
+    fn a_stream_of_a_panes_own_hears_of_the_tabs_it_opens_and_of_nobody_elses() {
+        let mut served = Served::new(|workspace, ctx, _| {
+            workspace.apply(TabAction::New, ctx);
+        });
+        let (lead, person) = served.read(|workspace, _| {
+            let mut panes = workspace.tabs().panes().map(|(_, pane)| pane.id());
+            (panes.next().expect("a pane"), panes.next().expect("two"))
+        });
+        let token = served.token(lead);
+
+        let following = served.start(follow(Some(&token), None));
+        served.pump_until("the stream never started", |served| served.following() == 1);
+        served.report(person, AgentStatus::NeedsInput, Some("not yours"));
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["claude"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+        served.report(worker, AgentStatus::Running, None);
+        served.report(lead, AgentStatus::Failed, None);
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::ClosePane(lead), ctx);
+        });
+
+        let events = served
+            .finish(following)
+            .expect("followed until the lead closed");
+        assert_eq!(
+            events,
+            vec![
+                PaneEvent::Opened {
+                    pane_id: opened.pane_id,
+                },
+                PaneEvent::Status {
+                    pane_id: opened.pane_id,
+                    status: "running".to_owned(),
+                    message: None,
+                },
+                PaneEvent::Status {
+                    pane_id: lead.as_u64(),
+                    status: "failed".to_owned(),
+                    message: None,
+                },
+                PaneEvent::Closed {
+                    pane_id: lead.as_u64(),
+                },
+            ],
+            "the worker outlives its lead and is not said to have closed"
+        );
+    }
+
+    #[test]
+    fn a_reader_that_falls_behind_is_told_it_lagged_and_the_window_holds_no_more_than_the_buffer() {
+        let (handed, feed) = std::sync::mpsc::channel::<Arc<Feed>>();
+        let answer: Answer = Arc::new(move |_, feed: Option<Arc<Feed>>, _| {
+            if let Some(feed) = feed {
+                let _ = handed.send(feed);
+            }
+            Ok(json!({ "panes": [7] }))
+        });
+        let (mut client, answering) = conversation(answer, Duration::from_secs(5));
+        client.send(&protocol::request_line(
+            &Verb::EventsFollow(Follow::default()),
+            Some("c0ffee"),
+        ));
+        assert!(client.reply().expect("the first answer").ok);
+        let feed = feed
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the window was handed a feed");
+
+        // Far more than the socket's buffer and the feed's together, pushed
+        // while the client reads nothing.
+        let pushed = 20_000u64;
+        for number in 0..pushed {
+            feed.push(
+                serde_json::to_value(PaneEvent::Status {
+                    pane_id: 7,
+                    status: "running".to_owned(),
+                    message: Some(number.to_string()),
+                })
+                .expect("encodes"),
+            );
+            assert!(feed.held() <= watch::FOLLOW_BUFFER);
+        }
+        feed.end();
+
+        let mut events = Vec::new();
+        loop {
+            let mut line = String::new();
+            match client.replies.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    events.push(serde_json::from_str::<PaneEvent>(&line).expect("an event a line"))
+                }
+                Err(error) => panic!("the stream broke: {error}"),
+            }
+        }
+        answering.join().expect("the connection's thread");
+
+        let dropped: u64 = events
+            .iter()
+            .map(|event| match event {
+                PaneEvent::Lagged { dropped } => *dropped,
+                _ => 0,
+            })
+            .sum();
+        let written = events
+            .iter()
+            .filter(|event| matches!(event, PaneEvent::Status { .. }))
+            .count() as u64;
+        assert!(dropped > 0, "a reader this far behind is told it lagged");
+        assert_eq!(
+            written + dropped,
+            pushed,
+            "every event was written or counted as dropped"
+        );
+        assert_eq!(
+            events.last(),
+            Some(&PaneEvent::Status {
+                pane_id: 7,
+                status: "running".to_owned(),
+                message: Some((pushed - 1).to_string()),
+            }),
+            "the newest are the ones kept"
+        );
+    }
+
+    #[test]
+    fn waits_take_no_place_a_question_needs_and_are_bounded_and_let_go_when_the_client_hangs_up() {
+        let lanes = Arc::new(Lanes::default());
+        let (asked, registered) = std::sync::mpsc::channel();
+        // A window that registers every wait and never answers one.
+        let answer: Answer = Arc::new(move |_, feed: Option<Arc<Feed>>, _| {
+            if feed.is_some() {
+                let _ = asked.send(());
+            }
+            Ok(Value::Null)
+        });
+        let waiting = protocol::request_line(
+            &Verb::PaneWait(Wait {
+                pane: 7,
+                until: Until::Idle,
+                timeout: Some(60),
+            }),
+            Some("c0ffee"),
+        );
+        let mut kept = Vec::new();
+        for _ in 0..server::MAX_KEPT {
+            let (mut client, answering) =
+                conversation_in(&lanes, answer.clone(), Duration::from_secs(5));
+            client.send(&waiting);
+            registered
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the wait reached the window");
+            kept.push((client, answering));
+        }
+
+        // Every place a question is answered in is still free.
+        let places: Vec<Place> = (0..server::MAX_CONNECTIONS)
+            .map(|_| Place::take(&lanes).expect("a question's place is free"))
+            .collect();
+        assert!(Place::take(&lanes).is_none(), "and no more than those");
+        drop(places);
+
+        let (mut client, answering) =
+            conversation_in(&lanes, answer.clone(), Duration::from_secs(5));
+        client.send(&waiting);
+        let refused = client.reply().expect("refused, not dropped");
+        let refusal = refused.error.expect("a refusal");
+        assert_eq!(refusal.code, code::BUSY);
+        assert!(
+            refusal.message.contains("keeping 32"),
+            "{}",
+            refusal.message
+        );
+        answering.join().expect("the connection's thread");
+
+        // A client that hangs up ends its wait then, not a minute later.
+        let started = Instant::now();
+        for (client, answering) in kept {
+            drop(client);
+            answering.join().expect("the connection's thread");
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{:?}",
+            started.elapsed()
+        );
+        let (mut client, answering) = conversation_in(&lanes, answer, Duration::from_secs(5));
+        client.send(&waiting);
+        registered
+            .recv_timeout(Duration::from_secs(10))
+            .expect("and there is room for a wait again");
+        drop(client);
+        answering.join().expect("the connection's thread");
+    }
+
+    #[test]
+    fn a_pane_drawn_as_a_live_grid_with_nothing_finished_says_so_rather_than_answering_nothing() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        served.shell.open();
+        served.pump_until("the shell never prompted", |served| {
+            served.text(lead).contains("fake$")
+        });
+
+        // A shell with no marks: its output is one block that never closes.
+        let refused = served
+            .ask(read_blocks(&token, lead, None))
+            .expect_err("nothing has finished");
+        assert!(refused.contains("no-blocks"), "{refused}");
+        assert!(refused.contains("no command marks"), "{refused}");
+        let refused = served
+            .ask(wait(&token, lead, Until::Finished, 5, false))
+            .expect_err("nothing there says a command finished");
+        assert!(refused.contains("no-blocks"), "{refused}");
+
+        // The alternate screen, the way a full-screen program or an agent's
+        // TUI takes the pane.
+        served.update(|workspace, ctx| workspace.type_into(lead, "\u{1b}[?1049h\n", ctx));
+        served.pump_until("the pane never took the alternate screen", |served| {
+            served.read(|workspace, app| {
+                workspace
+                    .terminal(lead, app)
+                    .is_some_and(|(_, snapshot)| snapshot.alt_screen)
+            })
+        });
+        let refused = served
+            .ask(read_blocks(&token, lead, Some(1)))
+            .expect_err("a grid is not a finished block");
+        assert!(refused.contains("no-blocks"), "{refused}");
+        assert!(refused.contains("live grid"), "{refused}");
+        assert!(
+            refused.contains("claude -p"),
+            "and it says what to do: {refused}"
+        );
+    }
+
+    #[test]
+    fn blocks_are_the_last_commands_with_what_they_printed_and_how_they_ended() {
+        let root = TempDir::new();
+        let Some(shell) = GatedShell::bash(&root) else {
+            eprintln!("skipped: no bash here");
+            return;
+        };
+        let mut served = Served::with(root, shell, |_, _, _| {});
+        let marked = served.read(|workspace, app| {
+            matches!(
+                workspace.shell_standing(app).0.marks,
+                crate::shell_integration::Marks::Installed(_)
+            )
+        });
+        if !marked {
+            eprintln!("skipped: the shell integration is opted out of here");
+            return;
+        }
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        served.shell.open();
+
+        served.run(lead, "printf 'one\\n'");
+        served.run(lead, "printf 'two\\n'; (exit 3)");
+        served.run(lead, "printf 'three\\n'");
+
+        // Its own pane, the caller's to read.
+        let read = served
+            .ask(read_blocks(&token, lead, Some(2)))
+            .expect("read");
+        assert_eq!(read.pane_id, lead.as_u64());
+        assert!(!read.running, "nothing is running at the prompt");
+        let [two, three] = &read.blocks[..] else {
+            panic!("the last two, oldest first: {read:#?}");
+        };
+        assert_eq!(two.command.as_deref(), Some("printf 'two\\n'; (exit 3)"));
+        assert_eq!(two.output, "two");
+        assert_eq!(two.exit, Some(3));
+        assert_eq!(three.output, "three");
+        assert_eq!(three.exit, Some(0));
+        for block in &read.blocks {
+            assert!(!block.truncated);
+            assert!(block.cwd.is_some(), "where it ran: {block:?}");
+            assert!(block.duration_ms.is_some(), "how long: {block:?}");
+        }
+        // Every block it holds, which is the three and whatever the shell
+        // printed before its first prompt.
+        let every = served.ask(read_blocks(&token, lead, None)).expect("read");
+        let commands: Vec<Option<&str>> = every
+            .blocks
+            .iter()
+            .map(|block| block.command.as_deref())
+            .collect();
+        assert!(
+            commands.ends_with(&[
+                Some("printf 'one\\n'"),
+                Some("printf 'two\\n'; (exit 3)"),
+                Some("printf 'three\\n'"),
+            ]),
+            "{commands:?}"
+        );
+
+        let table = served
+            .ask(move |socket| {
+                cli::unix::read_blocks(
+                    &socket,
+                    Some(&token),
+                    ReadBlocks {
+                        pane: lead.as_u64(),
+                        last: Some(1),
+                    },
+                    false,
+                    None,
+                )
+            })
+            .expect("read");
+        assert!(
+            table.starts_with("$ printf 'three\\n'\nthree\n[exit 0 · "),
+            "{table}"
+        );
+    }
+
+    #[test]
+    fn a_block_longer_than_an_answer_carries_is_its_end() {
+        let root = TempDir::new();
+        let Some(shell) = GatedShell::bash(&root) else {
+            eprintln!("skipped: no bash here");
+            return;
+        };
+        let mut served = Served::with(root, shell, |_, _, _| {});
+        let marked = served.read(|workspace, app| {
+            matches!(
+                workspace.shell_standing(app).0.marks,
+                crate::shell_integration::Marks::Installed(_)
+            )
+        });
+        if !marked {
+            eprintln!("skipped: the shell integration is opted out of here");
+            return;
+        }
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        served.shell.open();
+
+        let lines = super::super::blocks::MAX_ROWS_READ * 3;
+        served.run(lead, &format!("seq 1 {lines}"));
+        let read = served
+            .ask(read_blocks(&token, lead, Some(1)))
+            .expect("read");
+        let [block] = &read.blocks[..] else {
+            panic!("one block: {read:#?}");
+        };
+        assert!(block.truncated, "cut, and said to be");
+        assert!(
+            block.output.len() <= super::super::blocks::MAX_OUTPUT_PER_BLOCK,
+            "{}",
+            block.output.len()
+        );
+        assert!(
+            block.output.lines().count() <= super::super::blocks::MAX_ROWS_READ,
+            "no more rows read than the cap"
+        );
+        assert!(
+            block.output.ends_with(&lines.to_string()),
+            "the end is what is kept: {:?}",
+            &block.output[block.output.len().saturating_sub(40)..]
+        );
+        assert!(!block.output.contains("\n1\n"), "and the start is not");
+    }
+
+    #[test]
+    fn the_loop_an_agent_runs_opens_a_tab_waits_for_its_command_and_reads_what_it_printed() {
+        let root = TempDir::new();
+        let Some(shell) = GatedShell::bash(&root) else {
+            eprintln!("skipped: no bash here");
+            return;
+        };
+        let mut served = Served::with(root, shell, |_, _, _| {});
+        let marked = served.read(|workspace, app| {
+            matches!(
+                workspace.shell_standing(app).0.marks,
+                crate::shell_integration::Marks::Installed(_)
+            )
+        });
+        if !marked {
+            eprintln!("skipped: the shell integration is opted out of here");
+            return;
+        }
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+
+        // Opened while every shell is still held at its gate: the worker's
+        // command waits for its first prompt, and so does the wait.
+        let opened = served
+            .open_tab(
+                Some(token.clone()),
+                new_tab(&["sh", "-c", "printf 'the answer\\n'; exit 4"]),
+            )
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+        // Long, and not waited out: the answer when the time is up says
+        // `finished: exit 4` too, and must not pass for the one the shell's
+        // own mark gives.
+        let asking = served.start(wait(&token, worker, Until::Finished, 600, false));
+        served.pump_until("the wait was never registered", |served| {
+            served.waiting() == 1
+        });
+
+        served.shell.open();
+        served.pump_until("the command's end never answered the wait", |served| {
+            served.waiting() == 0
+        });
+        let printed = served.finish(asking).expect("answered");
+        assert_eq!(printed.text, "finished: exit 4");
+        assert_eq!(printed.failure, None);
+
+        let read = served
+            .ask(read_blocks(&token, worker, Some(1)))
+            .expect("read");
+        let [block] = &read.blocks[..] else {
+            panic!("one block: {read:#?}");
+        };
+        assert_eq!(block.exit, Some(4));
+        assert_eq!(block.output, "the answer");
+    }
+
+    /// A window whose every pane runs a real bash with Crook's command marks,
+    /// or `None` where there is no bash or the integration is opted out of.
+    fn marked_bash() -> Option<Served> {
+        let root = TempDir::new();
+        let Some(shell) = GatedShell::bash(&root) else {
+            eprintln!("skipped: no bash here");
+            return None;
+        };
+        let served = Served::with(root, shell, |_, _, _| {});
+        let marked = served.read(|workspace, app| {
+            matches!(
+                workspace.shell_standing(app).0.marks,
+                crate::shell_integration::Marks::Installed(_)
+            )
+        });
+        if !marked {
+            eprintln!("skipped: the shell integration is opted out of here");
+            return None;
+        }
+        Some(served)
+    }
+
+    /// Whether a pane's shell says a command is running in it.
+    fn executing(served: &Served, pane: PaneId) -> bool {
+        served.read(|workspace, app| {
+            workspace
+                .terminal(pane, app)
+                .is_some_and(|(_, snapshot)| snapshot.live_block.state.is_running())
+        })
+    }
+
+    /// Linux only: that is where a half-close is told from a hang-up. See
+    /// `server::until_closed`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_client_that_closes_its_half_after_asking_is_answered_and_one_that_leaves_is_let_go() {
+        let (handed, feeds) = std::sync::mpsc::channel::<Arc<Feed>>();
+        let answer: Answer = Arc::new(move |request: Request, feed: Option<Arc<Feed>>, _| {
+            if let Some(feed) = feed {
+                let _ = handed.send(feed);
+            }
+            match request.verb {
+                Verb::EventsFollow(_) => Ok(json!({ "panes": [7] })),
+                _ => Ok(Value::Null),
+            }
+        });
+        let waiting = protocol::request_line(
+            &Verb::PaneWait(Wait {
+                pane: 7,
+                until: Until::Idle,
+                timeout: Some(60),
+            }),
+            Some("c0ffee"),
+        );
+        // Long enough for the watch to have read the end of the request,
+        // which it once took for the client leaving.
+        let settle = || thread::sleep(Duration::from_millis(200));
+
+        // A wait: asked, the client's half closed, and answered afterwards.
+        let (mut client, answering) = conversation(answer.clone(), Duration::from_secs(5));
+        client.send(&waiting);
+        client
+            .stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("the client closes its half");
+        let feed = feeds
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the wait reached the window");
+        settle();
+        assert!(feed.is_open(), "a half-close is not a hang-up");
+        feed.push(json!({ "reached": true }));
+        let reply = client.reply().expect("answered, not hung up on");
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.result, Some(json!({ "reached": true })));
+        answering.join().expect("the connection's thread");
+
+        // A stream: its first answer, an event after the half-close, its end.
+        let (mut client, answering) = conversation(answer.clone(), Duration::from_secs(5));
+        client.send(&protocol::request_line(
+            &Verb::EventsFollow(Follow::default()),
+            Some("c0ffee"),
+        ));
+        client
+            .stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("the client closes its half");
+        assert!(client.reply().expect("the first answer").ok);
+        let feed = feeds
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the stream reached the window");
+        settle();
+        feed.push(serde_json::to_value(PaneEvent::Closed { pane_id: 7 }).expect("encodes"));
+        feed.end();
+        let mut line = String::new();
+        client.replies.read_line(&mut line).expect("an event");
+        assert_eq!(
+            serde_json::from_str::<PaneEvent>(&line).expect("an event a line"),
+            PaneEvent::Closed { pane_id: 7 }
+        );
+        line.clear();
+        assert_eq!(client.replies.read_line(&mut line).ok(), Some(0), "{line}");
+        answering.join().expect("the connection's thread");
+
+        // Half-closed and then gone: let go of then, not a minute later.
+        let (mut client, answering) = conversation(answer, Duration::from_secs(5));
+        client.send(&waiting);
+        client
+            .stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("the client closes its half");
+        let feed = feeds
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the wait reached the window");
+        settle();
+        let started = Instant::now();
+        drop(client);
+        answering.join().expect("the connection's thread");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(!feed.is_open(), "and its feed hung up");
+    }
+
+    /// Linux only, as the one above.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_wait_asked_by_a_client_that_closed_its_half_is_answered_by_the_window() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        served.report(lead, AgentStatus::NeedsInput, Some("which branch?"));
+
+        // What `printf '%s\n' "$request" | nc -N -U "$CROOK_SOCKET"` does.
+        let line = protocol::request_line(
+            &Verb::PaneWait(Wait {
+                pane: lead.as_u64(),
+                until: Until::NeedsInput,
+                timeout: Some(5),
+            }),
+            Some(&token),
+        );
+        let reply = served.ask(move |socket| {
+            let mut client = Client::connect(&socket);
+            client.send(&line);
+            client
+                .stream
+                .shutdown(std::net::Shutdown::Write)
+                .expect("the client closes its half");
+            client.reply()
+        });
+        let reply = reply.expect("answered, not closed on");
+        let waited: Waited =
+            serde_json::from_value(reply.result.expect("an answer")).expect("a wait's answer");
+        assert!(waited.reached, "{waited:?}");
+        assert_eq!(waited.message.as_deref(), Some("which branch?"));
+    }
+
+    #[test]
+    fn a_wait_on_a_tab_that_closed_before_it_was_asked_says_it_closed() {
+        let mut served = Served::new(|workspace, ctx, _| {
+            workspace.apply(TabAction::New, ctx);
+        });
+        let (lead, person) = served.read(|workspace, _| {
+            let mut panes = workspace.tabs().panes().map(|(_, pane)| pane.id());
+            (panes.next().expect("a pane"), panes.next().expect("two"))
+        });
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["claude"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+        let theirs = served
+            .open_tab(Some(served.token(person)), new_tab(&["claude"]))
+            .expect("the person's pane opens one of its own");
+        let theirs = served.pane(theirs.pane_id);
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::ClosePane(worker), ctx);
+            workspace.apply(TabAction::ClosePane(theirs), ctx);
+        });
+
+        // Exited, however long it was asked to wait, and at once.
+        for timeout in [0, 600] {
+            let started = Instant::now();
+            let printed = served
+                .ask(wait(&token, worker, Until::Exited, timeout, true))
+                .expect("answered, not refused as a pane that never was");
+            assert!(started.elapsed() < Duration::from_secs(10));
+            let waited: Waited = serde_json::from_str(&printed.text).expect("--json is the answer");
+            assert!(waited.reached && waited.closed, "{waited:?}");
+            assert_eq!(printed.failure, None);
+        }
+        // Anything else is somewhere it will never get to now.
+        let printed = served
+            .ask(wait(&token, worker, Until::Idle, 600, false))
+            .expect("answered");
+        assert_eq!(printed.text, "closed");
+        assert_eq!(
+            printed.failure,
+            Some(format!("pane {} closed before it was idle", opened.pane_id))
+        );
+
+        // A closed tab somebody else's pane opened is no more the lead's than
+        // it was open, and says no more than `pane list` would: nothing.
+        let refused = served
+            .ask(wait(&token, theirs, Until::Exited, 0, false))
+            .expect_err("not the lead's");
+        assert!(refused.contains("no-such-pane"), "{refused}");
+        // Its blocks went with it.
+        let refused = served
+            .ask(read_blocks(&token, worker, None))
+            .expect_err("closed");
+        assert!(refused.contains("no-such-pane"), "{refused}");
+        assert_eq!(served.waiting(), 0, "nothing was left waiting");
+    }
+
+    #[test]
+    fn blocks_of_a_pane_whose_first_command_is_still_running_say_so_rather_than_nothing() {
+        let Some(mut served) = marked_bash() else {
+            return;
+        };
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        served.shell.open();
+        served.pump_until("the shell never came to a prompt", |served| {
+            served.at_prompt(lead)
+        });
+
+        // What the shell printed on its way to its first prompt — `starting`,
+        // here — is not a command, and nothing has run.
+        let read = served
+            .ask(read_blocks(&token, lead, None))
+            .expect("nothing ran, which is an answer");
+        assert!(read.blocks.is_empty(), "{read:#?}");
+        assert!(!read.running);
+
+        // A command that prints more than the pane holds and goes on running:
+        // the block has grown past the top of the viewport, which the pane
+        // draws as a grid, and it is still an ordinary command.
+        served.update(|workspace, ctx| {
+            workspace.type_into(lead, "seq 1 500; sleep 30\r", ctx);
+        });
+        served.pump_until("the command never overflowed the pane", |served| {
+            executing(served, lead)
+                && served.read(|workspace, app| {
+                    workspace
+                        .terminal(lead, app)
+                        .is_some_and(|(_, snapshot)| snapshot.live_block.top_row < 0)
+                })
+        });
+        let refused = served
+            .ask(read_blocks(&token, lead, Some(1)))
+            .expect_err("nothing has finished");
+        assert!(refused.contains("no-blocks"), "{refused}");
+        assert!(refused.contains("has a command running"), "{refused}");
+        assert!(
+            refused.contains(&format!("pane wait {} --until finished", lead.as_u64())),
+            "and says what to wait for: {refused}"
+        );
+        assert!(
+            !refused.contains("live grid"),
+            "it is not a full-screen program: {refused}"
+        );
+
+        // Interrupted, it has finished; the next one running is said to be.
+        served.update(|workspace, ctx| workspace.type_into(lead, "\u{3}", ctx));
+        served.pump_until("the interrupted command never became a block", |served| {
+            served.at_prompt(lead)
+        });
+        served.update(|workspace, ctx| workspace.type_into(lead, "sleep 30\r", ctx));
+        served.pump_until("the second command never started", |served| {
+            executing(served, lead)
+        });
+        let read = served
+            .ask(read_blocks(&token, lead, None))
+            .expect("the finished one is read");
+        let [block] = &read.blocks[..] else {
+            panic!("the one that finished: {read:#?}");
+        };
+        assert_eq!(block.command.as_deref(), Some("seq 1 500; sleep 30"));
+        assert!(read.running, "and something is running now");
+    }
+
+    #[test]
+    fn a_command_too_quick_to_be_seen_running_is_named_by_its_finished() {
+        let Some(mut served) = marked_bash() else {
+            return;
+        };
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        served.shell.open();
+        served.pump_until("the shell never came to a prompt", |served| {
+            served.at_prompt(lead)
+        });
+
+        // Its own pane's stream, read until a command has finished.
+        let line = protocol::request_line(
+            &Verb::EventsFollow(Follow {
+                pane: Some(lead.as_u64()),
+            }),
+            Some(&token),
+        );
+        let following = served.start(move |socket| {
+            let mut client = Client::connect(&socket);
+            client.send(&line);
+            assert!(client.reply().expect("the first answer").ok);
+            let mut events = Vec::new();
+            loop {
+                let mut line = String::new();
+                match client.replies.read_line(&mut line) {
+                    Ok(0) | Err(_) => return events,
+                    Ok(_) => {}
+                }
+                let event: PaneEvent = serde_json::from_str(&line).expect("an event a line");
+                let finished = matches!(event, PaneEvent::Finished { .. });
+                events.push(event);
+                if finished {
+                    return events;
+                }
+            }
+        });
+        served.pump_until("the stream never started", |served| served.following() == 1);
+        served.run(lead, "true");
+
+        let events = served.finish(following);
+        let Some(PaneEvent::Finished {
+            pane_id,
+            command,
+            exit,
+            ..
+        }) = events.last()
+        else {
+            panic!("a command finished: {events:?}");
+        };
+        assert_eq!(*pane_id, lead.as_u64());
+        assert_eq!(command.as_deref(), Some("true"), "{events:?}");
+        assert_eq!(*exit, Some(0));
+    }
+
+    #[test]
+    fn an_empty_line_sent_from_the_field_is_not_the_command_that_finished_last() {
+        let Some(mut served) = marked_bash() else {
+            return;
+        };
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        served.shell.open();
+        served.run(lead, "echo the answer");
+        served.pump_until("the shell never came back to a prompt", |served| {
+            served.at_prompt(lead)
+        });
+        let filed = |served: &Served| {
+            served.read(|workspace, app| {
+                workspace
+                    .terminal_blocks(lead, app)
+                    .map_or(0, |history| history.len())
+            })
+        };
+        let before = filed(&served);
+
+        // Enter in the empty field: what the field hands the terminal then,
+        // which bash ends with a bare `D` and nothing run.
+        let sent = served.read(|workspace, app| {
+            workspace
+                .terminal(lead, app)
+                .is_some_and(|(terminal, _)| terminal.submit(""))
+        });
+        assert!(sent, "the empty line reached the shell");
+        served.pump_until("the empty line never became a block", |served| {
+            served.at_prompt(lead) && filed(served) > before
+        });
+        // A block of its own, so what follows is read past one that is there.
+        let newest = served.read(|workspace, app| {
+            let history = workspace.terminal_blocks(lead, app).expect("a shell");
+            let block = history.get(history.len() - 1).expect("a block");
+            (block.command.clone(), block.exit)
+        });
+        assert_eq!(newest, (None, None));
+
+        let read = served
+            .ask(read_blocks(&token, lead, Some(1)))
+            .expect("read");
+        let [block] = &read.blocks[..] else {
+            panic!("the command, not the empty line: {read:#?}");
+        };
+        assert_eq!(block.command.as_deref(), Some("echo the answer"));
+        assert_eq!(block.exit, Some(0));
+        assert_eq!(block.output, "the answer");
+        let printed = served
+            .ask(wait(&token, lead, Until::Finished, 0, false))
+            .expect("answered");
+        assert_eq!(printed.text, "finished: exit 0");
+        assert_eq!(printed.failure, None);
+    }
+
+    #[test]
+    fn a_wait_for_a_command_to_finish_is_not_answered_by_an_empty_line() {
+        // Marked, so that `finished` is a thing to wait for; the shells stay
+        // at their gate, and what they would say is said for them.
+        let Some(mut served) = marked_bash() else {
+            return;
+        };
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["make", "test"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+        let asking = served.start(wait(&token, worker, Until::Finished, 600, false));
+        served.pump_until("the wait was never registered", |served| {
+            served.waiting() == 1
+        });
+
+        // The `D` a shell ends an empty line with, from the field or typed at
+        // the prompt: no command, no status, and nothing started.
+        let finished = |command: Option<&str>, exit, took| TerminalUpdate::CommandFinished {
+            pane: worker,
+            command: command.map(str::to_owned),
+            exit,
+            took,
+            ran: command.is_some(),
+        };
+        served.update(|workspace, ctx| {
+            workspace.apply_terminal_update(&finished(None, None, None), ctx);
+        });
+        assert_eq!(served.waiting(), 1, "an empty line is not a command");
+
+        served.update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &finished(Some("make test"), Some(2), Some(Duration::from_secs(1))),
+                ctx,
+            );
+        });
+        let printed = served.finish(asking).expect("answered");
+        assert_eq!(printed.text, "finished: exit 2");
     }
 }
