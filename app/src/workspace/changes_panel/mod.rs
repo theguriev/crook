@@ -86,8 +86,15 @@ use super::view::Workspace;
 /// still leaves the pane beside it four hundred pixels.
 pub(super) const PANEL_WIDTH: f32 = 340.;
 
-/// The strip at the top: the title, Refresh and the close button.
-const HEADER_HEIGHT: f32 = 36.;
+/// The strip at the top, which holds Refresh and the close button at its
+/// right end and nothing at its left: the Themes panel's strip, and as tall.
+///
+/// The empty end is not waste. With the tabs hidden this is the window's
+/// leftmost column, and on a client-decorated macOS window the traffic
+/// lights are painted over its top-left corner — see
+/// [`Workspace::window_insets`](super::view::Workspace) — which is why the
+/// title is on a row of its own below the strip rather than in it.
+const HEADER_HEIGHT: f32 = 32.;
 
 /// The column's own inset.
 const PANEL_PADDING: f32 = 12.;
@@ -638,6 +645,7 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
                 .with_main_axis_size(MainAxisSize::Max)
                 .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
                 .with_child(header(workspace, ui))
+                .with_child(title_row(ui))
                 .with_child(base_line(workspace, ui))
                 .with_child(Expanded::new(1., list(workspace, app)).finish())
                 .finish(),
@@ -656,7 +664,7 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
     .finish()
 }
 
-/// The title, Refresh and the ×.
+/// Refresh and the ×, at the right end of the strip.
 fn header(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     let state = workspace.changes_panel();
     let refresh = text_button(
@@ -672,15 +680,6 @@ fn header(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
         Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_child(
-                Text::new(TITLE, ui, 16.)
-                    .with_color(theme().text_primary)
-                    .with_style(Properties {
-                        weight: Weight::Semibold,
-                        ..Properties::default()
-                    })
-                    .finish(),
-            )
             .with_child(Expanded::new(1., Empty::new().finish()).finish())
             .with_child(refresh)
             .with_child(
@@ -691,6 +690,22 @@ fn header(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
             .finish(),
     )
     .with_height(HEADER_HEIGHT)
+    .finish()
+}
+
+/// What the column is called, under the strip — where the Themes panel puts
+/// its own.
+fn title_row(ui: FamilyId) -> Box<dyn Element> {
+    Container::new(
+        Text::new(TITLE, ui, 16.)
+            .with_color(theme().text_primary)
+            .with_style(Properties {
+                weight: Weight::Semibold,
+                ..Properties::default()
+            })
+            .finish(),
+    )
+    .with_margin_bottom(4.)
     .finish()
 }
 

@@ -22642,6 +22642,61 @@ mod changes_column {
     }
 
     #[test]
+    fn with_the_tabs_hidden_the_leftmost_column_has_the_corner_the_traffic_lights_are_in() {
+        // On a client-decorated macOS window AppKit paints the lights over the
+        // window's top-left corner. With the tabs hidden, a docked column is
+        // what is there, not the header: the header keeping the room is room
+        // for nothing, and the column drawing its title there puts it under
+        // the lights.
+        let mut harness = Harness::new(1);
+        harness.override_controls(ControlLayout::MacOs);
+        harness.run_command("crook/window/toggle-panel");
+        let lights = harness.window_insets().header_left;
+        assert!(
+            lights > 0.,
+            "with nothing on the left the header owes the corner"
+        );
+
+        let nothing_in_the_corner = |harness: &mut Harness, which: &str| {
+            let scene = harness.frame();
+            let corner = RectF::new(
+                Vector2F::zero(),
+                vec2f(lights, tabs_panel::TITLE_STRIP_HEIGHT),
+            );
+            let under = text_lines(&scene, |position| corner.contains_point(position));
+            assert!(
+                under.is_empty(),
+                "{which} drew {under:?} where the traffic lights are painted"
+            );
+            let insets = harness.window_insets();
+            assert_eq!(
+                (insets.panel_left, insets.header_left),
+                (lights, 0.),
+                "with {which} leftmost the header kept the corner"
+            );
+        };
+
+        show_files(&mut harness, 3);
+        let scene = harness.frame();
+        let column = column_box(&scene).expect("the column is up");
+        assert!(
+            column.min_x() < 0.5,
+            "the column at {column:?} is not leftmost"
+        );
+        assert!(
+            column_lines(&scene)
+                .iter()
+                .any(|(_, line)| line.starts_with("Changes")),
+            "the column's title is not drawn at all"
+        );
+        nothing_in_the_corner(&mut harness, "the Changes column");
+
+        // The Themes panel docks left of it, and has the corner instead.
+        harness.open_theme_panel();
+        nothing_in_the_corner(&mut harness, "the Themes panel");
+    }
+
+    #[test]
     fn a_long_file_list_draws_only_the_rows_on_screen() {
         // Five thousand files is a vendored tree or a generated one, and a
         // frame of the column is still a screenful: every row built and laid

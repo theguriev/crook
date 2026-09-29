@@ -4863,9 +4863,13 @@ impl Workspace {
             .control_layout
             .insets(WINDOW_CHROME, self.window.state().fullscreen)
             .split();
-        // The corner is the header's while the panel is hidden, and the room
-        // the platform paints its controls in goes to whoever has the corner.
-        if self.tabs_panel_is_showing() {
+        // The room the platform paints its controls in goes to whoever has
+        // the top-left corner: the leftmost column — the tabs, or with the
+        // tabs hidden a docked column, the Themes panel or the Changes column
+        // — and the header only when no column is up at all. Both docked
+        // columns start with a strip whose left end is empty, which is where
+        // the traffic lights are painted.
+        if self.tabs_panel_is_showing() || self.panel.open || self.changes.open {
             insets
         } else {
             insets.without_panel()
