@@ -1801,17 +1801,16 @@ fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> R
             .map_err(anyhow::Error::msg)
             .with_context(|| path.display().to_string())?;
     }
-    // The process rather than the first pane, which is what makes this mean
-    // `cd DIR && crook`: every pane starts where Crook is — see
-    // `tab::starting_directory` — so the tab a person opens next in a window
-    // a file manager opened on a folder opens in that folder too. The paths
-    // the other flags named were made absolute when they were read. Named,
-    // so that a root directory is where the panes start too, rather than the
-    // home directory a Dock-launched Crook swaps it for.
+    // The process rather than the first pane: every pane starts where Crook
+    // is — see `tab::starting_directory` — so the tab a person opens next in
+    // a window a file manager opened on a folder opens in that folder too.
+    // The paths the other flags named were made absolute when they were
+    // read. And named, so that a root directory is where the panes start too,
+    // rather than the home directory a Dock-launched Crook — or a plain
+    // `cd / && crook` — swaps it for.
     if let Some(directory) = &launch.overrides.working_directory {
-        std::env::set_current_dir(directory)
+        crate::tab::start_in(directory)
             .with_context(|| format!("could not start in {}", directory.display()))?;
-        crate::tab::start_where_named();
     }
     let font_db = CosmicFontDb::new().context("no usable system fonts")?;
     // Blocking, and deliberately: one small file, read once, before there is a

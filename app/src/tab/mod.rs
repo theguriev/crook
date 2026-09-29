@@ -25,7 +25,7 @@
 //! hold one level down: the `pane` module is the strip's shape again, over
 //! panes.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -268,7 +268,7 @@ pub struct AgentSession {
 ///
 /// Unless the directory was named: `--working-directory /` — a file
 /// manager's "Open terminal here" on the root of the disk — says in so many
-/// words where to start, and is no Dock launch. See [`start_where_named`].
+/// words where to start, and is no Dock launch. See [`start_in`].
 fn starting_directory() -> Option<PathBuf> {
     resolve_starting_directory(
         std::env::current_dir().ok(),
@@ -280,13 +280,18 @@ fn starting_directory() -> Option<PathBuf> {
 /// Whether the directory Crook runs in is one the command line named.
 static DIRECTORY_WAS_NAMED: AtomicBool = AtomicBool::new(false);
 
-/// Says that the directory Crook is running in is the one the command line
+/// Moves Crook into the directory the command line named, and says it was
 /// named, so every session starts in it even when it is the root of a disk.
 ///
-/// Once, by the window a launcher opened with `--working-directory`, after it
-/// moved the process there.
-pub(crate) fn start_where_named() {
+/// One function rather than a move and a flag set beside it, so that the two
+/// cannot come apart: the move without the flag opens `--working-directory /`
+/// in the home directory, and nothing that opens a window is run by a test
+/// that would notice. Once, by the window a launcher opened with
+/// `--working-directory`, before its first pane starts.
+pub(crate) fn start_in(directory: &Path) -> std::io::Result<()> {
+    std::env::set_current_dir(directory)?;
     DIRECTORY_WAS_NAMED.store(true, Ordering::Relaxed);
+    Ok(())
 }
 
 /// The rule itself, with its inputs handed in so it can be tested.
@@ -1820,6 +1825,26 @@ mod starting_directory_tests {
             Some(PathBuf::from("/")),
         );
         assert_eq!(resolve_starting_directory(None, None, false), None);
+    }
+
+    /// What `--working-directory` does, as `open_window` calls it: the move,
+    /// and the word that the root it moved to was meant. Into the directory
+    /// the tests already run in, because the working directory is the whole
+    /// test binary's; and the only test that calls it, so the flag is read
+    /// before anything else could have set it.
+    #[test]
+    fn a_named_directory_is_moved_into_and_remembered_as_named() {
+        let here = std::env::current_dir().expect("the tests run somewhere");
+
+        assert!(start_in(&here.join("not a directory anybody made")).is_err());
+        assert!(
+            !DIRECTORY_WAS_NAMED.load(Ordering::Relaxed),
+            "a move that failed said Crook was where it was sent"
+        );
+
+        start_in(&here).expect("the directory the tests run in");
+        assert_eq!(std::env::current_dir().ok(), Some(here));
+        assert!(DIRECTORY_WAS_NAMED.load(Ordering::Relaxed));
     }
 }
 
