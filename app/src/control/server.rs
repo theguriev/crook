@@ -46,7 +46,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::Value;
 
-use super::protocol::{self, MAX_LINE, Refusal, Reply, Verb, code};
+use super::protocol::{self, MAX_LINE, Refusal, Reply, Request, code};
 
 /// The name of the directory the sockets live in, under the runtime or the
 /// temporary directory.
@@ -55,10 +55,11 @@ const DIRECTORY: &str = "crook-control";
 /// How long one connection has, from the moment it is accepted, to send its
 /// lines and read its answers.
 ///
-/// Five seconds, for everything: a `pane.list` is answered between two
+/// Five seconds, for everything but a verb that says it needs longer — see
+/// [`protocol::Verb::patience`]: a `pane.list` is answered between two
 /// frames, and a client that has not finished in five seconds is one that is
-/// not going to. It is also the bound on how long a connection's thread can be
-/// held by a client that connects and says nothing.
+/// not going to. It is also the bound on how long a connection's
+/// thread can be held by a client that connects and says nothing.
 pub const DEADLINE: Duration = Duration::from_secs(5);
 
 /// How much of a connection's time is kept back for its reply.
@@ -94,9 +95,9 @@ const NAMES: usize = 16;
 /// immediately would spin a core until one was freed.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
-/// How the window is asked: a verb, and the deadline the answer has to arrive
-/// by. Run on a connection's thread.
-pub type Answer = Arc<dyn Fn(Verb, Instant) -> Result<Value, Refusal> + Send + Sync>;
+/// How the window is asked: a request, and the deadline the answer has to
+/// arrive by. Run on a connection's thread.
+pub type Answer = Arc<dyn Fn(Request, Instant) -> Result<Value, Refusal> + Send + Sync>;
 
 /// The user this process runs as.
 pub fn euid() -> u32 {
@@ -383,7 +384,7 @@ impl Drop for Leaving {
 pub fn converse(
     stream: &UnixStream,
     deadline: Instant,
-    answer: &(dyn Fn(Verb, Instant) -> Result<Value, Refusal> + Send + Sync),
+    answer: &(dyn Fn(Request, Instant) -> Result<Value, Refusal> + Send + Sync),
 ) {
     let mut reader = BufReader::new(Timed { stream, deadline });
     loop {
@@ -412,17 +413,31 @@ pub fn converse(
         }
 
         if !line.iter().all(u8::is_ascii_whitespace) {
+            let (id, request) = protocol::read(&line);
+            // A verb that waits on git is given its own time, for this reply
+            // only: the reading goes on against the connection's deadline, so
+            // a line after a slow one finds that time has run out and the
+            // connection closes, rather than one slow verb lending the rest
+            // of the connection its two minutes.
+            let replying_by = match request
+                .as_ref()
+                .ok()
+                .and_then(|asked| asked.verb.patience())
+            {
+                Some(patience) => deadline.max(Instant::now() + patience),
+                None => deadline,
+            };
             // Short of the deadline, so that a window which runs out of time
             // still has some left to say so in: see `REPLY_MARGIN`.
-            let answer_by = deadline.checked_sub(REPLY_MARGIN).unwrap_or(deadline);
-            let reply = match protocol::read(&line) {
-                (id, Ok(verb)) => match answer(verb, answer_by) {
+            let answer_by = replying_by.checked_sub(REPLY_MARGIN).unwrap_or(replying_by);
+            let reply = match request {
+                Ok(request) => match answer(request, answer_by) {
                     Ok(result) => Reply::answered(id, result),
                     Err(refusal) => Reply::refused(id, refusal),
                 },
-                (id, Err(refusal)) => Reply::refused(id, refusal),
+                Err(refusal) => Reply::refused(id, refusal),
             };
-            if send(stream, deadline, &reply).is_err() {
+            if send(stream, replying_by, &reply).is_err() {
                 return;
             }
         }

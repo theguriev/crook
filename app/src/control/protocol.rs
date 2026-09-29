@@ -1,13 +1,16 @@
 //! What crosses the control socket: one JSON object a line, each way.
 //!
-//! Nothing here touches a socket. A line is read into a [`Verb`] or a
+//! Nothing here touches a socket. A line is read into a [`Request`] or a
 //! [`Refusal`], and an answer is written out as a [`Reply`], so that
 //! everything a client can get wrong — not JSON, no version, a verb this
-//! window has never heard of — is decided in one place that a test can reach
-//! without a connection, and the connection only ever moves bytes.
+//! window has never heard of, an argument a verb does not take — is decided in
+//! one place that a test can reach without a connection, and the connection
+//! only ever moves bytes.
 //!
 //! See "The window answers" in `docs/architecture.md` for the shape, and why
 //! a verb, once shipped, is only ever added to.
+
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -53,33 +56,127 @@ pub mod code {
     pub const TIMEOUT: &str = "timeout";
     /// The window closed before it answered.
     pub const GONE: &str = "gone";
+    /// The request carries no token of a pane in this window, and the verb
+    /// is one only a pane may ask.
+    pub const UNAUTHORIZED: &str = "unauthorized";
+    /// The caller already has as many tabs open on its behalf as it may.
+    pub const BUDGET: &str = "budget";
+    /// The caller has been refused so many times in a row that the window has
+    /// stopped answering it, until its pane closes.
+    pub const TOO_MANY_REFUSALS: &str = "too-many-refusals";
+    /// The shell a new pane runs is one whose quoting Crook has not proven,
+    /// so a command cannot be typed into it as the words it was given.
+    pub const UNSUPPORTED_SHELL: &str = "unsupported-shell";
+    /// The window tried and could not: git refused the worktree, the pane has
+    /// no directory to find a repository in.
+    pub const FAILED: &str = "failed";
 }
 
 /// What a request can ask for.
 ///
-/// One verb, and read-only. Every one after it is a promise that is hard to
-/// take back, which is why each is added on purpose and none by a pattern.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+/// Two verbs: one that reads and one that opens a tab. Every one is a promise
+/// that is hard to take back, which is why each is added on purpose and none
+/// by a pattern.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verb {
     /// Every pane of the window, as a list of [`PaneEntry`].
     PaneList,
+    /// A tab opened beside the caller's, running a command: see [`NewTab`].
+    /// Answered with an [`Opened`].
+    TabNew(NewTab),
 }
 
 impl Verb {
-    /// Every verb, in the order a refusal names them.
-    pub const ALL: [Verb; 1] = [Verb::PaneList];
-
-    /// The verb a request names, if this window knows it.
-    pub fn named(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|verb| verb.name() == name)
-    }
+    /// Every verb's name, in the order a refusal names them.
+    pub const NAMES: [&str; 2] = ["pane.list", "tab.new"];
 
     /// Its name on the wire: a noun and a verb, joined by a dot.
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
-            Self::PaneList => "pane.list",
+            Self::PaneList => Self::NAMES[0],
+            Self::TabNew(_) => Self::NAMES[1],
         }
     }
+
+    /// Its arguments on the wire, or `None` for a verb that takes none.
+    fn args(&self) -> Option<Value> {
+        match self {
+            Self::PaneList => None,
+            Self::TabNew(asked) => {
+                Some(serde_json::to_value(asked).expect("a new tab is strings and a boolean"))
+            }
+        }
+    }
+
+    /// How long the window may take over this one, when that is longer than a
+    /// connection is otherwise given.
+    ///
+    /// `None` for everything answered between two frames. A tab in a new
+    /// worktree waits for git to check a working tree out and run the
+    /// repository's own `post-checkout` hook, which the worktree module lets
+    /// run for two minutes; a connection that gave up at five seconds would
+    /// print `timeout` about a tab that then opened. So that one is given the
+    /// worktree's own read and write budgets, and a margin over them.
+    pub fn patience(&self) -> Option<Duration> {
+        match self {
+            Self::TabNew(NewTab {
+                worktree: Some(_), ..
+            }) => Some(
+                crate::git::worktree::READ_TIMEOUT
+                    + crate::git::worktree::WRITE_TIMEOUT
+                    + Duration::from_secs(10),
+            ),
+            _ => None,
+        }
+    }
+}
+
+/// What `tab.new` asks for: a command, and where to run it.
+///
+/// Read with unknown fields refused rather than ignored. A newer client's
+/// argument this window has never heard of could change what the tab is —
+/// ignoring a `worktree` would open the agent in the caller's own checkout —
+/// and a refusal naming it is the answer that cannot do harm.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewTab {
+    /// The command, as the words it is made of. The window joins them for
+    /// the new pane's shell, quoting each, so every word arrives as itself.
+    pub command: Vec<String>,
+    /// A branch to make a worktree on, from the caller's `HEAD`, for the tab
+    /// to open in; the caller's own directory when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    /// Whether the tab joins the caller's group, making one of the two when
+    /// the caller's tab is in none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_my_group: bool,
+    /// What to call the tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+/// What `tab.new` answers: the tab that opened.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Opened {
+    /// The new pane's number: the `CROOK_PANE_ID` its shell has, and the
+    /// `pane_id` `pane.list` lists it by.
+    pub pane_id: u64,
+    /// The number of the tab holding it.
+    pub tab_id: u64,
+    /// Where its shell starts: the worktree, when one was made.
+    #[serde(default)]
+    pub cwd: Option<String>,
+}
+
+/// One request: what it asks, and who asks it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Request {
+    /// What it asks.
+    pub verb: Verb,
+    /// The asking pane's `CROOK_TOKEN`, when it sent one. Whose it is, if it
+    /// is anybody's, is the window's to say: see `control::spawn`.
+    pub token: Option<String>,
 }
 
 /// Why a request was not answered: a code a script can branch on, and a
@@ -193,30 +290,36 @@ pub struct PaneEntry {
     pub branch: Option<String>,
 }
 
-/// The line a client sends to ask `verb`.
-pub fn request_line(verb: Verb) -> String {
-    format!(
-        "{}\n",
-        serde_json::json!({ "v": VERSION, "verb": verb.name() })
-    )
+/// The line a client sends to ask `verb`, carrying `token` when it has one.
+pub fn request_line(verb: &Verb, token: Option<&str>) -> String {
+    let mut request = Map::new();
+    request.insert("v".to_owned(), VERSION.into());
+    request.insert("verb".to_owned(), verb.name().into());
+    if let Some(args) = verb.args() {
+        request.insert("args".to_owned(), args);
+    }
+    if let Some(token) = token {
+        request.insert("token".to_owned(), token.into());
+    }
+    format!("{}\n", Value::Object(request))
 }
 
-/// Reads one request line into the verb it asks for.
+/// Reads one request line into what it asks for.
 ///
 /// Either way the request's `id` comes back with the answer, when the line was
 /// an object that had one, so that a refusal can be matched to its request as
 /// surely as an answer can.
-pub fn read(line: &[u8]) -> (Option<Value>, Result<Verb, Refusal>) {
+pub fn read(line: &[u8]) -> (Option<Value>, Result<Request, Refusal>) {
     let Ok(Value::Object(request)) = serde_json::from_slice::<Value>(line) else {
         return (None, Err(malformed("the line is not a JSON object")));
     };
     let id = request.get("id").cloned();
-    (id, verb_of(&request))
+    (id, request_of(&request))
 }
 
-/// The verb a request object asks for, once its versions agree with this
+/// What a request object asks for, once its versions agree with this
 /// window's.
-fn verb_of(request: &Map<String, Value>) -> Result<Verb, Refusal> {
+fn request_of(request: &Map<String, Value>) -> Result<Request, Refusal> {
     let Some(version) = request.get("v").and_then(Value::as_u64) else {
         return Err(malformed("a request carries its protocol version as `v`"));
     };
@@ -249,19 +352,40 @@ fn verb_of(request: &Map<String, Value>) -> Result<Verb, Refusal> {
         },
     }
 
+    let token = match request.get("token") {
+        None => None,
+        Some(Value::String(token)) => Some(token.clone()),
+        Some(_) => return Err(malformed("`token` is a string")),
+    };
     let Some(name) = request.get("verb").and_then(Value::as_str) else {
         return Err(malformed("a request names its `verb`"));
     };
-    Verb::named(name).ok_or_else(|| {
-        let known: Vec<&str> = Verb::ALL.iter().map(|verb| verb.name()).collect();
-        Refusal::new(
-            code::UNKNOWN_VERB,
-            format!(
-                "this Crook does not know the verb {name:?}; it knows {}",
-                known.join(", ")
-            ),
-        )
-    })
+    let args = request.get("args");
+    let verb = match name {
+        "pane.list" => match args {
+            None => Verb::PaneList,
+            Some(Value::Object(args)) if args.is_empty() => Verb::PaneList,
+            Some(_) => return Err(malformed("`pane.list` takes no `args`")),
+        },
+        "tab.new" => {
+            let Some(args) = args else {
+                return Err(malformed("`tab.new` needs `args` naming its `command`"));
+            };
+            let asked = NewTab::deserialize(args)
+                .map_err(|error| malformed(&format!("`tab.new`'s args: {error}")))?;
+            Verb::TabNew(asked)
+        }
+        name => {
+            return Err(Refusal::new(
+                code::UNKNOWN_VERB,
+                format!(
+                    "this Crook does not know the verb {name:?}; it knows {}",
+                    Verb::NAMES.join(", ")
+                ),
+            ));
+        }
+    };
+    Ok(Request { verb, token })
 }
 
 /// A `bad-request` refusal that says what a request looks like.

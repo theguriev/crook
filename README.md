@@ -321,6 +321,15 @@ Nineteen features, and the page that configures them:
   another agent. It goes over a Unix socket in a directory only you can enter, named in every
   pane's `CROOK_SOCKET` — never a network port — and it only reads. Outside a pane it asks
   the one Crook that is running and refuses to guess among several. Not on Windows yet.
+  **And an agent can fan its work out where you can see it.** From inside a pane,
+  `crook tab new --worktree fix-x --in-my-group -- claude "fix the flaky test"` opens a tab
+  beside it — in a new worktree on `fix-x` from the pane's `HEAD`, folded into the pane's group —
+  without taking your keyboard, and runs the command at the new shell's first prompt, every word
+  as itself; it prints the new pane's number for `crook pane list` to watch. A pane is known by
+  the secret in its own `CROOK_TOKEN`, so a script that is not in a pane can list but cannot
+  open anything; eight tabs may be open on behalf of one pane you opened, a worker's own workers
+  counted in, and the new row's card says which pane opened it. `sh`, `bash`, `zsh` and `fish`
+  only.
   Crook also reads the notifications other terminals show — OSC 9, 777 and 99 — as the pane
   asking for a look, with the notification's text on the row and the status left as it was, so
   an agent on a remote box with its notification channel set to `iterm2`, `ghostty` or `kitty`
@@ -448,7 +457,8 @@ Nineteen features, and the page that configures them:
   marks, every shell Crook starts has `TERM_PROGRAM=Crook` and `CROOK_PANE_ID` set to the
   pane's number — what WezTerm's `WEZTERM_PANE` is — so a script or an agent can tell it is
   inside Crook and which pane, and name a log file after it — and `CROOK_SOCKET`, where the
-  window answers `crook pane list`.
+  window answers `crook pane list`, with `CROOK_TOKEN`, the pane's own secret that
+  `crook tab new` sends to say which pane is asking.
 
   It also **answers**, which is what makes Tab work. Command marks are an announcement and
   completion is a question, so there is a second channel beside them: Crook writes the line

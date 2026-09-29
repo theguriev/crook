@@ -34,7 +34,7 @@ use crate::clipboard::Clipboard;
 use crate::editor::Selection;
 use crate::git::GitFacts;
 use crate::git_model::GitModel;
-use crate::input_keys::{Binding, Platform};
+use crate::input_keys::{Binding, Intent, Platform};
 use crate::keybindings::{Context, Keybindings, PendingSave, Recording, Resolution};
 use crate::notify::{Cooldown, LONG_COMMAND, Notice, Notifier, Occasion, Silent};
 use crate::pane_blocks::{PAGE_OVERLAP, PaneBlocks, ScrollCause};
@@ -594,6 +594,11 @@ pub struct Workspace {
     /// of its own, with its own undo stack and its own history, which is what
     /// makes two panes of the same tab two places to work rather than one.
     inputs: HashMap<PaneId, TextInput>,
+    /// The line each pane opened by `crook tab new` runs at its shell's first
+    /// prompt, while it waits for one. Already typed into that pane's field;
+    /// kept here to know it is still the line the field holds. See
+    /// [`Self::run_at_first_prompt`].
+    first_lines: HashMap<PaneId, String>,
     /// The resume line a restore typed into each pane's field, while nothing
     /// has run in that pane since.
     ///
@@ -1006,6 +1011,7 @@ impl Workspace {
             git,
             terminals,
             inputs: HashMap::new(),
+            first_lines: HashMap::new(),
             resume_offers: HashMap::new(),
             clipboard: Clipboard::new(),
             divider_drag: DividerDrag::new(),
@@ -5096,7 +5102,7 @@ impl Workspace {
     }
 
     /// The command line being composed in a pane.
-    pub(super) fn input(&self, pane: PaneId) -> Option<&TextInput> {
+    pub(crate) fn input(&self, pane: PaneId) -> Option<&TextInput> {
         self.inputs.get(&pane)
     }
 
@@ -5827,6 +5833,10 @@ impl Workspace {
                 StatusSource::CommandEnded(Instant::now()),
                 ctx,
             ),
+            TerminalUpdate::Prompted(pane) => {
+                self.submit_first_line(*pane, ctx);
+                self.tabs.pane(*pane).is_some()
+            }
             TerminalUpdate::Notification { pane, title, body } => {
                 self.notified(*pane, title.as_deref(), body.as_deref(), ctx)
             }
@@ -5973,6 +5983,135 @@ impl Workspace {
         }
 
         self.settle(effect, before, ctx)
+    }
+
+    /// Opens a tab for `crook tab new` beside `beside`, and answers the tab and
+    /// the pane in it.
+    ///
+    /// In `beside`'s group when `grouped`, and never selected: see
+    /// [`TabAction::NewBeside`]. `directory` is written onto the new session
+    /// before the shells are synced, for the reason [`Self::open_tab_in`]
+    /// gives, and so is whatever `prepare` writes — the lineage, the title —
+    /// so the session the strip saves is the finished one. A group that had a
+    /// `heading` handed in is renamed to it, as the worktree menu renames the
+    /// group it opens into after the repository.
+    ///
+    /// A `beside` that closed while a worktree was being checked out for it
+    /// gets a tab of its own beside the active one: the checkout happened and
+    /// the tab is still what was asked for, as it is for the menu.
+    pub(crate) fn open_worker_tab(
+        &mut self,
+        beside: TabId,
+        grouped: bool,
+        directory: Option<PathBuf>,
+        heading: Option<String>,
+        ctx: &mut ViewContext<Self>,
+        prepare: impl FnOnce(&mut AgentSession),
+    ) -> Option<(TabId, PaneId)> {
+        let (anchor, grouped) = match self.tabs.get(beside) {
+            Some(_) => (beside, grouped),
+            None => (self.tabs.active_id(), false),
+        };
+        let before = self.tabs.focused_pane_id();
+        let existing: Vec<TabId> = self.tabs.iter().map(Tab::id).collect();
+        let effect = self.tabs.apply(TabAction::NewBeside {
+            tab: anchor,
+            grouped,
+        });
+        let opened = self
+            .tabs
+            .iter()
+            .find(|tab| !existing.contains(&tab.id()))
+            .map(|tab| (tab.id(), tab.panes().focused_id(), tab.group()));
+
+        if let Some((_, pane, group)) = opened {
+            if let Some(session) = self.tabs.pane_mut(pane).map(Pane::session_mut) {
+                if let Some(directory) = directory {
+                    session.working_directory = Some(directory);
+                }
+                prepare(session);
+            }
+            if let (Some(group), Some(heading)) = (group.filter(|_| grouped), heading) {
+                self.tabs.rename_group(group, heading);
+            }
+        }
+
+        self.settle(effect, before, ctx);
+        opened.map(|(tab, pane, _)| (tab, pane))
+    }
+
+    /// Types `line` into a pane's field, and runs it at the pane's first
+    /// prompt.
+    ///
+    /// Typed now, so the command a tab was opened for is on screen, in the
+    /// field, from the moment the tab is — and sent the way Enter sends a
+    /// line, once the shell says it is ready for one: see
+    /// [`TerminalUpdate::Prompted`]. The wait is the shell's own mark rather
+    /// than a clock, and a shell whose integration never marks a prompt keeps
+    /// the line in its field for a person to send.
+    pub(crate) fn run_at_first_prompt(
+        &mut self,
+        pane: PaneId,
+        line: String,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.type_into_input(pane, &line, ctx);
+        self.first_lines.insert(pane, line);
+    }
+
+    /// Sends the line [`Self::run_at_first_prompt`] typed, if it is still the
+    /// line in the field.
+    ///
+    /// Exactly what Enter does in the field — the editor's submit, then
+    /// [`TerminalHandle::submit`], then the list scrolled to the end — so the
+    /// line goes into the pane's history and its block like one a person
+    /// ran. A field somebody has typed into since is theirs: the line they
+    /// changed is not the one that was asked for, and sending theirs for them
+    /// would be sending something nobody pressed Enter on.
+    fn submit_first_line(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        let Some(line) = self.first_lines.remove(&pane) else {
+            return;
+        };
+        let Some(input) = self.inputs.get(&pane) else {
+            return;
+        };
+        if input.editor().text() != line {
+            log::info!("pane {pane:?}'s first line was changed before its prompt; not sending it");
+            return;
+        }
+        let Some((terminal, _)) = self.terminal(pane, ctx) else {
+            return;
+        };
+        let Some(line) = input.apply(Intent::Submit, &self.clipboard) else {
+            return;
+        };
+        if terminal.submit(&line)
+            && let Some(view) = self.pane_blocks(pane)
+        {
+            view.apply(ScrollCause::Submit);
+        }
+        ctx.notify();
+    }
+
+    /// The pane whose shell was handed `token` for the control socket, while
+    /// that shell runs. See [`crate::control`].
+    pub(crate) fn pane_with_token(&self, token: &str, app: &AppContext) -> Option<PaneId> {
+        self.terminals.as_ref(app).pane_with_token(token)
+    }
+
+    /// The token a pane's shell was handed, for a test that has to ask as it.
+    ///
+    /// Unix only, as the socket tests that ask are: a Windows test build
+    /// would find it unused.
+    #[cfg(all(test, unix))]
+    pub(crate) fn token_of(&self, pane: PaneId, app: &AppContext) -> Option<String> {
+        self.terminals.as_ref(app).token(pane).map(str::to_owned)
+    }
+
+    /// Where the worktrees Crook makes are checked out, when this machine has
+    /// anywhere to put them.
+    pub(crate) fn worktrees_directory(&self) -> Option<&Path> {
+        self.worktrees_directory.as_deref()
     }
 
     /// Opens a tab whose shell starts in `directory`, in `tab`'s group.
@@ -6840,6 +6979,9 @@ impl Workspace {
             self.inputs.entry(*id).or_insert_with(TextInput::for_pane);
         }
         self.interactions.retain(|id, _| open.contains(id));
+        // A line waiting for a prompt in a pane that closed first waits for
+        // nothing.
+        self.first_lines.retain(|id, _| open.contains(id));
         self.resume_offers.retain(|id, _| open.contains(id));
         // A closed pane's half-written command line goes with it. Keeping it
         // would mean a later pane inheriting somebody else's history the first

@@ -52,7 +52,7 @@ use crook_terminal::{Program, TerminalOptions, default_shell};
 
 use super::launch::{HostEnv, Launch, ScratchFile, plain, plan};
 use super::{Options, PANE_ID_VARIABLE, Shell, opted_out};
-use crate::control::SOCKET_VARIABLE;
+use crate::control::{SOCKET_VARIABLE, TOKEN_VARIABLE};
 use crate::tab::PaneId;
 
 /// The root's name inside `XDG_RUNTIME_DIR`, which is this user's alone
@@ -289,6 +289,12 @@ impl Session {
             .and_then(Path::to_str)
             .unwrap_or_default();
         environment.push((SOCKET_VARIABLE.to_owned(), socket.to_owned()));
+        // Empty on the same terms and for the same reason: an outer pane's
+        // token inherited here would let this pane open tabs as that one.
+        environment.push((
+            TOKEN_VARIABLE.to_owned(),
+            options.control_token.clone().unwrap_or_default(),
+        ));
         // The snippet has to be told where to look, and an environment
         // variable is the only channel that reaches it: the file it reads is
         // in a directory whose name is minted per session.

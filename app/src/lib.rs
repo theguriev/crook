@@ -44,8 +44,9 @@
 //!
 //! # Answering from outside
 //!
-//! `crook pane list` is not a flag and opens no window: it asks a window that is
-//! already open, over the socket [`control`] listens on, and prints the answer.
+//! `crook pane list` and `crook tab new` are not flags and open no window: they
+//! ask a window that is already open, over the socket [`control`] listens on,
+//! and print the answer.
 
 pub mod agent;
 pub mod browser;
@@ -573,9 +574,14 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
     let mut args = args.peekable();
     // A noun and a verb rather than a flag, and only as the first word: it is
     // a question for a window that is already open, and the rest of the line
-    // is its own — `--json` after it means what `pane list` says it means.
+    // is its own — `--json` after it means what `pane list` says it means,
+    // and everything after `tab new`'s `--` is the command it runs.
     if args.next_if(|word| word == "pane").is_some() {
         println!("{}", control::cli::pane(args)?);
+        return Ok(Startup::Answered);
+    }
+    if args.next_if(|word| word == "tab").is_some() {
+        println!("{}", control::cli::tab(args)?);
         return Ok(Startup::Answered);
     }
     let mut frames = None;
@@ -993,6 +999,7 @@ fn help_text() -> String {
 USAGE:
     crook [OPTIONS]
     crook pane list [--json]
+    crook tab new [--worktree <BRANCH>] [--in-my-group] [--title <TITLE>] [--json] -- <COMMAND>...
 
 COMMANDS:
     pane list [--json] Ask the window this is run in which panes it has, over
@@ -1003,6 +1010,18 @@ COMMANDS:
                        window's own JSON array instead. Outside a pane it asks
                        the one Crook running, and refuses to pick among
                        several. Not on Windows yet
+    tab new [...] -- <COMMAND>...
+                       From inside a pane, open a tab beside it in the same
+                       window, without switching to it, and run the command
+                       there at the new shell's first prompt, every word of it
+                       as itself. --worktree makes a worktree on a new branch
+                       from this pane's HEAD and opens the tab in it;
+                       --in-my-group puts the tab in this tab's group; --title
+                       names it. Prints the new pane's number, or with --json
+                       the window's answer. The pane is known by the secret in
+                       its CROOK_TOKEN, and eight tabs may be open on behalf of
+                       one pane a person opened. sh, bash, zsh and fish only;
+                       not on Windows yet
 
 OPTIONS:
     --install-plugin <PATH>
@@ -3732,6 +3751,18 @@ mod tests {
     }
 
     #[test]
+    fn tab_is_a_command_only_as_the_first_word() {
+        // First, it is `crook tab …`: the rest of the line reaches the
+        // command's parser, which asks for its verb.
+        let bare = parse(&["tab"]).expect_err("tab needs a verb").to_string();
+        assert!(bare.contains("needs a verb"), "{bare}");
+        let later = parse(&["--frames", "3", "tab", "new"])
+            .expect_err("not a flag")
+            .to_string();
+        assert!(later.contains("unrecognised argument tab"), "{later}");
+    }
+
+    #[test]
     fn pane_is_a_command_only_as_the_first_word() {
         // First, it is `crook pane …`, and the rest of the line is its own:
         // it reaches the command's parser, which asks for its verb.
@@ -3817,15 +3848,38 @@ mod tests {
             agent::SKILL.contains("crook pane list"),
             "the skill teaches asking the window what is open"
         );
-        for (at, _) in agent::SKILL.match_indices("crook pane ") {
-            let verb = agent::SKILL[at + "crook pane ".len()..]
-                .split(|character: char| !character.is_ascii_lowercase())
+        assert!(
+            agent::SKILL.contains("crook tab new"),
+            "the skill teaches opening a worker's tab"
+        );
+        for noun in ["pane", "tab"] {
+            let command = format!("crook {noun} ");
+            for (at, _) in agent::SKILL.match_indices(&command) {
+                let verb = agent::SKILL[at + command.len()..]
+                    .split(|character: char| !character.is_ascii_lowercase())
+                    .next()
+                    .unwrap_or_default();
+                assert!(
+                    help.contains(&format!("crook {noun} {verb}")),
+                    "the skill names `crook {noun} {verb}`, which --help does not list"
+                );
+            }
+        }
+        // Every flag of `tab new` the skill uses is one the command takes.
+        for (at, _) in agent::SKILL.match_indices("crook tab new ") {
+            let line = agent::SKILL[at..].lines().next().unwrap_or_default();
+            let flags = line
+                .split(" -- ")
                 .next()
-                .unwrap_or_default();
-            assert!(
-                help.contains(&format!("crook pane {verb}")),
-                "the skill names `crook pane {verb}`, which --help does not list"
-            );
+                .unwrap_or_default()
+                .split(' ')
+                .filter(|word| word.starts_with("--"));
+            for flag in flags {
+                assert!(
+                    help.contains(&format!("[{flag}")),
+                    "the skill gives `crook tab new` {flag}, which --help does not list"
+                );
+            }
         }
         for flag in flags {
             assert!(

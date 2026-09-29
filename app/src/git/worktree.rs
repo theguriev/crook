@@ -62,7 +62,7 @@ static GIT_MISSING: AtomicBool = AtomicBool::new(false);
 /// only reason a local read is slow is a cold page cache — and short enough
 /// that a stall is something a person waits out rather than a hang they have to
 /// restart the app to clear.
-const READ_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long [`add`] may take.
 ///
@@ -76,7 +76,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// [`lock`] and the unlock under [`release`] share it without needing it:
 /// each writes one small file, and a separate budget for them would be a
 /// second number that bounds nothing different.
-const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How long [`remove`] may take.
 ///

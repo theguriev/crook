@@ -84,7 +84,10 @@
 //! set in the same place, and it *is* an address: where the window answers
 //! `crook pane list`. Empty when the window has no socket, rather than left
 //! out, so that a Crook started inside another Crook's pane does not pass the
-//! outer window's on to its own shells.
+//! outer window's on to its own shells. So is
+//! [`TOKEN_VARIABLE`](crate::control::TOKEN_VARIABLE) — `CROOK_TOKEN` — the
+//! pane's own secret, which is what lets what runs in it open a tab with
+//! `crook tab new`, and which is empty on the same terms.
 //!
 //! # What it costs when it does not work
 //!
@@ -333,6 +336,10 @@ pub struct Options {
     /// [`SOCKET_VARIABLE`](crate::control::SOCKET_VARIABLE); `None` when the
     /// window has no socket, which the shell is told as an empty value.
     pub control_socket: Option<PathBuf>,
+    /// The pane's secret for that socket, told to the shell in
+    /// [`TOKEN_VARIABLE`](crate::control::TOKEN_VARIABLE); `None` is told as
+    /// an empty value, like the socket.
+    pub control_token: Option<String>,
 }
 
 impl Default for Options {
@@ -344,6 +351,7 @@ impl Default for Options {
             login: login_by_default(),
             shell: None,
             control_socket: None,
+            control_token: None,
         }
     }
 }

@@ -613,6 +613,7 @@ fn test_a_session_writes_its_scratch_files_and_takes_them_with_it() {
         // shell that is not installed still exercises the whole arrangement.
         shell: Some(PathBuf::from("/nowhere/zsh")),
         control_socket: None,
+        control_token: None,
     };
 
     let scratch = {
@@ -647,6 +648,7 @@ fn test_a_session_fills_in_the_terminals_options() {
             login: true,
             shell: Some(PathBuf::from("/nowhere/bash")),
             control_socket: None,
+            control_token: None,
         },
         host_at(&home),
     );
@@ -699,6 +701,7 @@ fn test_every_shell_is_told_which_pane_it_is_in_marks_or_no_marks() {
                 login: true,
                 shell: Some(PathBuf::from(program)),
                 control_socket: None,
+                control_token: None,
             },
             host_at(&home),
         );
@@ -741,6 +744,7 @@ fn test_every_shell_is_told_where_its_window_answers_and_told_so_when_it_does_no
                 login: true,
                 shell: Some(PathBuf::from(program)),
                 control_socket: Some(socket.clone()),
+                control_token: None,
             },
             host_at(&home),
         );
@@ -763,6 +767,44 @@ fn test_every_shell_is_told_where_its_window_answers_and_told_so_when_it_does_no
 }
 
 #[test]
+fn test_every_shell_is_handed_its_panes_token_and_an_empty_one_when_it_has_none() {
+    // What `crook tab new` sends to say which pane is asking. Marks or no
+    // marks, like the socket beside it.
+    let home = TempDir::new("home");
+    for (name, enabled, program) in [
+        ("marked zsh", true, "/nowhere/zsh"),
+        ("bash with the marks off", false, "/nowhere/bash"),
+        ("a shell with no integration", true, "/nowhere/nu"),
+    ] {
+        let session = Session::with_host(
+            PaneId::next(),
+            &Options {
+                enabled,
+                login: true,
+                shell: Some(PathBuf::from(program)),
+                control_socket: Some(PathBuf::from("/run/user/1000/crook-control/1.sock")),
+                control_token: Some("5ec2e7".to_owned()),
+            },
+            host_at(&home),
+        );
+        assert_eq!(
+            session_variable(session.environment(), crate::control::TOKEN_VARIABLE),
+            Some("5ec2e7"),
+            "{name} should be handed its pane's token"
+        );
+    }
+
+    // Empty rather than left out: an outer Crook's pane's token, inherited,
+    // would let whatever runs here open tabs in that window as that pane.
+    let without = Session::with_host(PaneId::next(), &Options::default(), host_at(&home));
+    assert_eq!(
+        session_variable(without.environment(), crate::control::TOKEN_VARIABLE),
+        Some(""),
+        "a pane with no token says so rather than passing an outer one on"
+    );
+}
+
+#[test]
 fn test_the_opt_out_leaves_the_shell_exactly_as_it_was() {
     let home = TempDir::new("home");
     let session = Session::with_host(
@@ -772,6 +814,7 @@ fn test_the_opt_out_leaves_the_shell_exactly_as_it_was() {
             login: true,
             shell: Some(PathBuf::from("/nowhere/zsh")),
             control_socket: None,
+            control_token: None,
         },
         host_at(&home),
     );
@@ -823,6 +866,7 @@ fn marked(program: &str) -> Options {
         login: true,
         shell: Some(PathBuf::from(program)),
         control_socket: None,
+        control_token: None,
     }
 }
 
@@ -1247,6 +1291,7 @@ impl RealShell<'_> {
                 login: self.login,
                 shell: Some(program),
                 control_socket: None,
+                control_token: None,
             },
             host_at(&home),
         );
