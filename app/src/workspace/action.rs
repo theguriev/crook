@@ -311,8 +311,8 @@ pub enum WorktreeAction {
     },
     /// Do what Finish's question said.
     Finish,
-    /// Go from Discard's first question to its second, which names every
-    /// commit and every file that goes.
+    /// Go from Discard's first question to its second, which looks at the
+    /// checkout again and names the commits and files that go.
     ReviewDiscard,
     /// Do what Discard's second question said.
     Discard,

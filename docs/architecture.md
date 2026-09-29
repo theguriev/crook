@@ -1042,10 +1042,20 @@ them — the checks are what `-d` stood in for. Three gestures reach it:
   directory keeps Windows from deleting it — and since the menu hung off a row that is now
   gone, it moves to a tab in the main checkout and says what happened under the list.
 - **Discard task** is the one way to delete a branch nobody proved, and it asks twice. The
-  second question names every commit only that branch holds — on no other branch, tag or
-  remote, since one that is elsewhere is not lost — and every modified or untracked file the
-  forced removal throws away, over a button that says "for good" and is never Enter's. The
-  branch is deleted only if its tip is still the one those commits were counted from.
+  second question names the commits only that branch holds — on no other branch, tag or
+  remote, since one that is elsewhere is not lost — and the modified or untracked files the
+  forced removal throws away, six of each by name and the rest counted, over a button that
+  says "for good" and is never Enter's. The branch is deleted only if its tip is still the one
+  those commits were counted from.
+
+What a question says is what its press does, however long it was up. It stays up while an agent
+finishes — that is what lights its button — and an agent's last act is often a file or a
+commit, so the checkout is looked at again three times: when a pane in it stops working, so the
+question shows what was left; when a button is pressed, before any pane closes — a checkout
+that no longer holds what the question said is asked about again, as it is now, and nothing is
+done, which is also how Discard's second question comes to be about the checkout as it is and
+not as it was when the first opened; and once the panes have closed, just before git runs,
+when anything new keeps both the checkout and the branch.
 
 **A removal takes its empty directories with it.** `git worktree remove` deletes the checkout
 and nothing above it, so the store kept a directory per repository after its last checkout

@@ -463,9 +463,11 @@ Nineteen features, and the page that configures them:
   there, removes the checkout, and deletes the branch if its work has landed, or keeps it and
   says `kept feat/x: not on main yet`. It will not while an agent or a command is still working
   there. **Discard task** deletes the branch whether or not it has landed, after a second
-  question that names every commit and file that goes with it. Checkouts go in a store of Crook's own —
-  neither inside the repository, where git will happily let you put one and every build and
-  every search then trips over it, nor beside it in a directory somebody else laid out.
+  question that names the commits and files that go with it; a checkout that changed while
+  either question was up is asked about again rather than acted on. Checkouts go in a store of
+  Crook's own — neither inside the repository, where git will happily let you put one and every
+  build and every search then trips over it, nor beside it in a directory somebody else laid
+  out.
 
 - **A settings page**, which opens the way a shell does: `cmd/ctrl-,` — or the View options
   menu's last entry — puts it in a **tab of its own**, listed beside the work it
@@ -538,9 +540,10 @@ Nineteen features, and the page that configures them:
   `rerun-block`, `scroll-to-block-top`, `scroll-to-block-bottom`), every entry of a tab's
   (`crook/tabs/pin-tab`, `close-tab`, `open-menu`, `view-options`,
   `toggle-group`, `close-group`, the seven colours), the worktree list (`crook/worktrees/menu`),
-  the end of a task (`crook/worktrees/finish-task`, `discard-task`) and every settings page (`crook/appearance/open-page` and its three neighbours). The block
-  entries act on the block the menu is up on, or — with no menu — on the one the keyboard has
-  selected, so each of them is a chord as well as a row.
+  the end of a task (`crook/worktrees/finish-task`, `discard-task`) and every settings page
+  (`crook/appearance/open-page` and its three neighbours). The block entries act on the block
+  the menu is up on, or — with no menu — on the one the keyboard has selected, so each of them
+  is a chord as well as a row.
 
 - **The menus can be walked.** A tab's context menu opens with `crook/tabs/open-menu`, the
   arrows move down it, Enter runs the row and Escape takes it down. The worktree list inside

@@ -6039,6 +6039,17 @@ fn ask_about_the_task(harness: &mut Harness, pane: PaneId, discard: bool) -> Rc<
     harness.frame()
 }
 
+/// Answers Discard's first question, and waits for its second, which looks
+/// at the checkout again before it names what goes.
+fn review_the_discard(harness: &mut Harness) -> Rc<Scene> {
+    harness.dispatch_worktree(WorktreeAction::ReviewDiscard);
+    harness.wait_for("the second question to look at the checkout", |harness| {
+        harness.worktree_menu_finishing() == Some((true, true))
+            && harness.worktree_finish_is_ready()
+    });
+    harness.frame()
+}
+
 /// Waits for a task's question to be carried out and the list read again.
 fn wait_for_the_task_to_go(harness: &mut Harness) -> Rc<Scene> {
     harness.wait_for("the task to be carried out", |harness| {
@@ -6337,9 +6348,7 @@ fn discarding_deletes_an_unproved_branch_only_at_its_second_question_which_names
     harness.queue.run_until_parked();
     assert!(checkout.is_dir() && has_branch(&repository, &branch));
 
-    harness.dispatch_worktree(WorktreeAction::ReviewDiscard);
-    assert_eq!(harness.worktree_menu_finishing(), Some((true, true)));
-    let scene = harness.frame();
+    let scene = review_the_discard(&mut harness);
     assert!(worktree_menu_says(&scene, "Discard it for good?"));
     for named in [&unfinished[..7], "the unfinished work", "notes.txt"] {
         assert!(
@@ -6443,6 +6452,185 @@ fn finishing_is_refused_while_anything_in_the_checkout_is_working() {
         !checkout.exists(),
         "nothing working, and it still did not go"
     );
+}
+
+#[test]
+fn discard_names_what_an_agent_left_while_its_question_waited() {
+    // The question stays up while the agent finishes — that is what lights
+    // its button — and the agent's last act is a file. The second question
+    // has to name it, because the press throws it away.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let (checkout, pane) = task_checkout(&mut harness, tab, &store);
+    let branch = git_in(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    commit_in(&checkout, "task.txt", "the work");
+    harness.update_session(pane, |session| session.status = AgentStatus::Running);
+
+    let scene = ask_about_the_task(&mut harness, pane, true);
+    assert!(worktree_menu_says(&scene, "Not yet"));
+
+    fs::write(checkout.join("late.txt"), "written last\n").expect("the checkout is there");
+    harness.update_session(pane, |session| session.status = AgentStatus::Idle);
+    harness.wait_for("the question to show what the agent left", |harness| {
+        worktree_menu_reads(&harness.frame(), "1 untracked")
+    });
+    // And one more with nothing in the window to say so: the second question
+    // looks for itself before it names anything.
+    fs::write(checkout.join("later-still.txt"), "and this\n").expect("the checkout is there");
+
+    let scene = review_the_discard(&mut harness);
+    for named in ["late.txt", "later-still.txt"] {
+        assert!(
+            worktree_menu_says(&scene, named),
+            "the second question does not name {named}, which the press throws away"
+        );
+    }
+
+    harness.dispatch_worktree(WorktreeAction::Discard);
+    wait_for_the_task_to_go(&mut harness);
+    assert!(!checkout.exists());
+    assert!(!has_branch(&repository, &branch));
+}
+
+#[test]
+fn a_press_over_a_checkout_that_changed_since_its_question_asks_again() {
+    // Nothing in the window was working, so nothing said the checkout had
+    // changed: a file appeared behind the question's back. The press looks
+    // first, finds the question out of date, does nothing, and asks again.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let (checkout, pane) = task_checkout(&mut harness, tab, &store);
+    let branch = git_in(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    commit_in(&checkout, "task.txt", "the work");
+    ask_about_the_task(&mut harness, pane, true);
+    let scene = review_the_discard(&mut harness);
+    assert!(!worktree_menu_says(&scene, "sneaked.txt"));
+
+    fs::write(checkout.join("sneaked.txt"), "nobody said\n").expect("the checkout is there");
+    harness.dispatch_worktree(WorktreeAction::Discard);
+    harness.wait_for("the press to look again", |harness| {
+        harness.worktree_finish_is_ready()
+    });
+
+    assert!(checkout.join("sneaked.txt").is_file(), "the new file went");
+    assert!(has_branch(&repository, &branch));
+    assert!(harness.pane_ids().contains(&pane), "the tab closed anyway");
+    assert_eq!(harness.worktree_menu_finishing(), Some((true, true)));
+    let scene = harness.frame();
+    assert!(
+        worktree_menu_says(&scene, "sneaked.txt"),
+        "the question asked again does not name the new file"
+    );
+    assert!(worktree_menu_reads(
+        &scene,
+        "It changed while the question was up, so nothing was done."
+    ));
+
+    harness.dispatch_worktree(WorktreeAction::Discard);
+    wait_for_the_task_to_go(&mut harness);
+    assert!(!checkout.exists());
+    assert!(!has_branch(&repository, &branch));
+}
+
+#[test]
+fn a_press_taken_back_while_it_looks_again_does_nothing() {
+    // Escape during the second look is the press taken back: the look lands
+    // nowhere, and the question it was about is the one showing again.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let (checkout, pane) = task_checkout(&mut harness, tab, &store);
+    let branch = git_in(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    commit_in(&checkout, "task.txt", "the work");
+    ask_about_the_task(&mut harness, pane, true);
+    review_the_discard(&mut harness);
+
+    harness.dispatch_worktree(WorktreeAction::Discard);
+    assert!(
+        !harness.worktree_finish_is_ready(),
+        "the press did not look again"
+    );
+    harness.dispatch_worktree(WorktreeAction::Cancel);
+    harness.queue.run_until_parked();
+
+    assert_eq!(harness.worktree_menu_finishing(), Some((true, false)));
+    assert!(harness.worktree_finish_is_ready());
+    assert!(checkout.is_dir() && has_branch(&repository, &branch));
+    assert!(harness.pane_ids().contains(&pane), "the tab closed anyway");
+}
+
+#[test]
+fn finish_waits_on_what_a_stopped_agent_left_rather_than_closing_its_tab() {
+    // A landed task whose agent writes a file as it stops. Finish never
+    // forces, so pressing it would close the tab and then have git refuse
+    // the checkout; the question says so instead, and the tab stays.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let (checkout, pane) = task_checkout(&mut harness, tab, &store);
+    let branch = git_in(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    commit_in(&checkout, "task.txt", "the task");
+    squash_in(&repository, &branch);
+    harness.update_session(pane, |session| session.status = AgentStatus::Running);
+    ask_about_the_task(&mut harness, pane, false);
+
+    fs::write(checkout.join("agent-output.txt"), "left behind\n").expect("the checkout is there");
+    harness.update_session(pane, |session| session.status = AgentStatus::Idle);
+    harness.wait_for("the question to show what the agent left", |harness| {
+        worktree_menu_reads(&harness.frame(), "There is work in it — 1 untracked.")
+    });
+
+    harness.dispatch_worktree(WorktreeAction::Finish);
+    harness.queue.run_until_parked();
+    assert!(harness.pane_ids().contains(&pane), "the tab closed anyway");
+    assert!(checkout.join("agent-output.txt").is_file());
+    assert!(has_branch(&repository, &branch));
+}
+
+#[test]
+fn carrying_out_a_task_keeps_everything_when_its_checkout_changed_after_the_last_look() {
+    // The last of the three looks, made once the panes have closed and just
+    // before git is asked. For Discard, a file its second question never
+    // named; for Finish, a commit made on no branch — which git's own
+    // unforced removal does not look for, and would lose.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let (checkout, _) = task_checkout(&mut harness, tab, &store);
+    let branch = git_in(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    commit_in(&checkout, "task.txt", "the task");
+
+    let plan = super::finish::read_plan(&checkout, &store).expect("the checkout is looked at");
+    fs::write(checkout.join("late.txt"), "nobody named me\n").expect("the checkout is there");
+    let report = super::finish::carry_out(&repository, &plan, true, Some(&store));
+    assert!(
+        report.contains("late.txt appeared in it"),
+        "the report does not say why: {report}"
+    );
+    assert!(checkout.join("late.txt").is_file(), "the file went");
+    assert!(has_branch(&repository, &branch), "the branch went");
+    fs::remove_file(checkout.join("late.txt")).expect("the file is there");
+
+    let plan = super::finish::read_plan(&checkout, &store).expect("the checkout is looked at");
+    git_in(&checkout, &["switch", "--detach"]);
+    let stranded = commit_in(&checkout, "stranded.txt", "on no branch");
+    let report = super::finish::carry_out(&repository, &plan, false, Some(&store));
+    assert!(
+        report.contains("1 commit on no branch"),
+        "the report does not say why: {report}"
+    );
+    assert!(
+        checkout.is_dir(),
+        "the checkout went with a commit on no branch"
+    );
+    assert_eq!(git_in(&checkout, &["rev-parse", "HEAD"]), stranded);
 }
 
 #[test]

@@ -17,10 +17,11 @@
 //! main yet."
 //!
 //! Discard is the one way past the proof, and it is two questions. The first
-//! says what goes, as Finish's does. The second names every commit that only
-//! that branch holds and every file in the checkout that would go with it,
-//! under a button that says "for good" — and Enter answers the first and never
-//! the second, the rule the worktree menu's "Remove anyway" keeps.
+//! says what goes, as Finish's does. The second names the commits that only
+//! that branch holds and the files in the checkout that would go with it —
+//! six of each by name, and how many more past that — under a button that
+//! says "for good"; and Enter answers the first and never the second, the
+//! rule the worktree menu's "Remove anyway" keeps.
 //!
 //! # What finishing does
 //!
@@ -49,6 +50,24 @@
 //! checkout — one already there, or one opened there — and says what happened
 //! on its worktree list, which is where the checkout was and where a person
 //! looks to see that it has gone.
+//!
+//! # What the question said is what happens
+//!
+//! The question stays up while an agent finishes — that is what lights its
+//! button — and an agent's last act is often a file or a commit. So what the
+//! question says is looked at again three times, and a question that no
+//! longer says what a press would do is never pressed:
+//!
+//! * when a pane in the checkout stops working, so that the question shows
+//!   what it left behind;
+//! * when a button is pressed, before any pane closes: a checkout that holds
+//!   anything the question did not say is asked about again, as it is now,
+//!   and nothing is done — so Discard's second question is about the files
+//!   and commits its press takes, and Finish does not close a tab over a
+//!   checkout git will then refuse to remove;
+//! * and once the panes have closed, just before git is asked: whatever
+//!   appeared in between — a process nobody could see, a moment's race —
+//!   keeps the checkout and the branch where they are.
 
 use std::path::{Path, PathBuf};
 
@@ -75,6 +94,10 @@ pub(super) enum Finishing {
     Looking,
     /// What the look found.
     Ready(Box<Plan>),
+    /// A button has been pressed, and the checkout is being looked at again
+    /// before anything is done: the question on screen is this plan, and it
+    /// is carried out only if the second look finds what it says.
+    Checking(Box<Plan>),
     /// It could not be looked at, or it is not a checkout Crook made; why.
     Failed(String),
     /// The button has been pressed, and this is what is being waited on.
@@ -84,8 +107,22 @@ pub(super) enum Finishing {
 impl Finishing {
     /// Whether git is being waited on, which is when the pirate chews.
     pub(super) fn is_working(&self) -> bool {
-        matches!(self, Self::Looking | Self::Working(_))
+        matches!(self, Self::Looking | Self::Checking(_) | Self::Working(_))
     }
+}
+
+/// What a second look at a task's checkout is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Again {
+    /// Something working in the checkout has stopped: show what it holds
+    /// now, which may light the button or put it out.
+    Refresh,
+    /// Discard's first question was answered: ask the second about what the
+    /// checkout holds now, not about what it held when the first opened.
+    Review,
+    /// The button was pressed: carry it out if the checkout still holds what
+    /// the question said, and ask again about what it holds now if not.
+    CarryOut,
 }
 
 /// Everything the question needs to say what will happen, read once when it
@@ -137,6 +174,23 @@ impl Plan {
     /// The base as a person says it.
     fn base_name(&self) -> Option<&str> {
         self.base.as_deref().map(short_name)
+    }
+
+    /// Whether `fresh`, a second look at the same checkout, would ask the same
+    /// question this one did: the checkout as it was, holding the same work,
+    /// its branch on the same commit and proved or not the same way, and the
+    /// same commits only it holds.
+    ///
+    /// The other checkouts are left out: one made or removed beside this one
+    /// changes nothing this question says.
+    pub(super) fn holds_the_same(&self, fresh: &Plan) -> bool {
+        self.checkout() == fresh.checkout()
+            && self.local == fresh.local
+            && self.loose == fresh.loose
+            && self.base == fresh.base
+            && self.tip == fresh.tip
+            && self.landed == fresh.landed
+            && self.lost == fresh.lost
     }
 }
 
@@ -225,7 +279,7 @@ pub(super) fn panes_in(workspace: &Workspace, plan: &Plan) -> Vec<(PaneId, Strin
 /// nothing and is still a command running, and one in a shell with no
 /// command marks reports its status and opens no block. A failed agent has
 /// stopped, and so has an idle one.
-fn at_work(session: &AgentSession) -> Option<String> {
+pub(super) fn at_work(session: &AgentSession) -> Option<String> {
     if let Some(command) = &session.running_command {
         return Some(format!("{command} is still running in it"));
     }
@@ -350,7 +404,9 @@ pub(super) fn render(
             return column.finish();
         }
         Finishing::Ready(plan) => plan,
+        Finishing::Checking(plan) => plan,
     };
+    let checking = matches!(state.finishing, Finishing::Checking(_));
 
     if losing {
         for line in losses(plan) {
@@ -402,6 +458,16 @@ pub(super) fn render(
     }
     if let Some(problem) = &state.problem {
         column.add_child(note(problem.as_str(), ui));
+    }
+    if checking {
+        column.add_child(busy_line(
+            state,
+            "Looking again before anything goes…",
+            None,
+            ui,
+        ));
+        column.add_child(buttons(workspace, label, None, ui));
+        return column.finish();
     }
 
     let action = match (discard, losing) {
@@ -472,7 +538,8 @@ fn losses(plan: &Plan) -> Vec<String> {
 ///
 /// The branch is not touched unless the checkout went: a checkout git would
 /// not remove still has it checked out, and the deletion would refuse it
-/// anyway.
+/// anyway. Neither is touched if [`appeared_since`] finds anything the
+/// question did not say.
 pub(super) fn carry_out(
     repository: &Path,
     plan: &Plan,
@@ -481,6 +548,12 @@ pub(super) fn carry_out(
 ) -> String {
     use crate::git::worktree;
 
+    if let Some(why) = appeared_since(repository, plan, discard) {
+        return format!(
+            "The checkout of {} was kept, and so was its branch: {why}.",
+            plan.label()
+        );
+    }
     let checkout = plan.checkout();
     if let Err(problem) = super::view::remove_checkout(repository, &checkout.path, discard, store) {
         return format!("The checkout of {} was kept: {problem}.", plan.label());
@@ -514,6 +587,64 @@ pub(super) fn carry_out(
         }
     };
     format!("{removed} {branch_said}")
+}
+
+/// What has appeared in the checkout since `plan` was read that the press
+/// would take and the question never said, as the end of a sentence, or
+/// `None` when there is nothing.
+///
+/// **Blocking**: a `git status` or two and, for Discard, the commits only the
+/// branch holds. Background pool only, and asked the moment before git is:
+/// the last of the three looks the module describes.
+///
+/// For Finish, work of any kind, because its question said there was none:
+/// git would refuse the modified and untracked files itself, but a commit on
+/// no branch is nothing git's removal looks for. For Discard, any file or
+/// commit its second question did not name — a file already named that has
+/// changed since is still the file it named — and any commit that only the
+/// branch holds now and did not then. An error is a reason too, since a
+/// checkout that cannot be looked at is not one anyone can say is unchanged.
+fn appeared_since(repository: &Path, plan: &Plan, discard: bool) -> Option<String> {
+    use crate::git::worktree;
+
+    let checkout = plan.checkout();
+    let local = match worktree::local_work(&checkout.path) {
+        Ok(local) => local,
+        Err(problem) => return Some(problem.to_string()),
+    };
+    if !discard {
+        return local
+            .blocks_removal()
+            .then(|| format!("there is work in it now — {}", work_in(local)));
+    }
+
+    if local.stranded > plan.local.stranded {
+        return Some(
+            "a commit on no branch appeared in it after the question named what goes".to_owned(),
+        );
+    }
+    let loose = match worktree::loose_files(&checkout.path) {
+        Ok(loose) => loose,
+        Err(problem) => return Some(problem.to_string()),
+    };
+    if let Some(path) = loose.iter().find(|path| !plan.loose.contains(path)) {
+        return Some(format!(
+            "{path} appeared in it after the question named what goes"
+        ));
+    }
+    if let (Some(branch), None, Some(tip)) = (&checkout.branch, &plan.landed, &plan.tip) {
+        let lost = match worktree::held_only_by(repository, branch, tip) {
+            Ok(lost) => lost,
+            Err(problem) => return Some(problem.to_string()),
+        };
+        if let Some(commit) = lost.iter().find(|commit| !plan.lost.contains(commit)) {
+            return Some(format!(
+                "{} is only on {branch} now, and the question did not name it",
+                commit.id
+            ));
+        }
+    }
+    None
 }
 
 /// What the question says while it is being carried out.

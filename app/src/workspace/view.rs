@@ -68,7 +68,7 @@ use super::action::{
     Subject, TabMenuAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
 };
 use super::block_list::block_text;
-use super::finish::Finishing;
+use super::finish::{Again, Finishing};
 use super::settings_page::SettingsState;
 use super::tab_context_menu::TabContextMenuState;
 use super::tab_menu::{
@@ -3210,7 +3210,8 @@ impl Workspace {
             WorktreeAction::ReviewDiscard => {
                 // Only from Discard's first question, and only once it has
                 // something to say: the second names what the first could
-                // only count.
+                // only count — and names it as the checkout holds it now,
+                // which is why it is looked at again first.
                 if self.tab_menu.mode
                     == (WorktreeMode::Finishing {
                         discard: true,
@@ -3219,12 +3220,7 @@ impl Workspace {
                     && let Finishing::Ready(plan) = &self.tab_menu.finishing
                     && super::finish::refusal(self, plan, true).is_none()
                 {
-                    self.tab_menu.mode = WorktreeMode::Finishing {
-                        discard: true,
-                        losing: true,
-                    };
-                    self.tab_menu.forget_hover_state();
-                    ctx.notify();
+                    self.look_at_the_task_again(Again::Review, ctx);
                 }
             }
 
@@ -3249,6 +3245,13 @@ impl Workspace {
                 // it was asked from — the tab's own, not the worktree list —
                 // and from Discard's second question it is its first.
                 if let WorktreeMode::Finishing { discard, losing } = self.tab_menu.mode {
+                    // A press being checked is a press taken back, and the
+                    // question it was about is the one showing again. Its
+                    // look lands nowhere: it was asked of this question on
+                    // this step, and both change below.
+                    if let Finishing::Checking(plan) = &self.tab_menu.finishing {
+                        self.tab_menu.finishing = Finishing::Ready(plan.clone());
+                    }
                     if losing {
                         self.tab_menu.mode = WorktreeMode::Finishing {
                             discard,
@@ -4637,14 +4640,107 @@ impl Workspace {
         .detach();
     }
 
-    /// Does what the question about a task said: closes what is working in
-    /// the checkout, removes it, and deletes its branch or keeps it.
+    /// Looks at the checkout the question about a task is about again, and
+    /// does what `again` says with what the second look finds.
     ///
-    /// The panes close here, before git is asked for anything, and the menu
-    /// moves to a tab in the main checkout to say how it went — see
-    /// [`super::finish`] for why in that order. Refused while the question
-    /// has a refusal on it, which is what keeps a key from doing what the
-    /// inert button would not.
+    /// Only while that question is up and showing a plan to compare with —
+    /// not while it is still making its first, and not while a press is being
+    /// checked. Each look replaces any before it that has not landed. A press
+    /// shows the question as being checked, with its button inert, until the
+    /// look comes back; a refresh leaves the question as it is and swaps what
+    /// it says when the answer lands.
+    fn look_at_the_task_again(&mut self, again: Again, ctx: &mut ViewContext<Self>) {
+        let WorktreeMode::Finishing { discard, losing } = self.tab_menu.mode else {
+            return;
+        };
+        let (true, Finishing::Ready(plan), Some(store)) = (
+            self.tab_menu.is_open(),
+            &self.tab_menu.finishing,
+            self.worktrees_directory.clone(),
+        ) else {
+            return;
+        };
+        let shown = (**plan).clone();
+        let directory = shown.checkout().path.clone();
+
+        let epoch = self.tab_menu.epoch;
+        self.tab_menu.look = self.tab_menu.look.wrapping_add(1);
+        let look = self.tab_menu.look;
+        if again != Again::Refresh {
+            self.tab_menu.finishing = Finishing::Checking(Box::new(shown.clone()));
+            self.tab_menu.problem = None;
+            self.tab_menu.forget_hover_state();
+            self.start_chomping(ctx);
+            ctx.notify();
+        }
+
+        let reading = ctx
+            .background()
+            .spawn(async move { super::finish::read_plan(&directory, &store) });
+        ctx.spawn(reading, move |workspace, fresh, ctx| {
+            if workspace.tab_menu.epoch != epoch
+                || workspace.tab_menu.look != look
+                || workspace.tab_menu.mode != (WorktreeMode::Finishing { discard, losing })
+            {
+                return;
+            }
+            let fresh = match fresh {
+                Ok(fresh) => fresh,
+                Err(problem) => {
+                    workspace.tab_menu.finishing = Finishing::Failed(problem);
+                    ctx.notify();
+                    return;
+                }
+            };
+            match again {
+                Again::Refresh => {}
+                Again::Review => {
+                    workspace.tab_menu.mode = WorktreeMode::Finishing {
+                        discard: true,
+                        losing: true,
+                    };
+                    workspace.tab_menu.forget_hover_state();
+                }
+                Again::CarryOut => {
+                    if !fresh.holds_the_same(&shown) {
+                        workspace.tab_menu.problem = Some(
+                            "It changed while the question was up, so nothing was done. This is \
+                             what it holds now."
+                                .to_owned(),
+                        );
+                    } else if super::finish::refusal(workspace, &fresh, discard).is_none() {
+                        workspace.carry_out_task(fresh, discard, losing, ctx);
+                        return;
+                    }
+                }
+            }
+            workspace.tab_menu.finishing = Finishing::Ready(Box::new(fresh));
+            ctx.notify();
+        })
+        .detach();
+    }
+
+    /// Looks at a task's checkout again when `pane`, one of the panes working
+    /// in it, has just stopped — the first of the three looks
+    /// [`super::finish`] describes.
+    fn look_again_after(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        let Finishing::Ready(plan) = &self.tab_menu.finishing else {
+            return;
+        };
+        let directory = self
+            .tabs
+            .pane(pane)
+            .and_then(|pane| pane.session().working_directory.as_deref());
+        if super::tab_menu::holding(&plan.worktrees, directory) == Some(plan.index) {
+            self.look_at_the_task_again(Again::Refresh, ctx);
+        }
+    }
+
+    /// Answers the press of the question about a task: looks at the checkout
+    /// again, and carries the question out if it still says what will happen.
+    ///
+    /// Refused while the question has a refusal on it, which is what keeps a
+    /// key from doing what the inert button would not.
     ///
     /// `discard` is which of the two was pressed, and it has to be the one
     /// being asked: a Finish that arrived while Discard's second question was
@@ -4668,7 +4764,23 @@ impl Workspace {
         if super::finish::refusal(self, plan, discard).is_some() {
             return;
         }
-        let plan = (**plan).clone();
+        self.look_at_the_task_again(Again::CarryOut, ctx);
+    }
+
+    /// Does what the question about a task said, once a second look has
+    /// found the checkout as it said: closes what is working in the
+    /// checkout, removes it, and deletes its branch or keeps it.
+    ///
+    /// The panes close here, before git is asked for anything, and the menu
+    /// moves to a tab in the main checkout to say how it went — see
+    /// [`super::finish`] for why in that order.
+    fn carry_out_task(
+        &mut self,
+        plan: super::finish::Plan,
+        discard: bool,
+        losing: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let closing: Vec<PaneId> = super::finish::panes_in(self, &plan)
             .into_iter()
             .map(|(pane, _)| pane)
@@ -5509,11 +5621,18 @@ impl Workspace {
             return false;
         };
 
+        let was_working = super::finish::at_work(pane.session()).is_some();
         report(pane.session_mut());
+        let stopped = was_working && super::finish::at_work(pane.session()).is_none();
         // A report can move the session somewhere else, and the git facts a
         // row shows are looked up by directory — which is what makes the branch
         // chip follow a shell's `cd`.
         self.sync_git(ctx);
+        // What an agent or a command leaves behind when it stops is what a
+        // question about finishing its checkout has to show.
+        if stopped {
+            self.look_again_after(id, ctx);
+        }
         ctx.notify();
         true
     }

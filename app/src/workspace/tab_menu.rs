@@ -469,6 +469,13 @@ pub(super) struct TabMenuState {
     /// What finishing a task found, while that is being asked about.
     /// [`Mode::Finishing`]'s.
     pub(super) finishing: super::finish::Finishing,
+    /// Which look at a task's checkout is the latest, counted up by each.
+    ///
+    /// Finer than [`Self::epoch`], which is the question: a second look at
+    /// the same checkout — see [`super::finish::Again`] — replaces the first
+    /// without changing the question, and so without dropping the answers the
+    /// question is still waiting on, such as the list it was opened over.
+    pub(super) look: u64,
     /// What git said about the last thing that was asked of it, if it refused.
     pub(super) problem: Option<String>,
     /// Whether a git command is running for the creator or the confirmation
