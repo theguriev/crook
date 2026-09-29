@@ -41,6 +41,12 @@
 //!   made rather than checked afterwards.
 //! * **Nonsense** is a decode that fails, which is one contribution that draws
 //!   nothing.
+//! * **A tree deeper than the stack** is nonsense too. A megabyte of answer
+//!   holds half a million nested nodes, and a decode that recursed into each
+//!   aborted the host thousands of levels down.
+//!   [`crook_plugin_api::from_bytes`] refuses anything past
+//!   [`MAX_DEPTH`](crook_plugin_api::MAX_DEPTH) levels instead, so it is a
+//!   decode that fails like any other.
 //! * **A trap** is an `Err` from the call, which is the same.
 //!
 //! A plugin that runs out of fuel or traps is *disabled by the caller*, not

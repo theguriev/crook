@@ -1,11 +1,13 @@
-//! Every checkout a repository has, and the two commands that make and unmake
-//! one.
+//! Every checkout a repository has, the two commands that make and unmake
+//! one, and the lock that says one is in use.
 //!
 //! A tab in Crook is an agent working somewhere, and two agents working in the
 //! same directory fight over the same files. A worktree is git's answer to
 //! that: one repository, several checkouts, each on its own branch. Giving a
 //! new session its own checkout is two commands; this module is those two, plus
-//! the reading that makes them safe to offer.
+//! the reading that makes them safe to offer, plus the lock that tells every
+//! other tool an agent is working in one — see [`LOCK_PREFIX`] for how Crook
+//! tells its own lock from anybody else's.
 //!
 //! Everything here is a subprocess, which puts it in [`super::diff`]'s bracket
 //! rather than [`super::branch`]'s: blocking, background-only, and able to
@@ -18,7 +20,7 @@
 //! variant of [`Error`] rather than a `None`, and the ones a UI can act on
 //! carry the branch or the path git named.
 //!
-//! The second is that two of them write. `diff` documents that it has no
+//! The second is that several of them write. `diff` documents that it has no
 //! timeout and that a hung git parks a pool worker for the life of the
 //! process; a write can hang for reasons a read cannot, because [`add`]
 //! materialises a working tree and then runs the repository's own
@@ -60,7 +62,7 @@ static GIT_MISSING: AtomicBool = AtomicBool::new(false);
 /// only reason a local read is slow is a cold page cache — and short enough
 /// that a stall is something a person waits out rather than a hang they have to
 /// restart the app to clear.
-const READ_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long [`add`] may take.
 ///
@@ -70,7 +72,11 @@ const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// whatever the user wrote. Killing an honest checkout halfway leaves a
 /// half-written directory *and* a registered worktree — strictly worse than
 /// having waited.
-const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
+///
+/// [`lock`] and the unlock under [`release`] share it without needing it:
+/// each writes one small file, and a separate budget for them would be a
+/// second number that bounds nothing different.
+pub(crate) const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How long [`remove`] may take.
 ///
@@ -129,8 +135,12 @@ pub struct Worktree {
     /// The lock's reason when the worktree is locked, and `Some("")` when it is
     /// locked without one. `None` is unlocked.
     ///
-    /// Crook's own agent worktrees are locked with a reason naming the session
-    /// that holds them, which is what stops one agent tidying away another's.
+    /// A checkout Crook makes is locked with [`lock_reason`] — `crook: ` and
+    /// the branch — from the moment it is made until no pane in the window
+    /// that made it is working in it, or that window closes, which is what
+    /// tells git and every other tool that an agent is in there.
+    /// [`Self::is_locked_by_crook`] and [`Self::is_locked_by_another`] tell
+    /// that lock from anybody else's.
     pub locked: Option<String>,
     /// git's reason for thinking the entry could be pruned — most often that
     /// its directory is gone — with the same `Some("")` convention as
@@ -305,7 +315,8 @@ pub enum Error {
         path: PathBuf,
     },
     /// The worktree is locked. `reason` is git's own, empty when the lock has
-    /// none. [`remove`] never overrides one; see its documentation for why.
+    /// none. [`remove`] never overrides one, see its documentation for why,
+    /// and [`lock`] never puts another over it.
     Locked {
         /// Why whoever locked it said they were locking it.
         reason: String,
@@ -752,9 +763,11 @@ pub fn add(repository: &Path, path: &Path, branch: &str, base: Option<&str>) -> 
 ///
 /// `force` deliberately does **not** override a lock. git wants `-f -f` for
 /// that and only ever gets one `-f` here, so a locked worktree comes back as
-/// [`Error::Locked`] whichever way this is called. Crook's own worktrees are
-/// locked by the session that owns them, and "discard my uncommitted work" must
-/// never quietly also mean "take the checkout another agent is working in".
+/// [`Error::Locked`] whichever way this is called. A lock says an agent is
+/// working in the checkout, and "discard my uncommitted work" must never
+/// quietly also mean "take the checkout another agent is working in". The one
+/// lock Crook takes off before a removal is its own, through [`release`], and
+/// only once nothing in the window is working there.
 pub fn remove(repository: &Path, path: &Path, force: bool) -> Result<(), Error> {
     let mut args = vec![OsStr::new("worktree"), OsStr::new("remove")];
     if force {
@@ -768,6 +781,132 @@ pub fn remove(repository: &Path, path: &Path, force: bool) -> Result<(), Error> 
         return Ok(());
     }
     Err(classify(&finished.stderr))
+}
+
+// MARK: - Saying a checkout is in use
+
+/// What every reason Crook locks a checkout with begins with.
+///
+/// git records a lock as a sentence in a file and nothing about who wrote it,
+/// so the sentence has to say. This is how Crook tells its own lock from
+/// anybody else's. Its own the worktree menu may take off before removing a
+/// checkout nothing in the window is working in — one a Crook that crashed or
+/// was killed left behind, which would otherwise hold the checkout against
+/// Crook's own menu for ever. The prefix does not say *which* Crook, so a
+/// window closing its panes takes off only the locks it remembers taking.
+/// Any other reason is somebody else's — Claude Code's `claude session …`, a
+/// person's own `git worktree lock` — and nothing here ever takes one of
+/// those off.
+pub const LOCK_PREFIX: &str = "crook: ";
+
+/// The reason Crook locks the checkout it made for `branch` with.
+///
+/// The branch after the prefix, because the reason is what `git worktree
+/// list` and a refused `git worktree remove` show a person, and
+/// `crook: worktree/amber-anchor-0155` says who is holding what.
+pub fn lock_reason(branch: &str) -> String {
+    format!("{LOCK_PREFIX}{branch}")
+}
+
+impl Worktree {
+    /// Whether the lock on this checkout is one Crook took. See
+    /// [`LOCK_PREFIX`].
+    pub fn is_locked_by_crook(&self) -> bool {
+        self.locked
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with(LOCK_PREFIX))
+    }
+
+    /// Whether somebody other than Crook has locked this checkout — with no
+    /// reason at all too, which Crook never does.
+    pub fn is_locked_by_another(&self) -> bool {
+        self.locked.is_some() && !self.is_locked_by_crook()
+    }
+}
+
+/// Locks the checkout at `path`, giving `reason` as why.
+///
+/// **Blocking**, one subprocess, and a quick one: git writes one small file
+/// under the repository's `worktrees/<name>`.
+///
+/// A lock is how everything else that touches the repository is told that
+/// somebody is working in the checkout: git refuses to `remove` or `prune` a
+/// locked worktree until it is unlocked or told twice, and a tool that tidies
+/// checkouts away is expected to pass over one.
+///
+/// A checkout somebody has locked already stays theirs and comes back as
+/// [`Error::Locked`] with their reason. git will not put one lock over
+/// another, and neither does this.
+pub fn lock(repository: &Path, path: &Path, reason: &str) -> Result<(), Error> {
+    let finished = run(
+        repository,
+        &[
+            OsStr::new("worktree"),
+            OsStr::new("lock"),
+            OsStr::new("--reason"),
+            OsStr::new(reason),
+            OsStr::new("--"),
+            path.as_os_str(),
+        ],
+        Intent::Write,
+    )?;
+
+    if finished.success {
+        return Ok(());
+    }
+    Err(classify(&finished.stderr))
+}
+
+/// Unlocks the checkout at `path`, whoever locked it.
+///
+/// Private, because "whoever" is the whole danger: [`release`] is the way
+/// in, and it reads whose the lock is first.
+///
+/// A checkout that is not locked is not an error. Two asks can overlap — the
+/// last pane leaving a checkout as the window closes, or as the menu removes
+/// it — and the second finding the work done is the state they were both
+/// asking for.
+fn unlock(repository: &Path, path: &Path) -> Result<(), Error> {
+    let finished = run(
+        repository,
+        &[
+            OsStr::new("worktree"),
+            OsStr::new("unlock"),
+            OsStr::new("--"),
+            path.as_os_str(),
+        ],
+        Intent::Write,
+    )?;
+
+    // "'<path>' is not locked", on git 2.55.0.
+    if finished.success || finished.stderr.contains("is not locked") {
+        return Ok(());
+    }
+    Err(classify(&finished.stderr))
+}
+
+/// Takes Crook's own lock off the checkout at `path`, and leaves anybody
+/// else's where it is. Says whether there was one to take off.
+///
+/// **Blocking**: one read to learn whose the lock is, and one write when it
+/// is Crook's. The read is not optional. `git worktree unlock` removes
+/// whatever lock is there, so the only thing standing between "Crook's tab
+/// closed" and "Claude's session lost the lock it took" is looking first.
+///
+/// `path` is matched against git's own listing, so it should be a path git
+/// printed. Whether nothing is working in the checkout any more is the
+/// caller's question to answer before asking this: a lock is taken off
+/// because the last pane left, and only the window knows where its panes are
+/// and which locks it took.
+pub fn release(repository: &Path, path: &Path) -> Result<bool, Error> {
+    let ours = list(repository)?
+        .iter()
+        .any(|worktree| worktree.path == path && worktree.is_locked_by_crook());
+    if !ours {
+        return Ok(false);
+    }
+    unlock(repository, path)?;
+    Ok(true)
 }
 
 // MARK: - Naming the next one
@@ -1235,6 +1374,16 @@ fn classify_line(line: &str) -> Option<Error> {
             reason: reason.to_owned(),
         });
     }
+    // `lock` over somebody else's lock: "'<path>' is already locked, reason:
+    // <reason>", or the same without the reason when there is none.
+    if line.contains("is already locked") {
+        let reason = line
+            .split_once("is already locked, reason:")
+            .map_or("", |(_, reason)| reason.trim());
+        return Some(Error::Locked {
+            reason: reason.to_owned(),
+        });
+    }
     if line.contains("is a main working tree")
         && let Some(path) = first
     {
@@ -1308,7 +1457,7 @@ fn checked_out_at(repository: &Path, branch: &str) -> Option<PathBuf> {
 enum Intent {
     /// `worktree list`, `status`: answers a question and changes nothing.
     Read,
-    /// `worktree add`: writes the repository.
+    /// `worktree add`, `lock`, `unlock`: writes the repository.
     Write,
     /// `worktree remove`: writes the repository, and deletes a directory tree
     /// first, which is the one thing here whose honest duration has no bound

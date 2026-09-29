@@ -11,7 +11,10 @@
 //! Its own terminal rather than standard output, because the thing calling
 //! it is usually a hook, and a hook's standard output belongs to whoever ran
 //! the hook. Claude Code reads what its hooks print; a status printed there
-//! would be read as an answer and never reach the screen.
+//! would be read as an answer and never reach the screen. A hook often has
+//! no terminal of its own either — Claude Code starts each one in a session
+//! of its own — and then the pane is the terminal of the program that ran
+//! it, which `ancestors` finds one or two processes up on macOS and Linux.
 //!
 //! `--agent-hooks claude` prints the hooks that make Claude Code say all of
 //! this by itself: running when a prompt is sent and while tools run,
@@ -19,11 +22,25 @@
 //! the notification's own text — idle when it is done. What it prints
 //! is a fragment of Claude Code's own settings file, to be merged into it by
 //! the person whose file it is — Crook does not write a file it does not own,
-//! and that one it has never opened. `codex`, `gemini` and `copilot` print
-//! the same object under each one's own event names, which is how those
-//! three read their hooks too; `opencode` has no command hooks and gets the
-//! plugin its plugin directory loads instead; `aider` has no hooks, and gets
-//! the sentence that says so and what to do instead.
+//! and that one it has never opened. It leads with the other way to the same
+//! hooks, which needs no merging: this repository is a Claude Code plugin
+//! marketplace (`.claude-plugin/marketplace.json`) whose one plugin,
+//! `packaging/claude-code`, carries them and the skill, and installing it is
+//! Claude Code writing its own settings. The plugin's hooks call
+//! `"$CROOK_BIN"` — every pane is told its binary — behind a guard that makes
+//! them nothing outside Crook, and they exit 0 whatever the report did; the
+//! tests here hold its files to the table of Claude Code's events and to
+//! [`SKILL`]. `codex`, `gemini` and `copilot` print the same object under
+//! each one's own event names, which is how those three read their hooks
+//! too; `opencode` has no command hooks and gets the plugin its plugin
+//! directory loads instead; `aider` has no hooks, and gets the sentence that
+//! says so and what to do instead.
+//!
+//! The same table is how a window knows an agent when it sees one:
+//! [`program_of`] reads a pane's command line for the program an agent is
+//! started as, which is the one word of a process the session file keeps, and
+//! [`resume_line`] is what a pane restored from that file is offered to bring
+//! the agent's conversation back.
 //!
 //! `--skill` prints [`SKILL`], the file that teaches an agent the rest of
 //! this: how it tells it is in a pane, what the four words do to the row,
@@ -45,6 +62,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use crook_terminal::AgentReport;
 use serde_json::{Value, json};
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod ancestors;
 
 /// The longest title a prompt is cut down to, in characters.
 ///
@@ -125,14 +145,37 @@ pub fn report(status: &str, title: Option<&str>, message: Option<&str>) -> Resul
 /// The terminal this process is attached to, opened for writing.
 ///
 /// Not standard output, which a hook's parent has taken; the controlling
-/// terminal, which is the pane. A process with none — `cron`, a CI runner, a
-/// detached service — has nowhere to report to, and says so.
+/// terminal, which is the pane. A hook with none of its own is the ordinary
+/// case rather than the odd one — Claude Code starts every command hook in a
+/// session of its own, where `/dev/tty` is no such device — and the pane is
+/// still there one process up, as the terminal of the program that ran the
+/// hook, which is where `ancestors::terminal` finds it. A process whose
+/// session was started by a program with no terminal — `cron`, a CI runner, a
+/// detached service, an agent another agent's Bash tool runs — has nowhere
+/// to report to, and says so.
 fn terminal() -> io::Result<std::fs::File> {
     #[cfg(unix)]
     let path = "/dev/tty";
     #[cfg(windows)]
     let path = "CONOUT$";
-    OpenOptions::new().write(true).open(path)
+    OpenOptions::new()
+        .write(true)
+        .open(path)
+        .or_else(an_ancestors_terminal)
+}
+
+/// The terminal of the program that started this process's session, for a
+/// process that could not open its own; `error` when that program has none.
+///
+/// `error` is what opening its own said, and it is kept because when that
+/// program has no terminal either, "no such device" is still what went wrong.
+/// Only macOS and Linux are walked; anywhere else it is always the error.
+fn an_ancestors_terminal(error: io::Error) -> io::Result<std::fs::File> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(terminal) = ancestors::terminal() {
+        return terminal;
+    }
+    Err(error)
 }
 
 /// The title a hook's input names: the first line of its `prompt`, cut to
@@ -222,6 +265,11 @@ fn one_line(text: &str, chars: usize) -> Option<String> {
 /// What `--agent-hooks` prints for one agent.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Hooks {
+    /// The lead, for standard error before the fragment: the commands that
+    /// install Crook's plugin for the agent, which carries the same hooks,
+    /// so the fragment after it is for a person who would rather merge by
+    /// hand. `None` for an agent Crook ships no plugin for.
+    pub lead: Option<String>,
     /// The fragment, for standard output: a settings file's `hooks` object,
     /// a plugin file, or — for an agent with no hooks — the sentence that
     /// says so and what to do instead.
@@ -234,8 +282,10 @@ pub struct Hooks {
 
 /// One coding agent `--agent-hooks` knows.
 struct Agent {
-    /// The word on the command line, which is also the program's own name on
-    /// `PATH`.
+    /// The word on the command line, which is also the program's own file
+    /// name — `claude` is both what `--agent-hooks` takes and what a person
+    /// types to start Claude Code, and [`program_of`] reads a pane's command
+    /// line by it.
     name: &'static str,
     /// What the program calls itself.
     program: &'static str,
@@ -250,6 +300,31 @@ struct Agent {
     /// option is their `-i`. aider has no way to open a chat on a prompt, and
     /// its `--message` — do this one thing and exit — is the nearest.
     prompt_flag: Option<&'static str>,
+    /// The commands that install Crook's own plugin for this agent, which
+    /// carries the fragment's hooks; empty when there is none.
+    plugin: &'static [&'static str],
+    /// The line that goes back to the most recent conversation in the
+    /// directory it is run in, when the agent has one — see [`resume_line`].
+    last: Option<&'static str>,
+    /// The line that lists the agent's conversations for a person to choose
+    /// from, when the agent has one.
+    pick: Option<&'static str>,
+}
+
+/// Which of an agent's two resume lines a restored pane is offered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resume {
+    /// The most recent conversation in the pane's directory: `claude
+    /// --continue`. What a pane is offered when it is the only one of its
+    /// agent in its directory, which Crook's one-agent-per-worktree makes the
+    /// ordinary case.
+    Last,
+    /// The agent's own list to choose from: `claude --resume`. What two panes
+    /// of one agent in one directory are offered instead, because "the most
+    /// recent conversation" is one conversation and they had two, and
+    /// guessing which pane had which would put one agent's work in the
+    /// other's pane.
+    Pick,
 }
 
 /// The shapes a fragment comes in.
@@ -304,6 +379,18 @@ const CLAUDE_EVENTS: &[(&str, &str)] = &[
     ("Notification", "needs-input --message -"),
     ("Stop", "idle"),
     ("SessionEnd", "idle"),
+];
+
+/// The commands that install Crook's Claude Code plugin: this repository as
+/// a marketplace, then the one plugin in it.
+///
+/// `claude plugin install` writes Claude Code's own settings, which is what
+/// lets a person connect it without merging JSON and without Crook opening a
+/// file it does not own. The names are the ones
+/// `.claude-plugin/marketplace.json` gives, and a test holds them to it.
+const CLAUDE_PLUGIN: &[&str] = &[
+    "claude plugin marketplace add theguriev/crook",
+    "claude plugin install crook@crook",
 ];
 
 /// The Codex CLI hooks: the same object as Claude Code's, in
@@ -408,6 +495,24 @@ export const CrookPlugin = async ({ $ }) => {
 "#;
 
 /// The agents, in the order the errors list them.
+///
+/// The resume lines are each CLI's own documented spelling, and only where
+/// the documentation says the line is about the directory it runs in: the
+/// directory is the whole of how a restored pane finds its conversation
+/// again. Claude Code's `--continue` is "the most recent conversation in the
+/// current directory" and its bare `--resume` a picker; Codex's `resume
+/// --last` is "the most recent chat from the current working directory" and
+/// its bare `resume` a picker of that directory's; Gemini CLI keeps its
+/// sessions per project path and `--resume latest` takes the newest, with no
+/// picker on the command line. Copilot's `--continue` is documented as the
+/// most recent session of the *repository*, which every worktree of a
+/// repository shares, so it gets its picker for both. OpenCode's `--continue`
+/// is the newest session across a repository's root-level worktrees — an
+/// open bug, anomalyco/opencode#41562 — and it has no picker flag, so it
+/// gets neither. Aider gets none by default either, though
+/// `aider --restore-chat-history`, which reloads its chat history file, is a
+/// line to give it. Any of them can be given a line in the settings; see
+/// [`Settings::resume_line`](crate::settings::Settings::resume_line).
 const AGENTS: &[Agent] = &[
     Agent {
         name: "claude",
@@ -418,6 +523,9 @@ const AGENTS: &[Agent] = &[
             missing: "",
         },
         prompt_flag: None,
+        plugin: CLAUDE_PLUGIN,
+        last: Some("claude --continue"),
+        pick: Some("claude --resume"),
     },
     Agent {
         name: "codex",
@@ -429,6 +537,9 @@ const AGENTS: &[Agent] = &[
 permission, and a question the model asks ends its turn as idle.",
         },
         prompt_flag: None,
+        plugin: &[],
+        last: Some("codex resume --last"),
+        pick: Some("codex resume"),
     },
     Agent {
         name: "gemini",
@@ -440,6 +551,9 @@ permission, and a question the model asks ends its turn as idle.",
 model asks ends its turn as idle.",
         },
         prompt_flag: Some("-i"),
+        plugin: &[],
+        last: Some("gemini --resume latest"),
+        pick: None,
     },
     Agent {
         name: "copilot",
@@ -449,6 +563,9 @@ model asks ends its turn as idle.",
             events: COPILOT_EVENTS,
         },
         prompt_flag: Some("-i"),
+        plugin: &[],
+        last: Some("copilot --resume"),
+        pick: Some("copilot --resume"),
     },
     Agent {
         name: "opencode",
@@ -458,6 +575,9 @@ model asks ends its turn as idle.",
             source: OPENCODE_PLUGIN,
         },
         prompt_flag: Some("--prompt"),
+        plugin: &[],
+        last: None,
+        pick: None,
     },
     Agent {
         name: "aider",
@@ -469,8 +589,50 @@ ends and it waits for you, so `aider --notifications --notifications-command \"B
 wrapper script that runs `BINARY --agent running` first.",
         ),
         prompt_flag: Some("--message"),
+        plugin: &[],
+        last: None,
+        pick: None,
     },
 ];
+
+/// The known agent a command line starts, by its program's name, or `None`
+/// when the line starts something else.
+///
+/// The first word only, and only its file name: `claude "fix the login bug"`
+/// and `/opt/homebrew/bin/claude --model opus` are both `claude`. Nothing
+/// after the first word is ever handed on, because what comes after it is
+/// where a person types the prompt, and the answer to this is written into
+/// the session file. A word that names no agent this module knows — `cargo`,
+/// `vim`, a `claudette` — is `None`, so a file never holds the name of a
+/// program Crook would not know how to offer back.
+pub fn program_of(command: &str) -> Option<&'static str> {
+    let first = command.split_whitespace().next()?;
+    let file = first.rsplit(['/', '\\']).next().unwrap_or(first);
+    // Windows' own spellings of the same program: the binary, and the shim
+    // npm installs a Node CLI as.
+    let program = file
+        .strip_suffix(".exe")
+        .or_else(|| file.strip_suffix(".cmd"))
+        .unwrap_or(file);
+    AGENTS
+        .iter()
+        .find(|agent| agent.name == program)
+        .map(|agent| agent.name)
+}
+
+/// The line that resumes `program`'s conversation in the directory it is
+/// run in, in the `resume` form, or `None` when the agent has none.
+///
+/// Built in; a person's own lines are the settings' — see
+/// [`Settings::resume_line`](crate::settings::Settings::resume_line), which
+/// is what a restored pane actually asks.
+pub fn resume_line(program: &str, resume: Resume) -> Option<&'static str> {
+    let agent = AGENTS.iter().find(|agent| agent.name == program)?;
+    match resume {
+        Resume::Last => agent.last,
+        Resume::Pick => agent.pick,
+    }
+}
 
 /// The known names, listed the way an error lists them: "claude, codex, ...
 /// or aider".
@@ -592,7 +754,9 @@ pub fn launch_line(agent: &str, prompt: &str) -> Option<String> {
 /// The binary is named by its full path, because a hook runs in whatever
 /// `PATH` the agent was started with and a development build is on nobody's.
 /// The fragment is printed rather than installed: Crook does not write a file
-/// it does not own, and it has never opened any of these.
+/// it does not own, and it has never opened any of these. Where Crook ships
+/// a plugin that carries the same hooks, [`Hooks::lead`] names the commands
+/// that install it, which is the agent writing its own settings.
 pub fn hooks_text(agent: &str, binary: &Path) -> Result<Hooks> {
     let Some(known) = AGENTS.iter().find(|known| known.name == agent) else {
         let known: Vec<_> = AGENTS
@@ -617,14 +781,7 @@ pub fn hooks_text(agent: &str, binary: &Path) -> Result<Hooks> {
             events,
             missing,
         } => {
-            let hooks: serde_json::Map<String, Value> = events
-                .iter()
-                .map(|(event, arguments)| {
-                    let hook =
-                        json!([{ "hooks": [{ "type": "command", "command": run(arguments) }] }]);
-                    ((*event).to_owned(), hook)
-                })
-                .collect();
+            let hooks = hooks_object(events, run);
             let text = serde_json::to_string_pretty(&json!({ "hooks": hooks }))
                 .context("could not write the hooks as JSON")?;
             let note = format!(
@@ -666,7 +823,39 @@ doing.",
         }
         Fragment::None(sentence) => (sentence.replace("BINARY", &quoted(binary)), None),
     };
-    Ok(Hooks { text, note })
+    // Comment lines and the commands and nothing else, so a person who pastes
+    // the whole of it into a shell runs exactly the two.
+    let lead = (!known.plugin.is_empty()).then(|| {
+        format!(
+            "# {} can install these hooks, and the skill beside them, as Crook's plugin:\n{}\n\
+# Or merge the `hooks` below by hand instead; with both, every report is made twice.",
+            known.program,
+            known.plugin.join("\n")
+        )
+    });
+    Ok(Hooks { lead, text, note })
+}
+
+/// A `hooks` object in the shape Claude Code, Codex and Gemini CLI read:
+/// each event over one matcher group, with no matcher so it fires every
+/// time, running the one command `command` spells for its `--agent`
+/// arguments.
+///
+/// One function for two spellings: the binary's quoted path in the fragment
+/// a person merges, and the guarded `"$CROOK_BIN"` of the Claude Code
+/// plugin's `hooks/hooks.json`, which the tests build here to hold the file
+/// to [`CLAUDE_EVENTS`].
+fn hooks_object(
+    events: &[(&str, &str)],
+    command: impl Fn(&str) -> String,
+) -> serde_json::Map<String, Value> {
+    events
+        .iter()
+        .map(|(event, arguments)| {
+            let hook = json!([{ "hooks": [{ "type": "command", "command": command(arguments) }] }]);
+            ((*event).to_owned(), hook)
+        })
+        .collect()
 }
 
 /// `path`, quoted for the shell a hook runs in.
@@ -960,6 +1149,337 @@ mod tests {
         assert!(message.contains("cursor"));
         for agent in AGENTS {
             assert!(message.contains(agent.name), "{message}");
+        }
+    }
+
+    /// The Claude Code plugin's hooks, as the repository ships them.
+    const PLUGIN_HOOKS: &str = include_str!("../../packaging/claude-code/hooks/hooks.json");
+
+    /// The plugin's copy of the skill.
+    const PLUGIN_SKILL: &str = include_str!("../../packaging/claude-code/skills/crook/SKILL.md");
+
+    /// The plugin's own manifest.
+    const PLUGIN_MANIFEST: &str =
+        include_str!("../../packaging/claude-code/.claude-plugin/plugin.json");
+
+    /// The marketplace the repository is, which lists the plugin.
+    const MARKETPLACE: &str = include_str!("../../.claude-plugin/marketplace.json");
+
+    /// What the plugin runs for `arguments`: the `--agent` report, behind the
+    /// guard that makes it nothing outside Crook, and exiting 0 whatever the
+    /// report did.
+    ///
+    /// Built from the names the code gives the three variables, so renaming
+    /// one without the plugin is this test failing rather than hooks gating on
+    /// a variable no pane has.
+    fn plugin_command(arguments: &str) -> String {
+        use crate::shell_integration::{BIN_VARIABLE, PANE_ID_VARIABLE, TERM_PROGRAM};
+        format!(
+            "[ \"$TERM_PROGRAM\" = {TERM_PROGRAM} ] || [ -n \"${PANE_ID_VARIABLE}\" ] || exit 0; \
+crook=${BIN_VARIABLE}; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \
+\"$crook\" --agent {arguments} || exit 0"
+        )
+    }
+
+    #[test]
+    fn the_plugin_hooks_are_the_printed_hooks_behind_a_guard() {
+        // The plugin is a second copy of CLAUDE_EVENTS, in a file Claude Code
+        // reads and Rust does not, so nothing but this keeps the two saying
+        // the same thing: an event added to the table and not the file would
+        // be a status the plugin never reports.
+        let shipped: Value =
+            serde_json::from_str(PLUGIN_HOOKS).expect("the plugin's hooks.json is JSON");
+        let expected = Value::Object(hooks_object(CLAUDE_EVENTS, plugin_command));
+        assert_eq!(
+            expected,
+            shipped["hooks"],
+            "packaging/claude-code/hooks/hooks.json has drifted from CLAUDE_EVENTS; its \
+`hooks` should be\n{}",
+            serde_json::to_string_pretty(&expected).unwrap()
+        );
+        assert!(
+            shipped["description"].as_str().is_some(),
+            "a plugin's hooks file says what its hooks are for"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_plugin_hooks_run_crook_inside_crook_and_nothing_anywhere_else() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::process::Stdio;
+
+        let scratch =
+            std::env::temp_dir().join(format!("crook-plugin-hooks-{}", std::process::id()));
+        let empty = scratch.join("empty");
+        let on_path = scratch.join("on-path");
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::create_dir_all(&on_path).unwrap();
+        // A stand-in for the binary: it writes down what it was run with and
+        // what it was handed on stdin, which is the whole of what a hook does
+        // with it. `cat` by its path, because the hooks run with a PATH that
+        // holds nothing unless a case puts a `crook` on it.
+        let record = scratch.join("record");
+        let fake = format!(
+            "#!/bin/sh\nprintf '%s ' \"$@\" > '{0}'\n/bin/cat >> '{0}'\n",
+            record.display()
+        );
+        let binary = scratch.join("crook-dev");
+        // And one that fails the way a report with nowhere to go does.
+        let broken = scratch.join("crook-broken");
+        let failing = "#!/bin/sh\necho 'crook: no terminal' >&2\nexit 1\n";
+        for (path, script) in [
+            (&binary, fake.as_str()),
+            (&on_path.join("crook"), fake.as_str()),
+            (&broken, failing),
+        ] {
+            std::fs::write(path, script).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let binary = binary.to_str().unwrap();
+        let broken = broken.to_str().unwrap();
+
+        let shipped: Value = serde_json::from_str(PLUGIN_HOOKS).unwrap();
+        let events = shipped["hooks"].as_object().unwrap();
+        assert!(!events.is_empty());
+        let input = r#"{"hook_event_name": "Stop", "prompt": "port the tab bar"}"#;
+        for (event, groups) in events {
+            let command = groups[0]["hooks"][0]["command"].as_str().unwrap();
+            let arguments = CLAUDE_EVENTS
+                .iter()
+                .find(|(name, _)| name == event)
+                .map(|(_, arguments)| *arguments)
+                .unwrap();
+            // What `sh -c` makes of the command in an environment that holds
+            // only `variables`: its exit, its stdout and stderr, and what the
+            // stand-in was run with, if it was.
+            let run = |variables: &[(&str, &str)]| {
+                let _ = std::fs::remove_file(&record);
+                let mut shell = crate::process::command("/bin/sh");
+                shell
+                    .arg("-c")
+                    .arg(command)
+                    .env_clear()
+                    .env("PATH", &empty)
+                    .envs(variables.iter().copied())
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                let mut child = shell.spawn().expect("/bin/sh runs");
+                // A hook that never reads its input is allowed to exit before
+                // this is written, so a broken pipe here is not a failure.
+                let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
+                let output = child.wait_with_output().unwrap();
+                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                (
+                    output.status.success(),
+                    stdout,
+                    stderr,
+                    std::fs::read_to_string(&record).ok(),
+                )
+            };
+            let reported = Some(format!("--agent {arguments} {input}"));
+
+            // Another terminal: Claude Code runs the hook and it does nothing
+            // at all — no binary started, not a byte written, exit 0, since a
+            // failing UserPromptSubmit hook is a notice on every prompt and
+            // anything it prints is added to what the model reads.
+            for outside in [
+                &[][..],
+                &[("TERM_PROGRAM", "iTerm.app"), ("CROOK_BIN", binary)][..],
+            ] {
+                assert_eq!(
+                    (true, String::new(), String::new(), None),
+                    run(outside),
+                    "{event} outside Crook, with {outside:?}"
+                );
+            }
+            // A pane: the binary the pane names, handed the hook's input.
+            assert_eq!(
+                (true, String::new(), String::new(), reported.clone()),
+                run(&[("TERM_PROGRAM", "Crook"), ("CROOK_BIN", binary)]),
+                "{event} in a pane"
+            );
+            // tmux in a pane says TERM_PROGRAM=tmux; the pane's id is still
+            // there.
+            assert_eq!(
+                (true, String::new(), String::new(), reported.clone()),
+                run(&[
+                    ("TERM_PROGRAM", "tmux"),
+                    ("CROOK_PANE_ID", "7"),
+                    ("CROOK_BIN", binary)
+                ]),
+                "{event} in tmux in a pane"
+            );
+            // A Crook from before CROOK_BIN, or a binary an upgrade has moved
+            // from under a running one: the `crook` on PATH.
+            let path = on_path.to_str().unwrap();
+            for stale in [
+                &[("TERM_PROGRAM", "Crook"), ("PATH", path)][..],
+                &[
+                    ("TERM_PROGRAM", "Crook"),
+                    ("CROOK_BIN", "/nowhere/crook"),
+                    ("PATH", path),
+                ][..],
+            ] {
+                assert_eq!(
+                    (true, String::new(), String::new(), reported.clone()),
+                    run(stale),
+                    "{event} with {stale:?}"
+                );
+            }
+            // A pane with no binary to reach is quiet too, rather than a
+            // "not found" on every prompt.
+            assert_eq!(
+                (true, String::new(), String::new(), None),
+                run(&[("TERM_PROGRAM", "Crook"), ("CROOK_BIN", "/nowhere/crook")]),
+                "{event} with no binary"
+            );
+            // And so is a report that fails — a Crook too old to find the
+            // pane from a hook with no terminal: exit 0, so it is not a
+            // notice on every prompt and tool call, with what went wrong on
+            // stderr, which Claude Code keeps in its debug log.
+            assert_eq!(
+                (true, String::new(), "crook: no terminal\n".to_owned(), None),
+                run(&[("TERM_PROGRAM", "Crook"), ("CROOK_BIN", broken)]),
+                "{event} with a report that fails"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn the_plugin_skill_is_the_skill_crook_prints() {
+        // Byte for byte: the plugin's copy is what Claude Code loads, and a
+        // skill that says one thing from `--skill` and another from the
+        // plugin is two answers to what a pane can do.
+        assert!(
+            PLUGIN_SKILL == SKILL,
+            "packaging/claude-code/skills/crook/SKILL.md is not app/src/skill.md; copy it over"
+        );
+    }
+
+    #[test]
+    fn the_claude_hooks_lead_with_the_commands_that_install_the_plugin_the_repository_ships() {
+        let marketplace: Value =
+            serde_json::from_str(MARKETPLACE).expect("the marketplace is JSON");
+        let manifest: Value =
+            serde_json::from_str(PLUGIN_MANIFEST).expect("the plugin's manifest is JSON");
+        let name = marketplace["name"].as_str().unwrap();
+        let plugins = marketplace["plugins"].as_array().unwrap();
+        assert_eq!(1, plugins.len(), "{plugins:?}");
+        let plugin = plugins[0]["name"].as_str().unwrap();
+        // The directory the tests above read is the one the entry names, or
+        // they pin a copy nobody installs.
+        assert_eq!(
+            Some("./packaging/claude-code"),
+            plugins[0]["source"].as_str()
+        );
+        // Claude Code's rule: an install by a name the manifest does not
+        // share is "not found in marketplace".
+        assert_eq!(Some(plugin), manifest["name"].as_str());
+
+        let printed = hooks_text("claude", Path::new("/usr/bin/crook")).unwrap();
+        let lead = printed.lead.expect("claude's hooks come as a plugin too");
+        let lines: Vec<&str> = lead.lines().filter(|line| !line.starts_with('#')).collect();
+        assert_eq!(
+            vec![
+                "claude plugin marketplace add theguriev/crook".to_owned(),
+                format!("claude plugin install {plugin}@{name}"),
+            ],
+            lines,
+            "the lead is comments and the commands, so pasting all of it runs just those"
+        );
+        // And the fragment is still what it was, for merging by hand.
+        let parsed: Value = serde_json::from_str(&printed.text).unwrap();
+        assert!(parsed["hooks"]["Notification"].is_array());
+        assert!(printed.note.unwrap().contains("~/.claude/settings.json"));
+
+        // Only Claude Code has a plugin to lead with.
+        for agent in AGENTS.iter().filter(|agent| agent.name != "claude") {
+            let printed = hooks_text(agent.name, Path::new("/usr/bin/crook")).unwrap();
+            assert_eq!(None, printed.lead, "{}", agent.name);
+        }
+    }
+
+    #[test]
+    fn a_command_line_names_its_agent_by_the_first_word_and_nothing_after_it() {
+        assert_eq!(Some("claude"), program_of("claude"));
+        // The prompt is the rest of the line, and none of it is the answer.
+        assert_eq!(Some("claude"), program_of("claude \"fix the bug\""));
+        assert_eq!(
+            Some("codex"),
+            program_of("  codex --model o4 'port the tab bar'")
+        );
+        // By the program's file name, wherever it was run from.
+        assert_eq!(
+            Some("claude"),
+            program_of("/opt/homebrew/bin/claude --model opus")
+        );
+        assert_eq!(
+            Some("copilot"),
+            program_of(r"C:\Users\me\AppData\Roaming\npm\copilot.cmd")
+        );
+        for agent in AGENTS {
+            assert_eq!(Some(agent.name), program_of(agent.name));
+        }
+    }
+
+    #[test]
+    fn a_command_line_that_starts_no_known_agent_names_nothing() {
+        for command in [
+            "",
+            "   ",
+            "cargo test",
+            "vim claude.md",
+            "claudette",
+            "echo claude",
+            "./claude-notes.sh",
+        ] {
+            assert_eq!(None, program_of(command), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn each_agent_is_resumed_by_its_own_documented_line() {
+        assert_eq!(
+            Some("claude --continue"),
+            resume_line("claude", Resume::Last)
+        );
+        assert_eq!(Some("claude --resume"), resume_line("claude", Resume::Pick));
+        assert_eq!(
+            Some("codex resume --last"),
+            resume_line("codex", Resume::Last)
+        );
+        assert_eq!(Some("codex resume"), resume_line("codex", Resume::Pick));
+        assert_eq!(
+            Some("gemini --resume latest"),
+            resume_line("gemini", Resume::Last)
+        );
+        // No picker on Gemini's command line, and an offer of the newest
+        // conversation to two panes would be the same one twice.
+        assert_eq!(None, resume_line("gemini", Resume::Pick));
+        // Copilot's newest is the repository's, which a worktree shares.
+        assert_eq!(
+            Some("copilot --resume"),
+            resume_line("copilot", Resume::Last)
+        );
+        // OpenCode's newest is too, and it has no picker to fall back on.
+        assert_eq!(None, resume_line("opencode", Resume::Last));
+        assert_eq!(None, resume_line("aider", Resume::Last));
+        assert_eq!(None, resume_line("vim", Resume::Last));
+    }
+
+    #[test]
+    fn every_resume_line_starts_the_agent_it_resumes() {
+        // A line whose first word were another program's would be recorded,
+        // once it ran, as that program: the pane would come back next time
+        // offering the wrong agent.
+        for agent in AGENTS {
+            for line in [agent.last, agent.pick].into_iter().flatten() {
+                assert_eq!(Some(agent.name), program_of(line), "{line}");
+            }
         }
     }
 

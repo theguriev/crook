@@ -80,13 +80,29 @@
 //! pane, a split and a new tab all get it, because every shell Crook starts
 //! goes through [`Session::open`] and that is where it is set.
 //!
+//! [`BIN_VARIABLE`] — `CROOK_BIN` — is set there too: the path of the binary
+//! that started the pane, so a hook that has to call `crook` from a `PATH`
+//! nobody put it on can call it by that name instead.
+//!
+//! [`SOCKET_VARIABLE`](crate::control::SOCKET_VARIABLE) — `CROOK_SOCKET` — is
+//! set in the same place, and it *is* an address: where the window answers
+//! `crook pane list`. Empty when the window has no socket, rather than left
+//! out, so that a Crook started inside another Crook's pane does not pass the
+//! outer window's on to its own shells. So is
+//! [`TOKEN_VARIABLE`](crate::control::TOKEN_VARIABLE) — `CROOK_TOKEN` — the
+//! pane's own secret, which is what lets what runs in it open a tab with
+//! `crook tab new`, and which is empty on the same terms.
+//!
 //! # What it costs when it does not work
 //!
 //! One pane's blocks, and nothing else. [`Session::open`] cannot fail: an
-//! unrecognised shell, an unwritable temporary directory, no `HOME` for zsh's
-//! stubs to point back at — each of them returns a session whose
-//! [`marks`](Session::marks) is false, which starts the user's shell exactly as
-//! before. Degraded is a state this module reports, not an error it raises.
+//! unrecognised shell, an unwritable temporary directory, a scratch root that
+//! is not this user's alone, no `HOME` for zsh's stubs to point back at — each
+//! of them returns a session whose [`marks`](Session::marks) is false, which
+//! starts the user's shell exactly as before. The two that are the machine's
+//! doing rather than the shell's, the directory and the root, say so in one
+//! line of the log. Degraded is a state this module reports, not an error it
+//! raises.
 //!
 //! # Getting out of it, and getting it somewhere else
 //!
@@ -106,8 +122,9 @@
 //! # Layout
 //!
 //! * `launch` decides — pure functions, no filesystem, one per shell.
-//! * `scratch` does — writes the files, hands over the launch, removes the
-//!   directory when the session is dropped.
+//! * `scratch` does — makes sure the directory is the user's alone, writes the
+//!   files, hands over the launch, removes the directory when the session is
+//!   dropped.
 //! * `crook.zsh`, `crook.bash` and `crook.fish` are the snippets themselves,
 //!   compiled in.
 //!
@@ -139,6 +156,17 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// same number [`PaneId::as_u64`](crate::tab::PaneId::as_u64) hands a plugin,
 /// so a script and a plugin looking at the same pane agree on its name.
 pub const PANE_ID_VARIABLE: &str = "CROOK_PANE_ID";
+
+/// The variable that names the binary this Crook is: `CROOK_BIN`, set to the
+/// absolute path of the running executable.
+///
+/// A hook runs in whatever `PATH` its agent was started with, and the binary
+/// a person is running — a Crook.app nobody linked onto `PATH`, a build under
+/// `target/` — is often on nobody's. `crook --agent-hooks` works round that
+/// by printing the path into the fragment, which a file shipped for everybody
+/// cannot do; the Claude Code plugin's hooks call `"$CROOK_BIN"` instead, and
+/// this is what makes that name the same binary the pane belongs to.
+pub const BIN_VARIABLE: &str = "CROOK_BIN";
 
 /// Setting this in the environment to anything but `0` or the empty string
 /// stops Crook injecting anything into any shell, whatever the setting says.
@@ -319,6 +347,14 @@ pub struct Options {
     pub login: bool,
     /// The shell to run, or the user's own when unset.
     pub shell: Option<PathBuf>,
+    /// Where the window answers questions, told to the shell in
+    /// [`SOCKET_VARIABLE`](crate::control::SOCKET_VARIABLE); `None` when the
+    /// window has no socket, which the shell is told as an empty value.
+    pub control_socket: Option<PathBuf>,
+    /// The pane's secret for that socket, told to the shell in
+    /// [`TOKEN_VARIABLE`](crate::control::TOKEN_VARIABLE); `None` is told as
+    /// an empty value, like the socket.
+    pub control_token: Option<String>,
 }
 
 impl Default for Options {
@@ -329,6 +365,8 @@ impl Default for Options {
             enabled: true,
             login: login_by_default(),
             shell: None,
+            control_socket: None,
+            control_token: None,
         }
     }
 }

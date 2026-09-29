@@ -30,6 +30,8 @@
 //! a person comes now, and which branch the pane is on is not. The moment
 //! the agent goes back to work the message goes with it (see
 //! `AgentSession::message`), and the line says what the table says again.
+//! A notification a program sent while nobody was looking takes the same
+//! line for as long as nobody has — see `AgentSession::row_message`.
 
 use std::path::Path;
 
@@ -137,8 +139,9 @@ pub(super) struct RowFacts {
     directory: Option<String>,
     /// The branch it is on, if the directory is a repository.
     branch: Option<String>,
-    /// What the agent is waiting for, while it is waiting: the second line
-    /// while it is there, in place of whatever the table put there.
+    /// What the agent is waiting for, while it is waiting, or what a
+    /// notification nobody has seen yet said: the second line while it is
+    /// there, in place of whatever the table put there.
     message: Option<String>,
     /// Whether [`Self::command`] is the directory's own name rather than a
     /// name the session has.
@@ -157,20 +160,10 @@ impl RowFacts {
         facts: Option<&GitFacts>,
         home: Option<&Path>,
     ) -> Self {
-        // A name the session has, else the directory's own — `agent 3` is the
-        // last resort it always was, and now reaches only a pane with no name,
-        // no program and nowhere to be.
-        let named = session.name().map(str::to_owned);
-        let label = session
-            .working_directory
-            .as_deref()
-            .and_then(|directory| git::directory_label(directory, home));
-        let command_is_the_directory = named.is_none() && label.is_some();
+        let (command, command_is_the_directory) = command_of(session, home);
 
         Self {
-            command: named
-                .or(label)
-                .unwrap_or_else(|| session.display_title().to_owned()),
+            command,
             command_is_the_directory,
             directory: session
                 .working_directory
@@ -180,7 +173,7 @@ impl RowFacts {
                 .and_then(|facts| facts.branch.as_ref())
                 .map(Head::label)
                 .map(str::to_owned),
-            message: session.message.clone(),
+            message: session.row_message().map(str::to_owned),
         }
     }
 
@@ -265,6 +258,36 @@ impl RowFacts {
             Subtitle::Command if self.command_is_the_directory => None,
             Subtitle::Command => Some(RowLine::plain(self.command.clone())),
         }
+    }
+}
+
+/// What a row calls a session: the name it has, else its directory's.
+///
+/// The row's "Command / Conversation" fact, and what a desktop notification
+/// names the pane by: a banner that named it any other way — the `agent 1`
+/// a shell at a prompt was born as, while its row says `app` — would name a
+/// tab nobody can find.
+pub(super) fn row_name(session: &AgentSession, home: Option<&Path>) -> String {
+    command_of(session, home).0
+}
+
+/// [`row_name`], and whether it is the directory's own name rather than a
+/// name the session has.
+///
+/// A name the session has, else the directory's own — `agent 3` is the last
+/// resort it always was, and now reaches only a pane with no name, no
+/// program and nowhere to be.
+fn command_of(session: &AgentSession, home: Option<&Path>) -> (String, bool) {
+    if let Some(name) = session.name() {
+        return (name.to_owned(), false);
+    }
+    match session
+        .working_directory
+        .as_deref()
+        .and_then(|directory| git::directory_label(directory, home))
+    {
+        Some(label) => (label, true),
+        None => (session.display_title().to_owned(), false),
     }
 }
 
@@ -554,6 +577,18 @@ fn detail_section(
             Weight::Normal,
             ui,
         ));
+    }
+
+    // Where the work came from, when it was not a person: a tab another
+    // pane's agent opened is one nobody in the room asked for by hand, and
+    // the card is where a row says what it could not fit.
+    if let Some(lineage) = &session.spawned_by {
+        column.add_child(
+            Text::new(format!("opened by {}", lineage.title), ui, 12.)
+                .with_color(theme().text_muted)
+                .with_ellipsis(Cut::End)
+                .finish(),
+        );
     }
 
     let mut footer = Flex::row()

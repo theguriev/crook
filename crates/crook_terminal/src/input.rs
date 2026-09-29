@@ -18,7 +18,9 @@
 //!   the `SS3` form `DECPAM` asks for once a full-screen program has set it;
 //! * Shift, Alt, Ctrl and Super on all of the above, as the xterm modifier
 //!   parameter — `1 + shift + 2*alt + 4*ctrl + 8*super` — which switches the
-//!   arrows and function keys to their `CSI 1 ; m A` form.
+//!   arrows and function keys to their `CSI 1 ; m A` form;
+//! * the keyboard arriving and leaving, as `CSI I` and `CSI O`, for a program
+//!   that asked for them with `?1004h` — see [`focus`].
 //!
 //! ## The kitty keyboard protocol
 //!
@@ -315,6 +317,31 @@ pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
         return bytes;
     }
     text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+}
+
+/// What `CSI I` and `CSI O` are: xterm's report that the keyboard arrived
+/// and that it left.
+const FOCUS_IN: &[u8] = b"\x1b[I";
+const FOCUS_OUT: &[u8] = b"\x1b[O";
+
+/// The bytes a change of keyboard focus sends, or `None` when the child has
+/// not asked to hear about one.
+///
+/// `?1004h` is the asking: xterm's focus reporting, answered with `CSI I` when
+/// the program's terminal gains the keyboard and `CSI O` when it loses it. An
+/// editor reloads a file that changed while somebody was elsewhere on the
+/// first; a program that wants to know whether anybody is watching it reads
+/// both. Nothing is sent until a program asks, because a shell that never did
+/// reads the three bytes as typing — `[I` landing on its command line.
+///
+/// `reporting` comes from the emulator; [`crate::Terminal::send_focus`] reads
+/// it for the caller, and this function is the way to see the bytes without a
+/// child on the far end of a pty.
+pub fn focus(focused: bool, reporting: bool) -> Option<&'static [u8]> {
+    if !reporting {
+        return None;
+    }
+    Some(if focused { FOCUS_IN } else { FOCUS_OUT })
 }
 
 /// The bytes a key press sends, or `None` when it sends nothing.
