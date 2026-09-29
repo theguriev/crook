@@ -465,6 +465,13 @@ fn sixteen_refusals_in_a_row_stop_the_window_answering_that_pane_and_no_other() 
 
     spawns.refuse(pane, &refusal);
     assert!(spawns.stopped(pane), "sixteen in a row");
+    // A tab agreed to before the stop may still open after it; that is not
+    // the pane in the ordinary state again.
+    spawns.opened(pane);
+    assert!(
+        spawns.stopped(pane),
+        "a tab opening after the stop answered the pane again"
+    );
     assert!(
         !spawns.stopped(other),
         "a loop in one pane costs no other pane anything"
@@ -2024,6 +2031,96 @@ mod socket {
         let stopped = served
             .open_tab(Some(token), new_tab(&["make"]))
             .expect_err("and not only for worktrees");
+        assert!(stopped.contains("too-many-refusals"), "{stopped}");
+    }
+
+    #[test]
+    fn a_tab_agreed_to_before_the_stop_that_opens_after_it_leaves_the_pane_stopped() {
+        // A worktree is agreed to, and while git makes it the same pane is
+        // refused sixteen times. The tab that opens afterwards is one the
+        // window said yes to before the stop, not a sign the pane is back in
+        // the ordinary state; letting it start the count again would hand a
+        // loop another sixteen for every slow checkout it had in flight.
+        let mut gated = None;
+        let mut served = Served::new(|workspace, ctx, root| {
+            let Some(repository) = repository(&root.0.join("repo")) else {
+                return;
+            };
+            // A checkout that says when git has got to it — by then the
+            // request has been agreed to — and holds git there until the test
+            // lets it go. Bounded, so a test that fails first leaves nothing
+            // running for long.
+            let hooks = root.0.join("hooks");
+            let reached = root.0.join("checking-out");
+            let gate = root.0.join("checked-out");
+            fs::create_dir_all(&hooks).expect("the hooks directory is made");
+            let hook = hooks.join("post-checkout");
+            let script = format!(
+                "#!/bin/sh\n\
+                 : > '{reached}'\n\
+                 i=0\n\
+                 while [ ! -e '{gate}' ] && [ \"$i\" -lt 300 ]; do sleep 0.1; i=$((i + 1)); done\n",
+                reached = reached.display(),
+                gate = gate.display(),
+            );
+            fs::write(&hook, script).expect("the hook is written");
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
+                .expect("the hook is runnable");
+            git(
+                &repository,
+                &["config", "core.hooksPath", &hooks.display().to_string()],
+            );
+
+            workspace.set_worktrees_directory(root.0.join("store"));
+            let pane = workspace.tabs().focused_pane_id().expect("a pane");
+            workspace.update_session(pane, ctx, |session| {
+                session.working_directory = Some(repository);
+            });
+            gated = Some((reached, gate));
+        });
+        let Some((reached, gate)) = gated else {
+            eprintln!("skipped: no git here to make a repository with");
+            return;
+        };
+        let token = served.token(first_pane(&served));
+
+        let socket = served.socket();
+        let asking = token.clone();
+        let slow = thread::spawn(move || {
+            cli::unix::open_tab(
+                &socket,
+                Some(&asking),
+                NewTab {
+                    command: vec!["make".to_owned()],
+                    worktree: Some("slow".to_owned()),
+                    ..NewTab::default()
+                },
+                true,
+            )
+            .map_err(|error| error.to_string())
+        });
+        served.pump_until("git never got to the checkout", |_| reached.exists());
+
+        for _ in 0..spawn::REFUSALS_ALLOWED {
+            let refused = served
+                .open_tab(Some(token.clone()), new_tab(&["make\nmake again"]))
+                .expect_err("a newline in a word is refused");
+            assert!(refused.contains("bad-request"), "{refused}");
+        }
+        let stopped = served
+            .open_tab(Some(token.clone()), new_tab(&["make"]))
+            .expect_err("the window has stopped answering");
+        assert!(stopped.contains("too-many-refusals"), "{stopped}");
+
+        fs::write(&gate, "").expect("the gate opens");
+        served.pump_until("the worktree's tab never opened", |_| slow.is_finished());
+        slow.join()
+            .expect("the asking thread")
+            .expect("a tab agreed to before the stop still opens");
+
+        let stopped = served
+            .open_tab(Some(token), new_tab(&["make"]))
+            .expect_err("the stopped pane was answered again");
         assert!(stopped.contains("too-many-refusals"), "{stopped}");
     }
 }

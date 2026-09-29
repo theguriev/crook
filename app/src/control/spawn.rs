@@ -39,6 +39,8 @@
 //! the count starts again at every tab that opens for it. Only at one that
 //! opens: a worktree git will not make is refused after the request was
 //! agreed to, and a loop asking for that branch is a loop like any other.
+//! And never once the pane is stopped: a worktree agreed to before the stop
+//! can finish after it, and the tab still opens, but the stop stands.
 //!
 //! # The command
 //!
@@ -160,8 +162,15 @@ impl Spawns {
 
     /// Starts `caller`'s count of refusals again, and the strangers' with it:
     /// a tab opened for it, so it is a pane in the ordinary state again.
+    ///
+    /// Unless the window has stopped answering it. A worktree agreed to
+    /// before the stop can open after it, while git ran, and a stop that
+    /// such a tab lifted would be sixteen more turns of the loop for every
+    /// slow checkout it had in flight, where the refusal promised none.
     pub(super) fn opened(&mut self, caller: PaneId) {
-        self.refusals.remove(&caller);
+        if !self.stopped(caller) {
+            self.refusals.remove(&caller);
+        }
         self.strangers = 0;
     }
 
@@ -416,7 +425,8 @@ fn plan(
 /// Opens the tab a [`Plan`] describes, in `directory`, and answers with it.
 ///
 /// The one place a caller's run of refusals ends, since it is the one place a
-/// tab is known to have opened.
+/// tab is known to have opened — short of a stop, which [`Spawns::opened`]
+/// leaves standing.
 fn finish(
     workspace: &mut Workspace,
     plan: Plan,
