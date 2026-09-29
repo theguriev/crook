@@ -644,7 +644,10 @@ impl TerminalModel {
     }
 
     /// The token a pane's shell was handed, for a test that has to ask as it.
-    #[cfg(test)]
+    ///
+    /// Unix only, as the socket tests that ask are: a Windows test build
+    /// would find it unused.
+    #[cfg(all(test, unix))]
     pub fn token(&self, pane: PaneId) -> Option<&str> {
         self.sessions.get(&pane)?.token.as_deref()
     }

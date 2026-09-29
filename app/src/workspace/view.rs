@@ -5572,7 +5572,10 @@ impl Workspace {
     }
 
     /// The token a pane's shell was handed, for a test that has to ask as it.
-    #[cfg(test)]
+    ///
+    /// Unix only, as the socket tests that ask are: a Windows test build
+    /// would find it unused.
+    #[cfg(all(test, unix))]
     pub(crate) fn token_of(&self, pane: PaneId, app: &AppContext) -> Option<String> {
         self.terminals.as_ref(app).token(pane).map(str::to_owned)
     }

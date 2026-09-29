@@ -14,7 +14,7 @@ use crookui_core::fonts::FamilyId;
 use crookui_core::{App, ViewHandle};
 use serde_json::{Value, json};
 
-use super::protocol::{self, NewTab, Opened, PaneEntry, Reply, Request, Verb, code};
+use super::protocol::{self, NewTab, PaneEntry, Reply, Request, Verb, code};
 use super::*;
 use crate::Channel;
 use crate::git::{GitFacts, Head};
@@ -776,7 +776,7 @@ mod socket {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
 
-    use super::super::protocol::{MAX_LINE, Refusal};
+    use super::super::protocol::{MAX_LINE, Opened, Refusal};
     use super::super::server::{self, Answer, Socket, converse};
     use super::*;
 
