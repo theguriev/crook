@@ -24,7 +24,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crook_terminal::{AgentReport, Program, Pty, TerminalSize};
+use crook_terminal::{AgentReport, Program, Pty, PtyLink as _, TerminalSize};
 use serde_json::Value;
 
 /// The binary under test, the one a release ships.
