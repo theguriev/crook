@@ -253,6 +253,16 @@ fn prune(directory: &Path, prefix: &str, suffix: &str, kept: usize, made: &Path)
 
 /// Whether another open file holds `path` the way [`fresh`] does.
 ///
+/// Asked with a shared lock, which the writer's exclusive one refuses all the
+/// same, because the file is opened here for reading only. An exclusive lock
+/// can need a file open for writing: NFS on Linux carries these locks to the
+/// server as byte-range ones and refuses an exclusive one on a file open only
+/// for reading with `EBADF`, which is an error rather than "held" — so a home
+/// folder on NFS, where the writer's own lock was taken, had the log of a
+/// window still running pruned. A file system with no locks at all answers
+/// with an error as well, and there a live log can be pruned, as [`fresh`]
+/// says.
+///
 /// Never asked on Windows. The hold there is the missing right to delete, and
 /// the removal that asks for it is refused by itself; and a lock there is
 /// mandatory, so even a moment's lock taken to ask would refuse the other
@@ -261,7 +271,8 @@ fn in_use(path: &Path) -> bool {
     if cfg!(windows) {
         return false;
     }
-    File::open(path).is_ok_and(|file| matches!(file.try_lock(), Err(fs::TryLockError::WouldBlock)))
+    File::open(path)
+        .is_ok_and(|file| matches!(file.try_lock_shared(), Err(fs::TryLockError::WouldBlock)))
 }
 
 /// Every file in `directory` named `<prefix>…<suffix>`, oldest first.
