@@ -7982,10 +7982,13 @@ fn worktree_store() -> Option<PathBuf> {
 ///   once it exits. Any report counts, `idle` included, since that is what an
 ///   agent waiting for its next instruction says; one from before the line
 ///   is from a command the marks have since closed.
-/// - Short of that, a shell that has reported its prompt ending (`B`) and not
-///   answered the line is taken to be listening. It answers a command with
-///   `C` within milliseconds, and until it does it may be reading the rest
-///   of the line — an open quote, a here-document — in its line editor.
+/// - Short of that, a shell that reports marks and has not answered the line
+///   is taken to be listening. It answers a command with `C` within
+///   milliseconds, and until it does it may be reading the rest of the
+///   line — an open quote, a here-document — in its line editor. Such a
+///   shell is known by its open block not being the session's first, which
+///   only a mark closes, and not by where its prompt ended: a reflow forgets
+///   that, and the Changes column opening beside the pane is one.
 /// - A shell that reports no marks is known only by the composer, which is
 ///   where its commands are typed: `Submitted` says nothing about it, since
 ///   Crook's own submit puts it there for the rest of the session. With no
@@ -8015,7 +8018,7 @@ pub(super) fn a_shell_is_listening(
                 .is_some_and(|at| live.started_at.is_none_or(|handed_over| at >= handed_over));
             if since_the_line {
                 false
-            } else if live.prompt_end.is_some() {
+            } else if live.id.get() > 0 {
                 true
             } else {
                 pane_surface::of(snapshot, now).composer

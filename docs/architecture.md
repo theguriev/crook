@@ -1135,9 +1135,10 @@ program never does. What the marks leave open is a line handed to the shell and 
 (`Submitted`), and that the report decides: an agent that reported since the line was handed
 over is running under it. bash runs no DEBUG trap for a top-level `( … )`, so an agent started
 in one never gets a `C`, and a shell without Crook's marks stays `Submitted` from its first
-line on. Short of such a report, a shell that reports its prompt is taken to be still reading
-the line — an open quote, a here-document — and one that reports nothing is judged by its
-composer. A paste that
+line on. Short of such a report, a shell that reports marks is taken to be still reading the
+line — an open quote, a here-document — and one that reports nothing is judged by its
+composer. Which of the two a shell is, its open block says: only a mark closes the session's
+first, and a reflow, which forgets where the prompt ended, keeps that. A paste that
 went clears the comments and focuses the pane the ordinary way, so the person reads it in the
 agent's own prompt and presses Enter; any refusal keeps them and says why, and `Copy review` is
 the same text on the clipboard. The field takes the keyboard the way the tab search box does, as

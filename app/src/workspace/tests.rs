@@ -23499,7 +23499,9 @@ mod changes_column {
     fn a_shell_listens_at_its_prompt_and_not_under_an_agent_that_reported_since_its_line() {
         use std::time::{Duration, Instant};
 
-        use crook_terminal::{BlockState, LiveBlock, PromptEnd, Rgb, Snapshot};
+        use crook_terminal::{
+            BlockState, Emulator, LiveBlock, Palette, PromptEnd, Rgb, Snapshot, TerminalSize,
+        };
 
         use crate::workspace::view::a_shell_is_listening;
 
@@ -23518,62 +23520,91 @@ mod changes_column {
             live_block,
             title: None,
         };
-        let before = Instant::now();
-        let handed_over = before + Duration::from_secs(1);
-        let since = before + Duration::from_secs(2);
-        let now = before + Duration::from_secs(60);
-        // The block a line handed to the shell opened: in a shell that
-        // reports its prompt or one that reports nothing, fitting the pane
-        // or grown past its top.
-        let submitted = |marked: bool, top_row: i32| LiveBlock {
-            state: BlockState::Submitted,
-            started_at: Some(handed_over),
-            top_row,
-            bottom_row: top_row + 2,
-            prompt_end: marked.then_some(PromptEnd {
-                row: top_row,
-                column: 2,
-            }),
-            ..LiveBlock::default()
-        };
-        let listening = |block: LiveBlock, reported: Option<Instant>| {
-            a_shell_is_listening(&pane(block, false), reported, now)
+        // A shell handed `(claude)` by the composer, as its emulator has it:
+        // one that has drawn a marked prompt, or one that has printed a
+        // plain one, and then `lines` of output under the line.
+        let handed = |marked: bool, lines: usize| {
+            let mut emulator = Emulator::new(TerminalSize::new(80, 24), 1000, Palette::default());
+            emulator.advance(if marked {
+                b"\x1b]133;A\x07$ \x1b]133;B\x07"
+            } else {
+                b"$ "
+            });
+            emulator.command_submitted("(claude)");
+            emulator.advance("agent\r\n".repeat(lines).as_bytes());
+            // The column opening beside the pane narrows it, and the reflow
+            // that follows forgets where the prompt ended.
+            emulator.resize(TerminalSize::new(60, 24));
+            emulator.snapshot()
         };
 
-        // A shell that reports its prompt, handed a line it has not
-        // answered, may be reading the rest of it — until an agent reports
-        // from under the line. bash runs no DEBUG trap for a top-level
-        // `( … )`, so that is how an agent started in one looks for as long
-        // as it runs.
+        let marked = handed(true, 40);
+        assert_eq!(marked.live_block.state, BlockState::Submitted);
+        assert_eq!(
+            marked.live_block.prompt_end, None,
+            "the premise: a reflow forgets where the prompt ended"
+        );
         assert!(
-            listening(submitted(true, 0), None),
+            !crate::pane_surface::of(&marked, Instant::now()).composer,
+            "the premise: the block has outgrown the pane, and has no composer to go by"
+        );
+        let handed_over = marked
+            .live_block
+            .started_at
+            .expect("a submit starts the block's clock");
+        let before = handed_over
+            .checked_sub(Duration::from_millis(1))
+            .expect("the clock has run a millisecond");
+        let since = handed_over + Duration::from_millis(1);
+        let now = handed_over + Duration::from_secs(60);
+
+        // A shell that reports marks, handed a line it has not answered, may
+        // be reading the rest of it — until an agent reports from under the
+        // line. bash runs no DEBUG trap for a top-level `( … )`, so that is
+        // how an agent started in one looks for as long as it runs.
+        assert!(
+            a_shell_is_listening(&marked, None, now),
             "a shell reading the rest of a line would take the paste"
         );
         assert!(
-            listening(submitted(true, 0), Some(before)),
+            a_shell_is_listening(&marked, Some(before), now),
             "a report from before the line counted as one from under it"
         );
         assert!(
-            !listening(submitted(true, 0), Some(since)),
+            !a_shell_is_listening(&marked, Some(since), now),
             "an agent under a `( … )` line was taken for its shell"
         );
 
         // A shell that reports no marks is in Submitted from its first line
         // to its last: a report from under the line decides, and without one
-        // the composer does.
+        // the composer does. Its reports are compared with its own line.
+        let plain = handed(false, 0);
+        let grown = handed(false, 40);
+        assert_eq!(grown.live_block.state, BlockState::Submitted);
         assert!(
-            !listening(submitted(false, -40), Some(since)),
+            grown.live_block.top_row < 0,
+            "the premise: the block has grown past the pane's top"
+        );
+        let since = |snapshot: &Snapshot| {
+            snapshot.live_block.started_at.expect("submitted") + Duration::from_millis(1)
+        };
+        assert!(
+            !a_shell_is_listening(&grown, Some(since(&grown)), now),
             "an agent whose output outgrew a shell with no marks was taken for the shell"
         );
-        assert!(!listening(submitted(false, 0), Some(since)));
+        assert!(!a_shell_is_listening(&plain, Some(since(&plain)), now));
         assert!(
-            listening(submitted(false, 0), None),
+            a_shell_is_listening(&plain, None, now),
             "the composer of a shell with no marks would take the paste"
         );
         assert!(
-            !listening(submitted(false, -40), None),
+            !a_shell_is_listening(&grown, None, now),
             "a grid with no composer is whatever runs there, asked only about bracketed paste"
         );
+        let since = since(&marked);
+        let listening = |block: LiveBlock, reported: Option<Instant>| {
+            a_shell_is_listening(&pane(block, false), reported, now)
+        };
 
         // The shell's own word that it is at its prompt beats any agent's,
         // since an agent's last report outlives it.
@@ -23699,10 +23730,7 @@ mod changes_column {
             crook_terminal::BlockState::Submitted,
             "the premise: bash said nothing of the `( … )` line starting"
         );
-        assert!(
-            block.prompt_end.is_some(),
-            "the premise: the shell reports its prompt"
-        );
+        assert!(block.id.get() > 0, "the premise: the shell reports marks");
 
         // With nothing reported from under it, the line may as well be one
         // bash is still reading, and the review is kept.
@@ -23768,10 +23796,7 @@ mod changes_column {
         );
         let block = live_block_of(&harness, pane);
         assert_eq!(block.state, crook_terminal::BlockState::Submitted);
-        assert!(
-            block.prompt_end.is_none(),
-            "the premise: the shell reports no marks"
-        );
+        assert_eq!(block.id.get(), 0, "the premise: the shell reports no marks");
 
         // The agent reports, after the line that started it. Whether the
         // composer is still drawn by now or the block has grown past the
