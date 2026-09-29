@@ -413,9 +413,11 @@ impl ChangesPanelState {
     }
 
     /// Shows the file at `index`'s hunks, or stops showing them. Answers the
-    /// diff to read, the first time and after a read that failed — and never
-    /// again after that: a file shown, hidden and shown again is read once. A
-    /// nested repository is never read: there is no diff of one.
+    /// diff to read: the first time, after a read that failed, and after a
+    /// refresh that came while the file was folded — which drops a folded
+    /// file's diff, see [`Self::land`]. Between refreshes a file shown,
+    /// hidden and shown again is read once. A nested repository is never
+    /// read: there is no diff of one.
     pub(super) fn toggle(&mut self, index: usize) -> Option<HunkRead> {
         let file = self.overview()?.files.get(index)?;
         let path = file.path.clone();

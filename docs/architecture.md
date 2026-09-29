@@ -1075,9 +1075,10 @@ asked.
 one entry of one flat list with a fixed height per kind and a running sum of heights beside it,
 rebuilt when what is listed changes. A frame binary-searches the scroll offset for the first row
 and builds rows until it passes the bottom of the box, with a spacer standing for the rest: the
-arithmetic `block_list.rs` draws a pane's output with. A diff is read once per file and kept
-while the file is folded away; a refresh reads again only the files that are open. A line of a
-diff is kept to 256 bytes for drawing, because a line is shaped whole on every frame
+arithmetic `block_list.rs` draws a pane's output with. A file's diff is read when the file is
+opened and kept while it is folded away, until the next refresh: that reads again the files
+that are open and drops the folded ones' diffs, which are read again when they are opened. A
+line of a diff is kept to 256 bytes for drawing, because a line is shaped whole on every frame
 before it is cut to the column, and one line of a minified bundle is milliseconds of that;
 "Copy diff" copies the patch with its lines whole.
 
