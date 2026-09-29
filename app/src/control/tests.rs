@@ -1363,6 +1363,37 @@ mod socket {
             Self { program, gate }
         }
 
+        /// A real `bash`, with Crook's integration and so its command marks,
+        /// held at a gate the same way: a wrapper named `bash` that prints a
+        /// line — output, and no prompt — then waits, then becomes the real
+        /// one. In a home of the test's own, so no `~/.bashrc` of whoever runs
+        /// the suite prints or prompts first, and no history is written.
+        ///
+        /// `None` where bash is not installed.
+        fn bash(root: &TempDir) -> Option<Self> {
+            let real = std::env::split_paths(&std::env::var_os("PATH")?)
+                .map(|directory| directory.join("bash"))
+                .find(|candidate| candidate.is_file())?;
+            let program = root.0.join("bash");
+            let gate = root.0.join("gate");
+            let home = root.0.join("home");
+            fs::create_dir_all(&home).expect("the home is made");
+            let script = format!(
+                "#!/bin/sh\n\
+                 printf 'starting\\n'\n\
+                 while [ ! -e '{gate}' ]; do sleep 0.1; done\n\
+                 export HOME='{home}' HISTFILE=/dev/null\n\
+                 exec '{real}' \"$@\"\n",
+                gate = gate.display(),
+                home = home.display(),
+                real = real.display(),
+            );
+            fs::write(&program, script).expect("the shell is written");
+            fs::set_permissions(&program, fs::Permissions::from_mode(0o755))
+                .expect("the shell is runnable");
+            Some(Self { program, gate })
+        }
+
         /// Lets every shell waiting at the gate go on to its prompt.
         fn open(&self) {
             fs::write(&self.gate, "").expect("the gate opens");
@@ -1420,6 +1451,15 @@ mod socket {
         ) -> Self {
             let root = TempDir::new();
             let shell = GatedShell::new(&root);
+            Self::with(root, shell, prepare)
+        }
+
+        /// The same, with `shell` in every pane.
+        fn with(
+            root: TempDir,
+            shell: GatedShell,
+            prepare: impl FnOnce(&mut Workspace, &mut ViewContext<Workspace>, &TempDir),
+        ) -> Self {
             let mut window = Window::new();
             let control = Control::open_in(&root.sockets()).expect("opens");
             let socket = control.path().map(Path::to_path_buf);
@@ -1508,6 +1548,13 @@ mod socket {
         fn text(&self, pane: PaneId) -> String {
             self.read(|workspace, app| workspace.terminal_text(pane, app))
                 .unwrap_or_default()
+        }
+
+        /// What the newest command a pane's shell marked the end of printed:
+        /// read off the finished block, since a command's output leaves the
+        /// grid when the next prompt is drawn.
+        fn output(&self, pane: PaneId) -> Option<String> {
+            self.read(|workspace, app| workspace.newest_block_output(pane, app))
         }
 
         fn session<T>(&self, pane: PaneId, read: impl FnOnce(&crate::tab::AgentSession) -> T) -> T {
@@ -1834,5 +1881,81 @@ mod socket {
             }),
             "opened by the worker, and counted against the lead"
         );
+    }
+
+    #[test]
+    fn a_shell_with_marks_is_sent_the_line_at_its_first_prompt_and_not_at_its_first_output() {
+        // The other half of `TerminalUpdate::Prompted`, and the one every
+        // pane of sh, bash, zsh and fish with the integration on goes
+        // through: the shell's first `A`, not the first thing it prints. The
+        // wrapper prints before bash has started, so a pane that sent at the
+        // first output would send here, to a shell that is not at a prompt.
+        let root = TempDir::new();
+        let Some(shell) = GatedShell::bash(&root) else {
+            eprintln!("skipped: no bash here");
+            return;
+        };
+        let mut served = Served::with(root, shell, |_, _, _| {});
+        let marked = served.read(|workspace, app| {
+            matches!(
+                workspace.shell_standing(app).0.marks,
+                crate::shell_integration::Marks::Installed(_)
+            )
+        });
+        if !marked {
+            eprintln!("skipped: the shell integration is opted out of here");
+            return;
+        }
+        let caller = first_pane(&served);
+        let token = served.token(caller);
+
+        // One line out, with a newline only at its end: the format is a word
+        // of its own, so the pty's echo of the line carries `%s` where the
+        // output carries the words.
+        let words = [
+            "printf",
+            "%s|%s|%s|%s|%s|%s\\n",
+            "it's",
+            "\"double\"",
+            "$(echo pwned)",
+            "`id`",
+            "$HOME",
+            "END",
+        ];
+        let opened = served
+            .open_tab(Some(token), new_tab(&words))
+            .expect("the pane may open a tab");
+        let worker = served.pane(opened.pane_id);
+        let owned: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
+        let line = spawn::command_line(&owned, Path::new("bash")).expect("a proven shell");
+        assert_eq!(served.field(worker), line);
+
+        // Output, and no prompt yet: the line waits.
+        served.pump_until("the wrapper never spoke", |served| {
+            served.text(worker).contains("starting")
+        });
+        served.window.queue.run_until_parked();
+        assert_eq!(
+            served.field(worker),
+            line,
+            "sent at the first output, before the shell prompted"
+        );
+
+        // The first prompt, and the line goes and runs as a command of its
+        // own: one the shell marked the end of, printing the words as given.
+        served.shell.open();
+        served.pump_until("the command never ran", |served| {
+            served
+                .output(worker)
+                .is_some_and(|output| output.contains("END"))
+        });
+        let output = served.output(worker).unwrap_or_default();
+        assert!(
+            output
+                .lines()
+                .any(|printed| printed == "it's|\"double\"|$(echo pwned)|`id`|$HOME|END"),
+            "the words did not arrive as themselves: {output:?}"
+        );
+        assert_eq!(served.field(worker), "", "the field was sent, not copied");
     }
 }
