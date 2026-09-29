@@ -54,6 +54,12 @@ fn render() -> Node {
 }
 ```
 
+A tree may nest [`MAX_DEPTH`] levels — a node inside a node is two of them, so about sixty
+nodes — and a deeper one is refused like any answer the host cannot read: the contribution
+draws nothing, and three refusals in a row switch the plugin off. The deepest tree a published
+plugin draws is six nodes. The limit is what keeps a render from recursing through the host's
+stack, and it is the same one `from_bytes` applies on either side of the wire.
+
 ## Pictures
 
 A plugin can carry its own icon, and up to six screenshots, inside the module:
@@ -86,5 +92,6 @@ Install one with `crook --install-plugin <path>`, or list it in
 
 [`ABI_VERSION`]: https://docs.rs/crook_plugin_api/latest/crook_plugin_api/constant.ABI_VERSION.html
 [`Capability`]: https://docs.rs/crook_plugin_api/latest/crook_plugin_api/enum.Capability.html
+[`MAX_DEPTH`]: https://docs.rs/crook_plugin_api/latest/crook_plugin_api/constant.MAX_DEPTH.html
 [`Request`]: https://docs.rs/crook_plugin_api/latest/crook_plugin_api/enum.Request.html
 [`pictures`]: https://docs.rs/crook_plugin_api/latest/crook_plugin_api/pictures/index.html

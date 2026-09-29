@@ -166,6 +166,54 @@ fn test_a_command_that_finishes_without_starting_closes_the_block() {
     assert_eq!("$", block.rows.to_text());
 }
 
+/// Whether each command end the emulator announced since it was last asked
+/// had a command behind it.
+fn announced_runs(emulator: &mut Emulator) -> Vec<bool> {
+    emulator
+        .take_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            crate::emulator::TerminalEvent::CommandFinished { ran, .. } => Some(ran),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn test_a_command_end_says_whether_anything_ran_behind_it() {
+    // A bare `D` ends a line that ran nothing — ctrl-c at the prompt, Enter
+    // on an empty one — and it is announced like any other, since the shell
+    // did say it. What acts on a command having run, like a restored pane
+    // letting go of the agent it came back with, has to tell the two apart.
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}$ {B}^C\r\n\x1b]133;D\x07").as_bytes());
+    assert_eq!(vec![false], announced_runs(&mut emulator), "ctrl-c");
+
+    emulator.advance(format!("{A}$ {B}").as_bytes());
+    emulator.command_submitted("");
+    emulator.advance(b"\r\n\x1b]133;D\x07");
+    assert_eq!(vec![false], announced_runs(&mut emulator), "an empty line");
+
+    // A second `D` for the same end is not a second command.
+    emulator.advance(b"\x1b]133;D;0\x07");
+    assert_eq!(vec![false], announced_runs(&mut emulator), "a repeated D");
+
+    // bash 3.2 reports a bare `D` for a `( … )` line, which did run: the
+    // line that was sent is what says so, not the status.
+    emulator.advance(format!("{A}$ {B}").as_bytes());
+    emulator.command_submitted("(cd x)");
+    emulator.advance(b"(cd x)\r\n\x1b]133;D\x07");
+    assert_eq!(vec![true], announced_runs(&mut emulator), "a subshell line");
+
+    // And a command the shell said started, though no command line could be
+    // read off the screen for it: `C` with no `B` before it.
+    emulator.advance(format!("{A}$ ls\r\n{C}a  b\r\n\x1b]133;D;0\x07").as_bytes());
+    assert_eq!(vec![true], announced_runs(&mut emulator), "a C with no B");
+
+    emulator.advance(format!("{A}$ {B}echo hi\r\n{C}hi\r\n\x1b]133;D;0\x07").as_bytes());
+    assert_eq!(vec![true], announced_runs(&mut emulator), "a command");
+}
+
 #[test]
 fn test_a_prompt_arriving_with_no_completion_closes_the_open_block() {
     // Ctrl-C, Ctrl-D, a shell that crashed mid-command: the next prompt is the

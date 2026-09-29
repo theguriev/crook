@@ -334,8 +334,9 @@ pub enum IgnoreReason {
 /// The block itself keeps all of this and more, but a listener that only wants
 /// to know something ended should not have to go looking through the finished
 /// list to find out whether the thing it was told about is the last entry in
-/// it. So the boundary hands over the two facts that are about the *command*
-/// rather than about the block: how it went, and how long it took.
+/// it. So the boundary hands over the facts that are about the *command*
+/// rather than about the block: whether there was one, how it went, and how
+/// long it took.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Finished {
     /// The status the shell reported, or `None` when it reported none.
@@ -347,6 +348,18 @@ pub struct Finished {
     /// `None` when the block was already open when Crook started watching, so
     /// there is no beginning to measure from.
     pub took: Option<Duration>,
+    /// Whether a command ran behind this boundary: the block has a command
+    /// line, or the shell said one started with `C`.
+    ///
+    /// `false` for the bare `D` a shell sends for a line that ran nothing —
+    /// ctrl-c at the prompt, Enter on an empty one. That is a boundary all the
+    /// same, and a listener ringing on "the shell said something ended" still
+    /// hears it, but one that acts on a command having *run* must not: nothing
+    /// moved, nothing changed directory, nothing was started.
+    ///
+    /// Not the status. bash 3.2 reports a bare `D` for a `( … )` line, which
+    /// did run, and its command line is what says so.
+    pub ran: bool,
 }
 
 /// What the block model is being told. The columns of [`TABLE`].
@@ -841,8 +854,9 @@ impl BlockTracker {
 
         // Read before the close takes it: `close` moves `started_at` into the
         // block it files, so a duration read afterwards would always be
-        // `None`.
+        // `None`, and it takes the command line with it.
         let started_at = self.open.started_at;
+        let ran = self.open.command.is_some() || self.open.state == BlockState::Executing;
         let mut finished = None;
 
         match TABLE[self.open.state.row()][signal.column()] {
@@ -912,6 +926,7 @@ impl BlockTracker {
                     finished = Some(Finished {
                         exit,
                         took: started_at.map(|at| at.elapsed()),
+                        ran,
                     });
                 }
             }
