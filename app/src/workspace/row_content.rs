@@ -30,17 +30,21 @@
 //! a person comes now, and which branch the pane is on is not. The moment
 //! the agent goes back to work the message goes with it (see
 //! `AgentSession::message`), and the line says what the table says again.
+//! A notification a program sent while nobody was looking takes the same
+//! line for as long as nobody has — see `AgentSession::row_message`.
 
 use std::path::Path;
 
-use crookui_core::elements::Padding;
+use crookui_core::elements::{MouseStateHandle, Padding};
 use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::prelude::*;
 
 use crate::git::{self, DiffStats, GitFacts, Head};
 use crate::settings::{Granularity, PrimaryInfo, Subtitle, TabOptions, resolve_subtitle};
-use crate::tab::{AgentSession, Pane, PaneId, Tab};
+use crate::tab::{AgentSession, Pane, PaneId, PullRequestCheck, Tab};
 use crate::theme::theme;
+
+use super::action::WorkspaceAction;
 
 /// The height a metadata line is pinned to, whether or not it has chips in it.
 ///
@@ -137,8 +141,9 @@ pub(super) struct RowFacts {
     directory: Option<String>,
     /// The branch it is on, if the directory is a repository.
     branch: Option<String>,
-    /// What the agent is waiting for, while it is waiting: the second line
-    /// while it is there, in place of whatever the table put there.
+    /// What the agent is waiting for, while it is waiting, or what a
+    /// notification nobody has seen yet said: the second line while it is
+    /// there, in place of whatever the table put there.
     message: Option<String>,
     /// Whether [`Self::command`] is the directory's own name rather than a
     /// name the session has.
@@ -157,20 +162,10 @@ impl RowFacts {
         facts: Option<&GitFacts>,
         home: Option<&Path>,
     ) -> Self {
-        // A name the session has, else the directory's own — `agent 3` is the
-        // last resort it always was, and now reaches only a pane with no name,
-        // no program and nowhere to be.
-        let named = session.name().map(str::to_owned);
-        let label = session
-            .working_directory
-            .as_deref()
-            .and_then(|directory| git::directory_label(directory, home));
-        let command_is_the_directory = named.is_none() && label.is_some();
+        let (command, command_is_the_directory) = command_of(session, home);
 
         Self {
-            command: named
-                .or(label)
-                .unwrap_or_else(|| session.display_title().to_owned()),
+            command,
             command_is_the_directory,
             directory: session
                 .working_directory
@@ -180,7 +175,7 @@ impl RowFacts {
                 .and_then(|facts| facts.branch.as_ref())
                 .map(Head::label)
                 .map(str::to_owned),
-            message: session.message.clone(),
+            message: session.row_message().map(str::to_owned),
         }
     }
 
@@ -268,6 +263,36 @@ impl RowFacts {
     }
 }
 
+/// What a row calls a session: the name it has, else its directory's.
+///
+/// The row's "Command / Conversation" fact, and what a desktop notification
+/// names the pane by: a banner that named it any other way — the `agent 1`
+/// a shell at a prompt was born as, while its row says `app` — would name a
+/// tab nobody can find.
+pub(super) fn row_name(session: &AgentSession, home: Option<&Path>) -> String {
+    command_of(session, home).0
+}
+
+/// [`row_name`], and whether it is the directory's own name rather than a
+/// name the session has.
+///
+/// A name the session has, else the directory's own — `agent 3` is the last
+/// resort it always was, and now reaches only a pane with no name, no
+/// program and nowhere to be.
+fn command_of(session: &AgentSession, home: Option<&Path>) -> (String, bool) {
+    if let Some(name) = session.name() {
+        return (name.to_owned(), false);
+    }
+    match session
+        .working_directory
+        .as_deref()
+        .and_then(|directory| git::directory_label(directory, home))
+    {
+        Some(label) => (label, true),
+        None => (session.display_title().to_owned(), false),
+    }
+}
+
 /// The chips a row is allowed to draw, after the toggles have had their say.
 ///
 /// Resolved before the row is built rather than inside it, because "is there
@@ -276,6 +301,11 @@ impl RowFacts {
 pub(super) struct Chips {
     diff: Option<DiffStats>,
     pull_request: Option<String>,
+    /// What makes the pull request chip a link: the pane it opens the pull
+    /// request of, and the chip's own mouse state. `None` on the card, which
+    /// is torn down the moment the pointer leaves the row for it and so has
+    /// nothing a press could land on.
+    link: Option<(PaneId, MouseStateHandle)>,
 }
 
 impl Chips {
@@ -293,15 +323,22 @@ impl Chips {
                 .then(|| facts.and_then(|facts| facts.diff))
                 .flatten()
                 .filter(|diff| !diff.is_empty()),
-            // Always `None` today: nothing populates `pull_request`, because
-            // Crook has no forge to ask. The toggle is still live — it governs
-            // whether the slot appears when there *is* a link — and the menu
-            // says so on screen rather than leaving a chip that can never
-            // appear to be discovered.
+            // What the agent said its pull request is, when it has said —
+            // see `AgentSession::pull_request`. Crook asks no forge for one.
             pull_request: options
                 .show_pr_link
                 .then(|| session.pull_request_label())
                 .flatten(),
+            link: None,
+        }
+    }
+
+    /// The same chips, with the pull request one made a link that opens
+    /// `pane`'s pull request.
+    pub(super) fn linked(self, pane: PaneId, state: MouseStateHandle) -> Self {
+        Self {
+            link: Some((pane, state)),
+            ..self
         }
     }
 
@@ -316,7 +353,13 @@ impl Chips {
                 .and_then(|facts| facts.diff)
                 .filter(|diff| !diff.is_empty()),
             pull_request: session.pull_request_label(),
+            link: None,
         }
+    }
+
+    /// Whether these chips draw the pull request as a link.
+    pub(super) fn has_link(&self) -> bool {
+        self.pull_request.is_some() && self.link.is_some()
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -336,23 +379,87 @@ impl Chips {
             row.add_child(diff_chip(diff, ui));
         }
         if let Some(label) = self.pull_request.clone() {
-            row.add_child(pill(
-                Text::new(label, ui, 10.)
-                    .with_color(theme().text_muted)
-                    .finish(),
-            ));
+            row.add_child(match self.link.clone() {
+                Some((pane, state)) => pull_request_link(label, pane, state, ui),
+                None => pill(
+                    pull_request_text(label, theme().text_muted, ui),
+                    theme().overlay_1,
+                ),
+            });
         }
         Some(row.finish())
     }
 }
 
+/// The pull request chip on a row: a pill that lights under the pointer and
+/// opens the pull request when pressed.
+///
+/// The row under it focuses the pane on a press, so the row's own handler
+/// stands aside while this is hovered — the close button's arrangement, and
+/// for its reason.
+fn pull_request_link(
+    label: String,
+    pane: PaneId,
+    state: MouseStateHandle,
+    ui: FamilyId,
+) -> Box<dyn Element> {
+    Hoverable::new(state, move |state| {
+        let hovered = state.is_hovered();
+        pill(
+            pull_request_text(
+                label.clone(),
+                if hovered {
+                    theme().text_primary
+                } else {
+                    theme().text_muted
+                },
+                ui,
+            ),
+            if hovered {
+                theme().overlay_3
+            } else {
+                theme().overlay_1
+            },
+        )
+    })
+    .on_click(move |_, ctx, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::OpenPullRequest(pane));
+    })
+    .finish()
+}
+
+/// The widest a pull request chip's label is drawn, in pixels.
+///
+/// About `github.example.com #12` at the chip's size: room for any
+/// github.com label and most hosts, and narrow enough that the chip beside a
+/// diff count leaves the row's own text some of the line. The metadata line
+/// lays a chip out at its natural width and gives way only on the left, so
+/// without this a long label pushed the row's text to nothing and the chip
+/// past the panel's edge.
+pub(super) const PULL_REQUEST_LABEL_WIDTH: f32 = 100.;
+
+/// A pull request chip's label, cut at [`PULL_REQUEST_LABEL_WIDTH`].
+///
+/// At the start, when it is cut: the end of a host is the part that says
+/// whose it is, and the number is the part that says which.
+fn pull_request_text(label: String, color: Color, ui: FamilyId) -> Box<dyn Element> {
+    ConstrainedBox::new(
+        Text::new(label, ui, 10.)
+            .with_color(color)
+            .with_ellipsis(Cut::Start)
+            .finish(),
+    )
+    .with_max_width(PULL_REQUEST_LABEL_WIDTH)
+    .finish()
+}
+
 /// A chip's box: Warp's `render_badge_container`.
 ///
-/// It has no hover state, unlike Warp's, because Crook's chips are not
-/// clickable — there is no code-review panel to open and no browser call to
-/// make — and a box that lights up under the pointer and then does nothing is a
-/// worse lie than one that does not.
-fn pill(content: Box<dyn Element>) -> Box<dyn Element> {
+/// Lit under the pointer only when a press on it does something, which is
+/// the pull request's and no other: the diff count has no code-review panel
+/// to open, and a box that lights up under the pointer and then does nothing
+/// is a worse lie than one that does not.
+fn pill(content: Box<dyn Element>, background: Color) -> Box<dyn Element> {
     Container::new(content)
         .with_padding(Padding {
             top: 1.,
@@ -360,7 +467,7 @@ fn pill(content: Box<dyn Element>) -> Box<dyn Element> {
             bottom: 1.,
             right: 4.,
         })
-        .with_background_color(theme().overlay_1)
+        .with_background_color(background)
         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(3.)))
         .finish()
 }
@@ -392,7 +499,7 @@ fn diff_chip(diff: DiffStats, ui: FamilyId) -> Box<dyn Element> {
         );
     }
 
-    pill(row.finish())
+    pill(row.finish(), theme().overlay_1)
 }
 
 /// How heavy the branch mark's stroke is, in Lucide's 24-unit grid.
@@ -556,6 +663,18 @@ fn detail_section(
         ));
     }
 
+    // Where the work came from, when it was not a person: a tab another
+    // pane's agent opened is one nobody in the room asked for by hand, and
+    // the card is where a row says what it could not fit.
+    if let Some(lineage) = &session.spawned_by {
+        column.add_child(
+            Text::new(format!("opened by {}", lineage.title), ui, 12.)
+                .with_color(theme().text_muted)
+                .with_ellipsis(Cut::End)
+                .finish(),
+        );
+    }
+
     let mut footer = Flex::row()
         .with_main_axis_size(MainAxisSize::Max)
         .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
@@ -570,9 +689,55 @@ fn detail_section(
     }
     column.add_child(footer.finish());
 
+    // The whole address, where there is room for it. The chip is a label,
+    // and a label can be made to look like anything; this is where the link
+    // goes, readable before anybody presses it. Cut at the end, which keeps
+    // the host.
+    if let Some(pull_request) = &session.pull_request {
+        column.add_child(
+            Text::new(pull_request.url.clone(), ui, 10.)
+                .with_color(theme().text_muted)
+                .with_ellipsis(Cut::End)
+                .finish(),
+        );
+    }
+
+    // What the last "Check pull request" found, until the next press: the
+    // card is where a row says what it had no room for, and a state the row
+    // never shows is the plainest case of that.
+    if let Some(check) = session
+        .pull_request
+        .as_ref()
+        .and_then(|pull_request| pull_request.check.as_ref())
+    {
+        column.add_child(
+            Text::new(check.summary(), ui, 10.)
+                .with_color(check_color(check))
+                .with_ellipsis(Cut::End)
+                .finish(),
+        );
+    }
+
     Container::new(column.finish())
         .with_uniform_padding(CARD_SECTION_PADDING)
         .finish()
+}
+
+/// The colour a check's line is printed in: the diff's red for anything that
+/// failed — a check, or the asking — its green for a pull request whose
+/// checks all passed, and muted for the rest, which is waiting or has
+/// nothing to judge.
+fn check_color(check: &PullRequestCheck) -> Color {
+    match check {
+        PullRequestCheck::Failed(_) => theme().diff_removed,
+        PullRequestCheck::Answered(found) if found.checks.failing > 0 => theme().diff_removed,
+        PullRequestCheck::Answered(found)
+            if found.checks.total() > 0 && found.checks.pending == 0 =>
+        {
+            theme().diff_added
+        }
+        _ => theme().text_muted,
+    }
 }
 
 /// The fixed-height metadata line: text on the left, chips pushed to the right.

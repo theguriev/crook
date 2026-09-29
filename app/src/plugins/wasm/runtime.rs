@@ -32,6 +32,14 @@
 //! are served by the observer in `wasm::mod`, which is handed the workspace
 //! the moment anything here notifies.
 //!
+//! **They are served a turn at a time.** Served on the thread that draws, and
+//! answered there, so a guest that asks again from every answer would be
+//! served for as long as it kept asking — and the window with it. Past
+//! [`DEEDS_PER_TURN`] what is left waits here, untouched, for a turn booked
+//! after the window has drawn. A plugin whose turns run out
+//! [`OVERRUNS_ALLOWED`] times in a row, or that has more than [`MAX_WAITING`]
+//! things to type, run or copy waiting at once, stops being served at all.
+//!
 //! **And two of them may only happen because somebody pressed something.**
 //! A plugin that could type into a shell from a timer is a plugin that types
 //! while nobody is looking, so a request that *changes* something is taken
@@ -108,6 +116,81 @@ const REFUSALS_ALLOWED: u32 = 16;
 /// an answer that was quietly thrown away and never polls again. Retrying is
 /// cheap; a chip frozen on a number from an hour ago is not.
 const RETRY_AFTER: Duration = Duration::from_millis(16);
+
+/// How many deeds one plugin is handed in one of the window's turns.
+///
+/// A deed is served on the thread that draws, and its answer is delivered
+/// there too, so a guest that asks again from inside every answer is a loop
+/// with nothing in it that waits — and serving until nothing was left waiting
+/// was a window that never came back and had to be killed, over a plugin with
+/// one ordinary grant. Nothing else in that loop is finite: each deed is
+/// answered before the next is asked, so the sandbox's ceiling on what a guest
+/// may have outstanding never fills.
+///
+/// A turn is [`AppContext::turns`]: one update and everything its effects
+/// set off. Not one call of the observer, because each answer notifies this
+/// model and the effects queue would call it again; and not "until the queue
+/// is found empty", because a plugin that runs another plugin's action, and is
+/// run by it, finds its own queue empty after every answer while the chain
+/// goes on through the other one.
+///
+/// Thirty-two because that is as many requests as the sandbox holds for a
+/// guest at once, so everything any one call raised is served in the turn
+/// that raised it, and only a chain — answers that keep asking — ever spans
+/// turns. The plugins that exist ask for two at most: where the pane is and
+/// what Crook can do, from `build`, or what a command printed and then the
+/// clipboard, one after the other.
+pub(super) const DEEDS_PER_TURN: u32 = 32;
+
+/// How many turns in a row a plugin's deeds may run out of room: the one that
+/// makes it this many is the last it is served until Crook is restarted.
+///
+/// The rule [`REFUSALS_ALLOWED`] is, for the same kind of loop. A burst bigger
+/// than a turn is carried on with in the next one, and a chain that ends — a
+/// turn that ends with nothing left waiting — is forgiven its count, but a
+/// plugin still asking after sixteen full turns is asking because it asks, and
+/// each turn it is given is thirty-two calls into it on the thread that draws.
+const OVERRUNS_ALLOWED: u32 = 16;
+
+/// How many deeds that carry text — a line to type, a command to run and what
+/// to hand it, something to copy — one plugin may have waiting at once; one
+/// more and it stops being served until Crook is restarted.
+///
+/// A turn bounds what is *served*, and nothing about that bounds what is
+/// *kept*: each answer in a turn may ask for as many things as the sandbox
+/// holds for a guest at once, so a plugin that asks for thirty-two from every
+/// answer leaves a thousand behind after one turn and sixteen thousand by the
+/// time its turns run out — and each of these may be a megabyte. Twice a
+/// turn's worth is what a full turn leaves when every answer in it asks for
+/// two things more, which is the most any plugin that exists asks for from
+/// one call; a queue of these longer than that is growing, not being served.
+/// Only a press, or what came of one, may ask for them, and a press is one
+/// call, so it raises a turn's worth at most.
+///
+/// **The rest are not counted: they carry nothing to keep, and a burst of
+/// them is the window's doing.** Where the pane is and what Crook can do are
+/// all an event may ask the window for, and events come in batches: every
+/// command a pane reports finished in one read is an event of its own in one
+/// update, and all of them are delivered before the first thing they asked for
+/// is served. A plugin asking once from each has as many waiting as there
+/// were commands without a single answer having asked for anything, and a
+/// ceiling on those would stop it and drop every ticket it held unanswered.
+/// What they cost waiting is an entry each, and a plugin that keeps asking for
+/// them from its answers is the one [`OVERRUNS_ALLOWED`] stops — as is one
+/// handed more than sixteen turns' worth in one update, which that rule cannot
+/// tell from a loop.
+pub(super) const MAX_WAITING: usize = 2 * DEEDS_PER_TURN as usize;
+
+/// How long the window is left to itself before a plugin's waiting deeds are
+/// carried on with.
+///
+/// About a frame, and a sleep on the pool rather than a task queued straight
+/// back onto the foreground: on X11 and macOS the event loop runs every task
+/// it has been handed before it draws anything, so a task that queued the
+/// next one at once would run in the same pass, and the turn this is for
+/// would never come. Booked only while deeds are waiting, so it is not a
+/// clock — a plugin with nothing left to be served books nothing.
+const RESUME_AFTER: Duration = Duration::from_millis(16);
 
 /// How many files one walk will look at before it stops.
 ///
@@ -199,6 +282,25 @@ pub(super) struct Runtime {
     /// Every one of these has already been checked against the grant: what is
     /// waiting is the *doing*, and a request nobody allowed never gets here.
     deeds: Vec<(u32, Request)>,
+    /// How many of `deeds` carry text, which is what [`MAX_WAITING`] counts.
+    carrying: usize,
+    /// Which of the window's turns `served` is counting. See
+    /// [`DEEDS_PER_TURN`].
+    turn: u64,
+    /// How many deeds have been handed out in that turn.
+    served: u32,
+    /// Whether that turn has run out of room with deeds still waiting.
+    overran: bool,
+    /// How many turns in a row have. See [`OVERRUNS_ALLOWED`].
+    overruns: u32,
+    /// Whether the turn that carries on with what is still waiting has been
+    /// booked — once, however often the observer asks in the meantime.
+    resuming: bool,
+    /// Whether this plugin was caught asking the window for things without
+    /// end, so that what it asks the window for is neither kept nor served
+    /// for the rest of the session. See [`OVERRUNS_ALLOWED`] and
+    /// [`MAX_WAITING`].
+    stopped: bool,
 }
 
 impl Entity for Runtime {
@@ -223,16 +325,114 @@ impl Runtime {
             waiting: None,
             wake: None,
             deeds: Vec::new(),
+            carrying: 0,
+            turn: 0,
+            served: 0,
+            overran: false,
+            overruns: 0,
+            resuming: false,
+            stopped: false,
         }
     }
 
-    /// Everything waiting for a workspace, taken.
+    /// What is waiting for a workspace, taken, as far as this turn goes.
     ///
     /// Drained rather than read, for the reason the sandbox drains what a
     /// guest asked for: a deed served twice is a line typed into a shell
     /// twice, and the second one would be the host's fault.
-    pub(super) fn deeds(&mut self) -> Vec<(u32, Request)> {
-        std::mem::take(&mut self.deeds)
+    ///
+    /// **And taken no further than [`DEEDS_PER_TURN`].** What is past it stays
+    /// here, in the order it was asked, for the turn that is booked to carry
+    /// on with it: a ticket taken and not served is a guest waiting for the
+    /// rest of the session, so the budget decides what is *taken* and never
+    /// what is dropped. Once the turn is spent the answer is nothing at all,
+    /// which is what ends the observer's loop.
+    pub(super) fn deeds(&mut self, ctx: &mut ModelContext<Self>) -> Vec<(u32, Request)> {
+        if self.stopped {
+            return Vec::new();
+        }
+        let turn = ctx.turns();
+        if turn != self.turn {
+            // The last turn this plugin was looked at in is over. One that
+            // ended with nothing waiting ended a chain, and however long the
+            // chain ran it was not the loop: the loop always has something
+            // waiting when its turn runs out.
+            if !self.overran {
+                self.overruns = 0;
+            }
+            self.turn = turn;
+            self.served = 0;
+            self.overran = false;
+        }
+        if self.deeds.is_empty() {
+            return Vec::new();
+        }
+
+        let room = DEEDS_PER_TURN.saturating_sub(self.served) as usize;
+        if room == 0 {
+            self.ran_out(ctx);
+            return Vec::new();
+        }
+        let taken: Vec<(u32, Request)> = self.deeds.drain(..room.min(self.deeds.len())).collect();
+        self.served += taken.len() as u32;
+        self.carrying -= taken
+            .iter()
+            .filter(|(_, request)| carries_text(request))
+            .count();
+        taken
+    }
+
+    /// Books the turn that carries on with what is still waiting — or, for a
+    /// plugin whose turns have run out [`OVERRUNS_ALLOWED`] times in a row,
+    /// stops serving it.
+    fn ran_out(&mut self, ctx: &mut ModelContext<Self>) {
+        // Counted once a turn, however often the observer asks in it.
+        if !self.overran {
+            self.overran = true;
+            self.overruns += 1;
+            if self.overruns >= OVERRUNS_ALLOWED {
+                self.stop(&format!(
+                    "has asked the window for more than {DEEDS_PER_TURN} things a turn, \
+                     {OVERRUNS_ALLOWED} turns in a row,"
+                ));
+                return;
+            }
+        }
+        if self.resuming {
+            return;
+        }
+
+        self.resuming = true;
+        self.later(
+            RESUME_AFTER,
+            |runtime, ctx| {
+                runtime.resuming = false;
+                // The observer is what serves them, and it runs when this
+                // model notifies; nothing else would. It runs in a turn of its
+                // own, which is what gives it a turn's worth again.
+                ctx.notify();
+            },
+            ctx,
+        );
+    }
+
+    /// Stops serving this plugin's deeds for the rest of the session, and says
+    /// so, once.
+    ///
+    /// What is waiting is dropped, as a request past [`REFUSALS_ALLOWED`] is:
+    /// answering it would be delivering to the loop, which asks again. Its
+    /// tickets go from `pressed` too — in one pass, because a queue this is
+    /// called on can hold thousands — since none of them is ever going to be
+    /// answered.
+    fn stop(&mut self, why: &str) {
+        log::warn!(
+            "{} {why} and will not be served again until Crook is restarted",
+            self.id
+        );
+        self.stopped = true;
+        self.carrying = 0;
+        let dropped: HashSet<u32> = self.deeds.drain(..).map(|(ticket, _)| ticket).collect();
+        self.pressed.retain(|ticket| !dropped.contains(ticket));
     }
 
     /// Takes everything the guest asked for and starts it.
@@ -324,6 +524,22 @@ impl Runtime {
                 )
             });
 
+        let deed = refused.is_none() && declined.is_none() && needs_the_workspace(&request);
+        // Dropped, the way a refusal past its allowance is: this plugin was
+        // caught asking the window for things without end. See
+        // [`OVERRUNS_ALLOWED`].
+        if deed && self.stopped {
+            return;
+        }
+        let carrying = deed && carries_text(&request);
+        if carrying && self.carrying >= MAX_WAITING {
+            self.stop(&format!(
+                "has asked the window to type, run or copy more than {MAX_WAITING} things \
+                 at once,"
+            ));
+            return;
+        }
+
         // Written down before anything can answer it: what this ticket's
         // answer may go on to ask for is decided by what raised it. See the
         // field.
@@ -335,8 +551,9 @@ impl Runtime {
         // it waits for somewhere that holds one. Notified, because the thing
         // that serves it is an observer of this model and nothing else would
         // say there is anything to serve.
-        if refused.is_none() && declined.is_none() && needs_the_workspace(&request) {
+        if deed {
             self.deeds.push((ticket, request));
+            self.carrying += usize::from(carrying);
             ctx.notify();
             return;
         }
@@ -426,7 +643,11 @@ impl Runtime {
                 // ticket and will wait for the rest of the session if nobody
                 // ever answers it. See [`RETRY_AFTER`].
                 log::warn!("{} was answered while it was running", self.id);
-                self.later(move |runtime, ctx| runtime.answer(ticket, answer, ctx), ctx);
+                self.later(
+                    RETRY_AFTER,
+                    move |runtime, ctx| runtime.answer(ticket, answer, ctx),
+                    ctx,
+                );
                 return;
             }
         };
@@ -502,13 +723,15 @@ impl Runtime {
     /// Does something to this runtime a moment from now.
     ///
     /// A sleep on the pool, like every other wait here. What it is for is the
-    /// one case a borrow of the guest can fail — see [`RETRY_AFTER`].
-    fn later<F>(&mut self, what: F, ctx: &mut ModelContext<Self>)
+    /// one case a borrow of the guest can fail — see [`RETRY_AFTER`] — and the
+    /// turn the window takes between two batches of one plugin's deeds — see
+    /// [`RESUME_AFTER`].
+    fn later<F>(&mut self, after: Duration, what: F, ctx: &mut ModelContext<Self>)
     where
         F: FnOnce(&mut Self, &mut ModelContext<Self>) + 'static,
     {
         let sleeping = ctx.background().spawn(async move {
-            std::thread::sleep(RETRY_AFTER);
+            std::thread::sleep(after);
         });
         ctx.spawn(sleeping, move |runtime, (), ctx| what(runtime, ctx))
             .detach();
@@ -533,7 +756,7 @@ impl Runtime {
             // asks for one timer at a time, so a tick that never arrives is a
             // plugin that stops polling for good.
             Err(_) => {
-                self.later(Runtime::tick, ctx);
+                self.later(RETRY_AFTER, Runtime::tick, ctx);
                 return;
             }
         };
@@ -641,6 +864,18 @@ fn needs_the_workspace(request: &Request) -> bool {
             | Request::Run { .. }
             | Request::Output
             | Request::Copy { .. }
+    )
+}
+
+/// Whether this is a deed with text in it for the window to keep until it is
+/// served, which is what [`MAX_WAITING`] counts.
+///
+/// Every one of them is also one [`only_from_a_gesture`] names; what a command
+/// printed is the one of those that is asked for with nothing in it.
+fn carries_text(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Type { .. } | Request::Run { .. } | Request::Copy { .. }
     )
 }
 

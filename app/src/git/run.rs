@@ -65,7 +65,7 @@ static GIT_MISSING: AtomicBool = AtomicBool::new(false);
 /// only reason a local read is slow is a cold page cache — and short enough
 /// that a stall is something a person waits out rather than a hang they have to
 /// restart the app to clear.
-pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long [`super::worktree::add`] may take.
 ///
@@ -75,7 +75,7 @@ pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// whatever the user wrote. Killing an honest checkout halfway leaves a
 /// half-written directory *and* a registered worktree — strictly worse than
 /// having waited.
-const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How long [`super::worktree::remove`] may take.
 ///
@@ -120,7 +120,7 @@ pub(super) fn git_is_missing() -> bool {
 pub(super) enum Intent {
     /// `worktree list`, `status`: answers a question and changes nothing.
     Read,
-    /// `worktree add`: writes the repository.
+    /// `worktree add`, `lock`, `unlock`: writes the repository.
     Write,
     /// `worktree remove`: writes the repository, and deletes a directory tree
     /// first, which is the one thing here whose honest duration has no bound
@@ -172,6 +172,10 @@ thread_local! {
 pub(super) struct Finished {
     /// Whether git exited zero.
     pub(super) success: bool,
+    /// The code it exited with, for the commands whose non-zero exit is an
+    /// answer — `check-ignore` exits 1 for "none of them". `None` when a
+    /// signal ended it.
+    pub(super) code: Option<i32>,
     /// stdout, as bytes, because paths come out of it.
     pub(super) stdout: Vec<u8>,
     /// stderr, as text, because messages come out of it.
@@ -186,6 +190,17 @@ pub(super) struct Finished {
 /// those can outlive git by as long as whatever a hook backgrounded cares to
 /// live — see `collect`.
 pub(super) fn run(directory: &Path, args: &[&OsStr], intent: Intent) -> Result<Finished, Failure> {
+    run_feeding(directory, args, intent, None)
+}
+
+/// [`run`], with `input` written to git's stdin when there is one — and stdin
+/// closed at once when there is not, so nothing can wait on it.
+pub(super) fn run_feeding(
+    directory: &Path,
+    args: &[&OsStr],
+    intent: Intent,
+    input: Option<Vec<u8>>,
+) -> Result<Finished, Failure> {
     if git_is_missing() {
         return Err(Failure::GitMissing);
     }
@@ -198,12 +213,12 @@ pub(super) fn run(directory: &Path, args: &[&OsStr], intent: Intent) -> Result<F
         return Err(Failure::NoDirectory);
     }
 
-    let mut child = start(
-        directory,
-        args,
-        intent,
-        [Stdio::null(), Stdio::piped(), Stdio::piped()],
-    )?;
+    let stdin = if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
+    let mut child = start(directory, args, intent, [stdin, Stdio::piped(), Stdio::piped()])?;
 
     // Both pipes are drained on their own threads. Polling `try_wait` with the
     // output left unread deadlocks the moment git writes more than a pipe
@@ -212,6 +227,9 @@ pub(super) fn run(directory: &Path, args: &[&OsStr], intent: Intent) -> Result<F
     // a lie about what happened.
     let stdout = child.stdout.take().map(drain);
     let stderr = child.stderr.take().map(drain);
+    if let (Some(input), Some(stdin)) = (input, child.stdin.take()) {
+        feed(stdin, input);
+    }
 
     let timeout = intent.timeout();
     let deadline = Instant::now() + timeout;
@@ -271,6 +289,7 @@ pub(super) fn run(directory: &Path, args: &[&OsStr], intent: Intent) -> Result<F
 
     Ok(Finished {
         success: status.success(),
+        code: status.code(),
         stdout: stdout.unwrap_or_default(),
         stderr: String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned(),
     })
@@ -309,7 +328,8 @@ fn start(
         // and start point precisely so nothing can decide to go and fetch one —
         // so there is no credential to be asked for. These two make that a
         // guarantee rather than an argument: git may not prompt on a terminal,
-        // and has no terminal on stdin to prompt on.
+        // and has no terminal on stdin to prompt on — a pipe, when there is
+        // input, is no terminal either.
         .env("GIT_TERMINAL_PROMPT", "0");
 
     let [stdin, stdout, stderr] = stdio;
@@ -446,6 +466,24 @@ fn drain<R: std::io::Read + Send + 'static>(mut pipe: R) -> Receiver<Vec<u8>> {
         let _ = sender.send(bytes);
     });
     receiver
+}
+
+/// Writes `input` to git's stdin on a thread of its own, then closes it.
+///
+/// Not on the calling thread, for the deadline's sake: a write into a pipe
+/// git is not reading blocks, and it would block before [`wait_for`] had
+/// started counting. Not joined, for [`drain`]'s reason. Once git exits, or is
+/// killed at its deadline, the pipe has no reader and the write fails rather
+/// than blocks, so the thread ends with the command — nothing git runs for
+/// the one command that is fed, `check-ignore`, inherits the pipe to keep it
+/// open.
+fn feed(mut stdin: std::process::ChildStdin, input: Vec<u8>) {
+    std::thread::spawn(move || {
+        use std::io::Write as _;
+        // Ignored: a git that stopped reading has exited or failed, and says
+        // so in its exit status, which is what the caller reads.
+        let _ = stdin.write_all(&input);
+    });
 }
 
 /// How long a reader is given once git itself has been reaped.

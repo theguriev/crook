@@ -388,6 +388,40 @@ fn a_burst_of_bells_is_handed_over_as_one() {
 }
 
 #[test]
+fn a_burst_of_notifications_is_handed_over_as_the_last_one() {
+    // The bell's rule, with one difference: a notification carries words,
+    // and the ones worth showing are the last the program said.
+    let Some(shared) = session() else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    let said = |events: Vec<TerminalEvent>| {
+        events
+            .into_iter()
+            .filter_map(|event| match event {
+                TerminalEvent::Notification(notification) => notification.body,
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    shared.feed(b"\x1b]9;one\x07");
+    shared.feed(b"\x07");
+    shared.feed(b"\x1b]9;two\x07");
+    let events = shared.take_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, TerminalEvent::Bell)),
+        "the bell between them was dropped with the first notification"
+    );
+    assert_eq!(vec!["two".to_owned()], said(events));
+
+    shared.feed(b"\x1b]9;three\x07");
+    assert_eq!(vec!["three".to_owned()], said(shared.take_events()));
+}
+
+#[test]
 fn a_closed_pane_frees_its_terminal_even_while_its_reader_is_still_blocked() {
     // A `sleep 60 &` keeps the pty open after the pane is closed, so the read
     // cannot return — and the thread owns the object whose drop would return
@@ -460,4 +494,122 @@ fn a_scroll_shorter_than_a_line_is_carried_to_the_next_one() {
     // a line it has not been given.
     assert_eq!((0, -0.5), whole_lines(0.0, -0.5));
     assert_eq!((-1, 0.0), whole_lines(-0.5, -0.5));
+}
+
+#[test]
+fn a_line_typed_with_a_space_in_front_names_the_tab_without_it() {
+    // `crook -e htop` types ` exec htop`, the space keeping it out of the
+    // shell's history. The block keeps the line as it was typed, which is
+    // what Copy command and Run again hand back; the tab's name and the
+    // status line are read from here, and a row that began with a space was
+    // drawn a cell to the right of every other row.
+    let typed = crate::exec_line(&["htop".to_owned()]);
+    assert_eq!(" exec htop", typed);
+
+    let mut emulator =
+        crook_terminal::Emulator::new(TerminalSize::new(40, 5), 100, Palette::default());
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+    emulator.command_submitted(&typed);
+    assert_eq!(
+        None,
+        running_command(&emulator.live_block()),
+        "a line the shell has not started is not running"
+    );
+
+    emulator.advance(format!("{typed}\r\n\x1b]133;C\x07").as_bytes());
+    let live = emulator.live_block();
+    assert_eq!(Some(typed.as_str()), live.command.as_deref());
+    assert_eq!(Some("exec htop"), running_command(&live).as_deref());
+
+    emulator.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    assert_eq!(None, running_command(&emulator.live_block()));
+}
+
+/// How long a test watches for the terminal to come free while a writer is
+/// kept from installing the snapshot it built.
+///
+/// Not a wait for something to happen: on the right code the terminal never
+/// comes free here and the test spends the whole of it. On the wrong code it
+/// comes free the instant the writer has synced its blocks, so this only has to
+/// outlast a scheduler that has parked the writer's thread in between — which
+/// is also the one way the wrong code could slip through.
+const GAP_WINDOW: Duration = Duration::from_millis(100);
+
+/// Runs `write` on a thread of its own with the snapshot slot held, and asserts
+/// that it does not let go of the terminal before its snapshot is in the slot.
+///
+/// The gap is the whole race. A writer that builds its snapshot and syncs the
+/// blocks under the terminal's lock, then installs the snapshot after letting
+/// go, leaves a moment in which the other writer can build, sync and install a
+/// newer pair — and then have its snapshot overwritten by the older one, beside
+/// its own newer block list. A command that finished during a drag was painted
+/// twice, once as a block and once in the live viewport, with its tab still
+/// labelled running.
+///
+/// Holding the slot here turns that moment into one that lasts, so the test
+/// needs no second writer racing the first: a terminal that can be taken while
+/// the slot is still waiting is the gap.
+///
+/// `write` must leave the drawn content as it was. That is what lets the count
+/// on the installed snapshot say where the writer has got to.
+fn assert_the_terminal_is_held_until_the_snapshot_is_published(
+    shared: &Arc<Shared>,
+    write: impl FnOnce() + Send + 'static,
+) {
+    let slot = shared.latest.lock().unwrap_or_else(PoisonError::into_inner);
+    // The terminal is clean, so the snapshot a writer builds is this very `Arc`
+    // again, and one more count on it is the writer holding a snapshot it has
+    // built and not yet installed — under the terminal's lock either way.
+    let installed = Arc::strong_count(&*slot);
+    let writer = thread::spawn(write);
+
+    let deadline = Instant::now() + REPLY_TIMEOUT;
+    while Arc::strong_count(&*slot) == installed {
+        assert!(
+            Instant::now() < deadline,
+            "the writer never built a snapshot"
+        );
+        thread::yield_now();
+    }
+
+    let watching = Instant::now();
+    while watching.elapsed() < GAP_WINDOW {
+        assert!(
+            shared.terminal.try_lock().is_err(),
+            "the terminal was let go before its snapshot was published, so the \
+             other writer could publish a newer one in between and be overwritten"
+        );
+        thread::yield_now();
+    }
+
+    drop(slot);
+    writer.join().expect("the writer panicked");
+}
+
+#[test]
+fn a_key_press_publishes_what_it_drew_before_it_lets_go_of_the_terminal() {
+    // The UI thread's writer: typing, a resize, the wheel, all through `drive`.
+    let Some(shared) = session() else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    let handle = TerminalHandle(shared.clone());
+
+    assert_the_terminal_is_held_until_the_snapshot_is_published(&shared, move || {
+        handle.send_key(Key::Char('a'), Modifiers::default());
+    });
+}
+
+#[test]
+fn the_reader_publishes_what_it_drew_before_it_lets_go_of_the_terminal() {
+    // The other writer: the reader thread and the flusher, through `publish`.
+    let Some(shared) = session() else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    let publishing = shared.clone();
+
+    assert_the_terminal_is_held_until_the_snapshot_is_published(&shared, move || {
+        publishing.publish();
+    });
 }

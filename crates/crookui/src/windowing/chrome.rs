@@ -20,7 +20,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crookui_core::geometry::Vector2F;
-use winit::window::{CursorIcon, ResizeDirection, Window, WindowAttributes};
+use winit::window::{CursorIcon, ResizeDirection, UserAttentionType, Window, WindowAttributes};
 
 /// Who draws the window's title bar and the controls in it.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -91,37 +91,33 @@ pub(super) fn with_chrome(attributes: WindowAttributes, chrome: WindowChrome) ->
         .with_undecorated_shadow(!decorated)
 }
 
-/// What a Linux desktop calls this application.
-///
-/// Wayland's `app_id` and X11's `WM_CLASS`, which are the same fact under two
-/// names: it is what a window rule matches, what a dock groups by, what an
-/// alt-tab list labels, and what a `.desktop` file is tied to. A window
-/// without one is a window a person cannot write a rule for — and this had
-/// none, because winit only sets it when asked and nothing asked.
-///
-/// One name for both channels. The dev build says so in its *title*, which is
-/// what a person reads; the id is what their configuration matches, and a rule
-/// that stopped working because they ran a different build of the same
-/// application would be a rule nobody could debug.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const APPLICATION: &str = "crook";
-
 /// Adds `chrome` to the attributes a window is about to be created with.
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub(super) fn with_chrome(attributes: WindowAttributes, chrome: WindowChrome) -> WindowAttributes {
+    // No Linux compositor has macOS's arrangement either, so a
+    // client-decorated window here is a borderless one and the application
+    // draws the controls and finds the resize edges itself. The shadow around
+    // it is the compositor's own business and there is nothing to ask for.
+    attributes.with_decorations(matches!(chrome, WindowChrome::Native))
+}
+
+/// Names the window for a Linux desktop: Wayland's `app_id` and X11's
+/// `WM_CLASS`, both `app_id`.
+///
+/// It is what a window rule matches, what a dock groups by, what an alt-tab
+/// list labels, and what a `.desktop` file is tied to. A window without one is
+/// a window a person cannot write a rule for — and this had none, because
+/// winit only sets it when asked and nothing asked. What it is called is the
+/// caller's: see [`WindowOptions::app_id`](super::WindowOptions::app_id).
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub(super) fn with_app_id(attributes: WindowAttributes, app_id: &str) -> WindowAttributes {
     // Wayland's extension, and it is not only Wayland's: `with_name` writes
     // one field, which the X11 backend reads as `WM_CLASS` and the Wayland one
     // as `app_id`. Which display server is in force is the session's business
     // rather than this line's.
     use winit::platform::wayland::WindowAttributesExtWayland;
 
-    // No Linux compositor has macOS's arrangement either, so a
-    // client-decorated window here is a borderless one and the application
-    // draws the controls and finds the resize edges itself. The shadow around
-    // it is the compositor's own business and there is nothing to ask for.
-    let attributes = attributes.with_decorations(matches!(chrome, WindowChrome::Native));
-
-    WindowAttributesExtWayland::with_name(attributes, APPLICATION, APPLICATION)
+    WindowAttributesExtWayland::with_name(attributes, app_id, app_id)
 }
 
 /// How far into a frameless window a press still counts as grabbing its edge,
@@ -230,7 +226,7 @@ pub(super) fn edge_at(position: Vector2F, size: Vector2F, grab: f32) -> Option<R
 /// it must be, since building it is what the event loop calls before opening
 /// one — and what lets the headless paths hold a handle to nothing.
 ///
-/// No winit type appears in any signature here. What crosses the seam is four
+/// No winit type appears in any signature here. What crosses the seam is five
 /// verbs and two questions.
 #[derive(Clone, Default)]
 pub struct WindowControls(Rc<RefCell<State>>);
@@ -250,6 +246,14 @@ struct State {
     /// actually changes — a mouse move is a common event and setting a cursor
     /// is a call into the window system.
     cursor: Option<ResizeEdge>,
+    /// Whether [`WindowControls::bring_forward`] has asked for attention that
+    /// nobody has given yet.
+    ///
+    /// Kept because X11 never withdraws a request itself: the urgency hint
+    /// stays on the window until the application takes it off, and a window
+    /// somebody has already come to would go on asking to be looked at. See
+    /// [`WindowControls::focused`].
+    attention: bool,
 }
 
 impl WindowControls {
@@ -272,6 +276,41 @@ impl WindowControls {
         let state = self.0.borrow();
         if let Some(window) = state.window.as_ref() {
             window.set_minimized(true);
+        }
+    }
+
+    /// Brings the window back from wherever the desktop put it, and asks the
+    /// desktop for the person's attention if it does not have the keyboard.
+    ///
+    /// A window the platform reports minimised is restored first — Windows,
+    /// X11 and macOS can say so, Wayland cannot — which on Windows and X11
+    /// also activates it: a window nobody can see is the one case worth
+    /// that. Otherwise it asks rather than takes. winit's `focus_window`
+    /// would take — on Windows by pressing a fabricated Alt at whatever
+    /// application has the keyboard and seizing the foreground, on macOS by
+    /// activating over every other application — and a close that came from
+    /// a script while somebody typed elsewhere would hand the rest of their
+    /// typing to this window. `request_user_attention` is each desktop's own
+    /// way of asking instead: a flashing taskbar button on Windows, a
+    /// bouncing dock icon on macOS, the urgency hint on X11, and on Wayland
+    /// an `xdg_activation_v1` request, which the compositor answers as it is
+    /// set to — by focusing the window, or by marking it urgent. A window
+    /// that already has the keyboard is not asked about.
+    ///
+    /// Wherever the window does end up with the keyboard, the application
+    /// hears it through [`WindowDelegate::focused`](super::WindowDelegate::focused)
+    /// and can treat the next few keys as typed at somebody else.
+    pub fn bring_forward(&self) {
+        let mut state = self.0.borrow_mut();
+        let Some(window) = state.window.clone() else {
+            return;
+        };
+        if window.is_minimized() == Some(true) {
+            window.set_minimized(false);
+        }
+        if !window.has_focus() {
+            window.request_user_attention(Some(UserAttentionType::Critical));
+            state.attention = true;
         }
     }
 
@@ -301,6 +340,21 @@ impl WindowControls {
     /// Hands over the window these controls act on.
     pub(super) fn attach(&self, window: Arc<Window>) {
         self.0.borrow_mut().window = Some(window);
+    }
+
+    /// The window has taken the keyboard, which is the attention
+    /// [`Self::bring_forward`] asked for given: the request comes off.
+    ///
+    /// Only X11 needs it — every other desktop withdraws the request itself
+    /// once the window is in front — but it is harmless everywhere.
+    pub(super) fn focused(&self) {
+        let mut state = self.0.borrow_mut();
+        if !std::mem::take(&mut state.attention) {
+            return;
+        }
+        if let Some(window) = state.window.as_ref() {
+            window.request_user_attention(None);
+        }
     }
 
     /// Starts resizing the window from `edge`.

@@ -116,9 +116,9 @@ jobs:
           - name: macOS (Intel)
             runner: macos-latest
             target: x86_64-apple-darwin
-          - name: Linux (x86_64)
-            runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+          # Linux is not a leg here but the `linux` job below, because it is
+          # built in a container and held to a glibc floor by the same file
+          # `Crook CI` runs.
           - name: Windows (x86_64)
             runner: windows-latest
             target: x86_64-pc-windows-msvc
@@ -143,7 +143,7 @@ jobs:
 
       # rust-toolchain.toml asks for the minimal profile, which installs the
       # host's target and no other. The Intel macOS leg needs the one it does
-      # not have; for the other three this is already satisfied and costs a
+      # not have; for the other two this is already satisfied and costs a
       # second.
       - name: Add the target
         shell: bash
@@ -186,6 +186,19 @@ jobs:
             dist/*.sha256
           if-no-files-found: error
           retention-days: 7
+
+
+  # The same build a `Crook CI` dispatch runs, so the floor it is held to has
+  # been seen to hold on a branch before a tag asks for it. The artifact it
+  # uploads is named the way the matrix names its own, and the release job
+  # collects it with them.
+  linux:
+    name: Build Linux (x86_64)
+    needs: version
+    uses: ./.github/workflows/linux-binary.yml
+    with:
+      ref: ${{ inputs.tag || github.ref }}
+      upload: true
 
 
   macos-app:
@@ -297,7 +310,7 @@ jobs:
 
   release:
     name: Publish the release
-    needs: [build, macos-app]
+    needs: [build, linux, macos-app]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -370,7 +383,8 @@ jobs:
           ```
 
           Reads this release, checks the archive against the `SHA256SUMS` below, and installs to
-          `~/.local/bin` — or elsewhere with `--to`. macOS on both architectures, Linux on x86_64.
+          `~/.local/bin` — or elsewhere with `--to`. macOS on both architectures, Linux on x86_64
+          with glibc 2.31 or newer.
 
           **On macOS, prefer that to downloading an archive by hand.** These binaries are signed
           ad-hoc rather than notarized, which needs a paid Developer ID, so a Mac refuses the
@@ -392,9 +406,11 @@ jobs:
           ## By hand
 
           `aarch64-apple-darwin` is Apple Silicon, `x86_64-apple-darwin` is an Intel Mac. The
-          Linux build is made on Ubuntu 24.04 and so wants glibc 2.39 or newer; its window and
-          GPU are reached through X11/Wayland and Vulkan/GL at run time, so a minimal system
-          needs the runtime packages `./script/bootstrap` lists and at least one font family.
+          Linux build is made in a Debian 11 container and so wants glibc 2.31 or newer: Debian 11,
+          Ubuntu 20.04, RHEL 9 and anything since. `script/glibc-floor` checked that before this
+          page was published. Its window and GPU are reached through X11/Wayland and Vulkan/GL at
+          run time, so a minimal system needs the runtime packages `./script/bootstrap` lists and
+          at least one font family.
           Windows is a `.zip`: unzip it and run `crook.exe`. It is unsigned, so SmartScreen says
           "Windows protected your PC" once, and *More info → Run anyway* starts it.
 
