@@ -68,6 +68,7 @@ use super::action::{
     Subject, TabMenuAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
 };
 use super::block_list::block_text;
+use super::held_locks::{HeldLock, HeldLocks};
 use super::settings_page::SettingsState;
 use super::tab_context_menu::TabContextMenuState;
 use super::tab_menu::{Contents, Going, Looked, Mode as WorktreeMode, Sweep, TabMenuState};
@@ -789,6 +790,9 @@ pub struct Workspace {
     /// with no data directory, where the creator has nowhere to put one and
     /// says so rather than guessing.
     worktrees_directory: Option<PathBuf>,
+    /// The locks this window took on the checkouts it made, until it takes
+    /// them off. See [`HeldLocks`].
+    held: HeldLocks,
     /// Makes the last settings save the one the file ends up holding.
     ///
     /// Browsing themes with the arrow keys asks for one save per keystroke,
@@ -1005,6 +1009,7 @@ impl Workspace {
             theme_before_draft: None,
             themes_directory: crate::theme::user_themes_directory(),
             worktrees_directory: worktree_store(),
+            held: HeldLocks::default(),
             saves: Arc::default(),
             keybinding_saves: Arc::default(),
             settings_save_problem: None,
@@ -2038,6 +2043,77 @@ impl Workspace {
             .panes()
             .filter_map(|(_, pane)| Some((pane.id(), pane.session().working_directory.clone()?)))
             .collect()
+    }
+
+    /// Whether any pane in the window is working in `checkout` or anywhere
+    /// under it.
+    ///
+    /// The one question asked before Crook takes its own lock off a checkout,
+    /// wherever that happens — a pane leaving one this window locked, a
+    /// removal, a sweep. A plain prefix rather than
+    /// [`tab_menu::holding`](super::tab_menu::holding)'s longest match,
+    /// because this needs no listing to answer and it errs the right way: a
+    /// pane in a checkout nested inside this one counts as being in this one
+    /// too, and all that costs is a lock left standing that the menu
+    /// recognises as Crook's own anyway.
+    pub(super) fn a_pane_is_in(&self, checkout: &Path) -> bool {
+        self.tabs.panes().any(|(_, pane)| {
+            pane.session()
+                .working_directory
+                .as_deref()
+                .is_some_and(|directory| directory.starts_with(checkout))
+        })
+    }
+
+    /// The locks this window has taken and not yet taken off.
+    ///
+    /// Handed out so that the window's delegate can take off the ones still
+    /// held as the event loop stops, which is a moment the workspace is never
+    /// told about: see [`HeldLocks::release_all`].
+    pub fn held_locks(&self) -> HeldLocks {
+        self.held.clone()
+    }
+
+    /// Takes the lock off each checkout this window made and locked that no
+    /// pane is working in any more.
+    ///
+    /// Asked after anything that can take a pane out of one — the strip
+    /// moving, which is every pane that closes, and a pane's directory
+    /// changing, which is a shell that `cd`ed out — and it costs nothing then
+    /// unless the window holds a lock, which it almost never does. Only the
+    /// locks this window took: a checkout another Crook window made is locked
+    /// with the same prefix, and its agent is still in there whatever this
+    /// window's panes do.
+    ///
+    /// Asked here, where the panes are, and answered on the background pool,
+    /// where [`release`](crate::git::worktree::release) reads whose the lock is
+    /// again rather than trusting that it is still this window's.
+    fn release_vacated(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.held.is_empty() {
+            return;
+        }
+        let vacated = self.held.start_releasing(|lock| {
+            !lock
+                .spellings()
+                .into_iter()
+                .any(|checkout| self.a_pane_is_in(checkout))
+        });
+
+        for lock in vacated {
+            let releasing = ctx.background().spawn({
+                let lock = lock.clone();
+                async move { crate::git::worktree::release(&lock.repository, &lock.checkout) }
+            });
+            // Nothing on screen waits for this, so nothing is told but the
+            // list of what the window still holds.
+            ctx.spawn(releasing, move |workspace, released, _| {
+                if let Err(problem) = released {
+                    log::warn!("could not unlock {}: {problem}", lock.checkout.display());
+                }
+                workspace.held.released(&lock.checkout);
+            })
+            .detach();
+        }
     }
 
     /// Whether any popup is up.
@@ -3956,7 +4032,20 @@ impl Workspace {
         let opening = self.tab_menu.opening;
         let made = ctx.background().spawn({
             let path = path.clone();
-            async move { crate::git::worktree::add(&repository, &path, &branch, None) }
+            let held = self.held.clone();
+            async move {
+                crate::git::worktree::add(&repository, &path, &branch, None)?;
+                // Locked here, before the answer lands and the tab opens, so
+                // there is no moment in which an agent is working in a
+                // checkout nothing else has been told about. And handed in
+                // from here rather than with the answer, because the answer
+                // never lands in a window closed while git was busy: this
+                // task is then the one thing left to take the lock off.
+                if let Some(lock) = HeldLock::take(&repository, &path, &branch) {
+                    held.admit(lock);
+                }
+                Ok::<_, crate::git::worktree::Error>(())
+            }
         });
 
         ctx.spawn(made, move |workspace, made, ctx| {
@@ -3983,9 +4072,12 @@ impl Workspace {
                     // `open_tab_in_group_of` falls back out of if that tab has
                     // closed in the meantime.
                     match opened_on {
-                        Some(tab) => workspace.open_tab_in_group_of(tab, path, ctx),
-                        None => workspace.open_tab_in(path, ctx),
+                        Some(tab) => workspace.open_tab_in_group_of(tab, path.clone(), ctx),
+                        None => workspace.open_tab_in(path.clone(), ctx),
                     };
+                    // Held once its pane is in it, and from then on until no
+                    // pane in the window is.
+                    workspace.held.opened(&path);
                 }
                 Err(problem) => {
                     if answering {
@@ -4229,10 +4321,19 @@ impl Workspace {
             return;
         };
 
+        // Asked again at each step rather than once when the list was made: a
+        // pane that moved into one of these since is working in it now, and
+        // Crook's own lock is then what makes git leave it standing.
+        let release = !self.a_pane_is_in(&going.path);
         let removing = ctx.background().spawn({
             let repository = repository.clone();
             let path = going.path.clone();
-            async move { crate::git::worktree::remove(&repository, &path, false) }
+            async move {
+                if release {
+                    crate::git::worktree::release(&repository, &path)?;
+                }
+                crate::git::worktree::remove(&repository, &path, false)
+            }
         });
 
         ctx.spawn(removing, move |workspace, removed, ctx| {
@@ -4279,9 +4380,18 @@ impl Workspace {
         let asked_about = index;
         let opened_on = self.tab_menu.tab;
         let opening = self.tab_menu.opening;
+        // Decided here, where the panes are, rather than trusted to the × that
+        // led here: a removal dispatched at a checkout a pane is working in
+        // must meet Crook's own lock, which is what the lock is for.
+        let release = !self.a_pane_is_in(&path);
         let removed = ctx.background().spawn({
             let path = path.clone();
-            async move { crate::git::worktree::remove(&repository, &path, force) }
+            async move {
+                if release {
+                    crate::git::worktree::release(&repository, &path)?;
+                }
+                crate::git::worktree::remove(&repository, &path, force)
+            }
         });
 
         ctx.spawn(removed, move |workspace, removed, ctx| {
@@ -5104,6 +5214,9 @@ impl Workspace {
         // row shows are looked up by directory — which is what makes the branch
         // chip follow a shell's `cd`.
         self.sync_git(ctx);
+        // And a `cd` out of a checkout this window locked may have been the
+        // last pane in it leaving.
+        self.release_vacated(ctx);
         ctx.notify();
         true
     }
@@ -5516,6 +5629,11 @@ impl Workspace {
         // into view whichever gesture selected it.
         self.attend(before, ctx);
         self.scroll_row_into_view();
+        // After the strip has moved, which is every way a pane closes: the
+        // last one working in a checkout this window locked may just have.
+        // A window closing with its last tab is not one of them — the strip
+        // keeps that tab — and its locks come off with the process instead.
+        self.release_vacated(ctx);
 
         // An action that changed nothing repaints nothing: holding down
         // cmd-alt-left on the leftmost tab must not put the window on a

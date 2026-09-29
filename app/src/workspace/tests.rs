@@ -5853,6 +5853,565 @@ fn nothing_offers_to_tidy_a_checkout_a_tab_is_working_in() {
     );
 }
 
+/// What `git worktree list` says the checkout at `path` is locked with, if it
+/// is.
+fn lock_on(repository: &Path, path: &Path) -> Option<String> {
+    crate::git::worktree::list(repository)
+        .expect("the repository lists")
+        .into_iter()
+        .find(|worktree| worktree.path == path)
+        .unwrap_or_else(|| panic!("{} is not a worktree of the repository", path.display()))
+        .locked
+}
+
+/// The worktree menu open over a scratch repository with one checkout per
+/// reason, each locked with it, on branches `held/1` … `held/N` — every lock
+/// taken by git directly, the way a Crook that crashed or another tool leaves
+/// one. The checkouts come back in the order of the reasons.
+fn menu_over_locked_checkouts(reasons: &[&str]) -> Option<(Scratch, Harness, Vec<PathBuf>)> {
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return None;
+    };
+    // `args` names the checkout last, and the checkout is a path rather than
+    // text.
+    let git = |args: &[&str], checkout: &Path| {
+        crate::process::command("git")
+            .args(args)
+            .arg(checkout)
+            .current_dir(&repository)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+
+    let mut checkouts = Vec::new();
+    for (serial, reason) in reasons.iter().enumerate() {
+        let checkout = scratch.path().join(format!("held{}", serial + 1));
+        let branch = format!("held/{}", serial + 1);
+        assert!(
+            git(&["worktree", "add", "--quiet", "-b", &branch], &checkout),
+            "git would not add {}",
+            checkout.display()
+        );
+        assert!(
+            git(&["worktree", "lock", "--reason", reason], &checkout),
+            "git would not lock {}",
+            checkout.display()
+        );
+        checkouts.push(checkout);
+    }
+
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("every checkout to be read", |harness| {
+        harness.worktrees_listed() == Some(reasons.len() + 1)
+    });
+    Some((scratch, harness, checkouts))
+}
+
+/// A window with a checkout made through its own worktree menu, the way a
+/// person makes one, and open in a tab: the repository, the checkout as the
+/// pane that opened in it spells it, and that pane.
+fn window_with_a_checkout_it_made(
+    scratch: &Scratch,
+) -> Option<(Harness, PathBuf, PathBuf, PaneId)> {
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return None;
+    };
+
+    let mut harness = window_making_a_checkout(scratch, &repository);
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > 1
+    });
+    let opened = harness
+        .focused_pane_id()
+        .expect("the checkout did not open a pane");
+    let checkout = harness
+        .working_directory(opened)
+        .expect("the pane that opened does not know where it is");
+    Some((harness, repository, checkout, opened))
+}
+
+/// A window that has just asked its worktree menu for a new checkout of
+/// `repository`, the way a person asks for one, and has not heard back yet.
+fn window_making_a_checkout(scratch: &Scratch, repository: &Path) -> Harness {
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.to_owned());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    harness.dispatch_worktree(WorktreeAction::Create);
+    harness
+}
+
+/// Makes every checkout of `repository` slow to finish, the way a
+/// post-checkout hook that runs `npm ci` does: git runs the hook before
+/// `worktree add` returns, and this one writes `started` and then takes two
+/// seconds.
+fn slow_post_checkout(repository: &Path, started: &Path) {
+    let hooks = repository.join(".git").join("hooks");
+    fs::create_dir_all(&hooks).expect("the repository is writable");
+    let hook = hooks.join("post-checkout");
+    // Forward slashes, which the sh Git for Windows runs its hooks with reads
+    // as readily as any other.
+    let forward = |path: &Path| path.to_string_lossy().replace('\\', "/");
+    fs::write(
+        &hook,
+        format!("#!/bin/sh\n: > '{}'\nsleep 2\n", forward(started)),
+    )
+    .expect("the hook is writable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
+            .expect("the hook can be made executable");
+    }
+
+    // Named in the repository's own config, so that a hooks directory set for
+    // the whole machine does not pass this one by.
+    let configured = crate::process::command("git")
+        .args(["config", "core.hooksPath", &forward(&hooks)])
+        .current_dir(repository)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    assert!(configured, "git would not point the repository at the hook");
+}
+
+/// The checkouts whose lock the window says it still holds.
+fn held_checkouts(harness: &Harness) -> Vec<PathBuf> {
+    harness.workspace.read(&harness.app, |workspace, _| {
+        workspace.held_locks().checkouts()
+    })
+}
+
+#[test]
+fn a_checkout_crook_makes_is_locked_until_the_last_pane_in_it_closes() {
+    // The lock is what tells everything else that touches the repository —
+    // `git worktree remove` typed by hand, `prune`, another tool's tidy-up —
+    // that an agent is working in this checkout. So it is taken before the
+    // tab opens, it outlives one of two panes in it, and it goes with the
+    // last of them, which is the moment nothing is working there any more.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, checkout, first)) = window_with_a_checkout_it_made(&scratch)
+    else {
+        return;
+    };
+
+    let branch = crate::git::worktree::list(&repository)
+        .expect("the repository lists")
+        .into_iter()
+        .find(|worktree| worktree.path == checkout)
+        .and_then(|worktree| worktree.branch)
+        .expect("the checkout is on the branch it was made with");
+    assert_eq!(
+        lock_on(&repository, &checkout),
+        Some(crate::git::worktree::lock_reason(&branch)),
+        "the checkout was opened without being locked"
+    );
+
+    // A second pane, further down the same checkout: it is still being
+    // worked in when the first one goes.
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let second = harness
+        .focused_pane_id()
+        .expect("the split focused its pane");
+    assert_ne!(second, first);
+    let deeper = checkout.join("deeper");
+    fs::create_dir_all(&deeper).expect("the checkout is writable");
+    harness.update_session(second, |session| {
+        session.working_directory = Some(deeper.clone());
+    });
+
+    harness.dispatch_action(TabAction::ClosePane(first));
+    // Long enough for a release to have gone through twice over: asking git
+    // is milliseconds.
+    harness.settle(std::time::Duration::from_secs(1));
+    assert!(
+        lock_on(&repository, &checkout).is_some(),
+        "the lock went while a pane was still working in the checkout"
+    );
+
+    harness.dispatch_action(TabAction::ClosePane(second));
+    harness.wait_for("the lock to go with the last pane", |_| {
+        lock_on(&repository, &checkout).is_none()
+    });
+    assert!(checkout.is_dir(), "closing the pane took the checkout too");
+    harness.wait_for("the window to stop counting it as held", |harness| {
+        held_checkouts(harness).is_empty()
+    });
+}
+
+#[test]
+fn a_lock_crook_left_behind_does_not_keep_its_checkout_from_being_removed() {
+    // A Crook that crashed, or was killed, never closed its tabs and never
+    // took its locks off. Nothing in this window is working in the checkout,
+    // and the lock says whose it was, so it is free: the × and the sweep offer
+    // it, and removing it takes Crook's own lock off first.
+    let Some((_scratch, mut harness, checkouts)) =
+        menu_over_locked_checkouts(&[&crate::git::worktree::lock_reason("held/1")])
+    else {
+        return;
+    };
+    let checkout = &checkouts[0];
+
+    let scene = harness.frame();
+    assert!(
+        worktree_menu_says(&scene, "1 free checkout"),
+        "a checkout only Crook's own old lock was holding was not offered"
+    );
+    assert!(
+        !worktree_menu_says(&scene, "locked"),
+        "the row still says the checkout is locked by somebody"
+    );
+
+    let index = harness
+        .worktree_index_under(checkout)
+        .expect("the checkout is not in the menu");
+    harness.dispatch_worktree(WorktreeAction::AskRemove(index));
+    harness.dispatch_worktree(WorktreeAction::Remove { force: false });
+    harness.wait_for("the checkout to go", |_| !checkout.exists());
+}
+
+#[test]
+fn a_sweep_takes_crooks_own_old_lock_off_and_leaves_anybody_elses() {
+    // The same two locks side by side. Crook's is a lock with nothing in the
+    // window behind it, and goes with its checkout; the other is somebody
+    // else's statement that they are working there, which Crook has no way to
+    // check and so never overrules.
+    let Some((scratch, mut harness, checkouts)) = menu_over_locked_checkouts(&[
+        &crate::git::worktree::lock_reason("held/1"),
+        "claude session held-2",
+    ]) else {
+        return;
+    };
+    let repository = scratch.path().join("repo");
+
+    assert!(
+        worktree_menu_says(&harness.frame(), "1 free checkout"),
+        "the sweep does not offer exactly the checkout Crook's own lock held"
+    );
+    harness.dispatch_worktree(WorktreeAction::AskTidy);
+    harness.wait_for("the checkouts to be looked in", |harness| {
+        harness.worktrees_going().is_some()
+    });
+    assert_eq!(harness.worktrees_going(), Some(1));
+
+    harness.dispatch_worktree(WorktreeAction::Tidy);
+    harness.wait_for("the list to be read again", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    assert!(
+        !checkouts[0].exists(),
+        "the checkout under Crook's own lock was not removed"
+    );
+    assert!(
+        checkouts[1].is_dir(),
+        "the checkout somebody else locked was removed"
+    );
+    assert_eq!(
+        lock_on(&repository, &checkouts[1]).as_deref(),
+        Some("claude session held-2"),
+        "somebody else's lock was taken off"
+    );
+}
+
+#[test]
+fn crooks_own_lock_holds_while_a_pane_is_working_in_the_checkout() {
+    // The case the lock exists for, asked the hard way: a removal dispatched
+    // at a checkout a pane is in, which no × would have offered. Crook takes
+    // its own lock off only when nothing in the window is working in the
+    // checkout, so git refuses and the checkout stays — locked, and whole.
+    let Some((scratch, mut harness, checkouts)) =
+        menu_over_locked_checkouts(&[&crate::git::worktree::lock_reason("held/1")])
+    else {
+        return;
+    };
+    let repository = scratch.path().join("repo");
+    let checkout = &checkouts[0];
+
+    let tab = harness.active_id();
+    harness.dispatch_worktree(WorktreeAction::CloseMenu);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let working = harness
+        .focused_pane_id()
+        .expect("the split focused its pane");
+    harness.update_session(working, |session| {
+        session.working_directory = Some(checkout.clone());
+    });
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    let index = harness
+        .worktree_index_under(checkout)
+        .expect("the checkout is not in the menu");
+    harness.dispatch_worktree(WorktreeAction::AskRemove(index));
+    harness.dispatch_worktree(WorktreeAction::Remove { force: true });
+    harness.wait_for("git to answer", |harness| !harness.worktree_menu_is_busy());
+
+    assert!(
+        frame_text(&harness.frame()).contains("locked"),
+        "the refusal was not shown"
+    );
+    assert!(checkout.is_dir(), "the checkout a pane is in was removed");
+    assert_eq!(
+        lock_on(&repository, checkout),
+        Some(crate::git::worktree::lock_reason("held/1")),
+        "the lock was taken off a checkout a pane is working in"
+    );
+}
+
+#[test]
+fn a_pane_that_leaves_the_checkout_crook_made_takes_its_lock_off_with_it() {
+    // The last pane in a checkout does not have to close for nothing to be
+    // working there any more: a shell that goes back to the main checkout to
+    // merge the branch has left it. The lock goes then, rather than staying
+    // for good because the pane that closes later was somewhere else by the
+    // time it did.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, checkout, pane)) = window_with_a_checkout_it_made(&scratch)
+    else {
+        return;
+    };
+    assert!(
+        lock_on(&repository, &checkout).is_some(),
+        "the checkout was opened without being locked"
+    );
+
+    // Reported the way a shell reports a `cd`, which is the only way a
+    // pane's directory changes under it.
+    let moved = |harness: &mut Harness, to: PathBuf| {
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &crate::terminal_model::TerminalUpdate::WorkingDirectory(pane, to),
+                ctx,
+            );
+        });
+    };
+
+    // One directory down is still in it.
+    let deeper = checkout.join("deeper");
+    fs::create_dir_all(&deeper).expect("the checkout is writable");
+    moved(&mut harness, deeper);
+    harness.settle(std::time::Duration::from_secs(1));
+    assert!(
+        lock_on(&repository, &checkout).is_some(),
+        "the lock went while the pane was still in the checkout, one directory down"
+    );
+
+    moved(&mut harness, repository.clone());
+    harness.wait_for("the lock to go with the pane that left", |_| {
+        lock_on(&repository, &checkout).is_none()
+    });
+    harness.wait_for("the window to stop counting it as held", |harness| {
+        held_checkouts(harness).is_empty()
+    });
+    assert!(
+        harness.pane_ids().contains(&pane),
+        "the pane that left was closed"
+    );
+}
+
+#[test]
+fn closing_a_pane_in_a_checkout_another_crook_locked_leaves_its_lock() {
+    // `crook: ` says a Crook took the lock and not which one. Another Crook
+    // window on the same repository made this checkout and its agent is in
+    // there; a pane of *this* window passing through and closing again is no
+    // reason to tell git and every other tool that nobody is.
+    let Some((scratch, mut harness, checkouts)) =
+        menu_over_locked_checkouts(&[&crate::git::worktree::lock_reason("held/1")])
+    else {
+        return;
+    };
+    let repository = scratch.path().join("repo");
+    let checkout = &checkouts[0];
+    harness.dispatch_worktree(WorktreeAction::CloseMenu);
+
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let visiting = harness
+        .focused_pane_id()
+        .expect("the split focused its pane");
+    harness.update_session(visiting, |session| {
+        session.working_directory = Some(checkout.clone());
+    });
+    harness.dispatch_action(TabAction::ClosePane(visiting));
+    // Long enough for a release to have gone through twice over.
+    harness.settle(std::time::Duration::from_secs(1));
+
+    assert_eq!(
+        lock_on(&repository, checkout),
+        Some(crate::git::worktree::lock_reason("held/1")),
+        "closing a pane took off a lock this window never took"
+    );
+}
+
+#[test]
+fn release_all_takes_off_every_lock_the_window_still_holds() {
+    // Closing the window closes no pane — the strip keeps its last tab and
+    // the window goes instead — so nothing working in a checkout ever
+    // "leaves" it, and whatever the window still holds has to come off in
+    // one go: a lock left on would hold the checkout against a hand-typed
+    // `git worktree remove` for good, since a session brought back does not
+    // lock again, and with "Restore session" off nothing comes back to it at
+    // all.
+    //
+    // This is `release_all` alone, called the way the window's delegate calls
+    // it and in the order the process does things on the way out: the
+    // release, then the window and its background pool. The wiring that
+    // gets there — `Shell`'s `exiting`, and crookui's `App` handing winit's
+    // `exiting` to it — needs an event loop, and no test here has one.
+    let scratch = Scratch::new();
+    let Some((harness, repository, checkout, _)) = window_with_a_checkout_it_made(&scratch) else {
+        return;
+    };
+    assert!(
+        lock_on(&repository, &checkout).is_some(),
+        "the checkout was opened without being locked"
+    );
+    assert_eq!(held_checkouts(&harness), vec![checkout.clone()]);
+
+    let held = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.held_locks());
+    held.release_all(std::time::Duration::from_secs(30));
+    drop(harness);
+
+    assert_eq!(
+        lock_on(&repository, &checkout),
+        None,
+        "the lock outlived the window"
+    );
+    assert!(checkout.is_dir(), "releasing took the checkout too");
+}
+
+#[test]
+fn a_checkout_still_being_made_as_the_window_closes_takes_its_own_lock_off() {
+    // git can take a while over a checkout — a post-checkout hook running
+    // `npm ci` is why its write deadline is two minutes — and a window closed
+    // in that time holds nothing yet: the lock is taken once `add` returns,
+    // on the background pool. The process joins that pool on its way out
+    // *after* the window's delegate has taken off everything the window held,
+    // so the creation finishing then is the only thing left that can take its
+    // lock off. This runs in that order: the release, then the pool.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let started = scratch.path().join("hook-started");
+    slow_post_checkout(&repository, &started);
+
+    let mut harness = window_making_a_checkout(&scratch, &repository);
+    harness.wait_for("git to be running the post-checkout hook", |_| {
+        started.exists()
+    });
+    let held = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.held_locks());
+    held.release_all(std::time::Duration::from_secs(30));
+    // Dropping the window drops its background pool, and dropping the pool
+    // waits for the worker that is still making the checkout — which is
+    // what the process does as it ends.
+    drop(harness);
+
+    let checkout = crate::git::worktree::list(&repository)
+        .expect("the repository lists")
+        .into_iter()
+        .find(|worktree| !worktree.is_main)
+        .expect("the checkout was never made")
+        .path;
+    assert_eq!(
+        lock_on(&repository, &checkout),
+        None,
+        "a checkout finished after its window closed kept Crook's lock"
+    );
+    assert!(checkout.is_dir(), "releasing took the checkout too");
+}
+
+#[test]
+fn a_lock_handed_in_before_its_tab_opens_is_not_taken_for_one_nobody_is_in() {
+    // The creation hands its lock in from the background pool as soon as git
+    // has taken it, and the tab opens a moment later, on the main thread. A
+    // session report in between — any pane's shell saying anything — asks
+    // which held checkouts nothing is working in any more, and this one has
+    // no pane in it yet only because its tab has not opened.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let started = scratch.path().join("hook-started");
+    slow_post_checkout(&repository, &started);
+
+    let mut harness = window_making_a_checkout(&scratch, &repository);
+    harness.wait_for("git to be running the post-checkout hook", |_| {
+        started.exists()
+    });
+    // Without pumping the queue from here on, so the answer cannot land and
+    // the tab cannot open.
+    let deadline = std::time::Instant::now() + SHELL_TIMEOUT;
+    while held_checkouts(&harness).is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the creation never handed its lock in"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let checkout = held_checkouts(&harness)[0].clone();
+    assert_eq!(
+        harness.pane_ids().len(),
+        1,
+        "the tab opened before a report could come in between"
+    );
+
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |_| {});
+    // Long enough for a release to have gone through twice over.
+    harness.settle(std::time::Duration::from_secs(1));
+    assert!(
+        lock_on(&repository, &checkout).is_some(),
+        "the lock came off a checkout whose tab had not opened yet"
+    );
+
+    harness.wait_for("the checkout's tab to open", |harness| {
+        harness.pane_ids().len() > 1
+    });
+    assert_eq!(
+        held_checkouts(&harness),
+        vec![checkout],
+        "the window let go of the lock its new tab is working under"
+    );
+}
+
 #[test]
 fn a_removal_answers_the_menu_that_asked_not_the_same_tabs_next_one() {
     // The menu is taken down and opened again on the same tab while git is

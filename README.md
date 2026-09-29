@@ -451,8 +451,10 @@ Nineteen features, and the page that configures them:
   already in it, because two agents editing one checkout is exactly what a worktree exists to
   prevent. `New worktree…` asks for a branch name, fills one in that nothing is using, shows
   where the checkout will go, and opens a tab in it — folded into a group with the tab that
-  asked for it. Removal is offered only for a checkout
-  that is not locked, not the main one, and not one a tab is working in; it says what it will
+  asked for it. A checkout made that way is locked (`crook: <branch>`) until no pane in the
+  window is working in it any more, or the window closes, so `git worktree remove`, `prune` and
+  other tools' tidy-ups leave it alone. Removal is offered only for a checkout
+  that nobody else has locked, not the main one, and not one a tab is working in; it says what it will
   delete first, and it never deletes the branch. One row down, `Remove 3 free checkouts…`
   does the same to all of them at once — it looks in each one first, names the branches that
   will actually go, and leaves anything with work in it exactly where it is. That row is there

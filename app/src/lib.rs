@@ -1531,6 +1531,16 @@ fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> R
     })
 }
 
+/// How long quitting waits for git to take Crook's locks off the checkouts
+/// the window made.
+///
+/// Each is a listing and an unlock, milliseconds on any disk. The bound is
+/// for a git that hangs — a repository on a network mount that went away —
+/// and it is short, because it is the time between a person closing the
+/// window and the process being gone. A lock not taken off by then is the
+/// one a crash leaves, which the worktree menu already knows what to do with.
+const RELEASE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Puts a theme in force before there is a window to repaint.
 ///
 /// The command line's if it named one, and the saved one otherwise. A name
@@ -3270,6 +3280,20 @@ impl Shell {
 }
 
 impl WindowDelegate for Shell {
+    /// Takes off the locks the window still holds on the checkouts it made.
+    ///
+    /// Closing the window closes no pane — the strip keeps its last tab and
+    /// the window goes instead — so nothing working in a checkout Crook made
+    /// ever left it, and every agent in one ends with the process. Here
+    /// rather than wherever the window asks to quit, because the window
+    /// manager's close and macOS's Quit never ask.
+    fn exiting(&mut self) {
+        let held = self
+            .workspace
+            .read(&self.app, |workspace, _| workspace.held_locks());
+        held.release_all(RELEASE_PATIENCE);
+    }
+
     fn build_scene(&mut self, size: Vector2F, scale_factor: f32) -> Rc<Scene> {
         // Written down rather than dispatched: it costs nothing, it invalidates
         // nothing, and it is the only place the window's size is known. A size

@@ -68,8 +68,8 @@ impl Default for WindowOptions {
 /// What the window asks of the application above it.
 ///
 /// This is the whole seam between the platform layer and the application:
-/// three methods, no winit types, no wgpu types. A headless test double
-/// implements it in a dozen lines.
+/// four methods, one of them optional, no winit types, no wgpu types. A
+/// headless test double implements it in a dozen lines.
 pub trait WindowDelegate: 'static {
     /// Lays out and paints the frame to draw.
     ///
@@ -87,6 +87,18 @@ pub trait WindowDelegate: 'static {
 
     /// Runs after each frame reaches the screen.
     fn frame_drawn(&mut self);
+
+    /// Runs once, as the event loop stops, whatever stopped it.
+    ///
+    /// The one place an application hears that it is ending. Only some of
+    /// the ways a window closes pass through the application first — the
+    /// window manager's close and macOS's Quit go straight to the platform,
+    /// and Quit ends the process without [`run`] ever returning — and every
+    /// one of them passes through here.
+    ///
+    /// Nothing is drawn after it, so work done here is work the person
+    /// waits for with the window up and unanswering: bound it.
+    fn exiting(&mut self) {}
 }
 
 /// A `Send + Sync` handle for reaching the main thread from anywhere.
@@ -276,6 +288,10 @@ impl ApplicationHandler<CrookEvent> for App {
         {
             window.request_redraw();
         }
+    }
+
+    fn exiting(&mut self, _: &ActiveEventLoop) {
+        self.delegate.exiting();
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
