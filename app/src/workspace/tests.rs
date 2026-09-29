@@ -758,6 +758,12 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.worktrees_listed())
     }
 
+    /// The branches the menu has marked merged, once the proof is back.
+    fn worktrees_landed(&self) -> Option<Vec<String>> {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.worktrees_landed())
+    }
+
     /// The agents the creator offers, by command name.
     fn worktree_agents(&self) -> Vec<&'static str> {
         self.workspace
@@ -7987,6 +7993,172 @@ fn stop_spares_the_checkouts_after_the_one_in_flight() {
         worktree_menu_says(&harness.frame(), "Stopped after 1 of 3"),
         "the list does not say where the sweep stopped"
     );
+}
+
+/// Runs git in `directory` for a test that has to make history the menu then
+/// reads, and says what failed when it does.
+fn git_in(directory: &Path, args: &[&str]) -> String {
+    let output = crate::process::command("git")
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .current_dir(directory)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("git is installed; the repository was made with it");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+#[test]
+fn a_checkout_whose_work_landed_is_marked_merged_and_swept_on_its_own() {
+    // Two finished-looking checkouts, one whose work the base has as a squash
+    // and one whose work it does not. git calls both branches unmerged; the
+    // menu has to tell them apart, say so on the rows, and offer to take the
+    // first without the second.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    let landed = spare_checkout(&mut harness, tab, &store, &[]);
+    let open = spare_checkout(&mut harness, tab, &store, std::slice::from_ref(&landed));
+    let branch = |checkout: &Path| git_in(checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let (landed_branch, open_branch) = (branch(&landed), branch(&open));
+
+    fs::write(landed.join("landed.txt"), "finished\n").expect("the checkout is there");
+    git_in(&landed, &["add", "landed.txt"]);
+    git_in(&landed, &["commit", "--no-verify", "-m", "finished"]);
+    fs::write(open.join("open.txt"), "not yet\n").expect("the checkout is there");
+    git_in(&open, &["add", "open.txt"]);
+    git_in(&open, &["commit", "--no-verify", "-m", "not yet"]);
+    // What the forge's squash button does, on the branch the repository was
+    // made on — which is the base, whatever this machine calls it.
+    git_in(&repository, &["merge", "--squash", &landed_branch]);
+    git_in(
+        &repository,
+        &["commit", "--no-verify", "-m", "finished, squashed"],
+    );
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the proof to come back", |harness| {
+        harness.worktrees_landed().is_some()
+    });
+    assert_eq!(
+        harness.worktrees_landed(),
+        Some(vec![landed_branch.clone()]),
+        "the squashed branch was not the one proved"
+    );
+    let scene = harness.frame();
+    let row_says = |branch: &str| {
+        let row = worktree_row_saying(&scene, branch);
+        text_where(&scene, |position| row.contains_point(position))
+    };
+    assert!(
+        row_says(&landed_branch).contains("merged"),
+        "the row whose work landed is not marked: {:?}",
+        row_says(&landed_branch)
+    );
+    assert!(
+        !row_says(&open_branch).contains("merged"),
+        "the row with open work is marked as though it had landed"
+    );
+    assert!(
+        worktree_menu_says(&scene, "Remove 2 free checkouts"),
+        "the broader sweep stopped offering both"
+    );
+    assert!(
+        worktree_menu_says(&scene, "Remove 1 merged checkout"),
+        "the list did not offer the one checkout whose work landed"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::AskTidyLanded);
+    assert_eq!(harness.worktrees_swept(), Some((0, 1)));
+    harness.wait_for("the checkout to be looked in", |harness| {
+        harness.worktrees_going().is_some()
+    });
+    assert_eq!(harness.worktrees_going(), Some(1));
+    harness.dispatch_worktree(WorktreeAction::Tidy);
+    harness.wait_for("the list to be read again", |harness| {
+        harness.worktrees_listed() == Some(2) && !harness.worktree_menu_is_tidying()
+    });
+
+    assert!(
+        !landed.exists(),
+        "the checkout whose work landed is still there"
+    );
+    assert!(open.is_dir(), "the checkout with open work was taken too");
+    // The branch is the work, landed or not, and nothing here deletes one.
+    let branches = crate::git::worktree::branches(&repository).expect("the repository lists");
+    assert!(
+        branches.contains(&landed_branch) && branches.contains(&open_branch),
+        "a branch went with its checkout: {branches:?}"
+    );
+}
+
+#[test]
+fn removing_the_last_checkout_leaves_no_empty_directory_in_the_store() {
+    // git deletes the checkout and nothing above it, so the store kept a
+    // directory per repository for ever after its last checkout went.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    let made = spare_checkout(&mut harness, tab, &store, &[]);
+    let holder = made
+        .parent()
+        .expect("a checkout sits in a directory of the store")
+        .to_path_buf();
+    assert_ne!(holder, store, "the checkout is not grouped by repository");
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    let index = harness
+        .worktree_index_under(&store)
+        .expect("the checkout that was made is not in the menu");
+    harness.dispatch_worktree(WorktreeAction::AskRemove(index));
+    harness.dispatch_worktree(WorktreeAction::Remove { force: false });
+    harness.wait_for("the list to be read again", |harness| {
+        harness.worktrees_listed() == Some(1)
+    });
+
+    assert!(!made.exists(), "the checkout was not removed");
+    assert!(
+        !holder.exists(),
+        "{} was left behind with nothing in it",
+        holder.display()
+    );
+    assert!(store.is_dir(), "the store itself went with it");
 }
 
 #[test]

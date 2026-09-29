@@ -1174,6 +1174,39 @@ looking, then names the branches a press would really take. The row that opens i
 where there is nothing free, which is the same promise the menu itself makes by not opening
 outside a repository.
 
+**Work that has landed is proved, never assumed.** A removal keeps the branch, and git cannot
+see a squash merge, so every finished task used to leave a branch `git branch --no-merged`
+lists for ever — this repository had eighteen, and every one had landed. `app/src/git/merged.rs`
+proves it from the repository alone, with no network: by ancestry (the tip is on the base), or
+by patch (the branch's whole diff since its merge-base has the `patch-id` of one commit that
+reached the base after the branch left it, which is what a squash is), found in one
+`git log -p | git patch-id --verbatim` pass capped at a thousand commits and ten seconds —
+`--verbatim` because plain `--stable` ignores whitespace, and a follow-up commit that only
+re-indents a line of Python or YAML is still work the squash does not have; a git older than
+2.39, which lacks the flag, proves nothing by patch and only by ancestry. Neither proof counts
+for a branch whose own reflog records no commit made on it: a checkout nobody has committed
+in — fresh, only brought up to date, or cut from the tip of a branch that was squashed — is
+not "merged", whatever `--merged` says. A reflog is not a complete record,
+though: a month after an amend or a rebase, `gc` expires the entry of every commit it replaced
+and leaves only the branch's creation. So a reflog git has pruned, told by a newest entry that
+no longer ends at the branch's tip, is left to the proofs, as is no reflog at all; a rebase
+less than a month old of commits more than a month old still goes unproved until its own entry
+expires. The base is what `origin/HEAD` names, then `init.defaultBranch` if that branch exists,
+then `main`, then `master`.
+Anything it cannot prove — a stack squashed in pieces, a branch reworked during review, a pass
+cut off by its cap — is simply unproved, because a miss costs a badge and a false proof would
+cost somebody's branch the day deleting one is on the table. The menu asks after the list is
+in, marks a proved row `merged`, and offers `Remove N merged checkouts…`: the free checkouts
+narrowed to the proved ones, with the sweep's own safety — looked in first, never forced, the
+branches kept. On this repository it proves 14 of those eighteen in a second or two; the
+four it misses are stacked or were reworked, and are the ones it should miss.
+
+**A removal takes its empty directories with it.** `git worktree remove` deletes the checkout
+and nothing above it, so the store kept a directory per repository after its last checkout
+went. After any removal Crook deletes the directories of its own store the checkout leaves
+empty, from the nearest up — only inside the store, never the store itself, and only when
+empty, which `remove_dir` checks and does in one step.
+
 **A wait is drawn as the pirate eating it.** Every face of the menu that is waiting on git —
 the list being read, a checkout being looked in, six of them being looked in, six of them being
 deleted — draws the pirate chewing, and where the wait is a list he stands in a row of pellets,
@@ -1188,12 +1221,14 @@ worker for a frame at a time and only while something is running; there is no ti
 list nobody is waiting on. `app/src/pirate.rs` is the artwork both he and the usage chip's
 plugin draw from.
 
-`app/src/git/worktree.rs` is the whole of the git side — list, add, remove, and a count of what
-is loose in a checkout — with a timeout on every call (a removal's is the long one, because it
-deletes whatever was built in the checkout and a kill halfway through leaves a worktree the
-sweep will never touch again), two reader threads per call so a repository with a fat
-`target/` cannot deadlock a pipe, and an error type whose variants are
-the things a UI can offer to do about them.
+`app/src/git/worktree.rs` is the git side of the menu — list, add, remove, a count of what is
+loose in a checkout, and the store's tidying — with an error type whose variants are the things
+a UI can offer to do about them, and `app/src/git/merged.rs` is the proof. Both spawn git
+through `app/src/git/run.rs`, which puts a timeout on every call (a removal's is the long one,
+because it deletes whatever was built in the checkout and a kill halfway through leaves a
+worktree the sweep will never touch again), gives every call two reader threads so a repository
+with a fat `target/` cannot deadlock a pipe, and joins `log -p` to `patch-id` with a pipe of
+their own so a history's patches never pass through Crook.
 
 ### The agent says what it is doing
 

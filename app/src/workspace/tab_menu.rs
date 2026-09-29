@@ -35,12 +35,15 @@
 //!   or the window closes;
 //! * a way to remove one, offered only for a checkout nothing is working in;
 //! * a way to remove all of those at once, for the day a repository has eight
-//!   of them and seven are finished.
+//!   of them and seven are finished;
+//! * and a way to remove only the ones whose work has already landed, which is
+//!   the question that day is really asking.
 //!
 //! # Tidying up
 //!
-//! The last of those is the same offer as the ×, made about the list rather
-//! than about a row, and it is deliberately the *weaker* one: it never forces.
+//! The last two of those are the same offer as the ×, made about the list
+//! rather than about a row, and deliberately the *weaker* one: neither ever
+//! forces.
 //! A confirmation about one checkout can say "there is work in there" and
 //! offer to delete it anyway, because a person is looking at the one thing
 //! they asked about. A confirmation about six cannot — "remove anyway" over a
@@ -53,6 +56,19 @@
 //! list is not known until every candidate has been `git status`-ed. So the
 //! question opens saying it is looking, the same way the menu itself opens
 //! saying it is reading.
+//!
+//! # Work that has landed
+//!
+//! A finished task's checkout sits on a branch git calls unmerged for ever,
+//! because the forge squashed it — so "which of these are finished" is not
+//! something the list could say until [`crate::git::merged`] proved it from
+//! the repository alone. The menu asks once the list is in, on the background
+//! pool like every other read here, and marks a row whose branch is proved
+//! with `merged`. The same proof is the second sweep, "Remove N merged
+//! checkouts": the free checkouts, narrowed to the proved ones, and otherwise
+//! the very same sweep — looked in first, never forced, the branches kept. A
+//! branch the proof cannot reach is simply not marked; the first sweep and the
+//! × are still there for it.
 //!
 //! # A wait is the pirate eating it
 //!
@@ -184,7 +200,7 @@
 //! built on. The menu therefore opens *before* it knows what is in the
 //! repository and says so, the way a list that is being read says so.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crookui_core::elements::{
@@ -260,7 +276,8 @@ pub(super) enum Mode {
     Listing,
     /// Making one.
     Creating,
-    /// Asking about removing every free checkout at once.
+    /// Asking about removing every free checkout at once, or every one whose
+    /// work has landed.
     ///
     /// What it is asking about lives in [`TabMenuState::sweep`] rather than
     /// here: this enum is `Copy` and is read by value on the render path and
@@ -411,6 +428,8 @@ pub(super) enum Control {
     Create,
     /// "Remove N free checkouts…".
     Tidy,
+    /// "Remove N merged checkouts…".
+    TidyLanded,
     /// The creator's branch field.
     Branch,
     /// One of the creator's places to start from, by its index in
@@ -495,6 +514,15 @@ pub(super) struct TabMenuState {
     /// What the repository is called: the name of its main checkout's
     /// directory, which is what a person calls it.
     pub(super) repository: Option<String>,
+    /// The branches of the listed checkouts whose work is proved to have
+    /// landed on the repository's base, once that has been read.
+    ///
+    /// Read after the list rather than with it, because it is the slow half —
+    /// a pass over the base's history — and a list that waited for it would
+    /// open a second late for a badge. `None` until it lands, and drawn
+    /// exactly as an empty set is: no badge, no row. A proof that has not
+    /// arrived and one that found nothing both offer nothing to tidy.
+    pub(super) landed: Option<HashSet<String>>,
     /// Where Crook keeps checkouts it made.
     pub(super) store: Option<PathBuf>,
     /// What a tidy-up would take, while one is being asked about.
@@ -869,7 +897,34 @@ fn listing(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     // teaches people the menu is full of things that do nothing.
     let free = free_checkouts(workspace).len();
     if free > 0 {
-        column.add_child(tidy_row(workspace, free, ui));
+        column.add_child(sweep_row(
+            workspace,
+            Control::Tidy,
+            match free {
+                1 => "Remove 1 free checkout…".to_owned(),
+                free => format!("Remove {free} free checkouts…"),
+            },
+            WorktreeAction::AskTidy,
+            ui,
+        ));
+    }
+    // The narrower offer, under the broader one and on the same terms: absent
+    // until something has been proved, and never a checkout the row above
+    // would not also take. Named by the word the rows it takes are marked
+    // with, and short enough for one line of a menu this wide, which "whose
+    // work has landed" is not.
+    let landed = landed_checkouts(workspace).len();
+    if landed > 0 {
+        column.add_child(sweep_row(
+            workspace,
+            Control::TidyLanded,
+            match landed {
+                1 => "Remove 1 merged checkout…".to_owned(),
+                landed => format!("Remove {landed} merged checkouts…"),
+            },
+            WorktreeAction::AskTidyLanded,
+            ui,
+        ));
     }
     if let Some(problem) = &state.problem {
         column.add_child(note(problem.as_str(), ui));
@@ -915,6 +970,25 @@ fn removable(worktree: &Worktree, occupied: bool) -> bool {
 /// row, which is the only difference between this and asking [`removable`]
 /// about each row in turn.
 pub(super) fn free_checkouts(workspace: &Workspace) -> Vec<(PathBuf, String)> {
+    free_checkouts_where(workspace, |_| true)
+}
+
+/// Every free checkout whose work is proved to have landed.
+///
+/// A narrowing of [`free_checkouts`] and never anything else, so that the
+/// second sweep cannot reach a checkout the first would have left alone: a
+/// proof says the work is safe on the base, not that nobody is in the
+/// directory.
+pub(super) fn landed_checkouts(workspace: &Workspace) -> Vec<(PathBuf, String)> {
+    let state = workspace.tab_menu();
+    free_checkouts_where(workspace, |worktree| has_landed(state, worktree))
+}
+
+/// The free checkouts `also` agrees to.
+fn free_checkouts_where(
+    workspace: &Workspace,
+    also: impl Fn(&Worktree) -> bool,
+) -> Vec<(PathBuf, String)> {
     let state = workspace.tab_menu();
     let worktrees = state.worktrees();
     let directories = workspace.pane_directories();
@@ -927,9 +1001,49 @@ pub(super) fn free_checkouts(workspace: &Workspace) -> Vec<(PathBuf, String)> {
                 || directories
                     .iter()
                     .any(|(_, directory)| holding(worktrees, Some(directory)) == Some(*index));
-            removable(worktree, occupied)
+            removable(worktree, occupied) && also(worktree)
         })
         .map(|(_, worktree)| (worktree.path.clone(), branch_label(worktree)))
+        .collect()
+}
+
+/// Whether a checkout's branch is proved to have landed on the base.
+///
+/// Never the main checkout: it is on the base, or on whatever the repository
+/// was cloned onto, and "merged" on the row a person works from is a
+/// statement about nothing they did.
+pub(super) fn has_landed(state: &TabMenuState, worktree: &Worktree) -> bool {
+    !worktree.is_main
+        && worktree.branch.as_ref().is_some_and(|branch| {
+            state
+                .landed
+                .as_ref()
+                .is_some_and(|landed| landed.contains(branch))
+        })
+}
+
+/// The branches of `worktrees` whose work has landed on the base of the
+/// repository `directory` is in.
+///
+/// **Blocking**: the base, then the proof, which is a pass over the base's
+/// history. Background pool only — and the one place the menu asks either
+/// question, so that the list and a snapshot of it cannot disagree about
+/// which checkouts are asked about. The main checkout is left out for the
+/// reason [`has_landed`] gives, and a detached one has no branch to prove.
+pub(super) fn landed_branches(directory: &Path, worktrees: &[Worktree]) -> HashSet<String> {
+    let branches: Vec<String> = worktrees
+        .iter()
+        .filter(|worktree| !worktree.is_main)
+        .filter_map(|worktree| worktree.branch.clone())
+        .collect();
+    if branches.is_empty() {
+        return HashSet::new();
+    }
+    let Some(base) = crate::git::merged::base_of(directory) else {
+        return HashSet::new();
+    };
+    crate::git::merged::merged(directory, &base, &branches)
+        .into_keys()
         .collect()
 }
 
@@ -952,7 +1066,7 @@ fn worktree_row(
 
     let label = branch_label(worktree);
     let path = crate::git::user_friendly_path(&worktree.path, workspace.home());
-    let badge = if here {
+    let status = if here {
         Some("this tab")
     } else if elsewhere {
         Some("open")
@@ -966,6 +1080,15 @@ fn worktree_row(
         Some("missing")
     } else {
         None
+    };
+    // About the branch rather than the checkout, so it goes beside whatever
+    // the checkout's own word is instead of replacing it: an agent's tab still
+    // open on work that has landed is the tab most worth knowing about.
+    let badge = match (status, has_landed(state, worktree)) {
+        (Some(status), true) => Some(format!("{status} · merged")),
+        (Some(status), false) => Some(status.to_owned()),
+        (None, true) => Some("merged".to_owned()),
+        (None, false) => None,
     };
 
     let remove = state.control(Control::Remove(index));
@@ -1015,17 +1138,24 @@ fn worktree_row(
                 .finish(),
             );
 
-        // The badge and the × share the right edge, and only one of them can
-        // ever be there: a checkout somebody is working in is exactly the one
-        // that must not be removable.
-        if let Some(badge) = badge {
+        // The badge and the × share the right edge. The checkout's own words
+        // and the × never meet — a checkout somebody is working in is exactly
+        // the one that must not be removable — so the only thing the × can
+        // sit beside is `merged`, which is the row it is most likely to be
+        // pressed on.
+        if let Some(badge) = &badge {
             line.add_child(
-                Text::new(badge, ui, PATH_SIZE)
+                Text::new(badge.clone(), ui, PATH_SIZE)
                     .with_color(theme().text_muted)
                     .finish(),
             );
-        } else if removable && hovered {
-            line.add_child(remove_button(remove.clone(), index));
+        }
+        if removable && hovered {
+            line.add_child(
+                Container::new(remove_button(remove.clone(), index))
+                    .with_margin_left(if badge.is_some() { 6. } else { 0. })
+                    .finish(),
+            );
         }
 
         Container::new(
@@ -1142,15 +1272,22 @@ fn create_row(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     }
 }
 
-/// "Remove 3 free checkouts…", which is the × made about the whole list.
+/// "Remove 3 free checkouts…", which is the × made about the whole list — or
+/// about the part of it whose work has landed.
 ///
-/// Drawn only where there is something free, so it needs no inert state:
-/// [`listing`] does not add it otherwise, and hands it the count it counted to
-/// decide that.
-fn tidy_row(workspace: &Workspace, free: usize, ui: FamilyId) -> Box<dyn Element> {
+/// Drawn only where there is something to take, so it needs no inert state:
+/// [`listing`] does not add it otherwise, and hands it the sentence it counted
+/// to decide that.
+fn sweep_row(
+    workspace: &Workspace,
+    control: Control,
+    label: String,
+    action: WorktreeAction,
+    ui: FamilyId,
+) -> Box<dyn Element> {
     let state = workspace.tab_menu();
 
-    Hoverable::new(state.control(Control::Tidy), move |mouse| {
+    Hoverable::new(state.control(control), move |mouse| {
         Container::new(
             Flex::row()
                 .with_main_axis_size(MainAxisSize::Max)
@@ -1168,20 +1305,13 @@ fn tidy_row(workspace: &Workspace, free: usize, ui: FamilyId) -> Box<dyn Element
                     .finish(),
                 )
                 .with_child(
-                    Text::new(
-                        // Counted in the label, because how many is the whole
-                        // of what a person needs to decide whether to look:
-                        // "tidy up" on a repository with one stale checkout
-                        // and on one with nine reads the same.
-                        match free {
-                            1 => "Remove 1 free checkout…".to_owned(),
-                            free => format!("Remove {free} free checkouts…"),
-                        },
-                        ui,
-                        LABEL_SIZE,
-                    )
-                    .with_color(theme().text_primary)
-                    .finish(),
+                    // Counted in the label, because how many is the whole of
+                    // what a person needs to decide whether to look: "tidy
+                    // up" on a repository with one stale checkout and on one
+                    // with nine reads the same.
+                    Text::new(label.clone(), ui, LABEL_SIZE)
+                        .with_color(theme().text_primary)
+                        .finish(),
                 )
                 .finish(),
         )
@@ -1194,8 +1324,8 @@ fn tidy_row(workspace: &Workspace, free: usize, ui: FamilyId) -> Box<dyn Element
         .with_vertical_padding(6.)
         .finish()
     })
-    .on_click(|_, ctx, _| {
-        ctx.dispatch_typed_action(WorkspaceAction::Worktree(WorktreeAction::AskTidy));
+    .on_click(move |_, ctx, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::Worktree(action));
     })
     .finish()
 }

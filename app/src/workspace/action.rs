@@ -383,6 +383,10 @@ pub enum WorktreeAction {
     /// Ask about removing every checkout that is free: not the main one, not
     /// locked by anybody but Crook, and nothing in the window working in it.
     AskTidy,
+    /// Ask about removing every free checkout whose branch is proved to have
+    /// landed on the repository's base — the same question as
+    /// [`Self::AskTidy`], about fewer checkouts.
+    AskTidyLanded,
     /// Remove those of them git lets go without being forced, and leave the
     /// rest standing. There is no second question: this one never forces.
     Tidy,

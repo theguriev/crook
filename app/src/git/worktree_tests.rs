@@ -14,6 +14,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
+// Only the Unix hook case below keeps time, and an import nothing uses is an
+// error under the CI's `-D warnings` on Windows.
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 use super::*;
 use crate::process::command;
@@ -937,6 +941,76 @@ fn neither_the_main_worktree_nor_a_path_that_is_not_one_can_be_removed() {
     assert!(repo.join("tracked.txt").is_file());
 }
 
+// --- tidying the store after a removal -----------------------------------------
+
+#[test]
+fn removing_a_checkout_takes_the_empty_directories_above_it_up_to_the_store() {
+    if without_git("removing_a_checkout_takes_the_empty_directories_above_it_up_to_the_store") {
+        return;
+    }
+    let scratch = ScratchDir::new("prune-empty");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    let store = scratch.dir("store");
+    // Nested the way a checkout made by hand on `feat/x` is: two directories
+    // of the store's that only ever held it.
+    let checkout = store.join("repo").join("feat").join("x");
+    add(&repo, &checkout, "feat/x", Some("main")).expect("git added the worktree");
+    remove(&repo, &checkout, false).expect("nothing loose in it");
+    assert!(
+        store.join("repo").join("feat").is_dir(),
+        "git itself took the directories above the checkout, so there is nothing to prove"
+    );
+
+    let pruned = prune_empty_parents(&store, &checkout);
+
+    assert_eq!(pruned, 2);
+    assert!(!store.join("repo").exists());
+    // The store itself is Crook's to keep, empty or not.
+    assert!(store.is_dir());
+}
+
+#[test]
+fn a_directory_that_still_holds_another_checkout_is_left_standing() {
+    if without_git("a_directory_that_still_holds_another_checkout_is_left_standing") {
+        return;
+    }
+    let scratch = ScratchDir::new("prune-shared");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    let store = scratch.dir("store");
+    let gone = checkout_path(&store, "repo", "gone");
+    let kept = checkout_path(&store, "repo", "kept");
+    add(&repo, &gone, "gone", Some("main")).expect("git added the worktree");
+    add(&repo, &kept, "kept", Some("main")).expect("git added the worktree");
+    remove(&repo, &gone, false).expect("nothing loose in it");
+
+    assert_eq!(prune_empty_parents(&store, &gone), 0);
+    assert!(kept.join("tracked.txt").is_file());
+}
+
+#[test]
+fn nothing_outside_the_store_is_pruned() {
+    let scratch = ScratchDir::new("prune-outside");
+    let store = scratch.dir("store");
+    let elsewhere = scratch.dir("elsewhere/empty");
+
+    // A checkout somebody made beside the repository rather than in the
+    // store: the directory it left is theirs, however empty.
+    assert_eq!(prune_empty_parents(&store, &elsewhere.join("gone")), 0);
+    assert!(elsewhere.is_dir());
+    // And a path that only starts with the store's name, by way of `..`,
+    // is not inside it.
+    let sneaky = store
+        .join("..")
+        .join("elsewhere")
+        .join("empty")
+        .join("gone");
+    assert_eq!(prune_empty_parents(&store, &sneaky), 0);
+    assert!(elsewhere.is_dir());
+    // Nor is the store itself something a removal inside it can take.
+    assert_eq!(prune_empty_parents(&store, &store.join("gone")), 0);
+    assert!(store.is_dir());
+}
+
 // --- what is loose in a worktree -----------------------------------------------
 
 #[test]
@@ -1064,57 +1138,6 @@ fn a_renamed_file_is_one_change_rather_than_two() {
 
 #[cfg(unix)]
 #[test]
-fn a_process_that_outlives_its_deadline_is_killed_and_reaped() {
-    // `sleep` stands in for the git this exists to survive: one that has taken
-    // a lock nobody will release, or is running a `post-checkout` hook waiting
-    // on something that will never arrive. Fifty milliseconds against thirty
-    // seconds leaves no doubt about which of the two ended the call.
-    let mut child = command("sleep")
-        .arg("30")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("sleep is on PATH");
-
-    let started = std::time::Instant::now();
-    let timeout = Duration::from_millis(50);
-    let outcome = wait_for(&mut child, started + timeout, timeout);
-
-    match outcome {
-        Err(Error::TimedOut { after }) => assert_eq!(after, timeout),
-        other => panic!("expected TimedOut, got {other:?}"),
-    }
-    assert!(started.elapsed() < Duration::from_secs(5));
-    // Killed *and* waited for. A process that is never reaped stays a zombie,
-    // and a process id somebody else reaps can be handed out again to a
-    // stranger — which is what makes a later kill dangerous rather than
-    // useless.
-    let reaped = child
-        .try_wait()
-        .expect("the child was waited for inside wait_for");
-    assert!(matches!(reaped, Some(status) if !status.success()));
-}
-
-#[cfg(unix)]
-#[test]
-fn a_process_that_finishes_in_time_is_not_killed() {
-    let mut child = command("true")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("true is on PATH");
-
-    let timeout = Duration::from_secs(30);
-    let status =
-        wait_for(&mut child, Instant::now() + timeout, timeout).expect("it exits immediately");
-
-    assert!(status.success());
-}
-
-#[cfg(unix)]
-#[test]
 fn a_hook_that_backgrounds_something_does_not_hold_add_past_its_deadline() {
     if without_git("a_hook_that_backgrounds_something_does_not_hold_add_past_its_deadline") {
         return;
@@ -1153,7 +1176,7 @@ fn a_hook_that_backgrounds_something_does_not_hold_add_past_its_deadline() {
     // deadline: git exits in milliseconds here, and the call is timed against
     // the reader that will never finish.
     let deadline = Duration::from_secs(2);
-    WRITE_DEADLINE.with(|budget| budget.set(deadline));
+    crate::git::run::WRITE_DEADLINE.with(|budget| budget.set(deadline));
 
     let path = scratch.spot("hooked");
     let started = Instant::now();
