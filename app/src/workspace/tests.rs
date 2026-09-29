@@ -8592,7 +8592,13 @@ fn a_window_a_launcher_opened_leaves_the_last_session_file_alone() {
 
     let mut harness = Harness::with_settings(1, scratch.settings());
     let tab = harness.tab_ids()[0];
-    harness.workspace_update(|workspace, _| workspace.stop_saving_the_session());
+    // What the window does with the command line it was opened with, so the
+    // line under test is the one that decides a launched window stops saving.
+    let launched = crate::Overrides {
+        command: vec!["htop".to_owned()],
+        ..crate::Overrides::default()
+    };
+    harness.workspace_update(|workspace, ctx| crate::apply_overrides(workspace, &launched, ctx));
     // A gesture that saves at once in any other window: see
     // `a_rename_is_in_the_session_file_before_anything_else_saves_it`.
     harness.workspace_update(|workspace, ctx| {

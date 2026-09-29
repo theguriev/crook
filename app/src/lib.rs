@@ -540,8 +540,15 @@ impl Overrides {
 /// `--run` types, so it is a block like any other while it runs. Every word is
 /// quoted by [`shell_word`], since a launcher's arguments are words and a file
 /// called `my notes.txt` is one.
+///
+/// With a space in front, which fish, zsh's `HIST_IGNORE_SPACE` and bash's
+/// `HISTCONTROL=ignorespace` all read as "keep this out of the history". The
+/// line is Crook's rather than the person's, and the history file is where
+/// the field's suggestions come from — see [`crate::shell_history`] — so a
+/// launcher's `btop` would otherwise come back as an `exec btop` suggestion
+/// that closes whichever pane accepts it.
 fn exec_line(command: &[String]) -> String {
-    std::iter::once("exec".to_owned())
+    std::iter::once(" exec".to_owned())
         .chain(command.iter().map(|word| shell_word(word)))
         .collect::<Vec<_>>()
         .join(" ")
@@ -617,11 +624,32 @@ pub fn run(channel: Channel) -> Result<()> {
     attach_to_parent_console();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    match parse_args(channel, std::env::args().skip(1))? {
+    match parse_args(
+        channel,
+        command_line(std::env::args_os().skip(1))?.into_iter(),
+    )? {
         Startup::Answered => Ok(()),
         Startup::Snapshot { path, overrides } => write_snapshot(&path, overrides),
         Startup::Window { frames, overrides } => open_window(channel, frames, overrides),
     }
+}
+
+/// The command line as text, or the word in it that is not.
+///
+/// `std::env::args` panics on a word that is not UTF-8, and on Linux a path
+/// is bytes rather than text: a file manager's "Open terminal here" on a
+/// folder named in Latin-1 would be a crash and no window. Every word Crook
+/// reads is text — `-e`'s are typed into a field, a key at a time — so such a
+/// word is a line on stderr that names it, like any other argument Crook
+/// cannot use.
+fn command_line(words: impl Iterator<Item = std::ffi::OsString>) -> Result<Vec<String>> {
+    words
+        .map(|word| {
+            word.into_string().map_err(|word| {
+                anyhow!("{word:?} is not UTF-8, and Crook reads its arguments as text")
+            })
+        })
+        .collect()
 }
 
 /// Reconnects this process's standard streams to the console it was started
@@ -1139,7 +1167,9 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
 /// [`exec_line`] — and for a word with a control character in it: the command
 /// is typed into the pane a key at a time, where a line break is Return and a
 /// tab asks for a completion, so `printf 'a<newline>b'` would be sent as half
-/// a quote with the shell left waiting for the rest.
+/// a quote with the shell left waiting for the rest. And for a line longer
+/// than a terminal holds before its shell is reading: see
+/// [`TYPED_LINE_LIMIT`].
 fn launched_command(flag: &str, words: impl Iterator<Item = String>) -> Result<Vec<String>> {
     if cfg!(windows) {
         bail!(
@@ -1157,8 +1187,32 @@ fn launched_command(flag: &str, words: impl Iterator<Item = String>) -> Result<V
     {
         bail!("`{flag}` cannot type {word:?} into a shell: it holds a control character");
     }
+    let typed = exec_line(&command).len();
+    if typed > TYPED_LINE_LIMIT {
+        bail!(
+            "`{flag}` would type a line of {typed} bytes, and a terminal keeps at most \
+             {TYPED_LINE_LIMIT} bytes of a line typed before its shell is reading; name fewer \
+             or shorter arguments"
+        );
+    }
     Ok(command)
 }
+
+/// The longest line `-e` can type, in bytes.
+///
+/// The line is typed on the frame after the shell starts, before the shell is
+/// reading, so it waits in the pty's line discipline — which keeps at most
+/// this much of one line, drops the rest and still takes the Return. What
+/// runs is then a command whose last argument was cut short, or a quote the
+/// shell waits to see closed. Linux keeps 4095 bytes, measured against a
+/// shell that had not started reading; macOS's `MAX_CANON` is 1024, and a
+/// round number under it leaves room for the few bytes its line discipline
+/// holds back.
+const TYPED_LINE_LIMIT: usize = if cfg!(target_os = "linux") {
+    4095
+} else {
+    1000
+};
 
 /// The directory `--working-directory` named, made absolute, when it is one.
 ///
@@ -1751,10 +1805,13 @@ fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> R
     // `cd DIR && crook`: every pane starts where Crook is — see
     // `tab::starting_directory` — so the tab a person opens next in a window
     // a file manager opened on a folder opens in that folder too. The paths
-    // the other flags named were made absolute when they were read.
+    // the other flags named were made absolute when they were read. Named,
+    // so that a root directory is where the panes start too, rather than the
+    // home directory a Dock-launched Crook swaps it for.
     if let Some(directory) = &launch.overrides.working_directory {
         std::env::set_current_dir(directory)
             .with_context(|| format!("could not start in {}", directory.display()))?;
+        crate::tab::start_where_named();
     }
     let font_db = CosmicFontDb::new().context("no usable system fonts")?;
     // Blocking, and deliberately: one small file, read once, before there is a
@@ -4667,11 +4724,68 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
+    fn a_command_longer_than_a_terminal_line_is_refused_rather_than_cut_short() {
+        // Typed before the shell is reading, the line waits in the pty's line
+        // discipline, which keeps its first `TYPED_LINE_LIMIT` bytes and
+        // still takes the Return: `vim` would open a file whose name was cut
+        // off. What fits is typed.
+        let prefix = exec_line(&["vim".to_owned(), String::new()]).len() - "''".len();
+        let fits = "a".repeat(TYPED_LINE_LIMIT - prefix);
+        assert_eq!(
+            exec_line(&["vim".to_owned(), fits.clone()]).len(),
+            TYPED_LINE_LIMIT
+        );
+        assert_eq!(
+            window_overrides(&["-e", "vim", &fits]).command,
+            ["vim", fits.as_str()]
+        );
+
+        let over = format!("{fits}a");
+        let complaint = format!(
+            "{:#}",
+            parse(&["-e", "vim", &over]).expect_err("a line the terminal would cut")
+        );
+        assert!(
+            complaint.contains(&(TYPED_LINE_LIMIT + 1).to_string())
+                && complaint.contains(&TYPED_LINE_LIMIT.to_string()),
+            "{complaint}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_word_that_is_not_text_is_an_error_and_not_a_crash() {
+        // A folder name on Linux is bytes, and a file manager hands it over
+        // as it is: `std::env::args` panicked on this one.
+        use std::os::unix::ffi::OsStringExt;
+
+        let folder = std::ffi::OsString::from_vec(b"/tmp/caf\xe9".to_vec());
+        let complaint = format!(
+            "{:#}",
+            command_line(["--working-directory".into(), folder].into_iter())
+                .expect_err("a word that is not UTF-8")
+        );
+        assert!(
+            complaint.contains(r"caf\xE9") && complaint.contains("UTF-8"),
+            "{complaint}"
+        );
+
+        let words = ["--cwd", "/tmp/café", "-e", "htop"];
+        assert_eq!(
+            command_line(words.map(std::ffi::OsString::from).into_iter()).expect("all text"),
+            words
+        );
+    }
+
+    #[test]
     fn the_command_is_typed_as_an_exec_after_every_run() {
-        assert_eq!(exec_line(&["htop".to_owned()]), "exec htop");
+        // With a space in front, which keeps the line out of the history the
+        // field's suggestions are read from.
+        assert_eq!(exec_line(&["htop".to_owned()]), " exec htop");
         assert_eq!(
             exec_line(&["vim", "my notes.txt"].map(str::to_owned)),
-            "exec vim 'my notes.txt'"
+            " exec vim 'my notes.txt'"
         );
 
         // Last, since what comes after it is typed into the program.
@@ -4680,7 +4794,7 @@ mod tests {
             command: ["htop", "-d", "10"].map(str::to_owned).to_vec(),
             ..Overrides::default()
         };
-        assert_eq!(overrides.typed(), ["git status", "exec htop -d 10"]);
+        assert_eq!(overrides.typed(), ["git status", " exec htop -d 10"]);
         assert!(Overrides::default().typed().is_empty());
     }
 
