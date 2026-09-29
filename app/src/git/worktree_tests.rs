@@ -1703,6 +1703,30 @@ fn the_shallowest_ignored_directories_are_left_out_of_the_walk_first() {
 
 #[cfg(unix)]
 #[test]
+fn a_copy_is_born_with_the_mode_of_what_it_copies() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    // Not given it once the bytes are in: a `0600` key would be readable by
+    // anybody on the machine while it was written, and for good if Crook died
+    // before the `chmod`. Under the usual umask of `022` the default would be
+    // `0644`; a umask of `077` would make this pass without the fix, which is
+    // not a umask a test run has.
+    let scratch = ScratchDir::new("include-born-private");
+    let target = scratch.spot("key.pem");
+
+    let copy = create_copy(&target, &std::fs::Permissions::from_mode(0o600))
+        .expect("the scratch is writable");
+
+    let mode = copy
+        .metadata()
+        .expect("the copy is there")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "created as {mode:o}");
+}
+
+#[cfg(unix)]
+#[test]
 fn a_copied_file_keeps_its_executable_bit() {
     use std::os::unix::fs::PermissionsExt as _;
 

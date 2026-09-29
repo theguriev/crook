@@ -1064,7 +1064,8 @@ const LIMITS: Limits = Limits {
 ///   anywhere on the machine, and a link in the new one would have the copy
 ///   written wherever it points.
 /// * A file already in the new checkout is never overwritten.
-/// * The executable bit comes with the file.
+/// * The executable bit comes with the file, and on Unix the copy has the
+///   source's mode from the moment it exists.
 /// * Past [`MAX_INCLUDED_FILES`] or [`MAX_INCLUDED_BYTES`] nothing is copied,
 ///   and a file past [`MAX_INCLUDED_FILE_BYTES`] is left out on its own.
 ///
@@ -1420,15 +1421,7 @@ fn copy_one(
     }
 
     let mut source = std::fs::File::open(main.join(relative)).map_err(Skip::Failed)?;
-    // `create_new` is the whole of "never overwrite", and it is one system
-    // call rather than a look and then a write: it refuses anything already at
-    // the path, a link to nowhere included, so nothing between a check and
-    // the open can put something there to be written through.
-    let mut copy = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&target)
-    {
+    let mut copy = match create_copy(&target, &permissions) {
         Ok(copy) => copy,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(Skip::Exists);
@@ -1446,6 +1439,36 @@ fn copy_one(
         return Err(Skip::Failed(error));
     }
     Ok(())
+}
+
+/// Creates the file a copy is written into at `target`, which must not exist,
+/// born with the source's `permissions` as far as the platform allows.
+///
+/// `create_new` is the whole of "never overwrite", and it is one system call
+/// rather than a look and then a write: it refuses anything already at the
+/// path, a link to nowhere included, so nothing between a check and the open
+/// can put something there to be written through.
+///
+/// Born with them, on Unix, rather than given them once the bytes are in: the
+/// default is `0666` less the umask, and a key that is `0600` in the main
+/// checkout would be readable by anybody on the machine for as long as the
+/// write took — and for good, if Crook died before the `chmod` after it. The
+/// umask can only take bits away, so the `set_permissions` that follows the
+/// write is still what makes the mode exactly the source's.
+fn create_copy(
+    target: &Path,
+    permissions: &std::fs::Permissions,
+) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        options.mode(permissions.mode() & 0o777);
+    }
+    #[cfg(not(unix))]
+    let _ = permissions;
+    options.open(target)
 }
 
 /// Whether the way from `root` to `relative` passes through a symbolic link,
