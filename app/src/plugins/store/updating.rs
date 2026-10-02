@@ -127,11 +127,16 @@ fn asked(cache: Option<&Cache>) -> Result<index::Index, String> {
             Some(cache) => cache.write(&bytes, etag.as_deref()),
             None => index::parse(&bytes),
         },
-        Ok(fetch::Fetched::Unchanged) => cached.map(|cached| cached.index).ok_or_else(|| {
+        Ok(fetch::Fetched::Unchanged) => {
+            if let Some(cache) = cache.filter(|_| cached.is_some()) {
+                cache.confirm();
+            }
+            cached.map(|cached| cached.index).ok_or_else(|| {
             String::from(
                 "the registry says nothing has changed, and this machine has no copy of the list",
             )
-        }),
+            })
+        }
         Err(why) => match cached {
             Some(cached) => {
                 log::warn!("the registry could not be reached ({why}); using the cached list");

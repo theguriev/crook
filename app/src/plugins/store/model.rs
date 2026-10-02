@@ -354,7 +354,12 @@ impl StoreModel {
                         let agent = fetch::agent();
                         let fetched = fetch::index(&agent, fetch::INDEX_URL, etag.as_deref())?;
                         match fetched {
-                            Fetched::Unchanged => Ok(None),
+                            Fetched::Unchanged => {
+                                if let Some(cache) = &cache {
+                                    cache.confirm();
+                                }
+                                Ok(None)
+                            }
                             // Kept before it is answered with, because the
                             // cache parses it — a registry serving something
                             // that is not an index must not replace the list
