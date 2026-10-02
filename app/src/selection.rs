@@ -858,6 +858,14 @@ fn word_at(at: Place, blocks: &Blocks<'_>) -> Option<(Place, Place)> {
                 }
                 line.push(character);
             });
+        // The blanks a fold trimmed off the end of the row, as the copy and
+        // the find put them back: a space in the last column is a space, and
+        // without it `aaaaaaaaa bbb` folded there read as one word, so a
+        // double click on `bbb` took the `a`s with it.
+        for column in blanks_before_a_fold(&item.rows, local) {
+            cells.push((line.len(), row, column));
+            line.push(' ');
+        }
     }
 
     // Past the last character of the line — a click in the blank tail — takes
