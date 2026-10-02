@@ -81,12 +81,20 @@ impl History {
     ///
     /// Blank lines are not recorded: pressing Enter on an empty prompt is how
     /// a person asks for a fresh line, not something to recall later.
+    ///
+    /// A line already in the history moves to the newest end rather than
+    /// being written down twice — zsh's `HIST_IGNORE_ALL_DUPS`. The seeded
+    /// half is collapsed that way already (see [`crate::shell_history`]), and
+    /// without the same rule here, `git status` run five times in a pane was
+    /// five presses of Up before anything else.
     pub fn push(&mut self, line: &str) {
         self.reset();
         if line.trim().is_empty() {
             return;
         }
-        if self.entries.len() == CAPACITY {
+        if let Some(at) = self.entries.iter().position(|entry| entry == line) {
+            self.entries.remove(at);
+        } else if self.entries.len() == CAPACITY {
             self.entries.remove(0);
         }
         self.entries.push(line.to_string());

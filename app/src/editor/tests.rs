@@ -608,6 +608,36 @@ fn walking_up_the_history_reaches_the_oldest_entry_and_stops() {
 }
 
 #[test]
+fn a_line_run_again_moves_to_the_newest_end_instead_of_repeating() {
+    let mut editor = Editor::new();
+    for line in ["git status", "ls", "git status", "git status"] {
+        type_out(&mut editor, line);
+        editor.submit();
+    }
+
+    assert_eq!(editor.history(), ["ls", "git status"]);
+    assert!(editor.history_previous());
+    assert_eq!(editor.text(), "git status");
+    assert!(editor.history_previous());
+    assert_eq!(editor.text(), "ls", "one press past the repeated command");
+}
+
+#[test]
+fn a_full_history_keeps_its_oldest_entry_when_a_line_is_only_moved() {
+    let mut editor = Editor::new();
+    let lines = (0..1000).map(|n| format!("command {n}")).collect();
+    editor.seed_history(lines);
+
+    type_out(&mut editor, "command 500");
+    editor.submit();
+
+    let history = editor.history();
+    assert_eq!(history.len(), 1000);
+    assert_eq!(history[0], "command 0", "nothing had to make room");
+    assert_eq!(history[999], "command 500");
+}
+
+#[test]
 fn walking_back_down_restores_the_line_that_was_in_progress() {
     let mut editor = Editor::new();
     type_out(&mut editor, "ls");
