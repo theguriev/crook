@@ -126,6 +126,31 @@ fn test_a_reflow_lets_go_of_a_selection_made_at_another_width() {
 }
 
 #[test]
+fn test_a_reflow_in_the_middle_of_a_drag_ends_the_drag() {
+    // The anchor names a cell of the old wrapping; a drag that went on from
+    // it made a selection at every move that the next layout let go of.
+    let (block, _) = ids();
+    let selection = PaneSelection::new();
+    selection.press(
+        SelectionKind::Simple,
+        at(block, 0, 0),
+        false,
+        20,
+        Cells::List,
+    );
+    selection.drag(at(block, 0, 4), true);
+
+    assert!(selection.reflowed(40));
+    assert!(!selection.is_dragging(), "the press is in the old wrapping");
+    assert!(!selection.drag(at(block, 0, 8), true));
+    assert!(!selection.has_selection());
+    assert!(
+        !selection.reflowed(40),
+        "and it is settled at the new width"
+    );
+}
+
+#[test]
 fn test_a_selection_spans_the_blocks_its_anchors_name() {
     let (first, live) = ids();
     let selection = PaneSelection::new();
