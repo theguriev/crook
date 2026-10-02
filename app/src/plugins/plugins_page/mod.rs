@@ -384,13 +384,25 @@ pub(super) fn about(verb: &str) -> ActionName {
 /// `owner/name` has a slash in it and an action name has exactly three parts,
 /// so the plugin's own separator becomes a dash: `crook/usage` is toggled by
 /// `crook/plugins/toggle-crook-usage`.
+///
+/// Only where the owner has no dash of its own, which is where that is one
+/// name per plugin: the first dash after the verb is then the separator.
+/// `foo-bar/baz` and `foo/bar-baz` were both `toggle-foo-bar-baz`, so the
+/// second plugin's switch and palette row ran the first one's command. An
+/// owner with a dash in it is spelled `{verb}_{length}-{owner}-{name}`
+/// instead — a namespace the first form never reaches, since that form's
+/// verb is followed by a dash, and one the length makes one name per plugin
+/// too. The first form is kept for everybody else because it is a name a
+/// person may have bound a key to.
 pub(super) fn action(verb: &str, plugin: &PluginId) -> ActionName {
-    ActionName::parse(&format!(
-        "crook/plugins/{verb}-{}-{}",
-        plugin.owner(),
-        plugin.name()
-    ))
-    .expect("a name built from a verb and two names that already parsed")
+    let (owner, name) = (plugin.owner(), plugin.name());
+    let action = if owner.contains('-') {
+        format!("{verb}_{}-{owner}-{name}", owner.len())
+    } else {
+        format!("{verb}-{owner}-{name}")
+    };
+    ActionName::parse(&format!("crook/plugins/{action}"))
+        .expect("a name built from a verb and two names that already parsed")
 }
 
 /// Where a plugin stands with the person looking at it.
