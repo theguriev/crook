@@ -489,6 +489,31 @@ fn a_flat_refs_heads_past_the_limit_is_capped_like_a_packed_one() {
 }
 
 #[test]
+fn a_lock_file_or_a_dot_file_under_refs_heads_is_not_a_branch() {
+    // What a git killed mid-update and a Finder window leave behind. No git
+    // needed: the walk reads the files directly.
+    let scratch = ScratchDir::new("lock-files");
+    let git_dir = scratch.path().join("git");
+    let heads = git_dir.join("refs").join("heads");
+    for name in [
+        "main",
+        "main.lock",
+        ".DS_Store",
+        "eugen/thing",
+        "eugen/thing.lock",
+    ] {
+        write(&heads.join(name), "");
+    }
+    let layout = RepoLayout {
+        work_tree: None,
+        git_dir: git_dir.clone(),
+        common_dir: git_dir,
+    };
+
+    assert_eq!(branches_in(&layout), ["eugen/thing", "main"]);
+}
+
+#[test]
 fn a_linked_worktree_finds_the_repository_it_was_added_from() {
     if without_git("a_linked_worktree_finds_the_repository_it_was_added_from") {
         return;
