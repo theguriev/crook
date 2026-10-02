@@ -1045,6 +1045,28 @@ fn claude_codes_credentials_are_read_from_the_keychain_on_macos() {
     assert_eq!(keychain_item_for(Path::new("/etc/hosts")), None);
 }
 
+/// A keychain that answers with a dialog nobody is there to dismiss does not
+/// hold the request for good: the program asked is killed at the deadline.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_keychain_question_that_never_comes_back_is_given_up_on() {
+    let started = std::time::Instant::now();
+    let answer = output_within("/bin/sleep", &["30"], Duration::from_millis(200));
+    assert_eq!(
+        answer.map_err(|why| why.kind()),
+        Err(std::io::ErrorKind::TimedOut)
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "it waited the sleep out"
+    );
+
+    assert_eq!(
+        output_within("/bin/echo", &["secret"], Duration::from_secs(10)).expect("echo ran"),
+        (true, b"secret\n".to_vec())
+    );
+}
+
 /// Against the real keychain, where Claude Code is signed in on this machine:
 /// what is served is the JSON the file would hold, not the file.
 #[cfg(target_os = "macos")]
