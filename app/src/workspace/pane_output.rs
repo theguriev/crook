@@ -14,7 +14,7 @@
 //! emulator's, because that is the only place it stays anchored to its text
 //! while the shell prints underneath it. What this owns is the routing.
 
-use crook_terminal::{Modifiers, MouseButton, MouseEventKind, MouseModes, Rows, SelectionKind};
+use crook_terminal::{Key, Modifiers, MouseButton, MouseEventKind, MouseModes, Rows, SelectionKind};
 use crookui_core::event::Event;
 use crookui_core::presenter::EventContext;
 
@@ -254,17 +254,32 @@ impl Output {
         // The program owns the keyboard, so this is the only way the clipboard
         // reaches it.
         if route == Route::PasteToShell {
-            let pasted = self
+            let text = self
                 .clipboard
                 .as_ref()
                 .and_then(Clipboard::read)
-                .is_some_and(|text| !text.is_empty() && handle.paste(&text));
-            return if pasted {
+                .filter(|text| !text.is_empty());
+            if let Some(text) = text {
+                return if handle.paste(&text) {
+                    Typed::SentToPty
+                } else {
+                    log::debug!("nothing was pasted into the shell");
+                    Typed::Handled
+                };
+            }
+            // No text: a screenshot, most likely, and a terminal has no way to
+            // send a program an image. Claude Code and Codex read the clipboard
+            // themselves on Ctrl-V, so the chord a person pastes with becomes
+            // the one those programs paste on, and the image arrives as it
+            // would have from Ctrl-V — instead of Cmd-V doing nothing and
+            // Ctrl-V being a second paste key to remember.
+            let control = Modifiers {
+                control: true,
+                ..Modifiers::default()
+            };
+            return if handle.send_key(Key::Char('v'), control) {
                 Typed::SentToPty
             } else {
-                // Taken all the same. The chord meant "paste", and letting it
-                // fall through would hand the program a `SYN` nobody typed.
-                log::debug!("nothing was pasted into the shell");
                 Typed::Handled
             };
         }
