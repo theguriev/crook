@@ -12,8 +12,8 @@
 //! the README can still say there is no telemetry. What the press starts is
 //! [`UpdateModel::check`] on the pool; what it finds is drawn on the row it
 //! was pressed from, and an **Update** button appears beside it when this copy
-//! of Crook is one it may replace. Where it may not — a notarized bundle, a
-//! package manager's binary, a build, a dev build — the row says which instead
+//! of Crook is one it may replace, a `Crook.app` included. Where it may not — a
+//! bundle this user cannot write, a package manager's binary, a build, a dev build — the row says which instead
 //! of offering a button that would refuse.
 //!
 //! The `--check-update` and `--update` flags are the same two calls without a
