@@ -210,7 +210,22 @@ impl TextField {
             .edited
             .is_some()
             .then(|| self.input.editor().text().to_owned());
-        self.input.apply(intent, &self.clipboard);
+        match intent {
+            // One line in, as one line. Enter is refused above, but a paste
+            // went straight to the editor, which keeps the newlines a
+            // multi-line command needs: `foo` and `bar` pasted on two lines
+            // became a tab name with a line break in it — saved to the
+            // session that way — and a branch name git would refuse.
+            Intent::Paste => {
+                if let Some(pasted) = self.clipboard.read() {
+                    let line = one_line(&pasted);
+                    self.input.edit(|editor| editor.paste(&line));
+                }
+            }
+            intent => {
+                self.input.apply(intent, &self.clipboard);
+            }
+        }
         if before.is_some_and(|before| before != self.input.editor().text()) {
             self.say_edited(ctx);
         }
@@ -432,5 +447,32 @@ impl Element for TextField {
 
     fn origin(&self) -> Option<Point> {
         self.origin
+    }
+}
+
+/// `text` with each line break — `\r\n`, `\n` or `\r` — and the run of them
+/// it may be part of turned into a single space, and the breaks at either end
+/// dropped: what a paste of several lines is in a field that holds one.
+fn one_line(text: &str) -> String {
+    text.split(['\r', '\n'])
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::one_line;
+
+    #[test]
+    fn a_paste_of_several_lines_is_one_line_with_spaces_between() {
+        assert_eq!(one_line("foo\nbar"), "foo bar");
+        assert_eq!(one_line("foo\r\nbar\r\n"), "foo bar", "Windows line ends");
+        assert_eq!(
+            one_line("\nfoo\n\n\nbar\n"),
+            "foo bar",
+            "blank lines and ends"
+        );
+        assert_eq!(one_line("one line"), "one line", "nothing to do");
     }
 }
