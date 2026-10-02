@@ -21,6 +21,32 @@ fn what_was_written_is_what_comes_back() {
 }
 
 #[test]
+fn a_list_the_registry_confirmed_reads_back_as_checked_now() {
+    let scratch = Scratch::new("store-confirmed");
+    let cache = Cache::at(scratch.path());
+    cache.write(INDEX, Some("\"abc\"")).expect("it should keep");
+
+    // Written long ago, as far as the file can tell.
+    let month_ago = SystemTime::now() - std::time::Duration::from_secs(30 * 24 * 60 * 60);
+    fs::File::options()
+        .write(true)
+        .open(scratch.path().join(INDEX_FILE))
+        .and_then(|file| file.set_modified(month_ago))
+        .expect("the time should be settable");
+
+    cache.confirm();
+
+    let fetched = cache
+        .read()
+        .and_then(|cached| cached.fetched)
+        .expect("a time");
+    let age = SystemTime::now()
+        .duration_since(fetched)
+        .unwrap_or_default();
+    assert!(age.as_secs() < 60, "the answer is a month old: {age:?}");
+}
+
+#[test]
 fn nothing_cached_is_nothing_rather_than_a_failure() {
     let scratch = Scratch::new("store-empty");
 

@@ -96,6 +96,24 @@ impl Cache {
         })
     }
 
+    /// Records that the registry has just said the list on disk is current.
+    ///
+    /// How old the list is comes back from the file's modification time —
+    /// see [`Self::read`] — and a `304` writes nothing, so without this a
+    /// store checked a moment ago said "Checked just now" until the next
+    /// launch and then the age of the last *publish* again, weeks old. Best
+    /// effort: a time that cannot be set is a page that says an older one.
+    pub fn confirm(&self) {
+        let path = self.directory.join(INDEX_FILE);
+        let touched = fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(SystemTime::now()));
+        if let Err(why) = touched {
+            log::debug!("could not mark {} as checked: {why}", path.display());
+        }
+    }
+
     /// Keeps what a fetch answered with.
     ///
     /// The bytes are parsed before either file is written, so a registry
