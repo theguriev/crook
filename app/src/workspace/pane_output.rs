@@ -14,7 +14,9 @@
 //! emulator's, because that is the only place it stays anchored to its text
 //! while the shell prints underneath it. What this owns is the routing.
 
-use crook_terminal::{Key, Modifiers, MouseButton, MouseEventKind, MouseModes, Rows, SelectionKind};
+use crook_terminal::{
+    Key, Modifiers, MouseButton, MouseEventKind, MouseModes, Rows, SelectionKind,
+};
 use crookui_core::event::Event;
 use crookui_core::presenter::EventContext;
 

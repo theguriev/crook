@@ -165,7 +165,7 @@ impl Notice {
             None if session.attention == Some(Attention::Bell) => "Rang the bell".to_owned(),
             None => match session.source {
                 StatusSource::CommandEnded(_) => "Its command ended".to_owned(),
-                StatusSource::Agent(_) | StatusSource::NoReport => {
+                StatusSource::Agent(_) | StatusSource::Title(_) | StatusSource::NoReport => {
                     "Done, waiting for a prompt".to_owned()
                 }
             },
