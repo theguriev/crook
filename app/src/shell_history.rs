@@ -45,6 +45,7 @@
 //! shell's own history search makes — and its other lines, which are not
 //! commands, are not offered at all.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -367,8 +368,13 @@ fn fish_entry(line: &str) -> Option<String> {
 /// the Up key and the suggestion agree with a person's sense of recency: a
 /// command run this morning and again ten minutes ago is ten minutes old.
 fn newest(commands: Vec<String>) -> Vec<String> {
-    let mut kept: Vec<String> = Vec::new();
-    for command in commands.into_iter().rev() {
+    // Seen by a set rather than by scanning what is kept: a megabyte of tail
+    // is tens of thousands of lines, each of which was compared against up to
+    // [`LIMIT`] kept commands — 23ms in a release build, on the thread that
+    // opens the first pane, for a history mostly made of repeats.
+    let mut seen = HashSet::new();
+    let mut kept = Vec::new();
+    for command in commands.iter().rev() {
         // A command with a newline in it is read as its first line — see this
         // module's header — which is what a zsh entry's continuation lines and
         // a fish entry's `\n` both leave behind.
@@ -387,16 +393,15 @@ fn newest(commands: Vec<String>) -> Vec<String> {
         {
             command = going_on.trim_end_matches([' ', '\t']);
         }
-        if command.trim().is_empty() || kept.iter().any(|seen| seen == command) {
+        if command.trim().is_empty() || !seen.insert(command) {
             continue;
         }
-        kept.push(command.to_owned());
+        kept.push(command);
         if kept.len() == LIMIT {
             break;
         }
     }
-    kept.reverse();
-    kept
+    kept.into_iter().rev().map(str::to_owned).collect()
 }
 
 #[cfg(test)]
