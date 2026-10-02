@@ -503,7 +503,20 @@ fn element_in(
             explanation,
         } => explained(
             element_in(content, chrome, action, hovers, bounded),
-            element_in(explanation, chrome, action, hovers, BOUNDED),
+            // At the ordinary size, as a panel is and for its reason: the note
+            // is a surface of its own at a panel's width, not more of the mark
+            // it explains. Drawn at the mark's scale, a note on a tab row's
+            // badge was 8pt words in a 280pt box.
+            element_in(
+                explanation,
+                Chrome {
+                    scale: Scale::ROW,
+                    ..chrome
+                },
+                action,
+                hovers,
+                BOUNDED,
+            ),
             hovers.take(),
         ),
     }
