@@ -407,6 +407,34 @@ fn uid() -> u32 {
     geteuid()
 }
 
+/// Whether the process a scratch directory is named after — `<pid>-<n>` — is
+/// still running.
+///
+/// Asked with signal 0, which delivers nothing and only says whether the pid
+/// could be signalled: success, or `EPERM` for a process of another user's,
+/// is a process that exists. A pid the system has since given to something
+/// else keeps a dead window's directory until that process ends too, which
+/// costs a few kilobytes; deleting a live one's costs its shell.
+#[cfg(unix)]
+fn owner_is_running(name: &str) -> bool {
+    const EPERM: i32 = 1;
+    // Declared rather than depended on, as `geteuid` is above; `pid_t` is 32
+    // bits on every Unix Crook builds for.
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    let Some(pid) = name
+        .split_once('-')
+        .and_then(|(pid, _)| pid.parse::<i32>().ok())
+        .filter(|pid| *pid > 0)
+    else {
+        return false;
+    };
+    // SAFETY: signal 0 sends nothing and touches no memory of this process's.
+    let answered = unsafe { kill(pid, 0) } == 0;
+    answered || io::Error::last_os_error().raw_os_error() == Some(EPERM)
+}
+
 /// A root that has been checked: a directory, not a link to one, that this
 /// user owns and nobody else can enter.
 ///
@@ -617,15 +645,27 @@ fn remove(scratch: &Path) {
 /// directory that is not its own and has not been touched for `stale_after`.
 ///
 /// `mine` is the prefix of this process's own directories, which are skipped
-/// whatever their age. The root is a [`Root`] rather than a path because this
-/// deletes, and a root that has not been checked could be a link to anywhere.
+/// whatever their age. So, on Unix, is every directory whose name says it is
+/// another Crook's that is still running: each window is a process of its
+/// own, and a pane left open for a week in one window had its directory
+/// deleted by the next window to open — Tab answered by nothing, and an
+/// `exec zsh` starting without the person's configuration, which is what the
+/// week was there to prevent. The root is a [`Root`] rather than a path
+/// because this deletes, and a root that has not been checked could be a link
+/// to anywhere.
 pub(super) fn sweep(root: &Root, mine: &str, stale_after: Duration) {
     let Ok(entries) = fs::read_dir(root.path()) else {
         return;
     };
     let now = SystemTime::now();
     for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(mine) {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(mine) {
+            continue;
+        }
+        #[cfg(unix)]
+        if owner_is_running(&name) {
             continue;
         }
         let stale = entry

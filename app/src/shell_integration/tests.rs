@@ -878,7 +878,15 @@ fn test_the_sweep_removes_directories_no_session_owns_and_leaves_ours() {
     let parent = TempDir::new("sweep");
     let root = Root::open(&parent.path().join("root")).expect("a fresh root should open");
     let ours = root.path().join("9999-0");
-    let abandoned = root.path().join("1-0");
+    // A pid that was a process a moment ago and is not one now.
+    let mut gone = if cfg!(windows) {
+        crate::process::command("cmd").args(["/C", "exit"]).spawn()
+    } else {
+        crate::process::command("true").spawn()
+    }
+    .expect("a program that exits at once should start");
+    gone.wait().expect("and finish");
+    let abandoned = root.path().join(format!("{}-0", gone.id()));
     fs::create_dir_all(&ours).expect("a directory should be creatable");
     fs::create_dir_all(&abandoned).expect("a directory should be creatable");
 
@@ -893,6 +901,23 @@ fn test_the_sweep_removes_directories_no_session_owns_and_leaves_ours() {
         "a directory left behind by a killed Crook has to be collectable, or \
          the temporary directory grows for ever"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_the_sweep_leaves_another_running_crooks_directories_however_old() {
+    // Every window is a process of its own; the one that started this test
+    // is running, and so its directory is in use.
+    let parent = TempDir::new("sweep-live");
+    let root = Root::open(&parent.path().join("root")).expect("a fresh root should open");
+    let theirs = root
+        .path()
+        .join(format!("{}-0", std::os::unix::process::parent_id()));
+    fs::create_dir_all(&theirs).expect("a directory should be creatable");
+
+    sweep(&root, "9999-", Duration::ZERO);
+
+    assert!(theirs.exists(), "a live window's directory was swept");
 }
 
 /// A zsh, bash or fish that is not installed, with the marks on. The launch is
