@@ -165,10 +165,13 @@ crook --update-plugin theguriev/chips
 
 `--update` installs the archive for this platform the way `script/install` does — verified
 against the published sums, unpacked, and renamed into place within the binary's own directory —
-so a Crook that is running keeps the file it started from until it is restarted. Where the binary
-is not Crook's to replace it says so and stops: a notarized `Crook.app` is replaced whole from
-the disk image, a binary a package manager installed is that package manager's, and a build in
-`target/` is another build.
+so a Crook that is running keeps the file it started from until it is restarted. A `Crook.app`
+is replaced whole instead: the release's disk image is checked against the same sums, mounted
+read-only out of sight, and the app in it is copied beside this one, held to the same signing
+team and identifier, accepted by Gatekeeper, and only then renamed into place. Where Crook is
+not its to replace it says so and stops: an app run from the disk image or from a folder this
+user cannot write is updated from a new disk image, a binary a package manager installed is that
+package manager's, and a build in `target/` is another build.
 
 Both also live in the window. **Settings → About** has an **Updates** row: *Check for updates*
 asks, the answer is the line under it, and *Update* appears beside it when this copy is one Crook

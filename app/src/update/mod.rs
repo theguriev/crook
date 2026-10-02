@@ -24,20 +24,28 @@
 //! not disagree: if one of them changes how a release is verified, so does the
 //! other.
 //!
-//! # And it refuses rather than guesses
+//! # Except where the release is a bundle
 //!
 //! A binary inside `Crook.app` is one file of a signed, notarized bundle, and
 //! replacing it would leave a bundle whose signature no longer matches itself.
-//! A binary in `/usr/bin` belongs to whatever package manager put it there. A
-//! binary in `target/debug` is somebody's working tree. None of those is a
-//! thing to overwrite, and each gets the one line that says what to do
-//! instead — see [`Refusal`].
+//! So on macOS the thing replaced is the bundle, whole, from the disk image the
+//! release publishes for it — see [`bundle`].
+//!
+//! # And it refuses rather than guesses
+//!
+//! A bundle this user cannot replace is the image's to update. A binary in
+//! `/usr/bin` belongs to whatever package manager put it there. A binary in
+//! `target/debug` is somebody's working tree. None of those is a thing to
+//! overwrite, and each gets the one line that says what to do instead — see
+//! [`Refusal`].
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::Channel;
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod bundle;
 pub mod model;
 
 pub use model::UpdateModel;
@@ -66,7 +74,7 @@ const SUMS_LIMIT: u64 = 1 << 16;
 
 /// The most an archive may be.
 ///
-/// A release archive is about twenty megabytes; sixty-four is room for a
+/// A release archive or disk image is about twenty megabytes; sixty-four is room for a
 /// build that grew and a ceiling on a URL that turned into something else.
 const ARCHIVE_LIMIT: u64 = 64 << 20;
 
@@ -190,7 +198,9 @@ fn parts(version: &str) -> (u64, u64, u64, bool) {
 pub enum Refusal {
     /// A build from a working tree, run by whoever wrote it.
     Dev,
-    /// Inside a macOS application bundle, which is signed as a whole.
+    /// Inside a macOS application bundle that cannot be replaced whole from
+    /// here: run from the disk image, translocated, in a directory this user
+    /// may not write, or not where a release puts its executable.
     Bundle(PathBuf),
     /// Inside a `target/` directory, which is a build and not an install.
     BuildTree(PathBuf),
@@ -216,7 +226,7 @@ impl std::fmt::Display for Refusal {
             ),
             Self::Bundle(path) => write!(
                 out,
-                "this Crook is inside {}, and a notarized bundle is replaced whole: \
+                "this Crook is inside {}, which this user cannot replace whole: \
                  download the disk image from {RELEASES}",
                 path.display()
             ),
@@ -244,7 +254,8 @@ impl std::fmt::Display for Refusal {
     }
 }
 
-/// The binary an update would be written over, or why none can be.
+/// What an update would be written over — the binary, or on macOS the
+/// `Crook.app` it is inside — or why nothing can be.
 pub fn replaceable(channel: Channel) -> Result<PathBuf, Refusal> {
     if channel == Channel::Dev {
         return Err(Refusal::Dev);
@@ -273,11 +284,13 @@ fn replaceable_at(binary: PathBuf) -> Result<PathBuf, Refusal> {
         return Err(Refusal::Replaced);
     }
 
-    if binary
-        .ancestors()
-        .any(|part| part.extension().is_some_and(|kind| kind == "app"))
-    {
-        return Err(Refusal::Bundle(binary));
+    if let Some(bundle) = bundle::of(&binary) {
+        // A bundle is replaced whole, which only the platform it is built for
+        // has the tools to check the signature of.
+        return match cfg!(target_os = "macos") {
+            true => bundle::shape(bundle, &binary),
+            false => Err(Refusal::Bundle(binary)),
+        };
     }
     // A release-channel binary run straight out of a build is still a build,
     // and another build is what updates it.
@@ -352,7 +365,17 @@ fn stem(tag: &str, triple: &str) -> String {
     format!("crook-{tag}-{triple}")
 }
 
-/// Downloads the release named by `tag` and puts it where `binary` is.
+/// Downloads the release named by `tag` and puts it where `target` is: the
+/// disk image's app over a bundle, the archive's binary over anything else.
+pub fn install(tag: &str, target: &Path, agent: &ureq::Agent) -> Result<(), String> {
+    if cfg!(target_os = "macos") && target.extension().is_some_and(|kind| kind == "app") {
+        return bundle::install(tag, target, agent);
+    }
+    install_binary(tag, target, agent)
+}
+
+/// Downloads the archive of the release named by `tag` and puts its binary
+/// where `binary` is.
 ///
 /// Every step that could leave a half-written Crook happens before anything is
 /// moved: the archive is fetched, checked against the published sums, unpacked
@@ -360,11 +383,23 @@ fn stem(tag: &str, triple: &str) -> String {
 /// directory* and renamed over it. A rename within one directory is atomic, so
 /// the file is either the version that was there or the one that arrived, and
 /// never a prefix of either.
-pub fn install(tag: &str, binary: &Path, agent: &ureq::Agent) -> Result<(), String> {
+fn install_binary(tag: &str, binary: &Path, agent: &ureq::Agent) -> Result<(), String> {
     let triple = triple().ok_or_else(|| Refusal::Platform.to_string())?;
     let stem = stem(tag, triple);
-    let archive = format!("{stem}.tar.gz");
+    let bytes = verified(agent, tag, &format!("{stem}.tar.gz"))?;
 
+    let work = scratch()?;
+    let outcome = unpack_and_replace(&bytes, &stem, binary, &work);
+    // Whatever happened: the archive and what came out of it are this
+    // function's mess, and a failed update should not leave a hundred
+    // megabytes in the temporary directory.
+    let _ = std::fs::remove_dir_all(&work);
+    outcome
+}
+
+/// One file of the release named by `tag`, downloaded and checked against the
+/// `SHA256SUMS` published beside it.
+fn verified(agent: &ureq::Agent, tag: &str, archive: &str) -> Result<Vec<u8>, String> {
     let bytes = fetch(
         agent,
         &format!("{DOWNLOADS}/{tag}/{archive}"),
@@ -382,21 +417,14 @@ pub fn install(tag: &str, binary: &Path, agent: &ureq::Agent) -> Result<(), Stri
     let sums = String::from_utf8(sums).map_err(|_| String::from("SHA256SUMS is not text"))?;
 
     let want =
-        sum_for(&sums, &archive).ok_or_else(|| format!("SHA256SUMS has no line for {archive}"))?;
+        sum_for(&sums, archive).ok_or_else(|| format!("SHA256SUMS has no line for {archive}"))?;
     let got = crate::plugins::store::fetch::sha256_hex(&bytes);
     if !got.eq_ignore_ascii_case(want) {
         return Err(format!(
             "{archive} hashes to {got} and the release says {want}"
         ));
     }
-
-    let work = scratch()?;
-    let outcome = unpack_and_replace(&bytes, &stem, binary, &work);
-    // Whatever happened: the archive and what came out of it are this
-    // function's mess, and a failed update should not leave a hundred
-    // megabytes in the temporary directory.
-    let _ = std::fs::remove_dir_all(&work);
-    outcome
+    Ok(bytes)
 }
 
 /// The unpacking half, with the temporary directory already made.
