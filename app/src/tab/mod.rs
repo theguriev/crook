@@ -1262,6 +1262,14 @@ impl TabStrip {
         self.active().map(|tab| tab.panes().focused_id())
     }
 
+    /// Where the focused pane's shell last said it was, for what opens from it.
+    fn focused_directory(&self) -> Option<PathBuf> {
+        self.pane(self.focused_pane_id()?)?
+            .session()
+            .working_directory
+            .clone()
+    }
+
     /// Every row the bar should draw at this granularity, as the tab it
     /// belongs to and the pane it stands for.
     ///
@@ -1784,8 +1792,19 @@ impl TabStrip {
         match action {
             TabAction::New => {
                 self.opened += 1;
-                let tab = Tab::new(format!("agent {}", self.opened));
+                let mut tab = Tab::new(format!("agent {}", self.opened));
                 let id = tab.id();
+                // Where the person is working, not where Crook was started:
+                // from the Dock that is `/`, read as the home directory, and a
+                // new tab that always opened in `~` sent them `cd`-ing back to
+                // the directory they had just been in. A directory gone since
+                // is the pty's to fall back from, as it is for a restored one.
+                if let Some(directory) = self.focused_directory() {
+                    let pane = tab.panes().focused_id();
+                    if let Some(pane) = tab.panes_mut().get_mut(pane) {
+                        pane.session_mut().working_directory = Some(directory);
+                    }
+                }
                 // After the active tab, which is where a person who just
                 // branched off what they were doing expects to find it.
                 let at = self.slot_after(self.index_of(self.active));
