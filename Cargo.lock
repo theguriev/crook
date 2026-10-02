@@ -627,6 +627,7 @@ dependencies = [
  "log",
  "parking_lot",
  "portable-pty",
+ "unicode-width",
 ]
 
 [[package]]
