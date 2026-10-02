@@ -234,12 +234,21 @@ impl PaneSelection {
     /// did.
     ///
     /// Called from layout, where the width is known. See [`State::columns`].
+    ///
+    /// The press goes with it, for [`Self::resurfaced`]'s reason: its anchor
+    /// names a cell of the old wrapping. Left open, a drag across a resize —
+    /// the window, a split, the tabs panel — made a selection from that
+    /// anchor at every move and this let go of it at every layout, so the
+    /// rest of the drag showed no highlight and copied nothing.
     pub fn reflowed(&self, columns: usize) -> bool {
-        let stale = {
-            let state = self.0.borrow();
-            state.selected.is_some() && state.columns != columns
-        };
-        stale && self.clear()
+        let mut state = self.0.borrow_mut();
+        let open = state.selected.is_some() || state.pressed.is_some();
+        if !open || state.columns == columns {
+            return false;
+        }
+        state.columns = columns;
+        state.pressed = None;
+        state.selected.take().is_some()
     }
 
     /// Lets go of a selection made on the other surface, reporting whether it
