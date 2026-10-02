@@ -30414,6 +30414,32 @@ mod agent_titles {
         assert_eq!(status_and_source(&harness, pane).0, AgentStatus::Idle);
     }
 
+    /// The row draws the status already; the glyph is not part of the name.
+    #[test]
+    fn the_glyph_is_left_out_of_the_name() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+        let name = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                let session = workspace
+                    .tabs()
+                    .pane(pane)
+                    .expect("the pane is open")
+                    .session();
+                session.derived_title.clone()
+            })
+        };
+
+        titled(&mut harness, pane, "\u{25d0} Fix the tab directory");
+        assert_eq!(name(&harness).as_deref(), Some("Fix the tab directory"));
+
+        titled(&mut harness, pane, "\u{2733}");
+        assert_eq!(name(&harness), None, "a glyph alone is no name");
+
+        titled(&mut harness, pane, "vim notes.md");
+        assert_eq!(name(&harness).as_deref(), Some("vim notes.md"));
+    }
+
     #[test]
     fn a_title_without_the_glyph_says_nothing_about_the_status() {
         let mut harness = Harness::panel(1);

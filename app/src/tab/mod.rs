@@ -121,12 +121,18 @@ impl AgentStatus {
     /// a row is right about an agent nobody has set Crook's hooks up for.
     /// Only those glyphs: the braille spinners every build tool draws would
     /// make each `npm install` an agent.
-    pub fn from_title(title: &str) -> Option<Self> {
-        match title.chars().next()? {
-            '\u{2733}' => Some(Self::Idle),
-            '\u{25d0}'..='\u{25d3}' => Some(Self::Running),
-            _ => None,
-        }
+    ///
+    /// Answered with the title the glyph was in front of, which is the name
+    /// the row wears: the row draws its status already, and a glyph turning
+    /// in front of the name said it twice and moved the name as it turned.
+    pub fn from_title(title: &str) -> Option<(Self, &str)> {
+        let glyph = title.chars().next()?;
+        let status = match glyph {
+            '\u{2733}' => Self::Idle,
+            '\u{25d0}'..='\u{25d3}' => Self::Running,
+            _ => return None,
+        };
+        Some((status, title[glyph.len_utf8()..].trim_start()))
     }
 }
 

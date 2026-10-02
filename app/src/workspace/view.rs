@@ -7600,7 +7600,11 @@ impl Workspace {
             }
             TerminalUpdate::Title(pane, title) => {
                 let status = title.as_deref().and_then(AgentStatus::from_title);
-                let title = title.clone();
+                let title = match status {
+                    Some((_, name)) => Some(name.to_owned()).filter(|name| !name.is_empty()),
+                    None => title.clone(),
+                };
+                let status = status.map(|(status, _)| status);
                 let titled =
                     self.update_session(*pane, ctx, |session| session.derived_title = title);
                 if let Some(status) = status {
