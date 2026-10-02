@@ -271,3 +271,20 @@ fn a_decode_overtaken_by_another_plugins_does_not_take_its_place() {
     );
     assert!(state.shown(&first).is_none());
 }
+
+#[test]
+fn every_plugin_has_a_toggle_of_its_own() {
+    let toggle = |id: &str| {
+        action("toggle", &PluginId::parse(id).expect("a valid id"))
+            .as_str()
+            .to_owned()
+    };
+
+    // The name a person may have bound a key to, unchanged.
+    assert_eq!(toggle("crook/usage"), "crook/plugins/toggle-crook-usage");
+    // Two ids that used to be one name.
+    assert_ne!(toggle("foo-bar/baz"), toggle("foo/bar-baz"));
+    assert_eq!(toggle("foo-bar/baz"), "crook/plugins/toggle_7-foo-bar-baz");
+    // And the escaped form cannot be taken for a plain one either.
+    assert_ne!(toggle("foo-bar/baz"), toggle("toggle_7/foo-bar-baz"));
+}
