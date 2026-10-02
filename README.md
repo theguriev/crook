@@ -428,9 +428,9 @@ Twenty features, and the page that configures them:
   host anywhere else, and the hover card prints the whole address, since any program in the
   pane can write the sequence.
   **Check pull request** on the row's menu is the one place Crook asks the network about your
-  work: it runs your own `gh pr view <url> --json state,statusCheckRollup` once, on that
+  work: it runs your own `gh pr view <url> --json state,isDraft,statusCheckRollup` once, on that
   press, under a deadline — no token of Crook's, no timer, no poll — and the hover card says
-  open, merged or closed and how the checks stand until you press again, or that `gh` could
+  open, draft, merged or closed and how the checks stand until you press again, or that `gh` could
   not be found, is not signed in, or could not reach GitHub. `gh` is looked for on Crook's
   `PATH` and then where Homebrew, MacPorts, gh's own package and `~/.local/bin` put it, so a
   Crook opened from the Dock finds it too.

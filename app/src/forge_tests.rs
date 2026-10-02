@@ -14,7 +14,7 @@ use super::*;
 
 const URL: &str = "https://github.com/theguriev/crook/pull/398";
 
-/// What `gh pr view --json state,statusCheckRollup` prints, for a state and
+/// What `gh pr view --json state,isDraft,statusCheckRollup` prints, for a state and
 /// a list of checks already in gh's own shape.
 fn printed(state: &str, checks: &str) -> String {
     format!(r#"{{"state":"{state}","statusCheckRollup":[{checks}]}}"#)
@@ -100,6 +100,21 @@ fn a_merged_or_closed_pull_request_says_so() {
     let closed = read(printed("CLOSED", "").as_bytes()).unwrap();
     assert_eq!(State::Closed, closed.state);
     assert_eq!("Closed \u{b7} no checks", closed.summary());
+}
+
+#[test]
+fn an_open_draft_says_it_is_a_draft() {
+    let draft = r#"{"state":"OPEN","isDraft":true,"statusCheckRollup":[]}"#;
+    let found = read(draft.as_bytes()).unwrap();
+    assert_eq!(State::Draft, found.state);
+    assert_eq!("Draft \u{b7} no checks", found.summary());
+
+    let ready = r#"{"state":"OPEN","isDraft":false,"statusCheckRollup":[]}"#;
+    assert_eq!(State::Open, read(ready.as_bytes()).unwrap().state);
+
+    // Once merged or closed, having been a draft is no longer the news.
+    let closed = r#"{"state":"CLOSED","isDraft":true,"statusCheckRollup":[]}"#;
+    assert_eq!(State::Closed, read(closed.as_bytes()).unwrap().state);
 }
 
 #[test]
@@ -299,7 +314,13 @@ mod with_a_fake_gh {
         // else — the press asks what it says it asks.
         let asked = std::fs::read_to_string(scratch.path().join("asked")).unwrap();
         assert_eq!(
-            vec!["pr", "view", URL, "--json", "state,statusCheckRollup"],
+            vec![
+                "pr",
+                "view",
+                URL,
+                "--json",
+                "state,isDraft,statusCheckRollup"
+            ],
             asked.lines().collect::<Vec<_>>()
         );
     }
@@ -373,7 +394,13 @@ mod with_a_fake_gh {
         assert_eq!(State::Open, found.state);
         let asked = std::fs::read_to_string(installed.path().join("asked")).unwrap();
         assert_eq!(
-            vec!["pr", "view", URL, "--json", "state,statusCheckRollup"],
+            vec![
+                "pr",
+                "view",
+                URL,
+                "--json",
+                "state,isDraft,statusCheckRollup"
+            ],
             asked.lines().collect::<Vec<_>>()
         );
 
