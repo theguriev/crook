@@ -247,12 +247,15 @@ impl RowFacts {
         }
         match resolve_subtitle(options.primary_info, options.subtitle) {
             // Warp's `compact_branch_subtitle_display`: the branch, else the
-            // directory, else no second line at all.
-            Subtitle::Branch => self
-                .branch
-                .as_deref()
-                .map(RowLine::branch)
-                .or_else(|| self.directory.clone().map(RowLine::path)),
+            // directory, else no second line at all — but not the directory
+            // under a title that already is it. Branch is the subtitle a
+            // directory title is paired with by default, so a pane outside
+            // any repository printed `~/Downloads` on both lines.
+            Subtitle::Branch => self.branch.as_deref().map(RowLine::branch).or_else(|| {
+                (options.primary_info != PrimaryInfo::WorkingDirectory)
+                    .then(|| self.directory.clone().map(RowLine::path))
+                    .flatten()
+            }),
             Subtitle::WorkingDirectory => self.directory.clone().map(RowLine::path),
             // The same rule as the description line: a compact row asked for
             // the command, and a command that is only the directory restated
@@ -981,6 +984,25 @@ mod naming_tests {
             "~/work/crook"
         );
         assert!(facts.description(PrimaryInfo::WorkingDirectory).is_none());
+
+        // Nor on a compact row's second line, where the branch it is paired
+        // with by default falls back to the directory when there is none.
+        let compact = TabOptions {
+            primary_info: PrimaryInfo::WorkingDirectory,
+            subtitle: Subtitle::Branch,
+            ..TabOptions::default()
+        };
+        assert!(facts.branch.is_none(), "a pane outside any repository");
+        assert!(facts.subtitle(compact).is_none());
+        // Under any other title the directory is still the fallback.
+        let by_command = TabOptions {
+            primary_info: PrimaryInfo::Command,
+            ..compact
+        };
+        assert_eq!(
+            facts.subtitle(by_command).map(|line| line.text),
+            Some("~/work/crook".to_owned())
+        );
     }
 
     /// A question beats a place: while the agent is waiting and has said
