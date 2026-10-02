@@ -30,7 +30,9 @@
 //! collides with something else get the `CSI number ; modifiers u` form
 //! instead, so `ctrl-enter`, `ctrl-tab`, `shift-enter` and `ctrl-i` stop being
 //! indistinguishable from `enter`, `tab`, `enter` and `tab`. That collision is
-//! the entire reason the protocol exists.
+//! the entire reason the protocol exists. Plain Enter, Tab and Backspace are
+//! the spec's exception: they keep their legacy bytes under `disambiguate`, so
+//! a shell left in the mode by a program that crashed still runs `reset`.
 //!
 //! `report_all` (`CSI > 8 u`) extends it to every key, so a plain `a` is
 //! reported as `CSI 97u` rather than typed, and `report_text` (`16`) appends
@@ -375,6 +377,17 @@ fn kitty(key: Key, modifiers: Modifiers, keyboard: KeyboardModes) -> Option<Vec<
         // insert, and the protocol forbids a control code there — a CR or a
         // TAB would be typed into the line as well as acted on.
         Key::Escape => (27, None),
+        // But unmodified, and short of `report_all`, the other three keep
+        // their legacy bytes — the spec's one exception to `disambiguate`, so
+        // that a person can still type `reset` and press Enter in the shell a
+        // crashed editor left with the protocol on. Sent as `CSI 13u`, Enter
+        // typed `[13u` into the line and ran nothing, Backspace deleted
+        // nothing, and the pane was stuck until it was closed.
+        Key::Enter | Key::Tab | Key::Backspace
+            if modifiers.parameter() <= 1 && !keyboard.report_all =>
+        {
+            return None;
+        }
         Key::Enter => (13, None),
         Key::Tab => (9, None),
         Key::Backspace => (127, None),

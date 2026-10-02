@@ -323,13 +323,17 @@ mod kitty_keyboard {
     fn test_the_collisions_the_protocol_exists_for_are_told_apart() {
         let modes = disambiguating();
 
-        // Plain, these four keep the numbers of the control codes they used to
-        // send, which is what makes them recognisable to a program that has
-        // only just turned the protocol on.
+        // Plain Escape keeps the number of the control code it used to send,
+        // which is what makes it recognisable to a program that has only just
+        // turned the protocol on.
         assert_eq!(sent(Key::Escape, Modifiers::NONE, modes), "\x1b[27u");
-        assert_eq!(sent(Key::Enter, Modifiers::NONE, modes), "\x1b[13u");
-        assert_eq!(sent(Key::Tab, Modifiers::NONE, modes), "\x1b[9u");
-        assert_eq!(sent(Key::Backspace, Modifiers::NONE, modes), "\x1b[127u");
+
+        // Plain Enter, Tab and Backspace are the spec's exception: legacy
+        // bytes, so a shell a crashed editor left in the mode still runs
+        // `reset` when somebody types it.
+        assert_eq!(sent(Key::Enter, Modifiers::NONE, modes), "\r");
+        assert_eq!(sent(Key::Tab, Modifiers::NONE, modes), "\t");
+        assert_eq!(sent(Key::Backspace, Modifiers::NONE, modes), "\x7f");
 
         // And the whole point: these four were indistinguishable from the
         // unmodified key in every legacy encoding. Control is modifier 5.
