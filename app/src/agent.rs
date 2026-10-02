@@ -270,11 +270,27 @@ fn opens_a_pull_request(command: &str) -> bool {
         })
         .filter(|word| !word.is_empty())
         .collect();
-    words.windows(3).any(|words| {
-        let program = words[0].rsplit(['/', '\\']).next().unwrap_or_default();
-        matches!(program, "gh" | "gh.exe")
-            && words[1] == "pr"
-            && matches!(words[2], "create" | "new")
+    (0..words.len()).any(|at| {
+        let program = words[at].rsplit(['/', '\\']).next().unwrap_or_default();
+        if !matches!(program, "gh" | "gh.exe") {
+            return false;
+        }
+        // `gh -R owner/repo pr create` and `gh pr --repo owner/repo create`
+        // are both the command, and an agent working in a fork writes the
+        // repository it means: words that are flags are stepped over, with
+        // the value `-R` and `--repo` take after them.
+        let mut rest = words[at + 1..].iter().copied();
+        let mut next_command = || {
+            while let Some(word) = rest.next() {
+                if matches!(word, "-R" | "--repo") {
+                    rest.next();
+                } else if !word.starts_with('-') {
+                    return Some(word);
+                }
+            }
+            None
+        };
+        next_command() == Some("pr") && matches!(next_command(), Some("create" | "new"))
     })
 }
 
@@ -1431,6 +1447,22 @@ mod tests {
         // `gh pr new` is the same command, and a gh named by its path is gh.
         let aliased = claude_post_tool_use("/usr/bin/gh pr new -f", PR, "");
         assert_eq!(Some(PR.to_owned()), pull_request_from_hook(&aliased));
+
+        // The repository named before or after `pr`, as an agent in a fork
+        // writes it.
+        for command in [
+            "gh -R theguriev/crook pr create --fill",
+            "gh --repo theguriev/crook pr create --fill",
+            "gh --repo=theguriev/crook pr create --fill",
+            "gh pr -R theguriev/crook create --fill",
+        ] {
+            let named = claude_post_tool_use(command, PR, "");
+            assert_eq!(
+                Some(PR.to_owned()),
+                pull_request_from_hook(&named),
+                "{command}"
+            );
+        }
 
         // A script with no JSON pipes gh's own output.
         assert_eq!(
