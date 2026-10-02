@@ -1073,6 +1073,9 @@ fn a_block_that_printed_more_than_an_answer_carries_is_cut_from_the_front_at_a_l
     assert!(long.ends_with(kept), "the end is what is kept");
     assert!(kept.starts_with("line "), "from a whole line: {kept:?}");
 
+    // A cut that lands exactly on a line's start keeps that line.
+    assert_eq!(blocks::tail("aaa\nbbb\nccc", 7), ("bbb\nccc", true));
+
     // One line longer than the cap on its own is cut where a character
     // starts rather than dropped.
     let wide = "é".repeat(100);

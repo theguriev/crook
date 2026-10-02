@@ -192,6 +192,11 @@ pub fn tail(text: &str, cap: usize) -> (&str, bool) {
         start += 1;
     }
     let kept = &text[start..];
+    // Already at a line's start, the cut has nothing to drop: skipping to the
+    // next newline anyway threw away a whole line that fitted.
+    if text.as_bytes()[start - 1] == b'\n' {
+        return (kept, true);
+    }
     let kept = match kept.find('\n') {
         Some(newline) if newline + 1 < kept.len() => &kept[newline + 1..],
         _ => kept,
