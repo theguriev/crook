@@ -63,6 +63,25 @@ fn a_new_tab_lands_after_the_active_one_and_takes_the_selection() {
 }
 
 #[test]
+fn a_new_tab_opens_where_the_focused_pane_is_working() {
+    let mut strip = TabStrip::new();
+    let pane = strip.focused_pane_id().expect("a pane has the keyboard");
+    let here = PathBuf::from("/somewhere/the/shell/went");
+    strip
+        .pane_mut(pane)
+        .expect("the pane is open")
+        .session_mut()
+        .working_directory = Some(here.clone());
+
+    strip.apply(TabAction::New);
+
+    let opened = focused_pane(&strip, strip.active_id());
+    assert_ne!(opened, pane);
+    let session = strip.pane(opened).expect("the new pane is open").session();
+    assert_eq!(session.working_directory, Some(here));
+}
+
+#[test]
 fn selecting_moves_the_tab_to_the_front_of_the_mru_list() {
     let (mut strip, ids) = strip(3);
 
