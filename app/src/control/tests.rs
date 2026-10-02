@@ -516,6 +516,26 @@ fn the_table_marks_the_focused_pane_and_puts_a_question_under_its_title() {
     );
 }
 
+#[test]
+fn the_table_lines_up_a_title_drawn_in_wide_characters() {
+    // Four characters, eight columns: the cells after it still start under
+    // their headings.
+    let mut panes = two_panes();
+    panes[0].title = "修正バグ".to_owned();
+    let table = cli::table(&panes, Some(Path::new("/home/someone")));
+    let lines: Vec<&str> = table.lines().collect();
+
+    let column_of = |line: &str, text: &str| {
+        let at = line.find(text).expect("the text is on the line");
+        unicode_width::UnicodeWidthStr::width(&line[..at])
+    };
+    assert_eq!(
+        column_of(lines[1], "main"),
+        column_of(lines[0], "BRANCH"),
+        "the branch is under its heading:\n{table}"
+    );
+}
+
 /// Every control character a pane could have planted in what the window
 /// says about it: a retitle and a line erase over OSC 7's percent-decoding, a
 /// C1 CSI, a carriage return, a newline, and a DEL.
