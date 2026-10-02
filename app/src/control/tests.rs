@@ -1286,6 +1286,32 @@ mod socket {
         directory.join(format!("{}.sock", std::process::id()))
     }
 
+    /// Leaves a socket at `path` that nobody is listening on — what a Crook
+    /// that was killed leaves — and returns once a connection to it is
+    /// refused.
+    ///
+    /// Bound and dropped is not enough on its own while the suite runs. The
+    /// shell tests beside these start ptys by `fork` and `exec`, and a fork
+    /// that lands between the bind and the drop hands the child a copy of
+    /// the listener: until that child execs, the "dead" socket accepts, and a
+    /// sweep or a claim that knocks on it is right to leave it alone. The
+    /// test that then found it still there was failing on the suite's timing,
+    /// one run in a few, and never alone.
+    fn dead_socket(path: &Path) {
+        drop(UnixListener::bind(path).expect("bound"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !UnixStream::connect(path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "{} never went dead",
+                path.display()
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     fn mode(path: &Path) -> u32 {
         fs::symlink_metadata(path)
             .expect("there")
@@ -1554,7 +1580,7 @@ mod socket {
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).expect("closed");
         // Bound and dropped: the file stays and nothing listens, which is
         // what a Crook that was killed leaves.
-        drop(UnixListener::bind(first_name(&directory)).expect("bound"));
+        dead_socket(&first_name(&directory));
         assert!(first_name(&directory).exists());
 
         let socket = Socket::open_in(&directory, answering(two_panes())).expect("opens");
@@ -1612,7 +1638,7 @@ mod socket {
         let root = TempDir::new();
         let directory = root.0.clone();
         let dead = directory.join("100.sock");
-        drop(UnixListener::bind(&dead).expect("bound"));
+        dead_socket(&dead);
         let live = directory.join("200.sock");
         let _listening = UnixListener::bind(&live).expect("bound");
         let file = directory.join("300.sock");
@@ -1742,7 +1768,8 @@ mod socket {
         assert!(none.contains("no Crook is running"), "{none}");
 
         let first = Socket::open_in(&directory, answering(Vec::new())).expect("opens");
-        drop(UnixListener::bind(directory.join("1.sock")).expect("a dead one beside it"));
+        // A dead one beside it.
+        dead_socket(&directory.join("1.sock"));
         assert_eq!(
             socket_from(None, None),
             Ok(first.path().to_owned()),
