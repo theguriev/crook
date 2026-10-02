@@ -1356,6 +1356,11 @@ fn read(path: &str) -> Answer {
         return Answer::Failed(String::from("that is not a path this can read"));
     };
 
+    #[cfg(target_os = "macos")]
+    if let Some(bytes) = from_the_keychain(&resolved) {
+        return Answer::Read { bytes };
+    }
+
     match fs::read(&resolved) {
         Ok(bytes) if bytes.len() as u64 > MAX_ANSWER => Answer::Failed(format!(
             "{} is {} bytes and the limit is {MAX_ANSWER}",
@@ -1365,6 +1370,59 @@ fn read(path: &str) -> Answer {
         Ok(bytes) => Answer::Read { bytes },
         Err(why) => Answer::Failed(why.to_string()),
     }
+}
+
+/// Files a program writes to the keychain instead on macOS, and the
+/// keychain item it writes them to.
+///
+/// Claude Code keeps its sign-in in `~/.claude/.credentials.json` on Linux and
+/// Windows, and in the login keychain on macOS. The file can still be on a Mac
+/// — left by an older Claude Code, never written to again — holding a token
+/// that expired months ago, so a plugin granted the file read a session that
+/// was always "expired" while Claude Code was signed in the whole time. The
+/// item holds the same JSON the file would, so serving it in the file's place
+/// is the grant meaning what it says: Claude Code's credentials, where that
+/// platform keeps them.
+#[cfg(target_os = "macos")]
+const IN_THE_KEYCHAIN: &[(&str, &str)] =
+    &[("~/.claude/.credentials.json", "Claude Code-credentials")];
+
+/// The keychain item standing in for `resolved`, if it is one of
+/// [`IN_THE_KEYCHAIN`].
+#[cfg(target_os = "macos")]
+fn keychain_item_for(resolved: &Path) -> Option<&'static str> {
+    IN_THE_KEYCHAIN
+        .iter()
+        .find(|(file, _)| resolve(file).as_deref() == Some(resolved))
+        .map(|(_, service)| *service)
+}
+
+/// What the keychain holds in place of `resolved`, or `None` to read the file.
+///
+/// Through `/usr/bin/security`, the tool Claude Code writes the item with,
+/// which is what the item's access list already trusts: reading it this way
+/// asks nobody anything. Anything short of an answer — no such item, a locked
+/// keychain, a tool that failed — falls back to the file rather than failing
+/// the read, so a Mac whose Claude Code does use the file keeps working.
+#[cfg(target_os = "macos")]
+fn from_the_keychain(resolved: &Path) -> Option<Vec<u8>> {
+    let service = keychain_item_for(resolved)?;
+    let output = crate::process::command("/usr/bin/security")
+        .args(["find-generic-password", "-s", service, "-w"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|why| log::debug!("could not ask the keychain for {service:?}: {why}"))
+        .ok()?;
+    if !output.status.success() {
+        log::debug!("the keychain has no {service:?}; reading the file");
+        return None;
+    }
+    let mut bytes = output.stdout;
+    // `-w` ends the secret with a newline of its own.
+    while bytes.last().is_some_and(u8::is_ascii_whitespace) {
+        bytes.pop();
+    }
+    (!bytes.is_empty() && bytes.len() as u64 <= MAX_ANSWER).then_some(bytes)
 }
 
 /// Where a granted path actually is.

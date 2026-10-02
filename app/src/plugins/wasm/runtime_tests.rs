@@ -1030,3 +1030,38 @@ fn a_listing_answers_with_the_names_and_nothing_about_them() {
         ]
     );
 }
+
+/// Claude Code's credentials file is the keychain item on macOS, however the
+/// path was spelled, and no other file is.
+#[cfg(target_os = "macos")]
+#[test]
+fn claude_codes_credentials_are_read_from_the_keychain_on_macos() {
+    let file = resolve("~/.claude/.credentials.json").expect("there is a home directory");
+    assert_eq!(keychain_item_for(&file), Some("Claude Code-credentials"));
+    assert_eq!(
+        keychain_item_for(&resolve("~/.claude/settings.json").expect("home")),
+        None
+    );
+    assert_eq!(keychain_item_for(Path::new("/etc/hosts")), None);
+}
+
+/// Against the real keychain, where Claude Code is signed in on this machine:
+/// what is served is the JSON the file would hold, not the file.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_keychain_item_is_served_as_the_file_would_be() {
+    let file = resolve("~/.claude/.credentials.json").expect("there is a home directory");
+    let Some(bytes) = from_the_keychain(&file) else {
+        eprintln!("skipped: Claude Code is not signed in on this machine");
+        return;
+    };
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("the item is JSON");
+    assert!(
+        json.get("claudeAiOauth").is_some(),
+        "the shape the file has"
+    );
+    assert!(matches!(
+        super::read("~/.claude/.credentials.json"),
+        Answer::Read { .. }
+    ));
+}
