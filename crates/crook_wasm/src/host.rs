@@ -118,8 +118,21 @@ impl Registry {
     /// The requests go too. A plugin whose build gave up half way has not
     /// established what it is, and doing the network call it asked for on the
     /// way would be doing a thing on behalf of a plugin that does not exist.
+    ///
+    /// Two things stay, because neither is the build's. The time zone is the
+    /// machine's: the host sets it before a build so that the guest can work
+    /// out its first question from what day it is, and this runs at the start
+    /// of every build — clearing it told the guest it was in UTC for the whole
+    /// of `crook_build`. And the ticket count, which is never reused inside a
+    /// session, so an answer to a request made before a rebuild cannot be
+    /// taken for one made after it.
     pub(crate) fn clear(&self) {
-        *self.0.borrow_mut() = Inner::default();
+        let mut inner = self.0.borrow_mut();
+        *inner = Inner {
+            timezone: inner.timezone,
+            tickets: inner.tickets,
+            ..Inner::default()
+        };
     }
 
     /// Records a request and hands back the ticket its answer will carry.

@@ -100,6 +100,7 @@ fn assembled(manifest: &Manifest, body: &str, abi: u32, pages: u32) -> Vec<u8> {
             (import "crook" "request" (func $request (param i32 i32) (result i32)))
             (import "crook" "timer" (func $timer (param i32) (result i32)))
             (import "crook" "now" (func $now (result i64)))
+            (import "crook" "timezone" (func $timezone (result i32)))
             (memory (export "memory") {pages})
             (global $next (mut i32) (i32.const {free}))
             (data (i32.const {DATA}) "{manifest_bytes}")
@@ -447,6 +448,25 @@ fn what_a_plugin_registers_while_it_builds_comes_back() {
         registered.actions[0].title.as_deref(),
         Some("Refresh CI status")
     );
+}
+
+#[test]
+fn a_plugin_knows_the_time_zone_while_it_builds() {
+    // The host sets it before a build so that a guest can work out its first
+    // question from what day it is; a build that answers 1 saw anything else.
+    let body = r#"
+        (func (export "crook_build") (result i32)
+          (if (result i32) (i32.eq (call $timezone) (i32.const 120))
+            (then (i32.const 0))
+            (else (i32.const 1))))
+        (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
+        (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
+        "#;
+    let (mut sandbox, _) = open(&module(body, ABI_VERSION)).expect("it should open");
+    sandbox.set_timezone(120);
+
+    sandbox.build().expect("the build saw the time zone");
+    sandbox.build().expect("and so does the next one");
 }
 
 #[test]
