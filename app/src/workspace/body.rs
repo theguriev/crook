@@ -800,7 +800,8 @@ fn composer(
             .for_pane(pane)
             .with_terminal(handle, state.focused)
             .with_inline(state.inline)
-            .with_ink(state.ink);
+            .with_ink(state.ink)
+            .with_tab_key(workspace.general().tab_key);
     // So that Enter brings the list back to the block the command is about to
     // make, however far up somebody had scrolled to read.
     if let Some(view) = workspace.pane_blocks(pane) {

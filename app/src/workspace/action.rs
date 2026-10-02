@@ -742,6 +742,8 @@ pub enum SettingsAction {
     /// "Start a login shell": whether a pane's shell reads the startup files
     /// that only a login shell reads.
     ToggleLoginShell,
+    /// "Tab key": whether Tab completes the word or takes the suggestion.
+    SetTabKey(crate::settings::TabKey),
     /// "Show the tabs panel": whether the column of tabs is drawn at all.
     ///
     /// Here beside the other switches on the general options because that is

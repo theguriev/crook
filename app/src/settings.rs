@@ -250,6 +250,36 @@ pub enum StatusMarks {
     Glyphs,
 }
 
+/// What Tab does in the command line while a suggestion from the history
+/// stands after the caret.
+///
+/// Warp's "Tab key behavior", and the same two answers. Its dropdown rewrites
+/// two keybindings; here it is one option, because what Tab means in the
+/// field is decided by the field rather than by the keymap — see
+/// `TextInput::apply`.
+#[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TabKey {
+    /// Tab asks the shell what the word could become, and steps through
+    /// what it offered; Right takes the suggestion.
+    #[default]
+    Completions,
+    /// Tab takes the suggestion, as Right does. With none standing it asks
+    /// the shell, as it always did, and Ctrl-Space asks the shell whatever
+    /// is standing.
+    Suggestion,
+}
+
+impl TabKey {
+    /// What the page calls this.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Completions => "Complete",
+            Self::Suggestion => "Accept suggestion",
+        }
+    }
+}
+
 impl StatusMarks {
     /// What the page calls this.
     pub fn label(self) -> &'static str {
@@ -352,6 +382,9 @@ pub struct GeneralOptions {
     /// through the panel's limits rather than trusted, so a hand-edited
     /// width the panel cannot be drawn at is the nearest one it can.
     pub tabs_panel_width: f32,
+    /// What Tab does while a suggestion stands after the caret. See
+    /// [`TabKey`].
+    pub tab_key: TabKey,
     /// Whether a close that would end something still working asks first.
     ///
     /// The window's close, a tab's, a group's and a pane's all end the
@@ -402,6 +435,7 @@ impl Default for GeneralOptions {
             login_shell: crate::shell_integration::login_by_default(),
             show_tabs_panel: true,
             tabs_panel_width: DEFAULT_TABS_PANEL_WIDTH,
+            tab_key: TabKey::Completions,
             ask_before_ending_agents: true,
             notify_on_needs_input: true,
             notify_on_failed: false,
@@ -1768,6 +1802,9 @@ mod tests {
                 // Crook's own: what the mark at the head of a row is drawn
                 // as, which in Warp is not a choice.
                 "status_marks",
+                // Warp's "Tab key behavior", as one option rather than two
+                // rewritten keybindings.
+                "tab_key",
                 // Crook's own: how wide the column of tabs was dragged.
                 "tabs_panel_width",
                 // The chosen theme's name, which is a string rather than an
@@ -1956,11 +1993,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Nine tab options, ten general ones and three theme names, and
+        // Nine tab options, eleven general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(22, written.len());
+        assert_eq!(23, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),
