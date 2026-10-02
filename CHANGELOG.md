@@ -5,6 +5,18 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.18
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.17...v0.1.18)
+
+### Fixes
+
+- **plugins:** Read Claude Code's credentials from the keychain on macOS ([#415](https://github.com/theguriev/crook/pull/415))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.17
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.16...v0.1.17)
