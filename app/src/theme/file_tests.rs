@@ -666,6 +666,21 @@ fn writing_a_theme_never_overwrites_one_that_is_already_there() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn writing_a_theme_does_not_follow_a_link_that_points_nowhere() {
+    // `exists` says no to a dangling link, so a look-then-write wrote through
+    // it, to wherever it pointed.
+    let scratch = Scratch::new("dangling");
+    let elsewhere = scratch.path.join("elsewhere.txt");
+    std::os::unix::fs::symlink(&elsewhere, scratch.path.join("linked.yaml")).expect("linked");
+
+    let path = write_theme(&scratch.path, "Linked", &crate::theme::DARK).expect("written");
+
+    assert_eq!(path, scratch.path.join("linked_2.yaml"));
+    assert!(!elsewhere.exists(), "the write went through the link");
+}
+
 #[test]
 fn a_written_theme_is_spelled_the_way_warp_spells_one() {
     // Not decoration: a theme Crook writes should be a theme Warp reads, which
