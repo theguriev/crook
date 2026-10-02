@@ -499,11 +499,9 @@ impl<'a> Blocks<'a> {
     /// Every place `needle` occurs in the output, each as the selection that
     /// covers it, in reading order.
     ///
-    /// What a find bar highlights and steps through. Case-insensitive over
-    /// ASCII — a `grep` for `error` finds `Error` — and no more than that,
-    /// because a case fold that changed the number of characters would put
-    /// the highlight one cell off the text it grew from, and terminal output
-    /// is ASCII far more often than not. A match never crosses the line break
+    /// What a find bar highlights and steps through. Case-insensitive — a
+    /// `grep` for `error` finds `Error`, and `ошибка` finds `Ошибка` — one
+    /// character for one: see [`fold`]. A match never crosses the line break
     /// [`Blocks::walk`] writes between two rows, so a query with no newline in it is
     /// found within one logical line, folds and all.
     pub fn find_all(&self, needle: &str) -> Vec<Selection> {
@@ -518,11 +516,12 @@ impl<'a> Blocks<'a> {
             at.push(place);
         });
 
-        // ASCII case folding keeps every byte where it was, so a byte index
-        // into the folded haystack is a byte index into the shown text — and
-        // the char count up to it is the index into `at`.
-        let haystack = showing.to_ascii_lowercase();
-        let needle = needle.to_ascii_lowercase();
+        // Folded one character for one, so the folded haystack has exactly
+        // as many characters as `at` has places: a char count up to a byte of
+        // the haystack is the index into `at`, whatever the fold did to the
+        // bytes.
+        let haystack: String = showing.chars().map(fold).collect();
+        let needle: String = needle.chars().map(fold).collect();
         let needle_chars = needle.chars().count();
 
         let mut found = Vec::new();
@@ -606,6 +605,23 @@ impl<'a> Blocks<'a> {
                 ));
             }
         }
+    }
+}
+
+/// `character` as a find compares it: its lowercase, when that is one
+/// character, and itself when it is not.
+///
+/// Every script's case, not only ASCII's: output in Russian or Greek is
+/// searched the way English is. One for one, because a find maps each
+/// character it matched back to the cell it was drawn in, and a fold that
+/// grew a character — `İ` lowercases to two — would put every highlight after
+/// it one cell off the text. Those few keep their own case and match only
+/// themselves.
+fn fold(character: char) -> char {
+    let mut lower = character.to_lowercase();
+    match (lower.next(), lower.next()) {
+        (Some(only), None) => only,
+        _ => character,
     }
 }
 

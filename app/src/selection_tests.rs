@@ -632,6 +632,33 @@ fn find_all_lands_every_match_on_its_word_past_wide_and_accented_text() {
 }
 
 #[test]
+fn find_all_folds_case_outside_ascii_and_lands_on_the_word() {
+    // Cyrillic is two bytes a character in both cases, and `ẞ` is three
+    // bytes where its lowercase `ß` is two: the fold changes bytes, and the
+    // match still has to cover the cells the word was drawn in.
+    let mut emulator = Emulator::new(TerminalSize::new(40, 12), 500, Palette::default());
+    emulator.advance(A.as_bytes());
+    emulator.advance(format!("{B}log\r\n{C}").as_bytes());
+    emulator.advance("ẞ Ошибка: ОШИБКА\r\n".as_bytes());
+    emulator.advance(format!("{D}{A}$ ").as_bytes());
+    let session = Session {
+        finished: BlockHistory::new(emulator.blocks().iter().cloned().map(Arc::new).collect(), 0),
+        snapshot: emulator.snapshot(),
+    };
+
+    let matches = session.blocks().find_all("ошибка");
+    let texts: Vec<_> = matches
+        .iter()
+        .map(|found| found.text(&session.blocks()))
+        .collect();
+    assert_eq!(
+        texts,
+        [Some("Ошибка".to_owned()), Some("ОШИБКА".to_owned())]
+    );
+    assert_eq!(1, session.blocks().find_all("ß").len());
+}
+
+#[test]
 fn find_all_finds_every_occurrence_across_blocks_and_folds_ascii_case() {
     // Two commands, each printing its own name in capitals twice. The word
     // "one" appears once per command's output, so a search for it finds two,
