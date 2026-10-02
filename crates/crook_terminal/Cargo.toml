@@ -13,3 +13,4 @@ anyhow.workspace = true
 log.workspace = true
 parking_lot.workspace = true
 portable-pty.workspace = true
+unicode-width.workspace = true

@@ -381,6 +381,9 @@ impl BlockRows {
     /// that as its one row rather than being a gap with chrome around it.
     /// Plain, because the prompt that stood before it is gone with the rest.
     pub(crate) fn of_line(columns: usize, text: &str, palette: &Palette) -> Self {
+        use unicode_width::UnicodeWidthChar as _;
+
+        let columns = columns.max(1);
         let mut rows = Self::with_columns(columns);
         let blank = SnapshotCell {
             c: ' ',
@@ -388,16 +391,61 @@ impl BlockRows {
             background: palette.background,
             flags: CellFlags::NONE,
         };
-        let mut cells = vec![blank; columns.max(1)];
-        // Wrapped at the grid's width the way the grid would have wrapped it,
-        // so a long command line is as many rows as it was.
-        let characters: Vec<char> = text.chars().collect();
-        for line in characters.chunks(columns.max(1)) {
-            cells.fill(blank);
-            for (cell, character) in cells.iter_mut().zip(line) {
-                cell.c = *character;
+        let mut cells = vec![blank; columns];
+        let mut combining: Vec<RowCombining> = Vec::new();
+        // Laid out the way the grid lays out what a shell echoes, so the row
+        // is the command as it was drawn: a wide character takes two cells,
+        // the second a spacer; a zero-width one stacks on the character
+        // before it; and a row wraps at the grid's width in *cells*. One
+        // character a cell drew `日本語` overlapping itself and wrapped a long
+        // command at twice the width it had.
+        let mut column = 0;
+        let mut last = None;
+        let mut pending = false;
+        for character in text.chars() {
+            let width = character.width().unwrap_or(1);
+            if width == 0 {
+                if let Some(at) = last {
+                    match combining.last_mut() {
+                        Some(marks) if marks.column == at => {
+                            let mut stacked = marks.characters.to_vec();
+                            stacked.push(character);
+                            marks.characters = stacked.into();
+                        }
+                        _ => combining.push(RowCombining {
+                            column: at,
+                            characters: Box::new([character]),
+                        }),
+                    }
+                }
+                continue;
             }
-            rows.push_row(&cells, &mut Vec::new());
+            let wide = width == 2 && columns > 1;
+            if column + if wide { 2 } else { 1 } > columns {
+                // A wide character with one cell left before the edge leaves
+                // that cell as a spacer and starts the next row, as the grid
+                // does.
+                if wide && column < columns {
+                    cells[column].flags = CellFlags::WIDE_SPACER;
+                }
+                // Marked as folded, the way the grid marks the last cell of a
+                // row it wrapped, so a copy of the command is one line again.
+                cells[columns - 1].flags |= CellFlags::WRAPLINE;
+                rows.push_row(&cells, &mut combining);
+                cells.fill(blank);
+                column = 0;
+            }
+            cells[column].c = character;
+            if wide {
+                cells[column].flags = CellFlags::WIDE;
+                cells[column + 1].flags = CellFlags::WIDE_SPACER;
+            }
+            last = Some(column);
+            column += if wide { 2 } else { 1 };
+            pending = true;
+        }
+        if pending {
+            rows.push_row(&cells, &mut combining);
         }
         rows
     }

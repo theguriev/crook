@@ -212,3 +212,38 @@ fn test_copied_text_drops_wide_spacers_and_keeps_combining_marks() {
         "a copied block and a copied selection disagree"
     );
 }
+
+#[test]
+fn a_command_kept_without_its_rows_is_laid_out_the_way_the_grid_drew_it() {
+    // Wide characters, one that does not fit before the edge, and an accent
+    // that stacks on the letter before it: the row kept for a wiped block
+    // has to be the row the grid would have had.
+    let palette = Palette::default();
+    for (columns, text) in [
+        (4, "日本語"),
+        (5, "日本語x"),
+        (6, "cafe\u{301} ok"),
+        (3, "abcdefg"),
+    ] {
+        let kept = BlockRows::of_line(columns.into(), text, &palette);
+        let drawn = term(TerminalSize::new(columns, 6), text);
+        let harvested = harvest(&drawn, &palette, 0, kept.rows() as i32 - 1);
+
+        assert_eq!(
+            cells(&kept),
+            cells(&harvested),
+            "{text:?} in {columns} columns"
+        );
+        let marks = |rows: &BlockRows| {
+            let mut scratch = Vec::new();
+            (0..rows.rows())
+                .map(|row| rows.materialise(row, &mut scratch).to_vec())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            marks(&kept),
+            marks(&harvested),
+            "{text:?} in {columns} columns"
+        );
+    }
+}
