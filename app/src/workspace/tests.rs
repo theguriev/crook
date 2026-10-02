@@ -15899,6 +15899,32 @@ mod shells {
     }
 
     #[test]
+    fn what_an_input_method_composes_reaches_a_program_that_took_the_screen() {
+        // With no field to compose into, a committed composition is typed
+        // into the program: Japanese, Chinese, Korean, and a dead key's
+        // accent, all of which arrive as one event instead of key presses.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        harness.type_into(pane, "printf '\\033[?1049h'\n");
+        harness.wait_for("the shell never took the alt screen", |harness| {
+            harness.alt_screen(pane)
+        });
+        assert!(composer_boxes(&harness.frame()).is_empty());
+
+        harness.dispatch(Event::Ime(crookui_core::event::Ime::Commit(
+            "é日本".to_owned(),
+        )));
+
+        // The shell's line editor echoes what it was sent.
+        harness.wait_for("the composed text never reached the program", |harness| {
+            harness.terminal_text(pane).contains("é日本")
+        });
+    }
+
+    #[test]
     fn clicking_in_the_field_puts_the_caret_where_it_was_aimed() {
         // The mouse path through the real tree: a press at a point, hit-tested
         // against what was painted, landing on the boundary nearest it.
