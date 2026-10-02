@@ -15704,6 +15704,43 @@ mod shells {
         });
     }
 
+    /// Warp's "Tab key behavior", set to take the suggestion: Tab types the
+    /// command the history offers, and Ctrl-Space still only asks the shell.
+    #[test]
+    fn tab_takes_the_suggestion_when_it_is_given_the_suggestion() {
+        let mut harness = Harness::panel(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        await_prompt(&mut harness, pane);
+        harness.dispatch_workspace_action(
+            SettingsAction::SetTabKey(crate::settings::TabKey::Suggestion).into(),
+        );
+
+        type_line(&mut harness, "echo crook-tab-key");
+        harness.press("enter", Modifiers::default(), "");
+        await_prompt(&mut harness, pane);
+
+        type_line(&mut harness, "echo crook-t");
+        harness.press(
+            "space",
+            Modifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+            "",
+        );
+        assert_eq!(
+            harness.field_text(pane),
+            "echo crook-t",
+            "ctrl-space asks the shell and takes nothing"
+        );
+
+        harness.press("tab", Modifiers::default(), "\t");
+        assert_eq!(harness.field_text(pane), "echo crook-tab-key");
+    }
+
     #[test]
     fn a_pane_whose_pty_is_held_open_by_a_background_process_still_closes() {
         // End-of-file on the pty master is what the reader learns a session is

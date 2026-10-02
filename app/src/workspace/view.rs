@@ -9503,6 +9503,11 @@ impl Workspace {
                 let follow = !self.general().use_system_theme;
                 self.set_follow_system_theme(follow, ctx);
             }
+            SettingsAction::SetTabKey(tab_key) => {
+                let mut general = self.general();
+                general.tab_key = tab_key;
+                self.set_general(general, ctx);
+            }
             SettingsAction::ToggleLoginShell => {
                 let mut general = self.general();
                 general.login_shell = !general.login_shell;

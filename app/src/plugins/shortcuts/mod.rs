@@ -509,12 +509,19 @@ pub(crate) const PANE_KEYS: &[PaneKey] = &[
     PaneKey {
         label: "Complete the word, and step through what the shell offered",
         keywords: &["completion", "complete", "tab", "suggest"],
-        mac: "tab / shift+tab",
-        other: "tab / shift+tab",
+        mac: "tab / shift+tab / ctrl+space",
+        other: "tab / shift+tab / ctrl+space",
     },
     PaneKey {
         label: "Take the suggestion standing after the caret",
-        keywords: &["autosuggest", "ghost", "history", "completion", "accept"],
+        keywords: &[
+            "autosuggest",
+            "ghost",
+            "history",
+            "completion",
+            "accept",
+            "tab",
+        ],
         mac: "right / alt+right for one word",
         other: "right / ctrl+right for one word",
     },

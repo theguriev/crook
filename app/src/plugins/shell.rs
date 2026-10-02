@@ -11,10 +11,11 @@ use crookui_core::prelude::*;
 use crook_plugin::{Manifest, PluginId, Tier};
 
 use crate::plugin::{BuildError, Host, Plugin};
+use crate::settings::TabKey;
 use crate::shell_integration::{Marks, OPT_OUT_VARIABLE};
-use crate::workspace::settings_page::named;
 use crate::workspace::settings_page::search::Words;
-use crate::workspace::settings_page::widgets::{self, Category};
+use crate::workspace::settings_page::widgets::{self, Category, Segment};
+use crate::workspace::settings_page::{keyed, named};
 use crate::workspace::{SettingsAction, Workspace};
 
 /// The plugin that owns the Shell page.
@@ -147,9 +148,45 @@ fn shell(workspace: &Workspace, app: &AppContext) -> Vec<Category> {
         ui,
     );
 
+    let tab_key = widgets::row(
+        Words::new("Tab key")
+            .with_description(
+                "What Tab does while a command from your history stands after the caret: ask \
+                 the shell to complete the word, or take the suggestion as Right does. Either \
+                 way Right takes the suggestion and Ctrl-Space asks the shell.",
+            )
+            .with_keywords(&[
+                "tab",
+                "completion",
+                "complete",
+                "autosuggest",
+                "autosuggestion",
+                "suggestion",
+                "ghost",
+                "history",
+                "accept",
+                "ctrl-space",
+            ]),
+        true,
+        widgets::segmented(
+            [TabKey::Completions, TabKey::Suggestion]
+                .into_iter()
+                .map(|tab_key| Segment {
+                    label: tab_key.label(),
+                    selected: workspace.general().tab_key == tab_key,
+                    command: Some(SettingsAction::SetTabKey(tab_key).into()),
+                    state: state.control(keyed("tab-key", tab_key)),
+                })
+                .collect(),
+            ui,
+        ),
+        ui,
+    );
+
     vec![
         widgets::category("What a pane runs", vec![program, marks]),
         widgets::category("Startup", vec![login]),
+        widgets::category("The command line", vec![tab_key]),
         widgets::category(
             "What it changes",
             vec![widgets::note(

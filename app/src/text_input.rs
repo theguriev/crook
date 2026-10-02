@@ -391,6 +391,12 @@ impl TextInput {
             .map(str::to_owned)
     }
 
+    /// Whether what stands after the caret is a candidate the shell offered,
+    /// rather than a line recalled from the history.
+    pub fn has_offer(&self) -> bool {
+        self.offered_completion().is_some()
+    }
+
     /// Types the suggestion, all of it or one word, reporting whether there
     /// was one.
     ///
@@ -633,7 +639,7 @@ fn apply(intent: Intent, clipboard: &Clipboard, editor: &mut Editor) -> Option<S
         // channel of its own — the element that saw the keystroke sends it,
         // being the only thing holding the terminal to ask — and stepping
         // through what came back is the field's, above.
-        Complete | CompleteBackwards => {}
+        Complete | CompleteBackwards | AskCompletions => {}
         Newline => editor.insert_newline(),
         Submit => return Some(editor.submit()),
         Backspace => editor.backspace(),

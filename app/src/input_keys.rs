@@ -147,6 +147,14 @@ pub enum Intent {
     /// Shift-Tab with none is a keystroke about a list that was never asked
     /// for.
     CompleteBackwards,
+    /// Ask the shell, or step through its answer, whatever stands after the
+    /// caret: Ctrl-Space.
+    ///
+    /// [`Self::Complete`] is Tab, and Tab can be set to take the suggestion
+    /// instead — see [`crate::settings::TabKey`]. This is the key that asks
+    /// either way, which is where Warp moves its completions menu when Tab
+    /// is given to the suggestion.
+    AskCompletions,
 }
 
 /// Where a keystroke goes.
@@ -500,6 +508,9 @@ fn named_intent(key: &str, modifiers: Modifiers, platform: Platform) -> Option<I
         // because `plain` allows Shift.
         "tab" if plain(modifiers) && modifiers.shift => Some(Intent::CompleteBackwards),
         "tab" if plain(modifiers) => Some(Intent::Complete),
+        "space" if modifiers.ctrl && !modifiers.cmd && !modifiers.alt && !modifiers.shift => {
+            Some(Intent::AskCompletions)
+        }
 
         "backspace" => Some(match () {
             _ if line_chord(modifiers, platform) => Intent::DeleteToLineStart,
@@ -1182,6 +1193,22 @@ mod tests {
             route(&keystroke("f", alt()), "f", composing(), Platform::Other),
             Route::Ignored
         );
+    }
+
+    /// The key that asks the shell however Tab is set, and only bare: a
+    /// Shift or an Alt with it is somebody's input-source chord.
+    #[test]
+    fn control_space_asks_for_completions() {
+        for platform in [Platform::Mac, Platform::Other] {
+            assert_eq!(
+                route(&keystroke("space", ctrl()), "", composing(), platform),
+                Route::Edit(Intent::AskCompletions)
+            );
+            assert_ne!(
+                route(&keystroke("space", ctrl_shift()), "", composing(), platform),
+                Route::Edit(Intent::AskCompletions)
+            );
+        }
     }
 
     #[test]

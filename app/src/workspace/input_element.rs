@@ -96,6 +96,7 @@ use crate::input_keys::{self, Intent, Platform, Route};
 use crate::pane_blocks::{PaneBlocks, ScrollCause};
 use crate::pane_selection::PaneSelection;
 use crate::selection::Cells;
+use crate::settings::TabKey;
 use crate::tab::PaneId;
 use crate::terminal_font::{CellFont, CellMetrics};
 use crate::terminal_model::TerminalHandle;
@@ -218,6 +219,8 @@ pub struct CommandInput {
     rows: Option<Rows>,
     /// How many rows the last layout was allowed to draw. See [`row_budget`].
     budget: usize,
+    /// What Tab does while a suggestion stands. See [`TabKey`].
+    tab_key: TabKey,
 }
 
 impl CommandInput {
@@ -238,12 +241,19 @@ impl CommandInput {
             origin: None,
             rows: None,
             budget: MAX_ROWS,
+            tab_key: TabKey::default(),
         }
     }
 
     /// Draws in the terminal's own colours rather than the theme's.
     pub fn with_ink(mut self, ink: Ink) -> Self {
         self.ink = ink;
+        self
+    }
+
+    /// Gives Tab to the completions or to the suggestion.
+    pub fn with_tab_key(mut self, tab_key: TabKey) -> Self {
+        self.tab_key = tab_key;
         self
     }
 
@@ -338,7 +348,20 @@ impl CommandInput {
             // question needs the terminal *model* — only it knows where this
             // session's scratch directory is — and this element holds a
             // handle to the terminal and nothing else.
-            Route::Edit(Intent::Complete) => {
+            // Tab, given to the suggestion: it takes it, as Right does. An
+            // answer the shell already gave is still stepped through below —
+            // the offer is what stands after the caret then, and Tab moving
+            // to its next candidate is the list being used, not a second
+            // question — and with nothing standing Tab asks, as it would.
+            Route::Edit(Intent::Complete)
+                if self.tab_key == TabKey::Suggestion
+                    && !self.input.has_offer()
+                    && self.input.accept_suggestion(true) =>
+            {
+                ctx.notify();
+                true
+            }
+            Route::Edit(Intent::Complete | Intent::AskCompletions) => {
                 // An answer already in hand is what Tab steps through. Asking
                 // the shell the question it has just answered would put the
                 // offer back to the first candidate while somebody was
