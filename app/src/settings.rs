@@ -1308,6 +1308,17 @@ fn write_then_rename(temporary: &Path, destination: &Path, contents: &[u8]) -> R
     let mut file = fs::File::create(temporary)
         .with_context(|| format!("could not create {}", temporary.display()))?;
 
+    // The temporary is a new file with the default mode, and the rename puts
+    // it where the old one was — so a `settings.json` somebody had made
+    // private with `chmod 600` came back readable by everybody after the
+    // first option they changed. The old file's mode goes onto the new one
+    // first. Unix only: Windows' one bit is read-only, and a read-only
+    // temporary is one the rename and the cleanup below cannot touch.
+    #[cfg(unix)]
+    if let Ok(existing) = fs::metadata(destination) {
+        let _ = file.set_permissions(existing.permissions());
+    }
+
     let written = (|| {
         file.write_all(contents)
             .with_context(|| format!("could not write {}", temporary.display()))?;
@@ -1558,6 +1569,27 @@ mod tests {
             "the temporary outlived the failed save"
         );
         assert!(!scratch.settings_file().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_save_keeps_the_mode_the_file_had() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let scratch = ScratchDirectory::new("private");
+        fs::write(scratch.settings_file(), "{}\n").expect("the file should be writable");
+        fs::set_permissions(scratch.settings_file(), fs::Permissions::from_mode(0o600))
+            .expect("the mode should be settable");
+
+        let mut settings = Settings::load(scratch.settings_file());
+        settings.set_tab_options(everything_flipped());
+        settings.save_blocking().expect("the save should succeed");
+
+        let mode = fs::metadata(scratch.settings_file())
+            .expect("the file is there")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "the save made a private file readable");
     }
 
     #[cfg(unix)]
