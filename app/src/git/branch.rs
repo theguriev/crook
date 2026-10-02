@@ -424,6 +424,14 @@ fn loose_branches(directory: &Path, prefix: &mut String, depth: usize, found: &m
             // A ref whose name is not UTF-8 is not a ref git made.
             continue;
         };
+        // Nor is one `check-ref-format` refuses: a component starting with a
+        // dot, which is the Finder's `.DS_Store`, or a name ending in `.lock`,
+        // which is the file git writes beside a ref while it updates one and
+        // leaves behind when it is killed doing so. Listed, `main.lock` was a
+        // branch a menu offered and a plugin was told about.
+        if name.starts_with('.') || name.ends_with(".lock") {
+            continue;
+        }
         let length = prefix.len();
         prefix.push_str(&name);
         match entry.file_type() {
