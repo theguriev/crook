@@ -1404,25 +1404,85 @@ fn keychain_item_for(resolved: &Path) -> Option<&'static str> {
 /// asks nobody anything. Anything short of an answer — no such item, a locked
 /// keychain, a tool that failed — falls back to the file rather than failing
 /// the read, so a Mac whose Claude Code does use the file keeps working.
+///
+/// Under [`REQUEST_TIMEOUT`], like every other request a plugin makes. A
+/// keychain that is locked, or an item whose access list does not trust
+/// `security` after all, is answered with a dialog — and `security` waits on
+/// the dialog for as long as nobody answers it, holding a pool worker the
+/// whole time. Past the deadline it is killed, which takes its dialog with
+/// it, and the file is read instead.
 #[cfg(target_os = "macos")]
 fn from_the_keychain(resolved: &Path) -> Option<Vec<u8>> {
     let service = keychain_item_for(resolved)?;
-    let output = crate::process::command("/usr/bin/security")
-        .args(["find-generic-password", "-s", service, "-w"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|why| log::debug!("could not ask the keychain for {service:?}: {why}"))
-        .ok()?;
-    if !output.status.success() {
+    let (success, mut bytes) = output_within(
+        "/usr/bin/security",
+        &["find-generic-password", "-s", service, "-w"],
+        REQUEST_TIMEOUT,
+    )
+    .map_err(|why| log::debug!("could not ask the keychain for {service:?}: {why}"))
+    .ok()?;
+    if !success {
         log::debug!("the keychain has no {service:?}; reading the file");
         return None;
     }
-    let mut bytes = output.stdout;
     // `-w` ends the secret with a newline of its own.
     while bytes.last().is_some_and(u8::is_ascii_whitespace) {
         bytes.pop();
     }
     (!bytes.is_empty() && bytes.len() as u64 <= MAX_ANSWER).then_some(bytes)
+}
+
+/// Runs `program` with `args` and nothing on its stdin, and waits for it up
+/// to `timeout`, answering whether it succeeded and what it printed.
+///
+/// stdout is read on a thread of its own, so a program that prints more than
+/// a pipe holds cannot wedge the wait; stderr goes nowhere. Past `timeout` the
+/// program is killed and reaped, and that is an error.
+#[cfg(target_os = "macos")]
+fn output_within(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> std::io::Result<(bool, Vec<u8>)> {
+    use std::io::Read as _;
+    use std::process::Stdio;
+
+    let mut child = crate::process::command(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let (sender, printed) = std::sync::mpsc::channel();
+    if let Some(mut stdout) = child.stdout.take() {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stdout.read_to_end(&mut bytes);
+            let _ = sender.send(bytes);
+        });
+    }
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("no answer within {}s", timeout.as_secs()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    // The program is gone, so what it printed is already in the pipe; a
+    // second is for a reader somebody else's descriptor is holding open.
+    let bytes = printed
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap_or_default();
+    Ok((status.success(), bytes))
 }
 
 /// Where a granted path actually is.
