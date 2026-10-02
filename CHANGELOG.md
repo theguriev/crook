@@ -5,6 +5,22 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.15
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.14...v0.1.15)
+
+### Features
+
+- **update:** Replace a Crook.app whole from the release's disk image ([#409](https://github.com/theguriev/crook/pull/409))
+
+### Fixes
+
+- **tabs:** Open a new tab where the focused pane is working ([#410](https://github.com/theguriev/crook/pull/410))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.14
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.13...v0.1.14)
