@@ -23,19 +23,8 @@
 
 use std::ffi::OsStr;
 use std::path::Path;
-use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::run::{Intent, run};
-use crate::process::command;
-
-/// Set the first time git turns out not to be on `PATH`.
-///
-/// Without it a machine with no git spawns a doomed process on every refresh
-/// tick for the life of the session. The answer cannot change while the
-/// process runs in any way worth chasing, so it is latched rather than
-/// retried.
-static GIT_MISSING: AtomicBool = AtomicBool::new(false);
 
 /// Lines added and removed in the working tree, against `HEAD`.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -114,10 +103,10 @@ impl DiffStats {
 /// Whether git has already been found to be missing from this machine.
 ///
 /// A scheduler can stop asking for stats entirely once this is true. It does
-/// not have to: [`diff_stats_blocking`] checks the same latch and returns
-/// immediately.
+/// not have to: every call here goes through `run.rs`, which checks the same
+/// latch and returns immediately.
 pub fn git_is_missing() -> bool {
-    GIT_MISSING.load(Ordering::Relaxed)
+    super::run::git_is_missing()
 }
 
 /// Counts the working tree's line changes against `HEAD`.
@@ -128,12 +117,20 @@ pub fn git_is_missing() -> bool {
 /// spawn its own thread — who runs it is the caller's decision, and Crook
 /// already has a pool for exactly this.
 ///
+/// Through the git module's shared runner, `run.rs`, and so under its read
+/// deadline, with its locks rule and its no-prompt rule. This count used to
+/// spawn git itself with no deadline at all, and it runs on the tab strip's
+/// gather chain: a git that never came back — an `fsmonitor` hook that hung,
+/// a network filesystem that stopped answering — held a pool worker for the
+/// life of the window and stopped every row's numbers from updating.
+///
 /// `None` covers every way there can be no number, none of which is an error a
 /// row should render:
 ///
 /// - git is not installed — latched, so nothing spawns again this session;
 /// - `work_tree` is not a repository;
 /// - the repository has no commits yet, so `HEAD` resolves to nothing;
+/// - git did not answer within the deadline, and was killed;
 /// - git failed for any other reason, which is usually transient — a rebase in
 ///   progress, an index being rewritten — and the caller should keep the last
 ///   number it had and try again on its normal cadence.
@@ -145,58 +142,31 @@ pub fn git_is_missing() -> bool {
 /// matches, does not. The two therefore legitimately disagree for the same
 /// repository.
 pub fn diff_stats_blocking(work_tree: &Path) -> Option<DiffStats> {
-    if git_is_missing() {
-        return None;
-    }
-
-    let mut git = command("git");
-    git
-        // A background read must not take `.git/index.lock`, or it races the
-        // user's own commit, and must not rewrite the index as a side effect
-        // of refreshing it. Both flags are load-bearing; the environment
-        // variable carries the first one into anything git itself spawns.
-        .arg("--no-optional-locks")
-        .args(["-c", "diff.autoRefreshIndex=false"])
-        .args(["diff", "--shortstat", "HEAD"])
-        .current_dir(work_tree)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        // A git that decides to prompt — for a credential, through a pager —
-        // must fail rather than park a worker thread until the process exits.
-        // Dropping the task that awaits this cannot cancel a blocked syscall,
-        // so there is no rescue if it does hang.
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let output = match git.output() {
-        Ok(output) => output,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if !GIT_MISSING.swap(true, Ordering::Relaxed) {
-                log::warn!("git is not on PATH; diff stats are off for this session");
-            }
-            return None;
-        }
-        Err(error) => {
-            log::debug!("could not run git in {}: {error}", work_tree.display());
-            return None;
-        }
-    };
+    let args = [
+        OsStr::new("diff"),
+        OsStr::new("--shortstat"),
+        OsStr::new("HEAD"),
+    ];
+    let finished = run(work_tree, &args, Intent::Read).ok()?;
 
     // Never `from_utf8`: a path in a shortstat line can be any bytes the
     // filesystem accepted, and a rename clause prints one.
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&finished.stdout);
 
     // git's diff family reports 1 for "there were differences" under some
     // flags, so an exit of 1 that produced output is a successful read.
     let read_succeeded =
-        output.status.success() || (output.status.code() == Some(1) && !stdout.trim().is_empty());
+        finished.success || (finished.code == Some(1) && !stdout.trim().is_empty());
 
     if !read_succeeded {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         log::debug!(
             "no diff stats for {}: {}",
             work_tree.display(),
-            stderr.lines().next().unwrap_or("git reported no reason")
+            finished
+                .stderr
+                .lines()
+                .next()
+                .unwrap_or("git reported no reason")
         );
         return None;
     }
@@ -248,8 +218,8 @@ pub fn base_name(base: &str) -> &str {
 ///
 /// **Blocking**: one subprocess, and a second when there are commits to
 /// count lines for. Background executor only. Both go through the git
-/// module's shared runner, `run.rs`, and its deadline, which the older
-/// [`diff_stats_blocking`] predates.
+/// module's shared runner, `run.rs`, and its deadline, as
+/// [`diff_stats_blocking`] does.
 ///
 /// `base` is a full ref, the form [`super::merged::base_of`] answers in, so
 /// that neither a tag nor a file with the same name can stand in for it.
