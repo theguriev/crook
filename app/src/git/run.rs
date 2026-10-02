@@ -6,7 +6,7 @@
 //! else wrote. [`super::merged`] needs the same promise for another reason —
 //! it reads a history, and a history's honest length has no bound the way a
 //! listing's does — so the runner lives here and both spawn git through it.
-//! So does [`super::diff`]'s count since the base, which runs on the tab
+//! So do both of [`super::diff`]'s counts, which run on the tab
 //! strip's gather chain every fifteen seconds, where a git that never came
 //! back would stop every row's branch and count from updating again.
 //!
@@ -55,12 +55,11 @@ pub(super) enum Failure {
 
 /// Set the first time git turns out not to be on `PATH`.
 ///
-/// The same latch [`super::diff`] keeps, for the same reason: without it a
-/// machine with no git spawns a doomed process on every attempt for the life of
-/// the session. The two are read together and set separately — whichever half
-/// discovers it first spares the other — and deliberately not shared, because
-/// sharing would mean one module exporting a setter the other calls, and this
-/// module is worth keeping self-contained.
+/// Without it a machine with no git spawns a doomed process on every attempt
+/// for the life of the session — every refresh of every row. The answer cannot
+/// change while the process runs in any way worth chasing, so it is latched
+/// rather than retried. The one latch for the whole git module, because every
+/// part of it spawns git through here.
 static GIT_MISSING: AtomicBool = AtomicBool::new(false);
 
 /// How long a read may take before git is killed.
@@ -111,11 +110,8 @@ const EAGER_POLL: Duration = Duration::from_millis(1);
 const LAZY_POLL: Duration = Duration::from_millis(20);
 
 /// Whether git has already been found to be missing from this machine.
-///
-/// Reads [`super::diff`]'s latch too: a session that has already discovered
-/// there is no git while drawing a tab row need not discover it again here.
 pub(super) fn git_is_missing() -> bool {
-    GIT_MISSING.load(Ordering::Relaxed) || super::diff::git_is_missing()
+    GIT_MISSING.load(Ordering::Relaxed)
 }
 
 /// Whether an invocation only reads.
@@ -458,7 +454,7 @@ fn start(
         Ok(child) => Ok(child),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if !GIT_MISSING.swap(true, Ordering::Relaxed) {
-                log::warn!("git is not on PATH; worktrees are off for this session");
+                log::warn!("git is not on PATH; its features are off for this session");
             }
             Err(Failure::GitMissing)
         }
