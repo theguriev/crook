@@ -716,20 +716,41 @@ fn parse_hex(value: &str) -> Result<Color> {
 /// sanitised into a file name — see [`file_stem`]. A file whose name is
 /// already taken gets a serial rather than overwriting: nothing here should be
 /// able to destroy a theme somebody wrote by hand.
+///
+/// Taken is decided by creating the file, not by asking first. A look with
+/// `exists` and then a write left a moment for something else to put a file
+/// there — and a symlink pointing nowhere does not exist to `exists`, so the
+/// write followed it and made a file wherever it pointed. Created with
+/// `create_new`, a name anything at all is standing on — file, folder or
+/// link — is a name this moves past.
 pub fn write_theme(directory: &Path, name: &str, theme: &Theme) -> Result<PathBuf> {
+    use std::io::Write as _;
+
     crate::settings::ensure_directory(directory)?;
 
     let stem = file_stem(name);
-    let mut path = directory.join(format!("{stem}.yaml"));
-    let mut serial = 2;
-    while path.exists() {
-        path = directory.join(format!("{stem}_{serial}.yaml"));
-        serial += 1;
+    let text = emit(name, theme);
+    for serial in 1.. {
+        let path = match serial {
+            1 => directory.join(format!("{stem}.yaml")),
+            serial => directory.join(format!("{stem}_{serial}.yaml")),
+        };
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("could not write {}", path.display()));
+            }
+        };
+        file.write_all(text.as_bytes())
+            .with_context(|| format!("could not write {}", path.display()))?;
+        return Ok(path);
     }
-
-    fs::write(&path, emit(name, theme))
-        .with_context(|| format!("could not write {}", path.display()))?;
-    Ok(path)
+    unreachable!("every serial is taken")
 }
 
 /// A theme name as a file name that cannot be anything else.
