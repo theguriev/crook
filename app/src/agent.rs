@@ -671,8 +671,13 @@ export const CrookPlugin = async ({ $ }) => {
   return {
     "chat.message": async (_input, output) => {
       const text = output.parts.find((part) => part.type === "text")?.text ?? ""
-      const title = text.split("\n").find((line) => line.trim() !== "") ?? ""
-      await report("running", "--title", title)
+      const title = (text.split("\n").find((line) => line.trim() !== "") ?? "").trim()
+      // A lone `-` is how `--title` is told to read a hook's input from stdin,
+      // so a prompt that opens with one is sent with no title rather than as
+      // that instruction — and so is a prompt with no text at all.
+      await (title === "" || title === "-"
+        ? report("running")
+        : report("running", "--title", title))
     },
     event: async ({ event }) => {
       switch (event.type) {
@@ -1258,6 +1263,9 @@ mod tests {
                 .contains("const crook = \"/opt/crook/bin/crook\"\n")
         );
         assert!(opencode.text.contains("export const CrookPlugin"));
+        // A prompt that opens with `-` is not handed to `--title`, which
+        // would read stdin for it.
+        assert!(opencode.text.contains(r#"title === "-""#));
         for event in [
             "session.status",
             "permission.asked",
