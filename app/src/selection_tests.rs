@@ -726,6 +726,17 @@ fn a_space_in_the_last_column_of_a_fold_is_still_a_space() {
             session.dragged((0, 1, 0), (0, 2, 2)),
             "finished: {finished}"
         );
+        // And a double click on either side of the space takes one word.
+        assert_eq!(
+            Some(String::from("bbb")),
+            session.taken(SelectionKind::Semantic, (0, 2, 1), (0, 2, 1)),
+            "finished: {finished}"
+        );
+        assert_eq!(
+            Some(String::from("aaaaaaaaa")),
+            session.taken(SelectionKind::Semantic, (0, 1, 3), (0, 1, 3)),
+            "finished: {finished}"
+        );
     }
 }
 
