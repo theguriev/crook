@@ -8123,6 +8123,47 @@ fn tidying_one_free_checkout_asks_in_the_singular() {
 }
 
 #[test]
+fn tidying_one_checkout_with_work_in_it_still_asks_in_the_singular() {
+    // Nothing goes, because the one free checkout has work in it — and the
+    // question is still about that one checkout, not about a plural of none.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    let checkout = spare_checkout(&mut harness, tab, &store, &[]);
+    std::fs::write(checkout.join("unsaved.txt"), "work\n").expect("writable checkout");
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    harness.dispatch_worktree(WorktreeAction::AskTidy);
+    harness.wait_for("the checkout to be looked in", |harness| {
+        harness.worktrees_going().is_some()
+    });
+    assert_eq!(harness.worktrees_going(), Some(0), "the work kept it");
+
+    let scene = harness.frame();
+    assert!(
+        worktree_menu_says(&scene, "Remove this checkout?"),
+        "the question about one kept checkout was asked in the plural"
+    );
+}
+
+#[test]
 fn stop_spares_the_checkouts_after_the_one_in_flight() {
     // Six checkouts with a build in each is minutes of `git worktree remove`,
     // and the way out of that is a Stop that means it: the one git is
