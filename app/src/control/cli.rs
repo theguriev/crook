@@ -437,12 +437,16 @@ pub fn table(panes: &[PaneEntry], home: Option<&Path>) -> String {
         })
         .collect();
 
-    // By character rather than by byte: a title is whatever a person or an
-    // agent called the work, and the padding is a count of columns.
-    let mut widths = HEADINGS.map(|heading| heading.chars().count());
+    // By the columns a cell takes on a terminal, rather than by its bytes or
+    // its characters: a title is whatever a person or an agent called the
+    // work, and `修正バグ` is four characters drawn in eight columns. Counted
+    // as four, every cell after it on its row was pushed four columns right
+    // of the heading it belongs under.
+    let columns = |cell: &str| unicode_width::UnicodeWidthStr::width(cell);
+    let mut widths = HEADINGS.map(columns);
     for row in &rows {
         for (width, cell) in widths.iter_mut().zip(row) {
-            *width = (*width).max(cell.chars().count());
+            *width = (*width).max(columns(cell));
         }
     }
     let line = |cells: [&str; 6]| {
@@ -453,7 +457,7 @@ pub fn table(panes: &[PaneEntry], home: Option<&Path>) -> String {
             }
             line.push_str(cell);
             if column + 1 < cells.len() {
-                let pad = widths[column].saturating_sub(cell.chars().count());
+                let pad = widths[column].saturating_sub(columns(cell));
                 line.extend(std::iter::repeat_n(' ', pad));
             }
         }
