@@ -93,6 +93,10 @@ pub(super) fn lines(session: &AgentSession, now: Instant) -> Vec<String> {
         StatusSource::Agent(at) => {
             format!("Status: {status} — the agent said so {}.", since(at, now))
         }
+        StatusSource::Title(at) => format!(
+            "Status: {status} — the agent's title said so {}.",
+            since(at, now)
+        ),
         StatusSource::CommandEnded(at) => format!(
             "Status: {status} — the command ended {} and took the agent's last report back.",
             since(at, now)

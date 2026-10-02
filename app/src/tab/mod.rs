@@ -111,6 +111,23 @@ impl AgentStatus {
             Self::Failed => "failed",
         }
     }
+
+    /// What a program says it is doing in its own terminal title, when it
+    /// says so in a glyph — or `None` for a title that says nothing of it.
+    ///
+    /// Claude Code puts one in front of every title it sets: `✳` while it
+    /// waits for a prompt, and a half-filled circle that turns while it
+    /// works. That is a status reaching the pane with nothing installed, so
+    /// a row is right about an agent nobody has set Crook's hooks up for.
+    /// Only those glyphs: the braille spinners every build tool draws would
+    /// make each `npm install` an agent.
+    pub fn from_title(title: &str) -> Option<Self> {
+        match title.chars().next()? {
+            '\u{2733}' => Some(Self::Idle),
+            '\u{25d0}'..='\u{25d3}' => Some(Self::Running),
+            _ => None,
+        }
+    }
 }
 
 /// What asked for a look at a pane while nobody was giving it one.
@@ -154,6 +171,9 @@ pub enum StatusSource {
     /// The command the agent was ended and took its last report back, at
     /// this instant. See `Emulator::settle_agent` in `crook_terminal`.
     CommandEnded(Instant),
+    /// The program's terminal title said so, at this instant. See
+    /// [`AgentStatus::from_title`].
+    Title(Instant),
 }
 
 /// The pull request a session's work belongs to.

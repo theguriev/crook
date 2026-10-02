@@ -7374,6 +7374,34 @@ impl Workspace {
         reported
     }
 
+    /// Takes the status a program's title glyph said, for a pane whose agent
+    /// has no hooks to say it with.
+    ///
+    /// A hook's report outranks it: the hooks know needs-input from idle and
+    /// the glyph does not, so a pane that has ever heard from them keeps
+    /// listening only to them. And only a change is a report — the glyph
+    /// turns several times a second while the agent works, and each turn
+    /// is the same running.
+    fn title_reported(&mut self, pane: PaneId, status: AgentStatus, ctx: &mut ViewContext<Self>) {
+        let Some(open) = self.tabs.pane(pane) else {
+            return;
+        };
+        let session = open.session();
+        if matches!(session.source, StatusSource::Agent(_))
+            || (matches!(session.source, StatusSource::Title(_)) && session.status == status)
+        {
+            return;
+        }
+        self.agent_reported(
+            pane,
+            status,
+            None,
+            None,
+            StatusSource::Title(Instant::now()),
+            ctx,
+        );
+    }
+
     /// What a pane's row shows for its status, while the pane is open.
     fn shown_status(&self, pane: PaneId) -> Option<AgentStatus> {
         self.tabs.pane(pane).map(Pane::status)
@@ -7571,8 +7599,14 @@ impl Workspace {
                 self.tabs.pane(*pane).is_some()
             }
             TerminalUpdate::Title(pane, title) => {
+                let status = title.as_deref().and_then(AgentStatus::from_title);
                 let title = title.clone();
-                self.update_session(*pane, ctx, |session| session.derived_title = title)
+                let titled =
+                    self.update_session(*pane, ctx, |session| session.derived_title = title);
+                if let Some(status) = status {
+                    self.title_reported(*pane, status, ctx);
+                }
+                titled
             }
             TerminalUpdate::WorkingDirectory(pane, directory) => {
                 let directory = directory.clone();
@@ -7686,6 +7720,22 @@ impl Workspace {
             ),
             TerminalUpdate::Prompted(pane) => {
                 self.submit_first_line(*pane, ctx);
+                // A title that said running is never taken back by the agent
+                // that set it when it exits mid-turn, so the prompt it exits
+                // to does, as the shell's `D` does for a hook's report.
+                if self.tabs.pane(*pane).is_some_and(|open| {
+                    matches!(open.session().source, StatusSource::Title(_))
+                        && open.session().status == AgentStatus::Running
+                }) {
+                    self.agent_reported(
+                        *pane,
+                        AgentStatus::Idle,
+                        None,
+                        None,
+                        StatusSource::CommandEnded(Instant::now()),
+                        ctx,
+                    );
+                }
                 self.tabs.pane(*pane).is_some()
             }
             TerminalUpdate::Notification { pane, title, body } => {
@@ -10182,7 +10232,7 @@ pub(super) fn a_shell_is_listening(
 /// report came from.
 fn agent_report(pane: &Pane) -> Option<Instant> {
     match pane.session().source {
-        StatusSource::Agent(at) => Some(at),
+        StatusSource::Agent(at) | StatusSource::Title(at) => Some(at),
         StatusSource::NoReport | StatusSource::CommandEnded(_) => None,
     }
 }

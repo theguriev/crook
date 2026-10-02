@@ -30369,3 +30369,99 @@ mod changes_column {
         assert_eq!(comment_typed(&harness).as_deref(), Some("abc"));
     }
 }
+
+/// Claude Code's title glyph, read as a status for a pane with no hooks.
+mod agent_titles {
+    use super::*;
+    use crate::tab::StatusSource;
+    use crate::terminal_model::TerminalUpdate;
+
+    fn report(harness: &mut Harness, update: TerminalUpdate) {
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(&update, ctx);
+        });
+    }
+
+    fn titled(harness: &mut Harness, pane: PaneId, title: &str) {
+        report(harness, TerminalUpdate::Title(pane, Some(title.to_owned())));
+    }
+
+    fn status_and_source(harness: &Harness, pane: PaneId) -> (AgentStatus, StatusSource) {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            let session = workspace
+                .tabs()
+                .pane(pane)
+                .expect("the pane is open")
+                .session();
+            (session.status, session.source)
+        })
+    }
+
+    #[test]
+    fn the_glyph_in_front_of_the_title_is_the_status() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+
+        titled(&mut harness, pane, "\u{25d0} Fix the tab directory");
+        let (status, source) = status_and_source(&harness, pane);
+        assert_eq!(status, AgentStatus::Running);
+        assert!(matches!(source, StatusSource::Title(_)), "{source:?}");
+
+        titled(&mut harness, pane, "\u{25d1} Fix the tab directory");
+        assert_eq!(status_and_source(&harness, pane).0, AgentStatus::Running);
+
+        titled(&mut harness, pane, "\u{2733} Fix the tab directory");
+        assert_eq!(status_and_source(&harness, pane).0, AgentStatus::Idle);
+    }
+
+    #[test]
+    fn a_title_without_the_glyph_says_nothing_about_the_status() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+
+        titled(&mut harness, pane, "\u{25d0} working");
+        titled(&mut harness, pane, "vim notes.md");
+        titled(&mut harness, pane, "\u{280b} npm install");
+
+        assert_eq!(status_and_source(&harness, pane).0, AgentStatus::Running);
+    }
+
+    /// The hooks know a question from a finished turn, and the glyph does
+    /// not: a pane that has heard from them listens to nothing else.
+    #[test]
+    fn a_hooks_report_outranks_the_title() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+
+        report(
+            &mut harness,
+            TerminalUpdate::Agent {
+                pane,
+                status: AgentStatus::NeedsInput,
+                title: None,
+                message: Some("Allow Bash?".to_owned()),
+            },
+        );
+        titled(&mut harness, pane, "\u{25d0} Fix the tab directory");
+
+        assert_eq!(status_and_source(&harness, pane).0, AgentStatus::NeedsInput);
+    }
+
+    /// An agent that exits mid-turn never sets the glyph back, so the
+    /// prompt it exits to does.
+    #[test]
+    fn the_prompt_takes_back_a_running_title() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+
+        titled(&mut harness, pane, "\u{25d0} Fix the tab directory");
+        report(&mut harness, TerminalUpdate::Prompted(pane));
+
+        let (status, source) = status_and_source(&harness, pane);
+        assert_eq!(status, AgentStatus::Idle);
+        assert!(
+            matches!(source, StatusSource::CommandEnded(_)),
+            "{source:?}"
+        );
+    }
+}
