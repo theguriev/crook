@@ -17,7 +17,7 @@
 use crook_terminal::{
     Key, Modifiers, MouseButton, MouseEventKind, MouseModes, Rows, SelectionKind,
 };
-use crookui_core::event::Event;
+use crookui_core::event::{Event, Ime};
 use crookui_core::presenter::EventContext;
 
 use crate::clipboard::Clipboard;
@@ -222,7 +222,10 @@ impl Output {
     /// is never taken by a chord that could not have answered it.
     pub fn type_key(&self, event: &Event, ctx: &mut EventContext) -> Typed {
         let Event::KeyDown { keystroke, chars } = event else {
-            return Typed::Ignored;
+            return match event {
+                Event::Ime(Ime::Commit(text)) => self.commit(text),
+                _ => Typed::Ignored,
+            };
         };
         if self.keys == Keys::None {
             return Typed::Ignored;
@@ -310,6 +313,28 @@ impl Output {
             Typed::SentToPty
         } else {
             Typed::Ignored
+        }
+    }
+
+    /// Sends what an input method composed to the program that owns the
+    /// keyboard.
+    ///
+    /// Text an IME commits — Japanese, Chinese or Korean, and on macOS a dead
+    /// key's accent, `⌥e` then `e` — arrives as one event *instead of* the key
+    /// presses that made it, and only the composer read that event. Under a
+    /// composer that is right: the field has the line. With no composer — vim,
+    /// `less`, Claude Code — nothing else read it, and what somebody composed
+    /// reached no program at all. So it goes to the pty as typed text, the way
+    /// every terminal hands a full-screen program a composed character. Only
+    /// with the whole keyboard: a modal menu leaves the program the signals and
+    /// nothing else, and a composed word is not a signal.
+    fn commit(&self, text: &str) -> Typed {
+        if self.keys != Keys::All || self.input.is_some() || text.is_empty() {
+            return Typed::Ignored;
+        }
+        match self.handle.as_ref() {
+            Some(handle) if handle.write(text) => Typed::SentToPty,
+            _ => Typed::Ignored,
         }
     }
 
