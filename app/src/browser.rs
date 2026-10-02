@@ -7,8 +7,11 @@
 //! already made for `CREATE_NO_WINDOW`, and the same one the whole workspace
 //! makes about build scripts.
 //!
-//! Nothing waits for the child. A browser cold-starting takes seconds, and the
-//! frame that dispatched the click must not be one of them.
+//! Nothing on the frame waits for the child. A browser cold-starting takes
+//! seconds, and the frame that dispatched the click must not be one of them.
+//! A thread of its own waits instead, so the launcher is reaped when it exits
+//! rather than left a zombie for as long as Crook runs — one per link
+//! anybody ever clicked.
 //!
 //! # What is refused
 //!
@@ -87,7 +90,12 @@ fn is_openable(url: &str) -> bool {
     OPENABLE.iter().any(|scheme| lowered.starts_with(scheme))
 }
 
-/// Starts the platform's handler and does not wait for it.
+/// Starts the platform's handler, and leaves a thread waiting on it.
+///
+/// A thread rather than the background pool, for `changes_panel::launch`'s
+/// reason: `xdg-open` given a URL with no browser running can stay until the
+/// browser it started exits, and a pool worker held that long is one every
+/// git read is waiting for.
 fn spawn(url: &OsStr) -> io::Result<()> {
     #[cfg(test)]
     if OPENED
@@ -131,11 +139,19 @@ fn spawn(url: &OsStr) -> io::Result<()> {
         launcher
     };
 
-    launcher
+    let mut child = launcher
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
+    let reaper = std::thread::Builder::new()
+        .name("crook-opener".to_owned())
+        .spawn(move || {
+            let _ = child.wait();
+        });
+    if let Err(why) = reaper {
+        log::debug!("nothing could wait on the opener: {why}");
+    }
     Ok(())
 }
 
