@@ -6012,6 +6012,35 @@ fn a_person_s_name_for_a_pane_beats_the_one_its_agent_chose() {
 }
 
 #[test]
+fn enter_on_the_name_a_rename_opened_with_leaves_the_row_following_its_agent() {
+    // The field opens on the agent's title; Enter without typing is not a
+    // person choosing that title, and the row goes on following the agent.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+    harness.update_session(pane, |session| {
+        session.derived_title = Some("summarising the diff".to_owned());
+    });
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.run_command("crook/tabs/rename-pane");
+    harness.frame();
+    assert!(harness.press_key("enter", Modifiers::default()));
+    assert!(!harness.a_popup_is_open(), "the menu stayed up");
+
+    harness.update_session(pane, |session| {
+        session.derived_title = Some("writing the tests".to_owned());
+    });
+    assert_eq!(
+        harness.pane_title(pane),
+        "writing the tests",
+        "an unchanged rename froze the row on the agent's old title"
+    );
+}
+
+#[test]
 fn emptying_the_field_puts_back_the_name_it_started_with() {
     // A person who clears the box is asking for the name they had before they
     // touched it, not for a row with no name — which is what a tab whose name
