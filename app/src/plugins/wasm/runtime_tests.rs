@@ -682,6 +682,26 @@ fn a_line_written_twice_is_counted_once() {
 }
 
 #[test]
+fn a_line_that_is_not_utf8_costs_itself_and_not_the_rest_of_the_file() {
+    let root = transcripts("bytes");
+    let mut file = b"\xff\xfe not text, and \"usage\" in it\n".to_vec();
+    file.extend_from_slice(
+        concat!(
+            r#"{"type":"assistant","timestamp":"2026-09-06T10:00:00Z","message":{"id":"m4","model":"claude-opus-5","usage":{"output_tokens":7}}}"#,
+            "\n"
+        )
+        .as_bytes(),
+    );
+    fs::write(root.join("two/d.jsonl"), file).expect("a scratch file");
+
+    let Answer::Counted { lines, .. } = perform(tally_of(&root)) else {
+        panic!("a tally answers with tables");
+    };
+
+    assert_eq!(lines, 4, "the turn after the broken line was not counted");
+}
+
+#[test]
 fn a_line_below_the_floor_is_not_counted() {
     // `touched_since` skips files, which is what makes the walk cheap; a file
     // touched an hour ago can still hold lines from a month ago, and without
