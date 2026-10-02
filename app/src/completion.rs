@@ -147,10 +147,18 @@ impl Completions {
 }
 
 /// Whether `word` is the start of `candidate` but for case.
+///
+/// Any script's case, not only ASCII's: `до` is the start of `Документы` as
+/// much as `car` is of `Cargo.toml`, and folding ASCII alone left a person
+/// with Cyrillic or Greek names unable to narrow a list by typing lowercase.
+/// Character by character, so a character whose lowercase is longer than one
+/// (`İ`) still lines up with exactly one typed character.
 fn starts_with_ignoring_case(candidate: &str, word: &str) -> bool {
     let mut left = candidate.chars();
-    word.chars()
-        .all(|typed| left.next().is_some_and(|c| c.eq_ignore_ascii_case(&typed)))
+    word.chars().all(|typed| {
+        left.next()
+            .is_some_and(|c| c == typed || c.to_lowercase().eq(typed.to_lowercase()))
+    })
 }
 
 /// Reads an answer the shell has written, or `None` when there is nothing

@@ -178,6 +178,16 @@ fn test_a_case_difference_is_still_the_start_of_a_name() {
 }
 
 #[test]
+fn test_a_case_difference_outside_ascii_is_still_the_start_of_a_name() {
+    let answer = completions(&["Документы", "Загрузки", "Ελληνικά"]);
+
+    assert_eq!(answer.matching("до"), vec!["Документы"]);
+    assert_eq!(answer.matching("ελλ"), vec!["Ελληνικά"]);
+    let one = completions(&["Документы"]);
+    assert_eq!(one.insertion("док").as_deref(), Some("Документы"));
+}
+
+#[test]
 fn test_a_candidate_the_shell_repeats_is_offered_once() {
     // `compgen -c` lists a command once per directory of PATH that holds it.
     let answer = completions(&["python3", "python3", "python3-config"]);
