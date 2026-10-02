@@ -90,12 +90,7 @@ fn is_openable(url: &str) -> bool {
     OPENABLE.iter().any(|scheme| lowered.starts_with(scheme))
 }
 
-/// Starts the platform's handler, and leaves a thread waiting on it.
-///
-/// A thread rather than the background pool, for `changes_panel::launch`'s
-/// reason: `xdg-open` given a URL with no browser running can stay until the
-/// browser it started exits, and a pool worker held that long is one every
-/// git read is waiting for.
+/// Starts the platform's handler, and leaves it to [`crate::process::reap`].
 fn spawn(url: &OsStr) -> io::Result<()> {
     #[cfg(test)]
     if OPENED
@@ -139,19 +134,12 @@ fn spawn(url: &OsStr) -> io::Result<()> {
         launcher
     };
 
-    let mut child = launcher
+    let child = launcher
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
-    let reaper = std::thread::Builder::new()
-        .name("crook-opener".to_owned())
-        .spawn(move || {
-            let _ = child.wait();
-        });
-    if let Err(why) = reaper {
-        log::debug!("nothing could wait on the opener: {why}");
-    }
+    crate::process::reap(child, "opener");
     Ok(())
 }
 

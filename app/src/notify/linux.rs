@@ -32,7 +32,7 @@
 //! than one per question.
 
 use std::io;
-use std::process::{Child, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -129,7 +129,12 @@ fn deliver(program: &str, notice: &Notice, missing: &AtomicBool) -> Delivery {
         .spawn();
     match started {
         Ok(child) => {
-            reap(child);
+            // Not waited on here: the bus answers or gives up within its
+            // reply timeout, and `notify-send` exits either way — it holds
+            // nothing open without `--wait`, which is never passed. A
+            // non-zero exit is most often no notification daemon on the bus,
+            // which the missing banner has already said.
+            crate::process::reap(child, PROGRAM);
             Delivery::Started
         }
         Err(why) if why.kind() == io::ErrorKind::NotFound => {
@@ -194,33 +199,6 @@ fn escaped(body: &str) -> String {
         }
     }
     escaped
-}
-
-/// Waits on `notify-send` on a thread of its own, so that it does not become
-/// a zombie.
-///
-/// Not on the pool, for the reason `plugins::wasm::sound` gives: the pool is
-/// shared with everything else that must not block a frame, and a bus that is
-/// slow to answer would hold a worker. Without a deadline of its own, because
-/// the call has one: the bus answers or gives up within its reply timeout,
-/// and `notify-send` exits either way — it holds nothing open without
-/// `--wait`, which is never passed.
-fn reap(mut child: Child) {
-    let reaper = std::thread::Builder::new()
-        .name("crook-notify-send".to_owned())
-        .spawn(move || match child.wait() {
-            Ok(status) if !status.success() => {
-                // No service on the bus, most often — a window manager with
-                // no notification daemon — and nothing a person can be told
-                // from here that the missing banner has not already said.
-                log::debug!("{PROGRAM} exited {status}");
-            }
-            Ok(_) => {}
-            Err(why) => log::debug!("{PROGRAM} could not be waited on: {why}"),
-        });
-    if let Err(why) = reaper {
-        log::debug!("nothing could wait on {PROGRAM}: {why}");
-    }
 }
 
 #[cfg(test)]
