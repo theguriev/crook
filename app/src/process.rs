@@ -7,6 +7,9 @@
 //! `.clippy.toml` therefore bans `std::process::Command::new` outright and
 //! names this function as the replacement — which is why this is the one place
 //! in the workspace that is allowed to call it.
+//!
+//! And the other half of starting a process nobody waits on the answer from:
+//! [`reap`], so that it does not stay a zombie for as long as Crook runs.
 
 /// Builds a [`std::process::Command`] that runs `program` invisibly.
 ///
@@ -35,4 +38,30 @@ pub fn command(program: &str) -> std::process::Command {
     };
 
     command
+}
+
+/// Waits on `child` on a thread of its own, so it is reaped when it exits
+/// rather than left a zombie for as long as Crook runs.
+///
+/// For a program Crook starts and does not want an answer from — a link's
+/// opener, an editor, a desktop notification. Dropping a [`std::process::Child`]
+/// does not wait on it, and on Unix a child nobody waits on keeps its entry in
+/// the process table until its parent exits. A thread rather than the
+/// background pool, because what is waited on can live for hours — an editor
+/// window, an `xdg-open` that stays until the browser it started closes — and
+/// a pool worker held that long is one every git read is waiting for.
+///
+/// `name` is what the program is called in the log: a non-zero exit is a
+/// debug line and nothing more, since nobody is waiting on the outcome.
+pub fn reap(mut child: std::process::Child, name: &'static str) {
+    let reaper = std::thread::Builder::new()
+        .name(format!("crook-reap-{name}"))
+        .spawn(move || match child.wait() {
+            Ok(status) if !status.success() => log::debug!("{name} exited {status}"),
+            Ok(_) => {}
+            Err(why) => log::debug!("{name} could not be waited on: {why}"),
+        });
+    if let Err(why) = reaper {
+        log::debug!("nothing could wait on {name}: {why}");
+    }
 }

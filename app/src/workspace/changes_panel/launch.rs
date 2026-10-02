@@ -160,11 +160,8 @@ impl Editor {
     ///
     /// Nothing is handed to it on stdin and nothing it prints is read: an
     /// editor with a window of its own has no use for either, and one that
-    /// wrote to a pipe nobody reads would block on it. It is waited for on a
-    /// thread of its own, so it is reaped when it closes rather than left a
-    /// zombie for as long as Crook runs — a thread rather than the background
-    /// pool, because an editor window lives for hours and a pool worker held
-    /// that long is one every git read is waiting for.
+    /// wrote to a pipe nobody reads would block on it. It is reaped when it
+    /// closes — see [`crate::process::reap`].
     pub(crate) fn open(&self, path: &Path, line: u32) -> std::io::Result<()> {
         let (program, arguments) = self.command_line(path, line);
         let mut missing = None;
@@ -177,10 +174,8 @@ impl Editor {
                 .stderr(std::process::Stdio::null())
                 .spawn();
             match started {
-                Ok(mut child) => {
-                    std::thread::spawn(move || {
-                        let _ = child.wait();
-                    });
+                Ok(child) => {
+                    crate::process::reap(child, "editor");
                     return Ok(());
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
