@@ -56,6 +56,15 @@ pub enum WorkspaceAction {
         /// Whether it arrived, rather than left.
         entered: bool,
     },
+    /// Draw the tabs panel this wide: its edge dragged, or double-clicked
+    /// back to the default. `save` is the end of the gesture, and the one
+    /// step of it written to the settings file.
+    ResizeTabsPanel {
+        /// The width asked for, before the panel's limits.
+        width: f32,
+        /// Whether to write it down.
+        save: bool,
+    },
     /// Open the pull request a row links to, in the browser.
     ///
     /// The row's chip, pressed. It names the pane whose chip it is rather

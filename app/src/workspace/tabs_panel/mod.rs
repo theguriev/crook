@@ -88,6 +88,7 @@ use super::title_bar;
 use super::view::Workspace;
 
 pub(crate) mod drag;
+pub(crate) mod edge;
 pub(super) mod geometry;
 mod rail;
 mod row;
@@ -96,13 +97,27 @@ pub(crate) mod search;
 #[cfg(test)]
 pub(super) use row::waiting_wash;
 
-/// Warp's `PANEL_WIDTH`.
-///
-/// Warp's panel is resizable between `MIN_PANEL_WIDTH = 200` and half the
-/// window; Crook has no `Resizable`, so this is fixed. Nothing about a row's
-/// layout depends on the width being adjustable, so the day a drag bar arrives
-/// this becomes the initial value and nothing else moves.
-pub(super) const PANEL_WIDTH: f32 = 248.;
+/// How wide the panel is until its edge is dragged. See [`edge`].
+pub(super) const PANEL_WIDTH: f32 = crate::settings::DEFAULT_TABS_PANEL_WIDTH;
+
+/// The narrowest the edge can be dragged to: a row still has room for its
+/// mark, a few words of its name and its close button.
+const MIN_PANEL_WIDTH: f32 = 180.;
+
+/// The widest it can be dragged to. Warp stops at half the window; a fixed
+/// stop keeps the width a person chose the same in every window, and the
+/// work beside it a terminal and not a margin.
+const MAX_PANEL_WIDTH: f32 = 520.;
+
+/// A width the panel can be drawn at: `width` held between the stops, and
+/// the default for one that is not a number at all.
+pub(super) fn panel_width(width: f32) -> f32 {
+    if width.is_finite() {
+        width.clamp(MIN_PANEL_WIDTH, MAX_PANEL_WIDTH)
+    } else {
+        PANEL_WIDTH
+    }
+}
 
 /// How much of the top of the panel the window's own controls have taken.
 ///
@@ -218,14 +233,20 @@ pub(super) fn render(workspace: &Workspace, body: Box<dyn Element>) -> Box<dyn E
     column.add_child(Expanded::new(1., body).finish());
     column.add_child(sections(workspace));
 
-    ConstrainedBox::new(
+    let width = workspace.tabs_panel_width();
+    let panel = ConstrainedBox::new(
         Container::new(column.finish())
             .with_background_color(theme().surface)
             .with_border(Border::right(1.).with_border_color(theme().border))
             .finish(),
     )
-    .with_width(PANEL_WIDTH)
-    .finish()
+    .with_width(width)
+    .finish();
+    Box::new(edge::PanelEdge::new(
+        panel,
+        width,
+        workspace.panel_resize().clone(),
+    ))
 }
 
 /// The tab list, scrolling inside whatever the search box left it, and the

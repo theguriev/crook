@@ -345,6 +345,13 @@ pub struct GeneralOptions {
     /// back while one of those is showing and goes again on the way back to
     /// the tabs.
     pub show_tabs_panel: bool,
+    /// How wide the tabs panel is, in points, as its edge was last dragged.
+    ///
+    /// Here for the reason [`Self::show_tabs_panel`] is: how much of the
+    /// window a person gives the tabs is a preference about the window. Read
+    /// through the panel's limits rather than trusted, so a hand-edited
+    /// width the panel cannot be drawn at is the nearest one it can.
+    pub tabs_panel_width: f32,
     /// Whether a close that would end something still working asks first.
     ///
     /// The window's close, a tab's, a group's and a pane's all end the
@@ -379,6 +386,10 @@ pub struct GeneralOptions {
     pub notify_on_long_command: bool,
 }
 
+/// How wide the tabs panel is until its edge is dragged: Warp's
+/// `PANEL_WIDTH`.
+pub const DEFAULT_TABS_PANEL_WIDTH: f32 = 248.;
+
 impl Default for GeneralOptions {
     /// The tabs coming back, because that is what makes a terminal a place,
     /// and the type size the body panel already printed its one monospace line
@@ -390,6 +401,7 @@ impl Default for GeneralOptions {
             restore_session: true,
             login_shell: crate::shell_integration::login_by_default(),
             show_tabs_panel: true,
+            tabs_panel_width: DEFAULT_TABS_PANEL_WIDTH,
             ask_before_ending_agents: true,
             notify_on_needs_input: true,
             notify_on_failed: false,
@@ -1756,6 +1768,8 @@ mod tests {
                 // Crook's own: what the mark at the head of a row is drawn
                 // as, which in Warp is not a choice.
                 "status_marks",
+                // Crook's own: how wide the column of tabs was dragged.
+                "tabs_panel_width",
                 // The chosen theme's name, which is a string rather than an
                 // option with a type: see `Settings::theme`.
                 "theme",
@@ -1942,11 +1956,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Nine tab options, nine general ones and three theme names, and
+        // Nine tab options, ten general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(21, written.len());
+        assert_eq!(22, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),

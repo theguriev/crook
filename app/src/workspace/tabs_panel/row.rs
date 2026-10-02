@@ -345,7 +345,7 @@ pub(super) fn render(
     stack.add_anchored_overlay_child(
         WindowRoom::new(detail_card(&sections, home, ui))
             .with_width_right_of(
-                super::PANEL_WIDTH + CARD_GAP + WINDOW_INSET,
+                workspace.tabs_panel_width() + CARD_GAP + WINDOW_INSET,
                 CARD_LEAST_WIDTH,
             )
             .finish(),
