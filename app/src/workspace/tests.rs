@@ -30491,3 +30491,102 @@ mod agent_titles {
         );
     }
 }
+
+/// The tabs panel's right edge, dragged and double-clicked.
+mod panel_edge {
+    use super::*;
+
+    /// The width of the panel's ground in the frame just drawn, whatever it is.
+    fn drawn_width(harness: &mut Harness) -> f32 {
+        let height = WINDOW.y();
+        visible_rects(&harness.frame())
+            .filter(|(rect, _)| {
+                rect.background == Fill::Solid(theme().surface)
+                    && rect.bounds.min_x() < 1.
+                    && rect.bounds.height() > height / 2.
+            })
+            .map(|(_, bounds)| bounds.width())
+            .fold(0., f32::max)
+    }
+
+    fn width(harness: &Harness) -> f32 {
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.tabs_panel_width())
+    }
+
+    /// Half way down the panel, `inset` points in from its edge.
+    fn on_edge(harness: &Harness, inset: f32) -> Vector2F {
+        vec2f(width(harness) - inset, WINDOW.y() / 2.)
+    }
+
+    #[test]
+    fn dragging_the_edge_makes_the_panel_wider_and_narrower() {
+        let mut harness = Harness::panel(2);
+        harness.frame();
+        let grab = on_edge(&harness, 2.);
+
+        harness.hold(grab, 1);
+        harness.drag_to(grab + vec2f(100., 0.));
+        assert_eq!(width(&harness), tabs_panel::PANEL_WIDTH + 100.);
+        harness.drag_to(grab - vec2f(40., 0.));
+        harness.let_go(grab - vec2f(40., 0.));
+
+        assert_eq!(width(&harness), tabs_panel::PANEL_WIDTH - 40.);
+        assert!(
+            (drawn_width(&mut harness) - (tabs_panel::PANEL_WIDTH - 40.)).abs() < 0.5,
+            "the panel is drawn at the width it was dragged to"
+        );
+    }
+
+    #[test]
+    fn the_edge_stops_short_of_a_panel_too_narrow_or_too_wide() {
+        let mut harness = Harness::panel(1);
+        harness.frame();
+        let grab = on_edge(&harness, 2.);
+
+        harness.hold(grab, 1);
+        harness.drag_to(vec2f(0., grab.y()));
+        let narrowest = width(&harness);
+        harness.drag_to(vec2f(5000., grab.y()));
+        let widest = width(&harness);
+        harness.let_go(vec2f(5000., grab.y()));
+
+        assert!(narrowest > 100., "{narrowest}");
+        assert!(widest < 1000., "{widest}");
+        assert!(narrowest < tabs_panel::PANEL_WIDTH && widest > tabs_panel::PANEL_WIDTH);
+    }
+
+    #[test]
+    fn a_double_click_on_the_edge_puts_the_width_back() {
+        let mut harness = Harness::panel(1);
+        harness.frame();
+        let grab = on_edge(&harness, 2.);
+        harness.hold(grab, 1);
+        harness.drag_to(grab + vec2f(60., 0.));
+        harness.let_go(grab + vec2f(60., 0.));
+        assert_ne!(width(&harness), tabs_panel::PANEL_WIDTH);
+
+        harness.frame();
+        let grab = on_edge(&harness, 2.);
+        harness.hold(grab, 2);
+        harness.let_go(grab);
+
+        assert_eq!(width(&harness), tabs_panel::PANEL_WIDTH);
+    }
+
+    /// Further in than the handle reaches is a row, and a row dragged is a
+    /// tab being moved, not the panel being resized.
+    #[test]
+    fn a_press_inside_the_panel_is_not_on_the_edge() {
+        let mut harness = Harness::panel(2);
+        harness.frame();
+        let inside = on_edge(&harness, 40.);
+
+        harness.hold(inside, 1);
+        harness.drag_to(inside + vec2f(100., 0.));
+        harness.let_go(inside + vec2f(100., 0.));
+
+        assert_eq!(width(&harness), tabs_panel::PANEL_WIDTH);
+    }
+}

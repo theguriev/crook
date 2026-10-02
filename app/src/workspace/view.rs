@@ -85,6 +85,7 @@ use super::tab_menu::{
     Contents, Going, Looked, Mode as WorktreeMode, Pruning, Sweep, TabMenuState,
 };
 use super::tabs_panel::drag::{Carried, PanelDrag};
+use super::tabs_panel::edge::PanelResize;
 use super::tabs_panel::geometry::RowGeometry;
 use super::tabs_panel::search::SearchState;
 use super::theme_panel::{Mode, ThemePanelState};
@@ -632,6 +633,8 @@ pub struct Workspace {
     /// that only one can be dragged at a time. See
     /// [`DividerDrag`].
     divider_drag: DividerDrag,
+    /// The drag of the tabs panel's edge, held for the same reason.
+    panel_resize: PanelResize,
 
     /// Makes the last session save the one that lands. See
     /// [`Self::save_session`] and [`SaveOrder`].
@@ -1077,6 +1080,7 @@ impl Workspace {
             resume_offers: HashMap::new(),
             clipboard: Clipboard::new(),
             divider_drag: DividerDrag::new(),
+            panel_resize: PanelResize::new(),
             session_saves: Arc::default(),
             session_problem: None,
             saves_session: true,
@@ -3433,6 +3437,35 @@ impl Workspace {
     /// See [`GeneralOptions::show_tabs_panel`].
     pub fn tabs_panel_is_showing(&self) -> bool {
         self.section.is_some() || self.general().show_tabs_panel
+    }
+
+    /// How wide the tabs panel is drawn. See
+    /// [`GeneralOptions::tabs_panel_width`].
+    pub fn tabs_panel_width(&self) -> f32 {
+        tabs_panel::panel_width(self.general().tabs_panel_width)
+    }
+
+    /// The drag of the panel's edge, for the panel to start and follow.
+    pub(super) fn panel_resize(&self) -> &PanelResize {
+        &self.panel_resize
+    }
+
+    /// Draws the tabs panel `width` wide, and writes the width down when
+    /// `save` says the drag is over.
+    ///
+    /// Not [`Self::set_general`] for every step of a drag: that saves, and a
+    /// drag is a step per pixel the pointer moves, each of which would be a
+    /// file written for a width nobody stopped at.
+    fn resize_tabs_panel(&mut self, width: f32, save: bool, ctx: &mut ViewContext<Self>) {
+        let mut general = self.general();
+        general.tabs_panel_width = tabs_panel::panel_width(width);
+        if general != self.settings.general() {
+            self.settings.set_general(general);
+            ctx.notify();
+        }
+        if save {
+            self.save_settings(ctx);
+        }
     }
 
     /// Hides the tabs panel, or shows it again, and remembers which.
@@ -10360,6 +10393,9 @@ impl TypedActionView for Workspace {
             WorkspaceAction::Worktree(action) => self.apply_worktree(action, ctx),
             WorkspaceAction::Block(action) => self.apply_block(action, ctx),
             WorkspaceAction::HoverRow { pane, entered } => self.hover_row(pane, entered, ctx),
+            WorkspaceAction::ResizeTabsPanel { width, save } => {
+                self.resize_tabs_panel(width, save, ctx);
+            }
             WorkspaceAction::OpenPullRequest(pane) => self.open_pull_request(pane),
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),
             WorkspaceAction::Complete(pane) => self.request_completions(pane, ctx),
