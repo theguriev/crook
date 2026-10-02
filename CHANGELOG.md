@@ -5,6 +5,22 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.16
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.15...v0.1.16)
+
+### Features
+
+- **tabs:** Read Claude Code's status from its title without the plugin ([#412](https://github.com/theguriev/crook/pull/412))
+
+### Fixes
+
+- **input:** Paste an image into an agent with cmd-v ([#411](https://github.com/theguriev/crook/pull/411))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.15
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.14...v0.1.15)
