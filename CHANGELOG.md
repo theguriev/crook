@@ -5,6 +5,19 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.17
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.16...v0.1.17)
+
+### Features
+
+- **tabs:** Resize the tabs panel by dragging its edge ([#413](https://github.com/theguriev/crook/pull/413))
+- **input:** Choose whether tab completes or takes the suggestion ([#414](https://github.com/theguriev/crook/pull/414))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.16
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.15...v0.1.16)
