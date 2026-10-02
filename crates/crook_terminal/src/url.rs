@@ -82,10 +82,32 @@ pub const SCHEMES: [&str; 8] = [
 /// A closing bracket is *not* here: it is legal inside a URL — Wikipedia's are
 /// full of them — and is handled by the balancing rule in [`trim_trailing`]
 /// instead.
+///
+/// The full-width punctuation and brackets of Chinese and Japanese text are,
+/// though, opening and closing alike: no address anybody prints has one in it
+/// unescaped, and a sentence in either language ends a link with `。` or `，`
+/// and wraps one in `（）` or `「」`. They cannot be left to [`trim_trailing`]
+/// either — each is two cells wide, and the second cell, which the caller
+/// fills with a stand-in, is what the row ends in — so `https://example.com。`
+/// underlined the stop and opened an address that ended in it.
 fn terminates(character: char) -> bool {
     character.is_whitespace()
         || character.is_control()
         || matches!(character, '"' | '\'' | '<' | '>' | '`' | '|' | '\\' | '^')
+        || matches!(
+            character,
+            '\u{3001}' // 、
+                | '\u{3002}' // 。
+                | '\u{3008}'
+                ..='\u{3011}' // 〈〉《》「」『』【】
+                | '\u{ff01}' // ！
+                | '\u{ff08}' // （
+                | '\u{ff09}' // ）
+                | '\u{ff0c}' // ，
+                | '\u{ff1a}' // ：
+                | '\u{ff1b}' // ；
+                | '\u{ff1f}' // ？
+        )
 }
 
 /// The URL covering `column` of `text`, or `None` when that cell is not part

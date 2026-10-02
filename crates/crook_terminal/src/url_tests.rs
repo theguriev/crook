@@ -54,6 +54,32 @@ fn test_a_url_that_ends_a_sentence_does_not_take_the_full_stop() {
 }
 
 #[test]
+fn test_full_width_punctuation_ends_a_url_however_it_is_followed() {
+    // Two cells each on the grid, the second a stand-in the caller fills: the
+    // stop has to end the run, since trimming from the end meets the stand-in.
+    for (row, expected) in [
+        (
+            "见 https://example.com/a。\u{e000}",
+            "https://example.com/a",
+        ),
+        (
+            "见 https://example.com/a，\u{e000}然后",
+            "https://example.com/a",
+        ),
+        ("（https://example.com/a）\u{e000}", "https://example.com/a"),
+        ("「https://example.com/a」\u{e000}", "https://example.com/a"),
+    ] {
+        assert_eq!(uri_at(row, 8).as_deref(), Some(expected), "in {row:?}");
+    }
+
+    // A path in another script is still part of the address.
+    assert_eq!(
+        uri_at("https://ja.wikipedia.org/wiki/東京", 10).as_deref(),
+        Some("https://ja.wikipedia.org/wiki/東京")
+    );
+}
+
+#[test]
 fn test_a_bracket_belongs_to_the_url_only_if_the_url_opened_it() {
     // The rule that separates the two cases people actually hit.
     assert_eq!(
