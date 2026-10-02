@@ -1816,6 +1816,11 @@ fn tidying(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     // below and the "Remove 1 free checkout" entry that opens this both count.
     let count = match &state.sweep {
         Sweep::Counting { of, .. } | Sweep::Removing { of, .. } => *of,
+        // What goes, or — when nothing will, because every candidate has
+        // work in it — what is being left: one checkout kept is still "this
+        // checkout", and counting the none that go flipped the heading to the
+        // plural over "There is work in it."
+        Sweep::Ready { going, kept } if going.is_empty() => kept.len(),
         Sweep::Ready { going, .. } => going.len(),
     };
     let mut column = Flex::column()
