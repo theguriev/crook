@@ -1044,19 +1044,27 @@ fn count(
 
     let file = fs::File::open(path)?;
     let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
+    let mut bytes = Vec::new();
 
     loop {
-        line.clear();
-        if reader.read_line(&mut line)? == 0 {
+        bytes.clear();
+        if reader.read_until(b'\n', &mut bytes)? == 0 {
             return Ok(());
         }
+        // A line that is not UTF-8 is skipped like a line that is not JSON.
+        // Read with `read_line`, it was an error that ended the whole file —
+        // every line after it went uncounted, and the total came back low
+        // with nothing but a debug line to say so. An agent killed in the
+        // middle of writing a character leaves exactly such a line.
+        let Ok(line) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
         // The whole of what makes walking a hundred megabytes cheap: a line
         // without the needle is never handed to a JSON parser.
         if !line.contains(containing) {
             continue;
         }
-        let Ok(object) = serde_json::from_str::<serde_json::Value>(&line) else {
+        let Ok(object) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
 
