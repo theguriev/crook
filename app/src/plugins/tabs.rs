@@ -279,22 +279,27 @@ const RENAME_PLACEHOLDER: &str = "name";
 struct Rename {
     /// What is being renamed, if anything.
     what: Cell<Option<Renaming>>,
+    /// The name the field opened with, which an Enter that changed nothing
+    /// hands back unchanged.
+    opened: RefCell<String>,
     /// The host's flag for this plugin's surface, once it has been claimed.
     surface: RefCell<Option<Showing>>,
 }
 
 impl Rename {
-    /// Starts one.
-    fn begin(&self, what: Renaming) {
+    /// Starts one, with the field showing `opened`.
+    fn begin(&self, what: Renaming, opened: String) {
         self.what.set(Some(what));
+        self.opened.replace(opened);
         self.raise();
     }
 
-    /// Ends one, and says what it was about.
-    fn end(&self) -> Option<Renaming> {
+    /// Ends one, and says what it was about and what the field opened with.
+    fn end(&self) -> Option<(Renaming, String)> {
         let was = self.what.take();
+        let opened = self.opened.take();
         self.raise();
-        was
+        was.map(|what| (what, opened))
     }
 
     /// What is being renamed, if anything.
@@ -655,7 +660,7 @@ impl Plugin for Tabs {
                     editor.set_text(&current);
                     editor.select_all();
                 });
-                rename.begin(what);
+                rename.begin(what, current);
                 workspace.sync_input_keys();
                 ctx.notify();
             });
@@ -669,10 +674,19 @@ impl Plugin for Tabs {
             let rename = self.rename.clone();
             let field = field.clone();
             move |workspace, ctx| {
-                let Some(what) = rename.end() else {
+                let Some((what, opened)) = rename.end() else {
                     return;
                 };
                 let typed = field.editor().text().trim().to_owned();
+                // Enter on the name the field opened with is no rename. That
+                // name is often not a person's at all — an agent's title, the
+                // running command, `agent 1` — and keeping it as one froze the
+                // row on it: a person's name outranks every later one an
+                // agent chooses, so the row stopped following its agent.
+                if typed == opened.trim() {
+                    workspace.close_tab_context_menu(ctx);
+                    return;
+                }
                 // An emptied field is "put back the name I started with",
                 // which is what `None` means everywhere this reaches.
                 let name = (!typed.is_empty()).then_some(typed);
