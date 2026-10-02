@@ -1552,13 +1552,13 @@ in `Expanded`, under the "Show: PR link" toggle, and it is a link: the row's own
 aside while it is hovered, as it does for the close button. The menu carries **Open pull
 request** for the density that draws no chip and **Check pull request**, which is the one
 place Crook asks the network about the work — the person's own `gh pr view <url> --json
-state,statusCheckRollup`, on the background pool under `git::worktree`'s deadline shape
+state,isDraft,statusCheckRollup`, on the background pool under `git::worktree`'s deadline shape
 (`app/src/forge.rs`), once per press and never polled. `gh` holds the token and knows the
 host; Crook holds neither. It is looked for on Crook's own `PATH` and then in
 `forge::usual_places` — Homebrew's prefixes, MacPorts', `/usr/local/bin`, `~/.local/bin` and
 a Nix profile — because a `Crook.app` opened from the Dock is handed launchd's
 `/usr/bin:/bin:/usr/sbin:/sbin`, which holds `git` and no `gh`, and Crook runs no login shell
-to learn the person's. The answer — open, merged or closed, and how many checks pass, fail
+to learn the person's. The answer — open, draft, merged or closed, and how many checks pass, fail
 or are pending — is written onto the session and printed on the hover card until the next
 press, or the reason there is none: `gh` not found, not signed in, or unable to reach the
 forge. The hook reads a PostToolUse input it cannot parse as saying nothing — only text that

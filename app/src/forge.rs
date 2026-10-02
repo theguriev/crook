@@ -5,7 +5,7 @@
 //! does not know is whether that pull request is still open and whether its
 //! checks passed, and nothing on this machine does: the answer is on the
 //! forge. So "Check pull request" on the row's menu asks, and this is the
-//! asking — `gh pr view <url> --json state,statusCheckRollup`, run on the
+//! asking — `gh pr view <url> --json state,isDraft,statusCheckRollup`, run on the
 //! background pool under a deadline, once per press.
 //!
 //! # Why the person's `gh`, and why only on a press
@@ -74,11 +74,15 @@ const DRAIN_GRACE: Duration = Duration::from_secs(1);
 /// characters.
 const SAID_CHARS: usize = 160;
 
-/// What a pull request is: open, merged, or closed without being merged.
+/// What a pull request is: open, a draft, merged, or closed without being
+/// merged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
-    /// Open, merged or not yet.
+    /// Open, and ready for review.
     Open,
+    /// Open, and marked as a draft: not asking for a review yet, and not
+    /// mergeable until it is marked ready.
+    Draft,
     /// Merged.
     Merged,
     /// Closed without being merged.
@@ -90,6 +94,7 @@ impl State {
     pub fn label(self) -> &'static str {
         match self {
             Self::Open => "Open",
+            Self::Draft => "Draft",
             Self::Merged => "Merged",
             Self::Closed => "Closed",
         }
@@ -141,7 +146,7 @@ impl Checks {
 /// What the forge said about a pull request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Found {
-    /// Open, merged or closed.
+    /// Open, a draft, merged or closed.
     pub state: State,
     /// Its checks, counted.
     pub checks: Checks,
@@ -214,7 +219,13 @@ fn check_in(
     url: &str,
     timeout: Duration,
 ) -> Result<Found, CheckError> {
-    let arguments = ["pr", "view", url, "--json", "state,statusCheckRollup"];
+    let arguments = [
+        "pr",
+        "view",
+        url,
+        "--json",
+        "state,isDraft,statusCheckRollup",
+    ];
     let finished = match run(gh, &arguments, timeout) {
         Err(CheckError::Missing) => {
             let found = elsewhere(gh, places).ok_or(CheckError::Missing)?;
@@ -438,14 +449,21 @@ fn refused(code: Option<i32>, stderr: &str) -> CheckError {
     }
 }
 
-/// What `gh pr view --json state,statusCheckRollup` printed, read.
+/// What `gh pr view --json state,isDraft,statusCheckRollup` printed, read.
 ///
 /// A state this does not know is not guessed at: gh has said the three for
 /// as long as it has had `--json`, and one it adds later is a line on the
 /// card saying so rather than a wrong word.
+///
+/// A draft is not a fourth state to gh — it is `OPEN` with `isDraft` set — and
+/// read as plain `Open` it told a person whose agent opened a draft that the
+/// pull request was waiting on reviewers it had never asked. A missing
+/// `isDraft` is not one.
 fn read(stdout: &[u8]) -> Result<Found, CheckError> {
     let view: Value = serde_json::from_slice(stdout).map_err(|_| CheckError::Unreadable)?;
+    let draft = view.get("isDraft").and_then(Value::as_bool) == Some(true);
     let state = match view.get("state").and_then(Value::as_str) {
+        Some("OPEN") if draft => State::Draft,
         Some("OPEN") => State::Open,
         Some("MERGED") => State::Merged,
         Some("CLOSED") => State::Closed,
