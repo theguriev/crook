@@ -1746,6 +1746,42 @@ fn a_note_is_not_drawn_until_the_pointer_is_on_it() {
 }
 
 #[test]
+fn a_note_on_a_badge_is_written_at_the_size_a_panel_is() {
+    // The badge's own words are eight points; the note it raises is a
+    // surface at a panel's width, and is read at a panel's size.
+    let mut frame = Frame::at(
+        Node::Explained {
+            content: Box::new(Node::Icon {
+                name: "pirate".to_owned(),
+                tone: Tone::Primary,
+            }),
+            explanation: Box::new(Node::Text {
+                text: "two checks failing".to_owned(),
+                size: Size::Body,
+                tone: Tone::Primary,
+            }),
+        },
+        None,
+        render::Scale::BADGE,
+    );
+
+    let scene = frame.scene();
+    frame.hover(mark_center(&scene));
+    let sizes: Vec<f32> = frame
+        .scene()
+        .layers()
+        .flat_map(|layer| layer.glyphs.iter())
+        .map(|glyph| glyph.glyph_key.font_size)
+        .collect();
+
+    assert!(!sizes.is_empty(), "the note drew no words");
+    assert!(
+        sizes.iter().all(|size| *size == 12.),
+        "the note was drawn at the badge's size: {sizes:?}"
+    );
+}
+
+#[test]
 fn a_note_does_not_swallow_the_click_it_is_explaining() {
     // The trap in copying `anchored` across. A panel is modal, which is what
     // makes clicking the chip again one toggle rather than two — but a note is
