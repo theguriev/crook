@@ -15757,10 +15757,19 @@ mod shells {
         });
 
         // A process that outlives the shell and keeps the slave descriptor.
-        type_line(&mut harness, "sleep 30 &");
+        // Started by a throwaway `sh` rather than as `sleep 30 &`, so it is
+        // not one of the shell's jobs: zsh answers the first `exit` with "you
+        // have running jobs" and stays, and the test then waited out its
+        // timeout on a shell that had never left. The pid it echoes is how
+        // the wait tells the output from the echo of the line that asked.
+        type_line(&mut harness, "sh -c 'sleep 30 & echo held-$!'");
         harness.press("enter", Modifiers::default(), "");
-        harness.wait_for("the background job never started", |harness| {
-            harness.terminal_text(pane).contains(char::is_numeric)
+        harness.wait_for("the background process never started", |harness| {
+            harness
+                .terminal_text(pane)
+                .split("held-")
+                .skip(1)
+                .any(|after| after.starts_with(|c: char| c.is_ascii_digit()))
         });
 
         type_line(&mut harness, "exit");
