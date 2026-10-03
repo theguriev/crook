@@ -227,6 +227,10 @@ Twenty features, and the page that configures them:
   in it calls its work, else what it is running right now — `cargo test` while the tests run —
   else the directory it sits in. A number is what is left when a pane has no name, no program
   and nowhere to be, which is nowhere anybody works.
+  A tab closed by mistake comes back with `cmd-shift-t` (`ctrl-shift-alt-t` off macOS) — where
+  it was, with its name, colour and split, each shell in the directory it was in, and each
+  agent that was running offered its resume line, unsent, the way a restart offers it. The
+  last ten closed are kept, for as long as the window is open.
   They live in a panel down the left edge, and a **View options** menu — the panel's own
   secondary click, on the empty space the list leaves — says what a row of them shows: which
   fact it leads with, what its second line says, which chips it carries, whether hovering it
@@ -801,7 +805,7 @@ Twenty features, and the page that configures them:
   page tells you where it is.
 
 - **Everything the window does has a name, and most of it has a key.** The window registers
-  fifty-two commands of its own and ships chords for thirty-seven; the other fifteen are
+  fifty-three commands of its own and ships chords for thirty-eight; the other fifteen are
   reached by name, from the palette or from a chord of your own. That split is deliberate — a
   shipped chord is a key taken away from the shell in every pane, forever, so it is spent on
   what is pressed often and not on what is done once a week.

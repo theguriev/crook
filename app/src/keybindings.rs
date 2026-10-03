@@ -1065,6 +1065,8 @@ pub fn has_twin(key: &str) -> bool {
 /// matches the modifiers exactly.
 pub const DEFAULTS_MAC: &[(&str, &str)] = &[
     ("cmd+t", "crook/window/new-tab"),
+    // Every browser's, and Warp's: the tab that was just closed, back.
+    ("shift+cmd+t", "crook/window/reopen-closed-tab"),
     ("cmd+w", "crook/window/close-pane"),
     ("cmd+d", "crook/window/split-right"),
     ("shift+cmd+d", "crook/window/split-down"),
@@ -1162,6 +1164,9 @@ pub const DEFAULTS_MAC: &[(&str, &str)] = &[
 /// Every terminal emulator on Linux arrived at the same arrangement.
 pub const DEFAULTS_OTHER: &[(&str, &str)] = &[
     ("ctrl+shift+t", "crook/window/new-tab"),
+    // The browsers' ctrl+shift+t is the new tab here, as in every Linux
+    // terminal, so the closed one comes back with an Alt beside it.
+    ("ctrl+shift+alt+t", "crook/window/reopen-closed-tab"),
     ("ctrl+shift+w", "crook/window/close-pane"),
     ("ctrl+shift+d", "crook/window/split-right"),
     // Not ctrl+shift+D with a Shift already spent: the split pair takes the

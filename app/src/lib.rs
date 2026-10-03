@@ -1614,6 +1614,7 @@ EXIT STATUS:
 
 KEYS (macOS):
     cmd+t                      New agent tab
+    shift+cmd+t                Reopen the tab closed last, where it was
     cmd+,                      Show the settings
     shift+cmd+p                Open the command palette
     cmd+d / shift+cmd+d        Split the focused pane to the right / downwards
@@ -1636,6 +1637,7 @@ KEYS (macOS):
 
 KEYS (Linux and Windows):
     ctrl+shift+t               New agent tab
+    ctrl+shift+alt+t           Reopen the tab closed last, where it was
     ctrl+,                     Show the settings
     ctrl+shift+p               Open the command palette
     ctrl+shift+d / ctrl+shift+e  Split the focused pane to the right / downwards

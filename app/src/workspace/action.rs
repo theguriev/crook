@@ -133,6 +133,9 @@ pub enum WorkspaceAction {
     /// line while they reach for the second half. See
     /// [`crate::keybindings`].
     Chord,
+    /// Bring back the tab closed most recently. See
+    /// `Workspace::reopen_closed_tab`.
+    ReopenClosedTab,
     /// Ask this pane's shell what the word before the caret could become.
     ///
     /// An action rather than a call, for the reason `ReleaseSelection` is one:

@@ -58,8 +58,13 @@ pub const WINDOW_OVERLAY: SlotId = SlotId::new("window.overlay");
 ///
 /// The order is the order the shipped keybindings are written in, so a person
 /// reading one and the other is reading the same order twice.
-pub const COMMANDS: [(&str, &str, Binding); 52] = [
+pub const COMMANDS: [(&str, &str, Binding); 53] = [
     ("new-tab", "New agent tab", Binding::NewTab),
+    (
+        "reopen-closed-tab",
+        "Reopen the closed tab",
+        Binding::ReopenClosedTab,
+    ),
     ("close-pane", "Close the focused pane", Binding::ClosePane),
     ("split-right", "Split to the right", Binding::SplitRight),
     ("split-down", "Split downwards", Binding::SplitDown),

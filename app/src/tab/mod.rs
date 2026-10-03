@@ -1170,6 +1170,22 @@ impl TabStrip {
     /// back does not see. `agent 1` and `agent 3` back, with the second
     /// closed, went on to open another `agent 3`; one tab split in two came
     /// back as `agent 1` and `agent 2`, and the next tab was `agent 2`.
+    /// Puts a tab back at `index` — clamped to the end — and selects it.
+    ///
+    /// What reopening a closed tab is: it goes back where it was, as near as
+    /// the strip that is left allows, and it is the tab a person is looking at,
+    /// since bringing it back is asking to look at it.
+    pub(crate) fn reopen(&mut self, tab: Tab, index: usize) -> TabEffect {
+        let id = tab.id();
+        self.adopt(tab);
+        if let Some(from) = self.index_of(id) {
+            let tab = self.tabs.remove(from);
+            self.tabs.insert(index.min(self.tabs.len()), tab);
+        }
+        self.repair(Some(id));
+        TabEffect::Changed
+    }
+
     pub(crate) fn adopt(&mut self, tab: Tab) {
         let id = tab.id();
         let highest = std::iter::once(tab.born_as.as_str())
