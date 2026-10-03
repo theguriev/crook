@@ -566,6 +566,13 @@ pub struct Opening {
     pub plugins_directory: Option<PathBuf>,
 }
 
+/// How many closed tabs "Reopen the closed tab" can bring back, newest first.
+///
+/// A browser's own number, near enough. Past it the oldest is forgotten: a
+/// tab closed twenty closes ago is one nobody is reaching back for with a
+/// chord, and each snapshot holds its panes' names and directories.
+const CLOSED_KEPT: usize = 10;
+
 /// The window's root view.
 pub struct Workspace {
     tabs: TabStrip,
@@ -625,6 +632,9 @@ pub struct Workspace {
     /// has taken over, and it is theirs to send. See
     /// [`Self::resume_every_agent`].
     resume_offers: HashMap<PaneId, String>,
+    /// The tabs closed this session, newest last, each with where it was —
+    /// what "Reopen the closed tab" brings back. See [`CLOSED_KEPT`].
+    closed_tabs: Vec<(crate::session::TabSnapshot, usize)>,
     /// The system clipboard every field copies to and pastes from. One for the
     /// window: see [`Clipboard`].
     clipboard: Clipboard,
@@ -1078,6 +1088,7 @@ impl Workspace {
             first_lines: HashMap::new(),
             watches: Watches::default(),
             resume_offers: HashMap::new(),
+            closed_tabs: Vec::new(),
             clipboard: Clipboard::new(),
             divider_drag: DividerDrag::new(),
             panel_resize: PanelResize::new(),
@@ -7964,8 +7975,61 @@ impl Workspace {
     /// "the window is dirty" the same statement rather than two.
     pub fn apply(&mut self, action: TabAction, ctx: &mut ViewContext<Self>) -> TabEffect {
         let before = self.tabs.focused_pane_id();
+        // Recorded before it goes, because after it there is nothing left to
+        // record: a close of the tab, or of its last pane, is the moment a
+        // tab can be written down for "Reopen the closed tab".
+        let closing = match action {
+            TabAction::Close(tab) => Some(tab),
+            TabAction::ClosePane(pane) => self.tabs.tab_of(pane),
+            _ => None,
+        }
+        .and_then(|tab| {
+            let index = self.tabs.index_of(tab)?;
+            let snapshot = crate::session::TabSnapshot::of(self.tabs.get(tab)?)?;
+            Some((tab, snapshot, index))
+        });
         let effect = self.tabs.apply(action);
+        if let Some((tab, snapshot, index)) = closing
+            && self.tabs.get(tab).is_none()
+        {
+            if self.closed_tabs.len() == CLOSED_KEPT {
+                self.closed_tabs.remove(0);
+            }
+            self.closed_tabs.push((snapshot, index));
+        }
         self.settle(effect, before, ctx)
+    }
+
+    /// Brings back the tab closed most recently, where it was.
+    ///
+    /// The same snapshot a restart restores from, so it comes back the way a
+    /// restored window does: its name and colour, its panes in their split,
+    /// each shell in the directory it was in — and each agent that was running
+    /// offered its resume line, unsent, in its own pane. The processes are
+    /// not brought back; nothing can be. A directory that is gone since is a
+    /// pane that starts where a new one would.
+    fn reopen_closed_tab(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some((snapshot, index)) = self.closed_tabs.pop() else {
+            return;
+        };
+        let Some(tab) = snapshot.restore() else {
+            return;
+        };
+        let panes: Vec<PaneId> = tab.panes().iter().map(crate::tab::Pane::id).collect();
+        let before = self.tabs.focused_pane_id();
+        let effect = self.tabs.reopen(tab, index);
+        self.settle(effect, before, ctx);
+
+        // Only this tab's panes: another restored pane that has not spent its
+        // line already holds it.
+        let offers = crate::session::resume_offers(&self.tabs, |program, resume| {
+            self.settings.resume_line(program, resume)
+        });
+        for (pane, line) in offers.into_iter().filter(|(pane, _)| panes.contains(pane)) {
+            self.type_into_input(pane, &line, ctx);
+            self.resume_offers.insert(pane, line);
+        }
+        self.save_session(ctx);
     }
 
     /// Opens a tab whose shell starts in `directory`.
@@ -8555,6 +8619,11 @@ impl Workspace {
     pub fn command(&self, binding: Binding) -> Option<WorkspaceAction> {
         let tab = match binding {
             Binding::NewTab => TabAction::New,
+            // Declined with nothing to bring back, so the chord reaches the
+            // shell rather than being eaten by a command that does nothing.
+            Binding::ReopenClosedTab => {
+                return (!self.closed_tabs.is_empty()).then_some(WorkspaceAction::ReopenClosedTab);
+            }
             // Warp's `pane_group:close_current_session`: the pane goes, and
             // the tab only goes with it when it was the tab's last one.
             Binding::ClosePane => TabAction::ClosePane(self.tabs.focused_pane_id()?),
@@ -10426,6 +10495,7 @@ impl TypedActionView for Workspace {
             // its own while a chord is being recorded arrives here for the
             // same reason and is swallowed the same way.
             WorkspaceAction::Chord => {}
+            WorkspaceAction::ReopenClosedTab => self.reopen_closed_tab(ctx),
         }
     }
 }

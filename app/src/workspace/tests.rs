@@ -24072,18 +24072,75 @@ fn the_plugins_that_registered_one_command_share_a_heading() {
 }
 
 #[test]
+fn a_closed_tab_comes_back_where_it_was_with_its_name_and_its_split() {
+    // Three tabs; the middle one renamed and split, then closed. Reopening it
+    // puts it back in the middle, selected, called what it was called, with
+    // both panes and the focus where it had been.
+    let mut harness = Harness::new(3);
+    let tabs = harness.tab_ids();
+    let middle = tabs[1];
+    harness.dispatch_action(TabAction::Select(middle));
+    harness.workspace_update(|workspace, ctx| {
+        workspace.rename_tab(middle, Some("release work".to_owned()), ctx);
+    });
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let focused_title = harness
+        .focused_pane_id()
+        .map(|pane| harness.pane_title(pane));
+
+    harness.dispatch_action(TabAction::Close(middle));
+    assert_eq!(harness.tab_ids().len(), 2);
+
+    harness.run_command("crook/window/reopen-closed-tab");
+
+    let after = harness.tab_ids();
+    assert_eq!(after.len(), 3, "the tab did not come back");
+    let back = after[1];
+    assert_eq!(
+        harness.active_id(),
+        back,
+        "it came back but is not selected"
+    );
+    assert_eq!(harness.tab_name(back), "release work");
+    assert_eq!(
+        harness.active_pane_ids().len(),
+        2,
+        "the split did not come back"
+    );
+    assert_eq!(
+        harness
+            .focused_pane_id()
+            .map(|pane| harness.pane_title(pane)),
+        focused_title,
+        "the focus is not on the pane that had it"
+    );
+
+    // And with nothing left to bring back, the command declines.
+    assert!(
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .command(crate::input_keys::Binding::ReopenClosedTab)
+                .is_none()
+        }),
+        "a command with nothing to reopen took the chord anyway"
+    );
+}
+
+#[test]
 fn the_arrows_step_over_a_group_heading() {
-    // `close` matches two commands the window registered and two the tabs did,
-    // so the list is a group of two, a heading, and a group of two. One row is
-    // 34px and a heading is 28, and the selection moving by 62 is the heading
-    // being passed over rather than landed on.
+    // `close` matches three commands the window registered — closing a pane,
+    // reopening a closed tab — and two the tabs did, so the list is a group
+    // of three, a heading, and a group of two. One row is 34px and a heading
+    // is 28, and the selection moving by 62 is the heading being passed over
+    // rather than landed on.
     let mut harness = Harness::new(1);
     open_keys(&mut harness, "close");
     let inside_a_group = palette_selected_row(&harness.frame()).min_y();
 
     harness.press("down", Modifiers::default(), "");
+    harness.press("down", Modifiers::default(), "");
     let next = palette_selected_row(&harness.frame()).min_y();
-    assert_eq!(next - inside_a_group, 34.);
+    assert_eq!(next - inside_a_group, 34. * 2.);
 
     harness.press("down", Modifiers::default(), "");
     let across = palette_selected_row(&harness.frame()).min_y();

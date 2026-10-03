@@ -241,32 +241,16 @@ impl Session {
             .collect();
 
         for tab in strip.iter() {
-            let panes: Vec<_> = tab.panes().iter().map(PaneSnapshot::of).collect();
-            if panes.is_empty() {
+            let Some(mut snapshot) = TabSnapshot::of(tab) else {
                 continue;
-            }
-
+            };
             if strip.is_active(tab.id()) {
                 active = tabs.len();
             }
-            let focused = tab
-                .panes()
-                .iter()
-                .position(|pane| tab.panes().is_focused(pane.id()))
-                .unwrap_or(0);
-
-            tabs.push(TabSnapshot {
-                name: tab.name().to_owned(),
-                horizontal: tab.panes().axis() == SplitAxis::Horizontal,
-                focused,
-                zoomed: tab.panes().is_zoomed(),
-                panes,
-                pinned: tab.is_pinned(),
-                color: tab.color().map(|color| color.name().to_owned()),
-                group: tab
-                    .group()
-                    .and_then(|id| groups.iter().position(|held| *held == id)),
-            });
+            snapshot.group = tab
+                .group()
+                .and_then(|id| groups.iter().position(|held| *held == id));
+            tabs.push(snapshot);
         }
 
         Self {
@@ -450,8 +434,33 @@ impl Session {
 }
 
 impl TabSnapshot {
+    /// Records one tab, with no group — a group is a position in a whole
+    /// session's list, which [`Session::of`] fills in — or `None` when it
+    /// holds nothing worth recording.
+    pub(crate) fn of(tab: &Tab) -> Option<Self> {
+        let panes: Vec<_> = tab.panes().iter().map(PaneSnapshot::of).collect();
+        if panes.is_empty() {
+            return None;
+        }
+        let focused = tab
+            .panes()
+            .iter()
+            .position(|pane| tab.panes().is_focused(pane.id()))
+            .unwrap_or(0);
+        Some(Self {
+            name: tab.name().to_owned(),
+            horizontal: tab.panes().axis() == SplitAxis::Horizontal,
+            focused,
+            zoomed: tab.panes().is_zoomed(),
+            panes,
+            pinned: tab.is_pinned(),
+            color: tab.color().map(|color| color.name().to_owned()),
+            group: None,
+        })
+    }
+
     /// Builds the tab this describes, or `None` when it has no panes.
-    fn restore(&self) -> Option<Tab> {
+    pub(crate) fn restore(&self) -> Option<Tab> {
         let mut panes = self.panes.iter().take(MAX_PANES);
         let first = panes.next()?;
 
