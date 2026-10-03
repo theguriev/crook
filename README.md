@@ -789,7 +789,9 @@ Twenty features, and the page that configures them:
   status marks, the theme, the light and dark pair it follows the desktop between, the
   terminal's type size, whether the tabs come back, whether Crook opens at login (a
   LaunchAgent on macOS, an XDG autostart entry on Linux, the `Run` key on Windows — each the
-  person's own and taken out again when switched off), which stops post a notification, and —
+  person's own and taken out again when switched off), whether a bell plays the system's alert
+  sound (off, as in Warp; a pane you are not looking at is marked either way, and a burst is
+  one sound), which stops post a notification, and —
   set in the file rather than on the page — its font family and the line each agent is resumed
   with.
   Beside them, **Default terminal** makes Crook the terminal the system opens — Launch

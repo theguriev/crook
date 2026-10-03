@@ -14711,7 +14711,8 @@ fn turning_the_login_shell_off_reaches_the_thing_that_opens_shells() {
     harness.select_settings_section("Shell");
 
     let switches = settings_switch_boxes(&harness.frame());
-    assert_eq!(switches.len(), 1, "one switch on the shell page");
+    // The login shell's, and the bell's below it.
+    assert_eq!(switches.len(), 2, "two switches on the shell page");
     harness.click(center(switches[0]), MouseButton::Left);
 
     assert_eq!(harness.general().login_shell, !out_of_the_box);
@@ -24365,6 +24366,45 @@ fn making_crook_the_default_terminal_is_offered_only_while_it_is_not() {
     adopt(&mut harness, Some(false));
     harness.dispatch_workspace_action(SettingsAction::MakeDefaultTerminal.into());
     assert_eq!(answer(&harness), Some(true));
+}
+
+#[test]
+fn the_audible_bell_sounds_once_for_a_burst_and_only_when_switched_on() {
+    let mut harness = Harness::new(1);
+    let pane = harness.focused_pane_id().expect("a pane has the focus");
+    let update = crate::terminal_model::TerminalUpdate::Bell {
+        pane,
+        while_running: true,
+    };
+    let sounded = |harness: &Harness| {
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.bells_sounded())
+    };
+
+    // Off out of the box: the bell is heard by nobody.
+    harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(&update, ctx));
+    assert_eq!(sounded(&harness), 0);
+
+    // Switching it on plays it once, so the choice is heard; a bell straight
+    // after is inside the quiet that follows, and so is the next.
+    harness.dispatch_workspace_action(SettingsAction::ToggleAudibleBell.into());
+    assert!(harness.workspace.read(&harness.app, |workspace, _| {
+        workspace.general().audible_bell
+    }));
+    assert_eq!(sounded(&harness), 1);
+    harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(&update, ctx));
+    harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(&update, ctx));
+    assert_eq!(sounded(&harness), 1);
+
+    std::thread::sleep(crate::bell::QUIET);
+    harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(&update, ctx));
+    assert_eq!(sounded(&harness), 2);
+
+    harness.dispatch_workspace_action(SettingsAction::ToggleAudibleBell.into());
+    std::thread::sleep(crate::bell::QUIET);
+    harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(&update, ctx));
+    assert_eq!(sounded(&harness), 2, "switched off, and still sounding");
 }
 
 #[test]
