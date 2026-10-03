@@ -17804,7 +17804,12 @@ mod shells {
             run(&mut harness, pane, "seq 1 200");
 
             let panel = panel_of_the_pane(&mut harness);
-            let near_the_top = vec2f(panel.min_x() + panel.width() / 2., panel.min_y() + 8.);
+            // Below the sticky header, which names the tall block while its
+            // top is scrolled away and takes the pointer over its own strip.
+            let near_the_top = vec2f(
+                panel.min_x() + panel.width() / 2.,
+                panel.min_y() + crate::workspace::block_list::STICKY_HEIGHT + 8.,
+            );
             harness.move_to(near_the_top);
             harness.frame();
             let over_the_tall_one = harness.workspace.read(&harness.app, |workspace, _| {
@@ -17825,6 +17830,46 @@ mod shells {
                 "the list scrolled to its top and the control stayed on the block that had \
                  been under the pointer"
             );
+        }
+
+        #[test]
+        fn a_block_scrolled_into_its_middle_has_its_command_pinned_over_it() {
+            // `seq 1 200` is taller than the pane, so at the bottom of the list
+            // the window starts in its middle and nothing printed says which
+            // command that is — until the header says it. A press on the
+            // header brings the block's top back, and with it gone the header
+            // has nothing to say.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "seq 1 200") == 0 {
+                return;
+            }
+            let sticky = |harness: &Harness| {
+                harness.workspace.read(&harness.app, |workspace, _| {
+                    workspace.pane_blocks(pane).and_then(|view| view.sticky())
+                })
+            };
+            let scene = harness.frame();
+            assert_eq!(
+                sticky(&harness).map(|(_, command)| command).as_deref(),
+                Some("seq 1 200")
+            );
+            let header = drawn_line(&scene, "seq 1 200").expect("the header is drawn");
+            let panel = panel_of_the_pane(&mut harness);
+            assert!(
+                header.y() < panel.min_y() + crate::workspace::block_list::STICKY_HEIGHT,
+                "the command is not at the top of the pane"
+            );
+
+            harness.click(
+                vec2f(panel.min_x() + 40., panel.min_y() + 6.),
+                MouseButton::Left,
+            );
+            harness.frame();
+            assert_eq!(sticky(&harness), None, "the block's top did not come back");
         }
 
         /// Where the shell said its prompt ends, or `None` when it has not

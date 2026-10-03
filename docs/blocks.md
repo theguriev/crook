@@ -442,8 +442,6 @@ Stage 1 of the port. These are absent on purpose, not overlooked:
 * **Click-to-select a block.** The keyboard selects a block (see above), but the pointer does
   not yet: no click-to-select, no shift-click to extend, no per-block border. Pointer selection
   is still the text drag across the list.
-* **The sticky header.** A block taller than the window scrolls like any other content; there
-  is nothing pinned to say which command you are inside.
 * **Jump-to-bottom, as a button.** The keyboard has one — `crook/window/scroll-to-bottom`,
   `shift-cmd-PageDown` and `alt-End` — and so does `page-up` / `page-down` and
   `scroll-to-top`, over the block list and over a full-screen program's grid alike. What is

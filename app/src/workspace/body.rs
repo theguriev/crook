@@ -86,7 +86,7 @@ use crook_terminal::{Snapshot, TerminalSize};
 use crookui_core::element::SizeConstraint;
 use crookui_core::elements::{MouseStateHandle, Padding, Paragraph};
 use crookui_core::event::{DispatchedEvent, Event, MouseButton};
-use crookui_core::fonts::{Properties, Weight};
+use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::geometry::{Point, Vector2F, vec2f};
 use crookui_core::icons::Lucide;
 use crookui_core::prelude::*;
@@ -671,6 +671,22 @@ fn blocks(
             .with_links(interaction.links.clone());
     }
     let list = list.finish();
+
+    // The sticky header: the command a block ran, pinned over the list while
+    // the block's own top is scrolled away. Laid out after the list, which is
+    // what writes down which block that is.
+    let mut stack = Stack::new().with_child(list);
+    stack.add_anchored_overlay_child_within(
+        StickyHeader::new(pane, view.clone(), workspace.fonts().ui).finish(),
+        AnchorTo {
+            parent: Corner::TopLeft,
+            child: Corner::TopLeft,
+            offset: Vector2F::zero(),
+            keep_on_screen: false,
+            keep_clear_of_parent: false,
+        },
+    );
+    let list = stack.finish();
 
     // The bar floats over the top-right of the output, the way a browser's
     // does: it is about the whole pane, so it does not take a row from it —
@@ -1447,6 +1463,134 @@ impl Element for SplitDivider {
         }
 
         self.child.dispatch_event(event, ctx, app)
+    }
+
+    fn size(&self) -> Option<Vector2F> {
+        self.size
+    }
+
+    fn origin(&self) -> Option<Point> {
+        self.origin
+    }
+}
+
+/// The command a block ran, pinned over the top of the list while that block's
+/// own top is scrolled out of view — Warp's sticky header.
+///
+/// The list says which block that is as it lays out (see
+/// [`PaneBlocks::sticky`]), and this is laid out after it in the same frame,
+/// so it is built then rather than with the rest of the tree: what to say is
+/// not known until the list has decided where it starts. Nothing at all —
+/// no size, nothing to press — while no block is cut off at the top.
+///
+/// A press on it brings the block's first line to the top, which is where
+/// the command it names was printed.
+struct StickyHeader {
+    pane: PaneId,
+    view: PaneBlocks,
+    ui: FamilyId,
+    child: Option<Box<dyn Element>>,
+    mouse: MouseStateHandle,
+    size: Option<Vector2F>,
+    origin: Option<Point>,
+}
+
+impl StickyHeader {
+    fn new(pane: PaneId, view: PaneBlocks, ui: FamilyId) -> Self {
+        Self {
+            pane,
+            view,
+            ui,
+            child: None,
+            mouse: MouseStateHandle::default(),
+            size: None,
+            origin: None,
+        }
+    }
+}
+
+impl Element for StickyHeader {
+    fn layout(
+        &mut self,
+        constraint: SizeConstraint,
+        ctx: &mut LayoutContext,
+        app: &AppContext,
+    ) -> Vector2F {
+        let Some((block, command)) = self.view.sticky() else {
+            self.child = None;
+            self.size = Some(Vector2F::zero());
+            return Vector2F::zero();
+        };
+        let width = constraint.max.x();
+        let pane = self.pane;
+        // One line, cut at the end: what it says is which command this is,
+        // and the start of a command is what names it.
+        let line = command.lines().next().unwrap_or_default().to_owned();
+        let ui = self.ui;
+        let mut child = Hoverable::new(self.mouse.clone(), move |mouse| {
+            let ground = if mouse.is_hovered() {
+                theme().overlay_2
+            } else {
+                theme().surface_raised
+            };
+            ConstrainedBox::new(
+                Container::new(
+                    Align::new(
+                        Text::new(line.clone(), ui, 12.)
+                            .with_color(theme().text_primary)
+                            .with_ellipsis(Cut::End)
+                            .finish(),
+                    )
+                    .left()
+                    .finish(),
+                )
+                .with_padding(Padding {
+                    top: 0.,
+                    bottom: 0.,
+                    left: GUTTER,
+                    right: GUTTER,
+                })
+                .with_background_color(ground)
+                .with_border(Border::bottom(1.).with_border_color(theme().overlay_2))
+                .finish(),
+            )
+            .with_width(width)
+            .with_height(super::block_list::STICKY_HEIGHT)
+            .finish()
+        })
+        .on_click(move |_, ctx, _| {
+            ctx.dispatch_typed_action(WorkspaceAction::Block(BlockAction::RevealTop {
+                pane,
+                block,
+            }));
+        })
+        .finish();
+        let size = child.layout(
+            SizeConstraint::strict(vec2f(width, super::block_list::STICKY_HEIGHT)),
+            ctx,
+            app,
+        );
+        self.child = Some(child);
+        self.size = Some(size);
+        size
+    }
+
+    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
+        self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
+        if let Some(child) = self.child.as_mut() {
+            child.paint(origin, ctx, app);
+        }
+    }
+
+    fn dispatch_event(
+        &mut self,
+        event: &DispatchedEvent,
+        ctx: &mut EventContext,
+        app: &AppContext,
+    ) -> bool {
+        self.child
+            .as_mut()
+            .is_some_and(|child| child.dispatch_event(event, ctx, app))
     }
 
     fn size(&self) -> Option<Vector2F> {
