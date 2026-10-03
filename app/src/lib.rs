@@ -1242,24 +1242,28 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
     // The window moves the whole process into the directory — see
     // `open_window` — and a relative path typed beside the flag was typed
     // relative to where Crook was started, so it is made whole while that is
-    // still where it is running. A shell named with no directory in it is a
-    // `PATH` lookup, and stays one.
+    // still where it is running.
     if overrides.working_directory.is_some() {
-        let shell = overrides
-            .shell
-            .as_mut()
-            .filter(|shell| shell.components().count() > 1);
-        for path in [
-            overrides.dev_plugin.as_mut(),
-            overrides.fixture.as_mut(),
-            shell,
-        ]
-        .into_iter()
-        .flatten()
+        for path in [overrides.dev_plugin.as_mut(), overrides.fixture.as_mut()]
+            .into_iter()
+            .flatten()
         {
             *path = std::path::absolute(&*path)
                 .with_context(|| format!("{} cannot be made absolute", path.display()))?;
         }
+    }
+    // The shell always, and not only beside `--working-directory`: every pane
+    // starts it from its *own* directory, so `./bin/zsh` named a different
+    // file in a restored tab or one opened where another pane was working,
+    // and none at all in most of them. A shell named with no directory in it
+    // is a `PATH` lookup, and stays one.
+    if let Some(shell) = overrides
+        .shell
+        .as_mut()
+        .filter(|shell| shell.components().count() > 1)
+    {
+        *shell = std::path::absolute(&*shell)
+            .with_context(|| format!("{} cannot be made absolute", shell.display()))?;
     }
 
     match snapshot {
@@ -5669,6 +5673,11 @@ mod tests {
         assert_eq!(named.shell, Some(PathBuf::from("fish")));
         let unmoved = window_overrides(&["--dev-plugin", "build/probe.wasm"]);
         assert_eq!(unmoved.dev_plugin, Some(PathBuf::from("build/probe.wasm")));
+
+        // Except the shell, which every pane starts from a directory of its
+        // own: a relative one is made whole with or without a move.
+        let shell = window_overrides(&["--shell", "bin/zsh"]);
+        assert_eq!(shell.shell, Some(here("bin/zsh")));
     }
 
     #[test]
