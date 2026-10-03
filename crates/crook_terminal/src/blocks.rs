@@ -64,6 +64,7 @@ use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{ClearMode, Color, Handler};
 
 use crate::harvest::{self, BlockRows};
+use crate::image::ImagePlacement;
 use crate::marks::{PromptKind, ShellMark};
 use crate::snapshot::Palette;
 
@@ -88,6 +89,15 @@ const MAX_SCRAPED_COMMAND: usize = 4096;
 /// A pasted command wraps over several rows; nothing wraps over thirty-two.
 /// Past that the prompt-end mark is stale rather than the command long.
 const MAX_SCRAPED_LINES: i32 = 32;
+
+/// The most pictures the open block keeps; past it the oldest go first.
+const MAX_OPEN_IMAGES: usize = 64;
+
+/// The most the finished blocks' pictures may weigh together, as the files
+/// they arrived as. Past it the oldest blocks lose theirs — and keep their
+/// text — so that a session that `imgcat`s all afternoon holds the pictures
+/// a person is still likely to scroll back to and not every one since lunch.
+const MAX_IMAGE_BYTES: usize = 256 << 20;
 
 /// Identifies one block for as long as the session lives.
 ///
@@ -210,6 +220,11 @@ pub struct Block {
     /// reader meant, and "the output is everything after the first row" is
     /// wrong for every multi-line prompt there is.
     pub output_from: Option<usize>,
+    /// The pictures the block printed, each at a row of [`Self::rows`] —
+    /// empty for nearly every block, and emptied for the oldest once the
+    /// pictures of every block together are too many to keep. See
+    /// [`crate::image`].
+    pub images: Vec<ImagePlacement>,
 }
 
 impl Block {
@@ -284,6 +299,9 @@ pub struct LiveBlock {
     /// the row is still one this block is showing — see
     /// `block_list::inline_start`, which is the caller this exists for.
     pub prompt_end: Option<PromptEnd>,
+    /// The pictures printed in it, at viewport rows the way
+    /// [`Self::top_row`] is. None on the alternate screen.
+    pub images: Vec<ImagePlacement>,
 }
 
 impl Default for LiveBlock {
@@ -298,6 +316,7 @@ impl Default for LiveBlock {
             top_row: 0,
             bottom_row: -1,
             prompt_end: None,
+            images: Vec::new(),
         }
     }
 }
@@ -599,6 +618,10 @@ struct OpenBlock {
     command: Option<String>,
     working_directory: Option<PathBuf>,
     started_at: Option<Instant>,
+    /// The pictures printed in it, each anchored to the cell its top-left
+    /// corner is on so it scrolls with the rows it covers. The placement's
+    /// own row means nothing until it is read against the anchor.
+    images: Vec<(Anchor, ImagePlacement)>,
 }
 
 /// The blocks of one pane: the finished ones, and the one still open.
@@ -615,6 +638,8 @@ pub(crate) struct BlockTracker {
     /// A reflow that happened under a full-screen program, owed to the
     /// shell's screen for when it comes back. See [`Self::reflowed`].
     reflow_owed: bool,
+    /// What the finished blocks' pictures weigh. See [`MAX_IMAGE_BYTES`].
+    image_bytes: usize,
 }
 
 impl BlockTracker {
@@ -632,10 +657,12 @@ impl BlockTracker {
                 command: None,
                 working_directory: None,
                 started_at: None,
+                images: Vec::new(),
             },
             finished: Vec::new(),
             evicted: 0,
             reflow_owed: false,
+            image_bytes: 0,
             last_ignored: None,
         }
     }
@@ -689,6 +716,19 @@ impl BlockTracker {
                 }
             });
 
+        let images = if alt_screen {
+            Vec::new()
+        } else {
+            self.open
+                .images
+                .iter()
+                .map(|(anchor, placement)| ImagePlacement {
+                    row: anchor.line(term) + display_offset,
+                    ..placement.clone()
+                })
+                .collect()
+        };
+
         LiveBlock {
             id: self.open.id,
             state: self.open.state,
@@ -697,7 +737,25 @@ impl BlockTracker {
             top_row,
             bottom_row,
             prompt_end,
+            images,
         }
+    }
+
+    /// Records a picture printed with its top-left corner on grid `line` at
+    /// `column`, into the open block.
+    pub(crate) fn image<T>(
+        &mut self,
+        line: i32,
+        column: usize,
+        placement: ImagePlacement,
+        term: &Term<T>,
+    ) {
+        if self.open.images.len() == MAX_OPEN_IMAGES {
+            self.open.images.remove(0);
+        }
+        self.open
+            .images
+            .push((Anchor::at(line, column, term), placement));
     }
 
     /// Applies an OSC 133 mark that has just been parsed, with the grid
@@ -808,6 +866,10 @@ impl BlockTracker {
         // recoverable direction — an entry that cannot say where the output
         // starts offers nothing rather than the wrong half.
         self.open.output_start = None;
+        // And its pictures, whose rows moved with the rest and cannot be
+        // found again: a picture drawn over the wrong text is worse than the
+        // gap it leaves.
+        self.open.images.clear();
     }
 
     /// The scrollback was erased, and the open block now starts at the top of
@@ -996,6 +1058,7 @@ impl BlockTracker {
         // [`BlockRows::of_line`].
         let mut output_from = None;
         if rows.is_blank()
+            && self.open.images.is_empty()
             && let Some(command) = &self.open.command
         {
             rows = harvest::BlockRows::of_line(term.columns(), command, palette);
@@ -1006,7 +1069,9 @@ impl BlockTracker {
         // next prompt, and that leftover is not a block. Neither is the empty
         // one a session opens with. Keeping either would put a row of chrome
         // on screen around nothing.
-        let worth_keeping = self.open.command.is_some() || !rows.is_blank();
+        // A picture on rows with no text is not blank.
+        let worth_keeping =
+            self.open.command.is_some() || !rows.is_blank() || !self.open.images.is_empty();
         if worth_keeping {
             // Where the output starts, as a row of the block rather than a
             // line of the grid: the two differ by exactly the block's top, and
@@ -1020,6 +1085,17 @@ impl BlockTracker {
                     (from <= rows.rows()).then_some(from)
                 })
             });
+            // As rows of the block, the way the output's start is, and only
+            // the ones whose top is a row the block kept.
+            let images: Vec<ImagePlacement> = std::mem::take(&mut self.open.images)
+                .into_iter()
+                .filter_map(|(anchor, placement)| {
+                    let row = anchor.line(term) - top;
+                    (row >= 0 && (row as usize) < rows.rows())
+                        .then_some(ImagePlacement { row, ..placement })
+                })
+                .collect();
+            self.image_bytes += weight(&images);
             self.finished.push(Block {
                 id: self.open.id,
                 state,
@@ -1030,6 +1106,7 @@ impl BlockTracker {
                 finished_at: Some(Instant::now()),
                 rows,
                 output_from,
+                images,
             });
             if self.finished.len() > MAX_BLOCKS {
                 // A batch at a time, because a `Vec` shifts everything left on
@@ -1039,8 +1116,20 @@ impl BlockTracker {
                 // slice the renderer can index.
                 let over =
                     (self.finished.len() - MAX_BLOCKS + MAX_BLOCKS / 16).min(self.finished.len());
-                self.finished.drain(..over);
+                let evicted: usize = self
+                    .finished
+                    .drain(..over)
+                    .map(|block| weight(&block.images))
+                    .sum();
+                self.image_bytes -= evicted;
                 self.evicted += over;
+            }
+            // The oldest pictures go first, and the blocks they were in stay.
+            let mut oldest = self.finished.iter_mut();
+            while self.image_bytes > MAX_IMAGE_BYTES {
+                let Some(block) = oldest.next() else { break };
+                self.image_bytes -= weight(&block.images);
+                block.images = Vec::new();
             }
         }
     }
@@ -1099,6 +1188,7 @@ impl BlockTracker {
             command: None,
             working_directory: working_directory.map(Path::to_path_buf),
             started_at: None,
+            images: Vec::new(),
         };
         self.next_id += 1;
     }
@@ -1146,6 +1236,14 @@ impl BlockTracker {
             .unwrap_or(0);
         (!command.is_empty()).then(|| command[..end].to_owned())
     }
+}
+
+/// What `images` weigh, as the files they arrived as.
+fn weight(images: &[ImagePlacement]) -> usize {
+    images
+        .iter()
+        .map(|placement| placement.image.png().len())
+        .sum()
 }
 
 /// The last grid line with anything on it, given where the cursor is.

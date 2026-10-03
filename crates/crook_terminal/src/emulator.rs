@@ -44,6 +44,7 @@ use parking_lot::Mutex;
 use crate::agent::{self, AgentReport, Reported};
 use crate::blocks::{Block, BlockId, BlockTracker, IgnoreReason, LiveBlock};
 use crate::harvest::{self, BlockRows};
+use crate::image::{self, ImagePlacement};
 use crate::input::{InputModes, KeyboardModes};
 use crate::marks::ShellMark;
 use crate::mouse::MouseModes;
@@ -251,6 +252,10 @@ struct OscWatcher {
     /// Whether the chunk erased the scrollback — `CSI 3 J`, the third thing
     /// `clear` prints.
     history_cleared: bool,
+    /// Keeps an iTerm2 picture that is arriving in pieces.
+    images: image::Reader,
+    /// A picture to place at the cursor, which is where the watcher stops.
+    image: Option<image::Requested>,
 }
 
 impl Perform for OscWatcher {
@@ -273,6 +278,7 @@ impl Perform for OscWatcher {
                 }
             }
             Some(&b"133") => self.mark = ShellMark::parse(params),
+            Some(&b"1337") => self.image = self.images.read(params),
             // Crook's own, and the number is deliberately far from anything
             // standardised: nothing but a shell Crook itself set up emits it,
             // and a stream that happens to contain one costs a caller a look
@@ -317,7 +323,9 @@ impl Perform for OscWatcher {
     /// changed nothing. A burst of either with none of the other between
     /// still collapses to its last one, and costs no stop.
     fn terminated(&self) -> bool {
-        self.mark.is_some() || (self.agent.is_some() && self.notification.is_some())
+        self.mark.is_some()
+            || self.image.is_some()
+            || (self.agent.is_some() && self.notification.is_some())
     }
 }
 
@@ -548,10 +556,65 @@ impl Emulator {
                     });
                 }
             }
+            if let Some(requested) = self.osc_watcher.image.take() {
+                self.place_image(requested);
+            }
             rest = remaining;
         }
         self.dirty = true;
         self.drain();
+    }
+
+    /// Puts a picture at the cursor, in the open block, and moves the cursor
+    /// past the rows it covers.
+    ///
+    /// The rows are made the way the program's own newlines would make them,
+    /// by feeding the grid newlines: they scroll the screen when the picture
+    /// is printed at its foot, and they are the open block's rows like any
+    /// other, harvested with it when it finishes. A picture that would not
+    /// fit in what is left of the row starts on the next one.
+    fn place_image(&mut self, requested: image::Requested) {
+        if self.term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        let grid_columns = self.term.columns();
+        let (columns, rows) = image::cells(
+            &requested,
+            (self.size.cell_width, self.size.cell_height),
+            (grid_columns, self.term.screen_lines()),
+        );
+        let cursor = &self.term.grid().cursor;
+        if cursor.input_needs_wrap
+            || (cursor.point.column.0 > 0 && cursor.point.column.0 + columns > grid_columns)
+        {
+            self.parser.advance(&mut self.term, b"\r\n");
+        }
+        let at = self.term.grid().cursor.point;
+        let (line, column) = (at.line.0, at.column.0);
+        self.blocks.image(
+            line,
+            column,
+            ImagePlacement {
+                image: Arc::new(requested.image),
+                row: 0,
+                column,
+                columns,
+                rows,
+                stretch: requested.stretch,
+            },
+            &self.term,
+        );
+
+        // Down to its last row, and then along to the column after it — or,
+        // when it reaches the edge, to the start of the row below, which is
+        // where a character after it would wrap to anyway.
+        let mut moves = b"\n".repeat(rows - 1);
+        if column + columns >= grid_columns {
+            moves.extend_from_slice(b"\r\n");
+        } else {
+            moves.extend_from_slice(format!("\x1b[{}G", column + columns + 1).as_bytes());
+        }
+        self.parser.advance(&mut self.term, &moves);
     }
 
     /// Feeds one item of a stream that another emulator is also being fed,

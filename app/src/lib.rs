@@ -61,6 +61,7 @@ pub mod filename;
 pub mod forge;
 pub mod git;
 pub mod git_model;
+pub mod inline_image;
 pub mod input_keys;
 pub mod keybindings;
 pub mod login_item;
