@@ -909,7 +909,14 @@ A selection copies, and the paste chord puts the clipboard into the program as a
 paste. A program can write the clipboard too, with OSC 52 — what `tmux`, `nvim` and a copy over
 `ssh` use — and it is the same clipboard `cmd-c` writes; an empty write is dropped rather than
 clearing what somebody had copied. What a program cannot do is *read* it: that direction is
-refused, since answering it would hand the clipboard to anything that can print to the pane. The
+refused, since answering it would hand the clipboard to anything that can print to the pane.
+A program can also print a **picture**, with iTerm2's inline images — OSC 1337 `File=`, and its
+`MultipartFile` pieces — which `imgcat`, `viu`, `chafa -f iterm` and yazi's previewer speak. It
+is drawn in the block it was printed in, over the rows it pushed the cursor past, and sized the
+way iTerm2 sizes it: by `width` and `height` in cells, pixels or a share of the pane, fitted with
+its shape kept unless `preserveAspectRatio=0`, and never wider or taller than the pane. PNG only,
+at most 16 MB and 4096 pixels a side; not on the alternate screen; and a `clear`, or a resize
+that reflows the rows under it, takes it away. Kitty's graphics protocol is not read yet. The
 list of what is absent — and what adding each item would touch — is the last section of the
 architecture doc.
 

@@ -17000,6 +17000,53 @@ mod shells {
         }
 
         #[test]
+        fn a_picture_a_command_prints_is_drawn_over_its_rows() {
+            // iTerm2's inline image, as `imgcat` prints it, from a real shell:
+            // the emulator places it, the block keeps it, the list draws it.
+            use base64::Engine as _;
+
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            let png =
+                crate::picture::tests::png_of(8, 8, png::ColorType::Rgba, &[200, 30, 30, 255]);
+            let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+            if run(
+                &mut harness,
+                pane,
+                &format!("printf '\\033]1337;File=inline=1:{encoded}\\007\\n'"),
+            ) == 0
+            {
+                return;
+            }
+            let held = harness
+                .workspace
+                .read(&harness.app, |workspace, app| {
+                    Some(
+                        workspace
+                            .terminal_blocks(pane, app)?
+                            .iter()
+                            .last()?
+                            .images
+                            .len(),
+                    )
+                })
+                .unwrap_or_default();
+            assert_eq!(held, 1, "the block keeps the picture it printed");
+
+            let scene = harness.frame();
+            let drawn: Vec<RectF> = scene
+                .layers()
+                .flat_map(|layer| layer.images.iter())
+                .map(|image| image.bounds)
+                .collect();
+            assert_eq!(drawn.len(), 1, "the picture is drawn once");
+            assert!(drawn[0].width() > 0. && drawn[0].height() > 0.);
+        }
+
+        #[test]
         fn a_command_becomes_a_block_with_a_divider_above_it() {
             // The whole feature, end to end: a real shell says where its
             // command started and finished, and the pane draws one item per

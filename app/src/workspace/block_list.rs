@@ -58,7 +58,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crook_terminal::{Block, BlockId, CellSide, Rows, SelectionKind, Snapshot, SnapshotCell};
+use crook_terminal::{
+    Block, BlockId, CellSide, ImagePlacement, Rows, SelectionKind, Snapshot, SnapshotCell,
+};
 use crookui_core::AppContext;
 use crookui_core::element::{Element, SizeConstraint};
 use crookui_core::event::{DispatchedEvent, Event, Modifiers, MouseButton};
@@ -1137,6 +1139,22 @@ impl BlockList {
                     );
                     self.paint_link(LinkRow::Block { index: listed, row }, left, top, ctx);
                 }
+                // Not over a filtered block, whose rows are not where the
+                // pictures were printed among them.
+                if kept.is_none() {
+                    self.paint_images(
+                        &block.images,
+                        0,
+                        RowBox {
+                            left,
+                            rows_top,
+                            columns,
+                            first_visible,
+                            last_visible: block.rows.rows(),
+                        },
+                        ctx,
+                    );
+                }
             }
             None => self.paint_live(
                 RowBox {
@@ -1246,6 +1264,7 @@ impl BlockList {
         };
 
         let count = last - first + 1;
+        let images = self.snapshot.live_block.images.clone();
         for row in first_visible..count.min(last_visible) {
             let source = first + row;
             let cells = &self.snapshot.row(source)[..columns.min(self.snapshot.columns)];
@@ -1286,6 +1305,19 @@ impl BlockList {
             );
         }
 
+        self.paint_images(
+            &images,
+            first as i32,
+            RowBox {
+                left,
+                rows_top,
+                columns,
+                first_visible,
+                last_visible: count,
+            },
+            ctx,
+        );
+
         // **The cursor is drawn only when there is no composer.** While one is
         // up its caret is where typing goes, and the shell's own cursor
         // sitting at the end of a prompt above it would be a second caret
@@ -1318,6 +1350,74 @@ impl BlockList {
             metrics,
             ctx.scene,
         );
+    }
+
+    /// Draws the pictures an item's rows hold over those rows, each in the
+    /// cells it covers — fitted inside them with its shape kept, unless the
+    /// program asked for it stretched.
+    ///
+    /// `at.last_visible` is how many rows the item has, and a picture is cut
+    /// off at the last of them rather than hanging over the next item; `skip`
+    /// is subtracted from every picture's row, which turns the open block's
+    /// viewport rows into rows of the item.
+    fn paint_images(
+        &self,
+        images: &[ImagePlacement],
+        skip: i32,
+        at: RowBox,
+        ctx: &mut PaintContext,
+    ) {
+        if images.is_empty() {
+            return;
+        }
+        let metrics = self.font.metrics();
+        let size = self.size.unwrap_or_default();
+        let rows_box = RectF::new(
+            vec2f(at.left, at.rows_top),
+            vec2f(
+                at.columns as f32 * metrics.width,
+                at.last_visible as f32 * metrics.height,
+            ),
+        );
+        let view = self.origin.map_or(RectF::default(), |origin| {
+            RectF::new(vec2f(origin.x(), origin.y()), size)
+        });
+        let mut started = false;
+        for placement in images {
+            let cells = RectF::new(
+                vec2f(
+                    at.left + placement.column as f32 * metrics.width,
+                    at.rows_top + (placement.row - skip) as f32 * metrics.height,
+                ),
+                vec2f(
+                    placement.columns as f32 * metrics.width,
+                    placement.rows as f32 * metrics.height,
+                ),
+            );
+            if cells.intersection(view).is_none() {
+                continue;
+            }
+            let Some(bitmap) = crate::inline_image::bitmap(&placement.image) else {
+                continue;
+            };
+            let drawn = if placement.stretch {
+                cells.size()
+            } else {
+                let (width, height) = bitmap.size();
+                let scale = (cells.width() / width as f32).min(cells.height() / height as f32);
+                vec2f(width as f32 * scale, height as f32 * scale)
+            };
+            if !started {
+                ctx.scene
+                    .start_layer(ClipBounds::BoundedByActiveLayerAnd(rows_box));
+                started = true;
+            }
+            ctx.scene
+                .draw_image(bitmap, RectF::new(cells.origin(), drawn));
+        }
+        if started {
+            ctx.scene.stop_layer();
+        }
     }
 
     /// What an item's chrome says about it.
