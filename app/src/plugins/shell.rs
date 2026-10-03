@@ -183,10 +183,27 @@ fn shell(workspace: &Workspace, app: &AppContext) -> Vec<Category> {
         ui,
     );
 
+    let bell = widgets::row(
+        Words::new("Audible bell")
+            .with_description(
+                "Play the system's alert sound when a program rings the bell. A pane you are not \
+                 looking at is marked either way.",
+            )
+            .with_keywords(&["bell", "beep", "sound", "audible", "alert", "ding", "chime"]),
+        true,
+        widgets::switch(
+            workspace.general().audible_bell,
+            Some(SettingsAction::ToggleAudibleBell.into()),
+            state.control(named("audible-bell")),
+        ),
+        ui,
+    );
+
     vec![
         widgets::category("What a pane runs", vec![program, marks]),
         widgets::category("Startup", vec![login]),
         widgets::category("The command line", vec![tab_key]),
+        widgets::category("Bell", vec![bell]),
         widgets::category(
             "What it changes",
             vec![widgets::note(

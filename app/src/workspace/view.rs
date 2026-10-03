@@ -732,6 +732,11 @@ pub struct Workspace {
     /// the settings were shown; `None` where that cannot be asked or made so,
     /// and until it has been. See [`crate::default_terminal`].
     default_terminal: Option<bool>,
+    /// When the bell last made a sound; see [`Self::sound_the_bell`].
+    bell_sounded: Option<Instant>,
+    /// How many times it has, which is what a test can hear.
+    #[cfg(test)]
+    bells_sounded: usize,
 
     /// Whether the desktop is set to dark, as of the last thing the window
     /// said about it.
@@ -1130,6 +1135,9 @@ impl Workspace {
             recording: std::cell::RefCell::new(None),
             watching_keybindings: false,
             default_terminal: None,
+            bell_sounded: None,
+            #[cfg(test)]
+            bells_sounded: 0,
             window_size: Rc::new(std::cell::Cell::new(Vector2F::zero())),
             system_is_dark: true,
             window_focused: true,
@@ -7541,6 +7549,9 @@ impl Workspace {
     /// one are different questions, and this is where they part.
     fn ring(&mut self, pane: PaneId, while_running: bool, ctx: &mut ViewContext<Self>) -> bool {
         self.bell_rang(pane, while_running, ctx);
+        if self.general().audible_bell {
+            self.sound_the_bell();
+        }
 
         if self.looking_at() == Some(pane) {
             // Not "nothing to write into" — the pane is there and the bell was
@@ -7560,6 +7571,35 @@ impl Workspace {
         });
         self.tell_the_desktop(pane, was, ctx);
         reported
+    }
+
+    /// Plays the system's alert sound, unless it played a moment ago.
+    ///
+    /// `terminal_model` already hands a burst of bells over as one per read;
+    /// this is the same rule across reads and across panes, so that a loop
+    /// printing `\a` in four panes is one sound every so often and not a
+    /// buzz. Never from a test, whose sound would be the machine's.
+    fn sound_the_bell(&mut self) {
+        let now = Instant::now();
+        if self
+            .bell_sounded
+            .is_some_and(|sounded| now.duration_since(sounded) < crate::bell::QUIET)
+        {
+            return;
+        }
+        self.bell_sounded = Some(now);
+        #[cfg(test)]
+        {
+            self.bells_sounded += 1;
+        }
+        #[cfg(not(test))]
+        crate::bell::sound();
+    }
+
+    /// How many times the bell has been sounded, for a test to count.
+    #[cfg(test)]
+    pub(crate) fn bells_sounded(&self) -> usize {
+        self.bells_sounded
     }
 
     /// Records that a program in a pane sent one of the notifications other
@@ -9821,6 +9861,17 @@ impl Workspace {
                 let mut general = self.general();
                 general.login_shell = !general.login_shell;
                 self.set_general(general, ctx);
+            }
+            SettingsAction::ToggleAudibleBell => {
+                let mut general = self.general();
+                general.audible_bell = !general.audible_bell;
+                let on = general.audible_bell;
+                self.set_general(general, ctx);
+                // Played once on the click, so the person hears what they
+                // chose, the way the system's own alert-sound picker does.
+                if on {
+                    self.sound_the_bell();
+                }
             }
             SettingsAction::ToggleTabsPanel => {
                 let shown = !self.general().show_tabs_panel;

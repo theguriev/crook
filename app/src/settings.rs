@@ -421,6 +421,13 @@ pub struct GeneralOptions {
     /// [`crate::login_item`], which is what puts the entry in place: this is
     /// what the person asked for, and the entry is what the system reads.
     pub open_at_login: bool,
+    /// Whether a bell a program rings plays the system's alert sound.
+    ///
+    /// Off, as in Warp and every terminal that has learned what a shell
+    /// ringing on each failed completion sounds like across an afternoon. A
+    /// pane nobody is looking at is marked whichever way this is set; see
+    /// [`crate::bell`] for the sound.
+    pub audible_bell: bool,
 }
 
 /// How wide the tabs panel is until its edge is dragged: Warp's
@@ -445,6 +452,7 @@ impl Default for GeneralOptions {
             notify_on_failed: false,
             notify_on_long_command: false,
             open_at_login: false,
+            audible_bell: false,
         }
     }
 }
@@ -1809,6 +1817,8 @@ mod tests {
                 // Crook's own: whether a close that would end an agent still
                 // working asks first.
                 "ask_before_ending_agents",
+                // Warp's "audible terminal bell", off as it is there.
+                "audible_bell",
                 "compact_subtitle",
                 // The dark half of the pair the desktop chooses between. Warp
                 // has this too, spelled the same way.
@@ -2033,11 +2043,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Nine tab options, twelve general ones and three theme names, and
+        // Nine tab options, thirteen general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(24, written.len());
+        assert_eq!(25, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),

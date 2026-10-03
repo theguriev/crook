@@ -777,6 +777,8 @@ pub enum SettingsAction {
     /// "Start a login shell": whether a pane's shell reads the startup files
     /// that only a login shell reads.
     ToggleLoginShell,
+    /// "Audible bell": whether a bell plays the system's alert sound.
+    ToggleAudibleBell,
     /// "Tab key": whether Tab completes the word or takes the suggestion.
     SetTabKey(crate::settings::TabKey),
     /// "Show the tabs panel": whether the column of tabs is drawn at all.

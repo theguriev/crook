@@ -49,6 +49,7 @@
 //! [`control`] listens on, and print the answer.
 
 pub mod agent;
+pub mod bell;
 pub mod browser;
 pub mod clipboard;
 pub mod completion;
