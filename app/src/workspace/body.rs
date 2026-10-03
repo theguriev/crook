@@ -647,10 +647,16 @@ fn blocks(
     };
     let current = finding.and_then(|find| find.clamped(matches.len()));
 
+    let filtered = workspace.filtered_rows(pane, app);
     let mut list = BlockList::new(history, snapshot, font, view.clone())
         .with_terminal(handle.clone(), keyboard.keys)
         .with_menu(available, menu)
-        .with_find(matches.clone(), current);
+        .with_find(matches.clone(), current)
+        .with_filter(
+            filtered
+                .as_ref()
+                .map(|(block, kept, _, _)| (*block, kept.clone())),
+        );
     // The list is given the composer only while one is drawn under it, and
     // that is what decides who the keyboard belongs to: with no field the
     // block is a running program and every key is its own. It reads the line
@@ -695,7 +701,12 @@ fn blocks(
     // than the bar running over the pane next door.
     let list = match finding {
         Some(find) => {
-            let bar = find_bar(workspace, pane, find, &matches);
+            // How many of the filtered block's output lines are shown, out of
+            // how many it printed — what the bar counts while it filters.
+            let lines = filtered
+                .as_ref()
+                .map(|(_, _, shown, total)| (*shown, *total));
+            let bar = find_bar(workspace, pane, find, &matches, lines);
             let mut stack = Stack::new().with_child(list);
             stack.add_anchored_overlay_child_within(
                 bar,
@@ -1639,7 +1650,9 @@ fn find_bar(
     pane: PaneId,
     find: &crate::pane_find::PaneFind,
     matches: &[crate::selection::Selection],
+    lines: Option<(usize, usize)>,
 ) -> Box<dyn Element> {
+    let filtering = find.filter().is_some();
     let total = matches.len();
     let current = find.clamped(total);
     let has_matches = total > 0;
@@ -1652,9 +1665,17 @@ fn find_bar(
                 workspace.clipboard().clone(),
                 workspace.fonts(),
                 find.field(),
-                "Find in output",
+                if filtering {
+                    "Filter output"
+                } else {
+                    "Find in output"
+                },
             )
-            .with_icon(Lucide::Search)
+            .with_icon(if filtering {
+                Lucide::ListFilter
+            } else {
+                Lucide::Search
+            })
             .with_focus(WorkspaceAction::Find {
                 pane,
                 action: FindAction::Open,
@@ -1670,6 +1691,8 @@ fn find_bar(
         String::new()
     } else if workspace.find_pattern_is_bad(pane) {
         "Bad pattern".to_owned()
+    } else if let Some((shown, of)) = lines.filter(|_| filtering) {
+        format!("{shown}/{of} lines")
     } else if !has_matches {
         "No results".to_owned()
     } else {
@@ -1740,6 +1763,19 @@ fn find_bar(
                         },
                         options.regex,
                     ))
+                    // Only while filtering, and lit: a press goes back to
+                    // finding across every block.
+                    .with_children(filtering.then(|| {
+                        find_switch(
+                            find.filter_state(),
+                            Lucide::ListFilter,
+                            WorkspaceAction::Find {
+                                pane,
+                                action: FindAction::StopFiltering,
+                            },
+                            true,
+                        )
+                    }))
                     .finish(),
             )
             .finish(),

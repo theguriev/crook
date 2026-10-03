@@ -646,6 +646,58 @@ impl<'a> Blocks<'a> {
     }
 }
 
+/// One query, ready to ask of a line at a time: whether the line holds it.
+///
+/// What filtering a block's output asks — which of its lines to keep — with
+/// the find's own rules: folded or told apart, text or a pattern.
+pub enum LineMatcher {
+    /// Text, already folded when case does not matter.
+    Text {
+        /// The needle, as compared.
+        needle: String,
+        /// Whether lines are folded before they are searched.
+        folded: bool,
+    },
+    /// A compiled pattern.
+    Pattern(regex::Regex),
+}
+
+impl LineMatcher {
+    /// A matcher for `needle`, or `None` for a pattern that does not compile.
+    pub fn new(needle: &str, options: FindOptions) -> Option<Self> {
+        if options.regex {
+            return regex::RegexBuilder::new(needle)
+                .case_insensitive(!options.case_sensitive)
+                .size_limit(1 << 20)
+                .build()
+                .ok()
+                .map(Self::Pattern);
+        }
+        let folded = !options.case_sensitive;
+        Some(Self::Text {
+            needle: if folded {
+                needle.chars().map(fold).collect()
+            } else {
+                needle.to_owned()
+            },
+            folded,
+        })
+    }
+
+    /// Whether `line` holds the query.
+    pub fn matches(&self, line: &str) -> bool {
+        match self {
+            Self::Text { needle, folded } if *folded => line
+                .chars()
+                .map(fold)
+                .collect::<String>()
+                .contains(needle.as_str()),
+            Self::Text { needle, .. } => line.contains(needle.as_str()),
+            Self::Pattern(pattern) => pattern.is_match(line),
+        }
+    }
+}
+
 /// How a find matches its query against the output.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct FindOptions {

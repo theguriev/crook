@@ -1,5 +1,6 @@
 //! [`Workspace`]: the state behind the window, and the one place it changes.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -320,6 +321,8 @@ pub struct BlockMenuState {
     pub(super) bookmarked: bool,
     /// "Bookmark" / "Remove bookmark".
     pub(super) bookmark: MouseStateHandle,
+    /// "Filter output".
+    pub(super) filter: MouseStateHandle,
 }
 
 impl BlockMenuState {
@@ -640,6 +643,23 @@ pub struct Workspace {
     /// The tabs closed this session, newest last, each with where it was —
     /// what "Reopen the closed tab" brings back. See [`CLOSED_KEPT`].
     closed_tabs: Vec<(crate::session::TabSnapshot, usize)>,
+    /// The last answer [`Self::filtered_rows`] worked out, with what it was
+    /// worked out from.
+    #[allow(clippy::type_complexity)]
+    filter_cache: RefCell<
+        Option<(
+            (
+                PaneId,
+                BlockId,
+                String,
+                crate::selection::FindOptions,
+                usize,
+            ),
+            Rc<Vec<usize>>,
+            usize,
+            usize,
+        )>,
+    >,
     /// The system clipboard every field copies to and pastes from. One for the
     /// window: see [`Clipboard`].
     clipboard: Clipboard,
@@ -1094,6 +1114,7 @@ impl Workspace {
             watches: Watches::default(),
             resume_offers: HashMap::new(),
             closed_tabs: Vec::new(),
+            filter_cache: RefCell::new(None),
             clipboard: Clipboard::new(),
             divider_drag: DividerDrag::new(),
             panel_resize: PanelResize::new(),
@@ -3554,7 +3575,9 @@ impl Workspace {
             return Vec::new();
         }
         let query = find.query();
-        if query.is_empty() {
+        // Filtering one block is not finding across them all: nothing is
+        // highlighted, and there is nothing to step through.
+        if query.is_empty() || find.filter().is_some() {
             return Vec::new();
         }
         // A changed query is a new search, and a new search starts at its
@@ -3570,6 +3593,49 @@ impl Workspace {
         Blocks::list(&history, &snapshot)
             .find_all_with(&query, find.options())
             .unwrap_or_default()
+    }
+
+    /// The rows the find bar's filter keeps of the block it is filtering —
+    /// every row before the block's output, and the output rows that hold
+    /// the query — with how many output rows that keeps, out of how many
+    /// there were. `None` while nothing
+    /// is being filtered, or the query is empty or not a pattern: the block
+    /// then shows all of itself.
+    ///
+    /// Remembered between frames for as long as nothing it was worked out
+    /// from changes, since a block of fifty thousand lines is fifty thousand
+    /// lines read for every frame drawn while the filter is up.
+    pub(super) fn filtered_rows(
+        &self,
+        pane: PaneId,
+        app: &AppContext,
+    ) -> Option<(BlockId, Rc<Vec<usize>>, usize, usize)> {
+        let find = self.find(pane).filter(|find| find.is_open())?;
+        let block = find.filter()?;
+        let query = find.query();
+        if query.is_empty() {
+            return None;
+        }
+        let options = find.options();
+        let history = self.terminal_blocks(pane, app)?;
+        let found = history.iter().find(|finished| finished.id == block)?;
+        let rows = found.rows.rows();
+        let key = (pane, block, query.clone(), options, rows);
+        if let Some((held, kept, shown, total)) = self.filter_cache.borrow().as_ref()
+            && *held == key
+        {
+            return Some((block, kept.clone(), *shown, *total));
+        }
+        let matcher = crate::selection::LineMatcher::new(&query, options)?;
+        let from = found.output_from.unwrap_or(0).min(rows);
+        let kept: Vec<usize> = (0..from)
+            .chain((from..rows).filter(|row| matcher.matches(found.rows.text(*row))))
+            .collect();
+        let shown = kept.len() - from;
+        let kept = Rc::new(kept);
+        let total = rows - from;
+        *self.filter_cache.borrow_mut() = Some((key, kept.clone(), shown, total));
+        Some((block, kept, shown, total))
     }
 
     /// Whether the find bar's query is a regular expression that does not
@@ -3633,6 +3699,9 @@ impl Workspace {
             }
             FindAction::Close => {
                 find.close();
+            }
+            FindAction::StopFiltering => {
+                find.set_filter(None);
             }
             FindAction::ToggleCase | FindAction::ToggleRegex => {
                 find.toggle(action == FindAction::ToggleRegex);
@@ -4996,6 +5065,16 @@ impl Workspace {
                     ctx.notify();
                 }
                 self.close_block_menu(ctx);
+            }
+            BlockAction::FilterOutput => {
+                let target = self.block_target();
+                self.close_block_menu(ctx);
+                if let Some((pane, block)) = target
+                    && let Some(find) = self.find(pane).cloned()
+                {
+                    find.set_filter(Some(block));
+                    self.apply_find(pane, FindAction::Open, ctx);
+                }
             }
             BlockAction::JumpToBookmark { pane, older } => {
                 self.jump_to_bookmark(pane, older, ctx);

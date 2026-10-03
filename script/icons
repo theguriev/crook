@@ -41,6 +41,7 @@ ICONS = [
     ("ChevronUp", "chevron-up", "The find bar's step-to-previous-match button."),
     ("CaseSensitive", "case-sensitive", "The find bar's switch that makes a search tell capitals apart."),
     ("Regex", "regex", "The find bar's switch that reads the query as a regular expression."),
+    ("ListFilter", "list-filter", "The find bar's switch while it is filtering one block's output, and the block menu's row that starts that."),
     ("ChevronRight", "chevron-right", "A folded group's heading, in the same place."),
     ("Copy", "copy", "The control that takes a block's text, on the block the pointer is on."),
     ("EllipsisVertical", "ellipsis-vertical", "The control that opens a block's menu, beside that one."),

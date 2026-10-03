@@ -54,6 +54,7 @@
 //! jump-to-bottom button; see `docs/blocks.md`.
 
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -186,6 +187,9 @@ pub struct BlockList {
     /// What layout found in view, replayed by paint. Walked once per frame
     /// rather than once per pass.
     window: Vec<Visible>,
+    /// The block shown filtered, and the rows of it that are shown. See
+    /// [`Self::with_filter`].
+    filter: Option<(BlockId, Rc<Vec<usize>>)>,
     /// Which item of the window the sticky header names, if any. See
     /// [`PaneBlocks::sticky`].
     sticky: Option<usize>,
@@ -279,6 +283,7 @@ impl BlockList {
             size: None,
             origin: None,
             window: Vec::new(),
+            filter: None,
             sticky: None,
             scratch: Vec::new(),
         }
@@ -322,6 +327,32 @@ impl BlockList {
         self.finds = finds;
         self.find_current = current;
         self
+    }
+
+    /// Shows one block filtered: only the rows of it in `kept`, in order.
+    ///
+    /// The rows stay the block's own, addressed by their place in the block:
+    /// what is on screen as the third line of a filtered block is whatever
+    /// row of it `kept[2]` names, and a press, a selection and a link on it
+    /// are about that row. Only where it is drawn, and how tall the block is,
+    /// change.
+    pub fn with_filter(mut self, filter: Option<(BlockId, Rc<Vec<usize>>)>) -> Self {
+        self.filter = filter;
+        self
+    }
+
+    /// The rows a filtered item keeps, when the item is the filtered block.
+    fn kept(&self, index: usize) -> Option<&Rc<Vec<usize>>> {
+        let (block, kept) = self.filter.as_ref()?;
+        (self.block(index)?.id == *block).then_some(kept)
+    }
+
+    /// The block's own row that is drawn `shown` rows into an item.
+    fn source_row(&self, index: usize, shown: usize) -> Option<usize> {
+        match self.kept(index) {
+            Some(kept) => kept.get(shown).copied(),
+            None => Some(shown),
+        }
     }
 
     /// The blocks a selection in this pane addresses: the finished commands,
@@ -438,8 +469,17 @@ impl BlockList {
         // free: a new history can land on a freed one's address, and only the
         // eviction mark moves when the front of the list does rather than the
         // back.
+        // A filter changes one block's height without changing the history,
+        // so it is part of what the heights were built from: which block, and
+        // how many of its rows it keeps — the only thing about it a height
+        // depends on.
+        let filtered = self.filter.as_ref().map_or(0, |(block, kept)| {
+            (block.get() as usize)
+                .wrapping_mul(31)
+                .wrapping_add(kept.len() + 1)
+        });
         let identity = (
-            Arc::as_ptr(&self.blocks) as usize,
+            (Arc::as_ptr(&self.blocks) as usize) ^ filtered,
             self.blocks.len(),
             self.blocks.evicted(),
         );
@@ -447,7 +487,12 @@ impl BlockList {
         let viewport = size.y() / metrics.height;
         let content = self.view.sync_heights(
             identity,
-            self.blocks.iter().map(|block| block_height(block)),
+            self.blocks.iter().map(|block| match self.filter.as_ref() {
+                Some((id, kept)) if *id == block.id => {
+                    block_height(block) - block.rows.rows() as f32 + kept.len() as f32
+                }
+                _ => block_height(block),
+            }),
             live,
         );
 
@@ -596,7 +641,9 @@ impl BlockList {
             .or_else(|| self.window.last())?;
 
         let rows = self.rows_of(item.index);
-        let count = rows.count();
+        let count = self
+            .kept(item.index)
+            .map_or_else(|| rows.count(), |kept| kept.len());
         if count == 0 {
             return None;
         }
@@ -606,9 +653,10 @@ impl BlockList {
         }
 
         let rows_top = item.top + self.padding_top(item.index) * metrics.height;
-        let row = ((local.y() - rows_top) / metrics.height)
+        let shown = ((local.y() - rows_top) / metrics.height)
             .floor()
             .clamp(0., (count - 1) as f32) as usize;
+        let row = self.source_row(item.index, shown)?;
         let (column, side) =
             terminal_element::column_at(local.x() - GUTTER, metrics.width, columns);
         Some(Anchor::new(self.id(item.index), row, column, side))
@@ -684,7 +732,7 @@ impl BlockList {
             // The padding above a block's first row, which belongs to no row.
             return None;
         }
-        let row = row as usize;
+        let row = self.source_row(item.index, row as usize)?;
 
         let columns = usize::from(
             metrics
@@ -1040,14 +1088,21 @@ impl BlockList {
                     rows: Rows::Stored(&block.rows),
                     first: 0,
                 };
-                let rows = block.rows.rows().min(last_visible);
-                for row in first_visible..rows {
+                let kept = self.kept(listed).cloned();
+                let shown = kept
+                    .as_ref()
+                    .map_or_else(|| block.rows.rows(), |kept| kept.len())
+                    .min(last_visible);
+                for place in first_visible..shown {
+                    // The block's own row, drawn at the place the filter puts
+                    // it — which, unfiltered, is its own place.
+                    let row = kept.as_ref().map_or(place, |kept| kept[place]);
                     let selected = region
                         .and_then(|region| region.columns_on(&item, row))
                         .map(|selected| clamped(selected, columns));
                     let marks = block.rows.materialise(row, &mut self.scratch);
                     let cells = &self.scratch[..self.scratch.len().min(columns)];
-                    let top = rows_top + row as f32 * metrics.height;
+                    let top = rows_top + place as f32 * metrics.height;
 
                     // The same passes in the same order as a live row, because
                     // a command that has ended is not drawn differently from

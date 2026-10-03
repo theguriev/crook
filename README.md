@@ -551,7 +551,11 @@ Twenty features, and the page that configures them:
   with the query kept for next time. Two switches on the bar change how it matches: `Aa` tells
   capitals apart, and `.*` reads the query as a regular expression — one that does not compile
   says so on the bar instead of counting no results. It is a search, not a filter: the lines
-  between the hits stay where they are, because the output is a transcript. It opens only over
+  between the hits stay where they are, because the output is a transcript. The filter is a
+  block's own: **Filter output** on its menu opens the same bar filtering that one block, which
+  then shows its command and only the lines of its output that match — the bar counts them,
+  `2/4 lines`, with the same two switches — until the bar closes or its filter switch goes
+  back to finding. It opens only over
   the list of commands, never over a full-screen program, where `ctrl-f` is the program's own
   key.
 - **Step through the commands with the keyboard.** `cmd-alt-up` and `cmd-alt-down`
