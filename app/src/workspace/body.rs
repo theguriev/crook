@@ -1291,7 +1291,7 @@ impl SplitDivider {
         // A double click evens the split out again, which is the only way back
         // once a divider has been dragged and is what every editor does.
         if click_count >= 2 {
-            ctx.dispatch_typed_action(TabAction::EvenPanes);
+            ctx.dispatch_typed_action(WorkspaceAction::Tab(TabAction::EvenPanes));
             return true;
         }
 
@@ -1329,11 +1329,15 @@ impl SplitDivider {
         let moved = self.along(position) - drag.anchor;
         let leading = ((drag.before_extent + moved) / total).clamp(0., 1.);
 
-        ctx.dispatch_typed_action(TabAction::ResizePanes {
+        // As the workspace's action, which is the only action type a view
+        // in this window is keyed to receive: dispatched bare, as these two
+        // were, a `TabAction` reached no handler at all, and dragging a
+        // divider — or double-clicking it — moved nothing.
+        ctx.dispatch_typed_action(WorkspaceAction::Tab(TabAction::ResizePanes {
             before: drag.before,
             after: drag.after,
             leading,
-        });
+        }));
         true
     }
 }
