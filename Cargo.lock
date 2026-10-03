@@ -573,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "crook"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "anyhow",
  "arboard",
@@ -606,7 +606,7 @@ dependencies = [
 
 [[package]]
 name = "crook_plugin"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "crook_plugin_api",
 ]
@@ -621,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "crook_terminal"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "crookui"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -667,7 +667,7 @@ dependencies = [
 
 [[package]]
 name = "crookui_core"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "anyhow",
  "async-task",

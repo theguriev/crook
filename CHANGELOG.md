@@ -5,6 +5,81 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.19
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.18...v0.1.19)
+
+### Features
+
+- **agent:** Say a pull request is a draft when the check finds one ([#421](https://github.com/theguriev/crook/pull/421))
+- **tabs:** Reopen the tab closed last, where it was ([#459](https://github.com/theguriev/crook/pull/459))
+- **blocks:** Bookmark a block and jump between bookmarks ([#460](https://github.com/theguriev/crook/pull/460))
+- **find:** Tell capitals apart, or read the query as a regular expression ([#461](https://github.com/theguriev/crook/pull/461))
+- **blocks:** Pin a block's command over the list while its top is scrolled away ([#462](https://github.com/theguriev/crook/pull/462))
+- **blocks:** Filter a block's output to the lines that match ([#463](https://github.com/theguriev/crook/pull/463))
+- **settings:** Open Crook at login ([#464](https://github.com/theguriev/crook/pull/464))
+- **settings:** Make Crook the default terminal ([#465](https://github.com/theguriev/crook/pull/465))
+- **settings:** An audible bell ([#466](https://github.com/theguriev/crook/pull/466))
+- **terminal:** Draw iTerm2 inline images ([#467](https://github.com/theguriev/crook/pull/467))
+
+### Performance
+
+- **input:** Collapse a history's repeats with a set rather than a scan of what is kept ([#418](https://github.com/theguriev/crook/pull/418))
+
+### Fixes
+
+- **worktrees:** Keep clear of the COM0, LPT0 and superscript port names on Windows ([#416](https://github.com/theguriev/crook/pull/416))
+- **input:** Move a command run again to the newest end of the history instead of repeating it ([#419](https://github.com/theguriev/crook/pull/419))
+- **input:** Narrow the shell's completions by a lowercase word in any script, not only ASCII ([#420](https://github.com/theguriev/crook/pull/420))
+- **tabs:** Count a row's changed lines under git's read deadline, like every other git call ([#422](https://github.com/theguriev/crook/pull/422))
+- **plugins:** Give up on a keychain read that waits on a dialog, and read the file ([#423](https://github.com/theguriev/crook/pull/423))
+- **links:** End a link at full-width punctuation instead of opening an address with it ([#424](https://github.com/theguriev/crook/pull/424))
+- **links:** Reap the process that opens a link instead of leaving a zombie per click ([#426](https://github.com/theguriev/crook/pull/426))
+- **themes:** Claim a new theme file by creating it, so a save never writes through a link ([#428](https://github.com/theguriev/crook/pull/428))
+- **find:** Match the output's case in every script, not only ASCII ([#429](https://github.com/theguriev/crook/pull/429))
+- **input:** Keep plain Enter, Tab and Backspace legacy under kitty's disambiguate mode ([#430](https://github.com/theguriev/crook/pull/430))
+- **plugins:** Skip a tallied line that is not UTF-8 instead of dropping the rest of its file ([#431](https://github.com/theguriev/crook/pull/431))
+- **input:** Paste several lines into a one-line field as one line ([#432](https://github.com/theguriev/crook/pull/432))
+- **settings:** Keep a config file's mode when a save replaces it ([#433](https://github.com/theguriev/crook/pull/433))
+- **control:** Line up crook pane list by display columns, so wide titles stay under their headings ([#434](https://github.com/theguriev/crook/pull/434))
+- **control:** Keep the first whole line of a cut block when the cut lands on its start ([#435](https://github.com/theguriev/crook/pull/435))
+- **shell:** Leave a running window's scratch directory alone when another window sweeps ([#436](https://github.com/theguriev/crook/pull/436))
+- **store:** Keep "Checked just now" across a relaunch when the registry answers 304 ([#437](https://github.com/theguriev/crook/pull/437))
+- **git:** Leave lock files and dot files out of a repository's branches ([#438](https://github.com/theguriev/crook/pull/438))
+- **blocks:** Lay out a wiped block's command row the way the grid drew it ([#439](https://github.com/theguriev/crook/pull/439))
+- **selection:** Stop a double click at a space the terminal folded in the last column ([#440](https://github.com/theguriev/crook/pull/440))
+- **input:** Type what an input method composes into a program that took the screen ([#441](https://github.com/theguriev/crook/pull/441))
+- **selection:** End a drag the pane was resized under instead of flickering an invisible selection ([#442](https://github.com/theguriev/crook/pull/442))
+- **agent:** See a pull request opened with gh -R or --repo ([#443](https://github.com/theguriev/crook/pull/443))
+- **agent:** Keep the OpenCode plugin from passing a lone dash as a title ([#444](https://github.com/theguriev/crook/pull/444))
+- **plugins:** Let a plugin see the machine's time zone while it builds ([#445](https://github.com/theguriev/crook/pull/445))
+- **tabs:** Keep a compact row from printing its directory on both lines ([#446](https://github.com/theguriev/crook/pull/446))
+- **worktrees:** Ask about one kept checkout in the singular ([#447](https://github.com/theguriev/crook/pull/447))
+- **tabs:** Leave a name alone when a rename is committed unchanged ([#448](https://github.com/theguriev/crook/pull/448))
+- **plugins:** Give every plugin a toggle command of its own ([#449](https://github.com/theguriev/crook/pull/449))
+- **plugins:** Draw a hover note at a panel's size, not at the size of the mark it explains ([#450](https://github.com/theguriev/crook/pull/450))
+- **cli:** Read a short flag after --settings as a flag, not as a page name ([#451](https://github.com/theguriev/crook/pull/451))
+- **cli:** Make a relative --shell path whole whether or not the window moves ([#452](https://github.com/theguriev/crook/pull/452))
+- **render:** Draw nothing for a layer whose clip rounds to no pixels ([#453](https://github.com/theguriev/crook/pull/453))
+- **input:** End a drag in the command field wherever the button comes up ([#454](https://github.com/theguriev/crook/pull/454))
+- **tabs:** Make dragging a split divider, and double-clicking it, actually move it ([#455](https://github.com/theguriev/crook/pull/455))
+- **tabs:** Keep a press on a divider's grab band out of the pane beside it ([#456](https://github.com/theguriev/crook/pull/456))
+- **input:** Answer a press on the prompt row after a long command has scrolled the field ([#457](https://github.com/theguriev/crook/pull/457))
+- **ui:** Stretch a flexible child across a Stretch flex, keeping its share ([#458](https://github.com/theguriev/crook/pull/458))
+
+### Refactors
+
+- **process:** Reap the programs Crook starts and forgets in one place ([#427](https://github.com/theguriev/crook/pull/427))
+
+### Tests
+
+- **workspace:** Hold a closed shell's pty open without leaving it a job to refuse exit over ([#417](https://github.com/theguriev/crook/pull/417))
+- **control:** Wait for a dead socket to refuse before a test relies on it being dead ([#425](https://github.com/theguriev/crook/pull/425))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.18
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.17...v0.1.18)
