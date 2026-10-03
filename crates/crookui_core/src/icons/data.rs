@@ -59,6 +59,16 @@ pub(super) static REGEX: &[Segment] = &[
     Close,
 ];
 
+/// Lucide's `list-filter`.
+pub(super) static LIST_FILTER: &[Segment] = &[
+    Move(2.0, 5.0),
+    Line(22.0, 5.0),
+    Move(6.0, 12.0),
+    Line(18.0, 12.0),
+    Move(9.0, 19.0),
+    Line(15.0, 19.0),
+];
+
 /// Lucide's `chevron-right`.
 pub(super) static CHEVRON_RIGHT: &[Segment] = &[Move(9.0, 18.0), Line(15.0, 12.0), Line(9.0, 6.0)];
 
@@ -638,6 +648,7 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
     (Lucide::ChevronUp, "chevron-up", CHEVRON_UP),
     (Lucide::CaseSensitive, "case-sensitive", CASE_SENSITIVE),
     (Lucide::Regex, "regex", REGEX),
+    (Lucide::ListFilter, "list-filter", LIST_FILTER),
     (Lucide::ChevronRight, "chevron-right", CHEVRON_RIGHT),
     (Lucide::Copy, "copy", COPY),
     (
@@ -674,7 +685,7 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
 ];
 
 /// How many there are.
-pub const ICONS: usize = 34;
+pub const ICONS: usize = 35;
 
 /// The icons Crook draws, from Lucide.
 ///
@@ -702,6 +713,10 @@ pub enum Lucide {
     ///
     /// Lucide's [`regex`](https://lucide.dev/icons/regex).
     Regex,
+    /// The find bar's switch while it is filtering one block's output, and the block menu's row that starts that.
+    ///
+    /// Lucide's [`list-filter`](https://lucide.dev/icons/list-filter).
+    ListFilter,
     /// A folded group's heading, in the same place.
     ///
     /// Lucide's [`chevron-right`](https://lucide.dev/icons/chevron-right).

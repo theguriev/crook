@@ -56,8 +56,11 @@ struct State {
     /// it, the way an editor's find keeps its own.
     case_sensitive: bool,
     regex: bool,
-    /// The two switches' hover states: case first, then regex.
-    switches: [MouseStateHandle; 2],
+    /// The switches' hover states: case, regex, and the filter's.
+    switches: [MouseStateHandle; 3],
+    /// The block whose output the bar is filtering rather than searching,
+    /// when it was opened from that block's menu. See [`PaneFind::filter`].
+    filter: Option<crook_terminal::BlockId>,
     /// The query [`Self::current`] was last counted against. When the query
     /// in the field is no longer this one, the search is a different search
     /// and [`PaneFind::follow_query`] takes the cursor back to the first
@@ -86,6 +89,7 @@ impl PaneFind {
             case_sensitive: false,
             regex: false,
             switches: Default::default(),
+            filter: None,
         })))
     }
 
@@ -103,7 +107,27 @@ impl PaneFind {
     /// it was, for the same reason [`Self::open`] does not clear it.
     pub fn close(&self) -> bool {
         let mut state = self.0.borrow_mut();
+        // A filter is a way of looking at one block while the bar is up, and
+        // it goes down with the bar: the block shows all of itself again.
+        state.filter = None;
         std::mem::replace(&mut state.open, false)
+    }
+
+    /// The block this bar is filtering, when it is filtering one.
+    ///
+    /// Opened from a block's menu, the bar keeps that block's command line
+    /// and only the lines of its output that hold the query, rather than
+    /// highlighting matches across every block — Warp's block filter, with
+    /// the find's own field and switches.
+    pub fn filter(&self) -> Option<crook_terminal::BlockId> {
+        self.0.borrow().filter
+    }
+
+    /// Starts filtering `block`, or — with `None` — goes back to finding.
+    pub fn set_filter(&self, block: Option<crook_terminal::BlockId>) {
+        let mut state = self.0.borrow_mut();
+        state.filter = block;
+        state.current = 0;
     }
 
     /// Whether the bar is on screen.
@@ -157,6 +181,11 @@ impl PaneFind {
     /// A switch's hover state: the case switch, or the regex one.
     pub fn switch_state(&self, regex: bool) -> MouseStateHandle {
         self.0.borrow().switches[usize::from(regex)].clone()
+    }
+
+    /// The filter switch's hover state.
+    pub fn filter_state(&self) -> MouseStateHandle {
+        self.0.borrow().switches[2].clone()
     }
 
     /// What is being looked for.

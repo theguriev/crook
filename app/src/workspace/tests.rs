@@ -17833,6 +17833,60 @@ mod shells {
         }
 
         #[test]
+        fn filtering_a_block_keeps_its_command_and_the_lines_that_match() {
+            // Four lines of output; filtering them for `ap` keeps two, the
+            // bar counts them, and going back to finding shows all four.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(
+                &mut harness,
+                pane,
+                "printf 'apple\\nbanana\\ncherry\\napricot\\n'",
+            ) == 0
+            {
+                return;
+            }
+            harness.run_command("crook/window/select-block-up");
+            harness.dispatch_workspace_action(WorkspaceAction::Block(BlockAction::FilterOutput));
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("a find bar");
+            assert!(
+                find.is_open() && find.filter().is_some(),
+                "the filter did not open"
+            );
+            find.input().edit(|editor| editor.set_text("ap"));
+
+            let shown = frame_text(&harness.frame());
+            assert!(shown.contains("apricot"), "a matching line went: {shown}");
+            // Once: the command line, which a filter keeps, says it.
+            assert_eq!(
+                shown.matches("banana").count(),
+                1,
+                "a line that does not match stayed: {shown}"
+            );
+            assert!(
+                shown.contains("2/4 lines"),
+                "the bar does not count the lines: {shown}"
+            );
+
+            harness.dispatch_workspace_action(WorkspaceAction::Find {
+                pane,
+                action: crate::workspace::action::FindAction::StopFiltering,
+            });
+            let shown = frame_text(&harness.frame());
+            assert_eq!(
+                shown.matches("banana").count(),
+                2,
+                "the block did not come back whole: {shown}"
+            );
+        }
+
+        #[test]
         fn a_block_scrolled_into_its_middle_has_its_command_pinned_over_it() {
             // `seq 1 200` is taller than the pane, so at the bottom of the list
             // the window starts in its middle and nothing printed says which

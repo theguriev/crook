@@ -223,6 +223,8 @@ pub enum FindAction {
     ToggleCase,
     /// Flip whether the query is read as a regular expression.
     ToggleRegex,
+    /// Stop filtering a block and go back to finding across every one.
+    StopFiltering,
 }
 
 /// What the header does as a title bar.
@@ -528,6 +530,9 @@ pub enum BlockAction {
     Rerun,
     /// Bookmark the block, or take its bookmark off.
     ToggleBookmark,
+    /// Open the find bar filtering this block's output to the lines that
+    /// hold its query.
+    FilterOutput,
     /// Bring a block's first line to the top of its pane's list. What a press
     /// on the sticky header over a block does.
     RevealTop {

@@ -291,6 +291,18 @@ pub(crate) fn run_group(workspace: &Workspace) -> Box<dyn Element> {
             menu.bookmark.clone(),
             ui,
         ),
+        // Only for a block that said where its output starts: what a filter
+        // keeps is the command and the output lines that match, and with no
+        // line to divide them at there is nothing to keep the command by.
+        entry(
+            "Filter output",
+            None,
+            menu.output_from
+                .is_some()
+                .then(|| dispatching(BlockAction::FilterOutput)),
+            menu.filter.clone(),
+            ui,
+        ),
     ])
 }
 
