@@ -499,11 +499,16 @@ impl CommandInput {
             return local.y() <= height;
         }
 
+        // Asked of the column the field was told it continues from, not of
+        // whether its first row is still in view: a command long enough to
+        // scroll draws nothing on the shared row any more, but the list above
+        // still declines that half of it — it cannot know the field scrolled —
+        // and a press there reached neither of them.
         let metrics = self.font.metrics();
-        let Some(rows) = self.rows.as_ref().filter(|rows| rows.shift() > 0) else {
+        let Some(start) = self.inline else {
             return false;
         };
-        local.y() >= -metrics.height && local.x() >= rows.indent(0, metrics)
+        local.y() >= -metrics.height && local.x() >= start as f32 * metrics.width
     }
 
     /// The offset a point inside the field lands on, snapped to the nearest
@@ -872,6 +877,15 @@ impl Rows {
     /// [`Self::offset`] paints with, inverted, so a click lands on the
     /// grapheme it was aimed at rather than one column out.
     fn at_point(&self, text: &str, local: Vector2F, metrics: CellMetrics) -> usize {
+        // Above a window that has scrolled past the row it shares: the top of
+        // what is in view, rather than a column of its first row measured
+        // without the indent that row does not have.
+        if local.y() < 0.
+            && self.shift() == 0
+            && let Some(top) = self.rows.first()
+        {
+            return top.start;
+        }
         let row = (local.y() / metrics.height + self.shift() as f32)
             .floor()
             .clamp(0., (self.drawn() - 1) as f32) as usize;
