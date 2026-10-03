@@ -146,6 +146,40 @@ fn appearance(workspace: &Workspace) -> Vec<Category> {
         ui,
     );
 
+    // Beside "Open at login": the other thing the system is told about
+    // Crook. Only where the system can be told — not on Windows, nor from a
+    // binary outside its bundle — and a fact rather than a button once it
+    // has been, since there is nothing a second click would do.
+    let default_terminal = workspace.default_terminal().map(|is_default| {
+        widgets::row(
+            Words::new("Default terminal")
+                .with_description(if is_default {
+                    "Crook is the terminal this computer opens."
+                } else {
+                    "Make Crook the terminal this computer opens scripts and launchers in."
+                })
+                .with_keywords(&[
+                    "default",
+                    "terminal",
+                    "handler",
+                    "xdg-terminal-exec",
+                    "open",
+                ]),
+            true,
+            widgets::text_button(
+                if is_default {
+                    "Default"
+                } else {
+                    "Make default"
+                },
+                (!is_default).then(|| SettingsAction::MakeDefaultTerminal.into()),
+                state.control(named("default-terminal")),
+                ui,
+            ),
+            ui,
+        )
+    });
+
     // Beside "Bring the tabs back", because the two are one pair of facts
     // about the window's life: what comes back when it opens, and what it
     // asks before it goes. The row says what counts as working, since that
@@ -192,7 +226,11 @@ fn appearance(workspace: &Workspace) -> Vec<Category> {
         widgets::category("Text", text_category(workspace)),
         widgets::category(
             "Tabs",
-            vec![panel, granularity, density, restore, login, ask],
+            [panel, granularity, density, restore, login]
+                .into_iter()
+                .chain(default_terminal)
+                .chain([ask])
+                .collect(),
         ),
         widgets::category("Rows", rows_category(workspace)),
     ]

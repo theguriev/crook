@@ -24340,6 +24340,34 @@ fn open_at_login_is_a_setting_the_page_switches() {
 }
 
 #[test]
+fn making_crook_the_default_terminal_is_offered_only_while_it_is_not() {
+    // The answer is the system's and a test never asks it, so it is handed in
+    // the way the pool hands it in.
+    let mut harness = Harness::new(1);
+    let answer = |harness: &Harness| {
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.default_terminal())
+    };
+    let adopt = |harness: &mut Harness, given: Option<bool>| {
+        let workspace = &harness.workspace;
+        harness.app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| {
+                workspace.adopt_default_terminal(given, ctx);
+            });
+        });
+    };
+
+    // Where it cannot be made so, the action does nothing.
+    harness.dispatch_workspace_action(SettingsAction::MakeDefaultTerminal.into());
+    assert_eq!(answer(&harness), None);
+
+    adopt(&mut harness, Some(false));
+    harness.dispatch_workspace_action(SettingsAction::MakeDefaultTerminal.into());
+    assert_eq!(answer(&harness), Some(true));
+}
+
+#[test]
 fn the_arrows_step_over_a_group_heading() {
     // `close` matches three commands the window registered — closing a pane,
     // reopening a closed tab — and two the tabs did, so the list is a group

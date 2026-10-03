@@ -53,6 +53,7 @@ pub mod browser;
 pub mod clipboard;
 pub mod completion;
 pub mod control;
+pub mod default_terminal;
 pub mod diagnostics;
 pub mod editor;
 pub mod filename;

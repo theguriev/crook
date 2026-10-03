@@ -101,7 +101,7 @@ what a launcher's *Open in terminal* and a `Terminal=true` entry ask for — sta
 archive carries all three under `share/`, laid out the way a package installs them. Nothing that
 is not Crook's is written: which terminal your desktop opens is yours to say, so
 `xdg-terminals.list` and `mimeapps.list` are left alone and the installer prints the one command
-that puts Crook first.
+that puts Crook first — or the **Default terminal** button on the settings' Appearance page does it for you.
 
 A launcher starts Crook the way it starts any terminal, with the flags the entry advertises:
 
@@ -792,6 +792,10 @@ Twenty features, and the page that configures them:
   person's own and taken out again when switched off), which stops post a notification, and —
   set in the file rather than on the page — its font family and the line each agent is resumed
   with.
+  Beside them, **Default terminal** makes Crook the terminal the system opens — Launch
+  Services' shell handler on macOS, what Finder runs a script with, and the first line of
+  `xdg-terminals.list` on Linux — and says so once it is; it is the system's, so it is asked
+  afresh each time the page is shown, and not offered on Windows, which has no such setting.
   The type size is also on `cmd/ctrl-plus`, `-minus` and `-0`, and every pane resizes with it:
   a pane's columns and rows are its box divided by a cell, so the ptys follow.
   It is the one pane with no shell under it and no field: every control on it is a click.
