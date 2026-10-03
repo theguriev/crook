@@ -559,6 +559,11 @@ Twenty features, and the page that configures them:
   the whole selected block, and Escape lets the selection go. It is one selection per pane, and
   it answers the same question a drag does, so the two never both hold: stepping to a block
   drops any text the pointer had selected.
+  A block worth coming back to can be **bookmarked** — from its menu, or `bookmark-block` on
+  the selected one — and wears a short accent flag down its right edge. `previous-bookmark`
+  and `next-bookmark` select the nearest bookmarked block above or below and scroll it into
+  view; from the prompt, `previous-bookmark` is the newest one. Bookmarks last as long as the
+  block is in the pane's history.
 - **A command line that behaves like a text field.** Under each pane's output is the line
   being composed — not a box and not a raw terminal line: no border, no fill, no focus ring,
   on the pane's own ground, in the terminal's own font and colours, at the same column zero as
@@ -805,7 +810,7 @@ Twenty features, and the page that configures them:
   page tells you where it is.
 
 - **Everything the window does has a name, and most of it has a key.** The window registers
-  fifty-three commands of its own and ships chords for thirty-eight; the other fifteen are
+  fifty-six commands of its own and ships chords for thirty-eight; the other eighteen are
   reached by name, from the palette or from a chord of your own. That split is deliberate — a
   shipped chord is a key taken away from the shell in every pane, forever, so it is spent on
   what is pressed often and not on what is done once a week.
@@ -831,7 +836,8 @@ Twenty features, and the page that configures them:
   Without a chord, by name: `split-left` and `split-up`, `grow-pane`, `shrink-pane` and
   `even-panes`, a block's menu (`open-block-menu`) and every entry of it (`copy-block`,
   `copy-block-command`, `copy-block-output`, `copy-block-directory`, `copy-block-branch`,
-  `rerun-block`, `scroll-to-block-top`, `scroll-to-block-bottom`), `resume-agents` (the
+  `rerun-block`, `bookmark-block`, `scroll-to-block-top`, `scroll-to-block-bottom`), the
+  bookmarks between blocks (`previous-bookmark`, `next-bookmark`), `resume-agents` (the
   agents a restart ended — see Tabs), every entry of a tab's
   (`crook/tabs/pin-tab`, `close-tab`, `open-menu`, `view-options`,
   `toggle-group`, `close-group`, the seven colours), the Changes column

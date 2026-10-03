@@ -522,6 +522,16 @@ pub enum BlockAction {
     ScrollTo(BlockEdge),
     /// Put the block's command line back in the composer, unsent.
     Rerun,
+    /// Bookmark the block, or take its bookmark off.
+    ToggleBookmark,
+    /// Select the next bookmarked block of a pane's list, older or newer, and
+    /// bring it into view.
+    JumpToBookmark {
+        /// Whose list.
+        pane: PaneId,
+        /// Towards the oldest output, rather than the prompt.
+        older: bool,
+    },
     /// Step the keyboard's block selection one older, towards the top of the
     /// list — or onto the last block from the prompt. Names a pane because,
     /// unlike the menu's entries, it is reached from a chord over whichever

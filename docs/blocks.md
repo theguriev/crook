@@ -452,6 +452,8 @@ Stage 1 of the port. These are absent on purpose, not overlooked:
   so the block keeps the command as its one plain row (`BlockRows::of_line`) rather than
   being a gap with chrome around it. The prompt that stood before it is not reconstructed.
 * **Lazy reflow on a column change.** A harvested block keeps the width it was harvested at.
-* Share, bookmarks, block filters, and everything else that needs a block to
+* Share, block filters, and everything else that needs a block to
   be addressable rather than merely visible. Running a command a second time is in the menu —
-  as text put back in the composer, which needs nothing of the sort.
+  as text put back in the composer, which needs nothing of the sort — and so are bookmarks,
+  kept by `BlockId` on the pane's `PaneBlocks` beside the selection, which is all the
+  addressing they need: the jump between them is the keyboard selection's own landing.

@@ -954,6 +954,22 @@ impl BlockList {
                 .with_background(theme().accent);
         }
 
+        // A bookmark: a short flag down the block's right edge, from its top —
+        // on the side the selection stripe is not, so a block can wear both,
+        // and short, so it reads as a mark on the block rather than a status
+        // of all of it.
+        if self
+            .block(item.index)
+            .is_some_and(|block| self.view.is_bookmarked(block.id))
+        {
+            ctx.scene
+                .draw_rect_without_hit_recording(RectF::new(
+                    vec2f(origin.x() + size.x() - BOOKMARK_WIDTH, top),
+                    vec2f(BOOKMARK_WIDTH, metrics.height.min(item.height)),
+                ))
+                .with_background(theme().accent);
+        }
+
         // Over the wash rather than under it, and only above a block that has
         // one before it: a rule along the very top of the pane separates the
         // pane from nothing.
@@ -1762,6 +1778,9 @@ const SELECT_WASH_ALPHA: u8 = 22;
 /// How wide its edge stripe is, a touch wider than a running command's so the
 /// two never read as the same mark.
 const SELECT_STRIPE: f32 = STRIPE + 2.;
+
+/// How wide a bookmark's flag is, down the right edge of its block.
+const BOOKMARK_WIDTH: f32 = 4.;
 
 /// A selected run of columns, cut down to the ones this list is drawing.
 ///

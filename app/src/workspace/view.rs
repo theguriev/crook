@@ -315,6 +315,11 @@ pub struct BlockMenuState {
     pub(super) scroll_bottom: MouseStateHandle,
     /// "Run again".
     pub(super) rerun: MouseStateHandle,
+    /// Whether the block was bookmarked when the menu opened, which is what
+    /// the row says it will do.
+    pub(super) bookmarked: bool,
+    /// "Bookmark" / "Remove bookmark".
+    pub(super) bookmark: MouseStateHandle,
 }
 
 impl BlockMenuState {
@@ -4956,6 +4961,18 @@ impl Workspace {
                 self.rerun_block_command(ctx);
                 self.close_block_menu(ctx);
             }
+            BlockAction::ToggleBookmark => {
+                if let Some((pane, block)) = self.block_target()
+                    && let Some(view) = self.pane_blocks(pane)
+                {
+                    view.toggle_bookmark(block);
+                    ctx.notify();
+                }
+                self.close_block_menu(ctx);
+            }
+            BlockAction::JumpToBookmark { pane, older } => {
+                self.jump_to_bookmark(pane, older, ctx);
+            }
             BlockAction::SelectUp(pane) => self.step_block_selection(pane, false, ctx),
             BlockAction::SelectDown(pane) => self.step_block_selection(pane, true, ctx),
             BlockAction::ClearSelection(pane) => {
@@ -5091,6 +5108,44 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// Selects the nearest bookmarked block past the selected one, older or
+    /// newer, and brings it into view.
+    ///
+    /// From the prompt, older is the newest bookmark — the one a person is
+    /// most likely reaching back for — and newer is nothing. Past the last
+    /// bookmark in either direction nothing moves: a jump that wrapped round
+    /// would land somewhere a person has to look for.
+    fn jump_to_bookmark(&mut self, pane: PaneId, older: bool, ctx: &mut ViewContext<Self>) {
+        let (Some(history), Some(view)) = (self.terminal_blocks(pane, ctx), self.pane_blocks(pane))
+        else {
+            return;
+        };
+        let current = view
+            .selected()
+            .and_then(|id| history.iter().position(|block| block.id == id));
+        let marked = |index: &usize| {
+            history
+                .get(*index)
+                .is_some_and(|block| view.is_bookmarked(block.id))
+        };
+        let landing = if older {
+            (0..current.unwrap_or(history.len())).rev().find(marked)
+        } else {
+            current.and_then(|current| (current + 1..history.len()).find(marked))
+        };
+        let Some(index) = landing else {
+            return;
+        };
+        if !view.select(history.get(index).map(|block| block.id)) {
+            return;
+        }
+        if let Some(interaction) = self.interactions.get(&pane) {
+            interaction.selection.clear();
+        }
+        self.scroll_block_into_view(pane, index);
+        ctx.notify();
+    }
+
     /// Lets go of a pane's block selection, reporting whether there was one.
     fn clear_block_selection(&mut self, pane: PaneId) -> bool {
         self.pane_blocks(pane).is_some_and(|view| view.select(None))
@@ -5175,6 +5230,9 @@ impl Workspace {
             .and_then(crate::git::current_branch)
             .map(|head| head.label().to_owned());
         self.block_menu.on = Some((pane, block));
+        self.block_menu.bookmarked = self
+            .pane_blocks(pane)
+            .is_some_and(|view| view.is_bookmarked(block));
         // The corner the popup hangs off is written by the *paint* of the
         // frame that draws the block's controls, so a menu opened from the
         // keyboard on a block the pointer has never been over has no corner
@@ -8743,6 +8801,22 @@ impl Workspace {
             Binding::RerunBlock => {
                 self.block_target()?;
                 return Some(WorkspaceAction::Block(BlockAction::Rerun));
+            }
+            Binding::BookmarkBlock => {
+                self.block_target()?;
+                return Some(WorkspaceAction::Block(BlockAction::ToggleBookmark));
+            }
+            // Declined where there is nothing to jump to, so the chord a person
+            // gave either reaches the shell instead.
+            Binding::PreviousBookmark | Binding::NextBookmark => {
+                let pane = self.tabs.focused_pane_id()?;
+                if !self.pane_blocks(pane)?.has_bookmarks() {
+                    return None;
+                }
+                return Some(WorkspaceAction::Block(BlockAction::JumpToBookmark {
+                    pane,
+                    older: binding == Binding::PreviousBookmark,
+                }));
             }
             Binding::OpenBlockMenu => {
                 // Availability asked here rather than left to the handler,
