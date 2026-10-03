@@ -696,6 +696,36 @@ fn a_field_scrolled_past_its_first_row_continues_nothing() {
     );
 }
 
+#[test]
+fn the_shared_row_is_the_fields_even_once_it_has_scrolled_past_it() {
+    // The list above declines the half of the prompt row after the prompt,
+    // whatever the field has scrolled to; the field has to take it, or a
+    // press there reaches nobody.
+    let metrics = font().metrics();
+    let field = CommandInput::new(holding(""), font(), Clipboard::new()).with_inline(Some(2));
+    let width = width_for(20);
+
+    assert!(field.takes_press(vec2f(5. * metrics.width, -metrics.height / 2.), width));
+    assert!(
+        !field.takes_press(vec2f(metrics.width, -metrics.height / 2.), width),
+        "the prompt itself is the list's"
+    );
+
+    // And a press there lands at the top of what is in view.
+    let text = "a\n".repeat(MAX_ROWS + 4);
+    let rows = rows_inline(&text, text.len(), 20, Some(2));
+    assert_eq!(rows.shift(), 0, "scrolled past the shared row");
+    let top = rows.at_point(&text, vec2f(0., 0.), metrics);
+    assert_eq!(
+        rows.at_point(
+            &text,
+            vec2f(5. * metrics.width, -metrics.height / 2.),
+            metrics
+        ),
+        top
+    );
+}
+
 /// Composing with an input method: the half-typed word is in the field, and
 /// only what the method commits is text.
 mod composition {
