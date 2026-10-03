@@ -244,7 +244,8 @@ impl Element for Flex {
 
         // Pass one: measure everything that is not flexible, each free along
         // the main axis and bounded across it.
-        let inflexible = if self.cross_axis_alignment == CrossAxisAlignment::Stretch {
+        let stretch = self.cross_axis_alignment == CrossAxisAlignment::Stretch;
+        let inflexible = if stretch {
             SizeConstraint::tight_on_cross_axis(self.axis, constraint)
         } else {
             SizeConstraint::child_constraint_along_axis(self.axis, constraint)
@@ -322,13 +323,25 @@ impl Element for Flex {
                     FlexFit::Loose => 0.,
                 };
 
+                // Stretched across, as the inflexible children were in pass
+                // one, wherever the cross axis is bounded: a flexible child
+                // handed only the parent's minimum came out its own natural
+                // width in a column whose every other child was the full one.
+                let cross_min = if stretch && constraint.max_along(cross_axis).is_finite() {
+                    constraint.max_along(cross_axis)
+                } else {
+                    match cross_axis {
+                        Axis::Horizontal => constraint.min.x(),
+                        Axis::Vertical => constraint.min.y(),
+                    }
+                };
                 let child_constraint = match self.axis {
                     Axis::Horizontal => SizeConstraint::new(
-                        vec2f(child_min, constraint.min.y()),
+                        vec2f(child_min, cross_min),
                         vec2f(child_max, constraint.max.y()),
                     ),
                     Axis::Vertical => SizeConstraint::new(
-                        vec2f(constraint.min.x(), child_min),
+                        vec2f(cross_min, child_min),
                         vec2f(constraint.max.x(), child_max),
                     ),
                 };
@@ -458,16 +471,29 @@ impl Flex {
         }
 
         for child in &mut self.children {
-            if child
+            let Some(size) = child
                 .size()
-                .is_some_and(|size| size.along(cross_axis).is_infinite())
-            {
-                child.layout(
-                    SizeConstraint::tight_on_cross_axis(self.axis, constraint),
-                    ctx,
-                    app,
-                );
+                .filter(|size| size.along(cross_axis).is_infinite())
+            else {
+                continue;
+            };
+            let mut stretched = SizeConstraint::tight_on_cross_axis(self.axis, constraint);
+            // A flexible child keeps the share of the main axis it was given:
+            // re-measured free along it, an `Expanded` lost its tight size.
+            if Self::child_flex(child.as_ref()).is_some() {
+                let along = size.along(self.axis);
+                match self.axis {
+                    Axis::Horizontal => {
+                        stretched.min.set_x(along);
+                        stretched.max.set_x(along);
+                    }
+                    Axis::Vertical => {
+                        stretched.min.set_y(along);
+                        stretched.max.set_y(along);
+                    }
+                }
             }
+            child.layout(stretched, ctx, app);
         }
     }
 }

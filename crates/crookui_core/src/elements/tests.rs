@@ -278,6 +278,48 @@ fn an_expanded_spacer_pushes_the_next_child_to_the_far_edge() {
 }
 
 #[test]
+fn stretch_stretches_a_flexible_child_as_it_does_any_other() {
+    // Under a loose width, a stretched column's fixed children come out the
+    // full width; a flexible one has to as well, and keep its share of the
+    // height while it does.
+    let mut harness = Harness::new(|_| {
+        Align::new(
+            Flex::column()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                .with_child(marker(30., 10.))
+                .with_child(
+                    Expanded::new(
+                        1.,
+                        // Twenty wide on its own: what it is given across
+                        // is what makes it wider.
+                        Container::new(Flex::row().with_child(marker(20., 10.)).finish())
+                            .with_background_color(Color::BLACK)
+                            .finish(),
+                    )
+                    .finish(),
+                )
+                .finish(),
+        )
+        .top_left()
+        .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(100., 50.));
+    let filled: Vec<_> = rects(&scene)
+        .iter()
+        .filter(|rect| rect.background == crate::scene::Fill::Solid(Color::BLACK))
+        .map(|rect| rect.bounds)
+        .collect();
+
+    assert_eq!(
+        filled,
+        vec![RectF::new(vec2f(0., 10.), vec2f(100., 40.))],
+        "the flexible child is not the column's width, or lost its share"
+    );
+}
+
+#[test]
 fn a_zero_flex_child_takes_no_share_rather_than_a_nan() {
     // `flex: 0` is a real request — grow by none — and it is where
     // `remaining_flex` reaches zero once every child with any flex has taken
