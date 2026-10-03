@@ -291,6 +291,13 @@ pub enum Binding {
     RerunBlock,
     /// Open the menu on the selected block, at the dots it would open from.
     OpenBlockMenu,
+    /// Bookmark the selected block, or take its bookmark off.
+    BookmarkBlock,
+    /// Select the bookmarked block before the selected one — older — or the
+    /// newest one from the prompt.
+    PreviousBookmark,
+    /// Select the bookmarked block after the selected one, towards the prompt.
+    NextBookmark,
     /// Bring one edge of the selected block to the matching edge of the pane.
     ScrollToBlock(BlockEdge),
     /// Send every resume line a restore left in a composer and nobody has

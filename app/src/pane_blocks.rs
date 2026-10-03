@@ -286,6 +286,12 @@ struct State {
     /// the keyboard is at the prompt, composing — and stepping down off the
     /// last block goes back to it.
     selected: Option<BlockId>,
+    /// The blocks a person bookmarked, in the order they were marked.
+    ///
+    /// By [`BlockId`] for the reason the selection is: an index would mark
+    /// whatever slid into the slot. A bookmark on a block the history has
+    /// since evicted marks nothing, and is stepped over.
+    bookmarks: Vec<BlockId>,
     heights: Heights,
 }
 
@@ -520,6 +526,32 @@ impl PaneBlocks {
     /// prompt.
     pub fn selected(&self) -> Option<BlockId> {
         self.0.borrow().selected
+    }
+
+    /// Bookmarks a block, or takes its bookmark off, and answers whether it is
+    /// bookmarked now.
+    pub fn toggle_bookmark(&self, block: BlockId) -> bool {
+        let mut state = self.0.borrow_mut();
+        match state.bookmarks.iter().position(|marked| *marked == block) {
+            Some(at) => {
+                state.bookmarks.remove(at);
+                false
+            }
+            None => {
+                state.bookmarks.push(block);
+                true
+            }
+        }
+    }
+
+    /// Whether a block is bookmarked.
+    pub fn is_bookmarked(&self, block: BlockId) -> bool {
+        self.0.borrow().bookmarks.contains(&block)
+    }
+
+    /// Whether any block is.
+    pub fn has_bookmarks(&self) -> bool {
+        !self.0.borrow().bookmarks.is_empty()
     }
 
     /// Puts the keyboard on a block, or takes it back to the prompt, reporting

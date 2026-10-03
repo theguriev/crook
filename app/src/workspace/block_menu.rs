@@ -266,15 +266,32 @@ pub(crate) fn facts_group(workspace: &Workspace) -> Box<dyn Element> {
 /// honest way for a menu to offer a command a second time.
 pub(crate) fn run_group(workspace: &Workspace) -> Box<dyn Element> {
     let menu = workspace.block_menu();
-    group([entry(
-        "Run again",
-        chord_for(workspace, "crook/window/rerun-block"),
-        menu.command
-            .is_some()
-            .then(|| dispatching(BlockAction::Rerun)),
-        menu.rerun.clone(),
-        workspace.fonts().ui,
-    )])
+    let ui = workspace.fonts().ui;
+    group([
+        entry(
+            "Run again",
+            chord_for(workspace, "crook/window/rerun-block"),
+            menu.command
+                .is_some()
+                .then(|| dispatching(BlockAction::Rerun)),
+            menu.rerun.clone(),
+            ui,
+        ),
+        // Here rather than a group of its own: a bookmark is the other thing
+        // done *to* the command rather than with its text. See
+        // `Workspace::jump_to_bookmark` for getting back to it.
+        entry(
+            if menu.bookmarked {
+                "Remove bookmark"
+            } else {
+                "Bookmark"
+            },
+            chord_for(workspace, "crook/window/bookmark-block"),
+            Some(dispatching(BlockAction::ToggleBookmark)),
+            menu.bookmark.clone(),
+            ui,
+        ),
+    ])
 }
 
 /// The two ways of moving the list to the block, which are what a block taller

@@ -19030,6 +19030,56 @@ mod shells {
         }
 
         #[test]
+        fn a_bookmarked_block_is_where_the_bookmark_chords_land() {
+            // Bookmark the second-to-last block, go back to the prompt, and
+            // the bookmark commands find it; with the bookmark taken off they
+            // decline.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = three_commands(&mut harness) else {
+                return;
+            };
+            let blocks = ids(&harness, pane);
+            let marked = blocks[blocks.len() - 2];
+
+            up(&mut harness);
+            up(&mut harness);
+            assert_eq!(Some(marked), selected(&harness, pane));
+            harness.run_command("crook/window/bookmark-block");
+            let is_marked = |harness: &Harness| {
+                harness.workspace.read(&harness.app, |workspace, _| {
+                    workspace
+                        .pane_blocks(pane)
+                        .is_some_and(|view| view.is_bookmarked(marked))
+                })
+            };
+            assert!(is_marked(&harness), "the block was not bookmarked");
+
+            // Back at the prompt: up to the newest bookmark, and nothing past it.
+            down(&mut harness);
+            down(&mut harness);
+            assert_eq!(None, selected(&harness, pane));
+            harness.run_command("crook/window/previous-bookmark");
+            assert_eq!(Some(marked), selected(&harness, pane));
+            harness.run_command("crook/window/previous-bookmark");
+            assert_eq!(
+                Some(marked),
+                selected(&harness, pane),
+                "a jump past the oldest bookmark moved anyway"
+            );
+
+            harness.run_command("crook/window/bookmark-block");
+            assert!(!is_marked(&harness), "the bookmark did not come off");
+            assert!(
+                harness.workspace.read(&harness.app, |workspace, _| {
+                    workspace
+                        .command(crate::input_keys::Binding::NextBookmark)
+                        .is_none()
+                }),
+                "with no bookmarks the jump took the chord anyway"
+            );
+        }
+
+        #[test]
         fn stepping_up_walks_the_blocks_from_the_prompt_and_stops_at_the_top() {
             let mut harness = Harness::panel(1);
             let Some(pane) = three_commands(&mut harness) else {
