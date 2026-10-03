@@ -211,9 +211,22 @@ impl Frame<'_> {
                     let Some(visible) = scaled.intersection(target_bounds) else {
                         continue;
                     };
-                    set_scissor_rect(&mut render_pass, visible);
+                    // And so does one whose clip rounds to no pixels at all —
+                    // a `Clipped` 0.8 wide at x 10.6 is 11..11. wgpu cannot be
+                    // handed that rect, and skipping only the call left the
+                    // layer drawing under whatever rect the layer before it
+                    // set, which is usually the whole window.
+                    let Some((x, y, width, height)) = scissor_rect(visible) else {
+                        continue;
+                    };
+                    render_pass.set_scissor_rect(x, y, width, height);
                 }
-                None => set_scissor_rect(&mut render_pass, target_bounds),
+                None => match scissor_rect(target_bounds) {
+                    Some((x, y, width, height)) => {
+                        render_pass.set_scissor_rect(x, y, width, height);
+                    }
+                    None => continue,
+                },
             }
 
             // Fixed order within a layer: pictures and text are always drawn
@@ -231,8 +244,9 @@ impl Frame<'_> {
     }
 }
 
-/// Sets a scissor rect, rounding in the one way that cannot overflow the target.
-fn set_scissor_rect(render_pass: &mut wgpu::RenderPass<'_>, bounds: RectF) {
+/// The scissor rect for `bounds`, rounded in the one way that cannot overflow
+/// the target, or `None` when it covers no whole pixel.
+fn scissor_rect(bounds: RectF) -> Option<(u32, u32, u32, u32)> {
     // Round the two corners independently and derive the extent from them.
     // Rounding the origin and the size separately can push the far edge past
     // the surface when both round up, which wgpu rejects.
@@ -242,10 +256,9 @@ fn set_scissor_rect(render_pass: &mut wgpu::RenderPass<'_>, bounds: RectF) {
     let height = (bounds.max_y().round() as u32).saturating_sub(y);
 
     // A zero-dimension scissor rect trips a runtime assertion inside wgpu
-    // rather than clipping everything away. See gfx-rs/wgpu#1750.
-    if width != 0 && height != 0 {
-        render_pass.set_scissor_rect(x, y, width, height);
-    }
+    // rather than clipping everything away. See gfx-rs/wgpu#1750. The caller
+    // draws nothing for it instead.
+    (width != 0 && height != 0).then_some((x, y, width, height))
 }
 
 #[cfg(test)]
@@ -254,27 +267,28 @@ mod tests {
 
     use super::*;
 
-    /// A stand-in for `set_scissor_rect`'s arithmetic, so the rounding rule can
-    /// be checked without a GPU.
-    fn scissor(bounds: RectF) -> (u32, u32, u32, u32) {
-        let x = bounds.min_x().round() as u32;
-        let y = bounds.min_y().round() as u32;
-        (
-            x,
-            y,
-            (bounds.max_x().round() as u32).saturating_sub(x),
-            (bounds.max_y().round() as u32).saturating_sub(y),
-        )
-    }
-
     #[test]
     fn rounding_corners_independently_keeps_the_rect_inside_the_target() {
         // Origin 0.6 and size 99.6 round to 1 and 100, which would reach 101 on
         // a 100px surface. Rounding the far corner instead gives 100.
         let bounds = RectF::new(vec2f(0.6, 0.), vec2f(99.6, 50.));
-        let (x, _, width, _) = scissor(bounds);
+        let (x, _, width, _) = scissor_rect(bounds).expect("a rect with pixels in it");
 
         assert_eq!(x, 1);
         assert_eq!(x + width, 100);
+    }
+
+    #[test]
+    fn a_clip_that_rounds_to_no_pixels_has_no_rect_to_draw_under() {
+        // 10.6 to 11.4 is 11 to 11 once rounded: nothing to draw in, and the
+        // layer has to know that rather than keep the last rect set.
+        assert_eq!(
+            scissor_rect(RectF::new(vec2f(10.6, 0.), vec2f(0.8, 40.))),
+            None
+        );
+        assert_eq!(
+            scissor_rect(RectF::new(vec2f(0., 5.2), vec2f(30., 0.1))),
+            None
+        );
     }
 }
