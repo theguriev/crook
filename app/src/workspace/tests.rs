@@ -2484,6 +2484,41 @@ fn dragging_a_divider_moves_the_split_and_a_double_click_evens_it_out() {
 }
 
 #[test]
+fn a_press_beside_a_divider_drags_the_split_and_leaves_the_pane_under_it_alone() {
+    // The grab is wider than the line, so most of it lies over the panes on
+    // either side. A press there is the divider's: the split moves, and the
+    // pane under the press is neither focused nor pressed.
+    let mut harness = Harness::new(1);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let panes = harness.active_pane_ids();
+    assert_eq!(harness.focused_pane_id(), Some(panes[1]));
+
+    let before = panel_boxes(&harness.frame());
+    assert_eq!(before.len(), 2, "two panes side by side");
+    let line = before[0].max_x();
+    let y = center(before[0]).y();
+
+    // A click there, down and up, is not a click on the pane.
+    harness.click(vec2f(line - 2., y), MouseButton::Left);
+    assert_eq!(
+        harness.focused_pane_id(),
+        Some(panes[1]),
+        "the press beside the line was taken by the pane under it"
+    );
+
+    harness.hold(vec2f(line - 2., y), 1);
+    harness.drag_to(vec2f(line + 60., y));
+    harness.let_go(vec2f(line + 60., y));
+    let after = panel_boxes(&harness.frame());
+    assert!(
+        after[0].width() > before[0].width() + 30.,
+        "the split did not move: {} then {}",
+        before[0].width(),
+        after[0].width()
+    );
+}
+
+#[test]
 fn the_keyboard_alone_can_end_them_once_it_has_moved_off_cancel() {
     // A pane running `ssh` is working, and so is every pane with a pager, a
     // dev server or a busy agent in it. A person with no pointer has to be
@@ -3202,16 +3237,21 @@ fn a_pane_fills_its_share_of_the_body_and_not_just_the_cells_it_can_draw() {
     );
 
     // And the whole of it is a click target, including the corner a grid of
-    // whole cells cannot reach.
+    // whole cells cannot reach. The corner at the window's edge: the one
+    // beside a divider is in the divider's grab, and a press there is the
+    // divider's.
     harness.dispatch_action(TabAction::Split(Direction::Right));
     let panes = panel_boxes(&harness.frame());
-    let first = harness.active_pane_ids()[0];
+    let [first, second] = harness.active_pane_ids()[..] else {
+        panic!("two panes");
+    };
+    harness.dispatch_action(TabAction::FocusPane(first));
     harness.click(
-        panes[0].origin() + panes[0].size() - vec2f(2., 2.),
+        panes[1].origin() + panes[1].size() - vec2f(2., 2.),
         MouseButton::Left,
     );
     assert_eq!(
-        Some(first),
+        Some(second),
         harness.focused_pane_id(),
         "a click in the bottom-right corner of a pane did not focus it"
     );

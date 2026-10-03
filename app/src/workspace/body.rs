@@ -77,6 +77,8 @@
 //! has no shell. A run whose shell *failed to start* draws the reason, because
 //! "no shell" is a much worse answer than "the login shell is not executable".
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -190,6 +192,7 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
     // focused pane alone, whose one flex child then takes the whole row.
     // The hidden panes are not laid out at all, so their shells keep the
     // size they had and are told the new one when the split comes back.
+    let grabs = Grabs::default();
     let mut previous: Option<PaneId> = None;
     for pane in panes.visible() {
         if let Some(before) = previous {
@@ -205,6 +208,7 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
                         workspace.pane_extent(pane.id()),
                     ),
                     workspace.divider_drag().clone(),
+                    grabs.clone(),
                 )
                 .finish(),
             );
@@ -220,6 +224,7 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
         let measured = Measured::new(
             panes.axis(),
             workspace.pane_extent(pane.id()),
+            grabs.clone(),
             panel(workspace, pane, state, app),
         );
         layout.add_child(Expanded::new(pane.flex(), measured.finish()).finish());
@@ -1144,20 +1149,48 @@ fn divider(axis: SplitAxis) -> Box<dyn Element> {
 struct Measured {
     axis: SplitAxis,
     extent: PaneExtent,
+    /// Where the dividers beside it take a press; see [`Grabs`].
+    grabs: Grabs,
     child: Box<dyn Element>,
     size: Option<Vector2F>,
     origin: Option<Point>,
 }
 
 impl Measured {
-    fn new(axis: SplitAxis, extent: PaneExtent, child: Box<dyn Element>) -> Self {
+    fn new(axis: SplitAxis, extent: PaneExtent, grabs: Grabs, child: Box<dyn Element>) -> Self {
         Self {
             axis,
             extent,
+            grabs,
             child,
             size: None,
             origin: None,
         }
+    }
+}
+
+/// The areas this frame's dividers take a press in, which a pane's press must
+/// stay out of.
+///
+/// A divider's grab is [`DIVIDER_GRAB`] across and its line one pixel, so most
+/// of the grab lies over the panes on either side — and a flex hands a press
+/// to every child, with nothing painted over the band to make the pane see it
+/// as covered. A press a few pixels beside the line resized the split *and*
+/// started a selection, and focus, in the pane under it, extending on every
+/// drag; a program reporting the mouse got the press too. Each divider writes
+/// its area here when it paints, and each pane's wrapper declines a press in
+/// one. Built fresh with the frame's tree, so a divider that is gone takes
+/// its area with it.
+#[derive(Clone, Default)]
+struct Grabs(Rc<RefCell<Vec<RectF>>>);
+
+impl Grabs {
+    /// Whether a press at `position` is a divider's.
+    fn take(&self, position: Vector2F) -> bool {
+        self.0
+            .borrow()
+            .iter()
+            .any(|area| area.contains_point(position))
     }
 }
 
@@ -1188,6 +1221,11 @@ impl Element for Measured {
         ctx: &mut EventContext,
         app: &AppContext,
     ) -> bool {
+        if let Event::MouseDown { position, .. } = event.raw_event()
+            && self.grabs.take(*position)
+        {
+            return false;
+        }
         self.child.dispatch_event(event, ctx, app)
     }
 
@@ -1230,6 +1268,8 @@ struct SplitDivider {
     /// The drag in progress, shared with every other divider so that only one
     /// can be dragged at a time.
     drag: DividerDrag,
+    /// Where it writes its grab area for the panes beside it to stay out of.
+    grabs: Grabs,
     child: Box<dyn Element>,
     size: Option<Vector2F>,
     origin: Option<Point>,
@@ -1242,6 +1282,7 @@ impl SplitDivider {
         after: PaneId,
         extents: (PaneExtent, PaneExtent),
         drag: DividerDrag,
+        grabs: Grabs,
     ) -> Self {
         Self {
             axis,
@@ -1249,6 +1290,7 @@ impl SplitDivider {
             after,
             extents,
             drag,
+            grabs,
             child: divider(axis),
             size: None,
             origin: None,
@@ -1357,6 +1399,9 @@ impl Element for SplitDivider {
     fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
         self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
         self.child.paint(origin, ctx, app);
+        if let Some(area) = self.grab_area() {
+            self.grabs.0.borrow_mut().push(area);
+        }
     }
 
     fn dispatch_event(
