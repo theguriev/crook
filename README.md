@@ -562,6 +562,10 @@ Twenty features, and the page that configures them:
   the whole selected block, and Escape lets the selection go. It is one selection per pane, and
   it answers the same question a drag does, so the two never both hold: stepping to a block
   drops any text the pointer had selected.
+  A block scrolled into its middle — its top gone above the pane, its command with it — has
+  that command **pinned over the top of the list** until its top comes back, the open block
+  included, so a build or an agent printing screens of output still says what it is; a press
+  on the pin scrolls to the block's first line.
   A block worth coming back to can be **bookmarked** — from its menu, or `bookmark-block` on
   the selected one — and wears a short accent flag down its right edge. `previous-bookmark`
   and `next-bookmark` select the nearest bookmarked block above or below and scroll it into
@@ -886,9 +890,9 @@ not read — though a URL a program *printed* is clickable, because the scan tha
 works the same on a finished block as on the live grid, which an OSC 8 carried on the grid
 alone would not. The keyboard steps through the blocks, selects one, pages the output and
 runs every entry of a block's menu by name, and the composer types on the prompt's own line,
-but the blocks are still short of a few things: no pointer click-to-select a block, no sticky
-header for one taller than the window, and no jump-to-bottom *button* — the chord for it
-exists; [`docs/blocks.md`](docs/blocks.md) lists those and says what each would touch.
+but the blocks are still short of a few things: no pointer click-to-select a block and no
+jump-to-bottom *button* — the chord for it exists; [`docs/blocks.md`](docs/blocks.md) lists
+those and says what each would touch.
 A selection copies, and the paste chord puts the clipboard into the program as a bracketed
 paste. A program can write the clipboard too, with OSC 52 — what `tmux`, `nvim` and a copy over
 `ssh` use — and it is the same clipboard `cmd-c` writes; an empty write is dropped rather than

@@ -292,6 +292,11 @@ struct State {
     /// whatever slid into the slot. A bookmark on a block the history has
     /// since evicted marks nothing, and is stepped over.
     bookmarks: Vec<BlockId>,
+    /// The block the list's window starts inside, with the command it ran,
+    /// when its top has scrolled out of view — what the sticky header over
+    /// the list says. Written by the list as it lays out, read by the header
+    /// laid out after it in the same frame.
+    sticky: Option<(BlockId, String)>,
     heights: Heights,
 }
 
@@ -547,6 +552,17 @@ impl PaneBlocks {
     /// Whether a block is bookmarked.
     pub fn is_bookmarked(&self, block: BlockId) -> bool {
         self.0.borrow().bookmarks.contains(&block)
+    }
+
+    /// What the sticky header over the list should say: the block whose top
+    /// has scrolled away, and its command.
+    pub fn sticky(&self) -> Option<(BlockId, String)> {
+        self.0.borrow().sticky.clone()
+    }
+
+    /// Records it. See [`Self::sticky`].
+    pub fn set_sticky(&self, sticky: Option<(BlockId, String)>) {
+        self.0.borrow_mut().sticky = sticky;
     }
 
     /// Whether any block is.

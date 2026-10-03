@@ -186,6 +186,9 @@ pub struct BlockList {
     /// What layout found in view, replayed by paint. Walked once per frame
     /// rather than once per pass.
     window: Vec<Visible>,
+    /// Which item of the window the sticky header names, if any. See
+    /// [`PaneBlocks::sticky`].
+    sticky: Option<usize>,
     /// One row's cells, reused down the whole list.
     scratch: Vec<SnapshotCell>,
     /// The link under the pointer, which the workspace keeps per pane because
@@ -276,6 +279,7 @@ impl BlockList {
             size: None,
             origin: None,
             window: Vec::new(),
+            sticky: None,
             scratch: Vec::new(),
         }
     }
@@ -473,6 +477,29 @@ impl BlockList {
                 index += 1;
             }
         });
+
+        // The block the window starts inside, when its top has gone and there
+        // is enough of it left to be worth naming: a command three screens
+        // long scrolled into its middle, with nothing on screen saying what
+        // printed it. The open block too — a build or an agent still printing
+        // is the commonest such block of all.
+        let sticky = self
+            .window
+            .first()
+            .filter(|item| item.top < 0. && item.top + item.height > STICKY_HEIGHT * 2.)
+            .and_then(|item| {
+                let (id, command) = match self.block(item.index) {
+                    Some(block) => (block.id, block.command.clone()),
+                    None => (
+                        self.snapshot.live_block.id,
+                        self.snapshot.live_block.command.clone(),
+                    ),
+                };
+                let command = command?.trim().to_owned();
+                (!command.is_empty()).then_some((id, command))
+            });
+        self.sticky = sticky.as_ref().map(|_| self.window[0].index);
+        self.view.set_sticky(sticky);
     }
 
     /// The rectangle one of a block's controls is drawn in, given where the
@@ -493,7 +520,14 @@ impl BlockList {
         // clicked. It still never leaves the block: on a short one at the
         // bottom of the window it stays inside its own rows.
         let lowest = item.top + item.height - CONTROL_SIZE;
-        let top = (item.top.max(0.) + CONTROL_OFFSET)
+        // Under the sticky header, on the block it names, rather than behind
+        // it where nobody can press them.
+        let ceiling = if self.sticky == Some(item.index) {
+            STICKY_HEIGHT
+        } else {
+            0.
+        };
+        let top = (item.top.max(ceiling) + CONTROL_OFFSET)
             .min(lowest)
             .max(item.top.max(0.));
         // Counted from the outermost control inwards, so that a list with no
@@ -1778,6 +1812,9 @@ const SELECT_WASH_ALPHA: u8 = 22;
 /// How wide its edge stripe is, a touch wider than a running command's so the
 /// two never read as the same mark.
 const SELECT_STRIPE: f32 = STRIPE + 2.;
+
+/// How tall the sticky header over a block list is.
+pub(super) const STICKY_HEIGHT: f32 = 24.;
 
 /// How wide a bookmark's flag is, down the right edge of its block.
 const BOOKMARK_WIDTH: f32 = 4.;

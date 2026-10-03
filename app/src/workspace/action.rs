@@ -528,6 +528,14 @@ pub enum BlockAction {
     Rerun,
     /// Bookmark the block, or take its bookmark off.
     ToggleBookmark,
+    /// Bring a block's first line to the top of its pane's list. What a press
+    /// on the sticky header over a block does.
+    RevealTop {
+        /// Whose list.
+        pane: PaneId,
+        /// Which block of it — a finished one or the open one.
+        block: BlockId,
+    },
     /// Select the next bookmarked block of a pane's list, older or newer, and
     /// bring it into view.
     JumpToBookmark {

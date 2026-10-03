@@ -5000,6 +5000,7 @@ impl Workspace {
             BlockAction::JumpToBookmark { pane, older } => {
                 self.jump_to_bookmark(pane, older, ctx);
             }
+            BlockAction::RevealTop { pane, block } => self.reveal_block_top(pane, block, ctx),
             BlockAction::SelectUp(pane) => self.step_block_selection(pane, false, ctx),
             BlockAction::SelectDown(pane) => self.step_block_selection(pane, true, ctx),
             BlockAction::ClearSelection(pane) => {
@@ -5503,6 +5504,23 @@ impl Workspace {
             // not the same as scrolling to the block.
             BlockEdge::Bottom => heights.start(index + 1) - viewport,
         });
+        if view.apply(ScrollCause::ToLine(line)) {
+            ctx.notify();
+        }
+    }
+
+    /// Brings a block's first line to the top of the list: a finished one, or
+    /// the open one, which is the item after them all.
+    fn reveal_block_top(&mut self, pane: PaneId, block: BlockId, ctx: &mut ViewContext<Self>) {
+        let (Some(view), Some(history)) = (self.pane_blocks(pane), self.terminal_blocks(pane, ctx))
+        else {
+            return;
+        };
+        let index = history
+            .iter()
+            .position(|finished| finished.id == block)
+            .unwrap_or(history.len());
+        let line = view.with_heights(|heights| heights.start(index));
         if view.apply(ScrollCause::ToLine(line)) {
             ctx.notify();
         }
