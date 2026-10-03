@@ -728,6 +728,10 @@ pub struct Workspace {
     /// Whether the chain that re-reads `keybindings.json` while the settings
     /// are showing is already running — one at a time, like the themes'.
     watching_keybindings: bool,
+    /// Whether Crook is the terminal the system opens, as of the last time
+    /// the settings were shown; `None` where that cannot be asked or made so,
+    /// and until it has been. See [`crate::default_terminal`].
+    default_terminal: Option<bool>,
 
     /// Whether the desktop is set to dark, as of the last thing the window
     /// said about it.
@@ -1125,6 +1129,7 @@ impl Workspace {
             pending_keys: std::cell::RefCell::new(Vec::new()),
             recording: std::cell::RefCell::new(None),
             watching_keybindings: false,
+            default_terminal: None,
             window_size: Rc::new(std::cell::Cell::new(Vector2F::zero())),
             system_is_dark: true,
             window_focused: true,
@@ -4000,7 +4005,44 @@ impl Workspace {
         if !self.watching_keybindings {
             self.watch_keybindings(ctx);
         }
+        // Asked afresh each time the page is shown, since it is the system's
+        // and another terminal may have taken it since.
+        if self.settings_are_showing() {
+            self.ask_default_terminal(ctx);
+        }
         ctx.notify();
+    }
+
+    /// Asks the system, on the pool, whether Crook is its terminal. Never from
+    /// a test, whose answer would be the machine's running the suite.
+    fn ask_default_terminal(&self, ctx: &mut ViewContext<Self>) {
+        if cfg!(test) {
+            return;
+        }
+        let asking = ctx
+            .background()
+            .spawn(async move { crate::default_terminal::is_default() });
+        ctx.spawn(asking, |workspace, answer, ctx| {
+            workspace.adopt_default_terminal(answer, ctx);
+        })
+        .detach();
+    }
+
+    /// Whether Crook is the terminal the system opens, as last asked.
+    pub fn default_terminal(&self) -> Option<bool> {
+        self.default_terminal
+    }
+
+    /// Takes the system's answer to [`Self::default_terminal`].
+    pub(crate) fn adopt_default_terminal(
+        &mut self,
+        answer: Option<bool>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.default_terminal != answer {
+            self.default_terminal = answer;
+            ctx.notify();
+        }
     }
 
     /// Records that the window is another size, which the session file
@@ -9859,6 +9901,28 @@ impl Workspace {
                         })
                         .detach();
                 }
+            }
+            SettingsAction::MakeDefaultTerminal => {
+                if self.default_terminal != Some(false) {
+                    return;
+                }
+                // Said at once, and asked again once it is done, so that a
+                // refusal puts the button back rather than leaving the row
+                // claiming what the system did not do.
+                self.adopt_default_terminal(Some(true), ctx);
+                if cfg!(test) {
+                    return;
+                }
+                let making = ctx.background().spawn(async move {
+                    if let Err(why) = crate::default_terminal::make_default() {
+                        log::warn!("could not make Crook the default terminal: {why}");
+                    }
+                    crate::default_terminal::is_default()
+                });
+                ctx.spawn(making, |workspace, answer, ctx| {
+                    workspace.adopt_default_terminal(answer, ctx);
+                })
+                .detach();
             }
         }
     }

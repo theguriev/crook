@@ -772,6 +772,8 @@ pub enum SettingsAction {
     /// "Open at login": whether the system opens Crook when the person logs
     /// in.
     ToggleOpenAtLogin,
+    /// "Default terminal": makes Crook the terminal the system opens.
+    MakeDefaultTerminal,
     /// "Start a login shell": whether a pane's shell reads the startup files
     /// that only a login shell reads.
     ToggleLoginShell,
