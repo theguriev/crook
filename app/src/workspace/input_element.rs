@@ -684,6 +684,26 @@ impl Element for CommandInput {
         let Some(z_index) = self.z_index() else {
             return false;
         };
+
+        // The rest of a gesture this field opened is not hit tested, which is
+        // the grid's rule and for the grid's reason: the button can come up
+        // over the tabs panel, the find bar or a popup, all painted later, and
+        // a release dropped there left the drag open — so the next drag over
+        // the field, from no press at all, moved its selection from the old
+        // anchor. Neither does anything without a press of this field's own.
+        match event.raw_event() {
+            Event::MouseDragged {
+                button: MouseButton::Left,
+                position,
+                ..
+            } => return self.drag(*position, ctx),
+            Event::MouseUp {
+                button: MouseButton::Left,
+                ..
+            } => return self.input.release(),
+            _ => {}
+        }
+
         // Keystrokes are never filtered by what is painted over them; a press
         // is, so that a menu open over the pane is not typed through.
         let Some(event) = event.at_z_index(z_index, ctx) else {
@@ -699,15 +719,6 @@ impl Element for CommandInput {
                 click_count,
                 ..
             } => self.press(*position, *click_count, ctx),
-            Event::MouseDragged {
-                button: MouseButton::Left,
-                position,
-                ..
-            } => self.drag(*position, ctx),
-            Event::MouseUp {
-                button: MouseButton::Left,
-                ..
-            } => self.input.release(),
             _ => false,
         }
     }
