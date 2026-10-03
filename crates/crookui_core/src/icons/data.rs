@@ -20,6 +20,45 @@ pub(super) static CHEVRON_DOWN: &[Segment] = &[Move(6.0, 9.0), Line(12.0, 15.0),
 /// Lucide's `chevron-up`.
 pub(super) static CHEVRON_UP: &[Segment] = &[Move(18.0, 15.0), Line(12.0, 9.0), Line(6.0, 15.0)];
 
+/// Lucide's `case-sensitive`.
+pub(super) static CASE_SENSITIVE: &[Segment] = &[
+    Move(2.0, 16.0),
+    Line(6.039, 6.31),
+    Cubic(6.1165, 6.1241, 6.2991, 6.0024, 6.5005, 6.0024),
+    Cubic(6.7019, 6.0024, 6.8845, 6.1241, 6.962, 6.31),
+    Line(11.0, 16.0),
+    Move(22.0, 9.0),
+    Line(22.0, 16.0),
+    Move(3.304, 13.0),
+    Line(9.696, 13.0),
+    Move(22.0, 12.5),
+    Cubic(22.0, 14.433, 20.433, 16.0, 18.5, 16.0),
+    Cubic(16.567, 16.0, 15.0, 14.433, 15.0, 12.5),
+    Cubic(15.0, 10.567, 16.567, 9.0, 18.5, 9.0),
+    Cubic(20.433, 9.0, 22.0, 10.567, 22.0, 12.5),
+    Close,
+];
+
+/// Lucide's `regex`.
+pub(super) static REGEX: &[Segment] = &[
+    Move(17.0, 3.0),
+    Line(17.0, 13.0),
+    Move(12.67, 5.5),
+    Line(21.33, 10.5),
+    Move(12.67, 10.5),
+    Line(21.33, 5.5),
+    Move(9.0, 17.0),
+    Cubic(9.0, 15.9028, 8.0972, 15.0, 7.0, 15.0),
+    Line(5.0, 15.0),
+    Cubic(3.9028, 15.0, 3.0, 15.9028, 3.0, 17.0),
+    Line(3.0, 19.0),
+    Cubic(3.0, 20.0972, 3.9028, 21.0, 5.0, 21.0),
+    Line(7.0, 21.0),
+    Cubic(8.0972, 21.0, 9.0, 20.0972, 9.0, 19.0),
+    Line(9.0, 17.0),
+    Close,
+];
+
 /// Lucide's `chevron-right`.
 pub(super) static CHEVRON_RIGHT: &[Segment] = &[Move(9.0, 18.0), Line(15.0, 12.0), Line(9.0, 6.0)];
 
@@ -597,6 +636,8 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
     (Lucide::Check, "check", CHECK),
     (Lucide::ChevronDown, "chevron-down", CHEVRON_DOWN),
     (Lucide::ChevronUp, "chevron-up", CHEVRON_UP),
+    (Lucide::CaseSensitive, "case-sensitive", CASE_SENSITIVE),
+    (Lucide::Regex, "regex", REGEX),
     (Lucide::ChevronRight, "chevron-right", CHEVRON_RIGHT),
     (Lucide::Copy, "copy", COPY),
     (
@@ -633,7 +674,7 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
 ];
 
 /// How many there are.
-pub const ICONS: usize = 32;
+pub const ICONS: usize = 34;
 
 /// The icons Crook draws, from Lucide.
 ///
@@ -653,6 +694,14 @@ pub enum Lucide {
     ///
     /// Lucide's [`chevron-up`](https://lucide.dev/icons/chevron-up).
     ChevronUp,
+    /// The find bar's switch that makes a search tell capitals apart.
+    ///
+    /// Lucide's [`case-sensitive`](https://lucide.dev/icons/case-sensitive).
+    CaseSensitive,
+    /// The find bar's switch that reads the query as a regular expression.
+    ///
+    /// Lucide's [`regex`](https://lucide.dev/icons/regex).
+    Regex,
     /// A folded group's heading, in the same place.
     ///
     /// Lucide's [`chevron-right`](https://lucide.dev/icons/chevron-right).

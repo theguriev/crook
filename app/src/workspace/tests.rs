@@ -18775,6 +18775,52 @@ mod shells {
         }
 
         #[test]
+        fn the_switches_tell_capitals_apart_and_read_a_pattern() {
+            // `QVX qvx`: folded, two matches; told apart, one. As a pattern,
+            // `q.x` is the same two, and a pattern that does not compile is
+            // said on the bar rather than counted as nothing.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = searching(&mut harness, "QVX qvx", "qvx") else {
+                return;
+            };
+            let total = |harness: &Harness| {
+                harness.workspace.read(&harness.app, |workspace, app| {
+                    workspace.find_matches(pane, app).len()
+                })
+            };
+            let scene = harness.frame();
+            let bar = find_bar_box(&scene);
+            assert_eq!(icons_in(&scene, bar, Lucide::CaseSensitive).len(), 1);
+            assert_eq!(icons_in(&scene, bar, Lucide::Regex).len(), 1);
+
+            // Each one in the command line too: `printf 'QVX qvx'`.
+            assert_eq!(total(&harness), 4, "folded, every one");
+            harness.dispatch_workspace_action(WorkspaceAction::Find {
+                pane,
+                action: crate::workspace::action::FindAction::ToggleCase,
+            });
+            assert_eq!(total(&harness), 2, "told apart, only the small ones");
+
+            harness.dispatch_workspace_action(WorkspaceAction::Find {
+                pane,
+                action: crate::workspace::action::FindAction::ToggleRegex,
+            });
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("a find bar");
+            find.input().edit(|editor| editor.set_text("Q.X"));
+            assert_eq!(total(&harness), 2, "a pattern, told apart");
+
+            find.input().edit(|editor| editor.set_text("(unclosed"));
+            assert_eq!(total(&harness), 0);
+            assert!(
+                frame_text(&harness.frame()).contains("Bad pattern"),
+                "a pattern that does not compile was not said to be one"
+            );
+        }
+
+        #[test]
         fn the_bar_fits_the_pane_it_is_about() {
             // The bar hung off the pane's corner and was laid out against the
             // window, so it was as wide as it liked — 350 pixels — and in a

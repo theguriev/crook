@@ -659,6 +659,52 @@ fn find_all_folds_case_outside_ascii_and_lands_on_the_word() {
 }
 
 #[test]
+fn find_all_with_tells_capitals_apart_and_reads_a_pattern_when_asked() {
+    // Each command's name is in its prompt line in small letters and in its
+    // output twice in capitals.
+    let session = session(40, 12, &["alpha", "beta"]);
+    let blocks = session.blocks();
+    let count = |needle: &str, case_sensitive: bool, regex: bool| {
+        blocks
+            .find_all_with(
+                needle,
+                FindOptions {
+                    case_sensitive,
+                    regex,
+                },
+            )
+            .map(|found| found.len())
+    };
+
+    assert_eq!(count("ALPHA", false, false), Some(3), "folded: every one");
+    assert_eq!(
+        count("ALPHA", true, false),
+        Some(2),
+        "told apart: the output's"
+    );
+    assert_eq!(count("AL.HA", true, true), Some(2), "a pattern, told apart");
+    assert_eq!(count("al.ha", false, true), Some(3), "a pattern, folded");
+    assert_eq!(
+        count("x*", false, true),
+        Some(0),
+        "a match of nothing is none"
+    );
+    assert_eq!(count("(unclosed", false, true), None, "not a pattern");
+
+    // And a match covers the text it matched.
+    let found = blocks
+        .find_all_with(
+            "B[A-Z]+A",
+            FindOptions {
+                case_sensitive: true,
+                regex: true,
+            },
+        )
+        .expect("a pattern");
+    assert_eq!(Some("BETA".to_owned()), found[0].text(&blocks));
+}
+
+#[test]
 fn find_all_finds_every_occurrence_across_blocks_and_folds_ascii_case() {
     // Two commands, each printing its own name in capitals twice. The word
     // "one" appears once per command's output, so a search for it finds two,

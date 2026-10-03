@@ -50,6 +50,14 @@ struct State {
     /// exists again — at which point [`PaneFind::clamped`] brings it back inside
     /// the count rather than starting over at the top.
     current: usize,
+    /// Whether the search tells capitals apart, and whether it reads the
+    /// query as a regular expression. Kept with the bar rather than in the
+    /// settings: each is a fact about one search, set for it and left with
+    /// it, the way an editor's find keeps its own.
+    case_sensitive: bool,
+    regex: bool,
+    /// The two switches' hover states: case first, then regex.
+    switches: [MouseStateHandle; 2],
     /// The query [`Self::current`] was last counted against. When the query
     /// in the field is no longer this one, the search is a different search
     /// and [`PaneFind::follow_query`] takes the cursor back to the first
@@ -75,6 +83,9 @@ impl PaneFind {
             close_button: MouseStateHandle::default(),
             current: 0,
             last_query: String::new(),
+            case_sensitive: false,
+            regex: false,
+            switches: Default::default(),
         })))
     }
 
@@ -119,6 +130,33 @@ impl PaneFind {
     /// The close button's hover state.
     pub fn close_state(&self) -> MouseStateHandle {
         self.0.borrow().close_button.clone()
+    }
+
+    /// How the query is matched.
+    pub fn options(&self) -> crate::selection::FindOptions {
+        let state = self.0.borrow();
+        crate::selection::FindOptions {
+            case_sensitive: state.case_sensitive,
+            regex: state.regex,
+        }
+    }
+
+    /// Flips one of the two switches — case when `regex` is false — and
+    /// takes the cursor back to the first match, since a search matched
+    /// another way is a new search.
+    pub fn toggle(&self, regex: bool) {
+        let mut state = self.0.borrow_mut();
+        if regex {
+            state.regex = !state.regex;
+        } else {
+            state.case_sensitive = !state.case_sensitive;
+        }
+        state.current = 0;
+    }
+
+    /// A switch's hover state: the case switch, or the regex one.
+    pub fn switch_state(&self, regex: bool) -> MouseStateHandle {
+        self.0.borrow().switches[usize::from(regex)].clone()
     }
 
     /// What is being looked for.

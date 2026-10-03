@@ -548,9 +548,12 @@ Twenty features, and the page that configures them:
   command and the open one at once. Each match is highlighted where it is, the current one in
   the accent and the rest in amber; the bar counts them, Enter and Shift-Enter step between
   them and scroll the current one into view, and Escape hands the keyboard back to the shell
-  with the query kept for next time. It is a search, not a filter: the lines between the hits
-  stay where they are, because the output is a transcript. It opens only over the list of
-  commands, never over a full-screen program, where `ctrl-f` is the program's own key.
+  with the query kept for next time. Two switches on the bar change how it matches: `Aa` tells
+  capitals apart, and `.*` reads the query as a regular expression — one that does not compile
+  says so on the bar instead of counting no results. It is a search, not a filter: the lines
+  between the hits stay where they are, because the output is a transcript. It opens only over
+  the list of commands, never over a full-screen program, where `ctrl-f` is the program's own
+  key.
 - **Step through the commands with the keyboard.** `cmd-alt-up` and `cmd-alt-down`
   (`ctrl-alt-up` / `ctrl-alt-down` off macOS) move a selection through the finished blocks:
   up from the prompt lands on the last command, up walks to the oldest, down walks back and off
