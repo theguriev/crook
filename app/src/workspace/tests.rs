@@ -15995,6 +15995,40 @@ mod shells {
     }
 
     #[test]
+    fn a_release_over_the_tabs_panel_still_ends_a_drag_in_the_field() {
+        // The field's half of the grid's rule: the button can come up over a
+        // layer painted after it, and the drag has to end there all the same.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.type_field(pane, "echo hello world");
+
+        let scene = harness.frame();
+        let field = composer_boxes(&scene)[0];
+        let over_the_panel = center(panel_rows(&scene)[0]);
+        let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+        let text_left = field.min_x() + crate::workspace::body::GUTTER;
+        let middle = field.max_y() - crate::workspace::body::COMPOSER_PADDING_BOTTOM
+            + cell.height * 0.5
+            - cell.height;
+        let at = |column: f32| vec2f(text_left + cell.width * column, middle);
+
+        harness.hold(at(5.), 1);
+        harness.drag_to(at(10.));
+        harness.let_go(over_the_panel);
+        assert_eq!(harness.field_selection(pane), "hello");
+
+        // A drag with no press behind it: the gesture is over.
+        harness.drag_to(at(16.));
+        assert_eq!(
+            harness.field_selection(pane),
+            "hello",
+            "a drag the field was never pressed for moved its selection"
+        );
+    }
+
+    #[test]
     fn clicking_in_the_field_puts_the_caret_where_it_was_aimed() {
         // The mouse path through the real tree: a press at a point, hit-tested
         // against what was painted, landing on the boundary nearest it.
