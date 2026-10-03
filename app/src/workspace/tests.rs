@@ -24322,6 +24322,24 @@ fn a_closed_tab_comes_back_where_it_was_with_its_name_and_its_split() {
 }
 
 #[test]
+fn open_at_login_is_a_setting_the_page_switches() {
+    // Switched from the settings page's row, and kept in the file; the login
+    // entry itself is the system's, and a test never writes it.
+    let mut harness = Harness::new(1);
+    assert!(!harness.workspace.read(&harness.app, |workspace, _| {
+        workspace.general().open_at_login
+    }));
+    harness.dispatch_workspace_action(SettingsAction::ToggleOpenAtLogin.into());
+    assert!(harness.workspace.read(&harness.app, |workspace, _| {
+        workspace.general().open_at_login
+    }));
+    harness.dispatch_workspace_action(SettingsAction::ToggleOpenAtLogin.into());
+    assert!(!harness.workspace.read(&harness.app, |workspace, _| {
+        workspace.general().open_at_login
+    }));
+}
+
+#[test]
 fn the_arrows_step_over_a_group_heading() {
     // `close` matches three commands the window registered — closing a pane,
     // reopening a closed tab — and two the tabs did, so the list is a group

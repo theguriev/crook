@@ -417,6 +417,10 @@ pub struct GeneralOptions {
     /// banner at the end of every build is a banner a person learns to
     /// ignore, and the one that mattered goes with the rest.
     pub notify_on_long_command: bool,
+    /// Whether Crook is opened when the person logs in. See
+    /// [`crate::login_item`], which is what puts the entry in place: this is
+    /// what the person asked for, and the entry is what the system reads.
+    pub open_at_login: bool,
 }
 
 /// How wide the tabs panel is until its edge is dragged: Warp's
@@ -440,6 +444,7 @@ impl Default for GeneralOptions {
             notify_on_needs_input: true,
             notify_on_failed: false,
             notify_on_long_command: false,
+            open_at_login: false,
         }
     }
 }
@@ -1821,6 +1826,9 @@ mod tests {
                 "notify_on_failed",
                 "notify_on_long_command",
                 "notify_on_needs_input",
+                // Crook's own: an entry in the system's own list of programs
+                // to open at login.
+                "open_at_login",
                 "primary_info",
                 "restore_session",
                 "show_details_on_hover",
@@ -2025,11 +2033,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Nine tab options, eleven general ones and three theme names, and
+        // Nine tab options, twelve general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(23, written.len());
+        assert_eq!(24, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),

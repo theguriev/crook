@@ -131,6 +131,21 @@ fn appearance(workspace: &Workspace) -> Vec<Category> {
         ui,
     );
 
+    // Beside "Bring the tabs back": the other half of what happens when the
+    // day starts.
+    let login = widgets::row(
+        Words::new("Open at login")
+            .with_description("Open Crook when you log in to this computer.")
+            .with_keywords(&["startup", "login", "boot", "autostart", "launch", "start"]),
+        true,
+        widgets::switch(
+            workspace.general().open_at_login,
+            Some(SettingsAction::ToggleOpenAtLogin.into()),
+            state.control(named("open-at-login")),
+        ),
+        ui,
+    );
+
     // Beside "Bring the tabs back", because the two are one pair of facts
     // about the window's life: what comes back when it opens, and what it
     // asks before it goes. The row says what counts as working, since that
@@ -175,7 +190,10 @@ fn appearance(workspace: &Workspace) -> Vec<Category> {
     vec![
         widgets::category("Theme", theme_category(workspace)),
         widgets::category("Text", text_category(workspace)),
-        widgets::category("Tabs", vec![panel, granularity, density, restore, ask]),
+        widgets::category(
+            "Tabs",
+            vec![panel, granularity, density, restore, login, ask],
+        ),
         widgets::category("Rows", rows_category(workspace)),
     ]
 }
