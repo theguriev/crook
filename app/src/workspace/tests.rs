@@ -2451,6 +2451,39 @@ fn ending_every_agent_from_the_palette_quits_without_asking() {
 }
 
 #[test]
+fn dragging_a_divider_moves_the_split_and_a_double_click_evens_it_out() {
+    let mut harness = Harness::new(1);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+
+    let before = panel_boxes(&harness.frame());
+    assert_eq!(before.len(), 2, "two panes side by side");
+    // The one-pixel line is in the gap between the two panes.
+    let line = (before[0].max_x() + before[1].min_x()) / 2.;
+    let y = center(before[0]).y();
+
+    harness.hold(vec2f(line, y), 1);
+    harness.drag_to(vec2f(line + 60., y));
+    harness.let_go(vec2f(line + 60., y));
+    let dragged = panel_boxes(&harness.frame());
+    assert!(
+        dragged[0].width() > before[0].width() + 30.,
+        "the split did not move: {} then {}",
+        before[0].width(),
+        dragged[0].width()
+    );
+
+    let moved = (dragged[0].max_x() + dragged[1].min_x()) / 2.;
+    harness.hold(vec2f(moved, y), 2);
+    harness.let_go(vec2f(moved, y));
+    let evened = panel_boxes(&harness.frame());
+    assert_eq!(
+        evened[0].width(),
+        before[0].width(),
+        "a double click did not even the split out"
+    );
+}
+
+#[test]
 fn the_keyboard_alone_can_end_them_once_it_has_moved_off_cancel() {
     // A pane running `ssh` is working, and so is every pane with a pager, a
     // dev server or a busy agent in it. A person with no pointer has to be
