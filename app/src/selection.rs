@@ -505,8 +505,20 @@ impl<'a> Blocks<'a> {
     /// [`Blocks::walk`] writes between two rows, so a query with no newline in it is
     /// found within one logical line, folds and all.
     pub fn find_all(&self, needle: &str) -> Vec<Selection> {
+        self.find_all_with(needle, FindOptions::default())
+            .unwrap_or_default()
+    }
+
+    /// [`Self::find_all`], matched as `options` says: telling capitals apart,
+    /// or reading `needle` as a regular expression. `None` for a pattern that
+    /// is not one, which a find bar says rather than showing "no results".
+    ///
+    /// A regular expression is matched against the output as it reads, line
+    /// breaks included, and a match of nothing — `a*` before every character
+    /// — is no match: there is nothing to highlight in it.
+    pub fn find_all_with(&self, needle: &str, options: FindOptions) -> Option<Vec<Selection>> {
         if needle.is_empty() {
-            return Vec::new();
+            return Some(Vec::new());
         }
 
         let mut showing = String::new();
@@ -516,27 +528,56 @@ impl<'a> Blocks<'a> {
             at.push(place);
         });
 
-        // Folded one character for one, so the folded haystack has exactly
-        // as many characters as `at` has places: a char count up to a byte of
-        // the haystack is the index into `at`, whatever the fold did to the
-        // bytes.
-        let haystack: String = showing.chars().map(fold).collect();
-        let needle: String = needle.chars().map(fold).collect();
-        let needle_chars = needle.chars().count();
+        // Every span is in bytes of `haystack`, which has exactly as many
+        // characters as `at` has places: the output itself, or its fold —
+        // one character for one, see [`fold`].
+        let (haystack, spans): (String, Vec<(usize, usize)>) = if options.regex {
+            let pattern = regex::RegexBuilder::new(needle)
+                .case_insensitive(!options.case_sensitive)
+                // A pattern a person typed, compiled on every frame the bar is
+                // open: bounded, so a pathological one is refused rather than
+                // building an automaton the size of the output.
+                .size_limit(1 << 20)
+                .build()
+                .ok()?;
+            let spans = pattern
+                .find_iter(&showing)
+                .filter(|found| !found.is_empty())
+                .map(|found| (found.start(), found.end()))
+                .collect();
+            (showing, spans)
+        } else {
+            let (haystack, needle): (String, String) = if options.case_sensitive {
+                (showing, needle.to_owned())
+            } else {
+                (
+                    showing.chars().map(fold).collect(),
+                    needle.chars().map(fold).collect(),
+                )
+            };
+            let mut spans = Vec::new();
+            let mut from = 0;
+            // Past the whole match each time, so overlapping runs of a repeated
+            // needle are counted once each rather than at every offset.
+            while let Some(relative) = haystack[from..].find(&needle) {
+                let start = from + relative;
+                spans.push((start, start + needle.len()));
+                from = start + needle.len();
+            }
+            (haystack, spans)
+        };
 
-        let mut found = Vec::new();
-        let mut from = 0;
+        let mut found = Vec::with_capacity(spans.len());
         // How many chars come before `counted`, carried forward from one match
         // to the next: counting from the start for each match made a search
         // that matched often in a long output quadratic, on every frame the
         // find bar is open.
         let (mut counted, mut chars) = (0, 0);
-        while let Some(relative) = haystack[from..].find(&needle) {
-            let byte = from + relative;
-            chars += haystack[counted..byte].chars().count();
-            counted = byte;
+        for (start, end) in spans {
+            chars += haystack[counted..start].chars().count();
+            counted = start;
             let first = chars;
-            let last = first + needle_chars - 1;
+            let last = first + haystack[start..end].chars().count() - 1;
             if let (Some(start), Some(end)) = (at.get(first), at.get(last)) {
                 found.push(Selection::new(
                     SelectionKind::Simple,
@@ -544,11 +585,8 @@ impl<'a> Blocks<'a> {
                     Anchor::new(end.block, end.row, end.column, CellSide::Right),
                 ));
             }
-            // Past the whole match, so overlapping runs of a repeated needle
-            // are counted once each rather than at every offset.
-            from = byte + needle.len();
         }
-        found
+        Some(found)
     }
 
     /// The selection that runs from the start of the first `from` to the end
@@ -606,6 +644,15 @@ impl<'a> Blocks<'a> {
             }
         }
     }
+}
+
+/// How a find matches its query against the output.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct FindOptions {
+    /// Capitals told apart from small letters, rather than folded together.
+    pub case_sensitive: bool,
+    /// The query read as a regular expression, rather than as text.
+    pub regex: bool,
 }
 
 /// `character` as a find compares it: its lowercase, when that is one

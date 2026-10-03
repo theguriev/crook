@@ -219,6 +219,10 @@ pub enum FindAction {
         /// Forwards, rather than back.
         forward: bool,
     },
+    /// Flip whether the search tells capitals apart.
+    ToggleCase,
+    /// Flip whether the query is read as a regular expression.
+    ToggleRegex,
 }
 
 /// What the header does as a title bar.

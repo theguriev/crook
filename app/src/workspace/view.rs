@@ -3567,7 +3567,25 @@ impl Workspace {
         else {
             return Vec::new();
         };
-        Blocks::list(&history, &snapshot).find_all(&query)
+        Blocks::list(&history, &snapshot)
+            .find_all_with(&query, find.options())
+            .unwrap_or_default()
+    }
+
+    /// Whether the find bar's query is a regular expression that does not
+    /// compile, which the bar says rather than counting no results.
+    pub(super) fn find_pattern_is_bad(&self, pane: PaneId) -> bool {
+        let Some(find) = self.find(pane) else {
+            return false;
+        };
+        let options = find.options();
+        let query = find.query();
+        options.regex
+            && !query.is_empty()
+            && regex::RegexBuilder::new(&query)
+                .size_limit(1 << 20)
+                .build()
+                .is_err()
     }
 
     /// Opens a pane's find bar with `query` already in it.
@@ -3615,6 +3633,15 @@ impl Workspace {
             }
             FindAction::Close => {
                 find.close();
+            }
+            FindAction::ToggleCase | FindAction::ToggleRegex => {
+                find.toggle(action == FindAction::ToggleRegex);
+                // The first match of the search as it now reads, the way a
+                // changed query lands on its first.
+                let matches = self.find_matches(pane, ctx);
+                if let Some(current) = find.clamped(matches.len()) {
+                    self.scroll_find_into_view(pane, &matches[current], ctx);
+                }
             }
             FindAction::Step { forward } => {
                 let matches = self.find_matches(pane, ctx);

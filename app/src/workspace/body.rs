@@ -1524,6 +1524,8 @@ fn find_bar(
 
     let count = if find.query().is_empty() {
         String::new()
+    } else if workspace.find_pattern_is_bad(pane) {
+        "Bad pattern".to_owned()
     } else if !has_matches {
         "No results".to_owned()
     } else {
@@ -1564,6 +1566,42 @@ fn find_bar(
             .finish(),
         );
 
+    // The two switches give way like the field and the count, and are cut
+    // rather than spilled: in a pane too narrow for everything, the steps and
+    // the way out are what the bar must keep.
+    let options = find.options();
+    row.add_child(
+        Shrinkable::new(
+            1.,
+            Clipped::new(
+                Flex::row()
+                    .with_main_axis_size(MainAxisSize::Min)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_spacing(2.)
+                    .with_child(find_switch(
+                        find.switch_state(false),
+                        Lucide::CaseSensitive,
+                        WorkspaceAction::Find {
+                            pane,
+                            action: FindAction::ToggleCase,
+                        },
+                        options.case_sensitive,
+                    ))
+                    .with_child(find_switch(
+                        find.switch_state(true),
+                        Lucide::Regex,
+                        WorkspaceAction::Find {
+                            pane,
+                            action: FindAction::ToggleRegex,
+                        },
+                        options.regex,
+                    ))
+                    .finish(),
+            )
+            .finish(),
+        )
+        .finish(),
+    );
     row.add_child(find_button(
         find.step_state(false),
         Lucide::ChevronUp,
@@ -1603,6 +1641,42 @@ fn find_bar(
             right: 6.,
         })
         .finish()
+}
+
+/// One of the find bar's two switches — capitals told apart, a regular
+/// expression — which shows whether it is on by a ground that stays lit,
+/// where a button's ground only lights under the pointer.
+fn find_switch(
+    state: MouseStateHandle,
+    icon: Lucide,
+    action: WorkspaceAction,
+    on: bool,
+) -> Box<dyn Element> {
+    Hoverable::new(state, move |mouse| {
+        let ground = if on {
+            theme().accent.with_alpha(64)
+        } else if mouse.is_hovered() {
+            theme().overlay_2
+        } else {
+            Color::TRANSPARENT
+        };
+        let colour = if on {
+            theme().text_primary
+        } else {
+            theme().text_muted
+        };
+        Container::new(
+            Icon::new(icon, FIND_BUTTON_ICON)
+                .with_color(colour)
+                .finish(),
+        )
+        .with_uniform_padding(FIND_BUTTON_PADDING)
+        .with_background_color(ground)
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+        .finish()
+    })
+    .on_click(move |_, ctx, _| ctx.dispatch_typed_action(action))
+    .finish()
 }
 
 /// One of the find bar's buttons: an icon that lights under the pointer and
