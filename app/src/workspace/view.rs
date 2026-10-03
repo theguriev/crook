@@ -9841,6 +9841,25 @@ impl Workspace {
                 // window gets what they asked for.
                 self.save_session(ctx);
             }
+            SettingsAction::ToggleOpenAtLogin => {
+                let mut general = self.general();
+                general.open_at_login = !general.open_at_login;
+                let enabled = general.open_at_login;
+                self.set_general(general, ctx);
+                // The setting is what the person asked for; the entry is the
+                // system's, written on the pool — Windows' is a process — and
+                // never from a test, which must not leave a login item on the
+                // machine running the suite.
+                if !cfg!(test) {
+                    ctx.background()
+                        .spawn(async move {
+                            if let Err(why) = crate::login_item::apply(enabled) {
+                                log::warn!("could not change the login item: {why}");
+                            }
+                        })
+                        .detach();
+                }
+            }
         }
     }
 

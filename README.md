@@ -787,7 +787,9 @@ Twenty features, and the page that configures them:
   not do something. Changes apply on the click and are
   written to `<config>/crook/settings.json`, which is the same eight keys that menu writes, the
   status marks, the theme, the light and dark pair it follows the desktop between, the
-  terminal's type size, whether the tabs come back, which stops post a notification, and —
+  terminal's type size, whether the tabs come back, whether Crook opens at login (a
+  LaunchAgent on macOS, an XDG autostart entry on Linux, the `Run` key on Windows — each the
+  person's own and taken out again when switched off), which stops post a notification, and —
   set in the file rather than on the page — its font family and the line each agent is resumed
   with.
   The type size is also on `cmd/ctrl-plus`, `-minus` and `-0`, and every pane resizes with it:

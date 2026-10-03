@@ -61,6 +61,7 @@ pub mod git;
 pub mod git_model;
 pub mod input_keys;
 pub mod keybindings;
+pub mod login_item;
 pub mod notify;
 pub mod order;
 pub mod pane_blocks;
