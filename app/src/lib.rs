@@ -1071,8 +1071,12 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
                 // them exist is not known until they have built, and a build
                 // with an extra plugin should accept that plugin's page here
                 // without this list growing a line.
+                // Any flag, short as well as long: `-e`, `-h` and `-V` are
+                // flags of this command line, and `--settings -e htop` read
+                // `-e` as a page and then refused `htop`. No page's title
+                // starts with a dash.
                 let page = match args.peek().map(String::as_str) {
-                    Some(other) if !other.starts_with("--") => Some(other.to_owned()),
+                    Some(other) if !other.starts_with('-') => Some(other.to_owned()),
                     _ => None,
                 };
                 if page.is_some() {
@@ -4697,6 +4701,15 @@ mod tests {
                     ..Overrides::default()
                 }
             }
+        );
+        // A short flag after it is a flag, not a page.
+        assert_eq!(
+            window_overrides(&["--settings", "-e", "htop"]).settings,
+            Some(None)
+        );
+        assert_eq!(
+            parse(&["--settings", "-V"]).expect("valid"),
+            Startup::Answered
         );
         // A page name is not checked here: the pages come from plugins, so
         // which of them exist is not known until they have built. An unknown
