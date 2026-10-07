@@ -770,6 +770,18 @@ pub struct Workspace {
     /// Which panes have posted a notification lately, so that one which
     /// flaps posts once. See [`crate::notify::QUIET`].
     notified: Cooldown,
+    /// Whether a running agent's mark may breathe at all.
+    ///
+    /// Off until the window on a desktop says otherwise — see
+    /// [`Self::let_marks_breathe`] — because a test and a snapshot want the
+    /// one frame they draw to be frame zero, the full colour, every time.
+    marks_breathe: bool,
+    /// Whether the chain that moves the breath is running, so that a second
+    /// agent starting while the first still works does not start another.
+    breathing: bool,
+    /// How many frames that chain has drawn. See
+    /// [`crate::plugins::tabs::status_mark`].
+    breath: usize,
     interactions: HashMap<PaneId, PaneInteraction>,
     /// What the mouse is doing to each tab's chrome in the panel.
     ///
@@ -1144,6 +1156,9 @@ impl Workspace {
             looked_at_when_left: None,
             notifier: Rc::new(Silent),
             notified: Cooldown::default(),
+            marks_breathe: false,
+            breathing: false,
+            breath: 0,
             interactions: HashMap::new(),
             tab_chrome: HashMap::new(),
             group_chrome: HashMap::new(),
@@ -5038,6 +5053,79 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// How far into its breath a running agent's mark is, in frames.
+    pub fn breath(&self) -> usize {
+        self.breath
+    }
+
+    /// Puts the breath at `frame`, for a test that wants a frame the chain
+    /// it does not start would have drawn.
+    #[cfg(test)]
+    pub(super) fn set_breath(&mut self, frame: usize) {
+        self.breath = frame;
+    }
+
+    /// Lets a running agent's mark breathe from now on, and starts it if an
+    /// agent is already at work. Call once, after the window exists.
+    pub fn let_marks_breathe(&mut self, ctx: &mut ViewContext<Self>) {
+        self.marks_breathe = true;
+        self.start_breathing(ctx);
+    }
+
+    /// Starts the running marks breathing, unless they already are or no
+    /// agent is running.
+    ///
+    /// Called whenever a pane turns to running. The chain runs for as long as
+    /// one does and then ends, the way the pirate's bite ends with the wait it
+    /// was drawn for — so a window whose agents have all stopped, or never
+    /// started, has no tick at all.
+    fn start_breathing(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self.marks_breathe || self.breathing || !self.an_agent_is_running() {
+            return;
+        }
+        self.breathing = true;
+        self.keep_breathing(ctx);
+    }
+
+    /// Waits out one frame of the breath and draws the next, while an agent
+    /// is running.
+    ///
+    /// The bite's shape and the bite's argument for not being counted in
+    /// `PARKED_WORKERS`: one chain at most, parking a worker for one
+    /// [`BREATH_FRAME`](crate::plugins::tabs::BREATH_FRAME) at a time. It
+    /// repaints only while the tab list is the thing in the sidebar — a
+    /// hidden panel or a settings page has no mark on it to move — and keeps
+    /// counting either way, which costs nothing and means the list it comes
+    /// back to is mid-breath rather than restarting it.
+    fn keep_breathing(&self, ctx: &mut ViewContext<Self>) {
+        let waiting = ctx
+            .background()
+            .spawn(async { std::thread::sleep(crate::plugins::tabs::BREATH_FRAME) });
+
+        ctx.spawn(waiting, |workspace, (), ctx| {
+            if workspace.an_agent_is_running() {
+                workspace.breath = workspace.breath.wrapping_add(1);
+                if workspace.panel_search_is_showing() {
+                    ctx.notify();
+                }
+                workspace.keep_breathing(ctx);
+                return;
+            }
+            // Over. Back to the full colour for whatever agent starts next,
+            // and no repaint: no mark is drawn running any more.
+            workspace.breathing = false;
+            workspace.breath = 0;
+        })
+        .detach();
+    }
+
+    /// Whether any pane in the window shows a running agent.
+    fn an_agent_is_running(&self) -> bool {
+        self.tabs
+            .panes()
+            .any(|(_, pane)| pane.status() == AgentStatus::Running)
+    }
+
     /// Starts the pirate chewing, unless he already is or there is nothing
     /// to chew on.
     ///
@@ -7679,6 +7767,9 @@ impl Workspace {
             }
         });
         self.tell_the_desktop(pane, was, ctx);
+        if status == AgentStatus::Running {
+            self.start_breathing(ctx);
+        }
         reported
     }
 

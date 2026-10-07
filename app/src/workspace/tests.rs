@@ -11999,6 +11999,75 @@ impl Harness {
     }
 }
 
+impl Harness {
+    /// Puts a running mark `frame` frames into its breath.
+    fn breathe_to(&mut self, frame: usize) {
+        let workspace = &self.workspace;
+        self.app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| {
+                workspace.set_breath(frame);
+                ctx.notify();
+            });
+        });
+    }
+}
+
+#[test]
+fn a_running_mark_fades_halfway_through_its_breath_and_comes_back() {
+    // The breath starts on the full colour, so a still window — this one, a
+    // snapshot — draws the mark it always drew.
+    let (mut harness, _) = Harness::folded_group_with(AgentStatus::Running);
+    let accent = super::status_color(AgentStatus::Running);
+
+    let scene = harness.frame();
+    assert_eq!(
+        heading_disc(&scene, panel_heading(&scene)),
+        Some(accent),
+        "a running mark at the top of its breath is not the full accent"
+    );
+
+    harness.breathe_to(crate::plugins::tabs::BREATH_FRAMES / 2);
+    let scene = harness.frame();
+    let faded = heading_disc(&scene, panel_heading(&scene)).expect("no running mark");
+    assert_eq!(
+        (faded.r, faded.g, faded.b),
+        (accent.r, accent.g, accent.b),
+        "the breath changed the mark's colour rather than how much of it shows"
+    );
+    assert!(
+        f32::from(faded.a) < f32::from(accent.a) * 0.4,
+        "halfway through its breath the mark is still at alpha {} of {}",
+        faded.a,
+        accent.a
+    );
+
+    harness.breathe_to(crate::plugins::tabs::BREATH_FRAMES);
+    let scene = harness.frame();
+    assert_eq!(
+        heading_disc(&scene, panel_heading(&scene)),
+        Some(accent),
+        "a whole breath does not come back to the full accent"
+    );
+}
+
+#[test]
+fn only_a_running_mark_breathes() {
+    // A stopped agent's mark is waiting on a person; it has said so with its
+    // colour and does not fade in and out to say it again. (An idle group's
+    // heading carries no mark at all, so idle is not asked here.)
+    for status in [AgentStatus::NeedsInput, AgentStatus::Failed] {
+        let (mut harness, _) = Harness::folded_group_with(status);
+        harness.breathe_to(crate::plugins::tabs::BREATH_FRAMES / 2);
+
+        let scene = harness.frame();
+        assert_eq!(
+            heading_disc(&scene, panel_heading(&scene)),
+            Some(super::status_color(status)),
+            "a {status:?} mark faded with the breath"
+        );
+    }
+}
+
 #[test]
 fn a_folded_group_s_heading_is_washed_and_marked_for_a_waiting_member() {
     // The row that would have been amber is behind the fold, so the heading

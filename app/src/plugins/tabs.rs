@@ -1268,11 +1268,50 @@ pub fn mark(workspace: &Workspace, row: &TabRow<'_>, app: &AppContext) -> Box<dy
 /// group's heading carries for the worst of its members — the heading has no
 /// row behind it to offer the slot, so it is the host's answer and only
 /// that, which keeps a group's mark the same shape as its members'.
+///
+/// A running mark breathes: its colour fades towards [`BREATH_FLOOR`] and
+/// back over [`BREATH_FRAMES`] frames, so a row whose agent is working can be
+/// told from one whose agent stopped without a pointer over it. The other
+/// three states stay still — they are each waiting on a person or on nothing,
+/// and a mark that moved for them would be asking for a look it has already
+/// asked for with its colour.
 pub fn status_mark(workspace: &Workspace, status: AgentStatus) -> Box<dyn Element> {
-    match workspace.options().status_marks {
-        StatusMarks::Dots => disc(status),
-        StatusMarks::Glyphs => glyph(status),
+    let mut color = status_color(status);
+    if status == AgentStatus::Running {
+        color = color.with_alpha((f32::from(color.a) * breath(workspace.breath())).round() as u8);
     }
+    match workspace.options().status_marks {
+        StatusMarks::Dots => disc(color),
+        StatusMarks::Glyphs => glyph(status, color),
+    }
+}
+
+/// How long one frame of a running mark's breath is held.
+///
+/// Slow enough that a dozen working rows are a calm list rather than a
+/// flicker, and quick enough that the fade reads as a fade and not as steps:
+/// at this rate a full breath is twenty-five frames.
+pub const BREATH_FRAME: std::time::Duration = std::time::Duration::from_millis(80);
+
+/// How many frames one breath takes, in and out: two seconds at
+/// [`BREATH_FRAME`], about a resting breath.
+pub const BREATH_FRAMES: usize = 25;
+
+/// The faintest a running mark gets, as a share of its colour's own alpha.
+///
+/// Not zero: a mark that vanished would leave a row that, for a moment, says
+/// nothing at all, which is idle's job and not running's.
+const BREATH_FLOOR: f32 = 0.3;
+
+/// How much of its colour a running mark shows `frame` frames into breathing.
+///
+/// A cosine rather than a triangle, so the mark eases at both ends instead of
+/// bouncing off them. Frame zero is the full colour, which is what a still
+/// window — a snapshot, a test, an agent that has only just started — draws.
+fn breath(frame: usize) -> f32 {
+    let phase = (frame % BREATH_FRAMES) as f32 / BREATH_FRAMES as f32;
+    let swell = 0.5 + 0.5 * (phase * std::f32::consts::TAU).cos();
+    BREATH_FLOOR + (1. - BREATH_FLOOR) * swell
 }
 
 /// What a row's mark is when nothing has replaced it: a status-coloured disc.
@@ -1282,12 +1321,12 @@ pub fn status_mark(workspace: &Workspace, status: AgentStatus) -> Box<dyn Elemen
 /// own colour — one mark instead of two, in the same reserved box, so rows
 /// line up with Warp's. The corner it left free is what [`TAB_ROW_BADGE`] is.
 /// The other answer, for a person the colour says nothing to, is [`glyph`].
-fn disc(status: AgentStatus) -> Box<dyn Element> {
+fn disc(color: Color) -> Box<dyn Element> {
     let diameter = MARK_SIZE * DISC_RATIO;
 
     ConstrainedBox::new(
         Container::new(Empty::new().finish())
-            .with_background_color(status_color(status))
+            .with_background_color(color)
             .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
             .finish(),
     )
@@ -1307,9 +1346,9 @@ fn disc(status: AgentStatus) -> Box<dyn Element> {
 /// that are waiting. The `circle` is hollow so that idle is the quietest of
 /// the four — the disc's grey was already the one that said nothing — and
 /// the cross in a ring is the failure everybody recognises. Nothing here
-/// turns or blinks: a spinner for a running agent would be the idle timer
-/// the window keeps none of.
-fn glyph(status: AgentStatus) -> Box<dyn Element> {
+/// turns: the `play` breathes like the disc does, in `color`, and that is
+/// the one movement either mark makes.
+fn glyph(status: AgentStatus, color: Color) -> Box<dyn Element> {
     let icon = match status {
         AgentStatus::Idle => Lucide::Circle,
         AgentStatus::Running => Lucide::Play,
@@ -1318,7 +1357,7 @@ fn glyph(status: AgentStatus) -> Box<dyn Element> {
     };
 
     Icon::new(icon, MARK_SIZE * DISC_RATIO)
-        .with_color(status_color(status))
+        .with_color(color)
         .finish()
 }
 
