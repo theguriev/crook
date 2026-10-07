@@ -56,6 +56,7 @@ pub mod completion;
 pub mod control;
 pub mod default_terminal;
 pub mod diagnostics;
+pub mod duo;
 pub mod editor;
 pub mod filename;
 pub mod forge;

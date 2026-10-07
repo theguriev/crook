@@ -1234,13 +1234,24 @@ fn manifest() -> &'static Manifest {
 /// The mark at the head of one row, with whatever is on its corner.
 pub fn mark(workspace: &Workspace, row: &TabRow<'_>, app: &AppContext) -> Box<dyn Element> {
     let host = workspace.host();
-    let face = host
+    let taken = host
         .rows()
         .one(TAB_ROW_MARK, |build| build(workspace, row, app))
-        .flatten()
-        .unwrap_or_else(|| status_mark(workspace, row.status));
+        .flatten();
+    let plugin_drew_the_face = taken.is_some();
+    let face = taken.unwrap_or_else(|| status_mark(workspace, row.status));
 
     let mut stack = Stack::new().with_child(Align::new(face).finish());
+    // A plugin that took the mark took the status with it — an emoji says
+    // nothing about whether the agent behind it is working — so the status
+    // comes back as a pip on the top corner, the one the badges leave free.
+    if plugin_drew_the_face && row.status != AgentStatus::Idle {
+        stack.add_child(
+            Align::new(status_pip(workspace, row.status))
+                .top_right()
+                .finish(),
+        );
+    }
     // A plugin's badge first, then the zoom's: the corner is one thing at a
     // time, and a plugin that took it has said something about the row that
     // outlives a keystroke.
@@ -1276,15 +1287,56 @@ pub fn mark(workspace: &Workspace, row: &TabRow<'_>, app: &AppContext) -> Box<dy
 /// and a mark that moved for them would be asking for a look it has already
 /// asked for with its colour.
 pub fn status_mark(workspace: &Workspace, status: AgentStatus) -> Box<dyn Element> {
-    let mut color = status_color(status);
-    if status == AgentStatus::Running {
-        color = color.with_alpha((f32::from(color.a) * breath(workspace.breath())).round() as u8);
-    }
+    let color = mark_color(workspace, status);
     match workspace.options().status_marks {
         StatusMarks::Dots => disc(color),
         StatusMarks::Glyphs => glyph(status, color),
     }
 }
+
+/// The colour a status's mark is drawn in at this moment: its own, faded by
+/// the breath when it is running.
+fn mark_color(workspace: &Workspace, status: AgentStatus) -> Color {
+    let color = status_color(status);
+    if status != AgentStatus::Running {
+        return color;
+    }
+    color.with_alpha((f32::from(color.a) * breath(workspace.breath())).round() as u8)
+}
+
+/// The status, small, on the corner of a mark a plugin drew.
+///
+/// A running agent is the Duo pirate grinning (see [`crate::duo`]): a moving
+/// mouth is legible at a size where a fading dot is a smudge. A frame every
+/// two breaths, because a list may hold several of him, and a dozen mouths
+/// at full speed is a flicker.
+///
+/// The stopped states are a dot in the disc's colour at a badge's inside
+/// size, with no ring: a saturated dot over an emoji does not need one.
+/// Always a dot whatever "Status marks" says, since a glyph at eight pixels
+/// is a smudge too.
+fn status_pip(workspace: &Workspace, status: AgentStatus) -> Box<dyn Element> {
+    if status == AgentStatus::Running {
+        return crate::duo::mark(workspace.breath() / 2, PIP_PIRATE_SIZE);
+    }
+    let diameter = MARK_SIZE * BADGE_RATIO - 2. * BADGE_RING;
+    ConstrainedBox::new(
+        Container::new(Empty::new().finish())
+            .with_background_color(status_color(status))
+            .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
+            .finish(),
+    )
+    .with_width(diameter)
+    .with_height(diameter)
+    .finish()
+}
+
+/// How big the pirate on a plugin's mark is drawn.
+///
+/// Tried at 10, 12 and 14 over the emoji plugin's marks, and 10 is the one
+/// that was picked: the grin and the teeth still read, and he stays a mark
+/// on the emoji's corner rather than a second emoji beside it.
+pub const PIP_PIRATE_SIZE: f32 = 10.;
 
 /// How long one frame of a running mark's breath is held.
 ///

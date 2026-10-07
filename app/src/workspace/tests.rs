@@ -28843,6 +28843,120 @@ fn a_row_the_plugin_declines_keeps_the_disc_it_had() {
     );
 }
 
+/// The status pips on the corners of plugin-drawn marks: round, the size of
+/// a badge's inside, filled. Each with its bounds and colour, in panel order.
+fn status_pips(scene: &Scene) -> Vec<(RectF, Color)> {
+    let panel = panel_box(scene);
+    let inside = crate::plugins::tabs::MARK_SIZE * 0.46 - 3.;
+    let mut pips: Vec<(RectF, Color)> = visible_rects(scene)
+        .filter(|(rect, bounds)| {
+            rect.corner_radius.get_top_left() == Radius::Percentage(50.)
+                && (bounds.width() - inside).abs() < 0.5
+                && panel.contains_point(center(*bounds))
+        })
+        .filter_map(|(rect, bounds)| match rect.background {
+            Fill::Solid(color) => Some((bounds, color)),
+            _ => None,
+        })
+        .collect();
+    pips.sort_by(|left, right| left.0.min_y().total_cmp(&right.0.min_y()));
+    pips
+}
+
+impl Harness {
+    /// [`Self::with_marks`] with one row in each of the four states, in
+    /// [`EVERY_STATUS`]'s order.
+    fn marks_one_row_per_status() -> Self {
+        let mut harness = Harness::with_marks(EVERY_STATUS.len());
+        let panes = harness.pane_ids();
+        for (pane, status) in panes.into_iter().zip(EVERY_STATUS) {
+            harness.update_session(pane, |session| session.status = status);
+        }
+        harness
+    }
+}
+
+/// The Duo pirates painted inside `bounds`: where each is and which of his
+/// six frames it is.
+fn pirate_faces(scene: &Scene, bounds: RectF) -> Vec<(RectF, usize)> {
+    scene
+        .layers()
+        .flat_map(|layer| layer.images.iter())
+        .filter(|drawn| bounds.contains_point(center(drawn.bounds)))
+        .filter_map(|drawn| {
+            crate::duo::frames()
+                .iter()
+                .position(|frame| frame.id() == drawn.bitmap.id())
+                .map(|frame| (drawn.bounds, frame))
+        })
+        .collect()
+}
+
+#[test]
+fn a_mark_a_plugin_took_carries_the_status_on_its_top_corner() {
+    // An emoji where the disc was says nothing about the agent behind it, so
+    // the status comes back small, top right, where no badge goes: the
+    // pirate for the running row, a dot in its own colour for the two
+    // stopped ones. Idle has nothing to say — its disc was the grey that
+    // said nothing — and gets neither.
+    let mut harness = Harness::marks_one_row_per_status();
+
+    let scene = harness.frame();
+    let rows = tab_boxes(&scene);
+    let marks = icons_in(&scene, panel_box(&scene), MARK_ICON);
+    let pirates = pirate_faces(&scene, panel_box(&scene));
+    let pips = status_pips(&scene);
+    assert!(
+        badge_rings(&scene).is_empty(),
+        "a status is drawn in a badge's ring; it has none"
+    );
+
+    assert_eq!(pirates.len(), 1, "one running row, one pirate");
+    assert_eq!(
+        pips.iter().map(|(_, color)| *color).collect::<Vec<_>>(),
+        [AgentStatus::NeedsInput, AgentStatus::Failed].map(super::status_color),
+        "the dots are not needs-input and failed, in that order"
+    );
+
+    let corners = std::iter::once(pirates[0].0).chain(pips.iter().map(|(bounds, _)| *bounds));
+    for (bounds, row) in corners.zip(&rows[1..]) {
+        assert!(
+            row.contains_point(center(bounds)),
+            "a status is on the wrong row"
+        );
+        let mark = marks
+            .iter()
+            .find(|mark| row.contains_point(center(**mark)))
+            .expect("the row has its plugin mark");
+        assert!(
+            center(bounds).x() > center(*mark).x() && center(bounds).y() < center(*mark).y(),
+            "the status is not on the mark's top-right corner: {bounds:?} against {mark:?}"
+        );
+    }
+}
+
+#[test]
+fn the_pirate_on_a_running_row_chews_and_the_stopped_dots_stay_still() {
+    let mut harness = Harness::marks_one_row_per_status();
+
+    let mut bites = Vec::new();
+    for frame in (0..2 * crate::duo::CYCLE.len()).step_by(2) {
+        harness.breathe_to(frame);
+        let scene = harness.frame();
+        bites.push(pirate_faces(&scene, panel_box(&scene))[0].1);
+        assert_eq!(
+            status_pips(&scene)[0].1,
+            super::status_color(AgentStatus::NeedsInput),
+            "a stopped dot changed with the breath"
+        );
+    }
+    assert_eq!(
+        bites,
+        crate::duo::CYCLE,
+        "a frame every two breaths is not one whole grin"
+    );
+}
+
 /// The glyph the host draws for a status under `StatusMarks::Glyphs`, and
 /// the rows carrying it in the panel, in panel order.
 fn status_glyphs(scene: &Scene, icon: Lucide) -> Vec<RectF> {
