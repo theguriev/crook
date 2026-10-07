@@ -5,6 +5,18 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.20
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.19...v0.1.20)
+
+### Features
+
+- **tabs:** Show a working agent on its tab without hovering ([#468](https://github.com/theguriev/crook/pull/468))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.19
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.18...v0.1.19)
