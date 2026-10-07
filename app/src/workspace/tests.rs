@@ -11999,6 +11999,75 @@ impl Harness {
     }
 }
 
+impl Harness {
+    /// Puts a running mark `frame` frames into its breath.
+    fn breathe_to(&mut self, frame: usize) {
+        let workspace = &self.workspace;
+        self.app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| {
+                workspace.set_breath(frame);
+                ctx.notify();
+            });
+        });
+    }
+}
+
+#[test]
+fn a_running_mark_fades_halfway_through_its_breath_and_comes_back() {
+    // The breath starts on the full colour, so a still window — this one, a
+    // snapshot — draws the mark it always drew.
+    let (mut harness, _) = Harness::folded_group_with(AgentStatus::Running);
+    let accent = super::status_color(AgentStatus::Running);
+
+    let scene = harness.frame();
+    assert_eq!(
+        heading_disc(&scene, panel_heading(&scene)),
+        Some(accent),
+        "a running mark at the top of its breath is not the full accent"
+    );
+
+    harness.breathe_to(crate::plugins::tabs::BREATH_FRAMES / 2);
+    let scene = harness.frame();
+    let faded = heading_disc(&scene, panel_heading(&scene)).expect("no running mark");
+    assert_eq!(
+        (faded.r, faded.g, faded.b),
+        (accent.r, accent.g, accent.b),
+        "the breath changed the mark's colour rather than how much of it shows"
+    );
+    assert!(
+        f32::from(faded.a) < f32::from(accent.a) * 0.4,
+        "halfway through its breath the mark is still at alpha {} of {}",
+        faded.a,
+        accent.a
+    );
+
+    harness.breathe_to(crate::plugins::tabs::BREATH_FRAMES);
+    let scene = harness.frame();
+    assert_eq!(
+        heading_disc(&scene, panel_heading(&scene)),
+        Some(accent),
+        "a whole breath does not come back to the full accent"
+    );
+}
+
+#[test]
+fn only_a_running_mark_breathes() {
+    // A stopped agent's mark is waiting on a person; it has said so with its
+    // colour and does not fade in and out to say it again. (An idle group's
+    // heading carries no mark at all, so idle is not asked here.)
+    for status in [AgentStatus::NeedsInput, AgentStatus::Failed] {
+        let (mut harness, _) = Harness::folded_group_with(status);
+        harness.breathe_to(crate::plugins::tabs::BREATH_FRAMES / 2);
+
+        let scene = harness.frame();
+        assert_eq!(
+            heading_disc(&scene, panel_heading(&scene)),
+            Some(super::status_color(status)),
+            "a {status:?} mark faded with the breath"
+        );
+    }
+}
+
 #[test]
 fn a_folded_group_s_heading_is_washed_and_marked_for_a_waiting_member() {
     // The row that would have been amber is behind the fold, so the heading
@@ -28771,6 +28840,120 @@ fn a_row_the_plugin_declines_keeps_the_disc_it_had() {
     assert!(
         tab_boxes(&scene)[0].contains_point(center(discs[0])),
         "the disc came back on the wrong row"
+    );
+}
+
+/// The status pips on the corners of plugin-drawn marks: round, the size of
+/// a badge's inside, filled. Each with its bounds and colour, in panel order.
+fn status_pips(scene: &Scene) -> Vec<(RectF, Color)> {
+    let panel = panel_box(scene);
+    let inside = crate::plugins::tabs::MARK_SIZE * 0.46 - 3.;
+    let mut pips: Vec<(RectF, Color)> = visible_rects(scene)
+        .filter(|(rect, bounds)| {
+            rect.corner_radius.get_top_left() == Radius::Percentage(50.)
+                && (bounds.width() - inside).abs() < 0.5
+                && panel.contains_point(center(*bounds))
+        })
+        .filter_map(|(rect, bounds)| match rect.background {
+            Fill::Solid(color) => Some((bounds, color)),
+            _ => None,
+        })
+        .collect();
+    pips.sort_by(|left, right| left.0.min_y().total_cmp(&right.0.min_y()));
+    pips
+}
+
+impl Harness {
+    /// [`Self::with_marks`] with one row in each of the four states, in
+    /// [`EVERY_STATUS`]'s order.
+    fn marks_one_row_per_status() -> Self {
+        let mut harness = Harness::with_marks(EVERY_STATUS.len());
+        let panes = harness.pane_ids();
+        for (pane, status) in panes.into_iter().zip(EVERY_STATUS) {
+            harness.update_session(pane, |session| session.status = status);
+        }
+        harness
+    }
+}
+
+/// The Duo pirates painted inside `bounds`: where each is and which of his
+/// six frames it is.
+fn pirate_faces(scene: &Scene, bounds: RectF) -> Vec<(RectF, usize)> {
+    scene
+        .layers()
+        .flat_map(|layer| layer.images.iter())
+        .filter(|drawn| bounds.contains_point(center(drawn.bounds)))
+        .filter_map(|drawn| {
+            crate::duo::frames()
+                .iter()
+                .position(|frame| frame.id() == drawn.bitmap.id())
+                .map(|frame| (drawn.bounds, frame))
+        })
+        .collect()
+}
+
+#[test]
+fn a_mark_a_plugin_took_carries_the_status_on_its_top_corner() {
+    // An emoji where the disc was says nothing about the agent behind it, so
+    // the status comes back small, top right, where no badge goes: the
+    // pirate for the running row, a dot in its own colour for the two
+    // stopped ones. Idle has nothing to say — its disc was the grey that
+    // said nothing — and gets neither.
+    let mut harness = Harness::marks_one_row_per_status();
+
+    let scene = harness.frame();
+    let rows = tab_boxes(&scene);
+    let marks = icons_in(&scene, panel_box(&scene), MARK_ICON);
+    let pirates = pirate_faces(&scene, panel_box(&scene));
+    let pips = status_pips(&scene);
+    assert!(
+        badge_rings(&scene).is_empty(),
+        "a status is drawn in a badge's ring; it has none"
+    );
+
+    assert_eq!(pirates.len(), 1, "one running row, one pirate");
+    assert_eq!(
+        pips.iter().map(|(_, color)| *color).collect::<Vec<_>>(),
+        [AgentStatus::NeedsInput, AgentStatus::Failed].map(super::status_color),
+        "the dots are not needs-input and failed, in that order"
+    );
+
+    let corners = std::iter::once(pirates[0].0).chain(pips.iter().map(|(bounds, _)| *bounds));
+    for (bounds, row) in corners.zip(&rows[1..]) {
+        assert!(
+            row.contains_point(center(bounds)),
+            "a status is on the wrong row"
+        );
+        let mark = marks
+            .iter()
+            .find(|mark| row.contains_point(center(**mark)))
+            .expect("the row has its plugin mark");
+        assert!(
+            center(bounds).x() > center(*mark).x() && center(bounds).y() < center(*mark).y(),
+            "the status is not on the mark's top-right corner: {bounds:?} against {mark:?}"
+        );
+    }
+}
+
+#[test]
+fn the_pirate_on_a_running_row_chews_and_the_stopped_dots_stay_still() {
+    let mut harness = Harness::marks_one_row_per_status();
+
+    let mut bites = Vec::new();
+    for frame in (0..2 * crate::duo::CYCLE.len()).step_by(2) {
+        harness.breathe_to(frame);
+        let scene = harness.frame();
+        bites.push(pirate_faces(&scene, panel_box(&scene))[0].1);
+        assert_eq!(
+            status_pips(&scene)[0].1,
+            super::status_color(AgentStatus::NeedsInput),
+            "a stopped dot changed with the breath"
+        );
+    }
+    assert_eq!(
+        bites,
+        crate::duo::CYCLE,
+        "a frame every two breaths is not one whole grin"
     );
 }
 

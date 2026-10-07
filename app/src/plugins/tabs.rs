@@ -1234,13 +1234,24 @@ fn manifest() -> &'static Manifest {
 /// The mark at the head of one row, with whatever is on its corner.
 pub fn mark(workspace: &Workspace, row: &TabRow<'_>, app: &AppContext) -> Box<dyn Element> {
     let host = workspace.host();
-    let face = host
+    let taken = host
         .rows()
         .one(TAB_ROW_MARK, |build| build(workspace, row, app))
-        .flatten()
-        .unwrap_or_else(|| status_mark(workspace, row.status));
+        .flatten();
+    let plugin_drew_the_face = taken.is_some();
+    let face = taken.unwrap_or_else(|| status_mark(workspace, row.status));
 
     let mut stack = Stack::new().with_child(Align::new(face).finish());
+    // A plugin that took the mark took the status with it — an emoji says
+    // nothing about whether the agent behind it is working — so the status
+    // comes back as a pip on the top corner, the one the badges leave free.
+    if plugin_drew_the_face && row.status != AgentStatus::Idle {
+        stack.add_child(
+            Align::new(status_pip(workspace, row.status))
+                .top_right()
+                .finish(),
+        );
+    }
     // A plugin's badge first, then the zoom's: the corner is one thing at a
     // time, and a plugin that took it has said something about the row that
     // outlives a keystroke.
@@ -1268,11 +1279,91 @@ pub fn mark(workspace: &Workspace, row: &TabRow<'_>, app: &AppContext) -> Box<dy
 /// group's heading carries for the worst of its members — the heading has no
 /// row behind it to offer the slot, so it is the host's answer and only
 /// that, which keeps a group's mark the same shape as its members'.
+///
+/// A running mark breathes: its colour fades towards [`BREATH_FLOOR`] and
+/// back over [`BREATH_FRAMES`] frames, so a row whose agent is working can be
+/// told from one whose agent stopped without a pointer over it. The other
+/// three states stay still — they are each waiting on a person or on nothing,
+/// and a mark that moved for them would be asking for a look it has already
+/// asked for with its colour.
 pub fn status_mark(workspace: &Workspace, status: AgentStatus) -> Box<dyn Element> {
+    let color = mark_color(workspace, status);
     match workspace.options().status_marks {
-        StatusMarks::Dots => disc(status),
-        StatusMarks::Glyphs => glyph(status),
+        StatusMarks::Dots => disc(color),
+        StatusMarks::Glyphs => glyph(status, color),
     }
+}
+
+/// The colour a status's mark is drawn in at this moment: its own, faded by
+/// the breath when it is running.
+fn mark_color(workspace: &Workspace, status: AgentStatus) -> Color {
+    let color = status_color(status);
+    if status != AgentStatus::Running {
+        return color;
+    }
+    color.with_alpha((f32::from(color.a) * breath(workspace.breath())).round() as u8)
+}
+
+/// The status, small, on the corner of a mark a plugin drew.
+///
+/// A running agent is the Duo pirate grinning (see [`crate::duo`]): a moving
+/// mouth is legible at a size where a fading dot is a smudge. A frame every
+/// two breaths, because a list may hold several of him, and a dozen mouths
+/// at full speed is a flicker.
+///
+/// The stopped states are a dot in the disc's colour at a badge's inside
+/// size, with no ring: a saturated dot over an emoji does not need one.
+/// Always a dot whatever "Status marks" says, since a glyph at eight pixels
+/// is a smudge too.
+fn status_pip(workspace: &Workspace, status: AgentStatus) -> Box<dyn Element> {
+    if status == AgentStatus::Running {
+        return crate::duo::mark(workspace.breath() / 2, PIP_PIRATE_SIZE);
+    }
+    let diameter = MARK_SIZE * BADGE_RATIO - 2. * BADGE_RING;
+    ConstrainedBox::new(
+        Container::new(Empty::new().finish())
+            .with_background_color(status_color(status))
+            .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
+            .finish(),
+    )
+    .with_width(diameter)
+    .with_height(diameter)
+    .finish()
+}
+
+/// How big the pirate on a plugin's mark is drawn.
+///
+/// Tried at 10, 12 and 14 over the emoji plugin's marks, and 10 is the one
+/// that was picked: the grin and the teeth still read, and he stays a mark
+/// on the emoji's corner rather than a second emoji beside it.
+pub const PIP_PIRATE_SIZE: f32 = 10.;
+
+/// How long one frame of a running mark's breath is held.
+///
+/// Slow enough that a dozen working rows are a calm list rather than a
+/// flicker, and quick enough that the fade reads as a fade and not as steps:
+/// at this rate a full breath is twenty-five frames.
+pub const BREATH_FRAME: std::time::Duration = std::time::Duration::from_millis(80);
+
+/// How many frames one breath takes, in and out: two seconds at
+/// [`BREATH_FRAME`], about a resting breath.
+pub const BREATH_FRAMES: usize = 25;
+
+/// The faintest a running mark gets, as a share of its colour's own alpha.
+///
+/// Not zero: a mark that vanished would leave a row that, for a moment, says
+/// nothing at all, which is idle's job and not running's.
+const BREATH_FLOOR: f32 = 0.3;
+
+/// How much of its colour a running mark shows `frame` frames into breathing.
+///
+/// A cosine rather than a triangle, so the mark eases at both ends instead of
+/// bouncing off them. Frame zero is the full colour, which is what a still
+/// window — a snapshot, a test, an agent that has only just started — draws.
+fn breath(frame: usize) -> f32 {
+    let phase = (frame % BREATH_FRAMES) as f32 / BREATH_FRAMES as f32;
+    let swell = 0.5 + 0.5 * (phase * std::f32::consts::TAU).cos();
+    BREATH_FLOOR + (1. - BREATH_FLOOR) * swell
 }
 
 /// What a row's mark is when nothing has replaced it: a status-coloured disc.
@@ -1282,12 +1373,12 @@ pub fn status_mark(workspace: &Workspace, status: AgentStatus) -> Box<dyn Elemen
 /// own colour — one mark instead of two, in the same reserved box, so rows
 /// line up with Warp's. The corner it left free is what [`TAB_ROW_BADGE`] is.
 /// The other answer, for a person the colour says nothing to, is [`glyph`].
-fn disc(status: AgentStatus) -> Box<dyn Element> {
+fn disc(color: Color) -> Box<dyn Element> {
     let diameter = MARK_SIZE * DISC_RATIO;
 
     ConstrainedBox::new(
         Container::new(Empty::new().finish())
-            .with_background_color(status_color(status))
+            .with_background_color(color)
             .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
             .finish(),
     )
@@ -1307,9 +1398,9 @@ fn disc(status: AgentStatus) -> Box<dyn Element> {
 /// that are waiting. The `circle` is hollow so that idle is the quietest of
 /// the four — the disc's grey was already the one that said nothing — and
 /// the cross in a ring is the failure everybody recognises. Nothing here
-/// turns or blinks: a spinner for a running agent would be the idle timer
-/// the window keeps none of.
-fn glyph(status: AgentStatus) -> Box<dyn Element> {
+/// turns: the `play` breathes like the disc does, in `color`, and that is
+/// the one movement either mark makes.
+fn glyph(status: AgentStatus, color: Color) -> Box<dyn Element> {
     let icon = match status {
         AgentStatus::Idle => Lucide::Circle,
         AgentStatus::Running => Lucide::Play,
@@ -1318,7 +1409,7 @@ fn glyph(status: AgentStatus) -> Box<dyn Element> {
     };
 
     Icon::new(icon, MARK_SIZE * DISC_RATIO)
-        .with_color(status_color(status))
+        .with_color(color)
         .finish()
 }
 

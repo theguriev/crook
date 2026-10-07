@@ -56,6 +56,7 @@ pub mod completion;
 pub mod control;
 pub mod default_terminal;
 pub mod diagnostics;
+pub mod duo;
 pub mod editor;
 pub mod filename;
 pub mod forge;
@@ -1793,7 +1794,9 @@ THE INPUT FIELD:
 /// bite — `Workspace::keep_chomping`, which moves the pirate while that menu
 /// waits on git — is the same shape and is left out for the same reason: one
 /// chain at most, a frame of `pirate::FRAME` at a time, and only while a git
-/// command is running for the menu.
+/// command is running for the menu. A running agent's mark breathing —
+/// `Workspace::keep_breathing` — is the same again: one chain, a frame of
+/// `plugins::tabs::BREATH_FRAME` at a time, and only while an agent runs.
 ///
 /// The control socket parks nothing here either. Its listener blocks in
 /// `accept` for as long as nobody connects, which is a thread's job and not a
@@ -3820,6 +3823,7 @@ impl Shell {
                 }
                 workspace.start_git_poll(ctx);
                 workspace.start_caret_blink(ctx);
+                workspace.let_marks_breathe(ctx);
                 // Last, and not yet: the shells open after the first frame,
                 // which is what measures the panes they open in — see
                 // `frame_drawn`. Announced here so that the frame draws the
