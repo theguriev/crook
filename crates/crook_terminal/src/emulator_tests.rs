@@ -346,6 +346,120 @@ fn test_a_mirror_owes_nothing_for_an_update_that_expires_while_it_paints() {
     assert_eq!(Vec::<u8>::new(), mirror.take_replies());
 }
 
+/// What [`named`] answers XTVERSION with.
+const VERSION_REPLY: &str = "\x1bP>|Crook 1.2.3\x1b\\";
+
+/// An emulator with a name to answer XTVERSION with, as Crook's own have.
+fn named() -> Emulator {
+    let mut emulator = emulator();
+    emulator.set_name_and_version(Some("Crook 1.2.3"));
+    emulator
+}
+
+/// The replies owed so far, as text, so a failure prints escapes rather than
+/// a list of numbers.
+fn answered(emulator: &mut Emulator) -> String {
+    String::from_utf8(emulator.take_replies()).expect("every reply here is text")
+}
+
+#[test]
+fn test_a_version_query_is_answered_ahead_of_the_queries_after_it() {
+    // Claude Code's startup probe, byte for byte: XTVERSION, the kitty
+    // keyboard query and DA1, the sentinel every terminal answers. It reads
+    // up to the sentinel's answer, and asks whether synchronized output is
+    // supported only when the version came before it.
+    let mut emulator = named();
+    emulator.advance(b"\x1b[>0q\x1b[?u\x1b[c");
+    assert_eq!(
+        format!("{VERSION_REPLY}\x1b[?0u\x1b[?6c"),
+        answered(&mut emulator)
+    );
+}
+
+#[test]
+fn test_a_version_query_is_answered_between_the_queries_either_side_of_it() {
+    // `Term` queues its answers as it parses: a version answered once the
+    // whole read was parsed went out last, and one answered before any of
+    // it went out first.
+    let mut emulator = named();
+    emulator.advance(b"\x1b[?u\x1b[>q\x1b[6n\x1b[c");
+    assert_eq!(
+        format!("\x1b[?0u{VERSION_REPLY}\x1b[1;1R\x1b[?6c"),
+        answered(&mut emulator)
+    );
+}
+
+#[test]
+fn test_a_version_query_split_across_reads_is_answered_once() {
+    let probe = b"\x1b[>0q\x1b[c";
+    for cut in 1..probe.len() {
+        let mut emulator = named();
+        emulator.advance(&probe[..cut]);
+        let mut replies = answered(&mut emulator);
+        emulator.advance(&probe[cut..]);
+        replies.push_str(&answered(&mut emulator));
+        assert_eq!(
+            format!("{VERSION_REPLY}\x1b[?6c"),
+            replies,
+            "cut after {cut} bytes"
+        );
+    }
+}
+
+#[test]
+fn test_only_xtversion_is_answered_with_the_version() {
+    // The other `q`s: the cursor shape, DECLL's keyboard lights, and the
+    // version query with a parameter xterm gives no meaning.
+    let mut emulator = named();
+    emulator.advance(b"\x1b[ q\x1b[1q\x1b[>1q\x1b[c");
+    assert_eq!("\x1b[?6c", answered(&mut emulator));
+}
+
+#[test]
+fn test_an_emulator_with_no_name_leaves_the_version_query_unanswered() {
+    // What a program probing with a sentinel behind the query is built for:
+    // the sentinel's answer says no other is coming.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b[>0q\x1b[c");
+    assert_eq!("\x1b[?6c", answered(&mut emulator));
+}
+
+#[test]
+fn test_a_mirror_does_not_answer_the_version_query() {
+    let mut answering = named();
+    answering.advance(b"\x1b[>0q");
+    assert_eq!(VERSION_REPLY, answered(&mut answering));
+
+    let mut mirror = named();
+    mirror.advance_mirrored(Fed::Output(b"\x1b[>0q"));
+    assert_eq!("", answered(&mut mirror));
+}
+
+#[test]
+fn test_a_version_query_in_a_synchronized_update_is_answered_before_the_update_ends() {
+    // `vte` holds an update's queries until it ends, and answers them then.
+    // The version cannot wait with them in its place — the watcher sees it
+    // as it arrives — so it goes at once: ahead of every query sent after
+    // it, which is the order a program waiting on a sentinel needs.
+    let mut emulator = named();
+    emulator.advance(b"\x1b[?2026h\x1b[>0q\x1b[c");
+    assert_eq!(VERSION_REPLY, answered(&mut emulator));
+
+    emulator.advance(b"\x1b[?2026l");
+    assert_eq!("\x1b[?6c", answered(&mut emulator));
+}
+
+#[test]
+fn test_a_program_asking_about_synchronized_updates_is_told_they_are_supported() {
+    // The question a version answer unlocks for Claude Code, which brackets
+    // its frames when the mode is known, set (1) or reset (2). Each frame is
+    // then held whole until it ends, rather than painted half done when a
+    // read ends in the middle of it.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b[?2026$p");
+    assert_eq!("\x1b[?2026;2$y", answered(&mut emulator));
+}
+
 #[test]
 fn test_the_revision_moves_only_when_something_changed() {
     let mut emulator = emulator();

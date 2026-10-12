@@ -855,7 +855,13 @@ hand its shells the outer one's. Beside it is the one secret, `CROOK_TOKEN`, whi
 request says which pane it comes from, set empty on the same terms. `CROOK_BIN`, the absolute
 path of the running binary, is set in the same place, read once at the first pane: a hook runs
 in whatever `PATH` its agent was started with, where a Crook.app nobody linked is not, and on
-Linux a binary an upgrade has replaced reads its own path back as `… (deleted)`.
+Linux a binary an upgrade has replaced reads its own path back as `… (deleted)`. A program that
+asks the terminal rather than its environment, with XTVERSION (`CSI > q`), is told the same
+name and version, as `Crook <version>`, which reaches it through ssh and sudo where the
+variables do not. `vte` has no hook for that question, so the emulator's OSC watcher stops on
+it and answers it between the answers `Term` gives to the queries either side. Claude Code asks
+whether synchronized output is supported only once it has been answered, and until then draws
+frames a pane can paint half done when a read ends in the middle of one.
 
 **The pty opens at the pane's size.** A shell prints its whole startup — a `~/.zprofile`
 banner, a greeting sized with `tput cols` — before any resize can reach it, and what it
