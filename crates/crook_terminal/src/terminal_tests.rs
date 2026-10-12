@@ -843,3 +843,30 @@ fn test_a_terminal_whose_writer_was_taken_queues_everything_in_order_for_it() {
         .expect("the writer panicked")
         .expect("a terminal that went away ends its writer without an error");
 }
+
+#[test]
+fn test_a_line_submitted_behind_a_backlog_is_queued_with_its_enter_or_not_at_all() {
+    // A queue refuses input only once the backlog is already full, so the
+    // line that fills it must take its Enter along: a line queued without it
+    // sits typed at the prompt, and the composer that is handed the line back
+    // types it a second time. Nothing is writing, so everything stays queued.
+    let (mut terminal, _child) = over_a_fake_link();
+    let _writer = terminal
+        .take_writer()
+        .expect("a fresh terminal has its writer");
+    terminal
+        .write(&vec![b'x'; writer::INPUT_BACKLOG - 1])
+        .expect("queued: the backlog is not full yet");
+
+    terminal
+        .submit("echo hi")
+        .expect("the line that fills the backlog is queued whole, Enter and all");
+    assert_eq!(
+        io::ErrorKind::WouldBlock,
+        terminal
+            .submit("echo again")
+            .expect_err("a line behind a full backlog is refused")
+            .kind(),
+        "a line behind a full backlog is refused whole, and as one that may be tried again"
+    );
+}

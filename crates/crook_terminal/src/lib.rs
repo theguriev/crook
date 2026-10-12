@@ -311,8 +311,13 @@ impl Terminal {
     /// Sends bytes to the child as if they had been typed.
     ///
     /// Once the writer has been taken — see [`Self::take_writer`] — they are
-    /// queued for it and this returns at once, and an error means nothing more
-    /// will reach the child.
+    /// queued for it and this returns at once. `Ok` then means queued, not
+    /// read: bytes queued for a child that has just gone, before the writer
+    /// has found out, are dropped when it does. An error of kind
+    /// [`BrokenPipe`](io::ErrorKind::BrokenPipe) means nothing more will reach
+    /// the child; one of kind [`WouldBlock`](io::ErrorKind::WouldBlock) means
+    /// these bytes were refused, whole, behind a backlog the child has not
+    /// read, and what was queued before them is still on its way.
     pub fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
         match &mut self.input {
             Input::Direct(writer) => {
@@ -331,10 +336,17 @@ impl Terminal {
     /// the command started; a shell without it reports nothing, and this is
     /// then the only thing that knows a command was run at all — and it knows
     /// the exact text, where a mark-driven block only has what was echoed.
+    ///
+    /// The line and its Enter are one write, so a queue that refuses more
+    /// input — see [`PtyWriter`] — refuses them together: a line taken
+    /// without its Enter would sit typed at the prompt, and a caller that
+    /// tried again would type it a second time.
     pub fn submit(&mut self, line: &str) -> io::Result<()> {
         self.emulator.command_submitted(line);
-        self.write(line.as_bytes())?;
-        self.write(b"\r")
+        let mut entered = Vec::with_capacity(line.len() + 1);
+        entered.extend_from_slice(line.as_bytes());
+        entered.push(b'\r');
+        self.write(&entered)
     }
 
     /// The finished blocks, oldest first. Empty until the first command ends.
