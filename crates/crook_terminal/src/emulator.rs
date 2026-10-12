@@ -404,6 +404,15 @@ fn percent_decode(value: &str) -> Option<String> {
     String::from_utf8(decoded).ok()
 }
 
+/// Where the viewport stood before a feed, read against the history under it,
+/// which is what [`Emulator::keep_view`] needs to put it back on its lines.
+#[derive(Clone, Copy)]
+struct View {
+    alt_screen: bool,
+    offset: usize,
+    history: usize,
+}
+
 /// A terminal grid being driven by a stream of bytes.
 pub struct Emulator {
     term: Term<EventProxy>,
@@ -414,6 +423,10 @@ pub struct Emulator {
     proxy: EventProxy,
     palette: Palette,
     size: TerminalSize,
+    /// The most history the grid keeps. A history this long no longer grows
+    /// by the lines that scroll into it, which is where [`Self::keep_view`]
+    /// stops being able to count them.
+    scrollback_lines: usize,
     title: Option<String>,
     working_directory: Option<PathBuf>,
     /// What the program in the pane last said it was doing.
@@ -465,6 +478,7 @@ impl Emulator {
             proxy,
             palette,
             size,
+            scrollback_lines,
             title: None,
             working_directory: None,
             agent: AgentReport::default(),
@@ -501,6 +515,7 @@ impl Emulator {
             return;
         }
 
+        let view = self.view();
         let mut rest = bytes;
         while !rest.is_empty() {
             let consumed = self
@@ -561,6 +576,7 @@ impl Emulator {
             }
             rest = remaining;
         }
+        self.keep_view(view);
         self.dirty = true;
         self.drain();
     }
@@ -936,9 +952,64 @@ impl Emulator {
             return;
         }
 
+        // The update's bytes reach the grid only now, so this is a feed like
+        // any other.
+        let view = self.view();
         self.parser.stop_sync(&mut self.term);
+        self.keep_view(view);
         self.dirty = true;
         self.drain();
+    }
+
+    /// Where the viewport stands now, taken before a feed so that
+    /// [`Self::keep_view`] can be handed it after.
+    fn view(&self) -> View {
+        let grid = self.term.grid();
+        View {
+            alt_screen: self.term.mode().contains(TermMode::ALT_SCREEN),
+            offset: grid.display_offset(),
+            history: grid.history_size(),
+        }
+    }
+
+    /// Puts a scrolled-back viewport back on the lines it showed before a
+    /// feed, and never lets it past the oldest line there is.
+    ///
+    /// `alacritty_terminal` 0.26 raises the offset of a scrolled-back view by
+    /// every line it scrolls up, so that the view stays on its lines while they
+    /// move up into the history. Only a scroll that starts at the screen's top
+    /// row moves anything into the history, though: one inside a scroll region
+    /// set below row 1 (`CSI 5;24 r`, `tput csr`, a log follower pinning a
+    /// header), or a line deleted below row 1 (`CSI M`), shuffles rows within
+    /// the screen and leaves the history as it was — and the offset is raised
+    /// all the same, capped at the scrollback setting rather than at the
+    /// history there is. The view crept up the history as such output
+    /// arrived, and once it was past the oldest line the snapshot indexed rows
+    /// the grid does not have and panicked, taking down whichever thread
+    /// asked for the frame.
+    ///
+    /// The lines that really reached the history are the lines it grew by, so
+    /// the offset may rise by exactly that many: the view stays on what the
+    /// reader was looking at, which is what it does for ordinary output, rather
+    /// than drifting up or jumping to the live output. The count is exact
+    /// until the history is full, when every line scrolled in evicts one and
+    /// the size stops moving; from there alacritty's own figure stands, which
+    /// is right for all but the scrolls above and cannot pass a history as long
+    /// as its cap. A feed that switched screens compares two different grids,
+    /// and alacritty's figure stands there too. Past both, the offset is held
+    /// to the history there is.
+    fn keep_view(&mut self, before: View) {
+        let now = self.view();
+        let mut offset = now.offset;
+        if now.alt_screen == before.alt_screen && now.history < self.scrollback_lines {
+            let scrolled_in = now.history.saturating_sub(before.history);
+            offset = offset.min(before.offset + scrolled_in);
+        }
+        offset = offset.min(now.history);
+        if offset < now.offset {
+            let down = i32::try_from(now.offset - offset).unwrap_or(i32::MAX);
+            self.term.scroll_display(Scroll::Delta(-down));
+        }
     }
 
     /// Translates everything `Term` reported during the last operation.
