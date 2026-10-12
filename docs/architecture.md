@@ -1249,7 +1249,12 @@ reflog, and that commit is on no branch — the reflog is the last thing that re
 deleting the branch deletes the reflog. So every commit the reflog records as made on the
 branch has to be on a branch, tag or remote still, or its change has to be in what the tip or
 the base holds: copied by a rebase, replaced by an amend, or the whole branch as it stood then
-found as one commit, which is a squash. A reflog is not a complete record,
+found as one commit, which is a squash. That change is hashed as the lines added and removed
+alone (`--unified=0`), since a rebase onto a base that edited a line near the branch's, or one
+whose conflict was settled by keeping both sides, gives a copy new surroundings and the same
+lines; a conflict settled by rewriting the branch's own lines leaves the branch unproved until
+`gc` expires the entry, and a git older than 2.39 accounts for no change at all, only for an
+amend. Those looks share one more ten-second deadline. A reflog is not a complete record,
 though: a month after an amend or a rebase, `gc` expires the entry of every commit it replaced
 and leaves only the branch's creation. So a reflog git has pruned, told by a newest entry that
 no longer ends at the branch's tip, is left to the proofs, as is no reflog at all; a rebase

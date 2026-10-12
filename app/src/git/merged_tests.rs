@@ -649,7 +649,7 @@ fn a_branch_reset_back_onto_the_base_is_not_called_merged() {
     }
     let scratch = ScratchDir::new("reset-onto-base");
     let repo = repository(&scratch, "repo");
-    let reset = ["started-over", "caught-up"];
+    let reset = ["started-over", "caught-up", "rebased-away"];
     let mut abandoned = HashMap::new();
     for branch in reset {
         git(&repo, &["switch", "-c", branch, "main"]);
@@ -663,11 +663,15 @@ fn a_branch_reset_back_onto_the_base_is_not_called_merged() {
     }
     git(&repo, &["switch", "main"]);
     commit(&repo, "later.txt", "main moves on\n", "later");
-    // One back where it started, the other onto where main is now.
+    // One back where it started, one onto where main is now, and one onto
+    // main by a rebase that kept none of its commits — whose reflog entry is
+    // the one a rebase that kept them all would write.
     git(&repo, &["switch", "started-over"]);
     git(&repo, &["reset", "--hard", "HEAD~1"]);
     git(&repo, &["switch", "caught-up"]);
     git(&repo, &["reset", "--hard", "main"]);
+    git(&repo, &["switch", "rebased-away"]);
+    git(&repo, &["rebase", "--onto", "main", "HEAD"]);
     git(&repo, &["switch", "main"]);
 
     let landed = merged(&repo, MAIN, &names(&reset));
@@ -807,6 +811,130 @@ fn a_branch_rewritten_on_its_way_to_the_base_keeps_its_proof() {
         Some(&Proof::Patch { commit: by_hand })
     );
     assert_eq!(landed.get("synced"), Some(&Proof::Ancestor));
+}
+
+/// What `commit` changed as `patch-id` reads it, with `context` lines around
+/// each change: without the `index` lines, which name blobs, or the hunk
+/// headers, whose line numbers it takes out.
+fn change_of(repo: &Path, commit: &str, context: usize) -> Vec<String> {
+    let context = format!("--unified={context}");
+    git(repo, &["show", "--format=", "--no-color", &context, commit])
+        .lines()
+        .filter(|line| !line.starts_with("index ") && !line.starts_with("@@"))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn a_branch_rebased_over_a_change_beside_its_own_keeps_its_proof() {
+    // A rebase copies each commit onto the new base, and the copy's diff
+    // carries the lines around its change as that base has them. When the
+    // base edited a line within a diff's three of the branch's, or touched
+    // the same spot and the conflict was settled by keeping both sides —
+    // which the `union` driver does here, as a person would by hand — the
+    // copy hashes differently from its original although its lines are the
+    // same. The originals stay in the reflog, on no branch, and their lines
+    // are in what landed: a fast-forward, and a squash of each of the others.
+    if without_git("a_branch_rebased_over_a_change_beside_its_own_keeps_its_proof") {
+        return;
+    }
+    let scratch = ScratchDir::new("rebased-beside");
+    let repo = repository(&scratch, "repo");
+    let rebased = ["forwarded", "squashed", "conflicted"];
+    for branch in rebased {
+        commit(
+            &repo,
+            &format!("{branch}.txt"),
+            "a\nb\nc\nd\ne\nf\ng\nh\n",
+            &format!("{branch}'s file"),
+        );
+    }
+    let info = repo.join(".git").join("info");
+    std::fs::create_dir_all(&info).expect("the scratch directory is writable");
+    std::fs::write(info.join("attributes"), "conflicted.txt merge=union\n")
+        .expect("the scratch directory is writable");
+
+    let mut originals = HashMap::new();
+    for branch in ["forwarded", "squashed"] {
+        git(&repo, &["switch", "-c", branch, "main"]);
+        let edit = commit(
+            &repo,
+            &format!("{branch}.txt"),
+            "a\nb\nc\nd\nE\nf\ng\nh\n",
+            "one",
+        );
+        commit(&repo, &format!("{branch}-2.txt"), "two\n", "two");
+        originals.insert(branch, edit);
+    }
+    git(&repo, &["switch", "-c", "conflicted", "main"]);
+    let appended = commit(
+        &repo,
+        "conflicted.txt",
+        "a\nb\nc\nd\ne\nf\ng\nh\nthe branch's line\n",
+        "one",
+    );
+    originals.insert("conflicted", appended);
+
+    git(&repo, &["switch", "main"]);
+    for branch in ["forwarded", "squashed"] {
+        std::fs::write(
+            repo.join(format!("{branch}.txt")),
+            "a\nb\nC\nd\ne\nf\ng\nh\n",
+        )
+        .expect("the scratch directory is writable");
+    }
+    std::fs::write(
+        repo.join("conflicted.txt"),
+        "a\nb\nc\nd\ne\nf\ng\nh\nmain's line\n",
+    )
+    .expect("the scratch directory is writable");
+    git(&repo, &["commit", "--no-verify", "--all", "-m", "beside"]);
+
+    for branch in rebased {
+        git(&repo, &["switch", branch]);
+        git(&repo, &["rebase", "main"]);
+        let copy = match branch {
+            "conflicted" => git(&repo, &["rev-parse", "HEAD"]),
+            _ => git(&repo, &["rev-parse", "HEAD~1"]),
+        };
+        let original = &originals[branch];
+        // Or the copy hashes as its original does, and this is the case
+        // above over again.
+        assert_ne!(
+            change_of(&repo, original, 3),
+            change_of(&repo, &copy, 3),
+            "{branch}'s copy stands among the lines its original did"
+        );
+        // Or the copy is a different change, which nothing should take for
+        // the original.
+        assert_eq!(
+            change_of(&repo, original, 0),
+            change_of(&repo, &copy, 0),
+            "{branch}'s copy does not make its original's change"
+        );
+    }
+    git(&repo, &["switch", "main"]);
+    git(&repo, &["merge", "--ff-only", "forwarded"]);
+    let squashed = squash_onto_main(&repo, "squashed");
+    let conflicted = squash_onto_main(&repo, "conflicted");
+    for branch in rebased {
+        assert!(
+            moved_off(&repo, branch).contains(&originals[branch]),
+            "{branch} still holds the commit it was rebased off"
+        );
+    }
+
+    let landed = merged(&repo, MAIN, &names(&rebased));
+
+    assert_eq!(landed.get("forwarded"), Some(&Proof::Ancestor));
+    assert_eq!(
+        landed.get("squashed"),
+        Some(&Proof::Patch { commit: squashed })
+    );
+    assert_eq!(
+        landed.get("conflicted"),
+        Some(&Proof::Patch { commit: conflicted })
+    );
 }
 
 // --- what bounds the pass ------------------------------------------------------
