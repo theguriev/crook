@@ -5827,7 +5827,7 @@ fn a_tabs_menu_is_the_entries_its_plugins_put_in_it() {
     // tab's menu is — and it comes from three plugins rather than one, which
     // is the fact the slot exists to make true. `crook/changes` sits among
     // the copies because it asked for their band; `crook/worktrees` is last
-    // because it asked for the band after the one "Close tab" is alone in.
+    // because it asked for the band after the one the closes are alone in.
     let harness = Harness::seeded();
 
     assert_eq!(
@@ -5846,6 +5846,9 @@ fn a_tabs_menu_is_the_entries_its_plugins_put_in_it() {
             "crook/tabs/rename-tab",
             "crook/tabs/rename-pane",
             "crook/tabs/close-tab",
+            "crook/tabs/close-other-tabs",
+            "crook/tabs/close-tabs-below",
+            "crook/tabs/close-tabs-above",
             "crook/worktrees/menu",
             "crook/worktrees/finish-task",
             "crook/worktrees/discard-task",
@@ -28183,7 +28186,7 @@ mod plugins_page {
         // The last entries, not the first: a line that was cut off at the
         // measure would still start with pin-tab.
         assert!(
-            says(&scene, "close-tab, color"),
+            says(&scene, "close-tabs-above, color"),
             "the last entries were cut off: {}",
             frame_text(&scene)
         );
@@ -31406,4 +31409,73 @@ mod panel_edge {
 
         assert_eq!(width(&harness), tabs_panel::PANEL_WIDTH);
     }
+}
+
+#[test]
+fn close_other_tabs_closes_around_the_tab_its_menu_is_on_and_each_comes_back() {
+    // The menu is on the second of four, which is not the active one, so a
+    // handler that meant the active tab would keep the wrong one. Every tab
+    // it closed is written down for "Reopen the closed tab", and they come
+    // back top first, each at its own place.
+    let mut harness = Harness::new(4);
+    let tabs = harness.tab_ids();
+    for (index, tab) in tabs.iter().enumerate() {
+        harness.workspace_update(|workspace, ctx| {
+            workspace.rename_tab(*tab, Some(format!("tab {index}")), ctx);
+        });
+    }
+    assert_ne!(harness.active_id(), tabs[1]);
+
+    let pane = harness.workspace.read(&harness.app, |workspace, _| {
+        workspace
+            .tabs()
+            .get(tabs[1])
+            .map(|tab| tab.panes().focused_id())
+            .expect("the second tab is open")
+    });
+    harness.open_tab_menu_on(tabs[1], pane);
+    harness.run_command("crook/tabs/close-other-tabs");
+    harness.frame();
+
+    assert_eq!(harness.tab_ids(), [tabs[1]]);
+    assert!(!harness.a_popup_is_open(), "the menu outlived the close");
+
+    for _ in 0..3 {
+        harness.run_command("crook/window/reopen-closed-tab");
+    }
+    let names: Vec<String> = harness
+        .tab_ids()
+        .into_iter()
+        .map(|tab| harness.tab_name(tab))
+        .collect();
+    assert_eq!(names, ["tab 0", "tab 1", "tab 2", "tab 3"]);
+}
+
+#[test]
+fn the_menu_offers_every_close_and_below_takes_nothing_from_the_bottom_tab() {
+    let mut harness = Harness::new(2);
+    let tabs = harness.tab_ids();
+    let pane = harness.workspace.read(&harness.app, |workspace, _| {
+        workspace
+            .tabs()
+            .get(tabs[1])
+            .map(|tab| tab.panes().focused_id())
+            .expect("the bottom tab is open")
+    });
+    harness.open_tab_menu_on(tabs[1], pane);
+    let scene = harness.frame();
+    for label in ["Close other tabs", "Close tabs below", "Close tabs above"] {
+        assert!(
+            tab_menu_offers(&scene, label),
+            "the menu does not show {label:?}: {}",
+            frame_text(&scene)
+        );
+    }
+
+    harness.run_command("crook/tabs/close-tabs-below");
+    assert_eq!(
+        harness.tab_ids(),
+        tabs,
+        "the bottom tab had nothing below it"
+    );
 }

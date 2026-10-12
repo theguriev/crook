@@ -169,14 +169,19 @@ pub(super) enum Close {
 impl Close {
     /// The close a strip action is, if it is one.
     ///
-    /// Three of them, and they are every way a gesture takes panes away. A
+    /// Six of them, and they are every way a gesture takes panes away. A
     /// shell that exits closes its pane through [`TabAction::ClosePane`] as
     /// well, but not through here: it is already gone, and there is nothing
     /// left to ask about.
     pub(super) fn of(action: TabAction) -> Option<Self> {
         matches!(
             action,
-            TabAction::Close(_) | TabAction::ClosePane(_) | TabAction::CloseGroup(_)
+            TabAction::Close(_)
+                | TabAction::ClosePane(_)
+                | TabAction::CloseGroup(_)
+                | TabAction::CloseOthers(_)
+                | TabAction::CloseBelow(_)
+                | TabAction::CloseAbove(_)
         )
         .then_some(Self::Strip(action))
     }
@@ -185,17 +190,13 @@ impl Close {
     fn ends(self, strip: &TabStrip) -> Vec<&Pane> {
         match self {
             Self::Window => strip.panes().map(|(_, pane)| pane).collect(),
-            Self::Strip(TabAction::Close(tab)) => strip
-                .get(tab)
-                .into_iter()
-                .flat_map(|tab| tab.panes().iter())
-                .collect(),
             Self::Strip(TabAction::ClosePane(pane)) => strip.pane(pane).into_iter().collect(),
-            Self::Strip(TabAction::CloseGroup(group)) => strip
-                .members(group)
+            Self::Strip(action) => strip
+                .closed_by(action)
+                .into_iter()
+                .filter_map(|tab| strip.get(tab))
                 .flat_map(|tab| tab.panes().iter())
                 .collect(),
-            Self::Strip(_) => Vec::new(),
         }
     }
 
@@ -381,6 +382,9 @@ pub(super) fn consequence(close: Close, quits: bool, count: usize) -> String {
         Close::Strip(TabAction::Close(_)) => "Closing the tab",
         Close::Strip(TabAction::ClosePane(_)) => "Closing the pane",
         Close::Strip(TabAction::CloseGroup(_)) => "Closing the group",
+        Close::Strip(TabAction::CloseOthers(_)) => "Closing the other tabs",
+        Close::Strip(TabAction::CloseBelow(_)) => "Closing the tabs below",
+        Close::Strip(TabAction::CloseAbove(_)) => "Closing the tabs above",
         Close::Window | Close::Strip(_) => "Quitting Crook",
     };
     let them = if count == 1 { "it" } else { "them" };

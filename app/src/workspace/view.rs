@@ -8333,20 +8333,32 @@ impl Workspace {
         // Recorded before it goes, because after it there is nothing left to
         // record: a close of the tab, or of its last pane, is the moment a
         // tab can be written down for "Reopen the closed tab".
-        let closing = match action {
-            TabAction::Close(tab) => Some(tab),
-            TabAction::ClosePane(pane) => self.tabs.tab_of(pane),
-            _ => None,
+        //
+        // A close of several writes each of them down, bottom first, so that
+        // reopening — which takes the last written first — brings them back
+        // top first, and each lands at its own index with everything above
+        // it already back in place.
+        let closing: Vec<_> = match action {
+            TabAction::Close(tab) => vec![tab],
+            TabAction::ClosePane(pane) => self.tabs.tab_of(pane).into_iter().collect(),
+            TabAction::CloseOthers(_) | TabAction::CloseBelow(_) | TabAction::CloseAbove(_) => {
+                self.tabs.closed_by(action)
+            }
+            _ => Vec::new(),
         }
-        .and_then(|tab| {
+        .into_iter()
+        .rev()
+        .filter_map(|tab| {
             let index = self.tabs.index_of(tab)?;
             let snapshot = crate::session::TabSnapshot::of(self.tabs.get(tab)?)?;
             Some((tab, snapshot, index))
-        });
+        })
+        .collect();
         let effect = self.tabs.apply(action);
-        if let Some((tab, snapshot, index)) = closing
-            && self.tabs.get(tab).is_none()
-        {
+        for (tab, snapshot, index) in closing {
+            if self.tabs.get(tab).is_some() {
+                continue;
+            }
             if self.closed_tabs.len() == CLOSED_KEPT {
                 self.closed_tabs.remove(0);
             }

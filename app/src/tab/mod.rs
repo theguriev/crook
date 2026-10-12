@@ -1011,6 +1011,18 @@ pub enum TabAction {
     },
     /// Close a tab, whether or not it is the active one.
     Close(TabId),
+    /// Close every tab but this one, Chrome's "Close other tabs".
+    ///
+    /// Pinned tabs stay, as they do in Chrome: a pin is a person saying this
+    /// one is not part of whatever is being cleared away. So do the members
+    /// of a folded group, which are tabs like any other and go with the rest
+    /// — see [`TabStrip::closed_by`].
+    CloseOthers(TabId),
+    /// Close every unpinned tab under this one in the panel. Chrome's "Close
+    /// tabs to the right", which a vertical list puts below.
+    CloseBelow(TabId),
+    /// Close every unpinned tab above this one in the panel.
+    CloseAbove(TabId),
     /// Make a tab the active one.
     Select(TabId),
     /// Move the active tab one slot towards the start.
@@ -1261,6 +1273,36 @@ impl TabStrip {
     /// Where a tab sits in bar order.
     pub fn index_of(&self, id: TabId) -> Option<usize> {
         self.tabs.iter().position(|tab| tab.id() == id)
+    }
+
+    /// The tabs a close of several would take, in bar order: every tab of a
+    /// group, or the unpinned tabs other than, under or above one tab.
+    ///
+    /// One answer for the three places that need it — the strip doing the
+    /// close, the question asking before it, and "Reopen the closed tab"
+    /// writing each one down — so none of them can disagree with the others
+    /// about which tabs went. Empty for anything else, and for a tab or group
+    /// that is not here.
+    pub fn closed_by(&self, action: TabAction) -> Vec<TabId> {
+        let (anchor, keep): (TabId, fn(usize, usize) -> bool) = match action {
+            TabAction::Close(tab) => {
+                return self.get(tab).map(Tab::id).into_iter().collect();
+            }
+            TabAction::CloseGroup(group) => return self.members(group).map(Tab::id).collect(),
+            TabAction::CloseOthers(tab) => (tab, |at, anchor| at == anchor),
+            TabAction::CloseBelow(tab) => (tab, |at, anchor| at <= anchor),
+            TabAction::CloseAbove(tab) => (tab, |at, anchor| at >= anchor),
+            _ => return Vec::new(),
+        };
+        let Some(anchor) = self.index_of(anchor) else {
+            return Vec::new();
+        };
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter(|(at, tab)| !keep(*at, anchor) && !tab.is_pinned())
+            .map(|(_, tab)| tab.id())
+            .collect()
     }
 
     /// Tabs in most-recently-used order, active first.
@@ -1902,6 +1944,19 @@ impl TabStrip {
             },
 
             TabAction::Close(id) => self.close(id),
+
+            TabAction::CloseOthers(_) | TabAction::CloseBelow(_) | TabAction::CloseAbove(_) => {
+                let doomed = self.closed_by(action);
+                if doomed.is_empty() {
+                    return TabEffect::Unchanged;
+                }
+                // Never every tab, since the one it was asked about stays,
+                // so `close` never has to refuse halfway through.
+                for tab in doomed {
+                    self.close(tab);
+                }
+                TabEffect::Changed
+            }
 
             TabAction::Select(id) => self.select(id),
 

@@ -538,6 +538,37 @@ impl Plugin for Tabs {
             workspace.handle_action(&WorkspaceAction::Tab(TabAction::Close(tab)), ctx);
         });
 
+        // Chrome's other closes, about the tab the menu is on and the panel
+        // around it — or, from the palette, the active tab. "Below" and
+        // "above" because the list is vertical: Chrome's "to the right" is
+        // the same tabs, read in the same order. Pinned tabs stay, as they do
+        // there. See `TabStrip::closed_by`.
+        for (name, title, close) in [
+            (
+                "close-other-tabs",
+                "Close other tabs",
+                TabAction::CloseOthers as fn(TabId) -> TabAction,
+            ),
+            (
+                "close-tabs-below",
+                "Close tabs below",
+                TabAction::CloseBelow,
+            ),
+            (
+                "close-tabs-above",
+                "Close tabs above",
+                TabAction::CloseAbove,
+            ),
+        ] {
+            host.register_command(action(name), title, move |workspace, ctx| {
+                let Some((tab, _)) = workspace.menu_target() else {
+                    return;
+                };
+                workspace.close_tab_context_menu(ctx);
+                workspace.handle_action(&WorkspaceAction::Tab(close(tab)), ctx);
+            });
+        }
+
         // The menu itself, by name. Everything *in* it has been a command
         // since this plugin was written, and the popup that holds them was the
         // one thing only a secondary press could reach — so a person who never
@@ -790,6 +821,26 @@ impl Plugin for Tabs {
         contribute(host, "close-tab", 400, |workspace, _| {
             workspace.menu_target().is_some()
         });
+        // In the band "Close tab" leads, the way Chrome keeps its closes
+        // together. Inert rather than absent when there is nothing for one to
+        // take — the bottom tab has nothing below it — for the reason the
+        // branch's row is: a menu whose rows came and went by tab would put
+        // "Close tab" in a different place on each.
+        for (order, name, close) in [
+            (
+                401,
+                "close-other-tabs",
+                TabAction::CloseOthers as fn(TabId) -> TabAction,
+            ),
+            (402, "close-tabs-below", TabAction::CloseBelow),
+            (403, "close-tabs-above", TabAction::CloseAbove),
+        ] {
+            contribute(host, name, order, move |workspace, _| {
+                workspace
+                    .menu_target()
+                    .is_some_and(|(tab, _)| !workspace.tabs().closed_by(close(tab)).is_empty())
+            });
+        }
         // Band 6, under the worktree menu's 5: the swatches are the foot of
         // Warp's menu, and they are the one entry that is not a sentence.
         swatch_row(host, 600);
