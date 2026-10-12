@@ -5,6 +5,18 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.21
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.20...v0.1.21)
+
+### Features
+
+- **tabs:** Close other tabs, tabs below and tabs above ([#469](https://github.com/theguriev/crook/pull/469))
+
+### ❤️ Contributors
+
+- Eugen Guriev <gurievcreative@gmail.com>
+
 ## v0.1.20
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.19...v0.1.20)
