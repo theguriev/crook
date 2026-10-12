@@ -824,6 +824,280 @@ fn live_text(emulator: &mut Emulator) -> String {
         .join("\n")
 }
 
+/// A prompt as wide as a long path makes it: one row of a 40-column pane, two
+/// of a 20-column one.
+const WIDE_PROMPT: &str = "user@host:/a/very/long/path/xx$ ";
+
+/// A grid the wide prompt fits on one row of.
+fn wide_emulator() -> Emulator {
+    Emulator::new(TerminalSize::new(40, 6), 100, Palette::default())
+}
+
+/// What bash's readline prints when the pane's size changes under its prompt:
+/// back to the start of the row, erase it, and the whole prompt again, marks
+/// and all, because the marks are part of `PS1`.
+fn redrawn_prompt() -> String {
+    format!("\r\x1b[K{A}{WIDE_PROMPT}{B}")
+}
+
+#[test]
+fn test_a_prompt_a_narrower_pane_wraps_starts_where_the_shell_redraws_it() {
+    // A new tab or `clear` puts the prompt on the top row, and a split or the
+    // Changes column narrows the pane under it. The reflow pushes the first
+    // half of the wrapped prompt into the history, and the shell then draws
+    // the whole prompt again from the row its cursor was left on. A block
+    // anchored to the half in the history starts above the viewport, which
+    // turns the pane into a plain grid with no composer and no find.
+    let mut emulator = wide_emulator();
+    emulator.advance(format!("{A}{WIDE_PROMPT}{B}").as_bytes());
+    emulator.resize(TerminalSize::new(20, 6));
+    emulator.advance(redrawn_prompt().as_bytes());
+
+    let live = emulator.live_block();
+    assert_eq!(BlockState::AtPrompt, live.state);
+    assert_eq!(
+        0, live.top_row,
+        "the block starts on the half of the prompt the shell left behind"
+    );
+    assert_eq!(
+        "user@host:/a/very/lo\nng/path/xx$",
+        live_text(&mut emulator)
+    );
+
+    emulator.advance(format!("ls\r\n{C}a  b\r\n\x1b]133;D;0\x07{A}$ {B}").as_bytes());
+    let [block] = emulator.blocks() else {
+        panic!("the command made no block");
+    };
+    assert_eq!(Some("ls".to_owned()), block.command);
+    assert_eq!(
+        "user@host:/a/very/lo\nng/path/xx$ ls\na  b",
+        block.rows.to_text()
+    );
+}
+
+#[test]
+fn test_a_wrapped_prompt_below_a_finished_block_is_shown_once() {
+    // The same narrowing with the prompt lower down, under a command that has
+    // been harvested. The reflow moves the first half of the prompt up a row
+    // instead of into the history, so the pane keeps its list — and the block
+    // anchored to that half painted it twice, once above the redrawn prompt.
+    let mut emulator = wide_emulator();
+    emulator.advance(format!("{A}$ {B}true\r\n{C}\x1b]133;D;0\x07").as_bytes());
+    emulator.advance(format!("{A}{WIDE_PROMPT}{B}").as_bytes());
+    assert!(
+        emulator.live_block().top_row > 0,
+        "the prompt is on the top row, which is the other test"
+    );
+
+    emulator.resize(TerminalSize::new(20, 6));
+    emulator.advance(redrawn_prompt().as_bytes());
+    assert_eq!(
+        "user@host:/a/very/lo\nng/path/xx$",
+        live_text(&mut emulator)
+    );
+}
+
+#[test]
+fn test_a_wide_character_the_narrower_pane_wraps_is_still_the_prompt() {
+    // A wide character that no longer fits at the end of a row moves to the
+    // next one and leaves a padding cell where it would have started, which
+    // the prompt had none of before the change. The row above the redraw is
+    // still the head of the prompt and nothing else.
+    let prompt = "user@host:/a/very/l\u{1F680}/path$ ";
+    let mut emulator = wide_emulator();
+    emulator.advance(format!("{A}{prompt}{B}").as_bytes());
+    emulator.resize(TerminalSize::new(20, 6));
+    emulator.advance(format!("\r\x1b[K{A}{prompt}{B}").as_bytes());
+    assert_eq!(
+        0,
+        emulator.live_block().top_row,
+        "the block starts on the half of the prompt the shell left behind"
+    );
+}
+
+#[test]
+fn test_the_half_a_redrawn_prompt_left_behind_stays_out_of_the_next_reflow() {
+    // The open block is found again after a column change as the first line
+    // with anything on it, which is only its own first row while nothing is
+    // left above it. A command running when the pane widens back would
+    // otherwise begin with the half the shell abandoned, joined by the reflow
+    // to the start of the prompt that replaced it. In the history for a
+    // prompt on the top row, and on the screen for one under a finished
+    // block.
+    for (case, before) in [
+        ("on the top row", String::new()),
+        (
+            "under a finished block",
+            format!("{A}$ {B}true\r\n{C}\x1b]133;D;0\x07"),
+        ),
+    ] {
+        let mut emulator = wide_emulator();
+        emulator.advance(format!("{before}{A}{WIDE_PROMPT}{B}").as_bytes());
+        emulator.resize(TerminalSize::new(20, 6));
+        emulator.advance(redrawn_prompt().as_bytes());
+        emulator.advance(format!("ls\r\n{C}a  b\r\n").as_bytes());
+
+        emulator.resize(TerminalSize::new(40, 6));
+        assert!(emulator.live_block().top_row >= 0, "{case}");
+        assert_eq!(
+            format!("{WIDE_PROMPT}ls\na  b"),
+            live_text(&mut emulator),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn test_output_printed_at_a_prompt_outlives_the_redraw_a_column_change_brings() {
+    // A job started with `&` prints while the shell sits at its prompt, and
+    // the shell knows nothing of it: when the width changes it draws its
+    // prompt again on the row its cursor was left on, under that output. The
+    // rows above the redraw are the job's rather than a half of the prompt,
+    // and they stay in the block — after a widening or a narrowing, and
+    // whether they fit on the screen or scrolled into the history.
+    let finished = format!("{A}$ {B}true\r\n{C}\x1b]133;D;0\x07");
+    for columns in [30, 60] {
+        for lines in [2, 10] {
+            let case = format!("{lines} lines, then {columns} columns");
+            let printed: Vec<String> = (1..=lines).map(|n| format!("bg {n}")).collect();
+            let mut emulator = wide_emulator();
+            emulator.advance(format!("{finished}{A}$ {B}").as_bytes());
+            emulator.advance(format!("{}\r\n", printed.join("\r\n")).as_bytes());
+            emulator.resize(TerminalSize::new(columns, 6));
+            emulator.advance(format!("\r\x1b[K\r{A}$ {B}").as_bytes());
+            if lines == 2 {
+                assert_eq!("$ bg 1\nbg 2\n$", live_text(&mut emulator), "{case}");
+            }
+
+            emulator.advance(format!("ls\r\n{C}a  b\r\n\x1b]133;D;0\x07{A}$ {B}").as_bytes());
+            let [_, block] = emulator.blocks() else {
+                panic!("{case}: the command made no block");
+            };
+            assert_eq!(
+                format!("$ {}\n$ ls\na  b", printed.join("\n")),
+                block.rows.to_text(),
+                "{case}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_output_left_on_the_prompt_line_outlives_the_redraw_a_column_change_brings() {
+    // Output that does not end in a newline goes on the line the prompt is
+    // on, so after a column change the rows above the shell's redraw are
+    // one line the terminal wrapped, as the head of a wrapped prompt is —
+    // but they are the job's. A message from a job started with `&`, one
+    // long enough to wrap before the change, and a progress meter that went
+    // back over the prompt with `\r`. The shell's own `\r\e[K` takes what is
+    // on the row it redraws on, and nothing else goes.
+    let finished = format!("{A}$ {B}true\r\n{C}\x1b]133;D;0\x07");
+    let long = "x".repeat(50);
+    for (case, prompt, printed, columns, kept, redrawn) in [
+        (
+            "a message",
+            "$ ",
+            "build finished: 12 targets ok",
+            20,
+            "$ build finished: 12".to_owned(),
+            "$",
+        ),
+        (
+            "a long message",
+            WIDE_PROMPT,
+            long.as_str(),
+            30,
+            format!("user@host:/a/very/long/path/xx\n$ {}", "x".repeat(28)),
+            "user@host:/a/very/long/path/xx\n$",
+        ),
+        (
+            "a progress meter",
+            WIDE_PROMPT,
+            "\rfetching crates: 45% done",
+            20,
+            "fetching crates: 45%".to_owned(),
+            "user@host:/a/very/lo\nng/path/xx$",
+        ),
+    ] {
+        let mut emulator = wide_emulator();
+        emulator.advance(format!("{finished}{A}{prompt}{B}{printed}").as_bytes());
+        emulator.resize(TerminalSize::new(columns, 6));
+        emulator.advance(format!("\r\x1b[K\r{A}{prompt}{B}").as_bytes());
+        assert_eq!(
+            format!("{kept}\n{redrawn}"),
+            live_text(&mut emulator),
+            "{case}"
+        );
+
+        emulator.advance(format!("echo hi\r\n{C}hi\r\n\x1b]133;D;0\x07{A}$ {B}").as_bytes());
+        let [_, block] = emulator.blocks() else {
+            panic!("{case}: the command made no block");
+        };
+        assert_eq!(
+            format!("{kept}\n{redrawn} echo hi\nhi"),
+            block.rows.to_text(),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn test_output_over_a_wrapped_line_at_the_prompt_outlives_the_redraw() {
+    // A line typed at the shell's own editor that wrapped, the cursor moved
+    // back to its start, and a job printing a line there. The newline does
+    // not unwrap the row it leaves, so the rows above the redraw are still
+    // one wrapped line, but they no longer read as the prompt: they hold the
+    // job's `abc`. readline's redraw goes down to the line's last row, clears
+    // it, and comes back up a row to draw the prompt and the line again.
+    let typed = "y".repeat(60);
+    let mut emulator = wide_emulator();
+    emulator.advance(format!("{A}$ {B}{typed}\x1b[A\r\x1b[2C").as_bytes());
+    emulator.advance(b"abc\r\n");
+    emulator.resize(TerminalSize::new(20, 6));
+    emulator.advance(format!("\r\n\r\x1b[K\x1b[A{A}$ {B}{typed}").as_bytes());
+    emulator.advance(format!("\r\n{C}\x1b]133;D;0\x07{A}$ {B}").as_bytes());
+
+    let [block] = emulator.blocks() else {
+        panic!("the line made no block");
+    };
+    let y = |count| "y".repeat(count);
+    assert_eq!(
+        format!(
+            "$ abc{}\n{}\n$ {}\n{}\n{}\nyy",
+            y(15),
+            y(20),
+            y(18),
+            y(20),
+            y(20)
+        ),
+        block.rows.to_text()
+    );
+}
+
+#[test]
+fn test_a_redraw_without_a_prompt_start_leaves_the_next_one_to_the_table() {
+    // bash draws only the last line of a prompt of several again when the
+    // width changes, and that line has the prompt end and no prompt start.
+    // The next prompt start at the same prompt is then something else:
+    // readline listing completions and drawing the whole prompt under them.
+    // The list is what was asked for, and it stays.
+    let mut emulator = wide_emulator();
+    emulator.advance(format!("{A}info line\r\n$ {B}").as_bytes());
+    emulator.resize(TerminalSize::new(30, 6));
+    emulator.advance(format!("\r\x1b[K\r$ {B}").as_bytes());
+    emulator.advance(format!("ls /\r\nbin/  root/\r\nproc/  var/\r\n{A}").as_bytes());
+    assert_eq!(
+        Some(IgnoreReason::PromptRedraw),
+        emulator.last_ignored_mark()
+    );
+
+    emulator.advance(format!("info line\r\n$ {B}ls /").as_bytes());
+    assert_eq!(
+        "info line\n$ ls /\nbin/  root/\nproc/  var/\ninfo line\n$ ls /",
+        live_text(&mut emulator)
+    );
+}
+
 #[test]
 fn test_a_shell_that_never_reports_a_mark_never_looks_like_it_is_running() {
     // The composer is taken away while a command runs, and a shell with no

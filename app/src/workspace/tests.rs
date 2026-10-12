@@ -15121,7 +15121,7 @@ mod shells {
 
     /// Whether the one pane is drawing its output as a list of blocks rather
     /// than as one grid.
-    fn draws_blocks(harness: &Harness) -> bool {
+    pub(super) fn draws_blocks(harness: &Harness) -> bool {
         let Some(pane) = harness.focused_pane_id() else {
             return false;
         };
@@ -29812,7 +29812,7 @@ mod changes_column {
     //! The Changes column in the real view tree: where it is, what a frame
     //! of it builds, and what a press on it asks git for.
 
-    use super::shells::{a_shell_these_tests_speak, await_prompt};
+    use super::shells::{a_shell_these_tests_speak, await_prompt, draws_blocks};
     use super::*;
     use crate::git::changes::{Against, Base, Commits, FileChange, Overview, Status};
     use crate::tab::StatusSource;
@@ -31209,11 +31209,21 @@ mod changes_column {
         harness.update_session(pane, |session| {
             session.working_directory = Some(repository.clone());
         });
+        // The column before the shell, so the shell opens at the width the
+        // column leaves the pane. Opened the other way round, the column
+        // narrows the pane under a prompt that is already drawn, and whether
+        // that prompt wraps is a question about the machine running the
+        // test — its host name, its directory, its prompt theme — rather than
+        // about where the keyboard goes.
+        open_a_comment_on_the_added_line(&mut harness);
         if !harness.start_terminals_with_marks() {
             return;
         }
         await_prompt(&mut harness, pane);
-        open_a_comment_on_the_added_line(&mut harness);
+        assert!(
+            draws_blocks(&harness),
+            "the pane is not drawing the blocks the find bar opens over"
+        );
         type_keys(&mut harness, "abc");
 
         harness.dispatch_workspace_action(WorkspaceAction::Find {
