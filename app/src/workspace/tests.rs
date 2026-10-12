@@ -10090,11 +10090,12 @@ fn a_removal_leaves_standing_a_checkout_a_pane_is_in_through_a_link_with_no_lock
     // A shell reports the directory it `cd`ed into spelled the way it got
     // there — through `~/code`, linked to another disk — and git lists the
     // checkout by its real path, so asking the panes with git's spelling
-    // misses that shell. Crook's lock knows both spellings, but only while it
-    // is on, and it came off with the tab that made the checkout: a pane that
-    // comes back, by a reopened tab, a restored session or a `cd`, brings no
-    // lock with it. So the removal asks again with the links resolved, and
-    // leaves the checkout standing without asking git at all.
+    // misses that shell. Crook's lock is no help: it came off with the tab
+    // that made the checkout, and while it was on it knew only git's path and
+    // the path Crook made the checkout at, never a link a shell took. A pane
+    // that comes back, by a reopened tab, a restored session or a `cd`,
+    // brings no lock with it. So the removal asks again with the links
+    // resolved, and leaves the checkout standing without asking git at all.
     let scratch = Scratch::new();
     let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
         eprintln!("skipped: no git here to make a repository with");
@@ -10161,8 +10162,37 @@ fn a_removal_leaves_standing_a_checkout_a_pane_is_in_through_a_link_with_no_lock
         "the list does not say why the checkout is still there"
     );
 
-    // The list compares spellings too, so it offers the checkout to a sweep,
-    // and the sweep has to leave it the same way.
+    // The × went back to the list, which compares spellings, so the row still
+    // has its ×, and pressing it again gets the same answer.
+    let offered = harness.workspace.read(&harness.app, |workspace, _| {
+        super::tab_menu::free_checkouts(workspace)
+            .iter()
+            .any(|(path, _)| *path == checkout)
+    });
+    assert!(
+        offered,
+        "the list stopped offering the checkout, so the second press asks nothing"
+    );
+    let index = harness
+        .worktree_index_under(&checkout)
+        .expect("the checkout is not in the list the × went back to");
+    harness.dispatch_worktree(WorktreeAction::AskRemove(index));
+    harness.dispatch_worktree(WorktreeAction::Remove { force: false });
+    harness.wait_for("a second answer", |harness| {
+        !harness.worktree_menu_is_busy()
+    });
+    assert!(
+        checkout.is_dir(),
+        "the second × removed the checkout a pane is in through a link"
+    );
+    assert_eq!(
+        harness.worktree_problem(),
+        Some(format!("{branch} is in use now and was kept.")),
+        "the second × did not get the same answer"
+    );
+
+    // The list offers the checkout to a sweep for the same reason, and the
+    // sweep has to leave it the same way.
     harness.dispatch_worktree(WorktreeAction::CloseMenu);
     harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
     harness.wait_for("both checkouts to be read again", |harness| {

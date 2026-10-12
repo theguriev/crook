@@ -6374,9 +6374,11 @@ impl Workspace {
                         workspace.open_tab_menu(tab, ctx);
                     }
                 }
-                // Back to the list too, which no longer offers it, saying why:
-                // staying on the confirmation would leave a Remove button that
-                // can do nothing while the pane is there.
+                // Back to the list too, saying why: staying on the
+                // confirmation would leave a Remove button that can do nothing
+                // while the pane is there. The list compares spellings, so it
+                // can still offer a checkout a pane reached through a link;
+                // pressing × again gets the same answer.
                 Ok(Removal::InUse) => {
                     if let Some(tab) = workspace.tab_menu.tab {
                         workspace.tab_menu.tab = None;

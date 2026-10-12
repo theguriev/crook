@@ -226,7 +226,8 @@ impl HeldLocks {
     /// line behind asking the panes: a lock still held is one whose tab is
     /// about to open, with no pane in the checkout yet, or one this window
     /// last counted a pane in. One already on its way off is not counted: no
-    /// pane is in it, and its unlock is running.
+    /// pane is in it under either spelling the lock knows, and its unlock is
+    /// running.
     pub(crate) fn keeps(&self, checkout: &Path) -> bool {
         self.held()
             .locks
