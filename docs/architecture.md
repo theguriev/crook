@@ -914,9 +914,12 @@ build a snapshot, and publishes the `Arc` into a slot of its own before it lets 
 clones that `Arc` and walks owned data. The UI thread publishes too, after a keystroke or a
 resize, and both writers keep the mutex until their snapshot is in the slot: one that
 installed it after letting go could be overtaken in the gap and put an older snapshot back
-beside a newer block list, which painted a finished command twice. Layout — which asks "did
-the grid move?" on every single frame — answers from an atomic before it ever asks for the
-lock.
+beside a newer block list, which painted a finished command twice. What the child asked for in
+those bytes — a title, a bell, a command's end — is set aside as it is parsed and handed over
+by the same publication, once the snapshot and the block list are in place: handed over at
+once, a command's end answered `crook pane wait --until finished` up to a frame before
+`crook pane blocks` could read the block it ended. Layout — which asks "did the grid move?" on
+every single frame — answers from an atomic before it ever asks for the lock.
 
 ### Blocks: the output is a list of commands
 

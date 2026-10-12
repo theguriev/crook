@@ -29,13 +29,14 @@
 //! its own writes.
 //!
 //! So the reader never pauses. It reads and parses as fast as the child can
-//! produce, and only *publishing* — rebuilding the snapshot and waking the main
-//! thread — is rate-limited: a batch parsed less than [`PAINT_INTERVAL`] after
-//! the last published one is left parsed and undrawn, and [`Flusher`] draws it
-//! when the interval is up. That thread exists for exactly one case, and it is
-//! not a nicety: the last batch of a burst is always the one that misses the
-//! window, and without someone to come back for it the final screenful of a
-//! `cat` would sit invisible until the shell next said something.
+//! produce, and only *publishing* — rebuilding the snapshot, handing over what
+//! the child asked for in it, and waking the main thread — is rate-limited: a
+//! batch parsed less than [`PAINT_INTERVAL`] after the last published one is
+//! left parsed and undrawn, and [`Flusher`] draws it when the interval is up.
+//! That thread exists for exactly one case, and it is not a nicety: the last
+//! batch of a burst is always the one that misses the window, and without
+//! someone to come back for it the final screenful of a `cat` would sit
+//! invisible until the shell next said something.
 //!
 //! There are three more filters behind that one. The reader publishes a
 //! snapshot the emulator only rebuilds when the drawn content differs, so an
@@ -911,6 +912,7 @@ impl TerminalModel {
             terminal: Mutex::new(terminal),
             latest: Mutex::new(snapshot.clone()),
             blocks: Mutex::new(Arc::default()),
+            unpublished: Mutex::new(Vec::new()),
             events: Mutex::new(Vec::new()),
             wake: Arc::new(Wake::default()),
             grid: AtomicU64::new(packed(INITIAL_GRID)),
@@ -1666,7 +1668,32 @@ struct Shared {
     /// reason. See [`BlockHistory`].
     blocks: Mutex<Arc<BlockHistory>>,
 
-    /// What the child has asked for and nobody has looked at yet.
+    /// What the child has asked for in output that has been parsed and not yet
+    /// published, held back until the picture of that output is.
+    ///
+    /// An event reaches the main thread in the same publication as the
+    /// snapshot and block list of the bytes that carried it, never ahead of
+    /// them. `crook pane wait --until finished` is answered on
+    /// [`TerminalEvent::CommandFinished`], and the `crook pane blocks` an agent
+    /// runs straight after it reads [`Self::blocks`] and [`Self::snapshot`]. An
+    /// end handed over as it was parsed, up to a [`PAINT_INTERVAL`] before the
+    /// flusher published it, answered the wait while the read still found the
+    /// command running and refused it.
+    ///
+    /// Filled only by the acquisition of `terminal` that parsed the bytes, and
+    /// emptied only by the one that publishes them, so what `publish` finds
+    /// here is exactly what its snapshot shows. Kept here rather than left in
+    /// the emulator because bells and notifications are folded as they arrive
+    /// (see [`Self::collect`]), and a program ringing in a loop would otherwise
+    /// queue a frame's worth of them.
+    unpublished: Mutex<Vec<TerminalEvent>>,
+
+    /// What the child has asked for in output that has been published, and
+    /// nobody has looked at yet.
+    ///
+    /// Filled while `terminal` is held, so two publishers hand their events
+    /// over in the order they took their snapshots. The main thread takes it
+    /// alone, so the order is `terminal`, then this, as it is for `latest`.
     events: Mutex<Vec<TerminalEvent>>,
 
     /// The main thread's end of the wake.
@@ -1914,19 +1941,21 @@ impl Shared {
 
     /// Parses output into the grid, and does not draw it.
     ///
-    /// The lock covers the parse and nothing else; the snapshot it will
-    /// eventually be drawn from is built under a second, later acquisition, so
-    /// a burst never holds the terminal for longer than one chunk takes to
-    /// parse.
+    /// The lock covers the parse and setting aside what it asked for, and
+    /// nothing else; the snapshot it will eventually be drawn from is built
+    /// under a second, later acquisition, so a burst never holds the terminal
+    /// for longer than one chunk takes to parse.
     fn feed(&self, bytes: &[u8]) {
         let mut terminal = self.lock();
         if let Err(error) = terminal.feed(bytes) {
             log::debug!("could not answer a shell's query: {error}");
         }
-        let events = terminal.take_events();
+        // Set aside, not handed over: the picture of these bytes is not
+        // published yet. Under the parse's own acquisition, so a publish that
+        // finds them here took its snapshot after they were parsed.
+        Self::collect(&self.unpublished, terminal.take_events());
         drop(terminal);
 
-        self.collect(events);
         self.publish_state().pending = true;
     }
 
@@ -1972,7 +2001,8 @@ impl Shared {
         self.publish();
     }
 
-    /// Rebuilds the grid, hands it to the main thread, and wakes it.
+    /// Rebuilds the grid, hands it to the main thread with what the child
+    /// asked for in it, and wakes it.
     ///
     /// The `Arc` goes into a slot of its own so that painting never waits on
     /// parsing; the emulator returns the very same one when the drawn content
@@ -1986,17 +2016,34 @@ impl Shared {
         // is: a keystroke landing in the gap would otherwise be overwritten by
         // this older snapshot. See `latest` for the lock order.
         *self.latest.lock().unwrap_or_else(PoisonError::into_inner) = snapshot;
+        // Handed over only once the picture they belong to is in place, and
+        // before the terminal is let go, so that nothing parsed after this
+        // snapshot goes with them. The emulator's own leftovers — a child's
+        // exit, found since the last parse — come after what was set aside.
+        // See `unpublished`.
+        let mut published = std::mem::take(
+            &mut *self
+                .unpublished
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        published.extend(events);
+        Self::collect(&self.events, published);
         drop(terminal);
 
-        self.collect(events);
         self.wake.raise();
     }
 
-    fn collect(&self, events: Vec<TerminalEvent>) {
+    /// Adds `events` to `pending`, folding the ones that repeat.
+    ///
+    /// Used for both stages, `unpublished` and `events`, so a bell set aside
+    /// and one handed over that the main thread has not taken yet are still
+    /// one bell.
+    fn collect(pending: &Mutex<Vec<TerminalEvent>>, events: Vec<TerminalEvent>) {
         if events.is_empty() {
             return;
         }
-        let mut pending = self.events.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut pending = pending.lock().unwrap_or_else(PoisonError::into_inner);
         for event in events {
             // A bell that has not been handed over yet stands for every bell
             // after it: `yes $'\a'` rings thousands of times a second, and each
