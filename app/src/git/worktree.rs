@@ -1662,16 +1662,26 @@ pub fn held_only_by_history(
     if dropped.is_empty() {
         return Ok(Vec::new());
     }
-    let mut args = vec![
+    // On stdin, which `--no-walk=unsorted` keeps in the order given rather
+    // than on the command line: past the few dozen the proof looks for the
+    // change of, `dropped` is every commit the branch was moved off, however
+    // many, and Windows gives a command line 32,767 characters — eight
+    // hundred object ids.
+    let mut input = String::new();
+    for commit in &dropped {
+        input.push_str(commit);
+        input.push('\n');
+    }
+    let args = [
         "log",
         "--no-show-signature",
         "--no-walk=unsorted",
         "--format=%H %s",
-    ];
-    args.extend(dropped.iter().map(String::as_str));
-    args.push("--");
-    let args: Vec<&OsStr> = args.into_iter().map(OsStr::new).collect();
-    let finished = run(repository, &args, Intent::Read)?;
+        "--stdin",
+        "--",
+    ]
+    .map(OsStr::new);
+    let finished = run_fed(repository, &args, input.into_bytes())?;
     if !finished.success {
         return Err(classify(&finished.stderr));
     }

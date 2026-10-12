@@ -1137,6 +1137,104 @@ fn the_commits_named_as_lost_are_the_ones_no_other_ref_holds() {
     );
 }
 
+/// [`git`], with `input` on its stdin, for the commands that read one.
+fn git_fed(dir: &Path, args: &[&str], input: &str) {
+    use std::io::Write as _;
+
+    let nowhere = dir.join("no-such-gitconfig");
+    let mut child = command("git")
+        .args(["-c", "init.defaultBranch=main"])
+        .args(["-c", "core.autocrlf=false"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", &nowhere)
+        .env("GIT_CONFIG_SYSTEM", &nowhere)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_COMMITTER_NAME", "Crook Tests")
+        .env("GIT_COMMITTER_EMAIL", "tests@crook.invalid")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("git is installed; the caller checked");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(input.as_bytes())
+        .expect("git reads its input");
+    let output = child.wait_with_output().expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?} in {} failed: {}",
+        dir.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn every_commit_only_a_branch_s_history_holds_is_named_however_many() {
+    // Past the few dozen whose change the proof looks for, every commit a
+    // branch was moved off is named, and there is no telling how many: a
+    // month of an agent amending after each step. A thousand object ids are
+    // past the 32,767 characters Windows gives a command line, so they go to
+    // git on stdin. Only Windows can fail this the other way; a Unix command
+    // line holds a thousand ids easily.
+    if without_git("every_commit_only_a_branch_s_history_holds_is_named_however_many") {
+        return;
+    }
+    let scratch = ScratchDir::new("history-long");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    let main = git(&repo, &["rev-parse", "main"]);
+    git(&repo, &["branch", "feature", "main"]);
+    const MADE: usize = 1000;
+
+    // The commits, made in one process on a branch of their own rather than
+    // a thousand `git commit`s, which take minutes on Windows.
+    let mut stream = String::new();
+    for index in 0..MADE {
+        let message = format!("work {index}\n");
+        stream.push_str("commit refs/heads/heap\n");
+        stream.push_str("committer Crook Tests <tests@crook.invalid> 1700000000 +0000\n");
+        stream.push_str(&format!("data {}\n{message}", message.len()));
+        if index == 0 {
+            stream.push_str(&format!("from {main}\n"));
+        }
+    }
+    git_fed(&repo, &["fast-import", "--quiet"], &stream);
+    // Each moved `feature` onto it as `git commit` would, and is recorded in
+    // its reflog under the same name.
+    let mut moves = String::new();
+    for commit in git(&repo, &["rev-list", "--reverse", "heap", "^main"]).lines() {
+        moves.push_str(&format!(
+            "start\nupdate refs/heads/feature {commit}\nprepare\ncommit\n"
+        ));
+    }
+    git_fed(
+        &repo,
+        &["update-ref", "-m", "commit: work", "--stdin"],
+        &moves,
+    );
+    // Then the start over, and nothing else holding any of them.
+    git(
+        &repo,
+        &[
+            "update-ref",
+            "-m",
+            "reset: moving to main",
+            "refs/heads/feature",
+            &main,
+        ],
+    );
+    git(&repo, &["update-ref", "-d", "refs/heads/heap"]);
+
+    let named = held_only_by_history(&repo, "feature", &main, Some(MAIN)).expect("git answers");
+
+    assert_eq!(named.len(), MADE);
+    assert_eq!(named[0].subject, format!("work {}", MADE - 1));
+    assert_eq!(named[MADE - 1].subject, "work 0");
+}
+
 #[test]
 fn discarding_a_branch_takes_only_the_commit_its_losses_were_counted_from() {
     // The one deletion with no proof behind it. What a person agreed to lose
