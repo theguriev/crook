@@ -824,6 +824,111 @@ fn live_text(emulator: &mut Emulator) -> String {
         .join("\n")
 }
 
+/// A prompt as wide as a long path makes it: one row of a 40-column pane, two
+/// of a 20-column one.
+const WIDE_PROMPT: &str = "user@host:/a/very/long/path/xx$ ";
+
+/// A grid the wide prompt fits on one row of.
+fn wide_emulator() -> Emulator {
+    Emulator::new(TerminalSize::new(40, 6), 100, Palette::default())
+}
+
+/// What bash's readline prints when the pane's size changes under its prompt:
+/// back to the start of the row, erase it, and the whole prompt again, marks
+/// and all, because the marks are part of `PS1`.
+fn redrawn_prompt() -> String {
+    format!("\r\x1b[K{A}{WIDE_PROMPT}{B}")
+}
+
+#[test]
+fn test_a_prompt_a_narrower_pane_wraps_starts_where_the_shell_redraws_it() {
+    // A new tab or `clear` puts the prompt on the top row, and a split or the
+    // Changes column narrows the pane under it. The reflow pushes the first
+    // half of the wrapped prompt into the history, and the shell then draws
+    // the whole prompt again from the row its cursor was left on. A block
+    // anchored to the half in the history starts above the viewport, which
+    // turns the pane into a plain grid with no composer and no find.
+    let mut emulator = wide_emulator();
+    emulator.advance(format!("{A}{WIDE_PROMPT}{B}").as_bytes());
+    emulator.resize(TerminalSize::new(20, 6));
+    emulator.advance(redrawn_prompt().as_bytes());
+
+    let live = emulator.live_block();
+    assert_eq!(BlockState::AtPrompt, live.state);
+    assert_eq!(
+        0, live.top_row,
+        "the block starts on the half of the prompt the shell left behind"
+    );
+    assert_eq!(
+        "user@host:/a/very/lo\nng/path/xx$",
+        live_text(&mut emulator)
+    );
+
+    emulator.advance(format!("ls\r\n{C}a  b\r\n\x1b]133;D;0\x07{A}$ {B}").as_bytes());
+    let [block] = emulator.blocks() else {
+        panic!("the command made no block");
+    };
+    assert_eq!(Some("ls".to_owned()), block.command);
+    assert_eq!(
+        "user@host:/a/very/lo\nng/path/xx$ ls\na  b",
+        block.rows.to_text()
+    );
+}
+
+#[test]
+fn test_a_wrapped_prompt_below_a_finished_block_is_shown_once() {
+    // The same narrowing with the prompt lower down, under a command that has
+    // been harvested. The reflow moves the first half of the prompt up a row
+    // instead of into the history, so the pane keeps its list — and the block
+    // anchored to that half painted it twice, once above the redrawn prompt.
+    let mut emulator = wide_emulator();
+    emulator.advance(format!("{A}$ {B}true\r\n{C}\x1b]133;D;0\x07").as_bytes());
+    emulator.advance(format!("{A}{WIDE_PROMPT}{B}").as_bytes());
+    assert!(
+        emulator.live_block().top_row > 0,
+        "the prompt is on the top row, which is the other test"
+    );
+
+    emulator.resize(TerminalSize::new(20, 6));
+    emulator.advance(redrawn_prompt().as_bytes());
+    assert_eq!(
+        "user@host:/a/very/lo\nng/path/xx$",
+        live_text(&mut emulator)
+    );
+}
+
+#[test]
+fn test_the_half_a_redrawn_prompt_left_behind_stays_out_of_the_next_reflow() {
+    // The open block is found again after a column change as the first line
+    // with anything on it, which is only its own first row while nothing is
+    // left above it. A command running when the pane widens back would
+    // otherwise begin with the half the shell abandoned, joined by the reflow
+    // to the start of the prompt that replaced it. In the history for a
+    // prompt on the top row, and on the screen for one under a finished
+    // block.
+    for (case, before) in [
+        ("on the top row", String::new()),
+        (
+            "under a finished block",
+            format!("{A}$ {B}true\r\n{C}\x1b]133;D;0\x07"),
+        ),
+    ] {
+        let mut emulator = wide_emulator();
+        emulator.advance(format!("{before}{A}{WIDE_PROMPT}{B}").as_bytes());
+        emulator.resize(TerminalSize::new(20, 6));
+        emulator.advance(redrawn_prompt().as_bytes());
+        emulator.advance(format!("ls\r\n{C}a  b\r\n").as_bytes());
+
+        emulator.resize(TerminalSize::new(40, 6));
+        assert!(emulator.live_block().top_row >= 0, "{case}");
+        assert_eq!(
+            format!("{WIDE_PROMPT}ls\na  b"),
+            live_text(&mut emulator),
+            "{case}"
+        );
+    }
+}
+
 #[test]
 fn test_a_shell_that_never_reports_a_mark_never_looks_like_it_is_running() {
     // The composer is taken away while a command runs, and a shell with no

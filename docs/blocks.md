@@ -86,7 +86,12 @@ that invariant.
   That is only the right answer because everything above the block has been blanked; without
   the erase the block claims the last screenful of its predecessor, and the list paints a
   screenful of already-stored output a second time, under a divider, as if the shell had
-  printed it twice.
+  printed it twice. The one thing the search cannot see is the shell drawing its prompt again
+  after the change. A prompt the narrower pane wraps is redrawn from the row the cursor was
+  left on, under the half the reflow pushed up — into the history, for a prompt on the top
+  row, so a block anchored to that half starts above the viewport and the pane falls back to
+  the grid. A block still at its prompt when the width changes therefore moves to the next
+  `A`, and the rows above it are erased the way a harvest erases them.
 * **Rows below the cursor.** A progress display that redraws its own last lines with `\e[3A`
   leaves the cursor above them, and a harvest that stopped at the cursor would drop those rows
   and then re-parent them into the next block. Since nothing above the open block survives,
