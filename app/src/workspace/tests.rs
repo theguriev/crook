@@ -985,23 +985,21 @@ impl Harness {
     /// By the text on the row, found where it was drawn: the list is filtered
     /// and reordered by what is registered, so its rows have no fixed places.
     ///
-    /// Scrolled to first when the list's clip has it out of sight, the way a
-    /// person would reach it. A scene has no occlusion, so a row past the
-    /// bottom of the list still has its glyphs in the frame, and a press where
-    /// they are lands on whatever is drawn there instead. That is the footer
-    /// on macOS, where the traffic lights' strip moves the list down: with
-    /// `crook/changes` and `crook/notifications` in the box the probe is the last row,
-    /// its line fell under "1 update in the registry", and the press selected
-    /// nothing — the card stayed on the first built-in.
+    /// Scrolled to first, by [`reveal_line`], when the list's clip has it out
+    /// of sight: a press where its glyphs are lands on whatever is drawn there
+    /// instead. That is the footer on macOS, where the traffic lights' strip
+    /// moves the list down: with `crook/changes` and `crook/notifications` in
+    /// the box the probe is the last row, its line fell under "1 update in the
+    /// registry", and the press selected nothing — the card stayed on the
+    /// first built-in.
+    ///
+    /// [`reveal_line`]: Self::reveal_line
     fn click_plugin(&mut self, name: &str) {
-        // Far more turns of the wheel than a list this long can need; running
-        // out of them is a row the scroll never brings back, not a slow one.
-        for _ in 0..64 {
-            let scene = self.frame();
+        let (_, at) = self.reveal_line(WINDOW, |scene| {
             // The column the list is in, taken from its own field: the card is
             // to the right of it and shares baselines with it, so a line built
             // from both columns is a line neither of them drew.
-            let column = settings_field_boxes(&scene)
+            let column = settings_field_boxes(scene)
                 .into_iter()
                 .next()
                 .expect("the Plugins section has a field of its own");
@@ -1010,33 +1008,69 @@ impl Harness {
             // the version an update would bring, "installed" — run on after
             // it: the two share a baseline, so they are one line to
             // `text_lines`.
-            let lines = text_lines(&scene, |at| {
+            let lines = text_lines(scene, |at| {
                 at.x() >= column.min_x() && at.x() <= column.max_x()
             });
-            let (at, _) = lines
+            lines
                 .iter()
                 .find(|(_, line)| line.trim() == name)
                 .or_else(|| lines.iter().find(|(_, line)| line.trim().starts_with(name)))
-                .unwrap_or_else(|| panic!("no row in the plugin list says {name:?}"));
-            let press = *at + vec2f(4., 4.);
+                .map(|(at, _)| *at)
+        });
+        let at = at.unwrap_or_else(|| panic!("no row in the plugin list says {name:?}"));
+        self.click(at + vec2f(4., 4.), MouseButton::Left);
+        self.frame();
+    }
 
-            let Some(list) = clip_of_line_at(&scene, *at)
-                .filter(|list| !(list.contains_point(*at) && list.contains_point(press)))
-            else {
-                self.click(press, MouseButton::Left);
-                self.frame();
-                return;
+    /// Turns the wheel until the line `find` picks out of a frame is inside
+    /// the clip that shows it, the way a person brings a row on screen before
+    /// reading it or pressing it, and returns that frame and where the line
+    /// starts in it.
+    ///
+    /// For a test about how a row is drawn rather than where: a list or a page
+    /// puts its rows wherever the rows above them leave room, so one read at a
+    /// fixed place in a fixed window is read off the edge the day a row is
+    /// added above it. The Keyboard Shortcuts table grew "Reopen the closed
+    /// tab", and "Split downwards" went under a 400px window's bottom edge.
+    ///
+    /// A scene has no occlusion, so a line past the edge of a scroll view
+    /// still has its glyphs in the frame: `find` sees it there, and the clip
+    /// of the layer that drew it is what says it is out of sight. A line drawn
+    /// with no clip at all is on screen as it stands.
+    ///
+    /// No position when no line `find` accepts is drawn anywhere, with the
+    /// frame as it was. Whether that is a failure is the caller's to say: a
+    /// line that is missing is what some tests are asking about.
+    fn reveal_line(
+        &mut self,
+        window: Vector2F,
+        find: impl Fn(&Scene) -> Option<Vector2F>,
+    ) -> (Rc<Scene>, Option<Vector2F>) {
+        // Far more turns of the wheel than any page here can need; running
+        // out of them is a line the scroll never brings back, not a slow one.
+        for _ in 0..64 {
+            let scene = self.frame_sized(window);
+            let Some(at) = find(&scene) else {
+                return (scene, None);
             };
-            // Negative is towards the user: the list moves up, and what was
+            // The baseline and a little under it, which is where a press on
+            // the line lands.
+            let under = at + vec2f(4., 4.);
+            let Some(clip) = clip_of_line_at(&scene, at)
+                .filter(|clip| !(clip.contains_point(at) && clip.contains_point(under)))
+            else {
+                return (scene, Some(at));
+            };
+            // Negative is towards the user: the page moves up, and what was
             // under its bottom edge comes into view.
-            let towards = if press.y() > list.max_y() { -1. } else { 1. };
+            let towards = if under.y() > clip.max_y() { -1. } else { 1. };
             self.dispatch(Event::ScrollWheel {
-                position: center(list),
+                position: center(clip),
                 delta: ScrollDelta::Lines(vec2f(0., towards)),
                 modifiers: Modifiers::default(),
             });
         }
-        panic!("scrolling the plugin list never brought {name:?}'s row into view");
+        panic!("scrolling never brought the line into view");
     }
 
     /// Which plugin the store is downloading, straight from its model.
@@ -14351,7 +14385,18 @@ fn a_row_too_narrow_for_its_label_and_control_wraps_the_label_and_keeps_the_cont
     let mut harness = Harness::new(1);
     harness.open_settings_page();
     harness.select_settings_section("Keyboard Shortcuts");
-    let scene = harness.frame_sized(vec2f(560., 400.));
+
+    // Scrolled to the row first: the table is taller than the window, and
+    // where in it "Split downwards" sits is up to the rows above it. Found by
+    // the word wrapping keeps, so a label cut with a mark has nothing to
+    // scroll to, and it is the assertion on that word below that says so.
+    let (scene, _) = harness.reveal_line(vec2f(560., 400.), |scene| {
+        let pane = settings_pane_box(scene);
+        text_lines(scene, |position| position.x() >= pane.min_x())
+            .into_iter()
+            .find(|(_, text)| text.contains("downwards"))
+            .map(|(start, _)| start)
+    });
     let pane = settings_pane_box(&scene);
 
     // Every line drawn on the page ends inside it — the labels, the chips
