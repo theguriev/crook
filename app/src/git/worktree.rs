@@ -41,7 +41,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use super::merged::{Landed, merged};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use super::run::deadlines_run_under;
 use super::run::{Failure, Intent, run, run_fed};
 pub(crate) use super::run::{READ_TIMEOUT, WRITE_TIMEOUT};

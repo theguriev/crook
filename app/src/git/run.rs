@@ -180,8 +180,9 @@ thread_local! {
 /// every git it started to run to its deadline, which no test can wait out.
 /// So a test does the work once, honestly, and holds the wait it is meant to
 /// fit inside to this — see `protocol::Verb::patience`. Thread-local for
-/// [`WRITE_DEADLINE`]'s reason.
-#[cfg(test)]
+/// [`WRITE_DEADLINE`]'s reason. Unix-only, as the one test that reads it is:
+/// on Windows it would be dead code, which clippy refuses.
+#[cfg(all(test, unix))]
 pub(crate) fn deadlines_run_under() -> Duration {
     RAN_UNDER.with(std::cell::Cell::get)
 }
