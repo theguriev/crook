@@ -15,6 +15,10 @@
 //! open by a `sleep 60 &` that will read nothing either. The pipe is made the
 //! first time a writer has to wait at all, which most never do, so a pane
 //! holds the three descriptors it always held until its child stops reading.
+//! A process out of descriptors cannot make it; the writer then waits on the
+//! master alone, which a hang-up still ends, and tries again the next time it
+//! has to wait — one wait a closed pane may not release, rather than a pane
+//! whose input has stopped for good.
 //!
 //! Non-blocking is a property of the open file, which every descriptor
 //! duplicated from the master shares, so the reader cannot stay blocking
@@ -98,6 +102,10 @@ struct Ends {
     closed: bool,
     /// The writing end of each pipe a writer is waiting on, or once waited on.
     writing: Vec<FileDescriptor>,
+    /// Tests: refuse to make a pipe, as a process out of descriptors does,
+    /// and count the refusals.
+    #[cfg(test)]
+    refusing: Option<usize>,
 }
 
 impl Closing {
@@ -112,6 +120,11 @@ impl Closing {
         if ends.closed {
             return Ok(None);
         }
+        #[cfg(test)]
+        if let Some(refused) = &mut ends.refusing {
+            *refused += 1;
+            return Err(io::Error::other("Too many open files"));
+        }
         let Pipe { read, write } = Pipe::new().map_err(io::Error::other)?;
         ends.writing.push(write);
         Ok(Some(read))
@@ -123,6 +136,20 @@ impl Closing {
         ends.closed = true;
         ends.writing.clear();
     }
+
+    /// Tests: from now on [`Self::watch`] fails the way it does in a process
+    /// with no descriptors left.
+    #[cfg(test)]
+    pub(crate) fn refuse_pipes(&self) {
+        self.0.lock().refusing = Some(0);
+    }
+
+    /// Tests: how many times [`Self::watch`] has failed since
+    /// [`Self::refuse_pipes`].
+    #[cfg(test)]
+    pub(crate) fn pipes_refused(&self) -> usize {
+        self.0.lock().refusing.unwrap_or(0)
+    }
 }
 
 /// The writable half: a write waits for the child to read, and gives up when
@@ -132,6 +159,9 @@ pub(crate) struct Writable {
     closing: Arc<Closing>,
     /// The pipe this waits on beside the master, once it has had to wait.
     watching: Option<FileDescriptor>,
+    /// Whether a failure to make that pipe has been logged already, so a
+    /// process out of descriptors logs it once per writer, not once per wait.
+    unwatched: bool,
 }
 
 impl Writable {
@@ -142,6 +172,7 @@ impl Writable {
             master,
             closing,
             watching: None,
+            unwatched: false,
         }
     }
 }
@@ -153,12 +184,26 @@ impl Write for Writable {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     if self.watching.is_none() {
-                        self.watching = self.closing.watch()?;
+                        match self.closing.watch() {
+                            Ok(Some(watching)) => self.watching = Some(watching),
+                            Ok(None) => return Err(closed()),
+                            // Out of descriptors, most likely, which may not
+                            // last: waited out on the master alone, where a
+                            // hang-up still ends it, and tried again at the
+                            // next wait. Ending the write here would end the
+                            // writer, and the pane would take no key again.
+                            Err(error) => {
+                                if !std::mem::replace(&mut self.unwatched, true) {
+                                    log::warn!(
+                                        "could not watch for a pty closing ({error}); \
+                                         a write waiting on it ends only when the program reads \
+                                         or hangs up"
+                                    );
+                                }
+                            }
+                        }
                     }
-                    let Some(watching) = &self.watching else {
-                        return Err(closed());
-                    };
-                    match wait(&mut self.master, POLLOUT, Some(watching))? {
+                    match wait(&mut self.master, POLLOUT, self.watching.as_ref())? {
                         // A hang-up wins over writable beside it: Linux can
                         // report both and then refuse the write, and a loop
                         // that believed the first half would spin.

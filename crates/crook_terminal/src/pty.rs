@@ -389,6 +389,14 @@ fn duplicate(master: &dyn MasterPty) -> Result<FileDescriptor> {
     FileDescriptor::dup(&master).context("Failed to duplicate the pseudo-terminal")
 }
 
+#[cfg(all(test, unix))]
+impl Pty {
+    /// Tests: what releases this pty's waiting writers when it closes.
+    pub(crate) fn closing(&self) -> &Closing {
+        &self.closing
+    }
+}
+
 /// The local link: the child is this process's own, on a pty it opened.
 impl PtyLink for Pty {
     /// A writer for the child's standard input.
