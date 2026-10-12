@@ -1249,18 +1249,22 @@ reflog, and that commit is on no branch — the reflog is the last thing that re
 deleting the branch deletes the reflog. So every commit the reflog records as made on the
 branch has to be on a branch, tag or remote still, or its change has to be in what the tip or
 the base holds: copied by a rebase, replaced by an amend, or the whole branch as it stood then
-found as one commit, which is a squash. That change is hashed as the lines added and removed
-alone (`--unified=0`), since a rebase onto a base that edited a line near the branch's, or one
-whose conflict was settled by keeping both sides, gives a copy new surroundings and the same
-lines; a conflict settled by rewriting the branch's own lines leaves the branch unproved until
-`gc` expires the entry, and a git older than 2.39 accounts for no change at all, only for an
-amend. Those looks share one more ten-second deadline. A reflog is not a complete record,
-though: a month after an amend or a rebase, `gc` expires the entry of every commit it replaced
-and leaves only the branch's creation. So a reflog git has pruned, told by a newest entry that
-no longer ends at the branch's tip, is left to the proofs, as is no reflog at all; a rebase
-less than a month old of commits more than a month old still goes unproved until its own entry
-expires. The base is what `origin/HEAD` names, then `init.defaultBranch` if that branch exists,
-then `main`, then `master`.
+found as one commit, which is a squash. That change is looked for by the lines added and
+removed alone (`--unified=0`), since a rebase onto a base that edited a line near the branch's,
+or one whose conflict was settled by keeping both sides, gives a copy new surroundings and the
+same lines. The lines only find it: the same edit made to another, identical line of the same
+file has them too and leaves the branch's own line as it was, so a match counts only from a
+commit that is a copy git made — the same author at the same second, which a rebase and a
+cherry-pick keep — or that has the same lines around them, which is all a squash can show. A
+conflict settled by rewriting the branch's own lines leaves the branch unproved until `gc`
+expires the entry, and a git older than 2.39 accounts for no change at all, only for an amend.
+Those looks share one more ten-second deadline. A reflog is not a complete record, though: a
+month after an amend or a rebase, `gc` expires the entry of every commit it replaced and leaves
+only the branch's creation. So a reflog git has pruned, told by a newest entry that no longer
+ends at the branch's tip, is left to the proofs, as is no reflog at all; a rebase less than a
+month old of commits more than a month old still goes unproved until its own entry expires. The
+base is what `origin/HEAD` names, then `init.defaultBranch` if that branch exists, then `main`,
+then `master`.
 Anything it cannot prove — a stack squashed in pieces, a branch reworked during review, a pass
 cut off by its cap — is simply unproved, because a miss costs a badge and a false proof costs
 somebody's branch: a branch is deleted on the strength of one, below. The menu asks after the

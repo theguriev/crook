@@ -40,10 +40,16 @@
 //! a commit added and removed, without the lines around them: a rebase onto
 //! a base that edited a line near the branch's, or one whose conflict was
 //! settled by keeping both sides, gives each copy new surroundings and the
-//! same lines. A commit undone with a reset and made again differently
-//! leaves its lines in nothing, and so does one whose conflict was settled
-//! by rewriting the branch's own lines; their branch is unproved until `gc`
-//! expires the entry, a month on.
+//! same lines. Those lines are where the look starts and never where it
+//! ends, because the same edit made to another, identical line of the same
+//! file — a second `timeout=3`, a second `replicas: 1` — has them too, and
+//! leaves the branch's own line as it was. A commit that has them accounts
+//! for one the branch moved off only when it is that commit as git copies
+//! one, by the same author at the same second, or has them among the same
+//! lines around them as well. A commit undone with a reset and made again
+//! differently leaves its lines in nothing, and so does one whose conflict
+//! was settled by rewriting the branch's own lines; their branch is unproved
+//! until `gc` expires the entry, a month on.
 //!
 //! A branch neither proves is *unproved*, never "not merged": a stack squashed
 //! in pieces, a branch rebased or reworded during review, and a branch with a
@@ -288,7 +294,7 @@ pub fn is_base(branch: &str, base: &str) -> bool {
 /// a second pass over the base, shared by every such branch, and a pass over
 /// the own commits of each one proved by patch, which all share one more
 /// [`PASS_DEADLINE`]; and a few subprocesses for each of up to
-/// [`MOST_DROPPED`] commits a branch moved off whose lines no pass found.
+/// [`MOST_DROPPED`] commits a branch moved off that no pass settles.
 /// Background executor only, and only on a gesture — the menu opening —
 /// never on a timer.
 ///
@@ -459,7 +465,7 @@ pub fn dropped(
             let since = moved_off
                 .last()
                 .and_then(|oldest| merge_base(repository, base, oldest));
-            patch_ids(
+            held_on(
                 repository,
                 &[base],
                 since.as_deref(),
@@ -467,11 +473,11 @@ pub fn dropped(
                 left(until),
             )
         }
-        None => HashSet::new(),
+        None => HashMap::new(),
     };
     let held = Held {
         on_base: &on_base,
-        on_tip: patch_ids(repository, &[tip], base, PASS_COMMITS, left(until)),
+        on_tip: held_on(repository, &[tip], base, PASS_COMMITS, left(until)),
     };
     Some(unaccounted(
         repository, base, &reflog, &moved_off, &held, false,
@@ -527,11 +533,11 @@ fn nothing_dropped(
         .filter_map(|moved_off| merge_base(repository, base, moved_off.last()?))
         .collect();
     let on_base = if forks.is_empty() {
-        HashSet::new()
+        HashMap::new()
     } else {
         let forks: Vec<&str> = forks.iter().map(String::as_str).collect();
         let needed = oldest(repository, &forks);
-        patch_ids(repository, &[base], needed.as_deref(), commits, left(until))
+        held_on(repository, &[base], needed.as_deref(), commits, left(until))
     };
 
     proved
@@ -545,8 +551,8 @@ fn nothing_dropped(
                 return false;
             }
             let on_tip = match landed.proof() {
-                Proof::Ancestor => HashSet::new(),
-                Proof::Patch { .. } => patch_ids(
+                Proof::Ancestor => HashMap::new(),
+                Proof::Patch { .. } => held_on(
                     repository,
                     &[landed.tip()],
                     Some(base),
@@ -570,20 +576,36 @@ fn left(until: Instant) -> Duration {
     until.saturating_duration_since(Instant::now())
 }
 
-/// The patch-ids [`unaccounted`] looks for a change among, all of them
-/// [`Hunks::Bare`].
+/// The commits [`unaccounted`] looks for a change among, by the patch-id of
+/// what each changed on its own, [`Hunks::Bare`].
 struct Held<'a> {
     /// The base's commits, back to where the commits it asks about left it.
-    on_base: &'a HashSet<String>,
+    on_base: &'a HashMap<String, Vec<String>>,
     /// The branch's own commits, which the base does not have. Empty for a
     /// branch whose tip is on the base: its commits are among the base's.
-    on_tip: HashSet<String>,
+    on_tip: HashMap<String, Vec<String>>,
 }
 
 impl Held<'_> {
-    /// Whether a commit that is still somewhere has the patch-id `patch`.
-    fn has(&self, patch: &str) -> bool {
-        self.on_base.contains(patch) || self.on_tip.contains(patch)
+    /// The commits still somewhere whose own change has the patch-id
+    /// `patch`: the branch's, then the base's, newest first, and at most
+    /// [`MOST_DROPPED`] of them.
+    ///
+    /// The branch's first, because a copy of a commit a branch moved off is
+    /// most often on the branch; and no more than that many, because each is
+    /// then named on a command line, and a change a base makes over and over
+    /// — a version bumped, a line added to a changelog — can have hundreds
+    /// of commits to its name. One cut off accounts for nothing, which costs
+    /// a proof and never makes one.
+    fn with(&self, patch: &str) -> Vec<&str> {
+        self.on_tip
+            .get(patch)
+            .into_iter()
+            .chain(self.on_base.get(patch))
+            .flatten()
+            .map(String::as_str)
+            .take(MOST_DROPPED)
+            .collect()
     }
 }
 
@@ -598,33 +620,38 @@ impl Held<'_> {
 /// which between them are how git moves a branch off a commit without
 /// throwing its work away:
 ///
-/// * **Its own change** — what it did against its parent — has the patch-id
-///   of one of theirs. A rebase or a cherry-pick copies each commit, and a
-///   fast-forward or a squash of one lands it. A copy can stand among other
-///   lines than its original did: the base it went onto may have edited one
-///   beside it, or touched the same spot, and the conflict been settled by
-///   keeping both. So the change is hashed as its lines alone, without the
-///   ones around them — see [`Hunks::Bare`] — and a copy's are its
-///   original's. A conflict settled by rewriting the branch's own lines
-///   leaves no copy of them, and the commit unaccounted for.
+/// * **A copy** of it is held. A rebase or a cherry-pick copies each commit,
+///   and a fast-forward or a squash of one lands it. A copy can stand among
+///   other lines than its original did: the base it went onto may have
+///   edited one beside it, or touched the same spot, and the conflict been
+///   settled by keeping both. So a copy is looked for by the lines its
+///   change adds and removes alone, [`Hunks::Bare`] — and those are not
+///   enough on their own, because the same edit made to another, identical
+///   line of the same file has them too, and leaves the original's line as
+///   it was. What tells a copy from that is what git carries over when it
+///   makes one: the author, and the moment they wrote the commit, to the
+///   second. A copy that lost them — a rebase told to reset the date — still
+///   counts when its lines stand among the same lines around them as the
+///   original's, [`Hunks::InContext`], which is what the patch proof asks of
+///   a squash. A conflict settled by rewriting the branch's own lines leaves
+///   no copy, and the commit unaccounted for.
 /// * **An amend** replaced it — the reflog's next entry is `commit (amend)` —
 ///   with a commit that is held or accounted for. An amend rewrites a commit
 ///   in place, so its draft's change is in nothing by design, and the draft
 ///   goes the way of what replaced it.
 /// * **Its whole change** — everything the branch had done when this was its
-///   tip, `git diff <where it left the base> <commit>` — has the patch-id of
-///   one of theirs, and then so has every commit it reached since. That is a
-///   squash on the base of a branch since reset onto it, and a squash made by
-///   hand with `reset --soft` and a `commit`.
+///   tip, `git diff <where it left the base> <commit>` — is the change one
+///   held commit made, and then so is every commit it reached since. That is
+///   a squash on the base of a branch since reset onto it, and a squash made
+///   by hand with `reset --soft` and a `commit`. A squash is a new commit, by
+///   whoever made it, when they made it, so only the lines can say; it is
+///   found by its lines alone and kept only when the lines around them agree
+///   too.
 ///
 /// Anywhere in that history, and not only after where the commit left the
 /// base, as the patch proof asks of a squash: the question here is not
 /// whether a branch's work reached the base but whether a change it moved
-/// off is still in something, and one the base had once is. The same goes
-/// for where in a file the lines are, which the patch proof's context pins
-/// down: lines a commit added that another added elsewhere in the same file
-/// are still in something, and its branch's reflog is not what remembers
-/// them.
+/// off is still in something, and one the base had once is.
 ///
 /// Every doubt leaves a commit unaccounted for: a read that failed, a commit
 /// with no change at all, and every one of them past [`MOST_DROPPED`].
@@ -639,9 +666,24 @@ fn unaccounted(
     if moved_off.is_empty() || moved_off.len() > MOST_DROPPED {
         return moved_off.to_vec();
     }
-    let own = own_patches(repository, moved_off);
+    let commits: Vec<&str> = moved_off.iter().map(String::as_str).collect();
+    let own = own_patches(repository, &commits, Hunks::Bare);
+    // The held commits that make each one's change, and who wrote every one
+    // of them, in one read.
+    let alike: HashMap<&str, Vec<&str>> = commits
+        .iter()
+        .filter_map(|commit| {
+            let alike = held.with(own.get(*commit)?);
+            (!alike.is_empty()).then_some((*commit, alike))
+        })
+        .collect();
+    let asked: HashSet<&str> = alike
+        .iter()
+        .flat_map(|(commit, alike)| std::iter::once(*commit).chain(alike.iter().copied()))
+        .collect();
+    let authors = authors(repository, &asked.into_iter().collect::<Vec<_>>());
     let amended = amendments(reflog);
-    let nowhere: HashSet<&str> = moved_off.iter().map(String::as_str).collect();
+    let nowhere: HashSet<&str> = commits.iter().copied().collect();
 
     let mut accounted: HashSet<String> = HashSet::new();
     let mut lost = Vec::new();
@@ -651,11 +693,16 @@ fn unaccounted(
         if accounted.contains(commit) {
             continue;
         }
-        let copied = own.get(commit).is_some_and(|patch| held.has(patch));
         let replaced = amended
             .get(commit.as_str())
             .is_some_and(|by| !nowhere.contains(by) || accounted.contains(*by));
-        if copied || replaced {
+        // A copy second, since telling one can take reads that an amend's
+        // replacement never needs.
+        if replaced
+            || alike
+                .get(commit.as_str())
+                .is_some_and(|alike| copied(repository, commit, alike, &authors))
+        {
             accounted.insert(commit.clone());
             continue;
         }
@@ -672,13 +719,44 @@ fn unaccounted(
     lost
 }
 
+/// Whether one of `alike` — held commits whose own change has `commit`'s
+/// lines, [`Hunks::Bare`] — is a copy of `commit`: written by the same author
+/// at the same moment, as `authors` has them, or making the change among the
+/// same lines around it, [`Hunks::InContext`]. See [`unaccounted`].
+fn copied(
+    repository: &Path,
+    commit: &str,
+    alike: &[&str],
+    authors: &HashMap<String, String>,
+) -> bool {
+    if let Some(author) = authors.get(commit)
+        && alike.iter().any(|held| authors.get(*held) == Some(author))
+    {
+        return true;
+    }
+    let mut asked = vec![commit];
+    asked.extend(alike);
+    let patches = own_patches(repository, &asked, Hunks::InContext);
+    patches
+        .get(commit)
+        .is_some_and(|patch| alike.iter().any(|held| patches.get(*held) == Some(patch)))
+}
+
 /// The commits `commit` reaches since it left `base`, when everything they
-/// changed has the patch-id of a commit `held` has: `commit`'s whole change
-/// as a branch, found in one commit somewhere else.
+/// changed is the change one commit `held` has made: `commit`'s whole change
+/// as a branch, found in one commit somewhere else. Found by its lines,
+/// [`Hunks::Bare`], and kept only when the lines around them agree as well,
+/// [`Hunks::InContext`] — see [`unaccounted`].
 fn whole_held(repository: &Path, base: &str, commit: &str, held: &Held) -> Option<Vec<String>> {
     let fork = merge_base(repository, base, commit)?;
-    let patch = patch_since(repository, &fork, commit, Hunks::Bare)?;
-    if !held.has(&patch) {
+    let lines = patch_since(repository, &fork, commit, Hunks::Bare)?;
+    let alike = held.with(&lines);
+    if alike.is_empty() {
+        return None;
+    }
+    let whole = patch_since(repository, &fork, commit, Hunks::InContext)?;
+    let theirs = own_patches(repository, &alike, Hunks::InContext);
+    if !theirs.values().any(|patch| *patch == whole) {
         return None;
     }
     let exclude = format!("^{fork}");
@@ -686,26 +764,27 @@ fn whole_held(repository: &Path, base: &str, commit: &str, held: &Held) -> Optio
     Some(reached.lines().map(str::to_owned).collect())
 }
 
-/// The patch-ids of [`patches_on`]'s pass, [`Hunks::Bare`], without the
-/// commits that have them: what [`Held`] is made of.
-fn patch_ids(
+/// The commits of [`patches_on`]'s pass, [`Hunks::Bare`], by patch-id: what
+/// [`Held`] is made of.
+fn held_on(
     repository: &Path,
     heads: &[&str],
     since: Option<&str>,
     commits: usize,
     deadline: Duration,
-) -> HashSet<String> {
+) -> HashMap<String, Vec<String>> {
     patches_on(repository, heads, since, commits, deadline, Hunks::Bare)
-        .into_keys()
-        .collect()
 }
 
 /// The patch-id of what each of `commits` changed on its own, against its
-/// first parent, [`Hunks::Bare`], by commit.
+/// first parent, hashed as `hunks` says, by commit.
 ///
 /// One `git log -p` piped into one `patch-id`, as the pass is. A merge has no
 /// patch here, and nor has anything when git could not be asked.
-fn own_patches(repository: &Path, commits: &[String]) -> HashMap<String, String> {
+fn own_patches(repository: &Path, commits: &[&str], hunks: Hunks) -> HashMap<String, String> {
+    if commits.is_empty() {
+        return HashMap::new();
+    }
     let mut log = vec![
         "-c",
         "diff.relative=false",
@@ -714,9 +793,9 @@ fn own_patches(repository: &Path, commits: &[String]) -> HashMap<String, String>
         "--no-walk=unsorted",
     ];
     log.extend(DIFF_FLAGS);
-    log.extend(Hunks::Bare.flags());
+    log.extend(hunks.flags());
     log.push("--format=commit %H");
-    log.extend(commits.iter().map(String::as_str));
+    log.extend(commits);
     log.push("--");
     let log: Vec<&OsStr> = log.into_iter().map(OsStr::new).collect();
 
@@ -728,6 +807,43 @@ fn own_patches(repository: &Path, commits: &[String]) -> HashMap<String, String>
             .collect(),
         _ => HashMap::new(),
     }
+}
+
+/// Who wrote each of `commits` and when — the name, the address, and the
+/// moment to the second with its zone — as one string apiece, by commit.
+///
+/// What git carries over to the copy when a rebase, a cherry-pick or an
+/// amend rewrites a commit, and what two commits written apart do not share:
+/// see [`unaccounted`]. The commits go in on stdin, for [`unheld`]'s reason.
+/// Empty when git could not be asked.
+fn authors(repository: &Path, commits: &[&str]) -> HashMap<String, String> {
+    if commits.is_empty() {
+        return HashMap::new();
+    }
+    let input: String = commits.iter().map(|commit| format!("{commit}\n")).collect();
+    // `raw` is seconds and a zone, which no `log.date` setting rounds; and
+    // `log.showSignature` would put gpg's lines among the answers.
+    let args = [
+        "log",
+        "--no-walk=unsorted",
+        "--no-show-signature",
+        "--stdin",
+        "--date=raw",
+        "--format=%H %ad %an <%ae>",
+        "--",
+    ]
+    .map(OsStr::new);
+    run_fed(repository, &args, input.into_bytes())
+        .ok()
+        .filter(|finished| finished.success)
+        .map(|finished| {
+            String::from_utf8_lossy(&finished.stdout)
+                .lines()
+                .filter_map(|line| line.split_once(' '))
+                .map(|(commit, author)| (commit.to_owned(), author.to_owned()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Each commit an amend replaced, mapped to the commit that replaced it.
@@ -1018,13 +1134,16 @@ enum Hunks {
     /// Each change with the lines git shows around it. What the proofs hash:
     /// a branch has landed when the base has its change where the branch
     /// made it, and a commit adding the same line to another part of the
-    /// file has made a different change.
+    /// file has made a different change. And what [`unaccounted`] asks of a
+    /// match it found by [`Self::Bare`] and cannot otherwise tell from the
+    /// same edit made elsewhere.
     InContext,
     /// The lines each change adds and removes and nothing else,
-    /// `--unified=0`. What [`unaccounted`] hashes: it asks whether a commit's
-    /// lines are still in something, and a rebase gives a copy new lines
-    /// around its own whenever the base it went onto edited one near them —
-    /// or touched the same spot, and the conflict was settled by keeping both.
+    /// `--unified=0`. What [`unaccounted`] looks for a change by: a rebase
+    /// gives a copy new lines around its own whenever the base it went onto
+    /// edited one near them — or touched the same spot, and the conflict was
+    /// settled by keeping both. Never a match on its own, because the same
+    /// edit to another, identical line of the file has the same lines.
     Bare,
 }
 
