@@ -60,6 +60,7 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{ClearMode, Color, Handler};
 
@@ -440,9 +441,10 @@ enum Transition {
     /// Harvest the open block as [`BlockState::Terminated`] and stay there.
     Terminate,
     /// The shell is drawing the prompt it is sitting at again. Nothing, as
-    /// [`IgnoreReason::PromptRedraw`] — unless a column change has moved that
-    /// prompt since, and then the block starts where it is drawn now. See
-    /// [`BlockTracker::reflowed`].
+    /// [`IgnoreReason::PromptRedraw`] — unless it is the first prompt start or
+    /// end since a column change, and the rows above it are only the wrapped
+    /// head of the prompt drawn before the change. Then the block starts
+    /// where the prompt is drawn now. See [`BlockTracker::reflowed`].
     Redraw,
     /// Do nothing, for this reason.
     Ignore(IgnoreReason),
@@ -479,7 +481,8 @@ const TABLE: [[Transition; Signal::COUNT]; BlockState::COUNT] = {
     // shell prints after a column change wrapped the prompt, and then it is
     // the only thing that says where the prompt is. The shell draws the
     // prompt again from the row its cursor was left on, and the half of the
-    // old one the reflow pushed above that row is nobody's.
+    // old one the reflow pushed above that row is nobody's. Only that half:
+    // anything else above the redraw is the block's, and the cell declines.
     const REDRAWN: Transition = Redraw;
     const OTHER: Transition = Ignore(R::SecondaryPrompt);
     // A shell cannot be at a prompt and running a command at the same time,
@@ -634,8 +637,10 @@ struct OpenBlock {
     /// own row means nothing until it is read against the anchor.
     images: Vec<(Anchor, ImagePlacement)>,
     /// Whether a column change has reflowed the grid since its prompt was
-    /// drawn, so that the next prompt start says where it begins. Read only
-    /// at the prompt, by [`Transition::Redraw`].
+    /// drawn, so that the next prompt start may say where it begins. Read
+    /// only at the prompt, by [`Transition::Redraw`], and cleared by the
+    /// first prompt start or prompt end after the reflow: whichever arrives
+    /// first is the shell's redraw, and anything later is not.
     reflowed: bool,
 }
 
@@ -860,12 +865,14 @@ impl BlockTracker {
     /// the top row. That half is what this finds, and once the shell has
     /// drawn the whole prompt below it, it is a stale copy: the block starts
     /// above the viewport, which takes the composer away, or paints the half
-    /// twice. So the block remembers the reflow, and the next prompt start
-    /// at its prompt moves it to where the prompt is now. See
-    /// [`Transition::Redraw`]. A shell that redraws only the last line of a
-    /// prompt of several — bash does — prints no prompt start, and leaves
-    /// the rows above it where the reflow put them; then what this found is
-    /// still the prompt's own first row.
+    /// twice. So the block remembers the reflow, and the prompt start of the
+    /// shell's redraw moves it to where the prompt is now — when the rows
+    /// above that are the head of the one line the redraw is drawing over,
+    /// and nothing else. See [`Transition::Redraw`]. A shell that redraws
+    /// only the last line of a prompt of several — bash does — prints the
+    /// prompt end and no prompt start, and leaves the rows above it where
+    /// the reflow put them; then what this found is still the prompt's own
+    /// first row, and that prompt end is where the block stops waiting.
     ///
     /// Not while a full-screen program is up. The grid `Term` hands out then
     /// is the program's, so the search would find vim's first row and anchor
@@ -907,10 +914,12 @@ impl BlockTracker {
     /// because the shell is drawing its prompt again after a column change.
     ///
     /// Everything above that row is erased and the history dropped, the way
-    /// [`Self::reopen`] does it, because none of it is the block's: it is the
-    /// part of the old prompt the redraw did not paint over. Left there, the
-    /// next column change would find it as the block's first line, and a
-    /// widening one would join it to the start of the new prompt.
+    /// [`Self::reopen`] does it, but with nothing harvested first, because
+    /// none of it is anybody's: [`Self::only_a_wrapped_line_above`] has
+    /// said it is the part of the old prompt the redraw did not paint over,
+    /// above rows the reflow found blank. Left there, the next column change
+    /// would find it as the block's first line, and a widening one would join
+    /// it to the start of the new prompt.
     ///
     /// The prompt's end and any picture go with it, as they do in a reflow,
     /// and for a second reason: their anchors were measured against the
@@ -923,6 +932,30 @@ impl BlockTracker {
         self.open.command_start = None;
         self.open.images.clear();
         self.open.reflowed = false;
+    }
+
+    /// Whether the rows the open block holds above the cursor's are one line
+    /// the terminal wrapped into the cursor's row, and nothing else.
+    ///
+    /// That is what a prompt the reflow wrapped leaves when the shell draws
+    /// it again: the shell went back to the start of the row its cursor was
+    /// on and draws from there, and the rows above are the head of the line
+    /// it is drawing over — the old prompt, and whatever was typed after it.
+    /// Output printed at the prompt is not that. A job started with `&`
+    /// writes under the prompt without the shell knowing, and the shell draws
+    /// its prompt again below what the job wrote, which ends in a newline the
+    /// terminal did not wrap. Those rows are the block's, and erasing them
+    /// would lose them: nothing has harvested them.
+    ///
+    /// True when there are no such rows at all, as for a shell that moved up
+    /// to its prompt's first row before drawing it again: the rows above the
+    /// block are the ones the reflow found blank.
+    fn only_a_wrapped_line_above<T>(&self, term: &Term<T>) -> bool {
+        let grid = term.grid();
+        let last = Column(grid.columns().saturating_sub(1));
+        let cursor = grid.cursor.point.line.0;
+        (self.open.top.line(term)..cursor)
+            .all(|line| grid[Line(line)][last].flags.contains(Flags::WRAPLINE))
     }
 
     /// The scrollback was erased, and the open block now starts at the top of
@@ -988,15 +1021,22 @@ impl BlockTracker {
                 self.last_ignored = Some(reason);
                 return None;
             }
-            Transition::Redraw if !self.open.reflowed => {
+            Transition::Redraw if !(self.open.reflowed && self.only_a_wrapped_line_above(term)) => {
+                self.open.reflowed = false;
                 self.last_ignored = Some(IgnoreReason::PromptRedraw);
                 return None;
             }
             Transition::Redraw => self.redrawn(term),
             // The only signal the table records without moving is the prompt
             // end, and what it records is where the echoed command line
-            // starts.
-            Transition::Record => self.open.command_start = Some(Anchor::at_input(term)),
+            // starts. It also ends the wait for a redraw after a reflow: a
+            // shell drawing the whole prompt again has printed its start
+            // before this, and one drawing only the last line of it prints
+            // no start at all.
+            Transition::Record => {
+                self.open.command_start = Some(Anchor::at_input(term));
+                self.open.reflowed = false;
+            }
             Transition::Enter(state) => {
                 // A bare Enter at a prompt submits an empty line, and an empty
                 // line is not a command: recording one would give a block a

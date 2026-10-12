@@ -930,6 +930,65 @@ fn test_the_half_a_redrawn_prompt_left_behind_stays_out_of_the_next_reflow() {
 }
 
 #[test]
+fn test_output_printed_at_a_prompt_outlives_the_redraw_a_column_change_brings() {
+    // A job started with `&` prints while the shell sits at its prompt, and
+    // the shell knows nothing of it: when the width changes it draws its
+    // prompt again on the row its cursor was left on, under that output. The
+    // rows above the redraw are the job's rather than a half of the prompt,
+    // and they stay in the block — after a widening or a narrowing, and
+    // whether they fit on the screen or scrolled into the history.
+    let finished = format!("{A}$ {B}true\r\n{C}\x1b]133;D;0\x07");
+    for columns in [30, 60] {
+        for lines in [2, 10] {
+            let case = format!("{lines} lines, then {columns} columns");
+            let printed: Vec<String> = (1..=lines).map(|n| format!("bg {n}")).collect();
+            let mut emulator = wide_emulator();
+            emulator.advance(format!("{finished}{A}$ {B}").as_bytes());
+            emulator.advance(format!("{}\r\n", printed.join("\r\n")).as_bytes());
+            emulator.resize(TerminalSize::new(columns, 6));
+            emulator.advance(format!("\r\x1b[K\r{A}$ {B}").as_bytes());
+            if lines == 2 {
+                assert_eq!("$ bg 1\nbg 2\n$", live_text(&mut emulator), "{case}");
+            }
+
+            emulator.advance(format!("ls\r\n{C}a  b\r\n\x1b]133;D;0\x07{A}$ {B}").as_bytes());
+            let [_, block] = emulator.blocks() else {
+                panic!("{case}: the command made no block");
+            };
+            assert_eq!(
+                format!("$ {}\n$ ls\na  b", printed.join("\n")),
+                block.rows.to_text(),
+                "{case}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_a_redraw_without_a_prompt_start_leaves_the_next_one_to_the_table() {
+    // bash draws only the last line of a prompt of several again when the
+    // width changes, and that line has the prompt end and no prompt start.
+    // The next prompt start at the same prompt is then something else:
+    // readline listing completions and drawing the whole prompt under them.
+    // The list is what was asked for, and it stays.
+    let mut emulator = wide_emulator();
+    emulator.advance(format!("{A}info line\r\n$ {B}").as_bytes());
+    emulator.resize(TerminalSize::new(30, 6));
+    emulator.advance(format!("\r\x1b[K\r$ {B}").as_bytes());
+    emulator.advance(format!("ls /\r\nbin/  root/\r\nproc/  var/\r\n{A}").as_bytes());
+    assert_eq!(
+        Some(IgnoreReason::PromptRedraw),
+        emulator.last_ignored_mark()
+    );
+
+    emulator.advance(format!("info line\r\n$ {B}ls /").as_bytes());
+    assert_eq!(
+        "info line\n$ ls /\nbin/  root/\nproc/  var/\ninfo line\n$ ls /",
+        live_text(&mut emulator)
+    );
+}
+
+#[test]
 fn test_a_shell_that_never_reports_a_mark_never_looks_like_it_is_running() {
     // The composer is taken away while a command runs, and a shell with no
     // integration — `ssh` to a host that has none, a container, the opt-out —

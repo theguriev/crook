@@ -90,8 +90,13 @@ that invariant.
   after the change. A prompt the narrower pane wraps is redrawn from the row the cursor was
   left on, under the half the reflow pushed up — into the history, for a prompt on the top
   row, so a block anchored to that half starts above the viewport and the pane falls back to
-  the grid. A block still at its prompt when the width changes therefore moves to the next
-  `A`, and the rows above it are erased the way a harvest erases them.
+  the grid. A block still at its prompt when the width changes therefore moves to the `A` of
+  the shell's redraw, and the rows above it are erased — but only when they are one line the
+  terminal wrapped into the row the `A` landed on, which is the old prompt and nothing else.
+  Unlike a harvest, nothing has copied those rows first. Output printed at the prompt, by a job
+  started with `&`, ends in a newline the terminal did not wrap, and then the redraw is ignored
+  like any other and the block keeps it. The wait ends at the redraw's first `A` or `B`, so
+  bash redrawing only the last line of a prompt of several leaves no later `A` to act on it.
 * **Rows below the cursor.** A progress display that redraws its own last lines with `\e[3A`
   leaves the cursor above them, and a harvest that stopped at the cursor would drop those rows
   and then re-parent them into the next block. Since nothing above the open block survives,
