@@ -15,3 +15,7 @@ log.workspace = true
 parking_lot.workspace = true
 portable-pty.workspace = true
 unicode-width.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# The pty's halves wait for it in `poll`. See `src/nonblocking.rs`.
+filedescriptor.workspace = true

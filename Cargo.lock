@@ -626,6 +626,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "base64 0.22.1",
+ "filedescriptor",
  "log",
  "parking_lot",
  "portable-pty",

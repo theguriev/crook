@@ -56,14 +56,14 @@ use crate::snapshot::{self, Palette, Snapshot, TerminalSize};
 ///
 /// Almost everything an emulator knows arrives as bytes from the child. One
 /// thing does not: a submitted command line, which [`crate::Terminal::submit`]
-/// hands the emulator directly, before a byte leaves for the pty, and which
-/// nothing in the child's output announces — the echo is what the shell chose
-/// to print, not what was typed. A stream replayed into another emulator has
-/// to carry it, and carries it as an item of its own rather than as bytes
-/// spliced in among the child's. A read ends wherever it ends, inside an
-/// escape sequence or a character as readily as anywhere else, and a submit
-/// lands between two reads, so bytes spliced in there would reach the parser
-/// in the middle of the child's and end whatever it was reading. As an item it
+/// hands the emulator directly, before anything the child printed after it is
+/// fed, and which nothing in the child's output announces — the echo is what
+/// the shell chose to print, not what was typed. A stream replayed into another
+/// emulator has to carry it, and carries it as an item of its own rather than
+/// as bytes spliced in among the child's. A read ends wherever it ends, inside
+/// an escape sequence or a character as readily as anywhere else, and a submit
+/// lands between two reads, so bytes spliced in there would reach the parser in
+/// the middle of the child's and end whatever it was reading. As an item it
 /// reaches no parser at all: [`Emulator::advance_mirrored`] makes the same
 /// [`Emulator::command_submitted`] call a direct submit makes, at the same
 /// point. Nothing a child prints can pass for one, either. Turning a stream of
@@ -661,7 +661,10 @@ impl Emulator {
     ///
     /// The application knows what it wrote and when, so a block opened this way
     /// carries the command text exactly, where a shell-integrated one carries
-    /// whatever was echoed on screen. Call it just before writing the line.
+    /// whatever was echoed on screen. Call it once the line has been written,
+    /// and before anything the child printed after it is fed: then a line
+    /// that never reached the shell opens no block, and the echo of one that
+    /// did lands in the block it opened.
     ///
     /// A stream that has to carry this — one replayed into another emulator —
     /// carries it as a [`Fed::Submitted`] of its own, which

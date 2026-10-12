@@ -14,9 +14,10 @@
 //! as long as the shell is quiet, so a pane on the pool would park a worker for
 //! the life of the session: four panes would take the whole pool and the
 //! settings save a click was waiting on would never run. Each terminal gets an
-//! OS thread of its own instead, and reaches the main thread through [`Wake`] —
-//! a future the reader wakes, which is the same mechanism a completed pool task
-//! already uses to come home.
+//! OS thread of its own instead — two, with the writer below, which blocks on
+//! a child that is not reading just as long — and reaches the main thread
+//! through [`Wake`]: a future the reader wakes, which is the same mechanism a
+//! completed pool task already uses to come home.
 //!
 //! # The throttle
 //!
@@ -59,9 +60,43 @@
 //! tab is on screen. Only its grid stops costing frames, and the frame that
 //! puts it back on screen reads the latest snapshot, not the last one drawn.
 //!
+//! # The writer
+//!
+//! **Nothing writes to a pty on the UI thread, or under the terminal's lock.**
+//! A write to a pty waits for the child to read, and a child that is printing
+//! reads nothing until its output has been read — by the reader, which needs
+//! the lock to parse it. A paste that held the lock while it wrote into a
+//! `cat` that had stopped reading therefore waited on the reader, which waited
+//! on the paste, and the window froze for good at about eighteen kilobytes:
+//! zsh and fish at sixteen on a composer's Enter, and any program that asked
+//! the terminal questions faster than it read the answers, the reader writing
+//! those under the lock itself.
+//!
+//! So each session has a third thread, beside the reader and the shared
+//! flusher, that owns the pty's writer — see [`crook_terminal::PtyWriter`].
+//! Keys, pastes, submitted lines and the emulator's answers are all copied
+//! onto its one queue under the lock, in the order the lock was taken, which
+//! is the order they were written in when each was written on the spot; the
+//! thread writes them out after, holding nothing of the session's but that
+//! queue. A keystroke costs a copy and a wake. A submit records its block
+//! boundary under the same acquisition as the line it queues, once the queue
+//! has taken the line: one refused behind the backlog below opens no block,
+//! and the reader, which needs the lock to parse, finds the boundary in place
+//! before it can parse anything the shell said in answer.
+//!
+//! What a child that never reads costs is bounded: a person's input is kept
+//! whole, behind a backlog past which more is refused, and the emulator's
+//! answers are dropped oldest first past a backlog of their own, since a
+//! program that is not reading can use none of them.
+//!
+//! The lock order is the terminal, then the queue, and nothing takes them the
+//! other way round: the writer takes the queue alone, and never holds it
+//! across the write, so a push waits for at most a pop.
+//!
 //! # The lock
 //!
-//! One mutex per terminal, and **it is never held across a frame**. The reader
+//! One mutex per terminal, and **it is never held across a frame**, nor
+//! across a write to the pty — see "The writer". The reader
 //! takes it to feed bytes, and again to build a snapshot, and publishes the
 //! `Arc` into a slot of its own before letting go; painting clones that `Arc`
 //! and walks owned data. The UI thread publishes too, after a keystroke or a
@@ -91,6 +126,19 @@
 //! prompt. [`TerminalModel::watch_children`] asks the children directly instead,
 //! once a second and in one task for the whole model, so the pane closes when
 //! the shell does whatever the pty is doing.
+//!
+//! The writer is not part of the residue, save in a process short of
+//! descriptors. It holds no reference to the session at all, only its end of
+//! the queue, and the terminal being dropped closes the queue and the pty
+//! both: a write that was waiting on a child that will never read — even one
+//! whose pty an orphan is holding open — is released by that, and the thread
+//! ends. What lets the closing reach it on Unix is a pipe beside the master,
+//! which a write makes when it first has to wait. A process out of
+//! descriptors cannot make one, and the write waits on the master alone; on
+//! macOS, one with more open than `select` can watch cannot wait at all, and
+//! the write blocks on the master. Either way an orphan holding the pty open
+//! then holds the writer too — the thread and its copy of the master — until
+//! the orphan exits. See `crook_terminal`'s `nonblocking` module for both.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -762,10 +810,6 @@ impl TerminalModel {
             .map(|session| session.shared.blocks())
     }
 
-    /// Types `text` into a pane's shell, as if a person had.
-    ///
-    /// The pty buffers it, so this works before the shell has finished starting:
-    /// what is written now is read when it gets there.
     /// Asks a pane's shell what a half-typed line could become.
     ///
     /// Writes the question into the session's own scratch and sends the key
@@ -797,6 +841,10 @@ impl TerminalModel {
         session.shared.request_completions()
     }
 
+    /// Types `text` into a pane's shell, as if a person had.
+    ///
+    /// Queued for the session's writer, so this works before the shell has
+    /// finished starting: what is sent now is read when it gets there.
     pub fn type_into(&self, pane: PaneId, text: &str) {
         let Some(session) = self.sessions.get(&pane) else {
             log::warn!("nothing to type into: pane {pane:?} has no terminal");
@@ -886,7 +934,7 @@ impl TerminalModel {
             );
         }
 
-        let mut terminal = match Terminal::spawn(options) {
+        let terminal = match Terminal::spawn(options) {
             Ok(terminal) => terminal,
             Err(error) => {
                 let reason = format!("{error:#}");
@@ -897,30 +945,6 @@ impl TerminalModel {
             }
         };
 
-        // Taken before the terminal is shared, because it can only be taken
-        // once and the thread below is the one owner that may block on it.
-        let Some(reader) = terminal.take_reader() else {
-            log::error!("the shell for pane {pane:?} has no readable end");
-            self.failures
-                .insert(pane, "the pseudo-terminal has no readable end".to_owned());
-            ctx.notify();
-            return;
-        };
-
-        let snapshot = terminal.snapshot();
-        let shared = Arc::new(Shared {
-            terminal: Mutex::new(terminal),
-            latest: Mutex::new(snapshot.clone()),
-            blocks: Mutex::new(Arc::default()),
-            unpublished: Mutex::new(Vec::new()),
-            events: Mutex::new(Vec::new()),
-            wake: Arc::new(Wake::default()),
-            grid: AtomicU64::new(packed(INITIAL_GRID)),
-            resize_failing: AtomicBool::new(false),
-            scroll_remainder: AtomicU32::new(0.0f32.to_bits()),
-            publish: Mutex::new(PublishState::new()),
-        });
-
         if let Err(error) = self.start_flushing() {
             log::error!("could not start the repaint thread for pane {pane:?}: {error}");
             self.failures.insert(pane, format!("{error}"));
@@ -928,22 +952,15 @@ impl TerminalModel {
             return;
         }
 
-        // The reader holds a `Weak`, not an `Arc`: a pane whose pty stays open
-        // after it is closed — something other than the child is holding it —
-        // must not keep the terminal and its scrollback alive behind it. The
-        // thread owns the object whose drop would unblock it, and that is a
-        // knot that only a weak reference unties.
-        let reading = Arc::downgrade(&shared);
-        let flusher = self.flusher.clone();
-        let started = thread::Builder::new()
-            .name(format!("crook-pty-{pane:?}"))
-            .spawn(move || read_loop(&reading, &flusher, reader));
-        if let Err(error) = started {
-            log::error!("could not start a reader thread for pane {pane:?}: {error}");
-            self.failures.insert(pane, format!("{error}"));
-            ctx.notify();
-            return;
-        }
+        let shared = match start(terminal, pane, &self.flusher) {
+            Ok(shared) => shared,
+            Err(reason) => {
+                self.failures.insert(pane, reason);
+                ctx.notify();
+                return;
+            }
+        };
+        let snapshot = shared.snapshot();
 
         self.failures.remove(&pane);
         self.sessions.insert(
@@ -1051,16 +1068,20 @@ impl TerminalModel {
         Ok(())
     }
 
-    /// Ends a pane's shell and lets its reader thread finish.
+    /// Ends a pane's shell and lets its reader and writer threads finish.
     ///
     /// Killing the child is what closes the pty, which is what returns the
-    /// reader's blocking read. This runs on the thread that draws, so it kills
-    /// and does not wait: the exit status is a line in a log, and a child that
-    /// takes its time dying would otherwise hold the window. Nothing is leaked
-    /// by not waiting — the kill escalates to a signal nothing survives, and
-    /// the reader reports the status if it is still there to see it. The one
-    /// cost is the escalation's own quarter-second grace period, and only for a
-    /// child that ignores the first signal.
+    /// reader's blocking read; the terminal being dropped once nothing holds it
+    /// any more is what ends the writer, whatever it was waiting on — but for a
+    /// write that began to wait in a process short of descriptors, which an
+    /// orphan holding the pty open keeps waiting, as the module docs say under
+    /// "What a closed pane costs". This runs on the thread that draws, so it
+    /// kills and does not wait: the exit status is a line in a log, and a child
+    /// that takes its time dying would otherwise hold the window. Nothing is
+    /// leaked by not waiting — the kill escalates to a signal nothing survives,
+    /// and the reader reports the status if it is still there to see it. The
+    /// one cost is the escalation's own quarter-second grace period, and only
+    /// for a child that ignores the first signal.
     fn close(&mut self, pane: PaneId) {
         let Some(session) = self.sessions.remove(&pane) else {
             return;
@@ -1298,7 +1319,7 @@ impl Drop for TerminalModel {
 ///
 /// Cheap to clone. Every method takes the terminal's lock for as long as it
 /// takes to do one thing and no longer; nothing here is allowed to hold it
-/// across a frame.
+/// across a frame, or across a write to the pty.
 #[derive(Clone)]
 pub struct TerminalHandle(Arc<Shared>);
 
@@ -1318,13 +1339,17 @@ impl TerminalHandle {
         self.0.blocks()
     }
 
-    /// Runs a composed command line, reporting whether it reached the pty.
+    /// Runs a composed command line, reporting whether it was queued for the
+    /// pty — the line and its Enter together, or neither.
     ///
     /// Not [`Self::write`] with a newline stuck on the end: this is the block
     /// boundary that does not depend on the shell cooperating. The emulator is
-    /// told the exact text and the exact moment before a byte leaves, which is
-    /// what a shell with no OSC 133 integration can never report and what a
-    /// shell that has one can only report as whatever it echoed.
+    /// told the exact text and the exact moment, under the lock the line is
+    /// queued under and so before the reader can parse what the shell echoes,
+    /// which is what a shell with no OSC 133 integration can never report and
+    /// what a shell that has one can only report as whatever it echoed. A line
+    /// that was not queued is not recorded either, so `false` means nothing
+    /// happened and the line may be tried again.
     pub fn submit(&self, line: &str) -> bool {
         self.drive(|terminal| {
             terminal.scroll_to_bottom();
@@ -1407,7 +1432,8 @@ impl TerminalHandle {
         })
     }
 
-    /// Puts pasted text into the shell, returning whether it was written.
+    /// Puts pasted text into the shell, returning whether it was queued for
+    /// the pty.
     ///
     /// Not `send_key` with the text as keystrokes: [`Terminal::paste`] wraps
     /// it in the bracketed-paste markers when the program has asked for them,
@@ -1526,11 +1552,11 @@ impl TerminalHandle {
     }
 
     /// Writes text to the shell as if it had been typed, returning whether it
-    /// reached the pty.
+    /// was queued for the pty.
     ///
-    /// What the input field sends a finished command line with. The pty buffers
-    /// it, so a line composed before the shell has finished starting is read
-    /// when the shell gets there.
+    /// What the input field sends a finished command line with. The session's
+    /// writer holds it until the child reads it, so a line composed before the
+    /// shell has finished starting is read when the shell gets there.
     pub fn write(&self, text: &str) -> bool {
         self.drive(|terminal| {
             terminal.scroll_to_bottom();
@@ -1613,6 +1639,12 @@ impl TerminalHandle {
     /// typing or dragging, which arrives at the rate a person produces it, and
     /// holding a keystroke back for a frame is the one delay a terminal must
     /// never have.
+    ///
+    /// Nothing `work` sends the child is written here: it is queued, and the
+    /// session's writer thread is woken for it, so a keystroke costs a copy and
+    /// a wake and a paste the child is slow to read holds nothing — not this
+    /// thread, and not the lock the reader needs. See the module docs, "The
+    /// writer".
     fn drive<T>(&self, work: impl FnOnce(&mut Terminal) -> T) -> T {
         let mut terminal = self.0.lock();
         let outcome = work(&mut terminal);
@@ -1625,6 +1657,79 @@ impl TerminalHandle {
         drop(terminal);
         outcome
     }
+}
+
+/// Shares a terminal between the main thread and the two threads a session
+/// runs on: one that reads its pty, and one that writes it.
+///
+/// Each of those blocks for as long as the child likes — the reader until the
+/// child says something, the writer until it reads — so neither may happen on
+/// the thread that draws, or under the terminal's lock, which the reader needs
+/// to parse what a child waiting on its own output has printed. See the
+/// module docs, "The writer".
+///
+/// The error is the reason the session could not start, for the pane to say.
+fn start(
+    mut terminal: Terminal,
+    pane: PaneId,
+    flusher: &Arc<Flusher>,
+) -> Result<Arc<Shared>, String> {
+    // Taken before the terminal is shared, because each can only be taken
+    // once and the threads below are the one owners that may block on them.
+    let Some(reader) = terminal.take_reader() else {
+        log::error!("the shell for pane {pane:?} has no readable end");
+        return Err("the pseudo-terminal has no readable end".to_owned());
+    };
+    let Some(writer) = terminal.take_writer() else {
+        log::error!("the shell for pane {pane:?} has no writable end");
+        return Err("the pseudo-terminal has no writable end".to_owned());
+    };
+
+    // Detached, and holding nothing of the session's but the queue: it ends
+    // when the terminal is dropped, which closes the queue and — on the way —
+    // the pty, which is what releases a write the child was never going to
+    // read. A child that closes the pty first ends it sooner.
+    let started = thread::Builder::new()
+        .name(format!("crook-pty-writer-{pane:?}"))
+        .spawn(move || {
+            if let Err(error) = writer.run() {
+                log::debug!("the pty of pane {pane:?} stopped taking input: {error}");
+            }
+        });
+    if let Err(error) = started {
+        log::error!("could not start a writer thread for pane {pane:?}: {error}");
+        return Err(format!("{error}"));
+    }
+
+    let snapshot = terminal.snapshot();
+    let shared = Arc::new(Shared {
+        terminal: Mutex::new(terminal),
+        latest: Mutex::new(snapshot),
+        blocks: Mutex::new(Arc::default()),
+        unpublished: Mutex::new(Vec::new()),
+        events: Mutex::new(Vec::new()),
+        wake: Arc::new(Wake::default()),
+        grid: AtomicU64::new(packed(INITIAL_GRID)),
+        resize_failing: AtomicBool::new(false),
+        scroll_remainder: AtomicU32::new(0.0f32.to_bits()),
+        publish: Mutex::new(PublishState::new()),
+    });
+
+    // The reader holds a `Weak`, not an `Arc`: a pane whose pty stays open
+    // after it is closed — something other than the child is holding it —
+    // must not keep the terminal and its scrollback alive behind it. The
+    // thread owns the object whose drop would unblock it, and that is a
+    // knot that only a weak reference unties.
+    let reading = Arc::downgrade(&shared);
+    let flusher = flusher.clone();
+    let started = thread::Builder::new()
+        .name(format!("crook-pty-{pane:?}"))
+        .spawn(move || read_loop(&reading, &flusher, reader));
+    if let Err(error) = started {
+        log::error!("could not start a reader thread for pane {pane:?}: {error}");
+        return Err(format!("{error}"));
+    }
+    Ok(shared)
 }
 
 /// The whole lines to move now and the fraction to carry, given the fraction

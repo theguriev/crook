@@ -909,17 +909,37 @@ idle laptop; `the_frame_budget` in `app/src/workspace/tests.rs` holds it to none
 cannot see is the window itself: nothing tells the workspace that it has been minimised or
 covered, so a window nobody is looking at still asks to draw the panes it shows.
 
-The emulator's mutex is never held across a frame. The reader takes it to parse, and again to
-build a snapshot, and publishes the `Arc` into a slot of its own before it lets go; painting
-clones that `Arc` and walks owned data. The UI thread publishes too, after a keystroke or a
-resize, and both writers keep the mutex until their snapshot is in the slot: one that
-installed it after letting go could be overtaken in the gap and put an older snapshot back
+**Nothing writes to the pty on the UI thread or under the emulator's mutex.** A write waits
+for the child to read, a child that is printing reads nothing until its output has been read,
+and the reader needs the mutex to parse that output — so a paste that held the mutex while it
+wrote into a `cat` that had stopped reading waited on the reader, which waited on the paste,
+and the window froze for good at about eighteen kilobytes; the reader answering a program that
+asked questions faster than it read the answers wedged itself the same way. Each session
+therefore has a writer thread as well, which owns the pty's writer
+(`crook_terminal::PtyWriter`, handed out by `Terminal::take_writer`) and drains one queue:
+keys, pastes, submitted lines and the emulator's answers are copied onto it under the mutex,
+in the order the mutex was taken, which is the order they used to be written in. A keystroke
+costs a copy and a wake. A person's input is kept whole, behind a 64 MiB backlog past which
+more is refused; answers are dropped oldest first past 64 KiB, since a program that is not
+reading can use none of them. On Unix the master is non-blocking and both halves wait in
+`poll`, the writer on a pipe the `Pty` closes as well, because a blocking write on Linux can
+stay asleep after its child has been killed and reaped — and the writer thread must end when
+its pane does. It does, save for a write that began to wait in a process short of descriptors:
+out of them, so the pipe could not be made, or on macOS past what `select` can watch. That
+wait is on the master alone, and lasts as long as an orphan such as a `sleep 60 &` holds the
+pty open.
+
+The emulator's mutex is never held across a frame, or across a write. The reader takes it to
+parse, and again to build a snapshot, and publishes the `Arc` into a slot of its own before it
+lets go; painting clones that `Arc` and walks owned data. The UI thread publishes too, after a
+keystroke or a resize, and both writers keep the mutex until their snapshot is in the slot: one
+that installed it after letting go could be overtaken in the gap and put an older snapshot back
 beside a newer block list, which painted a finished command twice. What the child asked for in
 those bytes — a title, a bell, a command's end — is set aside as it is parsed and handed over
 by the same publication, once the snapshot and the block list are in place: handed over at
-once, a command's end answered `crook pane wait --until finished` up to a frame before
-`crook pane blocks` could read the block it ended. Layout — which asks "did the grid move?" on
-every single frame — answers from an atomic before it ever asks for the lock.
+once, a command's end answered `crook pane wait --until finished` up to a frame before `crook
+pane blocks` could read the block it ended. Layout — which asks "did the grid move?" on every
+single frame — answers from an atomic before it ever asks for the lock.
 
 ### Blocks: the output is a list of commands
 
@@ -930,13 +950,14 @@ seam between them.
 
 **Where a boundary comes from.** Two things, and only one needs the shell. `Terminal::submit`
 is what the composer calls on Enter: it records the exact command text and the exact moment
-before a byte leaves for the pty, so a block knows what was run even when it never learns how
-it ended. The other is OSC 133 — `A` prompt start, `B` prompt end, `C` output start,
-`D;<exit>` finished — read out of the *same second `vte` pass* the emulator already ran for
-OSC 7, so the mark is applied while the cursor still stands where the shell left it. That is
-also why `Emulator::advance` feeds the stream in pieces cut at the marks: feeding a whole
-chunk and looking for marks afterwards would place every boundary wherever the pty read
-happened to end.
+once the line is on its way, before anything the shell prints in answer is parsed, so a block
+knows what was run even when it never learns how it ended — and a line refused behind the
+backlog opens no block for a command that never ran. The other is OSC 133 — `A` prompt start,
+`B` prompt end, `C` output start, `D;<exit>` finished — read out of the *same second `vte`
+pass* the emulator already ran for OSC 7, so the mark is applied while the cursor still stands
+where the shell left it. That is also why `Emulator::advance` feeds the stream in pieces cut at
+the marks: feeding a whole chunk and looking for marks afterwards would place every boundary
+wherever the pty read happened to end.
 
 `blocks::TABLE` is the whole state machine — one row per state the open block can be in, one
 column per thing it can be told, every cell either a transition or a *named reason* for doing

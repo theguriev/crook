@@ -53,6 +53,12 @@ pub trait PtyLink: Send + fmt::Debug {
     ///
     /// [`Terminal`](crate::Terminal) asks for one when it is built and keeps
     /// it for its whole life, so this is not on any keystroke's path.
+    ///
+    /// A write may wait for as long as the child is not reading. It must give
+    /// up, with an error, once the link has been dropped: the writer is moved
+    /// to a thread of its own — see
+    /// [`Terminal::take_writer`](crate::Terminal::take_writer) — and a write
+    /// waiting there on a child that was ended has nothing else to wake it.
     fn writer(&self) -> Result<Box<dyn Write + Send>>;
 
     /// Tells the child its grid changed size.
