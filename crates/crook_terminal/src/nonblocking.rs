@@ -33,12 +33,14 @@
 //! on a closed pane, as every write did before, rather than a pane that
 //! cannot be read at all.
 //!
-//! On macOS a write waits for one thing more before it starts: for the child
-//! to have read everything written before it, and it then adds no more than
-//! the kernel's input queue holds. That kernel garbles input a child has not
-//! read when the child turns canonical mode on, once there is enough of it to
-//! wrap around the queue — which a shell running a pasted block line by line
-//! does between every two lines. See the `typeahead` module, and its wait,
+//! On macOS a write may wait for one thing more before it starts: for the
+//! child to read what it was sent, until no more than the kernel's input
+//! queue holds has gone in since it last read everything. That kernel garbles
+//! input a child has not read when the child turns canonical mode on, once
+//! there is enough of it to wrap around the queue — which a shell running a
+//! pasted block line by line does between every two lines. Keys typed ahead
+//! of a busy program go at once until there is that much, and a Ctrl-C does
+//! not wait on the count at all. See the `typeahead` module, and its wait,
 //! which is a `kqueue` with the pipe in it beside the master.
 
 use std::io::{self, Read, Write};
@@ -51,7 +53,7 @@ use filedescriptor::{FileDescriptor, POLLIN, POLLOUT, Pipe, pollfd};
 use parking_lot::Mutex;
 
 #[cfg(target_os = "macos")]
-use crate::typeahead::{self, Reads, Woke};
+use crate::typeahead::{self, Next, Pacing, Reads, Woke};
 
 /// What a wait for the master came to.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -168,10 +170,10 @@ impl Closing {
 /// The writable half: a write waits for the child to read, and gives up when
 /// the pty closes.
 ///
-/// On macOS a write also waits until the child has read everything written
-/// before it, and adds at most a ring's worth: the kernel garbles input a
-/// child has not read once there is more of it than that. See the `typeahead`
-/// module.
+/// On macOS a write also waits, when the child has not read enough of what
+/// it was sent, so that what it has not read stays within a ring's worth: the
+/// kernel garbles input a child has not read once there is more of it than
+/// that. See the `typeahead` module.
 pub(crate) struct Writable {
     master: FileDescriptor,
     closing: Arc<Closing>,
@@ -187,10 +189,10 @@ pub(crate) struct Writable {
     /// Whether a write that could not be paced has been logged already.
     #[cfg(target_os = "macos")]
     unpaced: bool,
-    /// The bytes written since the last line end, the most of a line the
-    /// child may have left unfinished.
+    /// What has gone into the child's queues, by the count that keeps it
+    /// from wrapping them.
     #[cfg(target_os = "macos")]
-    unended: usize,
+    pacing: Pacing,
 }
 
 impl Writable {
@@ -207,7 +209,7 @@ impl Writable {
             #[cfg(target_os = "macos")]
             unpaced: false,
             #[cfg(target_os = "macos")]
-            unended: 0,
+            pacing: Pacing::default(),
         }
     }
 
@@ -240,8 +242,8 @@ impl Writable {
 
 #[cfg(target_os = "macos")]
 impl Writable {
-    /// The piece of `bytes` the child's input queue takes without wrapping,
-    /// once the child has read everything written before them.
+    /// The part of `bytes` the child's input queues take now without
+    /// wrapping, once the child has read enough for there to be one.
     ///
     /// All of them, as every write was before, when the kernel will not say
     /// how much is unread or cannot be waited on for a read: input that may
@@ -252,24 +254,26 @@ impl Writable {
         // stuck on such a line is not.
         let mut deadline = None;
         loop {
+            // Not knowing is taken for canonical mode with no key acted on,
+            // which can only hold more back.
+            let modes = typeahead::modes(&self.master).unwrap_or_default();
             let unread = match typeahead::unread(&self.master) {
                 Ok(unread) => unread,
                 Err(error) => return Ok(self.unpaced(bytes, &error)),
             };
-            let patience = if unread == 0 {
-                // Not knowing is taken for canonical, which can only make the
-                // piece smaller.
-                let canonical = typeahead::canonical(&self.master).unwrap_or(true);
-                let room = typeahead::room(canonical, self.unended);
-                if room > 0 {
-                    return Ok(typeahead::piece(bytes, room));
+            let (patience, rest) = match self.pacing.next(bytes, unread, &modes) {
+                Next::Write(paced) => return Ok(paced),
+                Next::Wait => {
+                    deadline = None;
+                    (None, bytes)
                 }
-                Some(
-                    *deadline.get_or_insert_with(|| Instant::now() + typeahead::LONG_LINE_PATIENCE),
-                )
-            } else {
-                deadline = None;
-                None
+                Next::WaitAtMost(rest) => (
+                    Some(
+                        *deadline
+                            .get_or_insert_with(|| Instant::now() + typeahead::LONG_LINE_PATIENCE),
+                    ),
+                    rest,
+                ),
             };
             self.watch_closing()?;
             match self.next_read(patience) {
@@ -278,7 +282,10 @@ impl Writable {
                 Ok(Woke::Closed) => return Err(closed()),
                 // A program that has stayed in canonical mode with a line it
                 // cannot finish: see `LONG_LINE_PATIENCE`.
-                Ok(Woke::Waited) => return Ok(bytes),
+                Ok(Woke::Waited) => {
+                    self.pacing.give_up();
+                    return Ok(rest);
+                }
                 Err(error) => return Ok(self.unpaced(bytes, &error)),
             }
         }
@@ -334,7 +341,7 @@ impl Write for Writable {
                 #[cfg(target_os = "macos")]
                 Ok(written) => {
                     let written = bytes.get(..written).unwrap_or(bytes);
-                    self.unended = typeahead::unended(self.unended, written);
+                    self.pacing.wrote(written);
                     return Ok(written.len());
                 }
                 done => return done,

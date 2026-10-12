@@ -929,20 +929,27 @@ out of them, so the pipe could not be made, or on macOS past what `select` can w
 wait is on the master alone, and lasts as long as an orphan such as a `sleep 60 &` holds the
 pty open.
 
-**On macOS the writer never adds to input the child has not read.** XNU keeps a child's
+**On macOS the writer never lets unread input wrap the kernel's ring.** XNU keeps a child's
 unread input in a ring of 1024 bytes, and when the child turns canonical mode on, the kernel
 feeds what is unread through the line discipline again by reading the ring into itself:
 whatever had wrapped around its end is overwritten before it is read. A shell running a pasted
 block switches to canonical mode between every two lines, and a writer that kept the ring full
 had it wrapped nearly always — a 730-line block submitted to the system `bash` ran with lines
 mangled and missing every time, and in a third of the runs the rest of the block was thrown
-away past the kernel's line limit. So a write there waits, in a `kqueue`, until `FIONREAD`
-on the master says the child has read everything, and adds at most 1022 bytes, which start at
-the ring's first byte and end inside it — and end at a line end when they can, since the count
-leaves out a line a program in canonical mode has not finished. The rest of a line longer than
-that waits for the program to read it, a second at most: a shell back in its line editor reads
-it at once, and a program that stays in canonical mode never can. See
-`crates/crook_terminal/src/typeahead.rs`.
+away past the kernel's line limit. A ring starts again at its first byte once it empties, so
+the writer counts what it has written since `FIONREAD` on the master last said the child had
+read everything. A write that keeps the count within 1022 bytes goes at once — keys typed ahead
+of a busy program, a short paste — and one that does not waits, in a `kqueue`, for the child to
+read it all, and then goes at most 1022 bytes at a time, ending at a line end when it can,
+since the count leaves out a line a program in canonical mode has not finished. The rest of a
+line longer than that waits for the program to read it, a second at most: a shell back in its
+line editor reads it at once, and a program that stays in canonical mode never can, so that
+line is given up on until the next line end. The keys the line discipline acts on and never
+queues — `Ctrl-C`, `Ctrl-\`, `Ctrl-Z`, `Ctrl-S` and `Ctrl-Q`, and `Ctrl-T` in canonical mode,
+or whatever the terminal's modes make them — never wait on the count, since they are how a
+person stops a program that has stopped reading. One pressed behind input the writer is
+already holding still waits for that input, as it waited behind the kernel's full queue
+before. See `crates/crook_terminal/src/typeahead.rs`.
 
 The emulator's mutex is never held across a frame, or across a write. The reader takes it to
 parse, and again to build a snapshot, and publishes the `Arc` into a slot of its own before it

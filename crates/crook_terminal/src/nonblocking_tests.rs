@@ -233,3 +233,97 @@ fn from(bytes: &[u8], at: usize) -> String {
     let rest = bytes.get(at..).unwrap_or_default();
     String::from_utf8_lossy(&rest[..rest.len().min(40)]).into_owned()
 }
+
+/// Reads from `reader` until `marker` has been said.
+fn hear(reader: &mut impl Read, marker: &str) {
+    let mut heard = String::new();
+    let mut buffer = [0; 256];
+    while !heard.contains(marker) {
+        let read = reader
+            .read(&mut buffer)
+            .unwrap_or_else(|error| panic!("the child never said {marker}: {error}"));
+        assert!(read > 0, "the child ended before it said {marker}");
+        heard.push_str(&String::from_utf8_lossy(&buffer[..read]));
+    }
+}
+
+/// Reads from `reader` on a thread of its own, and tells the receiver once
+/// `marker` has been said.
+fn hearing(mut reader: impl Read + Send + 'static, marker: &'static str) -> mpsc::Receiver<()> {
+    let (said, heard) = mpsc::channel();
+    thread::spawn(move || {
+        let mut text = String::new();
+        let mut buffer = [0; 256];
+        while let Ok(read) = reader.read(&mut buffer)
+            && read > 0
+        {
+            text.push_str(&String::from_utf8_lossy(&buffer[..read]));
+            if text.contains(marker) {
+                let _ = said.send(());
+                return;
+            }
+        }
+    });
+    heard
+}
+
+/// A child that reads nothing until a Ctrl-C stops it, and then says
+/// `crook-42-stopped`; `setup` runs first, and `then` once it is ready.
+fn stoppable(setup: &str, then: &str) -> Pty {
+    spawn(&format!(
+        "trap 'echo crook-$((6 * 7))-stopped; exit' INT; {setup} echo crook-ready; \
+         {then} while :; do sleep 1; done"
+    ))
+}
+
+#[test]
+fn test_a_ctrl_c_behind_lines_a_busy_program_has_not_read_still_stops_it() {
+    // A command that reads nothing is running — `tail -f`, a server — and the
+    // person presses Enter twice to space out what it prints, then Ctrl-C.
+    // Each Enter finishes a line the command never reads. A writer on macOS
+    // that held every write until the child had read all it was sent held the
+    // second Enter, and the Ctrl-C behind it, for as long as the command ran.
+    let mut pty = stoppable("", "");
+    let mut reader = pty.take_reader().expect("a fresh pty has its reader");
+    hear(&mut reader, "crook-ready");
+    let stopped = hearing(reader, "crook-42-stopped");
+
+    let mut writer = pty.writer().expect("a pty hands out a writer");
+    thread::spawn(move || {
+        for key in [&b"\r"[..], b"\r", b"\x03"] {
+            if writer.write_all(key).is_err() {
+                return;
+            }
+        }
+    });
+    assert!(
+        stopped.recv_timeout(DEADLINE).is_ok(),
+        "the Ctrl-C typed behind two Enters never reached the program"
+    );
+}
+
+#[test]
+fn test_a_ctrl_c_goes_at_once_however_much_input_is_waiting() {
+    // The kernel acts on a Ctrl-C as it arrives and never queues it, so it is
+    // not held back for the queue's sake — not even when as much has gone in
+    // since the child last read everything as the writer lets in, and the
+    // child, having read some of it, has stopped.
+    let mut pty = stoppable(
+        "stty -icanon -echo;",
+        "dd bs=1 count=500 of=/dev/null 2>/dev/null; echo crook-read;",
+    );
+    let mut reader = pty.take_reader().expect("a fresh pty has its reader");
+    hear(&mut reader, "crook-ready");
+    let mut writer = pty.writer().expect("a pty hands out a writer");
+    writer
+        .write_all(&[b'x'; crate::typeahead::ROOM])
+        .expect("an empty queue takes this much at once");
+    hear(&mut reader, "crook-read");
+    let stopped = hearing(reader, "crook-42-stopped");
+
+    thread::spawn(move || writer.write_all(b"\x03"));
+    assert!(
+        stopped.recv_timeout(DEADLINE).is_ok(),
+        "the Ctrl-C never reached a program with input it had not read"
+    );
+}
