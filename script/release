@@ -94,14 +94,19 @@ echo "==> $previous → $tag, $(git rev-list --count "$range") commits"
 # Prints the Crook CI run that passed commit $1 and succeeds, or prints why
 # there is none and fails. The --jq folds a run into `status/conclusion url`;
 # the conclusion is empty while the run is going, which leaves `in_progress/`.
+#
+# There is no `gh auth status` first. It fails when any account gh knows on
+# github.com has a dead token, even one gh would not use, and it fails the
+# same way when GitHub cannot be reached, so it would send someone who is
+# logged in to log in. `gh run list` needs the login anyway, and when it
+# cannot answer gh says why on stderr, which is left to reach the terminal:
+# gh auth login, a refused token, no network.
 ci_verdict() {
   command -v gh >/dev/null \
     || { echo "gh is needed to ask whether $CI_WORKFLOW passed $short — https://cli.github.com"; return 1; }
-  gh auth status --hostname github.com >/dev/null 2>&1 \
-    || { echo "gh is not logged in to GitHub, so it cannot say whether $CI_WORKFLOW passed $short — gh auth login"; return 1; }
   run=$(gh run list --workflow "$CI_WORKFLOW" --commit "$1" --limit 1 \
     --json status,conclusion,url --jq '.[] | "\(.status)/\(.conclusion) \(.url)"') \
-    || { echo "gh could not list the $CI_WORKFLOW runs on $short"; return 1; }
+    || { echo "gh could not ask GitHub about the $CI_WORKFLOW runs on $short, for the reason it gave above"; return 1; }
   state=${run%% *}
   url=${run#* }
   case "$state" in

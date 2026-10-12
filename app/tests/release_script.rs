@@ -6,8 +6,10 @@
 //! one machine and `cargo test` runs on every change, so these run the script
 //! here: in a scratch repository on `main` one commit past v0.1.0, under a
 //! `PATH` that holds the few tools it uses and three stand-ins. `gh` answers
-//! from files the test writes, one commit at a time, so a script that asked
-//! about any commit but the one it releases would find no run at all. `npx`
+//! from files the test writes, one commit and one workflow at a time, so a
+//! script that asked about any commit but the one it releases would find no
+//! run at all, and one that asked about every workflow would find the newest
+//! run of whichever, the way the real `gh` does. `npx`
 //! prints a changelog section without fetching a generator. `cargo` ends the
 //! run at the step after the version is set — the first file a release
 //! changes — so a run that reaches it is one the check let through, and a run
@@ -42,25 +44,55 @@ const CARGO_STAND_IN: i32 = 3;
 /// A Crook CI run's page, which a refusal names so it can be opened.
 const RUN_URL: &str = "https://github.com/theguriev/crook/actions/runs/38216481742";
 
-/// The `gh` stand-in. It is logged in while `logged-in` exists beside it, and
-/// to `run list` it prints `runs/<the --commit it was given>` when that file
-/// exists: the lines the real `gh` prints for the script's `--jq`. Every call
-/// is appended to `gh.log`.
+/// The page of a run of some other workflow on the same commit.
+const OTHER_RUN_URL: &str = "https://github.com/theguriev/crook/actions/runs/38218642594";
+
+/// The workflow the script asks about, by the name in ci.yml.
+const CROOK_CI: &str = "Crook CI";
+
+/// Where the `gh` stand-in keeps the runs of every workflow, for a `run list`
+/// that is not told which one to look at.
+const EVERY_WORKFLOW: &str = "all";
+
+/// The `gh` stand-in, which behaves as gh 2.98 does where the script could
+/// lean on it.
+///
+/// - `run list` asks GitHub as the login gh uses, which exists while
+///   `logged-in` is beside it; without one it says what gh says and fails.
+///   Logged in, it prints `runs/<the --workflow>/<the --commit>` when that
+///   file exists, or `runs/all/<the --commit>` without a `--workflow`: the
+///   lines the real `gh` prints for the script's `--jq`. Crook CI is known by
+///   its file name too.
+/// - `auth status` fails over any login it knows on github.com, including one
+///   it would not use (`dead-account`), unless `--active` narrows it to the
+///   one it would.
+///
+/// Every call is appended to `gh.log`.
 const GH: &str = r#"#!/bin/sh
 here=${0%/*}
 echo "$*" >> "$here/gh.log"
 case "$1 $2" in
   "auth status")
-    [ -f "$here/logged-in" ]
+    [ -f "$here/logged-in" ] || exit 1
+    case " $* " in *" --active "*) exit 0 ;; esac
+    [ ! -f "$here/dead-account" ]
     exit $?
     ;;
   "run list")
-    commit=
+    if [ ! -f "$here/logged-in" ]; then
+      echo "To get started with GitHub CLI, please run:  gh auth login" >&2
+      exit 4
+    fi
+    commit= workflow=all
     while [ $# -gt 0 ]; do
-      [ "$1" = --commit ] && commit=$2
+      case "$1" in
+        --commit) commit=$2 ;;
+        --workflow) workflow=$2 ;;
+      esac
       shift
     done
-    [ ! -f "$here/runs/$commit" ] || cat "$here/runs/$commit"
+    [ "$workflow" != ci.yml ] || workflow="Crook CI"
+    [ ! -f "$here/runs/$workflow/$commit" ] || cat "$here/runs/$workflow/$commit"
     exit 0
     ;;
 esac
@@ -172,13 +204,26 @@ impl Scratch {
         write(&self.bin().join("logged-in"), "");
     }
 
+    /// Gives gh a second login to GitHub beside the one it uses, whose token
+    /// no longer works: a work or bot account left to expire.
+    fn add_dead_account(&self) {
+        write(&self.bin().join("dead-account"), "");
+    }
+
     /// Gives `commit` a newest Crook CI run that is `state`, written the way
     /// the script's `--jq` writes one: `<status>/<conclusion>`.
     fn ci(&self, commit: &str, state: &str) {
-        write(
-            &self.bin().join("runs").join(commit),
-            &format!("{state} {RUN_URL}\n"),
-        );
+        self.run(CROOK_CI, commit, state, RUN_URL);
+    }
+
+    /// Gives `commit` a newest run of `workflow` that is `state`, at `url`.
+    /// It is then the newest run on the commit of any workflow, too.
+    fn run(&self, workflow: &str, commit: &str, state: &str, url: &str) {
+        for workflow in [workflow, EVERY_WORKFLOW] {
+            let runs = self.bin().join("runs").join(workflow);
+            std::fs::create_dir_all(&runs).expect("the scratch directory is writable");
+            write(&runs.join(commit), &format!("{state} {url}\n"));
+        }
     }
 
     /// Every question the script put to the `gh` stand-in, one per line.
@@ -357,12 +402,46 @@ fn a_commit_crook_ci_never_ran_on_is_refused_with_how_to_start_a_run() {
 }
 
 #[test]
+fn a_green_run_of_another_workflow_on_the_commit_is_not_crook_ci_passing_it() {
+    // v0.1.21's commit has one run, its own green Release run, and no Crook CI
+    // run at all. A Commit titles run on a pull request merged without
+    // squashing is green on the commit main gets the same way.
+    let scratch = Scratch::new("other-workflow");
+    scratch.log_in();
+    scratch.run(
+        "Release",
+        &scratch.commit("HEAD"),
+        "completed/success",
+        OTHER_RUN_URL,
+    );
+
+    let verdict = scratch.release(&[]);
+
+    scratch.assert_refused(&verdict, &["gh workflow run \"Crook CI\" --ref main"]);
+}
+
+#[test]
+fn a_dead_login_gh_does_not_use_does_not_stop_a_release() {
+    // gh auth status fails over every account gh knows on github.com, so a
+    // script that asked it would send someone already logged in to log in.
+    let scratch = Scratch::new("dead-account");
+    scratch.log_in();
+    scratch.add_dead_account();
+    scratch.ci(&scratch.commit("HEAD"), "completed/success");
+
+    let verdict = scratch.release(&[]);
+
+    assert_released(&verdict);
+}
+
+#[test]
 fn without_gh_or_a_login_to_github_the_release_is_refused() {
     let scratch = Scratch::new("logged-out");
     scratch.ci(&scratch.commit("HEAD"), "completed/success");
 
+    // What is wrong is gh's to say, so the refusal has to let it through.
     let logged_out = scratch.release(&[]);
-    scratch.assert_refused(&logged_out, &["gh auth login"]);
+    scratch.assert_refused(&logged_out, &["gh auth login", "could not ask GitHub"]);
 
     std::fs::remove_file(scratch.bin().join("gh")).expect("the gh stand-in is there");
     let missing = scratch.release(&[]);
