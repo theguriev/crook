@@ -100,9 +100,13 @@ pub struct Worktree {
 /// that has been built once holds a `target/` worth gigabytes and it goes
 /// whether or not anyone forced anything, so saying it out loud before the
 /// button is pressed is the only chance a person gets.
+///
+/// A submodule checked out in it is a refusal of its own, and the one `force`
+/// is most dangerous over: see [`Self::submodules`].
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Local {
-    /// Tracked files that differ from the index or from `HEAD`.
+    /// Tracked files that differ from the index or from `HEAD`. A submodule
+    /// with changes or new files in it is one of these, by its path.
     pub modified: usize,
     /// Files git does not track and is not ignoring.
     pub untracked: usize,
@@ -114,18 +118,43 @@ pub struct Local {
     /// them, and a removal deletes it: git removes over them without a word,
     /// and the next `gc` deletes the commits.
     pub stranded: usize,
+    /// Submodules checked out in it, a submodule's own submodules among them.
+    ///
+    /// git refuses a plain removal of a checkout holding one, however clean —
+    /// "working trees containing submodules cannot be moved or removed", on
+    /// git 2.55.0 — and a forced one deletes the submodule's repository with
+    /// the checkout: in a linked checkout `git submodule update --init`
+    /// clones it into the checkout's own git directory,
+    /// `.git/worktrees/<name>/modules`, which the removal deletes whole. A
+    /// submodule nobody initialised there is an empty directory, which git
+    /// removes without a word, and is not counted.
+    pub submodules: usize,
+    /// Commits those submodules hold that none of their remote-tracking
+    /// branches does — on their `HEAD`, their branches or their tags, every
+    /// one of which lives in the repository the removal deletes. The
+    /// superproject cannot see them: its pointer at such a commit is an
+    /// ordinary commit of its own, pushed or not, so its status and its
+    /// branches say nothing is at stake. After a forced removal nothing
+    /// anywhere has them, `git fsck` included.
+    pub unpushed: usize,
 }
 
 impl Local {
     /// Whether the worktree holds nothing loose at all — nothing to warn
     /// about, nothing to lose, nothing to say.
     pub fn is_empty(self) -> bool {
-        self.modified == 0 && self.untracked == 0 && self.ignored == 0 && self.stranded == 0
+        self.modified == 0
+            && self.untracked == 0
+            && self.ignored == 0
+            && self.stranded == 0
+            && self.submodules == 0
+            && self.unpushed == 0
     }
 
     /// Whether the checkout holds work that must not go without a person
-    /// saying so: what a plain [`remove`] would refuse over, and the commits
-    /// it would lose without refusing.
+    /// saying so, or is one git will not remove without force: what a plain
+    /// [`remove`] would refuse over, and the commits it would lose without
+    /// refusing.
     ///
     /// Ignored files are deliberately left out: git removes over them without
     /// complaining, and counting them here would have a UI offering to force
@@ -133,9 +162,21 @@ impl Local {
     /// crying wolf that makes people stop reading warnings. Stranded commits
     /// are the opposite case: git raises no objection either, and they are
     /// somebody's work, so a sweep that tidies checkouts away must pass over
-    /// them rather than trust git to stop it.
+    /// them rather than trust git to stop it. A submodule checked out is in
+    /// because git does object to it, whatever it holds.
     pub fn blocks_removal(self) -> bool {
-        self.modified > 0 || self.untracked > 0 || self.stranded > 0
+        self.holds_work() || self.submodules > 0
+    }
+
+    /// Whether anything in the checkout is somebody's work: files nobody
+    /// committed, commits on no branch, commits only its submodules hold.
+    ///
+    /// Apart from [`Self::blocks_removal`] for the one thing that blocks a
+    /// removal without being work: a submodule that is clean and pushed. git
+    /// refuses over it all the same, and "there is work in it" would be the
+    /// wrong reason to give.
+    pub fn holds_work(self) -> bool {
+        self.modified > 0 || self.untracked > 0 || self.stranded > 0 || self.unpushed > 0
     }
 
     /// Counts one `git status --porcelain -z --ignored`.
@@ -568,10 +609,22 @@ fn choose_default(
 /// What is loose in `worktree`: what a removal would refuse over, and what it
 /// would delete without mentioning.
 ///
-/// **Blocking**, one subprocess, and the more expensive of the two reads here:
-/// it stats the working tree. Call it when a person is about to be asked
-/// whether to remove a checkout, not to keep a row up to date.
+/// **Blocking**, and the more expensive of the reads here: a `git status`
+/// that stats the working tree, the stranded commits, the index's
+/// submodules, and what only each submodule checked out holds. Call it when a
+/// person is about to be asked whether to remove a checkout, not to keep a
+/// row up to date.
 pub fn local_work(worktree: &Path) -> Result<Local, Error> {
+    local_work_with_submodules(worktree).map(|(local, _)| local)
+}
+
+/// [`local_work`], with the submodules it counted, by path and with the
+/// newest of the commits only each holds: what a question that names what a
+/// forced removal loses has to say.
+///
+/// **Blocking**, as `local_work` is — the commits are one more read for each
+/// submodule that holds any. Background pool only.
+pub fn local_work_with_submodules(worktree: &Path) -> Result<(Local, Vec<Submodule>), Error> {
     // A path that is not there is not a worktree, and saying so is better than
     // the "not a repository" the generic guard in `run` would produce.
     if !worktree.is_dir() {
@@ -591,6 +644,11 @@ pub fn local_work(worktree: &Path) -> Result<Local, Error> {
             // the only thing that disappears without git ever saying so, which
             // makes it the one a person most needs told.
             OsStr::new("--ignored"),
+            // `.gitmodules` can tell status to say nothing about a submodule
+            // with changes in it, and a forced removal deletes them all the
+            // same: this is a question about what would be lost, not about
+            // what the repository likes to be shown.
+            OsStr::new("--ignore-submodules=none"),
         ],
         Intent::Read,
     )?;
@@ -600,7 +658,12 @@ pub fn local_work(worktree: &Path) -> Result<Local, Error> {
     }
     let mut local = Local::parse_status(&finished.stdout);
     local.stranded = stranded(worktree)?;
-    Ok(local)
+
+    let mut submodules = Vec::new();
+    submodules_in(worktree, None, "", &mut submodules)?;
+    local.submodules = submodules.len();
+    local.unpushed = submodules.iter().map(|submodule| submodule.unpushed).sum();
+    Ok((local, submodules))
 }
 
 /// How many commits `HEAD` in `worktree` reaches that no branch, tag or
@@ -631,6 +694,167 @@ fn stranded(worktree: &Path) -> Result<usize, Error> {
         .trim()
         .parse()
         .unwrap_or(0))
+}
+
+/// One submodule checked out in a checkout, and the commits a forced removal
+/// of the checkout would take with it — see [`Local::submodules`] and
+/// [`Local::unpushed`] for why it takes them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Submodule {
+    /// Where it is checked out, relative to the checkout, as git prints a
+    /// path. A submodule of a submodule is named through the one it is in.
+    pub path: String,
+    /// How many commits it holds that none of its remote-tracking branches
+    /// does.
+    pub unpushed: usize,
+    /// The newest of those, newest first, and no more than [`UNPUSHED_NAMED`]
+    /// of them.
+    pub newest: Vec<Commit>,
+}
+
+/// How many of a submodule's unpushed commits [`Submodule::newest`] holds.
+///
+/// Six, as many as a question names before it counts the rest. A bound
+/// rather than a matter of taste: a submodule with no remote at all has its
+/// whole history unpushed, and that is a list nobody reads.
+pub const UNPUSHED_NAMED: usize = 6;
+
+/// Adds to `found` every submodule checked out in `directory` — the checkout,
+/// or a submodule in it — each followed by its own, with `prefix`, the path
+/// from the checkout to `directory` and a `/`, in front of its path.
+///
+/// The index says which paths are submodules, as it does to git's own
+/// removal, and a submodule is checked out when it has a `.git`: one nobody
+/// initialised is the empty directory `git worktree add` left, and costs
+/// nothing more than the listing.
+///
+/// `git_dir` is `directory`'s own `.git` when `directory` is a submodule,
+/// handed to git rather than left for it to find. Left to find it, git walks
+/// up from a `.git` that names no repository and answers about the
+/// superproject's; handed it, it says that it is not one — which git's
+/// removal agrees is no submodule checked out.
+fn submodules_in(
+    directory: &Path,
+    git_dir: Option<&Path>,
+    prefix: &str,
+    found: &mut Vec<Submodule>,
+) -> Result<(), Error> {
+    let listed = run_in(directory, git_dir, &["ls-files", "-z", "--stage"])?;
+    if !listed.success {
+        return Err(classify(&listed.stderr));
+    }
+
+    let mut previous: Option<&[u8]> = None;
+    // Every entry is `<mode> <object> <stage>\t<path>`; a gitlink's mode is
+    // 160000.
+    for entry in listed.stdout.split(|byte| *byte == 0) {
+        let Some(tab) = entry.iter().position(|byte| *byte == b'\t') else {
+            continue;
+        };
+        let (head, path) = (&entry[..tab], &entry[tab + 1..]);
+        // A submodule in a conflicted merge is listed once for each side.
+        if !head.starts_with(b"160000 ") || previous == Some(path) {
+            continue;
+        }
+        previous = Some(path);
+
+        let checked_out = directory.join(path_from(path));
+        let dot_git = checked_out.join(".git");
+        // Not through a link: a link where a submodule should be is nothing
+        // git checked out, and one back up the tree would be a walk with no
+        // end.
+        let is_directory =
+            std::fs::symlink_metadata(&checked_out).is_ok_and(|metadata| metadata.is_dir());
+        if !is_directory || std::fs::symlink_metadata(&dot_git).is_err() {
+            continue;
+        }
+        let Some((unpushed, newest)) = held_only_in(&checked_out, &dot_git)? else {
+            continue;
+        };
+        let path = format!("{prefix}{}", text(path));
+        let inside = format!("{path}/");
+        found.push(Submodule {
+            path,
+            unpushed,
+            newest,
+        });
+        submodules_in(&checked_out, Some(&dot_git), &inside, found)?;
+    }
+    Ok(())
+}
+
+/// What only the submodule checked out at `directory` holds, against its
+/// `.git` at `git_dir`: how many commits none of its remote-tracking branches
+/// has, and the newest of them. `None` when `git_dir` is not a repository
+/// after all.
+///
+/// Its own branches and tags count *against* it rather than for it, unlike
+/// [`stranded`]'s: they live in the submodule's repository, which goes with
+/// the checkout, so a commit only they hold goes too. Only a remote is
+/// somewhere else.
+fn held_only_in(directory: &Path, git_dir: &Path) -> Result<Option<(usize, Vec<Commit>)>, Error> {
+    // `--` because the submodule's own files are what git would otherwise
+    // check `HEAD` against, and a file called `HEAD` makes it ambiguous.
+    const ONLY_HERE: [&str; 6] = ["HEAD", "--branches", "--tags", "--not", "--remotes", "--"];
+
+    let counted = run_in(
+        directory,
+        Some(git_dir),
+        &[&["rev-list", "--count"][..], &ONLY_HERE].concat(),
+    )?;
+    if !counted.success {
+        return match classify(&counted.stderr) {
+            Error::NotARepository => Ok(None),
+            other => Err(other),
+        };
+    }
+    let unpushed = text(&counted.stdout).trim().parse().unwrap_or(0);
+    if unpushed == 0 {
+        return Ok(Some((0, Vec::new())));
+    }
+
+    let most = format!("--max-count={UNPUSHED_NAMED}");
+    let logged = run_in(
+        directory,
+        Some(git_dir),
+        // `log.showSignature` would put gpg's lines among the commits, as it
+        // would in `held_only_by`.
+        &[
+            &["log", "--no-show-signature", "--format=%H %s", &most][..],
+            &ONLY_HERE,
+        ]
+        .concat(),
+    )?;
+    if !logged.success {
+        return Err(classify(&logged.stderr));
+    }
+    let newest = text(&logged.stdout)
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .map(|(id, subject)| Commit {
+            id: short_sha(id.as_bytes()),
+            subject: subject.to_owned(),
+        })
+        .collect();
+    Ok(Some((unpushed, newest)))
+}
+
+/// [`run`] as a read in `directory`, with git told its repository is
+/// `git_dir` when there is one rather than left to look for it.
+fn run_in(
+    directory: &Path,
+    git_dir: Option<&Path>,
+    args: &[&str],
+) -> Result<super::run::Finished, Error> {
+    let mut all: Vec<OsString> = Vec::with_capacity(args.len() + 1);
+    if let Some(git_dir) = git_dir {
+        let mut option = OsString::from("--git-dir=");
+        option.push(git_dir);
+        all.push(option);
+    }
+    all.extend(args.iter().map(OsString::from));
+    let all: Vec<&OsStr> = all.iter().map(OsString::as_os_str).collect();
+    Ok(run(directory, &all, Intent::Read)?)
 }
 
 // MARK: - Writing
@@ -989,7 +1213,9 @@ pub fn held_only_by(repository: &Path, branch: &str, tip: &str) -> Result<Vec<Co
 /// The `git status` [`local_work`] counts, without `--ignored`: ignored files
 /// go with any removal, forced or not, and are what that count is for — a
 /// `target/` listed file by file is not something a person reads. An
-/// untracked directory is one entry ending in `/`, as it is there.
+/// untracked directory is one entry ending in `/`, as it is there, and a
+/// submodule with changes in it is one entry at its path, whatever
+/// `.gitmodules` tells status to ignore.
 pub fn loose_files(worktree: &Path) -> Result<Vec<String>, Error> {
     if !worktree.is_dir() {
         return Err(Error::NotAWorktree {
@@ -998,7 +1224,7 @@ pub fn loose_files(worktree: &Path) -> Result<Vec<String>, Error> {
     }
     let finished = run(
         worktree,
-        &["status", "--porcelain", "-z"].map(OsStr::new),
+        &["status", "--porcelain", "-z", "--ignore-submodules=none"].map(OsStr::new),
         Intent::Read,
     )?;
     if !finished.success {

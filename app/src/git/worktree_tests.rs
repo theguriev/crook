@@ -1340,6 +1340,8 @@ fn an_ignored_directory_is_deleted_by_a_removal_git_never_objects_to() {
             untracked: 0,
             ignored: 1,
             stranded: 0,
+            submodules: 0,
+            unpushed: 0,
         }
     );
     // Not empty, and yet nothing git will stand in the way of: a plain removal
@@ -1388,8 +1390,177 @@ fn a_renamed_file_is_one_change_rather_than_two() {
             untracked: 1,
             ignored: 1,
             stranded: 0,
+            submodules: 0,
+            unpushed: 0,
         }
     );
+}
+
+// --- submodules ----------------------------------------------------------------
+
+/// Runs git in `dir` the way [`git`] does, allowed to clone a submodule from
+/// a path on this disk: git 2.38.1 stopped doing that unasked.
+fn git_with_local_submodules(dir: &Path, args: &[&str]) -> String {
+    let mut allowed = vec!["-c", "protocol.file.allow=always"];
+    allowed.extend_from_slice(args);
+    git(dir, &allowed)
+}
+
+/// A repository whose `lib` is a submodule cloned from `<scratch>/lib`, and a
+/// checkout of it at `<scratch>/task` on a branch of its own, made as Crook
+/// makes one: `lib` is an empty directory in it, nobody having initialised
+/// it there yet.
+fn repo_with_a_submodule(scratch: &ScratchDir) -> (PathBuf, PathBuf) {
+    repo_with_a_commit(scratch, "lib");
+    superproject_of_lib(scratch)
+}
+
+/// [`repo_with_a_submodule`], over a `<scratch>/lib` the caller made.
+fn superproject_of_lib(scratch: &ScratchDir) -> (PathBuf, PathBuf) {
+    let repo = repo_with_a_commit(scratch, "repo");
+    git_with_local_submodules(&repo, &["submodule", "add", "--quiet", "../lib", "lib"]);
+    git(&repo, &["commit", "--no-verify", "-m", "a submodule"]);
+    let checkout = scratch.spot("task");
+    add(&repo, &checkout, "task", Some("main")).expect("git added the worktree");
+    (repo, checkout)
+}
+
+/// Initialises `checkout`'s `lib`, commits in it on a branch of its own, and
+/// commits the superproject's pointer at that: an agent's fix made inside a
+/// submodule. Answers the commit, which nothing but this checkout's copy of
+/// the submodule holds.
+fn fix_in_the_submodule(checkout: &Path, message: &str) -> String {
+    git_with_local_submodules(checkout, &["submodule", "update", "--init", "--quiet"]);
+    let lib = checkout.join("lib");
+    git(&lib, &["switch", "--quiet", "-c", "fix"]);
+    let fix = commit(&lib, "fix.txt", "fixed\n", message);
+    git(checkout, &["add", "lib"]);
+    git(
+        checkout,
+        &["commit", "--no-verify", "-m", "point at the fix"],
+    );
+    fix
+}
+
+#[test]
+fn a_commit_only_a_submodule_of_the_checkout_holds_is_work_a_removal_would_lose() {
+    // In a linked checkout `git submodule update --init` keeps the
+    // submodule's repository inside the checkout's own git directory, and a
+    // forced removal deletes it: a commit made there and never pushed is gone
+    // for good. The superproject sees nothing — its pointer is committed, and
+    // its own status and stranded commits are clean — so this is the one
+    // place that can say so. And git refuses a plain removal of a checkout
+    // with a submodule in it at all, pushed or not.
+    if without_git("a_commit_only_a_submodule_of_the_checkout_holds_is_work_a_removal_would_lose") {
+        return;
+    }
+    let scratch = ScratchDir::new("submodule-commit");
+    let (repo, checkout) = repo_with_a_submodule(&scratch);
+    assert!(
+        !local_work(&checkout)
+            .expect("git answered")
+            .blocks_removal(),
+        "a submodule nobody initialised is an empty directory, and nothing git refuses over"
+    );
+
+    let fix = fix_in_the_submodule(&checkout, "the fix, only here");
+    assert!(git(&checkout, &["status", "--porcelain"]).is_empty());
+
+    let (local, submodules) = local_work_with_submodules(&checkout).expect("git answered");
+    assert_eq!(
+        local,
+        Local {
+            submodules: 1,
+            unpushed: 1,
+            ..Local::default()
+        }
+    );
+    assert!(local.blocks_removal() && local.holds_work());
+    assert_eq!(
+        submodules,
+        vec![Submodule {
+            path: "lib".to_owned(),
+            unpushed: 1,
+            newest: vec![Commit {
+                id: fix[..7].to_owned(),
+                subject: "the fix, only here".to_owned(),
+            }],
+        }]
+    );
+    let Err(refused) = remove(&repo, &checkout, false) else {
+        panic!("git removed a checkout with a submodule in it without force");
+    };
+    assert!(
+        refused.to_string().contains("submodules"),
+        "git refused for another reason: {refused}"
+    );
+    assert!(checkout.join("lib/fix.txt").is_file());
+
+    // Pushed, the fix is somewhere else, and git still refuses the checkout.
+    git(&checkout.join("lib"), &["push", "--quiet", "origin", "fix"]);
+    let local = local_work(&checkout).expect("git answered");
+    assert_eq!((local.submodules, local.unpushed), (1, 0));
+    assert!(local.blocks_removal() && !local.holds_work());
+}
+
+#[test]
+fn a_submodule_inside_a_submodule_is_looked_in_too() {
+    // Its repository lives inside the outer one's, which lives inside the
+    // checkout's git directory: the removal takes all three.
+    if without_git("a_submodule_inside_a_submodule_is_looked_in_too") {
+        return;
+    }
+    let scratch = ScratchDir::new("submodule-nested");
+    repo_with_a_commit(&scratch, "deep");
+    let lib = repo_with_a_commit(&scratch, "lib");
+    git_with_local_submodules(&lib, &["submodule", "add", "--quiet", "../deep", "deep"]);
+    git(
+        &lib,
+        &["commit", "--no-verify", "-m", "a submodule of its own"],
+    );
+    let (_, checkout) = superproject_of_lib(&scratch);
+    git_with_local_submodules(
+        &checkout,
+        &["submodule", "update", "--init", "--recursive", "--quiet"],
+    );
+    let deep = checkout.join("lib/deep");
+    git(&deep, &["switch", "--quiet", "-c", "fix"]);
+    commit(&deep, "fix.txt", "fixed\n", "the fix, deep down");
+
+    let (local, submodules) = local_work_with_submodules(&checkout).expect("git answered");
+
+    assert_eq!((local.submodules, local.unpushed), (2, 1));
+    let named: Vec<(&str, usize)> = submodules
+        .iter()
+        .map(|submodule| (submodule.path.as_str(), submodule.unpushed))
+        .collect();
+    assert_eq!(named, [("lib", 0), ("lib/deep", 1)]);
+}
+
+#[test]
+fn a_submodule_with_changes_its_superproject_is_told_to_ignore_is_still_loose_work() {
+    // `.gitmodules` can tell `git status` to say nothing about a submodule,
+    // and a forced removal deletes what is in it all the same.
+    if without_git(
+        "a_submodule_with_changes_its_superproject_is_told_to_ignore_is_still_loose_work",
+    ) {
+        return;
+    }
+    let scratch = ScratchDir::new("submodule-ignored");
+    let (_, checkout) = repo_with_a_submodule(&scratch);
+    git(
+        &checkout,
+        &["config", "-f", ".gitmodules", "submodule.lib.ignore", "all"],
+    );
+    git(&checkout, &["commit", "--no-verify", "-am", "hush"]);
+    git_with_local_submodules(&checkout, &["submodule", "update", "--init", "--quiet"]);
+    write(&checkout.join("lib/notes.txt"), "never committed\n");
+
+    assert_eq!(
+        loose_files(&checkout).expect("git answered"),
+        vec!["lib".to_owned()]
+    );
+    assert_eq!(local_work(&checkout).expect("git answered").modified, 1);
 }
 
 // --- the deadline --------------------------------------------------------------

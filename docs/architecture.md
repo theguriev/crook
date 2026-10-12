@@ -1252,15 +1252,19 @@ them — the checks are what `-d` stood in for. Three gestures reach it:
   the tab's group: a worktree opens into the group of the tab it came from, so a group is the
   repository, and closing it would end the main checkout and every task beside this one. It is
   refused, in a sentence naming the pane, while an agent there is running or waiting on an
-  answer or a command is open in its shell. The panes close first — a shell sitting in a
-  directory keeps Windows from deleting it — and since the menu hung off a row that is now
-  gone, it moves to a tab in the main checkout and says what happened under the list.
+  answer or a command is open in its shell — and, in a sentence naming it, over a checkout with
+  a submodule checked out in it, however clean, which git removes only when forced. The panes
+  close first — a shell sitting in a directory keeps Windows from deleting it — and since the
+  menu hung off a row that is now gone, it moves to a tab in the main checkout and says what
+  happened under the list.
 - **Discard task** is the one way to delete a branch nobody proved, and it asks twice. The
   second question names the commits only that branch holds — on no other branch, tag or
   remote, since one that is elsewhere is not lost — and the modified or untracked files the
   forced removal throws away, six of each by name and the rest counted, over a button that
   says "for good" and is never Enter's. The branch is deleted only if its tip is still the one
-  those commits were counted from.
+  those commits were counted from. It names the commits only a submodule checked out in the
+  checkout holds too, on none of that submodule's remotes: its repository lives in the
+  checkout's own git directory, and the forced removal deletes it.
 
 What a question says is what its press does, however long it was up. It stays up while an agent
 finishes — that is what lights its button — and an agent's last act is often a file or a

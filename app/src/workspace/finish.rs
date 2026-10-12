@@ -39,6 +39,10 @@
 //!    uses. Finish never forces, so a checkout holding modified or untracked
 //!    files, or commits on no branch, is one Finish will not take and says
 //!    so; Discard forces, and its second question has named what that loses.
+//!    So is one with a submodule checked out in it, however clean: git
+//!    removes that only when forced, and the force deletes the submodule's
+//!    repository with the checkout — so Discard's questions name the commits
+//!    only a submodule holds as they name the branch's.
 //! 3. The branch goes if the proof holds — or, for Discard, whether or not it
 //!    does, provided it has not moved since its commits were counted.
 //!
@@ -76,7 +80,7 @@ use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
 use crate::git::merged::{Landed, short_name};
-use crate::git::worktree::{Commit, Local, Worktree};
+use crate::git::worktree::{Commit, Local, Submodule, Worktree};
 use crate::tab::{AgentSession, AgentStatus, PaneId};
 
 use super::action::WorktreeAction;
@@ -151,6 +155,9 @@ pub(super) struct Plan {
     /// The commits only the branch holds, newest first, when it has not
     /// landed: what deleting it loses.
     pub(super) lost: Vec<Commit>,
+    /// The submodules checked out in it, with the commits only each holds:
+    /// what removing the checkout loses besides its files.
+    pub(super) submodules: Vec<Submodule>,
 }
 
 impl Plan {
@@ -194,9 +201,10 @@ impl Plan {
     /// they cannot see. A landed branch's tip is in its proof, which is
     /// compared.
     ///
-    /// Discard's questions name those commits and the loose files, and its
-    /// press deletes the branch only from the tip they were counted from, so
-    /// for Discard all of it is compared.
+    /// Discard's questions name those commits, the loose files and the
+    /// commits only a submodule holds, and its press deletes the branch only
+    /// from the tip they were counted from, so for Discard all of it is
+    /// compared.
     ///
     /// The other checkouts are left out: one made or removed beside this one
     /// changes nothing either question says.
@@ -213,16 +221,17 @@ impl Plan {
                 || (was == is
                     && self.loose == fresh.loose
                     && self.tip == fresh.tip
-                    && self.lost == fresh.lost))
+                    && self.lost == fresh.lost
+                    && self.submodules == fresh.submodules))
     }
 }
 
 /// Looks at the checkout `directory` is in, for the question about finishing
 /// it.
 ///
-/// **Blocking**: a listing, two `git status`es, the proof — a pass over the
-/// base's history — and the commits only the branch holds. Background pool
-/// only.
+/// **Blocking**: a listing, two `git status`es, the submodules and what only
+/// each holds, the proof — a pass over the base's history — and the commits
+/// only the branch holds. Background pool only.
 ///
 /// Refused, with a sentence, for anything that is not a linked checkout
 /// under `store`: the entries are offered only there, and a checkout somebody
@@ -238,7 +247,8 @@ pub(super) fn read_plan(directory: &Path, store: &Path) -> Result<Plan, String> 
         return Err("This tab is not in a checkout Crook made.".to_owned());
     }
 
-    let local = worktree::local_work(&checkout.path).map_err(|problem| problem.to_string())?;
+    let (local, submodules) = worktree::local_work_with_submodules(&checkout.path)
+        .map_err(|problem| problem.to_string())?;
     let loose = worktree::loose_files(&checkout.path).map_err(|problem| problem.to_string())?;
     let base = crate::git::merged::base_of(directory);
 
@@ -278,6 +288,7 @@ pub(super) fn read_plan(directory: &Path, store: &Path) -> Result<Plan, String> 
         tip,
         landed,
         lost,
+        submodules,
     })
 }
 
@@ -347,18 +358,37 @@ pub(super) fn refusal(workspace: &Workspace, plan: &Plan, discard: bool) -> Opti
             format!("It is locked ({reason}), and nothing here takes a lock.")
         });
     }
-    if !discard && plan.local.blocks_removal() {
+    if !discard && plan.local.holds_work() {
         return Some(format!(
             "There is work in it — {}. Finish leaves a checkout like that where it is; Discard \
              throws the work away.",
             work_in(plan.local)
         ));
     }
+    // Nothing in it is work, and git still will not remove it unforced: said
+    // here, before a pane closes, rather than by git once the tabs have gone.
+    if !discard && plan.local.blocks_removal() {
+        let paths: Vec<String> = plan
+            .submodules
+            .iter()
+            .map(|submodule| submodule.path.clone())
+            .collect();
+        let (which, are) = match paths.len() {
+            1 => ("The submodule", "is"),
+            _ => ("The submodules", "are"),
+        };
+        return Some(format!(
+            "{which} {} {are} checked out in it, and git removes a checkout like that only when \
+             forced. Finish leaves it where it is; Discard forces it.",
+            named(&paths)
+        ));
+    }
     None
 }
 
 /// What in a checkout a plain removal would refuse over or lose, in a
-/// phrase: `2 modified, 1 untracked`, and any commits on no branch.
+/// phrase: `2 modified, 1 untracked`, and any commits on no branch or only in
+/// a submodule.
 fn work_in(local: Local) -> String {
     let mut parts = Vec::new();
     if local.modified > 0 {
@@ -372,7 +402,27 @@ fn work_in(local: Local) -> String {
         1 => parts.push("1 commit on no branch".to_owned()),
         stranded => parts.push(format!("{stranded} commits on no branch")),
     }
+    match local.unpushed {
+        0 => {}
+        1 => parts.push("1 commit only a submodule holds".to_owned()),
+        unpushed => parts.push(format!("{unpushed} commits only its submodules hold")),
+    }
     parts.join(", ")
+}
+
+/// The commits only `submodule` holds, in the line the first of Discard's
+/// questions gives them.
+fn unpushed_summary(submodule: &Submodule) -> String {
+    match submodule.unpushed {
+        1 => format!(
+            "1 commit only the submodule {} holds will be lost.",
+            submodule.path
+        ),
+        unpushed => format!(
+            "{unpushed} commits only the submodule {} holds will be lost.",
+            submodule.path
+        ),
+    }
 }
 
 /// The sentence about the branch on the first question.
@@ -465,6 +515,9 @@ pub(super) fn render(
             if local.stranded > 0 {
                 column.add_child(note(stranded_summary(local.stranded), ui));
             }
+            for submodule in plan.submodules.iter().filter(|s| s.unpushed > 0) {
+                column.add_child(note(unpushed_summary(submodule), ui));
+            }
             if local.modified + local.untracked + local.ignored > 0 {
                 column.add_child(note(local_summary(&local), ui));
             }
@@ -530,6 +583,23 @@ fn losses(plan: &Plan) -> Vec<String> {
     }
     if plan.local.stranded > 0 {
         lines.push(stranded_summary(plan.local.stranded));
+    }
+    // Pushed with the task's branch or not, the pointer at these is all the
+    // superproject has of them: their repository is inside the checkout's.
+    for submodule in plan.submodules.iter().filter(|s| s.unpushed > 0) {
+        lines.push(format!(
+            "Only the submodule {} holds these, and they go with the checkout:",
+            submodule.path
+        ));
+        for commit in &submodule.newest {
+            lines.push(format!("{} {}", commit.id, commit.subject));
+        }
+        if submodule.unpushed > submodule.newest.len() {
+            lines.push(format!(
+                "and {} more.",
+                submodule.unpushed - submodule.newest.len()
+            ));
+        }
     }
     if !plan.loose.is_empty() {
         lines.push("Not committed, and going with the checkout:".to_owned());
@@ -635,25 +705,30 @@ pub(super) fn carry_out(
 ///
 /// For Finish, work of any kind, because its question said there was none:
 /// git would refuse the modified and untracked files itself, but a commit on
-/// no branch is nothing git's removal looks for. For Discard, any file or
-/// commit its second question did not name — a file already named that has
-/// changed since is still the file it named — and any commit that only the
-/// branch holds now and did not then. For both, more ignored files than the
-/// question counted: either removal deletes them without git saying a word,
-/// so the count on the question is all the warning they get — and a `.env`
-/// or a first `target/` written by something nobody could see is exactly
-/// what this look is for. An error is a reason too, since a checkout that
-/// cannot be looked at is not one anyone can say is unchanged.
+/// no branch is nothing git's removal looks for — and a submodule checked out
+/// since, which git would refuse with the tabs already closed. For Discard,
+/// any file or commit its second question did not name — a file already
+/// named that has changed since is still the file it named — and any commit
+/// that only the branch, or only a submodule, holds now and did not then.
+/// For both, more ignored files than the question counted: either removal
+/// deletes them without git saying a word, so the count on the question is
+/// all the warning they get — and a `.env` or a first `target/` written by
+/// something nobody could see is exactly what this look is for. An error is
+/// a reason too, since a checkout that cannot be looked at is not one anyone
+/// can say is unchanged.
 fn appeared_since(repository: &Path, plan: &Plan, discard: bool) -> Option<String> {
     use crate::git::worktree;
 
     let checkout = plan.checkout();
-    let local = match worktree::local_work(&checkout.path) {
-        Ok(local) => local,
+    let (local, submodules) = match worktree::local_work_with_submodules(&checkout.path) {
+        Ok(read) => read,
         Err(problem) => return Some(problem.to_string()),
     };
-    if !discard && local.blocks_removal() {
+    if !discard && local.holds_work() {
         return Some(format!("there is work in it now — {}", work_in(local)));
+    }
+    if !discard && local.blocks_removal() {
+        return Some("a submodule is checked out in it now".to_owned());
     }
     if local.ignored > plan.local.ignored {
         return Some(format!(
@@ -669,6 +744,12 @@ fn appeared_since(repository: &Path, plan: &Plan, discard: bool) -> Option<Strin
         return Some(
             "a commit on no branch appeared in it after the question named what goes".to_owned(),
         );
+    }
+    if let Some(path) = unpushed_since(&plan.submodules, &submodules) {
+        return Some(format!(
+            "a commit only the submodule {path} holds appeared in it after the question named \
+             what goes"
+        ));
     }
     let loose = match worktree::loose_files(&checkout.path) {
         Ok(loose) => loose,
@@ -692,6 +773,24 @@ fn appeared_since(repository: &Path, plan: &Plan, discard: bool) -> Option<Strin
         }
     }
     None
+}
+
+/// The path of a submodule in `now` that holds a commit only it holds which
+/// `then` did not name, or more of them than `then` counted.
+///
+/// By commit as well as by count, because an amended commit is one gone and
+/// one come, and the count stays where it was.
+fn unpushed_since<'a>(then: &[Submodule], now: &'a [Submodule]) -> Option<&'a str> {
+    now.iter()
+        .find(|submodule| {
+            let was = then.iter().find(|was| was.path == submodule.path);
+            submodule.unpushed > was.map_or(0, |was| was.unpushed)
+                || submodule
+                    .newest
+                    .iter()
+                    .any(|commit| was.is_none_or(|was| !was.newest.contains(commit)))
+        })
+        .map(|submodule| submodule.path.as_str())
 }
 
 /// What the question says while it is being carried out.
