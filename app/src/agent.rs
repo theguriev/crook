@@ -28,8 +28,10 @@
 //! `packaging/claude-code`, carries them and the skill, and installing it is
 //! Claude Code writing its own settings. The plugin's hooks are the printed
 //! ones, command for command: each calls `"$CROOK_BIN"` — every pane is told
-//! its binary — behind a guard that makes it nothing outside Crook, and exits
-//! 0 whatever the report did, because a hook that fails can fail its agent;
+//! its binary — behind a guard that makes it nothing outside Crook, which
+//! includes the far side of `ssh` and the inside of a container until
+//! `TERM_PROGRAM` is passed on there, and exits 0 whatever the report did,
+//! because a hook that fails can fail its agent;
 //! the tests here hold the plugin's files to what is printed and to
 //! [`SKILL`]. `codex`, `gemini` and `copilot` print the same commands under
 //! each one's own event names, which is how those three read their hooks
@@ -1076,11 +1078,20 @@ fn hooks_object(events: &[(&str, &str)]) -> serde_json::Map<String, Value> {
 /// that names none, or whose binary has since moved — else there is none and
 /// the hook does nothing. Never a path written into the agent's settings:
 /// those outlive the binary, and a moved Crook.app or a deleted build would
-/// make every hook a "not found". And exit 0 whatever the report did. A report from an agent with no terminal has nowhere to go —
-/// `copilot -p` under CI or cron, `ssh` without `-t` — and GitHub Copilot
-/// CLI denies the tool call a `preToolUse` hook failed over, so an exit that
-/// passed the failure on refused every tool such an agent tried. What went
-/// wrong is still said on stderr, which each agent keeps in its log.
+/// make every hook a "not found". And exit 0 whatever the report did. A
+/// report from an agent with no terminal has nowhere to go — `copilot -p`
+/// under CI or cron, `ssh` without `-t` — and GitHub Copilot CLI denies the
+/// tool call a `preToolUse` hook failed over, so an exit that passed the
+/// failure on refused every tool such an agent tried. What went wrong is
+/// still said on stderr, which each agent keeps in its log.
+///
+/// The guard is also where these hooks stop short of `crook --agent` itself.
+/// The escape sequence crosses `ssh` and `docker exec`, but neither carries
+/// `TERM_PROGRAM` or `CROOK_PANE_ID`, so an agent on the far side of either,
+/// with these hooks in its settings there, reports nothing until
+/// `TERM_PROGRAM` is passed on: `SendEnv TERM_PROGRAM` in the ssh client's
+/// configuration with `AcceptEnv TERM_PROGRAM` in the server's, or
+/// `docker exec -e TERM_PROGRAM`.
 ///
 /// Spelled from the names the code gives the three variables, so renaming
 /// one without the plugin's file is its test failing rather than hooks
@@ -1807,6 +1818,25 @@ its `hooks` should be\n{}",
                     "{event} with {stale:?}"
                 );
             }
+            // The far side of `ssh`, or the inside of a container: a `crook`
+            // on that machine's PATH and neither variable, since neither
+            // crosses by itself — nothing, as in any other terminal. With
+            // TERM_PROGRAM passed on, which is what the README tells a person
+            // to do there, that `crook` reports.
+            assert_eq!(
+                (true, String::new(), String::new(), None),
+                run(&[("TERM", "xterm-256color"), ("PATH", path)]),
+                "{event} over ssh"
+            );
+            assert_eq!(
+                (true, String::new(), String::new(), reported.clone()),
+                run(&[
+                    ("TERM", "xterm-256color"),
+                    ("TERM_PROGRAM", "Crook"),
+                    ("PATH", path)
+                ]),
+                "{event} over ssh with TERM_PROGRAM passed on"
+            );
             // A pane with no binary to reach is quiet too, rather than a
             // "not found" on every prompt.
             assert_eq!(

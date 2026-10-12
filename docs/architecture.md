@@ -1519,7 +1519,11 @@ notice on every prompt and one that prints is text the model reads. For the same
 command exits 0 after the report too, whatever the report did: a Crook too old to reach the
 pane from a hook is a line of stderr in Claude Code's debug log, not a notice on every prompt
 and tool call — and GitHub Copilot CLI denies the tool call a `preToolUse` hook failed over, so
-a hook that passed a failed report on would refuse every tool of a `copilot -p` with no terminal. Tests in
+a hook that passed a failed report on would refuse every tool of a `copilot -p` with no terminal.
+The guard is the one place the hooks fall short of the sequence: `ssh` and `docker exec` carry
+neither variable, so an agent on the far side of either reports nothing through them until
+`TERM_PROGRAM` is passed on (`SendEnv`/`AcceptEnv`, `docker exec -e TERM_PROGRAM`), while
+`crook --agent` run there by hand, which has no guard, reaches the pane as it always did. Tests in
 `agent.rs` hold the plugin's `hooks/hooks.json` to what `--agent-hooks claude` prints and run
 each of its commands under `sh`, and hold its `SKILL.md` byte for byte to `skill.md`. Codex CLI and Gemini
 CLI read the same object under their own event names, and GitHub Copilot CLI a versioned

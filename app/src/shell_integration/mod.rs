@@ -164,9 +164,13 @@ pub const PANE_ID_VARIABLE: &str = "CROOK_PANE_ID";
 /// a person is running — a Crook.app nobody linked onto `PATH`, a build under
 /// `target/` — is often on nobody's. A path written into the agent's settings
 /// would reach it until the binary moved, and then fail every hook while the
-/// file stayed; so every hook `crook --agent-hooks` prints, and every one the
-/// Claude Code plugin ships, calls `"$CROOK_BIN"` instead, and this is what
-/// makes that name the same binary the pane belongs to.
+/// file stayed; so every command hook `crook --agent-hooks` prints — Claude
+/// Code's, Codex's, Gemini CLI's and Copilot CLI's — and every one the Claude
+/// Code plugin ships, calls `"$CROOK_BIN"` instead, and this is what makes
+/// that name the same binary the pane belongs to. What it prints for OpenCode
+/// and aider is no command hook and still names the binary by the path it
+/// was printed from: the OpenCode plugin's string literal, which `.nothrow()`
+/// keeps from ever failing OpenCode, and the commands in aider's sentence.
 pub const BIN_VARIABLE: &str = "CROOK_BIN";
 
 /// Setting this in the environment to anything but `0` or the empty string

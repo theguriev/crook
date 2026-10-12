@@ -408,8 +408,8 @@ Twenty features, and the page that configures them:
   waiting for, and the row prints that under the title until the agent gets on with it — so
   you know whether to come now or later without switching to the tab; `--message -` reads it
   from stdin, a hook's JSON `message` or the whole line. No socket and no pane id — the
-  terminal it has *is* the pane — so it works from a hook, over `ssh` and inside a container,
-  and every other terminal drops the sequence unread. A hook with no terminal of its own —
+  terminal it has *is* the pane — so the command works from a hook, over `ssh` and inside a
+  container, and every other terminal drops the sequence unread. A hook with no terminal of its own —
   every hook Claude Code runs — writes to the terminal of the program that ran it: the same
   pane. Claude Code says all of it by itself — running when a prompt is sent and around every
   tool, needing input whenever it stops to ask, with the notification's own text as the
@@ -425,7 +425,12 @@ Twenty features, and the page that configures them:
   GitHub Copilot CLI in each one's own hooks file, `opencode` prints the plugin OpenCode loads
   instead, and `aider`, which has no hooks, gets a sentence saying what to do instead. Copilot
   CLI refuses the tool call a hook failed over, so no hook ever fails: outside Crook, with no
-  terminal to report to, or with the binary gone, each one exits 0.
+  terminal to report to, or with the binary gone, each one exits 0. Outside Crook means where
+  neither `TERM_PROGRAM=Crook` nor `CROOK_PANE_ID` reaches, and `ssh` and `docker exec` carry
+  neither, so an agent on the far side of either reports nothing through these hooks, the
+  plugin's included, until `TERM_PROGRAM` is passed on: `SendEnv TERM_PROGRAM` in the ssh
+  client's configuration with `AcceptEnv TERM_PROGRAM` in the server's, or
+  `docker exec -e TERM_PROGRAM`.
   `--pull-request <url>` beside any status says which pull request the work is, and the row
   carries it as a chip that opens it — https only, capped, on a sequence of its own,
   `OSC 6342` — until the pane moves to another branch (a rebase is not a move); the Claude

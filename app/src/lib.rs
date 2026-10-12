@@ -1603,8 +1603,11 @@ OPTIONS:
                        Code), `codex`, `gemini`, `copilot` or `opencode`;
                        `aider` has none, and this says what to do instead.
                        `claude` leads with the two commands that install the
-                       same hooks as Crook's Claude Code plugin
-    --skill            Print the skill file that teaches a coding agent what it
+                       same hooks as Crook's Claude Code plugin. The hooks do
+                       nothing where neither TERM_PROGRAM=Crook nor
+                       CROOK_PANE_ID is set, which ssh and docker exec do not
+                       pass on unless told to
+    --skill           Print the skill file that teaches a coding agent what it
                        can do from inside a pane, to save as SKILL.md where
                        the agent loads its skills
     -h, --help         Print this message
