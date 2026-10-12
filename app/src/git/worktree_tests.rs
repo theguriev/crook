@@ -1717,6 +1717,131 @@ fn a_tag_the_submodule_was_cloned_with_is_not_work_of_the_checkout() {
     read("at the tag");
 }
 
+/// The subjects of the commits only `checkout`'s submodules hold, in the
+/// order a person reads them, and how many there are.
+fn held_only_by_submodules(checkout: &Path) -> (usize, Vec<String>) {
+    let (local, submodules) = local_work_with_submodules(checkout).expect("git answered");
+    let mut named: Vec<String> = submodules
+        .into_iter()
+        .flat_map(|submodule| submodule.newest)
+        .map(|commit| commit.subject)
+        .collect();
+    named.sort();
+    (local.unpushed, named)
+}
+
+#[test]
+fn a_tag_made_in_a_submodule_does_not_hide_the_work_it_marks() {
+    // A tag made by hand lives in the submodule's repository, which the
+    // forced removal deletes with the commits it marks. Taken for the
+    // remote's, it would have Discard say nothing is lost over a branch
+    // tagged before its push, or over a detached commit saved the way a
+    // detached commit is saved.
+    if without_git("a_tag_made_in_a_submodule_does_not_hide_the_work_it_marks") {
+        return;
+    }
+    let scratch = ScratchDir::new("submodule-own-tag");
+    let (_, checkout) = repo_with_a_submodule(&scratch);
+    git_with_local_submodules(&checkout, &["submodule", "update", "--init", "--quiet"]);
+    let inside = checkout.join("lib");
+
+    git(&inside, &["switch", "--quiet", "-c", "feat"]);
+    commit(&inside, "feat.txt", "feat\n", "the feature, on a branch");
+    git(&inside, &["tag", "v9"]);
+    assert_eq!(
+        held_only_by_submodules(&checkout),
+        (1, vec!["the feature, on a branch".to_owned()])
+    );
+
+    git(&inside, &["switch", "--quiet", "--detach", "main"]);
+    commit(&inside, "kept.txt", "kept\n", "the fix, kept by a tag");
+    git(&inside, &["tag", "keep"]);
+    assert_eq!(
+        held_only_by_submodules(&checkout),
+        (
+            2,
+            vec![
+                "the feature, on a branch".to_owned(),
+                "the fix, kept by a tag".to_owned()
+            ]
+        )
+    );
+    assert!(local_work(&checkout).expect("git answered").holds_work());
+}
+
+#[test]
+fn the_release_a_submodule_points_at_is_not_counted_under_a_commit_made_on_it() {
+    // The tags at or under the commit the superproject points at are the
+    // ones a person can take for the remote's: a release tagged off every
+    // branch, which the superproject was pointed at. A fix made on top of it
+    // is the checkout's own, and the release beneath it is not, whether or
+    // not the superproject has been pointed at the fix yet — or a tag made
+    // by hand marks it.
+    if without_git("the_release_a_submodule_points_at_is_not_counted_under_a_commit_made_on_it") {
+        return;
+    }
+    let scratch = ScratchDir::new("submodule-on-a-release");
+    let lib = repo_with_a_commit(&scratch, "lib");
+    git(&lib, &["switch", "--quiet", "--detach"]);
+    commit(&lib, "release.txt", "built\n", "release 1.0 (built)");
+    git(&lib, &["tag", "v1.0"]);
+    git(&lib, &["switch", "--quiet", "main"]);
+    let (_, checkout) = superproject_of_lib(&scratch);
+    git_with_local_submodules(&checkout, &["submodule", "update", "--init", "--quiet"]);
+    let inside = checkout.join("lib");
+    git(&inside, &["switch", "--quiet", "--detach", "v1.0"]);
+    git(&checkout, &["add", "lib"]);
+    git(
+        &checkout,
+        &["commit", "--no-verify", "-m", "point at the release"],
+    );
+    assert_eq!(held_only_by_submodules(&checkout), (0, Vec::new()));
+
+    commit(&inside, "fix.txt", "fixed\n", "the fix, on the release");
+    let only_the_fix = (1, vec!["the fix, on the release".to_owned()]);
+    assert_eq!(held_only_by_submodules(&checkout), only_the_fix);
+    git(&inside, &["tag", "keep"]);
+    assert_eq!(held_only_by_submodules(&checkout), only_the_fix);
+
+    git(&inside, &["tag", "--delete", "keep"]);
+    git(&checkout, &["add", "lib"]);
+    git(
+        &checkout,
+        &["commit", "--no-verify", "-m", "point at the fix"],
+    );
+    assert_eq!(held_only_by_submodules(&checkout), only_the_fix);
+}
+
+#[test]
+fn a_commit_the_superproject_points_at_is_counted_wherever_that_pointer_went() {
+    // The commit an agent makes in a submodule is the one the superproject
+    // is then pointed at, and that pointer travels without it: merged into
+    // the base, pushed with the superproject's branch, when nobody pushed the
+    // submodule. Wherever the pointer is, nothing but this checkout has the
+    // commit, so it is no sign the remote has it.
+    if without_git("a_commit_the_superproject_points_at_is_counted_wherever_that_pointer_went") {
+        return;
+    }
+    let scratch = ScratchDir::new("submodule-pointer-pushed");
+    let (repo, checkout) = repo_with_a_submodule(&scratch);
+    let remote = scratch.dir("remote.git");
+    git(&remote, &["init", "--bare", "--quiet"]);
+    git(&repo, &["remote", "add", "origin", &file_url(&remote)]);
+    fix_in_the_submodule(&checkout, "the fix, pointed at");
+
+    git(&repo, &["merge", "--quiet", "--ff-only", "task"]);
+    git(&repo, &["push", "--quiet", "origin", "main", "task"]);
+    assert_eq!(
+        git(&repo, &["rev-parse", "origin/main:lib"]),
+        git(&checkout.join("lib"), &["rev-parse", "HEAD"])
+    );
+
+    assert_eq!(
+        held_only_by_submodules(&checkout),
+        (1, vec!["the fix, pointed at".to_owned()])
+    );
+}
+
 /// `path` as a `file://` URL, which is what makes git clone it the way it
 /// would clone a remote: from a plain path it copies the repository whole,
 /// and `--depth` is ignored.

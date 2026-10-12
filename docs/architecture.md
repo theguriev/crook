@@ -1266,8 +1266,13 @@ them — the checks are what `-d` stood in for. Three gestures reach it:
   those commits were counted from. It names the commits only a submodule of the checkout holds
   too, checked out or only kept, and counts its stashes: its repository lives in the checkout's
   own git directory, and the forced removal deletes it. A commit counts when nothing says a
-  remote has it: no remote-tracking branch reaches it, no tag does — a clone fetches every tag
-  its remote has — and it is not a commit a shallow clone's history stops at.
+  remote has it: no remote-tracking branch reaches it, it is not a commit a shallow clone's
+  history stops at, and no tag at or under the commit the superproject points at reaches it. A
+  tag anywhere else, on a branch or past that commit, may be one made by hand in the repository
+  the removal deletes, over the very work it marks. The commit the superproject points at is
+  taken for the remote's when a `--depth 1` fetch brought it; one a deeper or full clone
+  fetched by name, on no remote branch, is still counted, since nothing tells it from the
+  commit an agent made there and pointed the superproject at.
 
 What a question says is what its press does, however long it was up. It stays up while an agent
 finishes — that is what lights its button — and an agent's last act is often a file or a

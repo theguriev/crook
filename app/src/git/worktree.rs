@@ -146,13 +146,31 @@ pub struct Local {
     /// forced removal nothing anywhere has them, `git fsck` included.
     ///
     /// What the remote demonstrably has is left out, as near as a repository
-    /// can tell without asking it: what its remote-tracking branches reach,
-    /// what its tags reach — a clone fetches every tag its remote has, a
-    /// release tagged off every branch among them, where a tag made by hand
-    /// in a submodule is the rare case — and the commits a shallow clone's
-    /// history stops at, which it fetched from there by name: `git submodule
-    /// update --depth 1` fetches the commit the superproject points at that
-    /// way. Counting those would warn about work nobody did.
+    /// can tell without asking it: what its remote-tracking branches reach;
+    /// the commits a shallow clone's history stops at, which it fetched from
+    /// there by name — `git submodule update --depth 1` fetches the commit
+    /// the superproject points at that way; and what the tags at or under
+    /// that commit reach, which is a release the superproject points at off
+    /// every branch, or one an agent's commits sit on. Counting those would
+    /// warn about work nobody did.
+    ///
+    /// A tag anywhere else excuses nothing. A clone fetches every tag its
+    /// remote has, but a tag made by hand is a tag all the same, and lives in
+    /// the repository the removal deletes: on a branch, or on a commit past
+    /// where the superproject points, it marks the very work that would go.
+    /// What this still misses is a commit made in the submodule that the
+    /// superproject is then pointed at and somebody tags by hand: that tag
+    /// is at the pointer, and is taken for a release.
+    ///
+    /// What a full clone, or one deeper than a single commit, fetched by
+    /// name still counts, though the remote has it: a commit the
+    /// superproject points at that no remote branch reaches any more — a
+    /// pull request's, squash-merged and its branch deleted. Nothing in the
+    /// repository tells it from the commit an agent makes in a submodule,
+    /// which is the one the superproject is then pointed at, and that pointer
+    /// can be merged into the base or pushed while the commit itself never
+    /// was. Taking the pointer for the remote's would lose that commit
+    /// without a word; counting it warns about one nobody made.
     pub unpushed: usize,
     /// Stashes those submodules hold. The superproject's `refs/stash` is
     /// shared by every checkout of it, so a stash made in the checkout itself
@@ -760,15 +778,6 @@ pub struct Submodule {
 /// whole history unpushed, and that is a list nobody reads.
 pub const UNPUSHED_NAMED: usize = 6;
 
-/// How many of the commits a shallow submodule's history stops at
-/// [`held_only_in`] hands git as somewhere else.
-///
-/// A bound for the command line, which Windows caps at 32 767 characters:
-/// each is a full object id. A shallow clone's file holds one or two of
-/// them — the tips it fetched — and one over the bound is only counted as
-/// unpushed, which warns rather than loses.
-const SHALLOW_NAMED: usize = 256;
-
 /// How deep [`kept_in`] looks for a repository under a `modules` directory
 /// that is not one. A submodule named `a/b` is kept at `modules/a/b`, so the
 /// walk goes through directories that are only part of a name; nothing git
@@ -810,6 +819,11 @@ struct Found {
     /// Where git is run for it: where it is checked out, or the checkout for
     /// one that is only kept.
     work_tree: PathBuf,
+    /// The commit the index of the repository it is checked out in points
+    /// at for it, as git prints an object id. `None` for one only kept,
+    /// which is not matched to a pointer: `git rm` leaves none, and the one
+    /// `deinit` leaves is under a path rather than the name it is kept by.
+    pin: Option<String>,
 }
 
 /// Every submodule of `worktree` whose repository its forced removal
@@ -849,7 +863,8 @@ fn submodules(worktree: &Path, modules: &Path) -> Result<Vec<Submodule>, Error> 
 
     let mut submodules = Vec::with_capacity(found.len());
     for found in found {
-        let Some((unpushed, stashed, newest)) = held_only_in(&found.work_tree, &found.git_dir)?
+        let Some((unpushed, stashed, newest)) =
+            held_only_in(&found.work_tree, &found.git_dir, found.pin.as_deref())?
         else {
             continue;
         };
@@ -899,10 +914,18 @@ fn checked_out_in(
         };
         let (head, path) = (&entry[..tab], &entry[tab + 1..]);
         // A submodule in a conflicted merge is listed once for each side.
-        if !head.starts_with(b"160000 ") || previous == Some(path) {
+        let Some(object) = head.strip_prefix(b"160000 ") else {
+            continue;
+        };
+        if previous == Some(path) {
             continue;
         }
         previous = Some(path);
+        let pin = object
+            .split(|byte| *byte == b' ')
+            .next()
+            .filter(|id| !id.is_empty() && id.iter().all(u8::is_ascii_hexdigit))
+            .map(text);
 
         let checked_out = directory.join(path_from(path));
         // Not through a link: a link where a submodule should be is nothing
@@ -924,6 +947,7 @@ fn checked_out_in(
             checked_out: true,
             git_dir: repository.clone(),
             work_tree: checked_out.clone(),
+            pin,
         });
         match checked_out_in(&checked_out, Some(&repository), &inside, found) {
             Ok(()) => {}
@@ -1016,6 +1040,7 @@ fn kept_in(
                 checked_out: false,
                 git_dir: directory.clone(),
                 work_tree: work_tree.to_owned(),
+                pin: None,
             });
         }
         kept_in(
@@ -1036,7 +1061,8 @@ fn kept_in(
 /// Its own branches count *against* it rather than for it, unlike
 /// [`stranded`]'s: they live in the submodule's repository, which goes with
 /// the checkout, so a commit only they hold goes too. What its remote has —
-/// see [`Local::unpushed`] — is somewhere else.
+/// see [`Local::unpushed`] — is somewhere else, and `pin`, the commit the
+/// superproject points at for it, is where the tags that say so stop.
 ///
 /// `work_tree` is where git is told the submodule's files are, and is never
 /// looked in: a submodule's repository names its checkout in its own
@@ -1046,29 +1072,25 @@ fn kept_in(
 fn held_only_in(
     work_tree: &Path,
     git_dir: &Path,
+    pin: Option<&str>,
 ) -> Result<Option<(usize, usize, Vec<Commit>)>, Error> {
-    // Plain object ids after `--not` are on the side of what is elsewhere.
-    let mut only_here: Vec<String> = ["HEAD", "--branches", "--not", "--remotes", "--tags"]
-        .map(str::to_owned)
-        .to_vec();
-    only_here.extend(shallow_boundary(git_dir));
-    // `--` because the submodule's own files are what git would otherwise
-    // check `HEAD` against, and a file called `HEAD` makes it ambiguous.
-    only_here.push("--".to_owned());
-    let only_here: Vec<&str> = only_here.iter().map(String::as_str).collect();
-
-    let counted = run_in(
-        work_tree,
-        Some(git_dir),
-        &[&["rev-list", "--count"][..], &only_here].concat(),
-    )?;
-    if !counted.success {
-        return match classify(&counted.stderr) {
-            Error::NotARepository => Ok(None),
-            other => Err(other),
-        };
+    let mut elsewhere = shallow_boundary(git_dir);
+    let Some(mut unpushed) = count_only_here(work_tree, git_dir, &elsewhere)? else {
+        return Ok(None);
+    };
+    // Asked only when something is counted — nothing is, for a submodule
+    // at a commit its remote's branches reach with no branch of its own
+    // past them — because which tags are under the pin is a walk of the
+    // history of every tag the library has.
+    if unpushed > 0
+        && let Some(pin) = pin
+    {
+        let tags = tags_under(work_tree, git_dir, pin)?;
+        if !tags.is_empty() {
+            elsewhere.extend(tags);
+            unpushed = count_only_here(work_tree, git_dir, &elsewhere)?.unwrap_or(unpushed);
+        }
     }
-    let unpushed = text(&counted.stdout).trim().parse().unwrap_or(0);
 
     // A stash is a reflog entry, one per stash; a repository nobody stashed
     // in has no `refs/stash`, which `--ignore-missing` makes a count of none
@@ -1094,16 +1116,17 @@ fn held_only_in(
         return Ok(Some((0, stashed, Vec::new())));
     }
     let most = format!("--max-count={UNPUSHED_NAMED}");
-    let logged = run_in(
+    let logged = run_in_fed(
         work_tree,
-        Some(git_dir),
+        git_dir,
         // `log.showSignature` would put gpg's lines among the commits, as it
         // would in `held_only_by`.
         &[
             &["log", "--no-show-signature", "--format=%H %s", &most][..],
-            &only_here,
+            &ONLY_HERE,
         ]
         .concat(),
+        fed(&elsewhere),
     )?;
     if !logged.success {
         return Err(classify(&logged.stderr));
@@ -1119,14 +1142,95 @@ fn held_only_in(
     Ok(Some((unpushed, stashed, newest)))
 }
 
+/// What [`held_only_in`] asks git for, with the rest of what is somewhere
+/// else on git's stdin: `HEAD` and the submodule's branches, less what its
+/// remote-tracking branches reach.
+///
+/// `--` because the submodule's own files are what git would otherwise
+/// check `HEAD` against, and a file called `HEAD` makes it ambiguous.
+const ONLY_HERE: [&str; 6] = ["--stdin", "HEAD", "--branches", "--not", "--remotes", "--"];
+
+/// How many commits [`ONLY_HERE`] counts in the submodule repository at
+/// `git_dir`, with the commits `elsewhere` names, and what they reach, left
+/// out as well. `None` when `git_dir` is not a repository.
+fn count_only_here(
+    work_tree: &Path,
+    git_dir: &Path,
+    elsewhere: &[String],
+) -> Result<Option<usize>, Error> {
+    let counted = run_in_fed(
+        work_tree,
+        git_dir,
+        &[&["rev-list", "--count"][..], &ONLY_HERE].concat(),
+        fed(elsewhere),
+    )?;
+    if !counted.success {
+        return match classify(&counted.stderr) {
+            Error::NotARepository => Ok(None),
+            other => Err(other),
+        };
+    }
+    Ok(Some(text(&counted.stdout).trim().parse().unwrap_or(0)))
+}
+
+/// `elsewhere` as lines for `rev-list --stdin`, each one left out.
+///
+/// On stdin rather than the command line, which Windows caps at 32 767
+/// characters: a submodule pinned at a release of a library with a long
+/// history has thousands of tags under it, each a full object id. A `^` on a
+/// line of its own is read the same whatever `--not` said before `--stdin`.
+fn fed(elsewhere: &[String]) -> Vec<u8> {
+    let mut lines = Vec::new();
+    for revision in elsewhere {
+        lines.push(b'^');
+        lines.extend_from_slice(revision.as_bytes());
+        lines.push(b'\n');
+    }
+    lines
+}
+
+/// The tags at or under `pin` in the submodule repository at `git_dir`, by
+/// object id: none when the repository does not have that commit.
+///
+/// These, and no others, are what a tag says the remote has. Everything
+/// `pin` reaches was fetched with it when the superproject's pointer is the
+/// one `git submodule update` checked out — the tags among it are the
+/// releases that pointer sits on or past — and a tag made by hand on a
+/// branch, or on a commit made past `pin`, is not among them: it marks the
+/// very commits the removal would delete.
+fn tags_under(work_tree: &Path, git_dir: &Path, pin: &str) -> Result<Vec<String>, Error> {
+    let merged = format!("--merged={pin}");
+    let listed = run_in(
+        work_tree,
+        Some(git_dir),
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            &merged,
+            "refs/tags",
+        ],
+    )?;
+    if !listed.success {
+        return Ok(Vec::new());
+    }
+    Ok(text(&listed.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_owned)
+        .collect())
+}
+
 /// The commits a shallow repository's history stops at, from its `shallow`
-/// file, no more than [`SHALLOW_NAMED`] of them: none for a repository with
-/// its whole history, which has no such file.
+/// file: none for a repository with its whole history, which has no such
+/// file.
 ///
 /// Every one was fetched from a remote by a fetch told to stop there, so it
 /// is something the remote had — and the commit `git submodule update
 /// --depth 1` checks out is one, fetched by name, which no remote-tracking
-/// branch need reach once the remote has moved past it.
+/// branch need reach once the remote has moved past it. Fetched any deeper,
+/// the boundary is under that commit rather than at it, and the commit
+/// counts: see [`Local::unpushed`].
 fn shallow_boundary(git_dir: &Path) -> Vec<String> {
     let Ok(listed) = std::fs::read_to_string(git_dir.join("shallow")) else {
         return Vec::new();
@@ -1135,7 +1239,6 @@ fn shallow_boundary(git_dir: &Path) -> Vec<String> {
         .lines()
         .map(str::trim)
         .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .take(SHALLOW_NAMED)
         .map(str::to_owned)
         .collect()
 }
@@ -1148,6 +1251,26 @@ fn run_in(
     git_dir: Option<&Path>,
     args: &[&str],
 ) -> Result<super::run::Finished, Error> {
+    let all = in_repository(directory, git_dir, args);
+    let all: Vec<&OsStr> = all.iter().map(OsString::as_os_str).collect();
+    Ok(run(directory, &all, Intent::Read)?)
+}
+
+/// [`run_in`] for the repository at `git_dir`, with `input` on git's stdin.
+fn run_in_fed(
+    directory: &Path,
+    git_dir: &Path,
+    args: &[&str],
+    input: Vec<u8>,
+) -> Result<super::run::Finished, Error> {
+    let all = in_repository(directory, Some(git_dir), args);
+    let all: Vec<&OsStr> = all.iter().map(OsString::as_os_str).collect();
+    Ok(run_fed(directory, &all, input)?)
+}
+
+/// `args`, after the options that tell git its repository is `git_dir` and
+/// its files `directory`, when there is a `git_dir` to tell it.
+fn in_repository(directory: &Path, git_dir: Option<&Path>, args: &[&str]) -> Vec<OsString> {
     let mut all: Vec<OsString> = Vec::with_capacity(args.len() + 2);
     if let Some(git_dir) = git_dir {
         let mut option = OsString::from("--git-dir=");
@@ -1158,8 +1281,7 @@ fn run_in(
         all.push(option);
     }
     all.extend(args.iter().map(OsString::from));
-    let all: Vec<&OsStr> = all.iter().map(OsString::as_os_str).collect();
-    Ok(run(directory, &all, Intent::Read)?)
+    all
 }
 
 // MARK: - Writing
