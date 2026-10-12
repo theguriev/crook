@@ -1159,6 +1159,65 @@ fn a_pass_that_outlives_its_deadline_proves_nothing_by_patch() {
     );
 }
 
+#[test]
+fn a_look_for_moved_off_work_whose_deadline_is_spent_accounts_for_nothing() {
+    // The passes over history are only the start of the look for what a
+    // branch moved off: after them come reads of the commits themselves, of
+    // who wrote them, and of what a branch had changed since its fork, for
+    // each commit of each branch. Every one is handed what is left of the
+    // deadline the passes had, so that the look costs that one deadline
+    // however many reads it makes — and once it is spent, the rest account
+    // for nothing, which costs a proof and never makes one.
+    if without_git("a_look_for_moved_off_work_whose_deadline_is_spent_accounts_for_nothing") {
+        return;
+    }
+    let scratch = ScratchDir::new("look-deadline");
+    let repo = repository(&scratch, "repo");
+    // One whose commits only their copies account for, rebased and
+    // fast-forwarded, and one only its squash does, reset onto it.
+    let moved = ["forwarded", "synced"];
+    for branch in moved {
+        git(&repo, &["switch", "-c", branch, "main"]);
+        commit(&repo, &format!("{branch}-1.txt"), "one half\n", "one half");
+        commit(
+            &repo,
+            &format!("{branch}-2.txt"),
+            "the other\n",
+            "the other",
+        );
+    }
+    git(&repo, &["switch", "main"]);
+    commit(&repo, "later.txt", "main moves on\n", "later");
+    git(&repo, &["switch", "forwarded"]);
+    git(&repo, &["rebase", "main"]);
+    git(&repo, &["switch", "main"]);
+    git(&repo, &["merge", "--ff-only", "forwarded"]);
+    squash_onto_main(&repo, "synced");
+    git(&repo, &["switch", "synced"]);
+    git(&repo, &["reset", "--hard", "main"]);
+    git(&repo, &["switch", "main"]);
+    let on_base = held_on(&repo, &[MAIN], None, PASS_COMMITS, PASS_DEADLINE);
+    let held = Held {
+        on_base: &on_base,
+        on_tip: HashMap::new(),
+    };
+
+    for branch in moved {
+        let reflog =
+            reflog_of(&repo, &format!("refs/heads/{branch}")).expect("git reads the reflog");
+        let originals = moved_off(&repo, branch);
+        assert_eq!(originals.len(), 2, "{branch} was not moved off its commits");
+        let look = |until| unaccounted(&repo, Some(MAIN), &reflog, &originals, &held, false, until);
+
+        assert_eq!(
+            look(Instant::now() + PASS_DEADLINE),
+            Vec::<String>::new(),
+            "{branch}'s commits are not accounted for even in time"
+        );
+        assert_eq!(look(Instant::now()), originals);
+    }
+}
+
 // --- which branch is the base ---------------------------------------------------
 
 #[test]

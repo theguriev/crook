@@ -71,10 +71,12 @@
 //! over history — the base's, and a branch's beside it when [`unaccounted`]
 //! looks for a change — is bounded twice, by [`PASS_COMMITS`] and
 //! [`PASS_DEADLINE`], because those are the reads here whose length grows
-//! with the repository rather than with the question. The passes that look
-//! for the change of what branches moved off share one deadline between
-//! them, so that however many branches did, the look costs one more deadline
-//! at most.
+//! with the repository rather than with the question. The look for the
+//! change of what branches moved off — its passes, and every read it makes
+//! after them, of the commits, of who wrote them, of what a branch changed
+//! since its fork — shares one deadline, each read handed what is left of
+//! it, so that however many branches and commits it is for, the look costs
+//! one more deadline at most.
 //!
 //! # What a proof is good for
 //!
@@ -91,7 +93,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use super::run::{Intent, READ_TIMEOUT, pipe, run, run_fed};
+use super::run::{Intent, READ_TIMEOUT, pipe, read_within, run, run_fed};
 
 /// How many of the base's commits the pass reads, newest first.
 ///
@@ -288,15 +290,16 @@ pub fn is_base(branch: &str, base: &str) -> bool {
 ///
 /// **Blocking**, and the most expensive read in the git module: a handful of
 /// subprocesses per branch and one pass over the base's recent history, which
-/// is a second or two on a busy repository. A branch a proof reached that
-/// moved off commits of its own — a rebase or an amend in the month before
-/// `gc` prunes its reflog — adds [`nothing_dropped`]'s look for their change:
-/// a second pass over the base, shared by every such branch, and a pass over
-/// the own commits of each one proved by patch, which all share one more
-/// [`PASS_DEADLINE`]; and a few subprocesses for each of up to
-/// [`MOST_DROPPED`] commits a branch moved off that no pass settles.
-/// Background executor only, and only on a gesture — the menu opening —
-/// never on a timer.
+/// is a second or two on a busy repository, and one `rev-list` for every
+/// branch a proof reached, asking which moved off commits of their own on the
+/// way — a rebase or an amend in the month before `gc` prunes the reflog.
+/// Each that did adds to [`nothing_dropped`]'s look for their change: a
+/// second pass over the base, shared by all of them; a read of the commits it
+/// moved off, and a pass over its own commits when it was proved by patch;
+/// and a few subprocesses for each of up to [`MOST_DROPPED`] commits those
+/// do not settle. All of the look shares one more [`PASS_DEADLINE`], however
+/// many branches and commits it is for. Background executor only, and only
+/// on a gesture — the menu opening — never on a timer.
 ///
 /// `branches` are short names, the form [`super::worktree::Worktree::branch`]
 /// carries. `base` is a ref, the form [`base_of`] answers in. A branch absent
@@ -352,10 +355,10 @@ fn merged_within(
             }
             continue;
         }
-        let Some(fork) = merge_base(repository, base, &tip) else {
+        let Some(fork) = merge_base(repository, base, &tip, READ_TIMEOUT) else {
             continue;
         };
-        if let Some(patch) = patch_since(repository, &fork, &tip, Hunks::InContext) {
+        if let Some(patch) = patch_since(repository, &fork, &tip, Hunks::InContext, READ_TIMEOUT) {
             pending.push((branch, reference, tip, fork, patch));
         }
     }
@@ -367,7 +370,7 @@ fn merged_within(
         .iter()
         .map(|(_, _, _, fork, _)| fork.as_str())
         .collect();
-    let since = oldest(repository, &forks);
+    let since = oldest(repository, &forks, READ_TIMEOUT);
     let patches = patches_on(
         repository,
         &[base],
@@ -428,9 +431,10 @@ fn merged_within(
 /// first, as full object ids.
 ///
 /// **Blocking**: the reflog, a `rev-list`, and, only for a branch that has
-/// moved off commits of its own, two passes over history — the base's since
-/// the oldest of them left it, and the branch's own commits — which share one
-/// [`PASS_DEADLINE`]. Background executor only.
+/// moved off commits of its own, the look for their change — two passes over
+/// history, the base's since the oldest of them left it and the branch's own
+/// commits, and the reads [`unaccounted`] makes after them — which all share
+/// one [`PASS_DEADLINE`]. Background executor only.
 ///
 /// "Nothing else" is `tip`, `base` and every branch, tag and remote-tracking
 /// branch, the refs [`super::worktree::held_only_by`] counts as somewhere a
@@ -464,7 +468,7 @@ pub fn dropped(
         Some(base) => {
             let since = moved_off
                 .last()
-                .and_then(|oldest| merge_base(repository, base, oldest));
+                .and_then(|oldest| merge_base(repository, base, oldest, left(until)));
             held_on(
                 repository,
                 &[base],
@@ -480,7 +484,7 @@ pub fn dropped(
         on_tip: held_on(repository, &[tip], base, PASS_COMMITS, left(until)),
     };
     Some(unaccounted(
-        repository, base, &reflog, &moved_off, &held, false,
+        repository, base, &reflog, &moved_off, &held, false, until,
     ))
 }
 
@@ -494,10 +498,12 @@ pub fn dropped(
 /// commits left it, and a branch proved by patch reads its own commits
 /// besides, which are on no base. Not the patch proof's pass, which hashes
 /// each change with the lines around it: these hash the lines alone — see
-/// [`Hunks::Bare`]. Each pass is capped at `commits`, and all of them
-/// together have `deadline`, so that the look costs one more deadline at
-/// most however many branches it is for. A git that could not be asked
-/// takes every proof away.
+/// [`Hunks::Bare`]. Each pass is capped at `commits`, and the passes and
+/// every read [`unaccounted`] makes after them have `deadline` between them,
+/// so that the look costs one more deadline at most however many branches
+/// and commits it is for. A deadline spent before a branch's commits are
+/// settled leaves it unproved, and a git that could not be asked takes every
+/// proof away.
 fn nothing_dropped(
     repository: &Path,
     base: &str,
@@ -530,13 +536,13 @@ fn nothing_dropped(
     let forks: Vec<String> = moved_off
         .iter()
         .filter(|moved_off| (1..=MOST_DROPPED).contains(&moved_off.len()))
-        .filter_map(|moved_off| merge_base(repository, base, moved_off.last()?))
+        .filter_map(|moved_off| merge_base(repository, base, moved_off.last()?, left(until)))
         .collect();
     let on_base = if forks.is_empty() {
         HashMap::new()
     } else {
         let forks: Vec<&str> = forks.iter().map(String::as_str).collect();
-        let needed = oldest(repository, &forks);
+        let needed = oldest(repository, &forks, left(until));
         held_on(repository, &[base], needed.as_deref(), commits, left(until))
     };
 
@@ -564,7 +570,16 @@ fn nothing_dropped(
                 on_base: &on_base,
                 on_tip,
             };
-            unaccounted(repository, Some(base), reflog, moved_off, &held, true).is_empty()
+            unaccounted(
+                repository,
+                Some(base),
+                reflog,
+                moved_off,
+                &held,
+                true,
+                until,
+            )
+            .is_empty()
         })
         .map(|((landed, _), _)| (landed.branch.clone(), landed))
         .collect()
@@ -612,7 +627,8 @@ impl Held<'_> {
 /// Which of `moved_off` — commits `reflog` records as made on a branch that
 /// nothing holds any more, newest first — have a change nothing holds
 /// either. With `first`, it stops at the first, which is all a proof needs to
-/// know.
+/// know. Every read it makes is handed what is left of the deadline that
+/// ends at `until`.
 ///
 /// The change is looked for in `held`: the commits the base has, back to
 /// where the oldest of `moved_off` left it, and those the branch's tip has
@@ -653,8 +669,9 @@ impl Held<'_> {
 /// whether a branch's work reached the base but whether a change it moved
 /// off is still in something, and one the base had once is.
 ///
-/// Every doubt leaves a commit unaccounted for: a read that failed, a commit
-/// with no change at all, and every one of them past [`MOST_DROPPED`].
+/// Every doubt leaves a commit unaccounted for: a read that failed or found
+/// the deadline spent, a commit with no change at all, and every one of them
+/// past [`MOST_DROPPED`].
 fn unaccounted(
     repository: &Path,
     base: Option<&str>,
@@ -662,12 +679,13 @@ fn unaccounted(
     moved_off: &[String],
     held: &Held,
     first: bool,
+    until: Instant,
 ) -> Vec<String> {
     if moved_off.is_empty() || moved_off.len() > MOST_DROPPED {
         return moved_off.to_vec();
     }
     let commits: Vec<&str> = moved_off.iter().map(String::as_str).collect();
-    let own = own_patches(repository, &commits, Hunks::Bare);
+    let own = own_patches(repository, &commits, Hunks::Bare, left(until));
     // The held commits that make each one's change, and who wrote every one
     // of them, in one read.
     let alike: HashMap<&str, Vec<&str>> = commits
@@ -681,7 +699,11 @@ fn unaccounted(
         .iter()
         .flat_map(|(commit, alike)| std::iter::once(*commit).chain(alike.iter().copied()))
         .collect();
-    let authors = authors(repository, &asked.into_iter().collect::<Vec<_>>());
+    let authors = authors(
+        repository,
+        &asked.into_iter().collect::<Vec<_>>(),
+        left(until),
+    );
     let amended = amendments(reflog);
     let nowhere: HashSet<&str> = commits.iter().copied().collect();
 
@@ -701,12 +723,14 @@ fn unaccounted(
         if replaced
             || alike
                 .get(commit.as_str())
-                .is_some_and(|alike| copied(repository, commit, alike, &authors))
+                .is_some_and(|alike| copied(repository, commit, alike, &authors, until))
         {
             accounted.insert(commit.clone());
             continue;
         }
-        if let Some(reached) = base.and_then(|base| whole_held(repository, base, commit, held)) {
+        if let Some(reached) =
+            base.and_then(|base| whole_held(repository, base, commit, held, until))
+        {
             accounted.extend(reached);
             accounted.insert(commit.clone());
             continue;
@@ -728,6 +752,7 @@ fn copied(
     commit: &str,
     alike: &[&str],
     authors: &HashMap<String, String>,
+    until: Instant,
 ) -> bool {
     if let Some(author) = authors.get(commit)
         && alike.iter().any(|held| authors.get(*held) == Some(author))
@@ -736,7 +761,7 @@ fn copied(
     }
     let mut asked = vec![commit];
     asked.extend(alike);
-    let patches = own_patches(repository, &asked, Hunks::InContext);
+    let patches = own_patches(repository, &asked, Hunks::InContext, left(until));
     patches
         .get(commit)
         .is_some_and(|patch| alike.iter().any(|held| patches.get(*held) == Some(patch)))
@@ -747,25 +772,36 @@ fn copied(
 /// as a branch, found in one commit somewhere else. Found by its lines,
 /// [`Hunks::Bare`], and kept only when the lines around them agree as well,
 /// [`Hunks::InContext`] — see [`unaccounted`].
-fn whole_held(repository: &Path, base: &str, commit: &str, held: &Held) -> Option<Vec<String>> {
-    let fork = merge_base(repository, base, commit)?;
-    let lines = patch_since(repository, &fork, commit, Hunks::Bare)?;
+fn whole_held(
+    repository: &Path,
+    base: &str,
+    commit: &str,
+    held: &Held,
+    until: Instant,
+) -> Option<Vec<String>> {
+    let fork = merge_base(repository, base, commit, left(until))?;
+    let lines = patch_since(repository, &fork, commit, Hunks::Bare, left(until))?;
     let alike = held.with(&lines);
     if alike.is_empty() {
         return None;
     }
-    let whole = patch_since(repository, &fork, commit, Hunks::InContext)?;
-    let theirs = own_patches(repository, &alike, Hunks::InContext);
+    let whole = patch_since(repository, &fork, commit, Hunks::InContext, left(until))?;
+    let theirs = own_patches(repository, &alike, Hunks::InContext, left(until));
     if !theirs.values().any(|patch| *patch == whole) {
         return None;
     }
     let exclude = format!("^{fork}");
-    let reached = answer(repository, &["rev-list", commit, &exclude, "--"])?;
+    let reached = answer_within(
+        repository,
+        &["rev-list", commit, &exclude, "--"],
+        left(until),
+    )?;
     Some(reached.lines().map(str::to_owned).collect())
 }
 
 /// The commits of [`patches_on`]'s pass, [`Hunks::Bare`], by patch-id: what
-/// [`Held`] is made of.
+/// [`Held`] is made of. Nothing once `deadline` is spent, rather than a pass
+/// started only to be killed.
 fn held_on(
     repository: &Path,
     heads: &[&str],
@@ -773,6 +809,9 @@ fn held_on(
     commits: usize,
     deadline: Duration,
 ) -> HashMap<String, Vec<String>> {
+    if deadline.is_zero() {
+        return HashMap::new();
+    }
     patches_on(repository, heads, since, commits, deadline, Hunks::Bare)
 }
 
@@ -780,9 +819,15 @@ fn held_on(
 /// first parent, hashed as `hunks` says, by commit.
 ///
 /// One `git log -p` piped into one `patch-id`, as the pass is. A merge has no
-/// patch here, and nor has anything when git could not be asked.
-fn own_patches(repository: &Path, commits: &[&str], hunks: Hunks) -> HashMap<String, String> {
-    if commits.is_empty() {
+/// patch here, and nor has anything when git could not be asked or `timeout`
+/// is spent.
+fn own_patches(
+    repository: &Path,
+    commits: &[&str],
+    hunks: Hunks,
+    timeout: Duration,
+) -> HashMap<String, String> {
+    if commits.is_empty() || timeout.is_zero() {
         return HashMap::new();
     }
     let mut log = vec![
@@ -799,7 +844,7 @@ fn own_patches(repository: &Path, commits: &[&str], hunks: Hunks) -> HashMap<Str
     log.push("--");
     let log: Vec<&OsStr> = log.into_iter().map(OsStr::new).collect();
 
-    match pipe(repository, &log, &PATCH_ID.map(OsStr::new), READ_TIMEOUT) {
+    match pipe(repository, &log, &PATCH_ID.map(OsStr::new), timeout) {
         Ok(finished) if finished.success => String::from_utf8_lossy(&finished.stdout)
             .lines()
             .filter_map(|line| line.split_once(' '))
@@ -815,9 +860,9 @@ fn own_patches(repository: &Path, commits: &[&str], hunks: Hunks) -> HashMap<Str
 /// What git carries over to the copy when a rebase, a cherry-pick or an
 /// amend rewrites a commit, and what two commits written apart do not share:
 /// see [`unaccounted`]. The commits go in on stdin, for [`unheld`]'s reason.
-/// Empty when git could not be asked.
-fn authors(repository: &Path, commits: &[&str]) -> HashMap<String, String> {
-    if commits.is_empty() {
+/// Empty when git could not be asked or `timeout` is spent.
+fn authors(repository: &Path, commits: &[&str], timeout: Duration) -> HashMap<String, String> {
+    if commits.is_empty() || timeout.is_zero() {
         return HashMap::new();
     }
     let input: String = commits.iter().map(|commit| format!("{commit}\n")).collect();
@@ -833,7 +878,7 @@ fn authors(repository: &Path, commits: &[&str]) -> HashMap<String, String> {
         "--",
     ]
     .map(OsStr::new);
-    run_fed(repository, &args, input.into_bytes())
+    read_within(repository, &args, Some(input.into_bytes()), timeout)
         .ok()
         .filter(|finished| finished.success)
         .map(|finished| {
@@ -949,8 +994,17 @@ fn subjects(repository: &Path, commits: &[&str]) -> HashMap<String, String> {
 /// What git printed for `args`, trimmed, when it succeeded and printed
 /// anything at all.
 fn answer(repository: &Path, args: &[&str]) -> Option<String> {
+    answer_within(repository, args, READ_TIMEOUT)
+}
+
+/// [`answer`], within `timeout`: nothing once that is spent, rather than a
+/// git started only to be killed.
+fn answer_within(repository: &Path, args: &[&str], timeout: Duration) -> Option<String> {
+    if timeout.is_zero() {
+        return None;
+    }
     let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
-    run(repository, &args, Intent::Read)
+    read_within(repository, &args, None, timeout)
         .ok()
         .filter(|finished| finished.success)
         .map(|finished| String::from_utf8_lossy(&finished.stdout).trim().to_owned())
@@ -1090,9 +1144,9 @@ fn after_fork(repository: &Path, commit: &str, fork: &str) -> bool {
     .is_some()
 }
 
-/// Where `reference` left `base`.
-fn merge_base(repository: &Path, base: &str, reference: &str) -> Option<String> {
-    answer(repository, &["merge-base", base, reference])
+/// Where `reference` left `base`, asked within `timeout`.
+fn merge_base(repository: &Path, base: &str, reference: &str, timeout: Duration) -> Option<String> {
+    answer_within(repository, &["merge-base", base, reference], timeout)
 }
 
 /// The flags every diff here is taken with, so that the branch's side and
@@ -1160,15 +1214,24 @@ impl Hunks {
 /// The patch-id of everything `reference` changed since `fork`, or `None`
 /// when it changed nothing — a branch whose commits cancel out has no patch
 /// to find, and proving it by the empty patch would prove it against every
-/// empty commit on the base.
-fn patch_since(repository: &Path, fork: &str, reference: &str, hunks: Hunks) -> Option<String> {
+/// empty commit on the base — or when git could not say within `timeout`.
+fn patch_since(
+    repository: &Path,
+    fork: &str,
+    reference: &str,
+    hunks: Hunks,
+    timeout: Duration,
+) -> Option<String> {
+    if timeout.is_zero() {
+        return None;
+    }
     let mut diff = vec!["-c", "diff.relative=false", "diff"];
     diff.extend(DIFF_FLAGS);
     diff.extend(hunks.flags());
     diff.extend([fork, reference, "--"]);
     let diff: Vec<&OsStr> = diff.into_iter().map(OsStr::new).collect();
 
-    let finished = pipe(repository, &diff, &PATCH_ID.map(OsStr::new), READ_TIMEOUT).ok()?;
+    let finished = pipe(repository, &diff, &PATCH_ID.map(OsStr::new), timeout).ok()?;
     if !finished.success {
         return None;
     }
@@ -1183,15 +1246,16 @@ fn patch_since(repository: &Path, fork: &str, reference: &str, hunks: Hunks) -> 
 /// commit, and on a base with merges in it — where the forks need not lie on
 /// one line — it is a commit they all descend from, which reads at most a
 /// little more than it has to. `None` is no bound at all, and the cap is then
-/// the only thing that stops the pass.
-fn oldest(repository: &Path, forks: &[&str]) -> Option<String> {
+/// the only thing that stops the pass; so is a git that could not say within
+/// `timeout`.
+fn oldest(repository: &Path, forks: &[&str], timeout: Duration) -> Option<String> {
     let unique: HashSet<&str> = forks.iter().copied().collect();
     if unique.len() == 1 {
         return unique.into_iter().next().map(str::to_owned);
     }
     let mut args = vec!["merge-base", "--octopus"];
     args.extend(unique);
-    answer(repository, &args)
+    answer_within(repository, &args, timeout)
 }
 
 /// The patch-id of each of the newest `commits` commits `heads` reach since

@@ -209,7 +209,7 @@ pub(super) struct Finished {
 /// those can outlive git by as long as whatever a hook backgrounded cares to
 /// live — see `collect`.
 pub(super) fn run(directory: &Path, args: &[&OsStr], intent: Intent) -> Result<Finished, Failure> {
-    run_with(directory, args, intent, None)
+    run_with(directory, args, intent, None, intent.timeout())
 }
 
 /// [`run`], as a read, with `input` on git's stdin.
@@ -222,15 +222,32 @@ pub(super) fn run_fed(
     args: &[&OsStr],
     input: Vec<u8>,
 ) -> Result<Finished, Failure> {
-    run_with(directory, args, Intent::Read, Some(input))
+    run_with(directory, args, Intent::Read, Some(input), READ_TIMEOUT)
 }
 
-/// [`run`] and [`run_fed`], which differ only in what git's stdin is.
+/// [`run`] as a read, fed `input` as [`run_fed`] is when there is some, under
+/// `timeout` rather than [`READ_TIMEOUT`].
+///
+/// For a read that is one of several sharing a deadline, which hands each of
+/// them what is left of it: the promise such a caller makes is about all of
+/// them together, and a read that took the whole budget again would break it.
+pub(super) fn read_within(
+    directory: &Path,
+    args: &[&OsStr],
+    input: Option<Vec<u8>>,
+    timeout: Duration,
+) -> Result<Finished, Failure> {
+    run_with(directory, args, Intent::Read, input, timeout)
+}
+
+/// [`run`], [`run_fed`] and [`read_within`], which differ only in what git's
+/// stdin is and how long the call may take.
 fn run_with(
     directory: &Path,
     args: &[&OsStr],
     intent: Intent,
     input: Option<Vec<u8>>,
+    timeout: Duration,
 ) -> Result<Finished, Failure> {
     if git_is_missing() {
         return Err(Failure::GitMissing);
@@ -279,7 +296,6 @@ fn run_with(
     let stdout = child.stdout.take().map(drain);
     let stderr = child.stderr.take().map(drain);
 
-    let timeout = intent.timeout();
     #[cfg(test)]
     RAN_UNDER.with(|ran| ran.set(ran.get() + timeout));
     let deadline = Instant::now() + timeout;

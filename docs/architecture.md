@@ -1258,13 +1258,13 @@ commit that is a copy git made — the same author at the same second, which a r
 cherry-pick keep — or that has the same lines around them, which is all a squash can show. A
 conflict settled by rewriting the branch's own lines leaves the branch unproved until `gc`
 expires the entry, and a git older than 2.39 accounts for no change at all, only for an amend.
-Those looks share one more ten-second deadline. A reflog is not a complete record, though: a
-month after an amend or a rebase, `gc` expires the entry of every commit it replaced and leaves
-only the branch's creation. So a reflog git has pruned, told by a newest entry that no longer
-ends at the branch's tip, is left to the proofs, as is no reflog at all; a rebase less than a
-month old of commits more than a month old still goes unproved until its own entry expires. The
-base is what `origin/HEAD` names, then `init.defaultBranch` if that branch exists, then `main`,
-then `master`.
+The whole look, its passes and every read after them, shares one more ten-second deadline. A
+reflog is not a complete record, though: a month after an amend or a rebase, `gc` expires the
+entry of every commit it replaced and leaves only the branch's creation. So a reflog git has
+pruned, told by a newest entry that no longer ends at the branch's tip, is left to the proofs,
+as is no reflog at all; a rebase less than a month old of commits more than a month old still
+goes unproved until its own entry expires. The base is what `origin/HEAD` names, then
+`init.defaultBranch` if that branch exists, then `main`, then `master`.
 Anything it cannot prove — a stack squashed in pieces, a branch reworked during review, a pass
 cut off by its cap — is simply unproved, because a miss costs a badge and a false proof costs
 somebody's branch: a branch is deleted on the strength of one, below. The menu asks after the
