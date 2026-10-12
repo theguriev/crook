@@ -247,6 +247,7 @@ fn session() -> Option<Arc<Shared>> {
         terminal: Mutex::new(terminal),
         latest: Mutex::new(snapshot),
         blocks: Mutex::new(Arc::default()),
+        unpublished: Mutex::new(Vec::new()),
         events: Mutex::new(Vec::new()),
         wake: Arc::new(Wake::default()),
         grid: AtomicU64::new(packed(INITIAL_GRID)),
@@ -380,10 +381,20 @@ fn a_burst_of_bells_is_handed_over_as_one() {
 
     shared.feed(b"\x07\x07\x07");
     shared.feed(b"\x07");
+    shared.publish();
     assert_eq!(1, bells(&shared.take_events()), "one read, and the next");
 
-    // Once handed over, the next bell is news again.
+    // Published twice before the main thread looked: the bell handed over
+    // the first time still stands for the one the second time brings.
     shared.feed(b"\x07");
+    shared.publish();
+    shared.feed(b"\x07");
+    shared.publish();
+    assert_eq!(1, bells(&shared.take_events()), "one frame, and the next");
+
+    // Once taken, the next bell is news again.
+    shared.feed(b"\x07");
+    shared.publish();
     assert_eq!(1, bells(&shared.take_events()));
 }
 
@@ -408,6 +419,7 @@ fn a_burst_of_notifications_is_handed_over_as_the_last_one() {
     shared.feed(b"\x1b]9;one\x07");
     shared.feed(b"\x07");
     shared.feed(b"\x1b]9;two\x07");
+    shared.publish();
     let events = shared.take_events();
     assert!(
         events
@@ -418,7 +430,59 @@ fn a_burst_of_notifications_is_handed_over_as_the_last_one() {
     assert_eq!(vec!["two".to_owned()], said(events));
 
     shared.feed(b"\x1b]9;three\x07");
+    shared.publish();
     assert_eq!(vec!["three".to_owned()], said(shared.take_events()));
+}
+
+#[test]
+fn a_finished_command_is_handed_over_only_once_its_block_can_be_read() {
+    // `crook pane wait --until finished` answers on this event, and the
+    // `crook pane blocks --last 1` an agent runs straight after it reads the
+    // published block list. An event handed over with the bytes that carried
+    // it, an interval ahead of the picture, answered the wait while the read
+    // still found the command running and refused it.
+    let Some(shared) = session() else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    let finished = |events: &[TerminalEvent]| {
+        events
+            .iter()
+            .any(|event| matches!(event, TerminalEvent::CommandFinished { .. }))
+    };
+
+    shared.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07work\r\n\x1b]133;C\x07the answer\r\n");
+    shared.publish();
+    assert!(!finished(&shared.take_events()));
+    assert_eq!(
+        BlockState::Executing,
+        shared.snapshot().live_block.state,
+        "the command was drawn running"
+    );
+
+    // The end, parsed and not drawn: the reader is inside the interval, and
+    // the flusher has not come back for it yet. Fed rather than read off a
+    // pty, so nothing races to publish it.
+    shared.feed(b"\x1b]133;D;4\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    let early = shared.take_events();
+    assert!(
+        !finished(&early),
+        "the command's end was handed over while {} blocks were published and the \
+         drawn command was {:?}",
+        shared.blocks().len(),
+        shared.snapshot().live_block.state
+    );
+
+    // What the flusher does an interval later.
+    shared.publish();
+    let events = shared.take_events();
+    assert!(finished(&events), "the end never arrived: {events:?}");
+    let blocks = shared.blocks();
+    let [block] = &blocks.iter().collect::<Vec<_>>()[..] else {
+        panic!("one finished block, published with the end");
+    };
+    assert_eq!(Some(4), block.exit);
+    assert_ne!(BlockState::Executing, shared.snapshot().live_block.state);
 }
 
 #[test]
