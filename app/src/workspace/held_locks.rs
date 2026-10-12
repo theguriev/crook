@@ -142,6 +142,24 @@ impl HeldLocks {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// How long [`Self::make_checkout`] may keep whoever is waiting for it.
+    ///
+    /// `git worktree add` and the lock, each under the write deadline — the
+    /// lock is one small file, but it is a write, and the deadline is the
+    /// promise — the listing the lock reads after it, and the copy's own
+    /// budget, [`worktree::INCLUDE_BUDGET`]. An `add` that fails reads the
+    /// listing once more, to say where the branch is out, and stops there,
+    /// well inside this.
+    ///
+    /// For a wait that answers somebody once the checkout is made, so that it
+    /// does not give up on a checkout still being made — see
+    /// `protocol::Verb::patience`.
+    pub(crate) const MAKE_CHECKOUT_BUDGET: Duration = Duration::from_secs(
+        2 * worktree::WRITE_TIMEOUT.as_secs()
+            + worktree::READ_TIMEOUT.as_secs()
+            + worktree::INCLUDE_BUDGET.as_secs(),
+    );
+
     /// Makes a checkout of the repository `repository` is in, at `path`, on
     /// a new `branch` from `base` — or, for `None`, from the `HEAD` of the
     /// checkout `repository` is in — then locks it and gives it what the main
@@ -149,9 +167,10 @@ impl HeldLocks {
     /// checkout Crook makes is given before a tab opens in it.
     ///
     /// **Blocking**: `git worktree add` and the `post-checkout` hook it runs,
-    /// the lock, and the copy. Background pool only. Whoever asked opens the
-    /// tab once this is done, and then tells [`Self::opened`] it has, which
-    /// is what holds the lock from there on.
+    /// the lock, and the copy: [`Self::MAKE_CHECKOUT_BUDGET`] at most, unless
+    /// the copy is slower than that allows. Background pool only. Whoever
+    /// asked opens the tab once this is done, and then tells
+    /// [`Self::opened`] it has, which is what holds the lock from there on.
     ///
     /// Fails only as `add` does. Neither the lock nor the copy can fail a
     /// checkout that exists by the time they run: a lock git refuses is

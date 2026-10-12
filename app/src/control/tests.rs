@@ -2599,6 +2599,61 @@ mod socket {
     }
 
     #[test]
+    fn a_worktree_tabs_connection_outwaits_every_deadline_its_checkout_is_made_under() {
+        let root = TempDir::new();
+        let Some(repository) = repository(&root.0.join("repo")) else {
+            eprintln!("skipped: no git here to make a repository with");
+            return;
+        };
+        // A `.env` for `.worktreeinclude` to name, so that the copy asks git
+        // everything it asks before a file goes: where the main checkout is,
+        // what it ignores, what the patterns match there, and what the new
+        // checkout ignores.
+        fs::write(repository.join(".gitignore"), ".env\n").expect("written");
+        fs::write(repository.join(".worktreeinclude"), ".env\n").expect("written");
+        git(&repository, &["add", ".gitignore", ".worktreeinclude"]);
+        git(&repository, &["commit", "--quiet", "-m", "ignore .env"]);
+        fs::write(repository.join(".env"), "SECRET=main\n").expect("written");
+        let checkout = root.0.join("fix-x");
+
+        // What the window does between being asked for the tab and answering,
+        // here on the test's thread, where every deadline its git runs under
+        // is counted: the listing that names the repository, then the
+        // checkout the menu's creator makes.
+        let held = crate::workspace::HeldLocks::default();
+        let before = crate::git::worktree::deadlines_run_under();
+        crate::git::worktree::list(&repository).expect("the repository lists");
+        let included = held
+            .make_checkout(&repository, &checkout, "fix-x", None)
+            .expect("git made the worktree");
+        let ran_under = crate::git::worktree::deadlines_run_under() - before;
+        let locked = !held.checkouts().is_empty();
+        held.release_all(Duration::from_secs(10));
+        assert!(locked, "the checkout was not locked");
+        assert_eq!(
+            (included.copied, included.problem()),
+            (1, None),
+            "the copy stopped short of the .env"
+        );
+
+        // A connection that gave up any sooner could print `timeout` about a
+        // tab that then opened.
+        let patience = Verb::TabNew(NewTab {
+            command: vec!["make".to_owned()],
+            worktree: Some("fix-x".to_owned()),
+            ..NewTab::default()
+        })
+        .patience()
+        .expect("a tab in a new worktree is given time");
+        assert!(
+            patience > ran_under,
+            "the connection gives up after {}s on a checkout git may take {}s to make",
+            patience.as_secs(),
+            ran_under.as_secs()
+        );
+    }
+
+    #[test]
     fn the_budget_refuses_the_tab_past_it_and_a_worker_spends_its_roots() {
         let mut served = Served::new(|_, _, _| {});
         let lead = first_pane(&served);

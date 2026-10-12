@@ -177,18 +177,22 @@ impl Verb {
     /// connection is otherwise given.
     ///
     /// `None` for everything answered between two frames. A tab in a new
-    /// worktree waits for git to check a working tree out and run the
-    /// repository's own `post-checkout` hook, which the worktree module lets
-    /// run for two minutes; a connection that gave up at five seconds would
-    /// print `timeout` about a tab that then opened. So that one is given the
-    /// worktree's own read and write budgets, and a margin over them.
+    /// worktree waits for the checkout the worktree menu's creator would
+    /// make: git checks a working tree out and runs the repository's own
+    /// `post-checkout` hook, which the worktree module lets run for two
+    /// minutes, then the checkout is locked and given what `.worktreeinclude`
+    /// names. A connection that gave up before all that was done would print
+    /// `timeout` about a tab that then opened. So that one is given every
+    /// deadline the making runs under — the listing that names the
+    /// repository, then `HeldLocks::MAKE_CHECKOUT_BUDGET` — and a margin over
+    /// them.
     pub fn patience(&self) -> Option<Duration> {
         match self {
             Self::TabNew(NewTab {
                 worktree: Some(_), ..
             }) => Some(
                 crate::git::worktree::READ_TIMEOUT
-                    + crate::git::worktree::WRITE_TIMEOUT
+                    + crate::workspace::HeldLocks::MAKE_CHECKOUT_BUDGET
                     + Duration::from_secs(10),
             ),
             // The wait, and time on either side of it: to be asked, and to

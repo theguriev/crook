@@ -168,6 +168,22 @@ thread_local! {
     /// See [`write_timeout`].
     pub(super) static WRITE_DEADLINE: std::cell::Cell<Duration> =
         const { std::cell::Cell::new(WRITE_TIMEOUT) };
+
+    /// See [`deadlines_run_under`].
+    static RAN_UNDER: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+}
+
+/// Every deadline a [`run`] or [`run_fed`] on the calling thread has run
+/// under so far, added up.
+///
+/// What somebody waiting on that thread's work would have to wait for were
+/// every git it started to run to its deadline, which no test can wait out.
+/// So a test does the work once, honestly, and holds the wait it is meant to
+/// fit inside to this — see `protocol::Verb::patience`. Thread-local for
+/// [`WRITE_DEADLINE`]'s reason.
+#[cfg(test)]
+pub(crate) fn deadlines_run_under() -> Duration {
+    RAN_UNDER.with(std::cell::Cell::get)
 }
 
 /// What one git invocation produced.
@@ -263,6 +279,8 @@ fn run_with(
     let stderr = child.stderr.take().map(drain);
 
     let timeout = intent.timeout();
+    #[cfg(test)]
+    RAN_UNDER.with(|ran| ran.set(ran.get() + timeout));
     let deadline = Instant::now() + timeout;
     let waited = wait_for(&mut child, deadline, timeout);
 

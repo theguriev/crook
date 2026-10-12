@@ -1959,8 +1959,9 @@ long as nobody connects — the reason a pty reader is a thread and not a pool w
 connection gets a short-lived thread of its own, eight at once and the ninth refused as `busy`.
 A connection has five seconds all told and a line 64 KiB; a longer line is refused as `too-long`
 and the connection closed, since nothing says where the next line starts. The one exception is a
-tab in a new worktree, which waits on git and its `post-checkout` hook: that reply is given the
-worktree module's own read and write budgets and a margin, and the connection closes after it. A question that needs
+tab in a new worktree, which waits on git, its `post-checkout` hook, the lock and the
+`.worktreeinclude` copy: that reply is given every deadline the making of the checkout runs
+under, an allowance for the copy and a margin, and the connection closes after it. A question that needs
 the window is posted to it and answered on the main thread through the `ctx.spawn` a pty's
 output comes home by, while the connection's thread waits for the answer until a quarter of a
 second before its five are up — the quarter being what it writes `timeout` back in, so a window

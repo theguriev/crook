@@ -41,6 +41,8 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use super::merged::{Landed, merged};
+#[cfg(test)]
+pub(crate) use super::run::deadlines_run_under;
 use super::run::{Failure, Intent, run, run_fed};
 pub(crate) use super::run::{READ_TIMEOUT, WRITE_TIMEOUT};
 
@@ -1363,6 +1365,19 @@ const LIMITS: Limits = Limits {
     total_bytes: MAX_INCLUDED_BYTES,
     prune_bytes: PRUNE_BUDGET,
 };
+
+/// How long [`copy_included`] may keep whoever is waiting for it.
+///
+/// Its five reads, each under [`READ_TIMEOUT`], and an allowance for the
+/// copying, which has no deadline of its own: [`MAX_INCLUDED_BYTES`] at eight
+/// megabytes a second, which is thirty-two seconds. A local disk copies that
+/// in a few; the allowance is for a slow one, and a copy slower still is the
+/// one part of making a checkout no number here can promise.
+///
+/// Not a deadline anything is killed at. It is what a wait for a new
+/// checkout counts the copy as — see `protocol::Verb::patience`.
+pub(crate) const INCLUDE_BUDGET: Duration =
+    Duration::from_secs(5 * READ_TIMEOUT.as_secs() + MAX_INCLUDED_BYTES / (8 * 1024 * 1024));
 
 /// Copies the ignored files the main checkout's [`INCLUDE_FILE`] names into
 /// `worktree`, which has just been made from the repository `repository` is in.
