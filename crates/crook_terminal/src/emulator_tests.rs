@@ -389,6 +389,178 @@ fn test_scrolling_back_moves_the_viewport_and_returns() {
     assert_eq!(0, emulator.snapshot().display_offset);
 }
 
+/// The first `rows` rows of a snapshot, as text.
+fn top_rows(snapshot: &Snapshot, rows: usize) -> Vec<String> {
+    snapshot
+        .text()
+        .lines()
+        .take(rows)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// An emulator showing `line0` to `line9`, scrolled back three lines so that
+/// its view runs from `line3` to `line7`.
+fn scrolled_back() -> Emulator {
+    let mut emulator = emulator();
+    for line in 0..10 {
+        emulator.advance(format!("line{line}\r\n").as_bytes());
+    }
+    emulator.scroll_lines(3);
+    assert_eq!(
+        vec!["line3", "line4", "line5", "line6", "line7"],
+        top_rows(&emulator.snapshot(), 5)
+    );
+    emulator
+}
+
+#[test]
+fn test_output_under_a_scrolled_back_view_leaves_it_on_the_lines_it_showed() {
+    let mut emulator = scrolled_back();
+    let before = emulator.snapshot();
+
+    emulator.advance(b"more\r\nand more\r\n");
+
+    let after = emulator.snapshot();
+    assert_eq!(before.display_offset + 2, after.display_offset);
+    assert_eq!(before.text(), after.text());
+}
+
+#[test]
+fn test_a_scroll_region_below_the_top_row_leaves_a_scrolled_back_view_on_its_lines() {
+    let mut emulator = scrolled_back();
+    let before = emulator.snapshot();
+
+    // Row 1 pinned and rows 2 to 5 scrolling. Nothing the region scrolls
+    // reaches the history, so the three history rows in view and the pinned
+    // row under them are exactly what was there.
+    emulator.advance(b"\x1b[2;5r\x1b[5;1Hone\r\ntwo\r\n");
+
+    let after = emulator.snapshot();
+    assert_eq!(before.display_offset, after.display_offset);
+    assert_eq!(before.history_len, after.history_len);
+    assert_eq!(top_rows(&before, 4), top_rows(&after, 4));
+}
+
+#[test]
+fn test_deleting_lines_below_the_top_row_leaves_a_scrolled_back_view_on_its_lines() {
+    let mut emulator = scrolled_back();
+    let before = emulator.snapshot();
+
+    // No region at all: a delete at row 3 scrolls rows 3 to 5 up through the
+    // same path in alacritty a region below the top row does, and the two
+    // screen rows in view are both above it.
+    emulator.advance(b"\x1b[3;1H\x1b[M");
+
+    let after = emulator.snapshot();
+    assert_eq!(before.display_offset, after.display_offset);
+    assert_eq!(before.text(), after.text());
+}
+
+#[test]
+fn test_a_scrolled_back_view_follows_its_lines_through_a_full_history() {
+    // Four lines of history, full long before the tenth line. Every line
+    // printed now evicts the oldest, which moves everything above the screen
+    // up by one, and the view has to move with it to stay where it was.
+    let mut emulator = Emulator::new(TerminalSize::new(20, 5), 4, Palette::default());
+    for line in 0..10 {
+        emulator.advance(format!("line{line}\r\n").as_bytes());
+    }
+    assert_eq!(4, emulator.history_len());
+    emulator.scroll_lines(2);
+    let before = emulator.snapshot();
+    assert_eq!(
+        vec!["line4", "line5", "line6", "line7", "line8"],
+        top_rows(&before, 5)
+    );
+
+    emulator.advance(b"more\r\n");
+
+    let after = emulator.snapshot();
+    assert_eq!(before.display_offset + 1, after.display_offset);
+    assert_eq!(before.text(), after.text());
+}
+
+#[test]
+fn test_a_scroll_region_below_the_top_row_cannot_take_the_view_past_the_history() {
+    // The offset alacritty raised for every line such a region scrolled was
+    // capped by the scrollback setting, not by the history there is, so with
+    // the default setting it ran thousands of lines past the oldest one and
+    // the snapshot indexed rows the grid does not have. In a debug build any
+    // cap trips alacritty's own assertion on that index. The real default is
+    // what makes a release build panic too, out of bounds in the snapshot,
+    // where a small cap only draws stale or blank rows. The screen only has
+    // to be tall enough for the region below: on five rows `5;24` is a single
+    // row, which alacritty clears rather than scrolls, and the offset never
+    // moves.
+    let mut emulator = Emulator::new(
+        TerminalSize::new(80, 24),
+        crate::DEFAULT_SCROLLBACK_LINES,
+        Palette::default(),
+    );
+    for line in 0..30 {
+        emulator.advance(format!("line{line}\r\n").as_bytes());
+    }
+    emulator.scroll_lines(5);
+    let before = emulator.snapshot();
+
+    // A four-row header pinned above a scrolling log, which is what
+    // `tput csr` or a follower with a status bar sets up.
+    emulator.advance(b"\x1b[5;24r\x1b[24;1H");
+    let output: String = (0..5000).map(|line| format!("out{line}\r\n")).collect();
+    emulator.advance(output.as_bytes());
+
+    let after = emulator.snapshot();
+    assert_eq!(5, after.display_offset);
+    assert_eq!(top_rows(&before, 9), top_rows(&after, 9));
+}
+
+#[test]
+fn test_a_screen_switch_behind_such_a_region_still_cannot_take_the_view_past_the_history() {
+    // The read that scrolls the region also enters the alternate screen,
+    // which parks the shell's grid, raised offset and all, where a view
+    // measured on one screen cannot be compared with the other. It comes back
+    // a read later, and has to come back inside its history.
+    let mut emulator = Emulator::new(
+        TerminalSize::new(80, 24),
+        crate::DEFAULT_SCROLLBACK_LINES,
+        Palette::default(),
+    );
+    for line in 0..30 {
+        emulator.advance(format!("line{line}\r\n").as_bytes());
+    }
+    emulator.scroll_lines(5);
+
+    let mut output = b"\x1b[5;24r\x1b[24;1H".to_vec();
+    for line in 0..5000 {
+        output.extend_from_slice(format!("out{line}\r\n").as_bytes());
+    }
+    output.extend_from_slice(b"\x1b[?1049h");
+    emulator.advance(&output);
+    assert!(emulator.snapshot().alt_screen);
+    emulator.advance(b"\x1b[?1049l");
+
+    let after = emulator.snapshot();
+    assert!(!after.alt_screen);
+    assert!(after.display_offset <= after.history_len);
+}
+
+#[test]
+fn test_a_synchronized_update_let_go_by_a_paint_leaves_a_scrolled_back_view_on_its_lines() {
+    // The update's bytes reach the grid only when the snapshot gives up on
+    // it, so that is a feed of its own, and the region it scrolls is the
+    // same trap there.
+    let mut emulator = scrolled_back();
+    let before = emulator.snapshot();
+
+    emulator.advance(b"\x1b[?2026h\x1b[2;5r\x1b[5;1Hone\r\ntwo\r\n");
+    std::thread::sleep(Duration::from_millis(200));
+
+    let after = emulator.snapshot();
+    assert_eq!(before.display_offset, after.display_offset);
+    assert_eq!(top_rows(&before, 4), top_rows(&after, 4));
+}
+
 #[test]
 fn test_a_new_palette_repaints_the_grid() {
     let mut emulator = emulator();
