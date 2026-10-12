@@ -929,6 +929,21 @@ out of them, so the pipe could not be made, or on macOS past what `select` can w
 wait is on the master alone, and lasts as long as an orphan such as a `sleep 60 &` holds the
 pty open.
 
+**On macOS the writer never adds to input the child has not read.** XNU keeps a child's
+unread input in a ring of 1024 bytes, and when the child turns canonical mode on, the kernel
+feeds what is unread through the line discipline again by reading the ring into itself:
+whatever had wrapped around its end is overwritten before it is read. A shell running a pasted
+block switches to canonical mode between every two lines, and a writer that kept the ring full
+had it wrapped nearly always — a 730-line block submitted to the system `bash` ran with lines
+mangled and missing every time, and in a third of the runs the rest of the block was thrown
+away past the kernel's line limit. So a write there waits, in a `kqueue`, until `FIONREAD`
+on the master says the child has read everything, and adds at most 1022 bytes, which start at
+the ring's first byte and end inside it — and end at a line end when they can, since the count
+leaves out a line a program in canonical mode has not finished. The rest of a line longer than
+that waits for the program to read it, a second at most: a shell back in its line editor reads
+it at once, and a program that stays in canonical mode never can. See
+`crates/crook_terminal/src/typeahead.rs`.
+
 The emulator's mutex is never held across a frame, or across a write. The reader takes it to
 parse, and again to build a snapshot, and publishes the `Arc` into a slot of its own before it
 lets go; painting clones that `Arc` and walks owned data. The UI thread publishes too, after a

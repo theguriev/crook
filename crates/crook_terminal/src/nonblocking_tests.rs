@@ -1,6 +1,7 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::link::PtyLink as _;
 use crate::pty::{Program, Pty};
@@ -149,4 +150,86 @@ fn test_a_write_that_cannot_watch_for_the_pty_closing_still_waits_for_the_child(
         "a write that could not watch for the pty closing gave up on a child that reads: {first:?}"
     );
     assert!(next.is_ok(), "the write after it was refused: {next:?}");
+}
+
+/// A file that is removed when the test is done with it, passed or not.
+struct Removed(std::path::PathBuf);
+
+impl Drop for Removed {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[test]
+fn test_input_a_child_has_not_read_comes_through_whole_when_it_turns_canonical_mode_on() {
+    // A shell running a pasted block turns canonical mode on to run each line,
+    // with the lines after it still unread. macOS then feeds that input
+    // through the line discipline again, garbling whatever of it had wrapped
+    // around the end of the queue's ring — which, from a writer that kept the
+    // queue full while the shell read a byte at a time, was nearly all of it.
+    // See the `typeahead` module. This child reads the start of what it is
+    // sent a byte at a time, as a line editor does, then turns canonical mode
+    // on and keeps the rest, which has to be exactly what followed.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let kept = Removed(std::env::temp_dir().join(format!(
+        "crook-typeahead-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )));
+    const READ_FIRST: usize = 600;
+    let mut pty = spawn(&format!(
+        "stty raw -echo; echo crook-ready; \
+         dd bs=1 count={READ_FIRST} of=/dev/null 2>/dev/null; \
+         stty icanon; exec cat > '{}'",
+        kept.0.display()
+    ));
+    let mut reader = pty.take_reader().expect("a fresh pty has its reader");
+    let mut heard = String::new();
+    let mut buffer = [0; 256];
+    while !heard.contains("crook-ready") {
+        let read = reader
+            .read(&mut buffer)
+            .expect("the child says it is ready");
+        assert!(read > 0, "the child ended before it was ready");
+        heard.push_str(&String::from_utf8_lossy(&buffer[..read]));
+    }
+
+    // Lines, since canonical mode holds at most a kilobyte of one.
+    let mut sent = Vec::new();
+    for line in 0..256 {
+        sent.extend_from_slice(format!("line {line:05} {}\n", "x".repeat(50)).as_bytes());
+    }
+    let mut writer = pty.writer().expect("a pty hands out a writer");
+    let sending = sent.clone();
+    thread::spawn(move || writer.write_all(&sending));
+
+    let wanted = &sent[READ_FIRST..];
+    let deadline = Instant::now() + DEADLINE;
+    let got = loop {
+        let got = std::fs::read(&kept.0).unwrap_or_default();
+        if got.len() >= wanted.len() || Instant::now() > deadline {
+            break got;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let differs = got
+        .iter()
+        .zip(wanted)
+        .position(|(got, wanted)| got != wanted)
+        .unwrap_or(got.len().min(wanted.len()));
+    assert!(
+        got == wanted,
+        "{} of {} bytes came through, and from byte {differs} they read {:?} where {:?} was sent",
+        got.len(),
+        wanted.len(),
+        from(&got, differs),
+        from(wanted, differs),
+    );
+}
+
+/// A few bytes of `bytes` from `at`, to show where two runs part.
+fn from(bytes: &[u8], at: usize) -> String {
+    let rest = bytes.get(at..).unwrap_or_default();
+    String::from_utf8_lossy(&rest[..rest.len().min(40)]).into_owned()
 }

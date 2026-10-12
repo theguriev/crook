@@ -96,6 +96,8 @@ mod pty;
 mod rows;
 pub mod selection;
 mod snapshot;
+#[cfg(target_os = "macos")]
+mod typeahead;
 pub mod url;
 mod writer;
 
