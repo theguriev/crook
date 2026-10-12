@@ -421,9 +421,11 @@ Twenty features, and the page that configures them:
   Code's debug log rather than a notice on every prompt; it carries the skill below too.
   `crook --agent-hooks claude` prints those two commands, then the same hooks as JSON for a
   person who would rather merge them into `~/.claude/settings.json` by hand.
-  `codex`, `gemini` and `copilot` print the same for Codex CLI, Gemini CLI and GitHub
-  Copilot CLI in each one's own hooks file, `opencode` prints the plugin OpenCode loads
-  instead, and `aider`, which has no hooks, gets a sentence saying what to do instead.
+  `codex`, `gemini` and `copilot` print the same guarded hooks for Codex CLI, Gemini CLI and
+  GitHub Copilot CLI in each one's own hooks file, `opencode` prints the plugin OpenCode loads
+  instead, and `aider`, which has no hooks, gets a sentence saying what to do instead. Copilot
+  CLI refuses the tool call a hook failed over, so no hook ever fails: outside Crook, with no
+  terminal to report to, or with the binary gone, each one exits 0.
   `--pull-request <url>` beside any status says which pull request the work is, and the row
   carries it as a chip that opens it — https only, capped, on a sequence of its own,
   `OSC 6342` — until the pane moves to another branch (a rebase is not a move); the Claude

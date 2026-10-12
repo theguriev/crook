@@ -1493,30 +1493,35 @@ is a fallback and never a second route: with a terminal of its own the process w
 and a process whose session was started by one with no terminal — `cron`, a CI runner — fails
 the way it always did. A test that hands a hook a stand-in binary, one that never opens a
 terminal, passes while every real report fails, so `app/tests/claude_code_hooks.rs` runs each
-of the plugin's commands, and each one `--agent-hooks claude` prints, with the real binary
-under `sh -c` in a session of its own below a process on a pty, and reads the report off the
-pty; and runs the plugin's once more below a shell with no terminal, where nothing may arrive.
+of the plugin's commands, and each one `--agent-hooks` prints for Claude Code, Codex, Gemini CLI
+and Copilot CLI, with the real binary under `sh -c` in a session of its own below a process on a
+pty, and reads the report off the pty; and runs each once more below a shell with no terminal,
+where nothing may arrive and each still exits 0, and the printed ones again with the binary
+gone, where each exits 0 without a word.
 `--message "run rm -rf build?"` is what a `needs-input` is waiting for, cut to
 one line of 200 characters in the writer so the sequence never carries a novel; `--message -`
 reads it from standard input, the `message` of a hook's JSON when the input is one and the
 whole input otherwise. `crook --agent-hooks claude` prints the fragment of Claude Code's settings
 that makes it say all of this by itself — running on a prompt and around every tool, needing
 input on every notification with the notification's text piped in as the message, idle on
-stop — naming the binary by its full path, since a hook
-runs in whatever `PATH` Claude Code was started with. It is printed rather than installed:
+stop. It is printed rather than installed:
 Crook writes no file it does not own, and it has never opened that one. What it prints first is
 the way that needs no merging at all: the repository is a Claude Code plugin marketplace
 (`.claude-plugin/marketplace.json`) whose one plugin, `packaging/claude-code`, carries the same
 hooks and the skill, and `claude plugin marketplace add theguriev/crook` with
-`claude plugin install crook@crook` is Claude Code writing its own settings. A file shipped to
-everybody cannot name one person's binary, so the plugin's hooks call `"$CROOK_BIN"` — `crook`
-on `PATH` for a Crook older than the variable — behind a guard that exits 0 unless
+`claude plugin install crook@crook` is Claude Code writing its own settings. The printed hooks
+and the plugin's are the same commands. A hook runs in whatever `PATH` its agent was started
+with, and a path written into the file goes stale — a moved Crook.app, a deleted build — while
+the file stays, so each calls `"$CROOK_BIN"`, the binary its pane names, and `crook` on `PATH`
+when a pane names none or the one it names has gone. Each is behind a guard that exits 0 unless
 `TERM_PROGRAM` is Crook or `CROOK_PANE_ID` is set, since a UserPromptSubmit hook that fails is a
 notice on every prompt and one that prints is text the model reads. For the same reason each
 command exits 0 after the report too, whatever the report did: a Crook too old to reach the
 pane from a hook is a line of stderr in Claude Code's debug log, not a notice on every prompt
-and tool call. Tests in `agent.rs` build the plugin's `hooks/hooks.json` from `CLAUDE_EVENTS`
-and run each of its commands under `sh`, and hold its `SKILL.md` byte for byte to `skill.md`. Codex CLI and Gemini
+and tool call — and GitHub Copilot CLI denies the tool call a `preToolUse` hook failed over, so
+a hook that passed a failed report on would refuse every tool of a `copilot -p` with no terminal. Tests in
+`agent.rs` hold the plugin's `hooks/hooks.json` to what `--agent-hooks claude` prints and run
+each of its commands under `sh`, and hold its `SKILL.md` byte for byte to `skill.md`. Codex CLI and Gemini
 CLI read the same object under their own event names, and GitHub Copilot CLI a versioned
 cousin of it with `bash` for the command, so `--agent-hooks codex`, `gemini` and `copilot`
 are the same table with a different first column; OpenCode has no command hooks, and

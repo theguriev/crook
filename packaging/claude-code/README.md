@@ -22,7 +22,7 @@ merges JSON and Crook opens no file it does not own:
 - `skills/crook/SKILL.md` — the skill `crook --skill` prints.
 
 Both are copies of what lives in `app/src`, and the tests in `app/src/agent.rs` fail when they
-drift: `hooks.json` has to be what `CLAUDE_EVENTS` builds behind the guard, and each command is
+drift: `hooks.json` has to be the `hooks` `crook --agent-hooks claude` prints, and each command is
 run under `sh` inside and outside a pane; `SKILL.md` has to be `app/src/skill.md` byte for
 byte. Edit those, then copy the result here — the failing test prints the `hooks` it expects.
 `app/tests/claude_code_hooks.rs` runs each command the way Claude Code does, with the real
