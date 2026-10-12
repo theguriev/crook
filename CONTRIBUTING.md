@@ -104,11 +104,20 @@ imperative, specific enough to mean something on a release page on its own.
 ./script/release 0.1.8 --push     # and push main with the tag, which starts release.yml
 ```
 
-From a clean `main`, with Node installed for the generator. The script sets the workspace
-`version` in `Cargo.toml`, refreshes `Cargo.lock`, prepends `## vX.Y.Z` to `CHANGELOG.md`,
-commits the three as `chore(release): vX.Y.Z` and tags it. It refuses a range holding
-titles the generator would drop; `--allow-untyped` is the way past that, and is needed exactly
-once, for the release that spans the change of convention.
+From a clean `main` that Crook CI has passed, with Node installed for the generator and `gh`
+logged in. The script sets the workspace `version` in `Cargo.toml`, refreshes `Cargo.lock`,
+prepends `## vX.Y.Z` to `CHANGELOG.md`, commits the three as `chore(release): vX.Y.Z` and
+tags it. It refuses a range holding titles the generator would drop; `--allow-untyped` is the
+way past that, and is needed exactly once, for the release that spans the change of
+convention.
+
+Before it changes a file, it asks GitHub through `gh` for the newest Crook CI run on the
+commit it would release, and refuses unless that run passed: v0.1.20 and v0.1.21 were each
+tagged minutes after a red run, because nothing asked. When the commit has no run yet, start
+one with `gh workflow run "Crook CI" --ref main` and release once it passes. `--dry-run` says
+what CI said without stopping. `--no-ci-check` skips the question, for a release that cannot
+wait for CI — one that fixes a release already broken in people's hands — and for nothing
+else.
 
 `script/release-notes vX.Y.Z` prints what a tag's release page will say: the section out of
 `CHANGELOG.md`, or — for a tag made by hand, which has none — the same generator run over the

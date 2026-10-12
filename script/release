@@ -6,24 +6,39 @@
 #   ./script/release 0.1.8 --push           # and push main with the tag, which starts release.yml
 #   ./script/release 0.1.8 --dry-run        # print the changelog it would write and stop
 #   ./script/release 0.1.8 --allow-untyped  # release over commits the changelog cannot list
+#   ./script/release 0.1.8 --no-ci-check    # release a commit Crook CI has not passed
 #
 # What one release is, in order:
 #
 #   1. The tree is clean, on main, and the version is newer than the last tag.
-#   2. `version` under [workspace.package] in Cargo.toml becomes the new one and
+#   2. Crook CI passed the commit being released: its newest run on that
+#      commit, as gh reports it, completed with success.
+#   3. `version` under [workspace.package] in Cargo.toml becomes the new one and
 #      Cargo.lock is refreshed, because release.yml refuses a tag whose manifest
 #      disagrees with it.
-#   3. changelogen reads every commit since the previous v* tag and prepends a
+#   4. changelogen reads every commit since the previous v* tag and prepends a
 #      `## vX.Y.Z` section to CHANGELOG.md, grouped by the types in
 #      changelog.config.json. release.yml lifts that section into the release
 #      notes through script/release-notes, so the file in the repository and
 #      the release page say the same.
-#   4. One commit, `chore(release): vX.Y.Z`, and an annotated tag on it.
+#   5. One commit, `chore(release): vX.Y.Z`, and an annotated tag on it.
 #
 # The generator reads only Conventional Commit titles and drops the rest without
 # a word. A release whose range holds such commits is refused here, listing
 # them, unless --allow-untyped says the omission is understood — which is the
 # case exactly once, for the release that spans the change of convention.
+#
+# A commit is not one CI passed just by being on main: the local gate runs on
+# one machine, and Crook CI may not have run on the merge yet, or may have
+# failed on it. v0.1.20 and v0.1.21 were each tagged minutes after a red run,
+# because nothing here asked. So step 2 asks GitHub, before a file is touched,
+# and refuses a commit whose run is missing, still going or ended any way but
+# success, naming the run when there is one. The newest run is the one that
+# counts: a rerun that fails after a pass is a flake nobody has explained yet.
+# gh is needed for that, logged in; without it the answer is a refusal too,
+# not a pass. A --dry-run says what CI said and carries on. --no-ci-check
+# skips the question, for the release that cannot wait for CI — one that
+# fixes a release already broken in people's hands — and only that.
 #
 # changelogen is pinned rather than @latest: the notes for v0.1.8 should not
 # change shape because a generator release happened in between. Node is the
@@ -31,6 +46,7 @@
 set -eu
 
 CHANGELOGEN="changelogen@0.6.2"
+CI_WORKFLOW="Crook CI"
 
 here=$(cd "$(dirname "$0")/.." && pwd)
 cd "$here"
@@ -38,15 +54,16 @@ cd "$here"
 version=${1:-}
 case "$version" in
   [0-9]*.[0-9]*.[0-9]*) ;;
-  *) echo "usage: script/release X.Y.Z [--push] [--dry-run] [--allow-untyped]" >&2; exit 2 ;;
+  *) echo "usage: script/release X.Y.Z [--push] [--dry-run] [--allow-untyped] [--no-ci-check]" >&2; exit 2 ;;
 esac
 shift
-push=; dry=; allow_untyped=
+push=; dry=; allow_untyped=; no_ci_check=
 for arg in "$@"; do
   case "$arg" in
     --push) push=1 ;;
     --dry-run) dry=1 ;;
     --allow-untyped) allow_untyped=1 ;;
+    --no-ci-check) no_ci_check=1 ;;
     *) echo "release: unknown option $arg" >&2; exit 2 ;;
   esac
 done
@@ -73,6 +90,44 @@ newest=$(printf '%s\n%s\n' "${previous#v}" "$version" | sort -V | tail -1)
   || fail "$version is not newer than $previous"
 
 echo "==> $previous → $tag, $(git rev-list --count "$range") commits"
+
+# Prints the Crook CI run that passed commit $1 and succeeds, or prints why
+# there is none and fails. The --jq folds a run into `status/conclusion url`;
+# the conclusion is empty while the run is going, which leaves `in_progress/`.
+#
+# There is no `gh auth status` first. It fails when any account gh knows on
+# github.com has a dead token, even one gh would not use, and it fails the
+# same way when GitHub cannot be reached, so it would send someone who is
+# logged in to log in. `gh run list` needs the login anyway, and when it
+# cannot answer gh says why on stderr, which is left to reach the terminal:
+# gh auth login, a refused token, no network.
+ci_verdict() {
+  command -v gh >/dev/null \
+    || { echo "gh is needed to ask whether $CI_WORKFLOW passed $short — https://cli.github.com"; return 1; }
+  run=$(gh run list --workflow "$CI_WORKFLOW" --commit "$1" --limit 1 \
+    --json status,conclusion,url --jq '.[] | "\(.status)/\(.conclusion) \(.url)"') \
+    || { echo "gh could not ask GitHub about the $CI_WORKFLOW runs on $short, for the reason it gave above"; return 1; }
+  state=${run%% *}
+  url=${run#* }
+  case "$state" in
+    "") echo "$CI_WORKFLOW has not run on $short; once main is pushed, start a run with  gh workflow run \"$CI_WORKFLOW\" --ref main  and release when it passes"; return 1 ;;
+    completed/success) echo "$CI_WORKFLOW passed $short: $url" ;;
+    completed/*) echo "$CI_WORKFLOW did not pass $short, its run ended in ${state#completed/}: $url"; return 1 ;;
+    *) echo "$CI_WORKFLOW has not finished with $short, its run is ${state%/}: $url — release when it passes"; return 1 ;;
+  esac
+}
+
+short=$(git rev-parse --short HEAD)
+if [ -n "$no_ci_check" ]; then
+  echo "==> --no-ci-check: releasing $short without asking whether $CI_WORKFLOW passed it"
+elif verdict=$(ci_verdict "$(git rev-parse HEAD)"); then
+  echo "==> $verdict"
+elif [ -n "$dry" ]; then
+  echo "==> $verdict"
+  echo "==> A release would stop there; --dry-run carries on"
+else
+  fail "$verdict"
+fi
 
 if ! ./script/commit-lint "$range"; then
   if [ -n "$allow_untyped" ]; then
