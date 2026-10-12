@@ -92,11 +92,18 @@ that invariant.
   row, so a block anchored to that half starts above the viewport and the pane falls back to
   the grid. A block still at its prompt when the width changes therefore moves to the `A` of
   the shell's redraw, and the rows above it are erased — but only when they are one line the
-  terminal wrapped into the row the `A` landed on, which is the old prompt and nothing else.
-  Unlike a harvest, nothing has copied those rows first. Output printed at the prompt, by a job
-  started with `&`, ends in a newline the terminal did not wrap, and then the redraw is ignored
-  like any other and the block keeps it. The wait ends at the redraw's first `A` or `B`, so
-  bash redrawing only the last line of a prompt of several leaves no later `A` to act on it.
+  terminal wrapped into the row the `A` landed on, and that line reads as the start of the
+  prompt did when its `B` was recorded: the old prompt and nothing else. Unlike a harvest,
+  nothing has copied those rows first. A job started with `&` that prints at the prompt fails
+  one test or the other. Output ending in a newline the terminal did not wrap is not part of
+  the wrapped line. Output that does not end in one is on the prompt's own line, after the
+  prompt or over it with a `\r` as a progress meter writes, and then the line no longer reads
+  as the prompt. Either way the redraw is ignored like any other and the block keeps the
+  output. So is text typed at readline that reaches those rows, which leaves a stale copy of
+  the line above the redraw rather than lose anything. What goes is only what the shell's own
+  redraw erases or paints over, such as the row bash's `\r\e[K` clears. The wait ends at the
+  redraw's first `A` or `B`, so bash redrawing only the last line of a prompt of several leaves
+  no later `A` to act on it.
 * **Rows below the cursor.** A progress display that redraws its own last lines with `\e[3A`
   leaves the cursor above them, and a harvest that stopped at the cursor would drop those rows
   and then re-parent them into the next block. Since nothing above the open block survives,

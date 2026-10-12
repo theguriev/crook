@@ -898,6 +898,24 @@ fn test_a_wrapped_prompt_below_a_finished_block_is_shown_once() {
 }
 
 #[test]
+fn test_a_wide_character_the_narrower_pane_wraps_is_still_the_prompt() {
+    // A wide character that no longer fits at the end of a row moves to the
+    // next one and leaves a padding cell where it would have started, which
+    // the prompt had none of before the change. The row above the redraw is
+    // still the head of the prompt and nothing else.
+    let prompt = "user@host:/a/very/l\u{1F680}/path$ ";
+    let mut emulator = wide_emulator();
+    emulator.advance(format!("{A}{prompt}{B}").as_bytes());
+    emulator.resize(TerminalSize::new(20, 6));
+    emulator.advance(format!("\r\x1b[K{A}{prompt}{B}").as_bytes());
+    assert_eq!(
+        0,
+        emulator.live_block().top_row,
+        "the block starts on the half of the prompt the shell left behind"
+    );
+}
+
+#[test]
 fn test_the_half_a_redrawn_prompt_left_behind_stays_out_of_the_next_reflow() {
     // The open block is found again after a column change as the first line
     // with anything on it, which is only its own first row while nothing is
@@ -962,6 +980,98 @@ fn test_output_printed_at_a_prompt_outlives_the_redraw_a_column_change_brings() 
             );
         }
     }
+}
+
+#[test]
+fn test_output_left_on_the_prompt_line_outlives_the_redraw_a_column_change_brings() {
+    // Output that does not end in a newline goes on the line the prompt is
+    // on, so after a column change the rows above the shell's redraw are
+    // one line the terminal wrapped, as the head of a wrapped prompt is —
+    // but they are the job's. A message from a job started with `&`, one
+    // long enough to wrap before the change, and a progress meter that went
+    // back over the prompt with `\r`. The shell's own `\r\e[K` takes what is
+    // on the row it redraws on, and nothing else goes.
+    let finished = format!("{A}$ {B}true\r\n{C}\x1b]133;D;0\x07");
+    let long = "x".repeat(50);
+    for (case, prompt, printed, columns, kept, redrawn) in [
+        (
+            "a message",
+            "$ ",
+            "build finished: 12 targets ok",
+            20,
+            "$ build finished: 12".to_owned(),
+            "$",
+        ),
+        (
+            "a long message",
+            WIDE_PROMPT,
+            long.as_str(),
+            30,
+            format!("user@host:/a/very/long/path/xx\n$ {}", "x".repeat(28)),
+            "user@host:/a/very/long/path/xx\n$",
+        ),
+        (
+            "a progress meter",
+            WIDE_PROMPT,
+            "\rfetching crates: 45% done",
+            20,
+            "fetching crates: 45%".to_owned(),
+            "user@host:/a/very/lo\nng/path/xx$",
+        ),
+    ] {
+        let mut emulator = wide_emulator();
+        emulator.advance(format!("{finished}{A}{prompt}{B}{printed}").as_bytes());
+        emulator.resize(TerminalSize::new(columns, 6));
+        emulator.advance(format!("\r\x1b[K\r{A}{prompt}{B}").as_bytes());
+        assert_eq!(
+            format!("{kept}\n{redrawn}"),
+            live_text(&mut emulator),
+            "{case}"
+        );
+
+        emulator.advance(format!("echo hi\r\n{C}hi\r\n\x1b]133;D;0\x07{A}$ {B}").as_bytes());
+        let [_, block] = emulator.blocks() else {
+            panic!("{case}: the command made no block");
+        };
+        assert_eq!(
+            format!("{kept}\n{redrawn} echo hi\nhi"),
+            block.rows.to_text(),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn test_output_over_a_wrapped_line_at_the_prompt_outlives_the_redraw() {
+    // A line typed at the shell's own editor that wrapped, the cursor moved
+    // back to its start, and a job printing a line there. The newline does
+    // not unwrap the row it leaves, so the rows above the redraw are still
+    // one wrapped line, but they no longer read as the prompt: they hold the
+    // job's `abc`. readline's redraw goes down to the line's last row, clears
+    // it, and comes back up a row to draw the prompt and the line again.
+    let typed = "y".repeat(60);
+    let mut emulator = wide_emulator();
+    emulator.advance(format!("{A}$ {B}{typed}\x1b[A\r\x1b[2C").as_bytes());
+    emulator.advance(b"abc\r\n");
+    emulator.resize(TerminalSize::new(20, 6));
+    emulator.advance(format!("\r\n\r\x1b[K\x1b[A{A}$ {B}{typed}").as_bytes());
+    emulator.advance(format!("\r\n{C}\x1b]133;D;0\x07{A}$ {B}").as_bytes());
+
+    let [block] = emulator.blocks() else {
+        panic!("the line made no block");
+    };
+    let y = |count| "y".repeat(count);
+    assert_eq!(
+        format!(
+            "$ abc{}\n{}\n$ {}\n{}\n{}\nyy",
+            y(15),
+            y(20),
+            y(18),
+            y(20),
+            y(20)
+        ),
+        block.rows.to_text()
+    );
 }
 
 #[test]
