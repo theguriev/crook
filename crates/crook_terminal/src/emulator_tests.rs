@@ -487,10 +487,12 @@ fn test_a_scroll_region_below_the_top_row_cannot_take_the_view_past_the_history(
     // capped by the scrollback setting, not by the history there is, so with
     // the default setting it ran thousands of lines past the oldest one and
     // the snapshot indexed rows the grid does not have. In a debug build any
-    // cap trips alacritty's own assertion on that index. A real-sized screen
-    // and the real default are what make a release build panic too, out of
-    // bounds in the snapshot, where a small cap only draws stale or blank
-    // rows.
+    // cap trips alacritty's own assertion on that index. The real default is
+    // what makes a release build panic too, out of bounds in the snapshot,
+    // where a small cap only draws stale or blank rows. The screen only has
+    // to be tall enough for the region below: on five rows `5;24` is a single
+    // row, which alacritty clears rather than scrolls, and the offset never
+    // moves.
     let mut emulator = Emulator::new(
         TerminalSize::new(80, 24),
         crate::DEFAULT_SCROLLBACK_LINES,
