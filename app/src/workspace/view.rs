@@ -7833,6 +7833,12 @@ impl Workspace {
     /// A running taken back when its command ended is not the title's any
     /// more either, so the `✳` of the next agent in the same pane waits for
     /// its own `◐` too.
+    ///
+    /// Such a `✳` still says that an agent has come, though, and the
+    /// Changes column needs to know where one is to send it a review — most
+    /// often before its first turn. So it is kept, as
+    /// [`StatusSource::TitleAtStart`]: the status stays the idle the pane
+    /// had, and nothing that waits for idle takes it for one.
     fn title_reported(&mut self, pane: PaneId, status: AgentStatus, ctx: &mut ViewContext<Self>) {
         let Some(open) = self.tabs.pane(pane) else {
             return;
@@ -7840,23 +7846,18 @@ impl Workspace {
         let session = open.session();
         let titled_running = matches!(session.source, StatusSource::Title(_))
             && session.status == AgentStatus::Running;
-        let heard = match status {
-            AgentStatus::Running => {
-                !titled_running && !matches!(session.source, StatusSource::Agent(_))
+        let now = Instant::now();
+        let source = match (status, session.source) {
+            (_, StatusSource::Agent(_)) => return,
+            (AgentStatus::Running, _) if titled_running => return,
+            (AgentStatus::Running, _) => StatusSource::Title(now),
+            _ if titled_running => StatusSource::Title(now),
+            (_, StatusSource::NoReport | StatusSource::CommandEnded(_)) => {
+                StatusSource::TitleAtStart(now)
             }
-            _ => titled_running,
+            _ => return,
         };
-        if !heard {
-            return;
-        }
-        self.agent_reported(
-            pane,
-            status,
-            None,
-            None,
-            StatusSource::Title(Instant::now()),
-            ctx,
-        );
+        self.agent_reported(pane, status, None, None, source, ctx);
     }
 
     /// Takes back a running the title said, now that the pane has said the
@@ -10833,10 +10834,13 @@ pub(super) fn a_shell_is_listening(
 
 /// When the agent in `pane` last reported, if the pane's status came from
 /// one — rather than from nothing, or from the shell ending the command a
-/// report came from.
+/// report came from. The title an agent starts with counts: it says no
+/// status, but it is the agent saying it is there.
 fn agent_report(pane: &Pane) -> Option<Instant> {
     match pane.session().source {
-        StatusSource::Agent(at) | StatusSource::Title(at) => Some(at),
+        StatusSource::Agent(at) | StatusSource::Title(at) | StatusSource::TitleAtStart(at) => {
+            Some(at)
+        }
         StatusSource::NoReport | StatusSource::CommandEnded(_) => None,
     }
 }

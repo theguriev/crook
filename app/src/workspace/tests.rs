@@ -22199,6 +22199,32 @@ mod the_agent {
     }
 
     #[test]
+    fn why_this_status_says_when_the_title_says_an_agent_has_had_no_turn() {
+        // Claude Code with no hooks, just started: its `✳` is no report of
+        // idle, and the panel does not pass it off as one.
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &TerminalUpdate::Title(away, Some("\u{2733} Claude Code".to_owned())),
+                ctx,
+            );
+        });
+
+        let text = explanation_of(&mut harness, tabs[0], away);
+        assert!(
+            text.contains("title said just now that it was there"),
+            "{text}"
+        );
+        assert!(text.contains("no turn has started"), "{text}");
+        assert!(
+            !text.contains("status changed"),
+            "an agent arriving asked for a look: {text}"
+        );
+    }
+
+    #[test]
     fn opening_the_worktree_list_takes_the_explanation_down() {
         // The two hang off the same corner, so opening one is closing the
         // other — and opening the menu afresh starts with neither.
@@ -30420,6 +30446,58 @@ mod changes_column {
         assert_eq!(chosen(&harness), Some(right));
     }
 
+    /// Claude Code with no hooks says what it is only in its title, and the
+    /// `✳` it draws from the moment it starts says an agent is in the pane
+    /// before it has had a turn — which is when a review is most often sent
+    /// to one. It is no idle for a wait to be answered by, but it is word of
+    /// an agent all the same, for the first agent in a pane and for the next
+    /// one after the end of a command took the last one's running back.
+    #[test]
+    fn a_review_goes_to_an_agent_whose_title_is_all_it_has_said() {
+        use crate::terminal_model::TerminalUpdate;
+
+        let scratch = Scratch::new();
+        let mut harness = Harness::new(1);
+        harness.dispatch_action(TabAction::Split(Direction::Right));
+        let [left, right] = harness.active_pane_ids()[..] else {
+            panic!("a split tab has two panes");
+        };
+        let here = scratch.path().to_path_buf();
+        for pane in [left, right] {
+            harness.update_session(pane, |session| {
+                session.working_directory = Some(here.clone());
+            });
+        }
+        let chosen = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace.review_pane(&here, app)
+            })
+        };
+        let titled = |harness: &mut Harness, title: Option<&str>| {
+            let update = TerminalUpdate::Title(left, title.map(str::to_owned));
+            harness.workspace_update(|workspace, ctx| {
+                workspace.apply_terminal_update(&update, ctx);
+            });
+        };
+        assert_eq!(harness.focused_pane_id(), Some(right));
+        assert_eq!(chosen(&harness), Some(right), "with no agent anywhere");
+
+        titled(&mut harness, Some("\u{2733} Claude Code"));
+        assert_eq!(
+            chosen(&harness),
+            Some(left),
+            "the title an agent starts with did not say it was there"
+        );
+
+        // A turn, and then the agent leaves: the cleared title takes its
+        // running back, and the pane is no agent's until the next one says so.
+        titled(&mut harness, Some("\u{25d0} Fix the tab directory"));
+        titled(&mut harness, None);
+        assert_eq!(chosen(&harness), Some(right), "the agent that left");
+        titled(&mut harness, Some("\u{2733} Claude Code"));
+        assert_eq!(chosen(&harness), Some(left), "the next agent in the pane");
+    }
+
     /// Two panes on [`a_task`], each with a shell that reports its commands,
     /// and the first running a stand-in for an agent: a program that turns
     /// bracketed paste on — the way Claude Code, Codex and the rest do —
@@ -31351,22 +31429,47 @@ mod agent_titles {
     /// Claude Code draws `✳` from the moment it starts, before anybody has
     /// asked it anything. That is the idle a new tab starts in, not a turn
     /// that ended, and `crook pane wait --until idle` must not take it for
-    /// one: only a `✳` that ends a running the title said is a report.
+    /// one: only a `✳` that ends a running the title said is a report. It is
+    /// kept as word that an agent is there, and so is the `✳` of the next
+    /// agent after the end of a command took the last one's running back.
     #[test]
     fn the_title_claude_starts_with_is_no_report() {
         let mut harness = Harness::panel(1);
         let pane = harness.active_pane_ids()[0];
+        let at_start = |harness: &Harness| {
+            let (status, source) = status_and_source(harness, pane);
+            status == AgentStatus::Idle && matches!(source, StatusSource::TitleAtStart(_))
+        };
 
         titled(&mut harness, pane, "\u{2733} Claude Code");
-        let (status, source) = status_and_source(&harness, pane);
-        assert_eq!(status, AgentStatus::Idle);
-        assert_eq!(source, StatusSource::NoReport, "the startup title counted");
+        assert!(
+            at_start(&harness),
+            "the startup title counted as a report, or as nothing: {:?}",
+            status_and_source(&harness, pane)
+        );
+        let first = status_and_source(&harness, pane).1;
+        titled(&mut harness, pane, "\u{2733} Fix the tab directory");
+        assert_eq!(
+            status_and_source(&harness, pane).1,
+            first,
+            "a second word of the same was taken for news"
+        );
 
         titled(&mut harness, pane, "\u{25d0} Fix the tab directory");
         titled(&mut harness, pane, "\u{2733} Fix the tab directory");
         let (status, source) = status_and_source(&harness, pane);
         assert_eq!(status, AgentStatus::Idle);
         assert!(matches!(source, StatusSource::Title(_)), "{source:?}");
+
+        titled(&mut harness, pane, "\u{25d1} Fix the tab directory");
+        report(&mut harness, TerminalUpdate::Title(pane, None));
+        assert_taken_back(&harness, pane);
+        titled(&mut harness, pane, "\u{2733} Claude Code");
+        assert!(
+            at_start(&harness),
+            "the next agent's startup title: {:?}",
+            status_and_source(&harness, pane)
+        );
     }
 
     /// What a running taken back looks like: idle, and said to have come from

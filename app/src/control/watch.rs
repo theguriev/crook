@@ -349,7 +349,7 @@ impl Watches {
                 return true;
             }
             let (reached, exit) = match (waiter.until, heard) {
-                (Until::Idle, Heard::Status) => (session.status == AgentStatus::Idle, None),
+                (Until::Idle, Heard::Status) => (is_idle(session), None),
                 (Until::NeedsInput, Heard::Status) => {
                     (session.status == AgentStatus::NeedsInput, None)
                 }
@@ -694,6 +694,18 @@ pub fn wait(
     Ok(Value::Null)
 }
 
+/// Whether a pane's agent is idle the way `--until idle` means: it said so,
+/// or the command it was ended. Not the idle a pane starts in before anything
+/// has reported, and not the `✳` Claude Code's title wears from the moment it
+/// starts: a worker whose agent has not had a turn is not one that finished.
+fn is_idle(session: &AgentSession) -> bool {
+    session.status == AgentStatus::Idle
+        && !matches!(
+            session.source,
+            StatusSource::NoReport | StatusSource::TitleAtStart(_)
+        )
+}
+
 /// Where a pane is, measured against `until`.
 ///
 /// `finished` is refused for a pane whose shell reports no command marks:
@@ -712,10 +724,7 @@ fn where_it_is(
         .map(|open| open.session())
         .ok_or_else(|| no_such_pane(number))?;
     let (reached, exit) = match until {
-        Until::Idle => (
-            session.status == AgentStatus::Idle && session.source != StatusSource::NoReport,
-            None,
-        ),
+        Until::Idle => (is_idle(session), None),
         Until::NeedsInput => (session.status == AgentStatus::NeedsInput, None),
         Until::Exited => (false, None),
         Until::Finished => {

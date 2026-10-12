@@ -2861,7 +2861,8 @@ mod socket {
 
     /// Claude Code with no hooks draws `✳` from the moment it starts. A lead
     /// that asks straight after opening it must not read that as the work
-    /// being done.
+    /// being done — nor, in a pane whose last agent's running was taken back
+    /// when it left, the `✳` of the next one.
     #[test]
     fn a_wait_for_idle_is_not_answered_by_the_title_claude_starts_with() {
         let mut served = Served::new(|_, _, _| {});
@@ -2871,15 +2872,29 @@ mod socket {
             .open_tab(Some(token.clone()), new_tab(&["claude"]))
             .expect("the lead opens a worker");
         let worker = served.pane(opened.pane_id);
+        let idle_now = |served: &mut Served| {
+            let printed = served
+                .ask(wait(&token, worker, Until::Idle, 0, false))
+                .expect("answered");
+            assert_eq!(printed.text, "idle");
+            printed.failure.is_none()
+        };
 
         served.titled(worker, "\u{2733} Claude Code");
-        let printed = served
-            .ask(wait(&token, worker, Until::Idle, 0, false))
-            .expect("answered");
-        assert_eq!(printed.text, "idle");
         assert!(
-            printed.failure.is_some(),
+            !idle_now(&mut served),
             "the title it starts with answered a wait for idle"
+        );
+
+        served.titled(worker, "\u{25d0} Fix the flaky test");
+        served.update(|workspace, ctx| {
+            workspace.apply_terminal_update(&TerminalUpdate::Title(worker, None), ctx);
+        });
+        assert!(idle_now(&mut served), "the agent that left is not idle");
+        served.titled(worker, "\u{2733} Claude Code");
+        assert!(
+            !idle_now(&mut served),
+            "the next agent's startup title answered a wait for idle"
         );
     }
 
