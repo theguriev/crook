@@ -1898,3 +1898,63 @@ fn a_pull_request_goes_with_another_branch_and_stays_through_a_detached_head() {
     assert!(!nowhere.is_left_for(None));
     assert!(nowhere.is_left_for(Some(&at("app", feat))));
 }
+
+#[test]
+fn close_others_keeps_the_tab_it_was_asked_about_and_the_pinned_ones() {
+    let (mut strip, ids) = strip(5);
+    strip.apply(TabAction::TogglePin(ids[3]));
+    let pinned = ids[3];
+    let order_before = order(&strip);
+    assert_eq!(
+        order_before[0], pinned,
+        "pinning moved the tab to the front"
+    );
+
+    assert_eq!(
+        strip.apply(TabAction::CloseOthers(ids[1])),
+        TabEffect::Changed
+    );
+
+    assert_eq!(order(&strip), [pinned, ids[1]]);
+}
+
+#[test]
+fn close_below_and_above_take_the_unpinned_tabs_on_their_side() {
+    let (mut strip, ids) = strip(5);
+    assert_eq!(
+        strip.closed_by(TabAction::CloseBelow(ids[2])),
+        [ids[3], ids[4]]
+    );
+    assert_eq!(
+        strip.closed_by(TabAction::CloseAbove(ids[2])),
+        [ids[0], ids[1]]
+    );
+
+    strip.apply(TabAction::CloseBelow(ids[2]));
+    assert_eq!(order(&strip), &ids[..3]);
+
+    strip.apply(TabAction::CloseAbove(ids[2]));
+    assert_eq!(order(&strip), [ids[2]]);
+}
+
+#[test]
+fn a_close_of_several_with_nothing_to_take_changes_nothing() {
+    // The bottom tab has nothing below it, and a strip of one has no others.
+    // Neither may reach `close`, which would close the window for the last
+    // tab rather than leave it alone.
+    let (mut strip, ids) = strip(2);
+    assert_eq!(
+        strip.apply(TabAction::CloseBelow(ids[1])),
+        TabEffect::Unchanged
+    );
+    assert_eq!(
+        strip.apply(TabAction::CloseAbove(ids[0])),
+        TabEffect::Unchanged
+    );
+    strip.apply(TabAction::Close(ids[0]));
+    assert_eq!(
+        strip.apply(TabAction::CloseOthers(ids[1])),
+        TabEffect::Unchanged
+    );
+    assert_eq!(order(&strip), [ids[1]]);
+}
