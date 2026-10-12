@@ -53,6 +53,12 @@ cosmic-text = "0.19"
 dirs = "6.0"
 env_logger = "0.11"
 etagere = "0.3"
+# A pty master's two halves wait in `poll` rather than in the call, so that a
+# closed pane can release a write the kernel would leave asleep. This is
+# `portable-pty`'s own descriptor crate, already built on every platform, and
+# the reason it rather than a declared `poll` is macOS: its `poll` does not
+# support devices, and this one is `select` there.
+filedescriptor = "0.8"
 futures-lite = "2.6"
 # The operating system's random source, for the secret each pane is handed
 # for the control socket. 0.2 is what `ring` (under `ureq`) and `dirs` already

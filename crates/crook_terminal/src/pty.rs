@@ -7,10 +7,14 @@
 //! environment to run it in, and how to hand the two ends of the pty to two
 //! different threads.
 //!
-//! The reader and the writer are separate on purpose. Reading from a pty blocks
-//! until the child says something, which may be hours; [`Pty::take_reader`]
-//! hands that half out so it can block on a thread of its own while the writer
-//! stays with the UI and stays responsive.
+//! The reader and the writer are separate on purpose, because each of them
+//! blocks for as long as the child likes and so belongs on a thread of its
+//! own. Reading waits until the child says something, which may be hours;
+//! [`Pty::take_reader`] hands that half out once. Writing waits until the
+//! child reads, which a child busy printing does not do until its own output
+//! has been read — so a writer on the thread that drains that output waits on
+//! itself. [`PtyLink::writer`] hands out the other half, and on Unix both are
+//! built so that the pty closing releases them; see the `nonblocking` module.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -18,9 +22,16 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
+#[cfg(unix)]
+use std::sync::Arc;
+
+#[cfg(unix)]
+use filedescriptor::FileDescriptor;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::link::PtyLink;
+#[cfg(unix)]
+use crate::nonblocking::{Closing, Readable, Writable};
 use crate::snapshot::TerminalSize;
 
 /// The terminal type the child is told it is running on.
@@ -286,6 +297,10 @@ pub struct Pty {
     child: Box<dyn Child + Send + Sync>,
     reader: Option<PtyReader>,
     exit: Option<ChildExit>,
+    /// Closed when this is dropped, which is what releases a write waiting
+    /// on a child that will never read. See the `nonblocking` module.
+    #[cfg(unix)]
+    closing: Arc<Closing>,
 }
 
 impl Pty {
@@ -337,31 +352,67 @@ impl Pty {
         // thread would never learn that the child had gone.
         drop(pair.slave);
 
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .context("Failed to read from the pseudo-terminal")?;
+        #[cfg(unix)]
+        let reader = {
+            let mut reading = duplicate(&*pair.master)?;
+            // Non-blocking belongs to the open file, which every duplicate of
+            // the master shares, so this is every writer's too.
+            reading
+                .set_non_blocking(true)
+                .context("Failed to make the pseudo-terminal non-blocking")?;
+            PtyReader::new(Readable::new(reading))
+        };
+        #[cfg(not(unix))]
+        let reader = PtyReader(
+            pair.master
+                .try_clone_reader()
+                .context("Failed to read from the pseudo-terminal")?,
+        );
 
         Ok(Self {
             master: pair.master,
             child,
-            reader: Some(PtyReader(reader)),
+            reader: Some(reader),
             exit: None,
+            #[cfg(unix)]
+            closing: Arc::default(),
         })
     }
+}
+
+/// The master on a descriptor of its own, sharing its open file.
+#[cfg(unix)]
+fn duplicate(master: &dyn MasterPty) -> Result<FileDescriptor> {
+    let master = master
+        .as_raw_fd()
+        .context("The pseudo-terminal has no descriptor")?;
+    FileDescriptor::dup(&master).context("Failed to duplicate the pseudo-terminal")
 }
 
 /// The local link: the child is this process's own, on a pty it opened.
 impl PtyLink for Pty {
     /// A writer for the child's standard input.
     ///
-    /// Every call opens a new handle; dropping the last one sends end-of-file
-    /// to the child, so a caller that wants the child to keep running must hold
-    /// on to it.
+    /// On Unix every call opens a new descriptor onto the master, and a write
+    /// that is waiting for the child to read gives up once this is dropped —
+    /// see the `nonblocking` module. Dropping one sends the child nothing: it
+    /// hears the end of its input when the pty closes, which ending it does.
+    ///
+    /// On Windows there is one, the pipe ConPTY reads, and a second call is an
+    /// error. A write waiting on it gives up once this is dropped as well:
+    /// closing the pseudo-console closes the pipe's far end.
     fn writer(&self) -> Result<Box<dyn Write + Send>> {
-        self.master
-            .take_writer()
-            .context("Failed to write to the pseudo-terminal")
+        #[cfg(unix)]
+        {
+            let master = duplicate(&*self.master)?;
+            Ok(Box::new(Writable::new(master, self.closing.clone())))
+        }
+        #[cfg(not(unix))]
+        {
+            self.master
+                .take_writer()
+                .context("Failed to write to the pseudo-terminal")
+        }
     }
 
     /// The readable half, once. Subsequent calls return `None`, because the
@@ -447,6 +498,11 @@ impl Drop for Pty {
         {
             log::debug!("Could not end the child process while closing a terminal: {error:#}");
         }
+        // After the kill, which already ends a write when nothing else holds
+        // the pty open. This ends the rest: the writer is on a thread of its
+        // own and outlives this, and nothing else can reach it.
+        #[cfg(unix)]
+        self.closing.close();
     }
 }
 

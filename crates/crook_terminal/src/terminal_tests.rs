@@ -789,3 +789,57 @@ fn test_a_mirrored_feed_answers_no_query_and_draws_the_same_grid() {
         "a mirror draws what it is fed"
     );
 }
+
+#[test]
+fn test_a_terminal_whose_writer_was_taken_queues_everything_in_order_for_it() {
+    // Nothing reaches the link from the terminal itself any more — not a
+    // line, not a key, not an answer — until the writer runs, and then it all
+    // does, in the order the terminal made it.
+    let (mut terminal, child) = over_a_fake_link();
+    let writer = terminal
+        .take_writer()
+        .expect("a fresh terminal has its writer");
+    assert!(
+        terminal.take_writer().is_none(),
+        "the writer is handed out exactly once"
+    );
+
+    terminal.submit("echo hi").expect("queued");
+    terminal.feed(b"\x1b[6n").expect("the answer is queued");
+    terminal
+        .send_key(Key::Char('x'), Modifiers::NONE)
+        .expect("queued");
+    assert_eq!(
+        Vec::<u8>::new(),
+        child.received(),
+        "the terminal wrote to the link itself"
+    );
+    assert_eq!(
+        BlockState::Submitted,
+        terminal.live_block().state,
+        "the boundary is recorded when the line is sent, not when it is written"
+    );
+
+    let running = thread::spawn(move || writer.run());
+    let deadline = Instant::now() + DEADLINE;
+    while !child.received().ends_with(b"x") {
+        assert!(
+            Instant::now() < deadline,
+            "the writer never wrote what was queued: {:?}",
+            child.received()
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    let received = child.received();
+    let reply = &received[b"echo hi\r".len()..received.len() - 1];
+    assert!(
+        received.starts_with(b"echo hi\r") && reply.starts_with(b"\x1b[") && reply.ends_with(b"R"),
+        "what was queued arrived out of order: {received:?}"
+    );
+
+    drop(terminal);
+    running
+        .join()
+        .expect("the writer panicked")
+        .expect("a terminal that went away ends its writer without an error");
+}

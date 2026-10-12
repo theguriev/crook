@@ -39,11 +39,11 @@
 //!
 //! It owns no thread, no executor and no timer. `Terminal` is a value with
 //! methods; every one of them runs on the thread that called it and returns.
-//! Deciding which thread reads the pty, how often the grid is repainted and
-//! when the child is reaped is the application's job, in the same way
-//! `crook_wasm` records what a plugin asked for and leaves the doing of it to
-//! whoever drives the sandbox — only the application knows which of its
-//! threads is allowed to block.
+//! Deciding which thread reads the pty, which writes it, how often the grid is
+//! repainted and when the child is reaped is the application's job, in the
+//! same way `crook_wasm` records what a plugin asked for and leaves the doing
+//! of it to whoever drives the sandbox — only the application knows which of
+//! its threads is allowed to block.
 //!
 //! It also draws nothing and knows nothing about fonts, windows or the GPU. The
 //! contract with the renderer is [`Snapshot`], which is plain owned data with
@@ -52,6 +52,9 @@
 //! ## The pieces
 //!
 //! * [`Pty`] spawns the shell and owns both ends of the pseudo-terminal.
+//! * [`PtyReader`] and [`PtyWriter`] are its two halves as a thread of the
+//!   application's holds them: the reader blocks until the child speaks, the
+//!   writer until it listens.
 //! * [`PtyLink`] is what a [`Terminal`] asks of the far end — [`Pty`] is the
 //!   local one — which is what lets a whole session be driven over something
 //!   that is not a process at all.
@@ -86,12 +89,15 @@ pub mod input;
 mod link;
 mod marks;
 pub mod mouse;
+#[cfg(unix)]
+mod nonblocking;
 pub mod notify;
 mod pty;
 mod rows;
 pub mod selection;
 mod snapshot;
 pub mod url;
+mod writer;
 
 use std::fmt;
 use std::io::{self, Write};
@@ -117,6 +123,8 @@ pub use crate::snapshot::{
     CellCombining, CellFlags, Cursor, CursorShape, Palette, Rgb, Snapshot, SnapshotCell,
     TerminalSize,
 };
+use crate::writer::Outbox;
+pub use crate::writer::PtyWriter;
 
 /// How much output a terminal remembers above the viewport.
 const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
@@ -158,8 +166,18 @@ pub struct TerminalOptions {
 pub struct Terminal {
     emulator: Emulator,
     link: Box<dyn PtyLink>,
-    writer: Box<dyn Write + Send>,
+    input: Input,
     exit: Option<ChildExit>,
+}
+
+/// Where a terminal's writes go.
+enum Input {
+    /// Straight into the link's writer, on the calling thread, which waits for
+    /// as long as the child is not reading. What a terminal starts with.
+    Direct(Box<dyn Write + Send>),
+    /// Into the queue a [`PtyWriter`] writes from on a thread of its own, once
+    /// [`Terminal::take_writer`] has handed it out. Nothing here waits.
+    Queued(Outbox),
 }
 
 impl fmt::Debug for Terminal {
@@ -208,7 +226,7 @@ impl Terminal {
         Ok(Self {
             emulator,
             link,
-            writer,
+            input: Input::Direct(writer),
             exit: None,
         })
     }
@@ -220,19 +238,53 @@ impl Terminal {
         self.link.take_reader()
     }
 
+    /// The writable half of the link, once, with a queue in front of it.
+    ///
+    /// Move it to a thread and call [`PtyWriter::run`] there. From then on no
+    /// method here writes: [`Self::write`], every key, paste and line that
+    /// goes through it, and the answers [`Self::feed`] owes the child are all
+    /// copied onto the queue, in the order they were made, and the call
+    /// returns. Which is the point — a write waits for the child to read, a
+    /// child that is printing reads nothing until its output has been read,
+    /// and the thread that reads it needs whatever lock the caller holds this
+    /// terminal under.
+    ///
+    /// Dropping the terminal ends [`PtyWriter::run`], with anything still
+    /// queued dropped, since the child it was for is ended with it. Every
+    /// later call returns `None`.
+    pub fn take_writer(&mut self) -> Option<PtyWriter> {
+        let (outbox, inbox) = writer::queue();
+        match std::mem::replace(&mut self.input, Input::Queued(outbox)) {
+            Input::Direct(writer) => Some(inbox.into_writer(writer)),
+            // Taken already, and the queue its writer drains stays this one.
+            queued => {
+                self.input = queued;
+                None
+            }
+        }
+    }
+
     /// Consumes output from the child.
     ///
     /// Some of that output is a question, and this answers it: replies the
-    /// emulator owes the child are written straight back to the pty, because a
-    /// program that asked for the cursor position or the palette will wait
-    /// forever otherwise.
+    /// emulator owes the child are written back to the pty, because a program
+    /// that asked for the cursor position or the palette will wait forever
+    /// otherwise. Once the writer has been taken they are queued instead, and
+    /// a program that asks faster than it reads has the oldest of them dropped
+    /// rather than kept without end — see [`PtyWriter`].
     pub fn feed(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.emulator.advance(bytes);
         let replies = self.emulator.take_replies();
         if replies.is_empty() {
             return Ok(());
         }
-        self.write(&replies)
+        match &mut self.input {
+            Input::Direct(writer) => {
+                writer.write_all(&replies)?;
+                writer.flush()
+            }
+            Input::Queued(outbox) => outbox.reply(replies),
+        }
     }
 
     /// Consumes one item of a stream that some other emulator is also
@@ -257,9 +309,18 @@ impl Terminal {
     }
 
     /// Sends bytes to the child as if they had been typed.
+    ///
+    /// Once the writer has been taken — see [`Self::take_writer`] — they are
+    /// queued for it and this returns at once, and an error means nothing more
+    /// will reach the child.
     pub fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.writer.write_all(bytes)?;
-        self.writer.flush()
+        match &mut self.input {
+            Input::Direct(writer) => {
+                writer.write_all(bytes)?;
+                writer.flush()
+            }
+            Input::Queued(outbox) => outbox.input(bytes),
+        }
     }
 
     /// Runs a command line: records the block boundary, then writes the line

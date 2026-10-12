@@ -6,7 +6,9 @@
 //! it once the shell is stubbed out.
 
 use std::sync::Arc;
+use std::sync::mpsc;
 
+use crook_terminal::Program;
 use crookui_core::App;
 use crookui_core::executor::{Background, LocalQueue};
 
@@ -676,4 +678,273 @@ fn the_reader_publishes_what_it_drew_before_it_lets_go_of_the_terminal() {
     assert_the_terminal_is_held_until_the_snapshot_is_published(&shared, move || {
         publishing.publish();
     });
+}
+
+/// How long something a person did is given to come back before the test
+/// calls the window frozen.
+///
+/// Every call here returns in microseconds once nothing writes to the pty
+/// under the terminal's lock. The bound is for the code that did, which never
+/// returned at all, so that it fails rather than hanging the suite.
+const RETURNS_WITHIN: Duration = Duration::from_secs(5);
+
+/// Runs `work` on a thread of its own and hands back what it returned, or
+/// `None` if it has not returned within [`RETURNS_WITHIN`] — which, on the UI
+/// thread, would have been a window that stopped drawing. A thread that did
+/// not return is left where it is stuck: joining it would hang the suite.
+fn returns<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let (done, finished) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = done.send(work());
+    });
+    finished.recv_timeout(RETURNS_WITHIN).ok()
+}
+
+/// The thread that draws what a reader parsed too soon to draw, as a window
+/// has one. Stopped when the test is done with it.
+fn repainting() -> Arc<Flusher> {
+    let flusher = Arc::new(Flusher::default());
+    let running = flusher.clone();
+    thread::spawn(move || flush_loop(&running));
+    flusher
+}
+
+/// A session started the way [`TerminalModel::open`] starts one — its reader
+/// and its writer each on a thread, its deferred batches drawn by `flusher` —
+/// running `program`, or `None` where it cannot be started.
+fn started(program: Program, flusher: &Arc<Flusher>) -> Option<Arc<Shared>> {
+    let terminal = Terminal::spawn(TerminalOptions {
+        program,
+        size: TerminalSize::new(80, 24),
+        ..TerminalOptions::default()
+    })
+    .ok()?;
+    start(terminal, PaneId::next(), flusher).ok()
+}
+
+/// `script`, run by `sh`. Not on Windows, whose shell is cmd.
+fn sh(script: &str, arguments: &[&str]) -> Option<Program> {
+    if cfg!(windows) {
+        return None;
+    }
+    let mut args = vec!["-c", script];
+    args.extend_from_slice(arguments);
+    Some(Program::command("/bin/sh", args))
+}
+
+/// Whether the pane's published grid comes to show `wanted`.
+fn comes_to_show(shared: &Shared, wanted: &str) -> bool {
+    let deadline = Instant::now() + REPLY_TIMEOUT;
+    while Instant::now() < deadline {
+        if shared.snapshot().text().contains(wanted) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+/// A file that is removed when the test is done with it, passed or not.
+struct Removed(PathBuf);
+
+impl Drop for Removed {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[test]
+fn a_megabyte_pasted_into_cat_returns_at_once_and_arrives_whole() {
+    // `cat` reads only as fast as its output is read, and its output is read
+    // by the pane's reader — which needed the terminal's lock to parse it,
+    // while the paste held that lock writing into a pty `cat` had stopped
+    // reading. The window froze for good at about eighteen kilobytes.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let file = Removed(std::env::temp_dir().join(format!(
+        "crook-pasted-into-cat-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )));
+    let path = file.0.to_string_lossy().into_owned();
+    // `tee` is `cat` that also keeps what it read, which is how the test sees
+    // all of it: the grid only ever holds a screenful.
+    let Some(program) = sh("stty -echo; echo crook-ready; exec tee \"$0\"", &[&path]) else {
+        return;
+    };
+    let flusher = repainting();
+    let Some(shared) = started(program, &flusher) else {
+        eprintln!("skipped: no shell could be started here");
+        return;
+    };
+    assert!(
+        comes_to_show(&shared, "crook-ready"),
+        "the child never got ready"
+    );
+
+    // Lines, because a terminal in canonical mode holds at most four
+    // kilobytes of one.
+    let mut text = String::new();
+    while text.len() < 1024 * 1024 {
+        text.push_str(&format!("line {:07} {}\n", text.len(), "x".repeat(60)));
+    }
+    let handle = TerminalHandle(shared.clone());
+    let pasting = text.clone();
+    assert_eq!(
+        Some(true),
+        returns(move || handle.paste(&pasting)),
+        "a megabyte pasted into cat did not come back: the window would be frozen"
+    );
+
+    // The paste turns each newline into the carriage return Enter sends, and
+    // the line discipline turns it back.
+    let deadline = Instant::now() + REPLY_TIMEOUT;
+    let kept = loop {
+        let kept = std::fs::read(&file.0).unwrap_or_default();
+        if kept.len() >= text.len() || Instant::now() > deadline {
+            break kept;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(
+        kept == text.as_bytes(),
+        "{} of {} bytes arrived, or not in the order they were pasted",
+        kept.len(),
+        text.len()
+    );
+    flusher.stop();
+}
+
+#[test]
+fn a_long_composed_line_submitted_to_an_interactive_shell_returns_at_once() {
+    // The composer's Enter on a pasted block: a shell's line editor echoes
+    // what it reads, so it stops reading once its echo has nowhere to go —
+    // and the echo went nowhere while the submit held the lock the reader
+    // needed. Thirty-two kilobytes froze bash and sixteen zsh and fish.
+    if cfg!(windows) {
+        return;
+    }
+    let Some(bash) = ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"]
+        .into_iter()
+        .find(|bash| std::path::Path::new(bash).exists())
+    else {
+        eprintln!("skipped: no bash here");
+        return;
+    };
+    let flusher = repainting();
+    let Some(shared) = started(
+        Program::command(bash, ["--norc", "--noprofile", "-i"]),
+        &flusher,
+    ) else {
+        eprintln!("skipped: no shell could be started here");
+        return;
+    };
+
+    // Commands that do nothing, and one at the end whose output is nowhere in
+    // what was typed: the shell has run every line once it is on the grid.
+    let mut block = String::new();
+    while block.len() < 64 * 1024 {
+        block.push_str(&format!(": {:06} {}\n", block.len(), "y".repeat(80)));
+    }
+    block.push_str("echo crook-ran-$((6 * 7))");
+    let handle = TerminalHandle(shared.clone());
+    assert_eq!(
+        Some(true),
+        returns(move || handle.submit(&block)),
+        "a 64 KiB submit into an interactive shell did not come back"
+    );
+    assert!(
+        comes_to_show(&shared, "crook-ran-42"),
+        "the shell did not run all of what was submitted"
+    );
+    flusher.stop();
+}
+
+/// A program that asks the terminal where its cursor is, and what it is,
+/// thousands of times, and never reads an answer: raw mode, so the line
+/// discipline drops nothing, and then a marker once the asking is done.
+const FLOOD: &str = "stty raw -echo; i=0; \
+    while [ $i -lt 6000 ]; do printf '\\033[6n\\033[c'; i=$((i + 1)); done; \
+    printf 'crook-%s\\r\\n' asked; exec sleep 60";
+
+#[test]
+fn a_program_that_floods_queries_and_never_reads_holds_up_neither_its_reader_nor_a_key() {
+    // The answers were written by the reader, under the terminal's lock, and
+    // a program that does not read them fills the pty after twenty kilobytes.
+    // The reader then waited in that write for good, holding the lock: the
+    // rest of the program's output was never parsed, and a key press — the
+    // Ctrl-C to stop it — or a pointer moving over the pane waited too.
+    let Some(program) = sh(FLOOD, &[]) else {
+        return;
+    };
+    let flusher = repainting();
+    let Some(shared) = started(program, &flusher) else {
+        eprintln!("skipped: no shell could be started here");
+        return;
+    };
+
+    assert!(
+        comes_to_show(&shared, "crook-asked"),
+        "the reader stopped parsing a program that floods queries"
+    );
+    let handle = TerminalHandle(shared.clone());
+    let control = Modifiers {
+        control: true,
+        ..Modifiers::default()
+    };
+    assert_eq!(
+        Some(true),
+        returns(move || handle.send_key(Key::Char('c'), control)),
+        "a key press into a pane flooded with queries did not come back"
+    );
+    let handle = TerminalHandle(shared.clone());
+    assert!(
+        returns(move || handle.mouse_modes()).is_some(),
+        "a pointer moving over a pane flooded with queries did not come back"
+    );
+    flusher.stop();
+}
+
+#[test]
+fn a_program_that_floods_queries_and_never_reads_does_not_stop_another_pane_drawing() {
+    // One thread draws every pane's late batches, and it took the flooded
+    // pane's lock to draw it: once that pane's reader was stuck holding the
+    // lock, the end of every other pane's output stayed undrawn.
+    //
+    // The flood here is output with a question in every line, as fast as
+    // `yes` prints it, rather than questions alone: the reader then has a
+    // batch parsed and waiting for that thread at the moment its answers
+    // fill the pty, which is what sends the thread into the stuck pane.
+    let (Some(flooding), Some(quiet)) = (
+        sh(
+            "stty raw -echo; exec yes \"$(printf 'crook%070d\\033[6n' 0)\"",
+            &[],
+        ),
+        sh(
+            "printf 'crook-%s\\n' first; sleep 0.004; printf 'crook-%s\\n' last; exec sleep 60",
+            &[],
+        ),
+    ) else {
+        return;
+    };
+    let flusher = repainting();
+    let Some(flooded) = started(flooding, &flusher) else {
+        eprintln!("skipped: no shell could be started here");
+        return;
+    };
+    // Long enough for the flood to have filled the pty, and the repaint
+    // thread to have come back for the flooded pane.
+    thread::sleep(Duration::from_millis(500));
+
+    // Printed twice within a frame, so the second lands inside the repaint
+    // interval and only the shared thread draws it.
+    let Some(other) = started(quiet, &flusher) else {
+        eprintln!("skipped: no shell could be started here");
+        return;
+    };
+    assert!(
+        comes_to_show(&other, "crook-last"),
+        "a pane beside one flooded with queries stopped drawing the end of its output"
+    );
+    drop(flooded);
+    flusher.stop();
 }
