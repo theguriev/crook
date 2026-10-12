@@ -219,6 +219,21 @@ impl HeldLocks {
             .any(|lock| lock.spellings().contains(&checkout))
     }
 
+    /// Whether the window holds the lock on the checkout git lists at
+    /// `checkout` for a pane of its own: taken, and not on its way off.
+    ///
+    /// What a removal asks before taking Crook's lock off, as the second
+    /// line behind asking the panes: a lock still held is one whose tab is
+    /// about to open, with no pane in the checkout yet, or one this window
+    /// last counted a pane in. One already on its way off is not counted: no
+    /// pane is in it, and its unlock is running.
+    pub(crate) fn keeps(&self, checkout: &Path) -> bool {
+        self.held()
+            .locks
+            .iter()
+            .any(|lock| lock.stage != Stage::Releasing && lock.spellings().contains(&checkout))
+    }
+
     /// The checkouts whose lock the window still holds, as git lists them.
     #[cfg(test)]
     pub(crate) fn checkouts(&self) -> Vec<PathBuf> {

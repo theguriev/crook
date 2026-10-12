@@ -8379,6 +8379,108 @@ fn stop_spares_the_checkouts_after_the_one_in_flight() {
     );
 }
 
+#[test]
+fn a_sweep_leaves_standing_a_checkout_a_pane_has_entered_since_it_asked() {
+    // A checkout is on the list for having no pane in it when the question
+    // was asked, and whatever lock Crook took on it came off as the last pane
+    // left. Nothing locks it again when a pane comes back — a reopened tab, a
+    // restored session, a shell's `cd` — so git has nothing to refuse over,
+    // and the sweep is the one that has to notice: each step asks the panes
+    // again, and a checkout one has entered, before the press or while the
+    // ones ahead of it were going, is left standing and counted as in use.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    let mut free: Vec<PathBuf> = Vec::new();
+    for _ in 0..3 {
+        let made = spare_checkout(&mut harness, tab, &store, &free);
+        free.push(made);
+    }
+
+    // Two panes in the main checkout, to walk into two of the free ones.
+    let mut walkers = Vec::new();
+    for _ in 0..2 {
+        harness.dispatch_action(TabAction::Split(Direction::Right));
+        let walker = harness
+            .focused_pane_id()
+            .expect("the split focused its pane");
+        harness.update_session(walker, |session| {
+            session.working_directory = Some(repository.clone());
+        });
+        walkers.push(walker);
+    }
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("every checkout to be read", |harness| {
+        harness.worktrees_listed() == Some(4)
+    });
+    harness.dispatch_worktree(WorktreeAction::AskTidy);
+    harness.wait_for("the checkouts to be looked in", |harness| {
+        harness.worktrees_going() == Some(3)
+    });
+    let going: Vec<PathBuf> =
+        harness.workspace.read(&harness.app, |workspace, _| {
+            match &workspace.tab_menu().sweep {
+                super::tab_menu::Sweep::Ready { going, .. } => {
+                    going.iter().map(|going| going.path.clone()).collect()
+                }
+                _ => Vec::new(),
+            }
+        });
+
+    // One walks into the first after the question and before the press.
+    harness.update_session(walkers[0], |session| {
+        session.working_directory = Some(going[0].clone());
+    });
+    harness.dispatch_worktree(WorktreeAction::Tidy);
+    // And one into the last while the second is going: before the queue is
+    // pumped, so that removal has not landed yet.
+    harness.update_session(walkers[1], |session| {
+        session.working_directory = Some(going[2].clone());
+    });
+
+    harness.wait_for(
+        "the sweep to finish and the list to be read again",
+        |harness| !harness.worktree_menu_is_tidying() && !harness.worktree_menu_is_busy(),
+    );
+    assert!(
+        going[0].is_dir(),
+        "the checkout a pane entered before the press was removed from under it"
+    );
+    assert!(
+        going[2].is_dir(),
+        "the checkout a pane entered during the sweep was removed from under it"
+    );
+    assert!(
+        !going[1].exists(),
+        "the checkout nobody entered was not removed"
+    );
+    assert_eq!(
+        harness.worktrees_listed(),
+        Some(3),
+        "git does not list exactly the main checkout and the two kept"
+    );
+    assert_eq!(
+        harness.worktree_problem().as_deref(),
+        Some("2 checkouts are in use now and were kept."),
+        "the list does not say why two of the three are still there"
+    );
+}
+
 /// Runs git in `directory` for a test that has to make history the menu then
 /// reads, and says what failed when it does.
 fn git_in(directory: &Path, args: &[&str]) -> String {
@@ -9741,9 +9843,10 @@ fn a_sweep_takes_crooks_own_old_lock_off_and_leaves_anybody_elses() {
 #[test]
 fn crooks_own_lock_holds_while_a_pane_is_working_in_the_checkout() {
     // The case the lock exists for, asked the hard way: a removal dispatched
-    // at a checkout a pane is in, which no × would have offered. Crook takes
-    // its own lock off only when nothing in the window is working in the
-    // checkout, so git refuses and the checkout stays — locked, and whole.
+    // at a checkout a pane is in, which no × would have offered, and forced.
+    // Crook takes its own lock off only when nothing in the window is working
+    // in the checkout, and asks git for nothing at all over one a pane is in,
+    // so the checkout stays — locked, and whole — and the list says why.
     let Some((scratch, mut harness, checkouts)) =
         menu_over_locked_checkouts(&[&crate::git::worktree::lock_reason("held/1")])
     else {
@@ -9771,10 +9874,11 @@ fn crooks_own_lock_holds_while_a_pane_is_working_in_the_checkout() {
         .expect("the checkout is not in the menu");
     harness.dispatch_worktree(WorktreeAction::AskRemove(index));
     harness.dispatch_worktree(WorktreeAction::Remove { force: true });
-    harness.wait_for("git to answer", |harness| !harness.worktree_menu_is_busy());
+    harness.wait_for("an answer", |harness| !harness.worktree_menu_is_busy());
 
-    assert!(
-        frame_text(&harness.frame()).contains("locked"),
+    assert_eq!(
+        harness.worktree_problem().as_deref(),
+        Some("held/1 is in use now and was kept."),
         "the refusal was not shown"
     );
     assert!(checkout.is_dir(), "the checkout a pane is in was removed");
@@ -9782,6 +9886,310 @@ fn crooks_own_lock_holds_while_a_pane_is_working_in_the_checkout() {
         lock_on(&repository, checkout),
         Some(crate::git::worktree::lock_reason("held/1")),
         "the lock was taken off a checkout a pane is working in"
+    );
+}
+
+#[test]
+fn the_cross_leaves_standing_a_checkout_a_pane_has_entered_since_it_asked() {
+    // The × asks about a checkout nothing was working in, and a pane can
+    // arrive while the question is up — a shell's `cd`, a tab the control
+    // socket opened — with no lock behind it, since Crook locks a checkout
+    // only as it makes one. Nothing would then stop git, so the press asks
+    // the panes again, and goes back to the list saying why the checkout is
+    // still there.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    let checkout = spare_checkout(&mut harness, tab, &store, &[]);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let walker = harness
+        .focused_pane_id()
+        .expect("the split focused its pane");
+    harness.update_session(walker, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    let branch = crate::git::worktree::list(&repository)
+        .expect("the repository lists")
+        .into_iter()
+        .find(|worktree| worktree.path == checkout)
+        .and_then(|worktree| worktree.branch)
+        .expect("the checkout is on the branch it was made with");
+    assert_eq!(
+        lock_on(&repository, &checkout),
+        None,
+        "the checkout is still locked, so this would be asking about the lock"
+    );
+
+    let index = harness
+        .worktree_index_under(&checkout)
+        .expect("the checkout is not in the menu");
+    harness.dispatch_worktree(WorktreeAction::AskRemove(index));
+    harness.update_session(walker, |session| {
+        session.working_directory = Some(checkout.clone());
+    });
+    harness.dispatch_worktree(WorktreeAction::Remove { force: false });
+    harness.wait_for("an answer", |harness| !harness.worktree_menu_is_busy());
+
+    assert!(
+        checkout.is_dir(),
+        "the checkout a pane entered was removed from under it"
+    );
+    assert_eq!(
+        harness.worktree_problem(),
+        Some(format!("{branch} is in use now and was kept.")),
+        "the list does not say why the checkout is still there"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_removal_leaves_the_lock_the_window_holds_for_a_pane_reached_through_a_link() {
+    // A store reached through a link is spelled one way by the pane that
+    // opened in it and the other way by git, so "is a pane in it?" asked with
+    // git's spelling misses that pane. A removal asks with the links resolved
+    // and leaves the checkout standing without asking git, and it leaves the
+    // lock the window holds for that pane where it is: that lock is what
+    // tells everything outside Crook an agent is in there.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let real = scratch.path().join("real-store");
+    fs::create_dir_all(&real).expect("the scratch is writable");
+    let store = scratch.path().join("store");
+    std::os::unix::fs::symlink(&real, &store).expect("the scratch takes a link");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    harness.dispatch_worktree(WorktreeAction::Create);
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > 1
+    });
+    let opened = harness
+        .focused_pane_id()
+        .expect("the checkout did not open a pane");
+    let spelled = harness
+        .working_directory(opened)
+        .expect("the pane that opened does not know where it is");
+    let made = crate::git::worktree::list(&repository)
+        .expect("the repository lists")
+        .into_iter()
+        .find(|worktree| !worktree.is_main)
+        .expect("git lists the checkout");
+    let listed = made.path;
+    let branch = made
+        .branch
+        .expect("the checkout is on the branch it was made with");
+    assert!(
+        spelled.starts_with(&store) && listed.starts_with(&real),
+        "the pane and git spell the checkout the same way, so this asks nothing: \
+         {spelled:?} and {listed:?}"
+    );
+    let reason = lock_on(&repository, &listed).expect("the checkout was opened without a lock");
+
+    harness.dispatch_action(TabAction::Select(tab));
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    let index = harness
+        .worktree_index_under(&listed)
+        .expect("the checkout is not in the menu");
+    harness.dispatch_worktree(WorktreeAction::AskRemove(index));
+    harness.dispatch_worktree(WorktreeAction::Remove { force: false });
+    harness.wait_for("an answer", |harness| !harness.worktree_menu_is_busy());
+
+    assert!(
+        listed.is_dir(),
+        "the checkout a pane is in through a link was removed from under it"
+    );
+    assert_eq!(
+        lock_on(&repository, &listed),
+        Some(reason.clone()),
+        "the lock the window holds for its pane was taken off"
+    );
+    assert_eq!(
+        harness.worktree_problem(),
+        Some(format!("{branch} is in use now and was kept.")),
+        "the list does not say why the checkout is still there"
+    );
+
+    // The list compares spellings too, so it offers the checkout to a sweep
+    // as well, and the sweep has to leave it the same way.
+    harness.dispatch_worktree(WorktreeAction::CloseMenu);
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read again", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    harness.dispatch_worktree(WorktreeAction::AskTidy);
+    harness.wait_for("the checkout to be looked in", |harness| {
+        harness.worktrees_going().is_some()
+    });
+    assert_eq!(
+        harness.worktrees_going(),
+        Some(1),
+        "the sweep no longer offers the checkout, so this half asks nothing"
+    );
+    harness.dispatch_worktree(WorktreeAction::Tidy);
+    harness.wait_for("the sweep to finish", |harness| {
+        !harness.worktree_menu_is_tidying() && !harness.worktree_menu_is_busy()
+    });
+
+    assert!(
+        listed.is_dir(),
+        "the sweep removed the checkout a pane is in through a link"
+    );
+    assert_eq!(
+        lock_on(&repository, &listed),
+        Some(reason),
+        "the sweep took off the lock the window holds for its pane"
+    );
+    assert_eq!(
+        harness.worktree_problem().as_deref(),
+        Some("One checkout is in use now and was kept."),
+        "the list does not say why the sweep left the checkout"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_removal_leaves_standing_a_checkout_a_pane_is_in_through_a_link_with_no_lock_on_it() {
+    // A shell reports the directory it `cd`ed into spelled the way it got
+    // there — through `~/code`, linked to another disk — and git lists the
+    // checkout by its real path, so asking the panes with git's spelling
+    // misses that shell. Crook's lock knows both spellings, but only while it
+    // is on, and it came off with the tab that made the checkout: a pane that
+    // comes back, by a reopened tab, a restored session or a `cd`, brings no
+    // lock with it. So the removal asks again with the links resolved, and
+    // leaves the checkout standing without asking git at all.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    let checkout = spare_checkout(&mut harness, tab, &store, &[]);
+    harness.wait_for("the lock to come off with the tab that made it", |_| {
+        lock_on(&repository, &checkout).is_none()
+    });
+    let branch = crate::git::worktree::list(&repository)
+        .expect("the repository lists")
+        .into_iter()
+        .find(|worktree| worktree.path == checkout)
+        .and_then(|worktree| worktree.branch)
+        .expect("the checkout is on the branch it was made with");
+
+    let link = scratch.path().join("linked");
+    std::os::unix::fs::symlink(&checkout, &link).expect("the scratch takes a link");
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let visitor = harness
+        .focused_pane_id()
+        .expect("the split focused its pane");
+    let spelled = link.join("deeper");
+    fs::create_dir_all(&spelled).expect("the checkout is writable");
+    harness.update_session(visitor, |session| {
+        session.working_directory = Some(spelled.clone());
+    });
+    assert!(
+        !spelled.starts_with(&checkout),
+        "the pane and git spell the checkout the same way, so this asks nothing: \
+         {spelled:?} and {checkout:?}"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    let index = harness
+        .worktree_index_under(&checkout)
+        .expect("the checkout is not in the menu");
+    harness.dispatch_worktree(WorktreeAction::AskRemove(index));
+    harness.dispatch_worktree(WorktreeAction::Remove { force: false });
+    harness.wait_for("an answer", |harness| !harness.worktree_menu_is_busy());
+
+    assert!(
+        checkout.is_dir(),
+        "the × removed the checkout a pane is in through a link"
+    );
+    assert_eq!(
+        harness.worktree_problem(),
+        Some(format!("{branch} is in use now and was kept.")),
+        "the list does not say why the checkout is still there"
+    );
+
+    // The list compares spellings too, so it offers the checkout to a sweep,
+    // and the sweep has to leave it the same way.
+    harness.dispatch_worktree(WorktreeAction::CloseMenu);
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read again", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    harness.dispatch_worktree(WorktreeAction::AskTidy);
+    harness.wait_for("the checkout to be looked in", |harness| {
+        harness.worktrees_going().is_some()
+    });
+    assert_eq!(
+        harness.worktrees_going(),
+        Some(1),
+        "the sweep no longer offers the checkout, so this half asks nothing"
+    );
+    harness.dispatch_worktree(WorktreeAction::Tidy);
+    harness.wait_for("the sweep to finish", |harness| {
+        !harness.worktree_menu_is_tidying() && !harness.worktree_menu_is_busy()
+    });
+
+    assert!(
+        checkout.is_dir(),
+        "the sweep removed the checkout a pane is in through a link"
+    );
+    assert_eq!(
+        harness.worktree_problem().as_deref(),
+        Some("One checkout is in use now and was kept."),
+        "the list does not say why the sweep left the checkout"
     );
 }
 
