@@ -146,10 +146,12 @@ crook pane list    # the workers' dots, branches and questions
 
 `crook tab new` opens a tab beside yours, in the same window, and runs the command in it at its
 shell's first prompt. It prints the new pane's number, the `pane_id` to find in `crook pane
-list`; `--json` prints `pane_id`, `tab_id` and `cwd`.
+list`; `--json` prints `pane_id`, `tab_id` and `cwd`, and a `note` when there is one.
 
 - `--worktree <branch>` makes a git worktree on a new branch from your `HEAD` and opens the tab
-  in it, so two agents never edit one checkout. Without it the tab opens in your directory.
+  in it, so two agents never edit one checkout. Without it the tab opens in your directory. The
+  worktree is given the ignored files the repository's `.worktreeinclude` names, such as `.env`;
+  a file that could not be copied is named in the `note`, on standard error without `--json`.
 - `--in-my-group` folds the tab into your tab's group, which says it is part of your work.
 - `--title` names the new row.
 - Everything after `--` is the command, one argument a word, and each word arrives as itself:

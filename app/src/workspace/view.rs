@@ -78,7 +78,7 @@ use super::changes_panel::{ChangesPanelState, Editor, HunkRead};
 use super::closing::{self, Close, Question};
 use super::crash_note::CrashNote;
 use super::finish::{Again, Finishing};
-use super::held_locks::{HeldLock, HeldLocks};
+use super::held_locks::HeldLocks;
 use super::row_content::row_name;
 use super::settings_page::SettingsState;
 use super::tab_context_menu::TabContextMenuState;
@@ -5871,28 +5871,7 @@ impl Workspace {
         let made = ctx.background().spawn({
             let path = path.clone();
             let held = self.held.clone();
-            async move {
-                crate::git::worktree::add(&repository, &path, &branch, base.as_deref())?;
-                // Locked here, before the answer lands and the tab opens, so
-                // there is no moment in which an agent is working in a
-                // checkout nothing else has been told about. And handed in
-                // from here rather than with the answer, because the answer
-                // never lands in a window closed while git was busy: this
-                // task is then the one thing left to take the lock off.
-                if let Some(lock) = HeldLock::take(&repository, &path, &branch) {
-                    held.admit(lock);
-                }
-                // On the same worker, before the tab opens rather than after
-                // it: a shell whose rc reads `.env` — `direnv`, or anything
-                // like it — reads it once, as it starts, and a copy landing a
-                // moment later is a file the agent's first run never saw. It
-                // cannot fail the checkout, which exists by now; what it has
-                // to say comes back beside it.
-                Ok::<_, crate::git::worktree::Error>(crate::git::worktree::copy_included(
-                    &repository,
-                    &path,
-                ))
-            }
+            async move { held.make_checkout(&repository, &path, &branch, base.as_deref()) }
         });
 
         ctx.spawn(made, move |workspace, made, ctx| {

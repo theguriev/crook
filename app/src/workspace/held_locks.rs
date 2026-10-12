@@ -14,12 +14,18 @@
 //! The one other place a `crook: ` lock comes off is the worktree menu, which
 //! reads one on a checkout nothing in the window is working in as left behind
 //! by a Crook that crashed; see `tab_menu::removable`.
+//!
+//! The checkouts are made here too, in [`HeldLocks::make_checkout`], since the
+//! lock is taken in the same breath as `git worktree add`. It is the one way a
+//! window makes a checkout — the worktree menu's creator and `crook tab new
+//! --worktree` both come through it — so that no way of asking for one hands
+//! an agent a checkout nobody has locked, or one without its `.env`.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use crate::git::worktree;
+use crate::git::worktree::{self, Included};
 
 /// Where a held lock is, between being taken and being taken off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +75,7 @@ impl HeldLock {
     /// `None` when git would not lock it. The checkout is made and is what
     /// was asked for, so that costs the lock and not the checkout, and is
     /// logged rather than shown.
-    pub(crate) fn take(repository: &Path, path: &Path, branch: &str) -> Option<Self> {
+    fn take(repository: &Path, path: &Path, branch: &str) -> Option<Self> {
         let reason = worktree::lock_reason(branch);
         if let Err(problem) = worktree::lock(repository, path, &reason) {
             log::warn!("{} was made but not locked: {problem}", path.display());
@@ -136,6 +142,43 @@ impl HeldLocks {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Makes a checkout of the repository `repository` is in, at `path`, on
+    /// a new `branch` from `base` — or, for `None`, from the `HEAD` of the
+    /// checkout `repository` is in — then locks it and gives it what the main
+    /// checkout's `.worktreeinclude` names, in that order: everything a
+    /// checkout Crook makes is given before a tab opens in it.
+    ///
+    /// **Blocking**: `git worktree add` and the `post-checkout` hook it runs,
+    /// the lock, and the copy. Background pool only. Whoever asked opens the
+    /// tab once this is done, and then tells [`Self::opened`] it has, which
+    /// is what holds the lock from there on.
+    ///
+    /// Fails only as `add` does. Neither the lock nor the copy can fail a
+    /// checkout that exists by the time they run: a lock git refuses is
+    /// logged, and what the copy has to say comes back in the [`Included`].
+    pub(crate) fn make_checkout(
+        &self,
+        repository: &Path,
+        path: &Path,
+        branch: &str,
+        base: Option<&str>,
+    ) -> Result<Included, worktree::Error> {
+        worktree::add(repository, path, branch, base)?;
+        // Locked here, before the answer lands and the tab opens, so there is
+        // no moment in which an agent is working in a checkout nothing else
+        // has been told about. And handed in from here rather than with the
+        // answer, because the answer never lands in a window closed while git
+        // was busy: this task is then the one thing left to take the lock off.
+        if let Some(lock) = HeldLock::take(repository, path, branch) {
+            self.admit(lock);
+        }
+        // On the same worker, before the tab opens rather than after it: a
+        // shell whose rc reads `.env` — `direnv`, or anything like it — reads
+        // it once, as it starts, and a copy landing a moment later is a file
+        // the agent's first run never saw.
+        Ok(worktree::copy_included(repository, path))
+    }
+
     /// Remembers a lock a creation has just taken, until its tab opens — or,
     /// when the window closed while git was making the checkout, takes it
     /// straight back off.
@@ -148,7 +191,7 @@ impl HeldLocks {
     ///
     /// Decided under the lock [`Self::release_all`] closes the list under, so
     /// a lock is either in the list when that runs or finds it closed.
-    pub(crate) fn admit(&self, lock: HeldLock) {
+    fn admit(&self, lock: HeldLock) {
         {
             let mut held = self.held();
             if !held.closed {

@@ -465,6 +465,15 @@ pub struct Opened {
     /// Where its shell starts: the worktree, when one was made.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// A sentence about the tab that the numbers cannot say, when there is
+    /// one: what the main checkout's `.worktreeinclude` named that the new
+    /// worktree was not given, and why.
+    ///
+    /// Left out when there is nothing to say, so an answer is the same three
+    /// fields it always was unless something did not arrive; and read with
+    /// a default, so a `crook` this new reads an older window's answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// One request: what it asks, and who asks it.
