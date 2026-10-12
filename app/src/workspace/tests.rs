@@ -31399,9 +31399,11 @@ mod agent_titles {
     }
 
     /// The order the model hands a batch over in when the title and the end
-    /// of the command arrive in one read: what the pane is running is read
-    /// off the snapshot first, and the events follow in the order they were
-    /// written. The end of the command still has to take the title back.
+    /// of the command arrive together, in one read or in two the model takes
+    /// at once: what the pane is running is read off the snapshot first, and
+    /// the events follow in the order they were written — which the emulator
+    /// keeps within one read too, handing a title over before the mark after
+    /// it. The end of the command still has to take the title back.
     #[test]
     fn the_end_of_the_command_takes_back_a_title_read_in_the_same_batch() {
         let mut harness = Harness::panel(1);
@@ -31507,6 +31509,42 @@ mod agent_titles {
         harness.type_into(pane, "\n");
 
         await_taken_back(&mut harness, pane);
+    }
+
+    /// The agent's last title and the shell's end of its command in one
+    /// read, which is how they come whenever nothing reads the pty between
+    /// them. The title has to be heard before the end that takes it back, as
+    /// it was written, and not after it as the agent saying running again.
+    ///
+    /// The command writes the marks itself, in the same `printf` as the
+    /// title, so that nothing can read between them — the bytes are the
+    /// ones a shell writes when the command ends — and its `sleep` holds the
+    /// shell's own end back.
+    #[test]
+    fn a_title_read_with_the_end_of_its_command_is_taken_back_with_it() {
+        let mut harness = Harness::panel(1);
+        let Some(pane) = super::shells::marked_shell(&mut harness) else {
+            return;
+        };
+        super::shells::await_prompt(&mut harness, pane);
+
+        harness.type_into(
+            pane,
+            "sh -c 'printf \"\\033]0;\\342\\227\\220 %s\\007\\033]133;D;137\\007\\033]133;A\\007\" \
+             \"Fix the flaky test\"; exec sleep 600'\n",
+        );
+        await_taken_back(&mut harness, pane);
+        let name = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .pane(pane)
+                .and_then(|open| open.session().derived_title.clone())
+        });
+        assert_eq!(
+            name.as_deref(),
+            Some("Fix the flaky test"),
+            "the title never arrived, so nothing was taken back"
+        );
     }
 
     /// ctrl-z: the agent is still there, stopped, and it is not running —

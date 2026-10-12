@@ -171,6 +171,50 @@ fn test_setting_the_same_title_twice_reports_it_once() {
 }
 
 #[test]
+fn test_what_the_grid_reports_before_a_mark_is_handed_over_before_it() {
+    // A program's last title and the shell's `D` after it land in one read
+    // whenever nothing reads the pty between them. The workspace takes back
+    // a running the title said when the command ends, so a title handed over
+    // after the end would say running again for a program that has gone —
+    // and for good, since it says nothing more. One read hands them over in
+    // the order they were written, as a read for each does; a bell keeps its
+    // place the same way. A title written after the mark, as a shell's
+    // prompt writes one, still comes after it.
+    let bell_and_title = "\x07\x1b]0;\u{25d0} Fix the flaky test\x07";
+    let end = "\x1b]133;D;137\x07";
+    let prompt = "\x1b]0;eugen@devbox: ~/src\x07\x1b]133;A\x07$ ";
+    let started = || {
+        let mut emulator = emulator();
+        emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07claude\r\n\x1b]133;C\x07");
+        emulator.take_events();
+        emulator
+    };
+    let order = |emulator: &mut Emulator| -> Vec<&'static str> {
+        emulator
+            .take_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                TerminalEvent::Bell => Some("bell"),
+                TerminalEvent::Title(_) => Some("title"),
+                TerminalEvent::CommandFinished { .. } => Some("finished"),
+                _ => None,
+            })
+            .collect()
+    };
+    let written = ["bell", "title", "finished", "title"];
+
+    let mut split = started();
+    for read in [bell_and_title, end, prompt] {
+        split.advance(read.as_bytes());
+    }
+    assert_eq!(order(&mut split), written, "a read for each");
+
+    let mut whole = started();
+    whole.advance(format!("{bell_and_title}{end}{prompt}").as_bytes());
+    assert_eq!(order(&mut whole), written, "all three in one read");
+}
+
+#[test]
 fn test_osc_seven_reports_the_working_directory() {
     let mut emulator = emulator();
     assert_eq!(None, emulator.working_directory());
