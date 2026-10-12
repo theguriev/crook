@@ -1064,13 +1064,14 @@ impl TerminalModel {
     ///
     /// Killing the child is what closes the pty, which is what returns the
     /// reader's blocking read; the terminal being dropped once nothing holds
-    /// it any more is what ends the writer, whatever it was waiting on. This runs on the thread that draws, so it kills
-    /// and does not wait: the exit status is a line in a log, and a child that
-    /// takes its time dying would otherwise hold the window. Nothing is leaked
-    /// by not waiting — the kill escalates to a signal nothing survives, and
-    /// the reader reports the status if it is still there to see it. The one
-    /// cost is the escalation's own quarter-second grace period, and only for a
-    /// child that ignores the first signal.
+    /// it any more is what ends the writer, whatever it was waiting on. This
+    /// runs on the thread that draws, so it kills and does not wait: the exit
+    /// status is a line in a log, and a child that takes its time dying would
+    /// otherwise hold the window. Nothing is leaked by not waiting — the kill
+    /// escalates to a signal nothing survives, and the reader reports the
+    /// status if it is still there to see it. The one cost is the escalation's
+    /// own quarter-second grace period, and only for a child that ignores the
+    /// first signal.
     fn close(&mut self, pane: PaneId) {
         let Some(session) = self.sessions.remove(&pane) else {
             return;
@@ -1328,7 +1329,8 @@ impl TerminalHandle {
         self.0.blocks()
     }
 
-    /// Runs a composed command line, reporting whether it reached the pty.
+    /// Runs a composed command line, reporting whether it was queued for the
+    /// pty — the line and its Enter together, or neither.
     ///
     /// Not [`Self::write`] with a newline stuck on the end: this is the block
     /// boundary that does not depend on the shell cooperating. The emulator is
@@ -1417,7 +1419,8 @@ impl TerminalHandle {
         })
     }
 
-    /// Puts pasted text into the shell, returning whether it was written.
+    /// Puts pasted text into the shell, returning whether it was queued for
+    /// the pty.
     ///
     /// Not `send_key` with the text as keystrokes: [`Terminal::paste`] wraps
     /// it in the bracketed-paste markers when the program has asked for them,
