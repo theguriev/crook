@@ -502,8 +502,11 @@ impl Emulator {
     /// `vte` keeps the state that spans the split, so a mark arriving one byte
     /// at a time works exactly as one arriving whole. What the grid reported
     /// in a piece — a title, a bell — goes out before the mark that ends it,
-    /// so the events come out in the order they were written however the pty
-    /// cut the stream.
+    /// so a title or a bell and a mark written after it come out in the order
+    /// they were written however the pty cut the stream. That is the whole of
+    /// the promise: a title and an OSC 6340 report or a notification in one
+    /// read can still come out in another order than two reads give them,
+    /// since the watcher keeps no note of where in a piece each one sat.
     ///
     /// The one case this cannot place exactly is a mark inside a synchronized
     /// update: `vte` buffers those bytes and applies them when the update
