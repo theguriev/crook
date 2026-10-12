@@ -4606,7 +4606,11 @@ mod tests {
         else {
             panic!("a shell alone opens the window");
         };
-        assert_eq!(overrides.shell, Some(PathBuf::from("/opt/fish")));
+        // Compared as `absolute` spells it: a path with a directory in it is
+        // made whole, and on Windows a whole `/opt/fish` is on the drive Crook
+        // was started from, which a literal cannot know.
+        let named = std::path::absolute("/opt/fish").expect("a full path");
+        assert_eq!(overrides.shell, Some(named));
         // A snapshot with a shell named opens a pane for it: naming one is
         // the whole reason.
         assert!(overrides.wants_shells());
@@ -4716,11 +4720,17 @@ mod tests {
                 }
             }
         );
-        // A short flag after it is a flag, not a page.
-        assert_eq!(
-            window_overrides(&["--settings", "-e", "htop"]).settings,
-            Some(None)
-        );
+        // A short flag after it is a flag, not a page. Read as a page, `-e`
+        // would leave `htop` to be refused as an argument nobody has heard
+        // of; Windows refuses `-e` itself, and that refusal naming `-e` is
+        // the same proof there that the window is everywhere else.
+        let dash_e = ["--settings", "-e", "htop"];
+        if cfg!(windows) {
+            let complaint = format!("{:#}", parse(&dash_e).expect_err("no `exec` on Windows"));
+            assert!(complaint.contains("`-e`"), "{complaint}");
+        } else {
+            assert_eq!(window_overrides(&dash_e).settings, Some(None));
+        }
         assert_eq!(
             parse(&["--settings", "-V"]).expect("valid"),
             Startup::Answered
