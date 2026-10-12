@@ -1253,7 +1253,8 @@ them — the checks are what `-d` stood in for. Three gestures reach it:
   repository, and closing it would end the main checkout and every task beside this one. It is
   refused, in a sentence naming the pane, while an agent there is running or waiting on an
   answer or a command is open in its shell — and, in a sentence naming it, over a checkout with
-  a submodule checked out in it, however clean, which git removes only when forced. The panes
+  a submodule checked out in it, however clean, or still holding the repository of one that was
+  deinitialised or `git rm`ed there, which git removes only when forced. The panes
   close first — a shell sitting in a directory keeps Windows from deleting it — and since the
   menu hung off a row that is now gone, it moves to a tab in the main checkout and says what
   happened under the list.
@@ -1262,9 +1263,11 @@ them — the checks are what `-d` stood in for. Three gestures reach it:
   remote, since one that is elsewhere is not lost — and the modified or untracked files the
   forced removal throws away, six of each by name and the rest counted, over a button that
   says "for good" and is never Enter's. The branch is deleted only if its tip is still the one
-  those commits were counted from. It names the commits only a submodule checked out in the
-  checkout holds too, on none of that submodule's remotes: its repository lives in the
-  checkout's own git directory, and the forced removal deletes it.
+  those commits were counted from. It names the commits only a submodule of the checkout holds
+  too, checked out or only kept, and counts its stashes: its repository lives in the checkout's
+  own git directory, and the forced removal deletes it. A commit counts when nothing says a
+  remote has it: no remote-tracking branch reaches it, no tag does — a clone fetches every tag
+  its remote has — and it is not a commit a shallow clone's history stops at.
 
 What a question says is what its press does, however long it was up. It stays up while an agent
 finishes — that is what lights its button — and an agent's last act is often a file or a

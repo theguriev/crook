@@ -393,10 +393,11 @@ pub(super) enum Sweep {
         going: Vec<Going>,
         /// The branches of the ones being left alone.
         kept: Vec<String>,
-        /// Those of [`Self::Ready::kept`] left alone only because a submodule
-        /// is checked out in them: nothing in them is work, and git will not
-        /// remove them unforced — which is a reason of its own to give,
-        /// since "there is work in it" would not be true.
+        /// Those of [`Self::Ready::kept`] left alone only because of a
+        /// submodule — checked out in them, or its repository still kept
+        /// there: nothing in them is work, and git will not remove them
+        /// unforced — which is a reason of its own to give, since "there is
+        /// work in it" would not be true.
         submodules: Vec<String>,
     },
     /// The button has been pressed and the checkouts are going, one at a time.
@@ -1943,12 +1944,17 @@ fn tidying(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     }
     // Said here rather than found out by pressing: the press would only have
     // git refuse them, one by one, and send the person to the log for why.
+    // "Holds", not "has checked out": a submodule deinitialised in a checkout
+    // leaves its repository there, and git refuses over that too.
     if !submodules.is_empty() {
-        let have = if submodules.len() == 1 { "has" } else { "have" };
+        let hold = if submodules.len() == 1 {
+            "holds"
+        } else {
+            "hold"
+        };
         column.add_child(note(
             format!(
-                "{} {have} a submodule checked out, and git removes a checkout like that only \
-                 when forced.",
+                "{} {hold} a submodule, and git removes a checkout like that only when forced.",
                 named(submodules)
             ),
             ui,

@@ -1341,7 +1341,9 @@ fn an_ignored_directory_is_deleted_by_a_removal_git_never_objects_to() {
             ignored: 1,
             stranded: 0,
             submodules: 0,
+            keeps_modules: false,
             unpushed: 0,
+            stashed: 0,
         }
     );
     // Not empty, and yet nothing git will stand in the way of: a plain removal
@@ -1391,7 +1393,9 @@ fn a_renamed_file_is_one_change_rather_than_two() {
             ignored: 1,
             stranded: 0,
             submodules: 0,
+            keeps_modules: false,
             unpushed: 0,
+            stashed: 0,
         }
     );
 }
@@ -1471,6 +1475,7 @@ fn a_commit_only_a_submodule_of_the_checkout_holds_is_work_a_removal_would_lose(
         local,
         Local {
             submodules: 1,
+            keeps_modules: true,
             unpushed: 1,
             ..Local::default()
         }
@@ -1480,7 +1485,9 @@ fn a_commit_only_a_submodule_of_the_checkout_holds_is_work_a_removal_would_lose(
         submodules,
         vec![Submodule {
             path: "lib".to_owned(),
+            checked_out: true,
             unpushed: 1,
+            stashed: 0,
             newest: vec![Commit {
                 id: fix[..7].to_owned(),
                 subject: "the fix, only here".to_owned(),
@@ -1561,6 +1568,229 @@ fn a_submodule_with_changes_its_superproject_is_told_to_ignore_is_still_loose_wo
         vec!["lib".to_owned()]
     );
     assert_eq!(local_work(&checkout).expect("git answered").modified, 1);
+}
+
+/// Runs `drop` in `checkout`, which takes its `lib` out of the tree once an
+/// agent has committed in it, and answers the commit.
+fn fix_then_drop_the_submodule(checkout: &Path, message: &str, drop: &[&str]) -> String {
+    let fix = fix_in_the_submodule(checkout, message);
+    git(checkout, drop);
+    assert!(
+        !checkout.join("lib/.git").exists(),
+        "`git {}` left the submodule checked out",
+        drop.join(" ")
+    );
+    fix
+}
+
+#[test]
+fn a_submodule_no_longer_checked_out_still_has_its_repository_in_the_checkout() {
+    // `deinit` empties the submodule's directory and `git rm` takes it out of
+    // the tree, and neither touches the repository `submodule update --init`
+    // cloned into the checkout's git directory: the commits made there are
+    // still there, the forced removal still deletes them, and git still
+    // refuses a plain one — it looks for that directory before it looks at
+    // what is checked out. Nothing in the tree says so any more.
+    if without_git("a_submodule_no_longer_checked_out_still_has_its_repository_in_the_checkout") {
+        return;
+    }
+    let ways: [&[&str]; 2] = [
+        &["submodule", "deinit", "--force", "--quiet", "lib"],
+        &["rm", "--quiet", "lib"],
+    ];
+    for (n, drop) in ways.into_iter().enumerate() {
+        let scratch = ScratchDir::new(&format!("submodule-dropped-{n}"));
+        let (repo, checkout) = repo_with_a_submodule(&scratch);
+        let fix = fix_then_drop_the_submodule(&checkout, "the fix, left behind", drop);
+        if drop[0] == "rm" {
+            git(&checkout, &["commit", "--no-verify", "-m", "no more lib"]);
+            assert!(git(&checkout, &["status", "--porcelain", "--ignored"]).is_empty());
+        }
+
+        let (local, submodules) = local_work_with_submodules(&checkout).expect("git answered");
+        assert!(
+            local.blocks_removal() && local.holds_work(),
+            "`git {}` hid the submodule: {local:?}",
+            drop.join(" ")
+        );
+        assert_eq!(
+            (local.submodules, local.keeps_modules, local.unpushed),
+            (1, true, 1)
+        );
+        assert_eq!(
+            submodules,
+            vec![Submodule {
+                path: "lib".to_owned(),
+                checked_out: false,
+                unpushed: 1,
+                stashed: 0,
+                newest: vec![Commit {
+                    id: fix[..7].to_owned(),
+                    subject: "the fix, left behind".to_owned(),
+                }],
+            }]
+        );
+        let Err(refused) = remove(&repo, &checkout, false) else {
+            panic!("git removed a checkout keeping a submodule's repository without force");
+        };
+        assert!(
+            refused.to_string().contains("submodules"),
+            "git refused for another reason: {refused}"
+        );
+    }
+}
+
+#[test]
+fn an_empty_modules_directory_is_still_one_git_refuses_over() {
+    // git's refusal asks whether the directory is there, not what is in it,
+    // so a checkout whose submodule repositories have all gone from it is one
+    // a plain removal still will not take.
+    if without_git("an_empty_modules_directory_is_still_one_git_refuses_over") {
+        return;
+    }
+    let scratch = ScratchDir::new("submodule-empty-modules");
+    let (repo, checkout) = repo_with_a_submodule(&scratch);
+    fix_then_drop_the_submodule(
+        &checkout,
+        "the fix, gone with its repository",
+        &["submodule", "deinit", "--force", "--quiet", "lib"],
+    );
+    let modules = checkout.join(git(&checkout, &["rev-parse", "--git-path", "modules"]));
+    std::fs::remove_dir_all(modules.join("lib")).expect("the repository is deleted");
+    assert!(modules.is_dir());
+
+    let (local, submodules) = local_work_with_submodules(&checkout).expect("git answered");
+    assert_eq!(
+        local,
+        Local {
+            keeps_modules: true,
+            ..Local::default()
+        }
+    );
+    assert!(local.blocks_removal() && !local.holds_work());
+    assert!(submodules.is_empty());
+    assert!(remove(&repo, &checkout, false).is_err());
+}
+
+#[test]
+fn a_tag_the_submodule_was_cloned_with_is_not_work_of_the_checkout() {
+    // A clone fetches every tag its remote has, a release tagged off every
+    // branch among them: the commit is on the remote, and nobody made it in
+    // the checkout — whether the submodule is on a branch beside it or checked
+    // out at the tag itself.
+    if without_git("a_tag_the_submodule_was_cloned_with_is_not_work_of_the_checkout") {
+        return;
+    }
+    let scratch = ScratchDir::new("submodule-tag");
+    let lib = repo_with_a_commit(&scratch, "lib");
+    git(&lib, &["switch", "--quiet", "--detach"]);
+    commit(&lib, "release.txt", "built\n", "release 1.0 (built)");
+    git(&lib, &["tag", "v1.0"]);
+    git(&lib, &["switch", "--quiet", "main"]);
+    let (_, checkout) = superproject_of_lib(&scratch);
+    git_with_local_submodules(&checkout, &["submodule", "update", "--init", "--quiet"]);
+
+    let read = |what: &str| {
+        let (local, submodules) = local_work_with_submodules(&checkout).expect("git answered");
+        assert_eq!(
+            (local.unpushed, local.holds_work()),
+            (0, false),
+            "{what}: {submodules:?}"
+        );
+        assert!(
+            local.blocks_removal(),
+            "{what}: git refuses it all the same"
+        );
+    };
+    read("on the commit the superproject points at");
+    // Pointed at with a commit of the checkout's own, so that the
+    // superproject has nothing modified to report either.
+    git(
+        &checkout.join("lib"),
+        &["switch", "--quiet", "--detach", "v1.0"],
+    );
+    git(&checkout, &["add", "lib"]);
+    git(
+        &checkout,
+        &["commit", "--no-verify", "-m", "point at the release"],
+    );
+    read("at the tag");
+}
+
+/// `path` as a `file://` URL, which is what makes git clone it the way it
+/// would clone a remote: from a plain path it copies the repository whole,
+/// and `--depth` is ignored.
+fn file_url(path: &Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    match path.starts_with('/') {
+        true => format!("file://{path}"),
+        false => format!("file:///{path}"),
+    }
+}
+
+#[test]
+fn the_commit_a_shallow_submodule_was_fetched_at_is_not_work_of_the_checkout() {
+    // `git submodule update --depth 1` (or `shallow = true`) fetches the
+    // commit the superproject points at by name, and once the remote has
+    // moved past it no remote-tracking branch reaches it in a history that
+    // stops there. It came from the remote all the same; a commit made on
+    // top of it did not.
+    if without_git("the_commit_a_shallow_submodule_was_fetched_at_is_not_work_of_the_checkout") {
+        return;
+    }
+    let scratch = ScratchDir::new("submodule-shallow");
+    let lib = repo_with_a_commit(&scratch, "lib");
+    commit(&lib, "second.txt", "two\n", "second");
+    let (_, checkout) = superproject_of_lib(&scratch);
+    commit(&lib, "third.txt", "three\n", "third, past the pin");
+    git(&checkout, &["config", "submodule.lib.url", &file_url(&lib)]);
+    git_with_local_submodules(
+        &checkout,
+        &["submodule", "update", "--init", "--depth", "1", "--quiet"],
+    );
+    let inside = checkout.join("lib");
+    assert_eq!(
+        git(&inside, &["rev-parse", "--is-shallow-repository"]),
+        "true"
+    );
+
+    let local = local_work(&checkout).expect("git answered");
+    assert_eq!((local.unpushed, local.holds_work()), (0, false));
+
+    commit(&inside, "fix.txt", "fixed\n", "the fix, on top");
+    let local = local_work(&checkout).expect("git answered");
+    assert_eq!((local.unpushed, local.holds_work()), (1, true));
+}
+
+#[test]
+fn a_stash_made_in_a_submodule_is_work_the_removal_would_lose() {
+    // The superproject's stash is shared by every checkout of it; a
+    // submodule's is a ref of the submodule's repository, which the forced
+    // removal deletes. The stash leaves nothing behind for status to see.
+    if without_git("a_stash_made_in_a_submodule_is_work_the_removal_would_lose") {
+        return;
+    }
+    let scratch = ScratchDir::new("submodule-stash");
+    let (_, checkout) = repo_with_a_submodule(&scratch);
+    git_with_local_submodules(&checkout, &["submodule", "update", "--init", "--quiet"]);
+    let inside = checkout.join("lib");
+    write(&inside.join("tracked.txt"), "half done\n");
+    git(&inside, &["stash", "--quiet"]);
+    assert!(git(&checkout, &["status", "--porcelain", "--ignored"]).is_empty());
+
+    let (local, submodules) = local_work_with_submodules(&checkout).expect("git answered");
+    assert_eq!((local.stashed, local.unpushed), (1, 0));
+    assert!(
+        local.holds_work(),
+        "a stash only the submodule holds is work"
+    );
+    assert_eq!(
+        submodules
+            .iter()
+            .map(|submodule| (submodule.path.as_str(), submodule.stashed))
+            .collect::<Vec<_>>(),
+        [("lib", 1)]
+    );
 }
 
 // --- the deadline --------------------------------------------------------------

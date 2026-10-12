@@ -39,9 +39,10 @@
 //!    uses. Finish never forces, so a checkout holding modified or untracked
 //!    files, or commits on no branch, is one Finish will not take and says
 //!    so; Discard forces, and its second question has named what that loses.
-//!    So is one with a submodule checked out in it, however clean: git
-//!    removes that only when forced, and the force deletes the submodule's
-//!    repository with the checkout — so Discard's questions name the commits
+//!    So is one with a submodule checked out in it, however clean, or one
+//!    still keeping the repository of a submodule that was: git removes that
+//!    only when forced, and the force deletes the submodule's repository with
+//!    the checkout — so Discard's questions name the commits and stashes
 //!    only a submodule holds as they name the branch's.
 //! 3. The branch goes if the proof holds — or, for Discard, whether or not it
 //!    does, provided it has not moved since its commits were counted.
@@ -155,8 +156,9 @@ pub(super) struct Plan {
     /// The commits only the branch holds, newest first, when it has not
     /// landed: what deleting it loses.
     pub(super) lost: Vec<Commit>,
-    /// The submodules checked out in it, with the commits only each holds:
-    /// what removing the checkout loses besides its files.
+    /// The submodules whose repositories go with it, checked out or only
+    /// kept, with the commits and stashes only each holds: what removing the
+    /// checkout loses besides its files.
     pub(super) submodules: Vec<Submodule>,
 }
 
@@ -202,9 +204,9 @@ impl Plan {
     /// compared.
     ///
     /// Discard's questions name those commits, the loose files and the
-    /// commits only a submodule holds, and its press deletes the branch only
-    /// from the tip they were counted from, so for Discard all of it is
-    /// compared.
+    /// commits and stashes only a submodule holds, and its press deletes the
+    /// branch only from the tip they were counted from, so for Discard all of
+    /// it is compared.
     ///
     /// The other checkouts are left out: one made or removed beside this one
     /// changes nothing either question says.
@@ -368,27 +370,49 @@ pub(super) fn refusal(workspace: &Workspace, plan: &Plan, discard: bool) -> Opti
     // Nothing in it is work, and git still will not remove it unforced: said
     // here, before a pane closes, rather than by git once the tabs have gone.
     if !discard && plan.local.blocks_removal() {
-        let paths: Vec<String> = plan
-            .submodules
-            .iter()
-            .map(|submodule| submodule.path.clone())
-            .collect();
-        let (which, are) = match paths.len() {
-            1 => ("The submodule", "is"),
-            _ => ("The submodules", "are"),
-        };
         return Some(format!(
-            "{which} {} {are} checked out in it, and git removes a checkout like that only when \
-             forced. Finish leaves it where it is; Discard forces it.",
-            named(&paths)
+            "{}, and git removes a checkout like that only when forced. Finish leaves it where it \
+             is; Discard forces it.",
+            in_the_way(&plan.submodules)
         ));
     }
     None
 }
 
+/// What about a checkout's submodules has git refuse to remove it unforced,
+/// as the start of a sentence: the ones checked out in it, or else the ones
+/// whose repositories it still keeps, or else the directory git keeps them
+/// in, which it refuses over even empty.
+fn in_the_way(submodules: &[Submodule]) -> String {
+    let paths = |checked_out: bool| -> Vec<String> {
+        submodules
+            .iter()
+            .filter(|submodule| submodule.checked_out == checked_out)
+            .map(|submodule| submodule.path.clone())
+            .collect()
+    };
+    let (checked_out, kept) = (paths(true), paths(false));
+    match (checked_out.len(), kept.len()) {
+        (1, _) => format!("The submodule {} is checked out in it", named(&checked_out)),
+        (0, 0) => "git keeps a directory of submodules for it".to_owned(),
+        (0, 1) => format!(
+            "The repository of the submodule {} is still in it",
+            named(&kept)
+        ),
+        (0, _) => format!(
+            "The repositories of the submodules {} are still in it",
+            named(&kept)
+        ),
+        _ => format!(
+            "The submodules {} are checked out in it",
+            named(&checked_out)
+        ),
+    }
+}
+
 /// What in a checkout a plain removal would refuse over or lose, in a
-/// phrase: `2 modified, 1 untracked`, and any commits on no branch or only in
-/// a submodule.
+/// phrase: `2 modified, 1 untracked`, and any commits on no branch, or
+/// commits or stashes only in a submodule.
 fn work_in(local: Local) -> String {
     let mut parts = Vec::new();
     if local.modified > 0 {
@@ -407,22 +431,38 @@ fn work_in(local: Local) -> String {
         1 => parts.push("1 commit only a submodule holds".to_owned()),
         unpushed => parts.push(format!("{unpushed} commits only its submodules hold")),
     }
+    match local.stashed {
+        0 => {}
+        1 => parts.push("1 stash only a submodule holds".to_owned()),
+        stashed => parts.push(format!("{stashed} stashes only its submodules hold")),
+    }
     parts.join(", ")
 }
 
-/// The commits only `submodule` holds, in the line the first of Discard's
-/// questions gives them.
-fn unpushed_summary(submodule: &Submodule) -> String {
+/// Whether `submodule` holds anything that goes with it and nowhere else.
+fn holds_anything(submodule: &&Submodule) -> bool {
+    submodule.unpushed > 0 || submodule.stashed > 0
+}
+
+/// The commits and stashes only `submodule` holds, in the line the first of
+/// Discard's questions gives them.
+fn submodule_summary(submodule: &Submodule) -> String {
+    let mut held = Vec::new();
     match submodule.unpushed {
-        1 => format!(
-            "1 commit only the submodule {} holds will be lost.",
-            submodule.path
-        ),
-        unpushed => format!(
-            "{unpushed} commits only the submodule {} holds will be lost.",
-            submodule.path
-        ),
+        0 => {}
+        1 => held.push("1 commit".to_owned()),
+        unpushed => held.push(format!("{unpushed} commits")),
     }
+    match submodule.stashed {
+        0 => {}
+        1 => held.push("1 stash".to_owned()),
+        stashed => held.push(format!("{stashed} stashes")),
+    }
+    format!(
+        "{} only the submodule {} holds will be lost.",
+        held.join(" and "),
+        submodule.path
+    )
 }
 
 /// The sentence about the branch on the first question.
@@ -515,8 +555,8 @@ pub(super) fn render(
             if local.stranded > 0 {
                 column.add_child(note(stranded_summary(local.stranded), ui));
             }
-            for submodule in plan.submodules.iter().filter(|s| s.unpushed > 0) {
-                column.add_child(note(unpushed_summary(submodule), ui));
+            for submodule in plan.submodules.iter().filter(holds_anything) {
+                column.add_child(note(submodule_summary(submodule), ui));
             }
             if local.modified + local.untracked + local.ignored > 0 {
                 column.add_child(note(local_summary(&local), ui));
@@ -600,6 +640,20 @@ fn losses(plan: &Plan) -> Vec<String> {
                 submodule.unpushed - submodule.newest.len()
             ));
         }
+    }
+    // A stash in a submodule is that submodule's, not the superproject's,
+    // which every checkout of it shares: it goes with the repository.
+    for submodule in plan.submodules.iter().filter(|s| s.stashed > 0) {
+        lines.push(match submodule.stashed {
+            1 => format!(
+                "1 stash in the submodule {} goes with the checkout.",
+                submodule.path
+            ),
+            stashed => format!(
+                "{stashed} stashes in the submodule {} go with the checkout.",
+                submodule.path
+            ),
+        });
     }
     if !plan.loose.is_empty() {
         lines.push("Not committed, and going with the checkout:".to_owned());
@@ -709,7 +763,8 @@ pub(super) fn carry_out(
 /// since, which git would refuse with the tabs already closed. For Discard,
 /// any file or commit its second question did not name — a file already
 /// named that has changed since is still the file it named — and any commit
-/// that only the branch, or only a submodule, holds now and did not then.
+/// that only the branch, or only a submodule, holds now and did not then,
+/// and any stash a submodule holds that it did not count.
 /// For both, more ignored files than the question counted: either removal
 /// deletes them without git saying a word, so the count on the question is
 /// all the warning they get — and a `.env` or a first `target/` written by
@@ -728,7 +783,13 @@ fn appeared_since(repository: &Path, plan: &Plan, discard: bool) -> Option<Strin
         return Some(format!("there is work in it now — {}", work_in(local)));
     }
     if !discard && local.blocks_removal() {
-        return Some("a submodule is checked out in it now".to_owned());
+        let why = in_the_way(&submodules);
+        let why = why
+            .strip_prefix("The ")
+            .map_or_else(|| why.clone(), |rest| format!("the {rest}"));
+        return Some(format!(
+            "{why} now, and git removes a checkout like that only when forced"
+        ));
     }
     if local.ignored > plan.local.ignored {
         return Some(format!(
@@ -745,11 +806,8 @@ fn appeared_since(repository: &Path, plan: &Plan, discard: bool) -> Option<Strin
             "a commit on no branch appeared in it after the question named what goes".to_owned(),
         );
     }
-    if let Some(path) = unpushed_since(&plan.submodules, &submodules) {
-        return Some(format!(
-            "a commit only the submodule {path} holds appeared in it after the question named \
-             what goes"
-        ));
+    if let Some(why) = held_since(&plan.submodules, &submodules) {
+        return Some(why);
     }
     let loose = match worktree::loose_files(&checkout.path) {
         Ok(loose) => loose,
@@ -775,22 +833,34 @@ fn appeared_since(repository: &Path, plan: &Plan, discard: bool) -> Option<Strin
     None
 }
 
-/// The path of a submodule in `now` that holds a commit only it holds which
-/// `then` did not name, or more of them than `then` counted.
+/// Why a submodule in `now` holds more than `then` said it would lose, as
+/// the end of a sentence: a commit only it holds which `then` did not name,
+/// or more of them than `then` counted, or more stashes.
 ///
 /// By commit as well as by count, because an amended commit is one gone and
 /// one come, and the count stays where it was.
-fn unpushed_since<'a>(then: &[Submodule], now: &'a [Submodule]) -> Option<&'a str> {
-    now.iter()
-        .find(|submodule| {
-            let was = then.iter().find(|was| was.path == submodule.path);
-            submodule.unpushed > was.map_or(0, |was| was.unpushed)
-                || submodule
-                    .newest
-                    .iter()
-                    .any(|commit| was.is_none_or(|was| !was.newest.contains(commit)))
+fn held_since(then: &[Submodule], now: &[Submodule]) -> Option<String> {
+    now.iter().find_map(|submodule| {
+        let was = then.iter().find(|was| was.path == submodule.path);
+        let path = &submodule.path;
+        let committed = submodule.unpushed > was.map_or(0, |was| was.unpushed)
+            || submodule
+                .newest
+                .iter()
+                .any(|commit| was.is_none_or(|was| !was.newest.contains(commit)));
+        if committed {
+            return Some(format!(
+                "a commit only the submodule {path} holds appeared in it after the question \
+                 named what goes"
+            ));
+        }
+        (submodule.stashed > was.map_or(0, |was| was.stashed)).then(|| {
+            format!(
+                "a stash only the submodule {path} holds appeared in it after the question \
+                 counted what goes"
+            )
         })
-        .map(|submodule| submodule.path.as_str())
+    })
 }
 
 /// What the question says while it is being carried out.

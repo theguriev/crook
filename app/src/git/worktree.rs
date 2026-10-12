@@ -118,25 +118,47 @@ pub struct Local {
     /// them, and a removal deletes it: git removes over them without a word,
     /// and the next `gc` deletes the commits.
     pub stranded: usize,
-    /// Submodules checked out in it, a submodule's own submodules among them.
+    /// Submodules whose repositories a forced removal deletes with it: each
+    /// checked out in it, a submodule's own submodules among them, and each
+    /// whose repository is still kept there with nothing checked out —
+    /// deinitialised, or `git rm`ed, after it was initialised in it.
     ///
-    /// git refuses a plain removal of a checkout holding one, however clean —
-    /// "working trees containing submodules cannot be moved or removed", on
-    /// git 2.55.0 — and a forced one deletes the submodule's repository with
-    /// the checkout: in a linked checkout `git submodule update --init`
-    /// clones it into the checkout's own git directory,
-    /// `.git/worktrees/<name>/modules`, which the removal deletes whole. A
-    /// submodule nobody initialised there is an empty directory, which git
+    /// git refuses a plain removal of a checkout with one checked out,
+    /// however clean — "working trees containing submodules cannot be moved
+    /// or removed", on git 2.55.0 — and a forced one deletes the submodule's
+    /// repository with the checkout: in a linked checkout `git submodule
+    /// update --init` clones it into the checkout's own git directory,
+    /// `.git/worktrees/<name>/modules`, which the removal deletes whole, and
+    /// neither `deinit` nor `git rm` takes it out of there again. A
+    /// submodule nobody initialised in it is an empty directory, which git
     /// removes without a word, and is not counted.
     pub submodules: usize,
-    /// Commits those submodules hold that none of their remote-tracking
-    /// branches does — on their `HEAD`, their branches or their tags, every
-    /// one of which lives in the repository the removal deletes. The
-    /// superproject cannot see them: its pointer at such a commit is an
-    /// ordinary commit of its own, pushed or not, so its status and its
-    /// branches say nothing is at stake. After a forced removal nothing
-    /// anywhere has them, `git fsck` included.
+    /// Whether the checkout's own git directory has that `modules` directory
+    /// at all. git's refusal looks for it before it looks at what is checked
+    /// out, and refuses whenever it is there — empty, or holding only the
+    /// repository of a submodule that is no longer checked out.
+    pub keeps_modules: bool,
+    /// Commits those submodules hold that none of their remotes has: on
+    /// their `HEAD` or their branches, every one of which lives in the
+    /// repository the removal deletes. The superproject cannot see them: its
+    /// pointer at such a commit is an ordinary commit of its own, pushed or
+    /// not, so its status and its branches say nothing is at stake. After a
+    /// forced removal nothing anywhere has them, `git fsck` included.
+    ///
+    /// What the remote demonstrably has is left out, as near as a repository
+    /// can tell without asking it: what its remote-tracking branches reach,
+    /// what its tags reach — a clone fetches every tag its remote has, a
+    /// release tagged off every branch among them, where a tag made by hand
+    /// in a submodule is the rare case — and the commits a shallow clone's
+    /// history stops at, which it fetched from there by name: `git submodule
+    /// update --depth 1` fetches the commit the superproject points at that
+    /// way. Counting those would warn about work nobody did.
     pub unpushed: usize,
+    /// Stashes those submodules hold. The superproject's `refs/stash` is
+    /// shared by every checkout of it, so a stash made in the checkout itself
+    /// outlives it; one made in a submodule is a ref of the submodule's
+    /// repository, and goes with it, uncommitted work and all.
+    pub stashed: usize,
 }
 
 impl Local {
@@ -148,7 +170,9 @@ impl Local {
             && self.ignored == 0
             && self.stranded == 0
             && self.submodules == 0
+            && !self.keeps_modules
             && self.unpushed == 0
+            && self.stashed == 0
     }
 
     /// Whether the checkout holds work that must not go without a person
@@ -162,21 +186,27 @@ impl Local {
     /// crying wolf that makes people stop reading warnings. Stranded commits
     /// are the opposite case: git raises no objection either, and they are
     /// somebody's work, so a sweep that tidies checkouts away must pass over
-    /// them rather than trust git to stop it. A submodule checked out is in
-    /// because git does object to it, whatever it holds.
+    /// them rather than trust git to stop it. A submodule is in because git
+    /// does object to it, whatever it holds — and so does the `modules`
+    /// directory git keeps their repositories in, whatever is checked out.
     pub fn blocks_removal(self) -> bool {
-        self.holds_work() || self.submodules > 0
+        self.holds_work() || self.submodules > 0 || self.keeps_modules
     }
 
     /// Whether anything in the checkout is somebody's work: files nobody
-    /// committed, commits on no branch, commits only its submodules hold.
+    /// committed, commits on no branch, commits or stashes only its
+    /// submodules hold.
     ///
     /// Apart from [`Self::blocks_removal`] for the one thing that blocks a
     /// removal without being work: a submodule that is clean and pushed. git
     /// refuses over it all the same, and "there is work in it" would be the
     /// wrong reason to give.
     pub fn holds_work(self) -> bool {
-        self.modified > 0 || self.untracked > 0 || self.stranded > 0 || self.unpushed > 0
+        self.modified > 0
+            || self.untracked > 0
+            || self.stranded > 0
+            || self.unpushed > 0
+            || self.stashed > 0
     }
 
     /// Counts one `git status --porcelain -z --ignored`.
@@ -610,10 +640,11 @@ fn choose_default(
 /// would delete without mentioning.
 ///
 /// **Blocking**, and the more expensive of the reads here: a `git status`
-/// that stats the working tree, the stranded commits, the index's
-/// submodules, and what only each submodule checked out holds. Call it when a
-/// person is about to be asked whether to remove a checkout, not to keep a
-/// row up to date.
+/// that stats the working tree, the stranded commits, where git keeps the
+/// checkout's submodules, the index's submodules, and what only each
+/// submodule holds — checked out, or only kept. Call it when a person is
+/// about to be asked whether to remove a checkout, not to keep a row up to
+/// date.
 pub fn local_work(worktree: &Path) -> Result<Local, Error> {
     local_work_with_submodules(worktree).map(|(local, _)| local)
 }
@@ -622,8 +653,8 @@ pub fn local_work(worktree: &Path) -> Result<Local, Error> {
 /// newest of the commits only each holds: what a question that names what a
 /// forced removal loses has to say.
 ///
-/// **Blocking**, as `local_work` is — the commits are one more read for each
-/// submodule that holds any. Background pool only.
+/// **Blocking**, as `local_work` is — two reads for each submodule, and a
+/// third, the commits, for each that holds any. Background pool only.
 pub fn local_work_with_submodules(worktree: &Path) -> Result<(Local, Vec<Submodule>), Error> {
     // A path that is not there is not a worktree, and saying so is better than
     // the "not a repository" the generic guard in `run` would produce.
@@ -659,10 +690,12 @@ pub fn local_work_with_submodules(worktree: &Path) -> Result<(Local, Vec<Submodu
     let mut local = Local::parse_status(&finished.stdout);
     local.stranded = stranded(worktree)?;
 
-    let mut submodules = Vec::new();
-    submodules_in(worktree, None, "", &mut submodules)?;
+    let modules = modules_of(worktree)?;
+    let submodules = submodules(worktree, &modules)?;
+    local.keeps_modules = modules.is_dir();
     local.submodules = submodules.len();
     local.unpushed = submodules.iter().map(|submodule| submodule.unpushed).sum();
+    local.stashed = submodules.iter().map(|submodule| submodule.stashed).sum();
     Ok((local, submodules))
 }
 
@@ -696,19 +729,27 @@ fn stranded(worktree: &Path) -> Result<usize, Error> {
         .unwrap_or(0))
 }
 
-/// One submodule checked out in a checkout, and the commits a forced removal
-/// of the checkout would take with it — see [`Local::submodules`] and
-/// [`Local::unpushed`] for why it takes them.
+/// A submodule whose repository a forced removal of a checkout deletes, and
+/// what only it holds that goes with it — see [`Local::submodules`],
+/// [`Local::unpushed`] and [`Local::stashed`] for why it goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Submodule {
     /// Where it is checked out, relative to the checkout, as git prints a
-    /// path. A submodule of a submodule is named through the one it is in.
+    /// path. One with nothing checked out is named by where git keeps its
+    /// repository instead, which is its name — the path it was added at,
+    /// unless somebody named it otherwise. A submodule of a submodule is
+    /// named through the one it is in.
     pub path: String,
-    /// How many commits it holds that none of its remote-tracking branches
-    /// does.
+    /// Whether it is checked out in the checkout, rather than only kept in
+    /// the checkout's git directory.
+    pub checked_out: bool,
+    /// How many commits it holds that none of its remotes has, as
+    /// [`Local::unpushed`] counts them.
     pub unpushed: usize,
-    /// The newest of those, newest first, and no more than [`UNPUSHED_NAMED`]
-    /// of them.
+    /// How many stashes it holds.
+    pub stashed: usize,
+    /// The newest of the commits [`Self::unpushed`] counts, newest first, and
+    /// no more than [`UNPUSHED_NAMED`] of them.
     pub newest: Vec<Commit>,
 }
 
@@ -719,25 +760,130 @@ pub struct Submodule {
 /// whole history unpushed, and that is a list nobody reads.
 pub const UNPUSHED_NAMED: usize = 6;
 
+/// How many of the commits a shallow submodule's history stops at
+/// [`held_only_in`] hands git as somewhere else.
+///
+/// A bound for the command line, which Windows caps at 32 767 characters:
+/// each is a full object id. A shallow clone's file holds one or two of
+/// them — the tips it fetched — and one over the bound is only counted as
+/// unpushed, which warns rather than loses.
+const SHALLOW_NAMED: usize = 256;
+
+/// How deep [`kept_in`] looks for a repository under a `modules` directory
+/// that is not one. A submodule named `a/b` is kept at `modules/a/b`, so the
+/// walk goes through directories that are only part of a name; nothing git
+/// makes there is anywhere near this deep.
+const KEPT_DEPTH: usize = 16;
+
+/// Where git keeps the repositories of the submodules initialised in
+/// `worktree`: the `modules` directory of its own git directory —
+/// `.git/worktrees/<name>/modules` for a linked checkout, which a removal
+/// deletes with the rest of that directory. Whether or not it is there.
+fn modules_of(worktree: &Path) -> Result<PathBuf, Error> {
+    let asked = run(
+        worktree,
+        &["rev-parse", "--git-path", "modules"].map(OsStr::new),
+        Intent::Read,
+    )?;
+    if !asked.success {
+        return Err(classify(&asked.stderr));
+    }
+    let printed = &asked.stdout;
+    let end = printed
+        .iter()
+        .rposition(|byte| !matches!(byte, b'\n' | b'\r'))
+        .map_or(0, |last| last + 1);
+    // Relative to where git ran when it is relative at all, which is the
+    // checkout: the main checkout's comes out as `.git/modules`.
+    Ok(worktree.join(path_from(&printed[..end])))
+}
+
+/// One repository [`submodules`] found, before it is asked what only it
+/// holds.
+struct Found {
+    /// What [`Submodule::path`] will say.
+    path: String,
+    /// What [`Submodule::checked_out`] will say.
+    checked_out: bool,
+    /// The repository itself.
+    git_dir: PathBuf,
+    /// Where git is run for it: where it is checked out, or the checkout for
+    /// one that is only kept.
+    work_tree: PathBuf,
+}
+
+/// Every submodule of `worktree` whose repository its forced removal
+/// deletes, with what only each holds: the ones checked out in it, and then
+/// the ones only kept — under `modules`, its git directory's, or in the git
+/// directory of a submodule checked out with one of its own.
+///
+/// Both, because they are the two things git's own refusal looks at, and
+/// neither finds all of the other's: a submodule deinitialised, or `git rm`ed
+/// once it had been initialised, has nothing checked out and its repository
+/// still under `modules`, commits made in it and all; and a submodule checked
+/// out with its `.git` a directory rather than a pointer — a repository
+/// somebody cloned into the tree and added — has nothing under `modules`,
+/// and goes with the files. One checked out with its `.git` pointing at a
+/// repository anywhere else, which the removal leaves where it is, is counted
+/// all the same: rare, and a warning too many rather than one too few.
+fn submodules(worktree: &Path, modules: &Path) -> Result<Vec<Submodule>, Error> {
+    let mut found = Vec::new();
+    checked_out_in(worktree, None, "", &mut found)?;
+
+    // A checked-out submodule's repository is usually under `modules` too,
+    // and is the same repository however it is reached: once, by where it is
+    // checked out.
+    let mut seen: HashSet<PathBuf> = found
+        .iter()
+        .map(|found| same_place(&found.git_dir))
+        .collect();
+    kept_in(modules, worktree, "", 0, &mut seen, &mut found);
+    let checked_out: Vec<(String, PathBuf)> = found
+        .iter()
+        .filter(|found| found.checked_out)
+        .map(|found| (format!("{}/", found.path), found.git_dir.join("modules")))
+        .collect();
+    for (prefix, modules) in checked_out {
+        kept_in(&modules, worktree, &prefix, 0, &mut seen, &mut found);
+    }
+
+    let mut submodules = Vec::with_capacity(found.len());
+    for found in found {
+        let Some((unpushed, stashed, newest)) = held_only_in(&found.work_tree, &found.git_dir)?
+        else {
+            continue;
+        };
+        submodules.push(Submodule {
+            path: found.path,
+            checked_out: found.checked_out,
+            unpushed,
+            stashed,
+            newest,
+        });
+    }
+    Ok(submodules)
+}
+
 /// Adds to `found` every submodule checked out in `directory` — the checkout,
 /// or a submodule in it — each followed by its own, with `prefix`, the path
 /// from the checkout to `directory` and a `/`, in front of its path.
 ///
 /// The index says which paths are submodules, as it does to git's own
-/// removal, and a submodule is checked out when it has a `.git`: one nobody
-/// initialised is the empty directory `git worktree add` left, and costs
-/// nothing more than the listing.
+/// removal, and a submodule is checked out when it has a `.git` naming a
+/// repository: one nobody initialised is the empty directory `git worktree
+/// add` left, and costs nothing more than the listing.
 ///
-/// `git_dir` is `directory`'s own `.git` when `directory` is a submodule,
+/// `git_dir` is `directory`'s repository when `directory` is a submodule,
 /// handed to git rather than left for it to find. Left to find it, git walks
 /// up from a `.git` that names no repository and answers about the
 /// superproject's; handed it, it says that it is not one — which git's
-/// removal agrees is no submodule checked out.
-fn submodules_in(
+/// removal agrees is no submodule checked out, and which comes back from
+/// here as [`Error::NotARepository`] for the caller to pass over.
+fn checked_out_in(
     directory: &Path,
     git_dir: Option<&Path>,
     prefix: &str,
-    found: &mut Vec<Submodule>,
+    found: &mut Vec<Found>,
 ) -> Result<(), Error> {
     let listed = run_in(directory, git_dir, &["ls-files", "-z", "--stage"])?;
     if !listed.success {
@@ -759,48 +905,162 @@ fn submodules_in(
         previous = Some(path);
 
         let checked_out = directory.join(path_from(path));
-        let dot_git = checked_out.join(".git");
         // Not through a link: a link where a submodule should be is nothing
         // git checked out, and one back up the tree would be a walk with no
         // end.
         let is_directory =
             std::fs::symlink_metadata(&checked_out).is_ok_and(|metadata| metadata.is_dir());
-        if !is_directory || std::fs::symlink_metadata(&dot_git).is_err() {
+        if !is_directory {
             continue;
         }
-        let Some((unpushed, newest)) = held_only_in(&checked_out, &dot_git)? else {
+        let Some(repository) = repository_of(&checked_out) else {
             continue;
         };
         let path = format!("{prefix}{}", text(path));
         let inside = format!("{path}/");
-        found.push(Submodule {
+        let before = found.len();
+        found.push(Found {
             path,
-            unpushed,
-            newest,
+            checked_out: true,
+            git_dir: repository.clone(),
+            work_tree: checked_out.clone(),
         });
-        submodules_in(&checked_out, Some(&dot_git), &inside, found)?;
+        match checked_out_in(&checked_out, Some(&repository), &inside, found) {
+            Ok(()) => {}
+            Err(Error::NotARepository) => found.truncate(before),
+            Err(other) => return Err(other),
+        }
     }
     Ok(())
 }
 
-/// What only the submodule checked out at `directory` holds, against its
-/// `.git` at `git_dir`: how many commits none of its remote-tracking branches
-/// has, and the newest of them. `None` when `git_dir` is not a repository
-/// after all.
+/// The repository `directory`'s `.git` names: the directory itself, or
+/// where the file in its place points — `gitdir: <path>`, relative to
+/// `directory` when it is not absolute, which is how git writes it for a
+/// submodule. `None` when there is no `.git` at all.
 ///
-/// Its own branches and tags count *against* it rather than for it, unlike
+/// Read here rather than left to git, which would follow it all the same,
+/// because the place it points at is what tells a repository reached from
+/// here from the same one reached under `modules`, and where a shallow one
+/// keeps the list of commits its history stops at.
+fn repository_of(directory: &Path) -> Option<PathBuf> {
+    let dot_git = directory.join(".git");
+    let metadata = std::fs::symlink_metadata(&dot_git).ok()?;
+    if !metadata.is_file() {
+        return Some(dot_git);
+    }
+    let Some(pointer) = std::fs::read(&dot_git)
+        .ok()
+        .and_then(|contents| contents.strip_prefix(b"gitdir: ").map(<[u8]>::to_vec))
+    else {
+        // Not a pointer git would follow either: handed it, git says that it
+        // is no repository.
+        return Some(dot_git);
+    };
+    let end = pointer
+        .iter()
+        .rposition(|byte| !matches!(byte, b'\n' | b'\r'))
+        .map_or(0, |last| last + 1);
+    Some(directory.join(path_from(&pointer[..end])))
+}
+
+/// `path` as one place on disk, for telling whether two paths are the same
+/// repository: canonical where it can be made so, and as it is where not —
+/// which at worst counts one repository twice.
+fn same_place(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned())
+}
+
+/// Adds to `found` every repository under `modules` that `seen` does not
+/// have, as kept rather than checked out, named by its path under `modules`
+/// after `prefix`, and then the ones under its own `modules`, where a
+/// submodule's submodules are kept.
+///
+/// A directory with a `HEAD` in it is taken for a repository, and git is the
+/// judge of whether it is one; any other is part of a name with a `/` in it,
+/// and is looked through. Links are not followed: git makes none there, and
+/// one back up the tree would be a walk with no end. A `modules` that is not
+/// there, or cannot be read, has nothing in it to find.
+fn kept_in(
+    modules: &Path,
+    work_tree: &Path,
+    prefix: &str,
+    depth: usize,
+    seen: &mut HashSet<PathBuf>,
+    found: &mut Vec<Found>,
+) {
+    if depth > KEPT_DEPTH {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(modules) else {
+        return;
+    };
+    let mut names: Vec<OsString> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.file_name())
+        .collect();
+    // The order a person reads them in, rather than the one the disk keeps.
+    names.sort();
+    for name in names {
+        let directory = modules.join(&name);
+        let path = format!("{prefix}{}", name.to_string_lossy());
+        let inside = format!("{path}/");
+        if !directory.join("HEAD").is_file() {
+            kept_in(&directory, work_tree, &inside, depth + 1, seen, found);
+            continue;
+        }
+        if seen.insert(same_place(&directory)) {
+            found.push(Found {
+                path,
+                checked_out: false,
+                git_dir: directory.clone(),
+                work_tree: work_tree.to_owned(),
+            });
+        }
+        kept_in(
+            &directory.join("modules"),
+            work_tree,
+            &inside,
+            depth + 1,
+            seen,
+            found,
+        );
+    }
+}
+
+/// What only the submodule repository at `git_dir` holds: how many commits
+/// none of its remotes has, how many stashes, and the newest of those
+/// commits. `None` when `git_dir` is not a repository after all.
+///
+/// Its own branches count *against* it rather than for it, unlike
 /// [`stranded`]'s: they live in the submodule's repository, which goes with
-/// the checkout, so a commit only they hold goes too. Only a remote is
-/// somewhere else.
-fn held_only_in(directory: &Path, git_dir: &Path) -> Result<Option<(usize, Vec<Commit>)>, Error> {
+/// the checkout, so a commit only they hold goes too. What its remote has —
+/// see [`Local::unpushed`] — is somewhere else.
+///
+/// `work_tree` is where git is told the submodule's files are, and is never
+/// looked in: a submodule's repository names its checkout in its own
+/// configuration, and once it is deinitialised or removed that names a
+/// directory that is not there, which git refuses to read even a history
+/// past.
+fn held_only_in(
+    work_tree: &Path,
+    git_dir: &Path,
+) -> Result<Option<(usize, usize, Vec<Commit>)>, Error> {
+    // Plain object ids after `--not` are on the side of what is elsewhere.
+    let mut only_here: Vec<String> = ["HEAD", "--branches", "--not", "--remotes", "--tags"]
+        .map(str::to_owned)
+        .to_vec();
+    only_here.extend(shallow_boundary(git_dir));
     // `--` because the submodule's own files are what git would otherwise
     // check `HEAD` against, and a file called `HEAD` makes it ambiguous.
-    const ONLY_HERE: [&str; 6] = ["HEAD", "--branches", "--tags", "--not", "--remotes", "--"];
+    only_here.push("--".to_owned());
+    let only_here: Vec<&str> = only_here.iter().map(String::as_str).collect();
 
     let counted = run_in(
-        directory,
+        work_tree,
         Some(git_dir),
-        &[&["rev-list", "--count"][..], &ONLY_HERE].concat(),
+        &[&["rev-list", "--count"][..], &only_here].concat(),
     )?;
     if !counted.success {
         return match classify(&counted.stderr) {
@@ -809,19 +1069,39 @@ fn held_only_in(directory: &Path, git_dir: &Path) -> Result<Option<(usize, Vec<C
         };
     }
     let unpushed = text(&counted.stdout).trim().parse().unwrap_or(0);
-    if unpushed == 0 {
-        return Ok(Some((0, Vec::new())));
-    }
 
+    // A stash is a reflog entry, one per stash; a repository nobody stashed
+    // in has no `refs/stash`, which `--ignore-missing` makes a count of none
+    // rather than an error.
+    let stashes = run_in(
+        work_tree,
+        Some(git_dir),
+        &[
+            "rev-list",
+            "--walk-reflogs",
+            "--count",
+            "--ignore-missing",
+            "refs/stash",
+            "--",
+        ],
+    )?;
+    if !stashes.success {
+        return Err(classify(&stashes.stderr));
+    }
+    let stashed = text(&stashes.stdout).trim().parse().unwrap_or(0);
+
+    if unpushed == 0 {
+        return Ok(Some((0, stashed, Vec::new())));
+    }
     let most = format!("--max-count={UNPUSHED_NAMED}");
     let logged = run_in(
-        directory,
+        work_tree,
         Some(git_dir),
         // `log.showSignature` would put gpg's lines among the commits, as it
         // would in `held_only_by`.
         &[
             &["log", "--no-show-signature", "--format=%H %s", &most][..],
-            &ONLY_HERE,
+            &only_here,
         ]
         .concat(),
     )?;
@@ -836,20 +1116,45 @@ fn held_only_in(directory: &Path, git_dir: &Path) -> Result<Option<(usize, Vec<C
             subject: subject.to_owned(),
         })
         .collect();
-    Ok(Some((unpushed, newest)))
+    Ok(Some((unpushed, stashed, newest)))
+}
+
+/// The commits a shallow repository's history stops at, from its `shallow`
+/// file, no more than [`SHALLOW_NAMED`] of them: none for a repository with
+/// its whole history, which has no such file.
+///
+/// Every one was fetched from a remote by a fetch told to stop there, so it
+/// is something the remote had — and the commit `git submodule update
+/// --depth 1` checks out is one, fetched by name, which no remote-tracking
+/// branch need reach once the remote has moved past it.
+fn shallow_boundary(git_dir: &Path) -> Vec<String> {
+    let Ok(listed) = std::fs::read_to_string(git_dir.join("shallow")) else {
+        return Vec::new();
+    };
+    listed
+        .lines()
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .take(SHALLOW_NAMED)
+        .map(str::to_owned)
+        .collect()
 }
 
 /// [`run`] as a read in `directory`, with git told its repository is
-/// `git_dir` when there is one rather than left to look for it.
+/// `git_dir` when there is one rather than left to look for it, and its
+/// files `directory`.
 fn run_in(
     directory: &Path,
     git_dir: Option<&Path>,
     args: &[&str],
 ) -> Result<super::run::Finished, Error> {
-    let mut all: Vec<OsString> = Vec::with_capacity(args.len() + 1);
+    let mut all: Vec<OsString> = Vec::with_capacity(args.len() + 2);
     if let Some(git_dir) = git_dir {
         let mut option = OsString::from("--git-dir=");
         option.push(git_dir);
+        all.push(option);
+        let mut option = OsString::from("--work-tree=");
+        option.push(directory);
         all.push(option);
     }
     all.extend(args.iter().map(OsString::from));

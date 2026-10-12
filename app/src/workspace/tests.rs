@@ -8332,7 +8332,7 @@ fn tidying_leaves_a_checkout_with_a_submodule_checked_out_and_says_why() {
     let scene = harness.frame();
     let label = git_in(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
     assert!(
-        worktree_menu_reads(&scene, &format!("{label} has a submodule checked out")),
+        worktree_menu_reads(&scene, &format!("{label} holds a submodule")),
         "the question does not say why it is left alone"
     );
     assert!(!worktree_menu_says(&scene, "There is work in it"));
@@ -9529,6 +9529,82 @@ fn a_commit_made_in_a_submodule_after_the_last_look_keeps_the_checkout() {
     assert!(checkout.is_dir(), "the checkout went");
     assert!(has_branch(&repository, &branch), "the branch went");
     assert_eq!(git_in(&lib, &["rev-parse", "more"]), later);
+}
+
+#[test]
+fn finish_leaves_a_checkout_still_keeping_a_submodule_and_its_tab_where_they_are() {
+    // `deinit` empties the submodule's directory and leaves its repository
+    // in the checkout's git directory, and git refuses a plain removal over
+    // that as it does over a submodule checked out. Nothing in the tree shows
+    // it: Finish used to find the checkout clean, close the tab, and then
+    // have git refuse.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    add_a_submodule(&repository);
+    let (checkout, pane) = task_checkout(&mut harness, tab, &store);
+    let branch = git_in(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    commit_in(&checkout, "task.txt", "the task");
+    squash_in(&repository, &branch);
+    initialise_the_submodule(&checkout);
+    git_in(
+        &checkout,
+        &["submodule", "deinit", "--force", "--quiet", "lib"],
+    );
+    assert!(!checkout.join("lib").join(".git").exists());
+
+    let scene = ask_about_the_task(&mut harness, pane, false);
+    assert!(
+        worktree_menu_reads(&scene, "The repository of the submodule lib is still in it"),
+        "the question does not say what is in the way"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::Finish);
+    harness.queue.run_until_parked();
+    assert!(harness.pane_ids().contains(&pane), "the tab closed anyway");
+    assert!(checkout.is_dir());
+    assert!(has_branch(&repository, &branch));
+}
+
+#[test]
+fn discard_counts_a_stash_only_a_submodule_holds_before_it_takes_it() {
+    // A stash made in the checkout itself is the superproject's, shared by
+    // every checkout of it; one made in a submodule is a ref of the
+    // submodule's repository, which the forced removal deletes — and it
+    // leaves the submodule clean, so nothing else says it is there.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    add_a_submodule(&repository);
+    let (checkout, pane) = task_checkout(&mut harness, tab, &store);
+    let lib = initialise_the_submodule(&checkout);
+    fs::write(lib.join("README"), "half done\n").expect("the submodule is checked out");
+    git_in(&lib, &["stash", "--quiet"]);
+
+    let scene = ask_about_the_task(&mut harness, pane, true);
+    assert!(
+        worktree_menu_reads(&scene, "1 stash only the submodule lib holds will be lost."),
+        "the first question does not count the stash"
+    );
+
+    let scene = review_the_discard(&mut harness);
+    assert!(
+        !worktree_menu_says(&scene, "Nothing is lost"),
+        "the second question says nothing is lost"
+    );
+    assert!(
+        worktree_menu_reads(
+            &scene,
+            "1 stash in the submodule lib goes with the checkout."
+        ),
+        "the second question does not name the stash"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::Discard);
+    wait_for_the_task_to_go(&mut harness);
+    assert!(!checkout.exists(), "the checkout is still there");
 }
 
 #[test]

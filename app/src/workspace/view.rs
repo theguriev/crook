@@ -6142,7 +6142,8 @@ impl Workspace {
                 // at all is kept for the same reason, one step further out.
                 Ok(local) if !local.blocks_removal() => going.push(Going { path, label, local }),
                 // Not work, and git refuses it all the same: a submodule is
-                // checked out in it. Kept, and kept apart, to say so.
+                // checked out in it, or its repository is still kept there.
+                // Kept, and kept apart, to say so.
                 Ok(local) if !local.holds_work() => {
                     submodules.push(label.clone());
                     kept.push(label);
