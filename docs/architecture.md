@@ -1243,7 +1243,13 @@ re-indents a line of Python or YAML is still work the squash does not have; a gi
 2.39, which lacks the flag, proves nothing by patch and only by ancestry. Neither proof counts
 for a branch whose own reflog records no commit made on it: a checkout nobody has committed
 in — fresh, only brought up to date, or cut from the tip of a branch that was squashed — is
-not "merged", whatever `--merged` says. A reflog is not a complete record,
+not "merged", whatever `--merged` says. Nor is one that moved off work of its own on the way:
+a branch committed on and then reset back onto the base has its tip there and a commit in its
+reflog, and that commit is on no branch — the reflog is the last thing that remembers it, and
+deleting the branch deletes the reflog. So every commit the reflog records as made on the
+branch has to be on a branch, tag or remote still, or its change has to be in what the tip or
+the base holds: copied by a rebase, replaced by an amend, or the whole branch as it stood then
+found as one commit, which is a squash. A reflog is not a complete record,
 though: a month after an amend or a rebase, `gc` expires the entry of every commit it replaced
 and leaves only the branch's creation. So a reflog git has pruned, told by a newest entry that
 no longer ends at the branch's tip, is left to the proofs, as is no reflog at all; a rebase
@@ -1293,7 +1299,8 @@ them — the checks are what `-d` stood in for. Three gestures reach it:
   happened under the list.
 - **Discard task** is the one way to delete a branch nobody proved, and it asks twice. The
   second question names the commits only that branch holds — on no other branch, tag or
-  remote, since one that is elsewhere is not lost — and the modified or untracked files the
+  remote, since one that is elsewhere is not lost — then those only its history holds, which
+  it was moved off and its reflog still remembers, and the modified or untracked files the
   forced removal throws away, six of each by name and the rest counted, over a button that
   says "for good" and is never Enter's. The branch is deleted only if its tip is still the one
   those commits were counted from. It names the commits only a submodule of the checkout holds

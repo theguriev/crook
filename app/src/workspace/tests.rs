@@ -8997,6 +8997,103 @@ fn discarding_deletes_an_unproved_branch_only_at_its_second_question_which_names
     ));
 }
 
+/// Whether `branch`'s reflog still names `commit`.
+fn reflog_names(repository: &Path, branch: &str, commit: &str) -> bool {
+    git_in(
+        repository,
+        &["log", "-g", "--format=%H", &format!("refs/heads/{branch}")],
+    )
+    .lines()
+    .any(|named| named == commit)
+}
+
+#[test]
+fn finishing_a_task_reset_back_onto_its_base_keeps_the_branch_that_remembers_its_work() {
+    // An agent commits and is told to start over: `git reset --hard` onto
+    // the base. The branch's tip is on the base and its reflog records a
+    // commit, which once read as landed — and the commit it was moved off is
+    // on no branch at all. Its reflog is the last thing that remembers it,
+    // and deleting the branch deletes that.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let base = git_in(&repository, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let (checkout, pane) = task_checkout(&mut harness, tab, &store);
+    let branch = git_in(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let abandoned = commit_in(&checkout, "task.txt", "the abandoned work");
+    git_in(&checkout, &["reset", "--hard", &base]);
+
+    let kept = format!("{branch}: not on {base} yet.");
+    let scene = ask_about_the_task(&mut harness, pane, false);
+    assert!(
+        worktree_menu_reads(&scene, &format!("Keeps {kept}")),
+        "the question does not say the branch stays"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::Finish);
+    let scene = wait_for_the_task_to_go(&mut harness);
+
+    assert!(!checkout.exists(), "the checkout is still there");
+    assert!(
+        has_branch(&repository, &branch) && reflog_names(&repository, &branch, &abandoned),
+        "the reflog that was the last to remember {abandoned} went with its branch"
+    );
+    assert!(
+        worktree_menu_reads(&scene, &format!("Kept {kept}")),
+        "the list does not say the branch was kept"
+    );
+}
+
+#[test]
+fn discarding_a_task_reset_back_onto_its_base_names_what_only_its_history_holds() {
+    // The same branch on its way out by Discard, which deletes it without a
+    // proof: every commit on its tip is on the base, and the one it was moved
+    // off is what goes with it — so that is what the two questions name.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let base = git_in(&repository, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let (checkout, pane) = task_checkout(&mut harness, tab, &store);
+    let branch = git_in(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let abandoned = commit_in(&checkout, "task.txt", "the abandoned work");
+    git_in(&checkout, &["reset", "--hard", &base]);
+
+    let scene = ask_about_the_task(&mut harness, pane, true);
+    assert!(
+        worktree_menu_reads(
+            &scene,
+            &format!("Deletes {branch}, and the 1 commit only it holds.")
+        ),
+        "the first question does not count what only the branch's history holds"
+    );
+
+    let scene = review_the_discard(&mut harness);
+    assert!(worktree_menu_reads(
+        &scene,
+        &format!("Only {branch}'s history holds these, and they go with it:")
+    ));
+    for named in [&abandoned[..7], "the abandoned work"] {
+        assert!(
+            worktree_menu_says(&scene, named),
+            "the second question does not name {named:?}"
+        );
+    }
+
+    harness.dispatch_worktree(WorktreeAction::Discard);
+    let scene = wait_for_the_task_to_go(&mut harness);
+
+    assert!(
+        !has_branch(&repository, &branch),
+        "the discarded branch is still there"
+    );
+    assert!(worktree_menu_reads(
+        &scene,
+        &format!("Deleted {branch} and the 1 commit only it held.")
+    ));
+}
+
 #[test]
 fn finishing_leaves_a_checkout_with_uncommitted_work_where_it_is() {
     // Finish never forces: a file nobody committed is work, and the

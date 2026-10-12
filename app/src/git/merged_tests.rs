@@ -623,6 +623,192 @@ fn a_patch_the_base_had_before_the_branch_left_it_proves_nothing() {
     );
 }
 
+// --- work a branch was moved off ----------------------------------------------
+
+/// Every commit `branch`'s reflog names that no branch holds any more.
+fn moved_off(repo: &Path, branch: &str) -> Vec<String> {
+    git(
+        repo,
+        &["log", "-g", "--format=%H", &format!("refs/heads/{branch}")],
+    )
+    .lines()
+    .filter(|commit| git(repo, &["branch", "--contains", commit]).is_empty())
+    .map(str::to_owned)
+    .collect()
+}
+
+#[test]
+fn a_branch_reset_back_onto_the_base_is_not_called_merged() {
+    // An agent commits, goes off the rails and is told to start over: `git
+    // reset --hard origin/main`. The tip is on main and the reflog records a
+    // commit, which is all either proof asks — and that commit is on no
+    // branch at all. The branch's reflog is the last thing that remembers it,
+    // and a branch deleted on a proof takes its reflog with it.
+    if without_git("a_branch_reset_back_onto_the_base_is_not_called_merged") {
+        return;
+    }
+    let scratch = ScratchDir::new("reset-onto-base");
+    let repo = repository(&scratch, "repo");
+    let reset = ["started-over", "caught-up"];
+    let mut abandoned = HashMap::new();
+    for branch in reset {
+        git(&repo, &["switch", "-c", branch, "main"]);
+        let work = commit(
+            &repo,
+            &format!("{branch}.txt"),
+            "the abandoned work\n",
+            "the abandoned work",
+        );
+        abandoned.insert(branch, work);
+    }
+    git(&repo, &["switch", "main"]);
+    commit(&repo, "later.txt", "main moves on\n", "later");
+    // One back where it started, the other onto where main is now.
+    git(&repo, &["switch", "started-over"]);
+    git(&repo, &["reset", "--hard", "HEAD~1"]);
+    git(&repo, &["switch", "caught-up"]);
+    git(&repo, &["reset", "--hard", "main"]);
+    git(&repo, &["switch", "main"]);
+
+    let landed = merged(&repo, MAIN, &names(&reset));
+
+    assert!(landed.is_empty(), "proved {landed:?}");
+    let tip = git(&repo, &["rev-parse", "started-over"]);
+    assert_eq!(
+        dropped(&repo, Some(MAIN), "started-over", &tip),
+        Some(vec![abandoned["started-over"].clone()]),
+        "the commit only the branch's history holds is not the one it was moved off"
+    );
+
+    // Put on a branch of its own before the reset, the work is somewhere a
+    // deletion of this one does not reach, and the proof is back.
+    git(&repo, &["branch", "kept", &abandoned["started-over"]]);
+    assert_eq!(
+        merged(&repo, MAIN, &names(&["started-over"])).get("started-over"),
+        Some(&Proof::Ancestor)
+    );
+    assert_eq!(
+        dropped(&repo, Some(MAIN), "started-over", &tip),
+        Some(Vec::new())
+    );
+}
+
+#[test]
+fn a_squashed_branch_reset_away_from_work_after_its_squash_is_not_proved() {
+    // Squashed, worked on again, and that work thrown off: the tip is the one
+    // the squash proves, and the commit after it is in nothing but the
+    // branch's reflog.
+    if without_git("a_squashed_branch_reset_away_from_work_after_its_squash_is_not_proved") {
+        return;
+    }
+    let scratch = ScratchDir::new("reset-after-squash");
+    let repo = repository(&scratch, "repo");
+    git(&repo, &["switch", "-c", "feature"]);
+    commit(&repo, "feature.txt", "the work\n", "the work");
+    let squash = squash_onto_main(&repo, "feature");
+    assert_eq!(
+        merged(&repo, MAIN, &names(&["feature"])).get("feature"),
+        Some(&Proof::Patch { commit: squash }),
+        "the squash itself was not proved, so the rest proves nothing"
+    );
+
+    git(&repo, &["switch", "feature"]);
+    commit(&repo, "feature.txt", "the work\nand more of it\n", "more");
+    git(&repo, &["reset", "--hard", "HEAD~1"]);
+    git(&repo, &["switch", "main"]);
+
+    assert_eq!(
+        merged(&repo, MAIN, &names(&["feature"])).get("feature"),
+        None
+    );
+}
+
+#[test]
+fn a_branch_rewritten_on_its_way_to_the_base_keeps_its_proof() {
+    // Every one of these moved off commits of its own before it landed, and
+    // git has pruned none of their reflogs — but each of those commits has
+    // its change in what the branch holds or the base has: an amend, a
+    // rebase before a squash or a fast-forward, a squash made by hand with
+    // `reset --soft`, and a branch squashed on main and then reset onto it to
+    // start the next thing. A proof that asked only whether the commits
+    // themselves were somewhere would take all five away.
+    if without_git("a_branch_rewritten_on_its_way_to_the_base_keeps_its_proof") {
+        return;
+    }
+    let scratch = ScratchDir::new("rewritten");
+    let repo = repository(&scratch, "repo");
+    let rewritten = ["amended", "rebased", "forwarded", "by-hand", "synced"];
+    for branch in rewritten {
+        git(&repo, &["branch", branch, "main"]);
+    }
+    git(&repo, &["switch", "amended"]);
+    commit(&repo, "amended.txt", "a first draft\n", "the work");
+    std::fs::write(repo.join("amended.txt"), "the final draft\n")
+        .expect("the scratch directory is writable");
+    git(
+        &repo,
+        &["commit", "--no-verify", "--amend", "--all", "--no-edit"],
+    );
+    for branch in ["rebased", "forwarded", "by-hand", "synced"] {
+        git(&repo, &["switch", branch]);
+        commit(&repo, &format!("{branch}-1.txt"), "one half\n", "one half");
+        commit(
+            &repo,
+            &format!("{branch}-2.txt"),
+            "the other\n",
+            "the other",
+        );
+    }
+    git(&repo, &["switch", "by-hand"]);
+    git(&repo, &["reset", "--soft", "main"]);
+    git(&repo, &["commit", "--no-verify", "-m", "both halves"]);
+
+    git(&repo, &["switch", "main"]);
+    commit(&repo, "later.txt", "main moves on\n", "later");
+    for branch in ["rebased", "forwarded"] {
+        git(&repo, &["switch", branch]);
+        git(&repo, &["rebase", "main"]);
+    }
+    // And one more after the rebase, so that what was squashed is more than
+    // the commits it moved off, and only their copies on the branch hold
+    // their change.
+    git(&repo, &["switch", "rebased"]);
+    commit(&repo, "rebased-3.txt", "and more\n", "and more");
+    git(&repo, &["switch", "main"]);
+    git(&repo, &["merge", "--ff-only", "forwarded"]);
+    let amended = squash_onto_main(&repo, "amended");
+    let rebased = squash_onto_main(&repo, "rebased");
+    let by_hand = squash_onto_main(&repo, "by-hand");
+    squash_onto_main(&repo, "synced");
+    git(&repo, &["switch", "synced"]);
+    git(&repo, &["reset", "--hard", "main"]);
+    git(&repo, &["switch", "main"]);
+    for branch in rewritten {
+        // Or nothing was moved off, and this is the case above over again.
+        assert!(
+            !moved_off(&repo, branch).is_empty(),
+            "{branch} holds every commit its reflog names"
+        );
+    }
+
+    let landed = merged(&repo, MAIN, &names(&rewritten));
+
+    assert_eq!(
+        landed.get("amended"),
+        Some(&Proof::Patch { commit: amended })
+    );
+    assert_eq!(
+        landed.get("rebased"),
+        Some(&Proof::Patch { commit: rebased })
+    );
+    assert_eq!(landed.get("forwarded"), Some(&Proof::Ancestor));
+    assert_eq!(
+        landed.get("by-hand"),
+        Some(&Proof::Patch { commit: by_hand })
+    );
+    assert_eq!(landed.get("synced"), Some(&Proof::Ancestor));
+}
+
 // --- what bounds the pass ------------------------------------------------------
 
 /// A repository whose `feature` was squashed onto main, with `after` more

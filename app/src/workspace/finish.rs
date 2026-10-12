@@ -18,10 +18,12 @@
 //!
 //! Discard is the one way past the proof, and it is two questions. The first
 //! says what goes, as Finish's does. The second names the commits that only
-//! that branch holds and the files in the checkout that would go with it —
-//! six of each by name, and how many more past that — under a button that
-//! says "for good"; and Enter answers the first and never the second, the
-//! rule the worktree menu's "Remove anyway" keeps.
+//! that branch holds, then those only its history does — ones it was moved
+//! off, which its reflog is the last thing to remember — and the files in
+//! the checkout that would go with it — six of each by name, and how many
+//! more past that — under a button that says "for good"; and Enter answers
+//! the first and never the second, the rule the worktree menu's "Remove
+//! anyway" keeps.
 //!
 //! # What finishing does
 //!
@@ -156,6 +158,11 @@ pub(super) struct Plan {
     /// The commits only the branch holds, newest first, when it has not
     /// landed: what deleting it loses.
     pub(super) lost: Vec<Commit>,
+    /// The commits only the branch's history holds — ones it was moved off,
+    /// by a reset most often — newest first, when it has not landed: what
+    /// deleting it loses beyond [`Self::lost`], with the reflog that is the
+    /// last thing to remember them.
+    pub(super) dropped: Vec<Commit>,
     /// The submodules whose repositories go with it, checked out or only
     /// kept, with the commits and stashes only each holds: what removing the
     /// checkout loses besides its files.
@@ -224,6 +231,7 @@ impl Plan {
                     && self.loose == fresh.loose
                     && self.tip == fresh.tip
                     && self.lost == fresh.lost
+                    && self.dropped == fresh.dropped
                     && self.submodules == fresh.submodules))
     }
 }
@@ -233,7 +241,7 @@ impl Plan {
 ///
 /// **Blocking**: a listing, two `git status`es, the submodules and what only
 /// each holds, the proof — a pass over the base's history — and the commits
-/// only the branch holds. Background pool only.
+/// only the branch and its history hold. Background pool only.
 ///
 /// Refused, with a sentence, for anything that is not a linked checkout
 /// under `store`: the entries are offered only there, and a checkout somebody
@@ -254,8 +262,8 @@ pub(super) fn read_plan(directory: &Path, store: &Path) -> Result<Plan, String> 
     let loose = worktree::loose_files(&checkout.path).map_err(|problem| problem.to_string())?;
     let base = crate::git::merged::base_of(directory);
 
-    let (tip, landed, lost) = match &checkout.branch {
-        None => (None, None, Vec::new()),
+    let (tip, landed, lost, dropped) = match &checkout.branch {
+        None => (None, None, Vec::new(), Vec::new()),
         Some(branch) => {
             let landed = base.as_deref().and_then(|base| {
                 crate::git::merged::merged(directory, base, std::slice::from_ref(branch))
@@ -264,7 +272,12 @@ pub(super) fn read_plan(directory: &Path, store: &Path) -> Result<Plan, String> 
             match landed {
                 // Its commits are on no other ref once it goes, but their
                 // change is on the base: nothing is lost that is not there.
-                Some(landed) => (Some(landed.tip().to_owned()), Some(landed), Vec::new()),
+                Some(landed) => (
+                    Some(landed.tip().to_owned()),
+                    Some(landed),
+                    Vec::new(),
+                    Vec::new(),
+                ),
                 None => {
                     let tip = worktree::tip_of(directory, branch)
                         .map_err(|problem| problem.to_string())?;
@@ -275,7 +288,14 @@ pub(super) fn read_plan(directory: &Path, store: &Path) -> Result<Plan, String> 
                             .map_err(|problem| problem.to_string())?,
                         None => Vec::new(),
                     };
-                    (tip, None, lost)
+                    let dropped = match &tip {
+                        Some(tip) => {
+                            worktree::held_only_by_history(directory, branch, tip, base.as_deref())
+                                .map_err(|problem| problem.to_string())?
+                        }
+                        None => Vec::new(),
+                    };
+                    (tip, None, lost, dropped)
                 }
             }
         }
@@ -290,6 +310,7 @@ pub(super) fn read_plan(directory: &Path, store: &Path) -> Result<Plan, String> 
         tip,
         landed,
         lost,
+        dropped,
         submodules,
     })
 }
@@ -472,7 +493,7 @@ fn branch_line(plan: &Plan, discard: bool) -> Option<String> {
         (Some(landed), _, _) => format!("Deletes {branch}: {}.", evidence(landed)),
         (None, Some(base), false) => format!("Keeps {branch}: not on {base} yet."),
         (None, None, false) => format!("Keeps {branch}: there is no base to check it against."),
-        (None, _, true) => match plan.lost.len() {
+        (None, _, true) => match plan.lost.len() + plan.dropped.len() {
             0 => format!("Deletes {branch}. Every commit on it is on another branch too."),
             1 => format!("Deletes {branch}, and the 1 commit only it holds."),
             lost => format!("Deletes {branch}, and the {lost} commits only it holds."),
@@ -621,6 +642,19 @@ fn losses(plan: &Plan) -> Vec<String> {
             lines.push(format!("and {} more.", plan.lost.len() - NAMED));
         }
     }
+    if let (Some(branch), None) = (&branch, &plan.landed)
+        && !plan.dropped.is_empty()
+    {
+        lines.push(format!(
+            "Only {branch}'s history holds these, and they go with it:"
+        ));
+        for commit in plan.dropped.iter().take(NAMED) {
+            lines.push(format!("{} {}", commit.id, commit.subject));
+        }
+        if plan.dropped.len() > NAMED {
+            lines.push(format!("and {} more.", plan.dropped.len() - NAMED));
+        }
+    }
     if plan.local.stranded > 0 {
         lines.push(stranded_summary(plan.local.stranded));
     }
@@ -737,7 +771,7 @@ pub(super) fn carry_out(
                 return removed;
             };
             match worktree::discard_branch(repository, branch, tip, plan.base.as_deref()) {
-                Ok(()) => match plan.lost.len() {
+                Ok(()) => match plan.lost.len() + plan.dropped.len() {
                     0 => format!("Deleted {branch}."),
                     1 => format!("Deleted {branch} and the 1 commit only it held."),
                     lost => format!("Deleted {branch} and the {lost} commits only it held."),
@@ -754,7 +788,7 @@ pub(super) fn carry_out(
 /// `None` when there is nothing.
 ///
 /// **Blocking**: a `git status` or two and, for Discard, the commits only the
-/// branch holds. Background pool only, and asked the moment before git is:
+/// branch and its history hold. Background pool only, and asked the moment before git is:
 /// the last of the three looks the module describes.
 ///
 /// For Finish, work of any kind, because its question said there was none:
@@ -763,8 +797,8 @@ pub(super) fn carry_out(
 /// since, which git would refuse with the tabs already closed. For Discard,
 /// any file or commit its second question did not name — a file already
 /// named that has changed since is still the file it named — and any commit
-/// that only the branch, or only a submodule, holds now and did not then,
-/// and any stash a submodule holds that it did not count.
+/// that only the branch holds now, or only its history or a submodule does,
+/// and did not then, and any stash a submodule holds that it did not count.
 /// For both, more ignored files than the question counted: either removal
 /// deletes them without git saying a word, so the count on the question is
 /// all the warning they get — and a `.env` or a first `target/` written by
@@ -826,6 +860,17 @@ fn appeared_since(repository: &Path, plan: &Plan, discard: bool) -> Option<Strin
         if let Some(commit) = lost.iter().find(|commit| !plan.lost.contains(commit)) {
             return Some(format!(
                 "{} is only on {branch} now, and the question did not name it",
+                commit.id
+            ));
+        }
+        let dropped =
+            match worktree::held_only_by_history(repository, branch, tip, plan.base.as_deref()) {
+                Ok(dropped) => dropped,
+                Err(problem) => return Some(problem.to_string()),
+            };
+        if let Some(commit) = dropped.iter().find(|commit| !plan.dropped.contains(commit)) {
+            return Some(format!(
+                "{} is only in {branch}'s history now, and the question did not name it",
                 commit.id
             ));
         }
