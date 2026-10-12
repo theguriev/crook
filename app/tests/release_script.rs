@@ -404,8 +404,10 @@ fn a_commit_crook_ci_never_ran_on_is_refused_with_how_to_start_a_run() {
 #[test]
 fn a_green_run_of_another_workflow_on_the_commit_is_not_crook_ci_passing_it() {
     // v0.1.21's commit has one run, its own green Release run, and no Crook CI
-    // run at all. A Commit titles run on a pull request merged without
-    // squashing is green on the commit main gets the same way.
+    // run at all. A pull request's branch fast-forwarded onto main by hand
+    // brings its green Commit titles runs to main's commit the same way.
+    // GitHub's merge buttons all make a new commit, and the pull request's
+    // runs stay on its head.
     let scratch = Scratch::new("other-workflow");
     scratch.log_in();
     scratch.run(
