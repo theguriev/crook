@@ -176,8 +176,9 @@ crook pane blocks "$id" --last 1                          # what its last comman
 `crook pane wait <id> --until <state>` blocks until the pane gets there, then prints where it
 got to:
 
-- `idle` — its agent said the work is done. The idle a new tab starts in, before its agent has
-  said anything, does not count.
+- `idle` — its agent said the work is done, or the command it was running ended without its
+  saying so. The idle a new tab starts in, before its agent has said anything, does not count,
+  and nor does the `✳` Claude Code's title shows before its first turn.
 - `needs-input` — its agent stopped for a person; printed with what it is asking.
 - `finished` — its command has ended, printed with the exit status: `finished: exit 0`. Only in
   a shell with command marks.
@@ -188,8 +189,10 @@ default 3600) passes first, or the pane closes first, it prints where the pane i
 a failure, so `crook pane wait "$id" --until finished && …` reads the way it looks. `--timeout
 0` answers at once. A tool that runs your shell commands may cut one off after a couple of
 minutes: keep `--timeout` under that limit and wait again rather than be killed mid-wait.
-`idle` and `needs-input` are only as real as what the agent reports: a Claude Code worker needs
-the hooks `crook --agent-hooks claude` prints.
+`idle` and `needs-input` are only as real as what the agent reports. A Claude Code worker without
+the hooks `crook --agent-hooks claude` prints says only what its title says — running, and idle
+when its turn ends — so a question it stops to ask reads as `idle` too, and `needs-input` never
+comes: a worker you will wait on for a question needs the hooks.
 
 `crook pane blocks <id> [--last N]` prints the pane's newest finished commands: the command line,
 what it printed (the end of it, when it is long), the exit status, how long it ran and where;

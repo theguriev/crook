@@ -1876,7 +1876,9 @@ opened it, or any pane up that chain (below).
 
 **`pane.wait`** answers when the pane gets to `until`: `idle` — its agent said so; the idle a
 pane starts in, before anything has reported, is not it, so a worker whose agent has not
-started is not taken for one that has finished — `needs-input`, `finished` or `exited`.
+started is not taken for one that has finished, and nor is the `✳` Claude Code's title wears
+from the moment it starts, which is a report only once a `◐` has said running — `needs-input`,
+`finished` or `exited`.
 `finished` is a state and not an event: nothing is running, no line is waiting for the shell's
 first prompt (a tab `tab.new` just opened has not run its command yet), and a command has been
 closed by the shell's own `D`, whose exit status the answer carries — a command's, not an empty
@@ -1920,8 +1922,10 @@ that starts and ends between two frames — `true`, `git status` — is never se
 `finished` is what names it. With `pane` it follows that one pane,
 and the stream ends after the `closed` of the pane it is anchored on — the one named, or the
 caller's own. The events come from where the workspace already applies what a pane's shell did
-(`apply_terminal_update`) and from `settle`, which every road a pane opens or closes by goes
-through: no poll, no timer, and nothing done at all while nobody watches.
+(`apply_terminal_update`), a status from `agent_reported`, which every status is written by —
+a hook's report, the title's glyph, and the end of a command taking either back — and from
+`settle`, which every road a pane opens or closes by goes through: no poll, no timer, and
+nothing done at all while nobody watches.
 
 **Kept connections.** A wait with time to wait, and a stream, keep their connection, and neither
 fits a five-second deadline or one of the eight places a question is answered in: a lead

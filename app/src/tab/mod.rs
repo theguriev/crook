@@ -175,7 +175,10 @@ pub enum StatusSource {
     /// The agent said so, at this instant.
     Agent(Instant),
     /// The command the agent was ended and took its last report back, at
-    /// this instant. See `Emulator::settle_agent` in `crook_terminal`.
+    /// this instant. See `Emulator::settle_agent` in `crook_terminal` for a
+    /// hook's report, and `Workspace::take_back_a_running_title` for a
+    /// running the title said — which a cleared title takes back too, since
+    /// that is how Claude Code leaves.
     CommandEnded(Instant),
     /// The program's terminal title said so, at this instant. See
     /// [`AgentStatus::from_title`].

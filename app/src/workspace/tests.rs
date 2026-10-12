@@ -31348,22 +31348,214 @@ mod agent_titles {
         assert_eq!(status_and_source(&harness, pane).0, AgentStatus::NeedsInput);
     }
 
-    /// An agent that exits mid-turn never sets the glyph back, so the
-    /// prompt it exits to does.
+    /// Claude Code draws `✳` from the moment it starts, before anybody has
+    /// asked it anything. That is the idle a new tab starts in, not a turn
+    /// that ended, and `crook pane wait --until idle` must not take it for
+    /// one: only a `✳` that ends a running the title said is a report.
     #[test]
-    fn the_prompt_takes_back_a_running_title() {
+    fn the_title_claude_starts_with_is_no_report() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+
+        titled(&mut harness, pane, "\u{2733} Claude Code");
+        let (status, source) = status_and_source(&harness, pane);
+        assert_eq!(status, AgentStatus::Idle);
+        assert_eq!(source, StatusSource::NoReport, "the startup title counted");
+
+        titled(&mut harness, pane, "\u{25d0} Fix the tab directory");
+        titled(&mut harness, pane, "\u{2733} Fix the tab directory");
+        let (status, source) = status_and_source(&harness, pane);
+        assert_eq!(status, AgentStatus::Idle);
+        assert!(matches!(source, StatusSource::Title(_)), "{source:?}");
+    }
+
+    /// What a running taken back looks like: idle, and said to have come from
+    /// the end of the command rather than from the title — which never said
+    /// idle in any of these.
+    fn assert_taken_back(harness: &Harness, pane: PaneId) {
+        let (status, source) = status_and_source(harness, pane);
+        assert_eq!(status, AgentStatus::Idle);
+        assert!(
+            matches!(source, StatusSource::CommandEnded(_)),
+            "{source:?}"
+        );
+    }
+
+    /// Claude Code clears its title on a clean exit. Over `ssh`, or in a
+    /// shell with no marks, that is the only word the pane gets that the
+    /// agent is gone — and a shell's own title after it, with no glyph,
+    /// says nothing either way.
+    #[test]
+    fn a_title_cleared_on_the_way_out_takes_back_its_running() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+
+        titled(&mut harness, pane, "\u{25d0} Fix the tab directory");
+        report(&mut harness, TerminalUpdate::Title(pane, None));
+        assert_taken_back(&harness, pane);
+
+        titled(&mut harness, pane, "eugen@devbox: ~/src");
+        assert_taken_back(&harness, pane);
+    }
+
+    /// The order the model hands a batch over in when the title and the end
+    /// of the command arrive in one read: what the pane is running is read
+    /// off the snapshot first, and the events follow in the order they were
+    /// written. The end of the command still has to take the title back.
+    #[test]
+    fn the_end_of_the_command_takes_back_a_title_read_in_the_same_batch() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+
+        report(&mut harness, TerminalUpdate::Running(pane, None));
+        titled(&mut harness, pane, "\u{25d0} Fix the tab directory");
+        report(
+            &mut harness,
+            TerminalUpdate::CommandFinished {
+                pane,
+                command: Some("claude".to_owned()),
+                exit: Some(137),
+                took: None,
+                ran: true,
+            },
+        );
+
+        assert_taken_back(&harness, pane);
+    }
+
+    /// A block closes when the next prompt arrives too, with no `D` before
+    /// it — a shell whose marks start prompts and do not end commands — and
+    /// what the pane runs going back to nothing is then the only word that
+    /// the command is over.
+    #[test]
+    fn the_pane_going_back_to_a_prompt_takes_back_a_running_title() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+
+        report(
+            &mut harness,
+            TerminalUpdate::Running(pane, Some("claude".to_owned())),
+        );
+        titled(&mut harness, pane, "\u{25d0} Fix the tab directory");
+        assert_eq!(status_and_source(&harness, pane).0, AgentStatus::Running);
+        report(&mut harness, TerminalUpdate::Running(pane, None));
+
+        assert_taken_back(&harness, pane);
+    }
+
+    /// An agent a shell's startup files ran, before its first prompt: the
+    /// shell marks no command for it, so nothing ends one when it exits
+    /// mid-turn, and the first prompt is the word that it has gone.
+    #[test]
+    fn the_first_prompt_takes_back_a_title_the_startup_files_left_running() {
         let mut harness = Harness::panel(1);
         let pane = harness.active_pane_ids()[0];
 
         titled(&mut harness, pane, "\u{25d0} Fix the tab directory");
         report(&mut harness, TerminalUpdate::Prompted(pane));
 
-        let (status, source) = status_and_source(&harness, pane);
-        assert_eq!(status, AgentStatus::Idle);
-        assert!(
-            matches!(source, StatusSource::CommandEnded(_)),
-            "{source:?}"
+        assert_taken_back(&harness, pane);
+    }
+
+    /// A stand-in for Claude Code mid-turn: its running title, then whatever
+    /// `then` does. `sh -c` so that the line means the same in every shell
+    /// these tests speak, fish included.
+    fn mid_turn(then: &str) -> String {
+        format!(
+            "sh -c 'printf \"\\033]0;\\342\\227\\220 %s\\007\" \"Fix the flaky test\"; {then}'\n"
+        )
+    }
+
+    /// Waits for a pane's row to say running, from the title.
+    fn await_running(harness: &mut Harness, pane: PaneId) {
+        harness.wait_for("the title never said running", |harness| {
+            let (status, source) = status_and_source(harness, pane);
+            status == AgentStatus::Running && matches!(source, StatusSource::Title(_))
+        });
+    }
+
+    /// Waits for a pane's running to be taken back, and checks what the
+    /// close and the breath read: nothing is at work in the pane any more.
+    fn await_taken_back(harness: &mut Harness, pane: PaneId) {
+        harness.wait_for("the running title was never taken back", |harness| {
+            let (status, source) = status_and_source(harness, pane);
+            status == AgentStatus::Idle && matches!(source, StatusSource::CommandEnded(_))
+        });
+        let working = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .pane(pane)
+                .expect("the pane is open")
+                .session()
+                .is_working()
+        });
+        assert!(!working, "closing the tab would still ask about it");
+    }
+
+    /// Killed, or crashed: the title is left saying running, and the shell's
+    /// end of the command is the only word that the agent has gone.
+    #[test]
+    fn an_agent_killed_mid_turn_takes_its_running_title_with_it() {
+        let mut harness = Harness::panel(1);
+        let Some(pane) = super::shells::marked_shell(&mut harness) else {
+            return;
+        };
+        super::shells::await_prompt(&mut harness, pane);
+
+        harness.type_into(pane, &mid_turn("read line; kill -9 $$"));
+        await_running(&mut harness, pane);
+        harness.type_into(pane, "\n");
+
+        await_taken_back(&mut harness, pane);
+    }
+
+    /// ctrl-z: the agent is still there, stopped, and it is not running —
+    /// the shell is back at its prompt, which ends the command as far as the
+    /// marks say, and `fg` is a command of its own.
+    #[test]
+    fn an_agent_suspended_mid_turn_takes_its_running_title_with_it() {
+        let mut harness = Harness::panel(1);
+        let Some(pane) = super::shells::marked_shell(&mut harness) else {
+            return;
+        };
+        super::shells::await_prompt(&mut harness, pane);
+
+        harness.type_into(pane, &mid_turn("exec sleep 600"));
+        await_running(&mut harness, pane);
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        harness.press("z", ctrl, "z");
+
+        await_taken_back(&mut harness, pane);
+    }
+
+    /// A clean exit in a shell with no marks, which is what a shell over
+    /// `ssh` is: no end of a command ever comes, and the title Claude Code
+    /// clears on its way out is what takes the running back.
+    #[test]
+    fn an_agent_that_exits_where_no_marks_are_takes_its_running_title_with_it() {
+        let mut harness = Harness::panel(1);
+        if !super::shells::a_shell_these_tests_speak() || !harness.start_terminals() {
+            return;
+        }
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        harness.wait_for("the shell never printed anything", |harness| {
+            !harness.terminal_text(pane).trim().is_empty()
+        });
+
+        // Held at a `read` until the row has said running, and then held at
+        // a `sleep` after the title is cleared: the command never ends, so
+        // nothing but the cleared title can be what took the running back.
+        harness.type_into(
+            pane,
+            &mid_turn("read line; printf \"\\033]0;\\007\"; exec sleep 600"),
         );
+        await_running(&mut harness, pane);
+        harness.type_into(pane, "\n");
+
+        await_taken_back(&mut harness, pane);
     }
 }
 
