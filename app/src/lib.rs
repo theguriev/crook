@@ -1607,7 +1607,7 @@ OPTIONS:
                        nothing where neither TERM_PROGRAM=Crook nor
                        CROOK_PANE_ID is set, which ssh and docker exec do not
                        pass on unless told to
-    --skill           Print the skill file that teaches a coding agent what it
+    --skill            Print the skill file that teaches a coding agent what it
                        can do from inside a pane, to save as SKILL.md where
                        the agent loads its skills
     -h, --help         Print this message
@@ -4828,6 +4828,44 @@ mod tests {
             complaint.contains("owner/name"),
             "--update-plugin with no plugin said {complaint:?}"
         );
+    }
+
+    #[test]
+    fn every_command_and_option_is_described_from_the_same_column() {
+        // The tables are read down the description column, so a row one
+        // column off is the line the eye snags on. Nothing else looks: an
+        // edit to the `--agent-hooks` row once took a space from the `--skill`
+        // row under it, and `--help` printed that row a column left of its
+        // own wrapped lines.
+        const COLUMN: usize = 23;
+        let help = help_text();
+        let start = help.find("\nCOMMANDS:\n").expect("--help has its COMMANDS");
+        let end = help
+            .find("\nEXIT STATUS:\n")
+            .expect("--help has its EXIT STATUS");
+        for line in help[start..end].lines() {
+            let indent = line.len() - line.trim_start_matches(' ').len();
+            if line.is_empty() || indent == 0 {
+                continue;
+            }
+            if indent == 4 {
+                // An entry. Its description, when it shares the line, is
+                // after a gap of two spaces or more. `pane list [--json]`
+                // reaches the column with a single space, and goes unchecked.
+                let Some(gap) = line[indent..].find("  ") else {
+                    continue;
+                };
+                let after_gap = &line[indent + gap..];
+                let description = indent + gap + after_gap.len() - after_gap.trim_start().len();
+                assert_eq!(
+                    COLUMN,
+                    line[..description].chars().count(),
+                    "{line:?} starts its description off the column"
+                );
+            } else {
+                assert_eq!(COLUMN, indent, "{line:?} is wrapped off the column");
+            }
+        }
     }
 
     #[test]
