@@ -69,6 +69,13 @@
 //! it. One pressed behind input the writer is already holding waits for that
 //! input, as it waited behind the kernel's own full queue before.
 //!
+//! Nor do they count, and neither do the other bytes the line discipline
+//! takes in place: the literal-next and discard characters, and in canonical
+//! mode the ones that edit the line not finished yet. Those go in their turn,
+//! but a ring is no fuller for them; see [`Modes::queues`]. Counting them let
+//! a line typed ahead of a busy program, and corrected with Backspace as it
+//! went, fill the count while the kernel held a few bytes.
+//!
 //! The wait is a `kqueue`, not the `select` the rest of the writer waits in:
 //! `select` calls a master writable whenever the queue has room for a byte,
 //! which it has from the child's first read to its last, and the event wanted
@@ -146,11 +153,11 @@ pub(crate) enum Next<'a> {
 /// [`Self::next`] says what to write, and [`Self::wrote`] is told what was.
 #[derive(Copy, Clone, Debug, Default)]
 pub(crate) struct Pacing {
-    /// How far into a ring unread input may reach: what has been written
+    /// How far into a ring unread input may reach: what has been queued
     /// since the count of unread input was last nothing, and in canonical
     /// mode the line that was unfinished then, which that count leaves out.
     filled: usize,
-    /// The bytes written since the last line end, the most of a line the
+    /// The bytes queued since the last line end, the most of a line the
     /// child may have left unfinished.
     unended: usize,
     /// Whether that line was given up on: see [`LONG_LINE_PATIENCE`].
@@ -201,32 +208,28 @@ impl Pacing {
     }
 
     /// Counts `written`, which [`Self::next`] said to write and the kernel
-    /// took.
+    /// took: each byte the line discipline queued, and none it took in place
+    /// — see [`Modes::queues`].
     pub(crate) fn wrote(&mut self, written: &[u8]) {
-        self.filled = self.filled.saturating_add(written.len());
-        if let [byte] = written
-            && self.modes.first_acted_on(written, self.quoting) == Some(0)
-        {
-            // Never queued. The ones that send a signal throw away what the
-            // child had not read, the unfinished line with it, unless the
-            // terminal says not to; the count of unread input says so too
-            // the next time it is asked, which is what clears `filled`.
-            if self.modes.flushes(*byte) {
-                self.unended = 0;
-                self.given_up = false;
-            }
-            return;
-        }
         for byte in written {
             let quoted = std::mem::take(&mut self.quoting);
-            if !quoted && self.modes.quotes(*byte) {
+            if quoted || self.modes.queues(*byte) {
+                self.filled = self.filled.saturating_add(1);
+                if !quoted && ends_a_line(*byte) {
+                    self.unended = 0;
+                    self.given_up = false;
+                } else {
+                    self.unended = self.unended.saturating_add(1);
+                }
+            } else if self.modes.quotes(*byte) {
                 self.quoting = true;
-            }
-            if !quoted && ends_a_line(*byte) {
+            } else if self.modes.acts_on(*byte) && self.modes.flushes(*byte) {
+                // The ones that send a signal throw away what the child had
+                // not read, the unfinished line with it, unless the terminal
+                // says not to; the count of unread input says so too the next
+                // time it is asked, which is what clears `filled`.
                 self.unended = 0;
                 self.given_up = false;
-            } else {
-                self.unended = self.unended.saturating_add(1);
             }
         }
     }
@@ -246,12 +249,17 @@ const ICANON: c_ulong = 0x0000_0100;
 const IEXTEN: c_ulong = 0x0000_0400;
 const EXTPROC: c_ulong = 0x0000_0800;
 const NOFLSH: c_ulong = 0x8000_0000;
+const VERASE: usize = 3;
+const VWERASE: usize = 4;
+const VKILL: usize = 5;
+const VREPRINT: usize = 6;
 const VINTR: usize = 8;
 const VQUIT: usize = 9;
 const VSUSP: usize = 10;
 const VSTART: usize = 12;
 const VSTOP: usize = 13;
 const VLNEXT: usize = 14;
+const VDISCARD: usize = 15;
 const VSTATUS: usize = 18;
 /// How many control characters a `struct termios` holds.
 pub(crate) const NCCS: usize = 20;
@@ -310,12 +318,18 @@ impl Modes {
         self.local & (IEXTEN | EXTPROC) == IEXTEN && self.is(VLNEXT, byte)
     }
 
+    /// Whether `byte` is the discard character, which the line discipline
+    /// drops after turning the program's output off or back on.
+    fn discards(&self, byte: u8) -> bool {
+        self.local & (IEXTEN | EXTPROC) == IEXTEN && self.is(VDISCARD, byte)
+    }
+
     /// Whether the line discipline acts on `byte`, unquoted, and queues
     /// nothing: the checks `ttyinput` makes before it looks at the room left,
     /// which end in a signal to the program or in its output stopping or
     /// starting.
     pub(crate) fn acts_on(&self, byte: u8) -> bool {
-        if self.local & EXTPROC != 0 || self.quotes(byte) {
+        if self.local & EXTPROC != 0 || self.quotes(byte) || self.discards(byte) {
             return false;
         }
         self.signals(byte)
@@ -332,6 +346,29 @@ impl Modes {
     /// Whether `byte`, acted on, also throws away the input not read yet.
     fn flushes(&self, byte: u8) -> bool {
         self.local & NOFLSH == 0 && self.signals(byte)
+    }
+
+    /// Whether the line discipline puts `byte`, unquoted, in a queue for the
+    /// program to read. It does not for the literal-next and discard
+    /// characters, nor for those it [acts on](Self::acts_on), nor in
+    /// canonical mode for the erase, kill, word erase and reprint characters,
+    /// which edit the line not finished yet or show it again: `ttyinput` takes
+    /// each of them in place, and a ring is no fuller for any number of them.
+    ///
+    /// The letter an erase character rubs out goes on counting. Whether the
+    /// unfinished line held one cannot be seen in canonical mode, since the
+    /// count of unread input leaves that line out, and a count lower than
+    /// what the kernel holds is what lets a ring wrap.
+    fn queues(&self, byte: u8) -> bool {
+        if self.local & EXTPROC != 0 {
+            return true;
+        }
+        let edits = self.canonical()
+            && (self.is(VERASE, byte)
+                || self.is(VKILL, byte)
+                || (self.local & IEXTEN != 0
+                    && (self.is(VWERASE, byte) || self.is(VREPRINT, byte))));
+        !(self.quotes(byte) || self.discards(byte) || self.acts_on(byte) || edits)
     }
 
     /// Where in `bytes` the first byte the line discipline acts on is, with

@@ -949,7 +949,10 @@ queues — `Ctrl-C`, `Ctrl-\`, `Ctrl-Z`, `Ctrl-S` and `Ctrl-Q`, and `Ctrl-T` in 
 or whatever the terminal's modes make them — never wait on the count, since they are how a
 person stops a program that has stopped reading. One pressed behind input the writer is
 already holding still waits for that input, as it waited behind the kernel's full queue
-before. See `crates/crook_terminal/src/typeahead.rs`.
+before. Neither they nor the other keys the line discipline takes in place — `Ctrl-V` and
+`Ctrl-O`, and in canonical mode `Backspace`, `Ctrl-U`, `Ctrl-W` and `Ctrl-R` — add to the
+count, so a line typed ahead of a busy program and corrected as it goes does not fill it. See
+`crates/crook_terminal/src/typeahead.rs`.
 
 The emulator's mutex is never held across a frame, or across a write. The reader takes it to
 parse, and again to build a snapshot, and publishes the `Arc` into a slot of its own before it

@@ -4,12 +4,17 @@ use super::*;
 /// looks at them.
 fn characters() -> [u8; NCCS] {
     let mut characters = [DISABLED; NCCS];
+    characters[VERASE] = 0x7f;
+    characters[VWERASE] = 0x17;
+    characters[VKILL] = 0x15;
+    characters[VREPRINT] = 0x12;
     characters[VINTR] = 0x03;
     characters[VQUIT] = 0x1c;
     characters[VSUSP] = 0x1a;
     characters[VSTART] = 0x11;
     characters[VSTOP] = 0x13;
     characters[VLNEXT] = 0x16;
+    characters[VDISCARD] = 0x0f;
     characters[VSTATUS] = 0x14;
     characters
 }
@@ -100,6 +105,88 @@ fn test_nothing_written_behind_unread_input_reaches_past_the_room() {
 
     // Once it has read it all, the count starts again.
     assert_eq!(Next::Write(b"x"), send(&mut pacing, b"x", 0, &raw()));
+}
+
+#[test]
+fn test_keys_the_line_discipline_takes_in_place_take_no_room() {
+    // `sleep` is running, canonical and reading nothing, with `ls` and Enter
+    // typed ahead of it, and the person types the next command and corrects
+    // it as they go. The kernel takes each Backspace and queues nothing for
+    // it, and the same goes for the other keys that edit a line, the quote
+    // and discard keys, and the status, stop and start keys. Counting them
+    // filled the count while the kernel held a few bytes, and the next key —
+    // and the Ctrl-C behind it — was held until `sleep` ended.
+    let mut pacing = Pacing::default();
+    assert_eq!(
+        Next::Write(b"ls\r"),
+        send(&mut pacing, b"ls\r", 0, &cooked())
+    );
+    for _ in 0..500 {
+        assert_eq!(Next::Write(b"a"), send(&mut pacing, b"a", 3, &cooked()));
+        assert_eq!(
+            Next::Write(b"\x7f"),
+            send(&mut pacing, b"\x7f", 3, &cooked())
+        );
+    }
+    for key in [
+        b"\x15", b"\x17", b"\x12", b"\x0f", b"\x14", b"\x13", b"\x11",
+    ] {
+        assert_eq!(
+            Next::Write(key),
+            send(&mut pacing, key, 3, &cooked()),
+            "{key:?}"
+        );
+    }
+    // Quoted, a Ctrl-U is a byte of the line like any other. The Ctrl-V that
+    // quotes it is not.
+    assert_eq!(
+        Next::Write(b"\x16"),
+        send(&mut pacing, b"\x16", 3, &cooked())
+    );
+    assert_eq!(
+        Next::Write(b"\x15"),
+        send(&mut pacing, b"\x15", 3, &cooked())
+    );
+
+    // The line typed ahead and the letters typed behind it are all that
+    // count. A letter rubbed out still does: see `Modes::queues`.
+    let counted = 3 + 500 + 1;
+    let fits = vec![b'b'; ROOM - counted];
+    let over = vec![b'b'; ROOM - counted + 1];
+    assert_eq!(Next::Wait, pacing.next(&over, 3, &cooked()));
+    assert_eq!(Next::Write(&fits[..]), pacing.next(&fits, 3, &cooked()));
+}
+
+#[test]
+fn test_the_keys_that_edit_a_line_are_taken_in_place_only_in_canonical_mode() {
+    let editing = [0x7f, 0x15, 0x17, 0x12];
+    for key in editing.into_iter().chain([0x0f, 0x16]) {
+        assert!(!cooked().queues(key), "{key:#x} in canonical mode");
+    }
+    // A line editor reads them as keys. The quote and discard keys are taken
+    // in every mode, as long as the extended characters are on.
+    for key in editing {
+        assert!(raw().queues(key), "{key:#x} in raw mode");
+    }
+    assert!(!raw().queues(0x16) && !raw().queues(0x0f));
+
+    // Without them, erase and kill still edit the line; nothing else does.
+    let plain = Modes::new(IXON, ISIG | ICANON, characters());
+    assert!(!plain.queues(0x7f) && !plain.queues(0x15));
+    for key in [0x17, 0x12, 0x0f, 0x16] {
+        assert!(plain.queues(key), "{key:#x} without IEXTEN");
+    }
+
+    // A line edited elsewhere is queued byte for byte, and so is anything
+    // under modes nobody could read.
+    let elsewhere = Modes::new(IXON, ISIG | ICANON | IEXTEN | EXTPROC, characters());
+    for key in editing.into_iter().chain([0x0f, 0x16, 0x03, 0x14]) {
+        assert!(elsewhere.queues(key), "{key:#x} under EXTPROC");
+        assert!(Modes::default().queues(key), "{key:#x} under unknown modes");
+    }
+    for key in [b'a', b'\r', b'\n', 0xff] {
+        assert!(cooked().queues(key), "{key:#x}");
+    }
 }
 
 #[test]

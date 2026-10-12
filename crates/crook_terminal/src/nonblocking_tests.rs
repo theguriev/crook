@@ -303,6 +303,38 @@ fn test_a_ctrl_c_behind_lines_a_busy_program_has_not_read_still_stops_it() {
 }
 
 #[test]
+fn test_a_ctrl_c_behind_a_line_corrected_ahead_of_a_busy_program_still_stops_it() {
+    // The same command, with Enter pressed ahead of it, and then the next
+    // command typed ahead too and corrected as it goes: more keys than the
+    // queue holds, though no more than a byte or two of them are ever in it,
+    // since canonical mode takes each Backspace and the letter before it out
+    // of the line. A writer on macOS that counted every key it sent held the
+    // next one, and the Ctrl-C behind it, for as long as the command ran.
+    const CORRECTED: usize = 600;
+    let mut pty = stoppable("stty erase '^?';", "");
+    let mut reader = pty.take_reader().expect("a fresh pty has its reader");
+    hear(&mut reader, "crook-ready");
+    let stopped = hearing(reader, "crook-42-stopped");
+
+    let mut writer = pty.writer().expect("a pty hands out a writer");
+    thread::spawn(move || {
+        let corrected = [&b"a"[..], b"\x7f"].repeat(CORRECTED);
+        let keys = std::iter::once(&b"\r"[..])
+            .chain(corrected)
+            .chain([&b"\x03"[..]]);
+        for key in keys {
+            if writer.write_all(key).is_err() {
+                return;
+            }
+        }
+    });
+    assert!(
+        stopped.recv_timeout(DEADLINE).is_ok(),
+        "the Ctrl-C typed behind a corrected line never reached the program"
+    );
+}
+
+#[test]
 fn test_a_ctrl_c_goes_at_once_however_much_input_is_waiting() {
     // The kernel acts on a Ctrl-C as it arrives and never queues it, so it is
     // not held back for the queue's sake — not even when as much has gone in
