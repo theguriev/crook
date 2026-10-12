@@ -427,10 +427,15 @@ Twenty features, and the page that configures them:
   CLI refuses the tool call a hook failed over, so no hook ever fails: outside Crook, with no
   terminal to report to, or with the binary gone, each one exits 0. Outside Crook means where
   neither `TERM_PROGRAM=Crook` nor `CROOK_PANE_ID` reaches, and `ssh` and `docker exec` carry
-  neither, so an agent on the far side of either reports nothing through these hooks, the
-  plugin's included, until `TERM_PROGRAM` is passed on: `SendEnv TERM_PROGRAM` in the ssh
-  client's configuration with `AcceptEnv TERM_PROGRAM` in the server's, or
-  `docker exec -e TERM_PROGRAM`.
+  neither, so an agent on the far side of either reports nothing through these command hooks,
+  the Claude Code plugin's included, until two things hold there. `TERM_PROGRAM` is passed
+  on: `SendEnv TERM_PROGRAM` in the ssh client's configuration with `AcceptEnv TERM_PROGRAM`
+  in the server's, or `docker exec -e TERM_PROGRAM`. And the hooks find a `crook` on that
+  machine, since they carry no path of their own: one on its `PATH`, or `CROOK_BIN` set there
+  to its path, as in `docker exec -e TERM_PROGRAM -e CROOK_BIN=/opt/crook/crook` for a binary
+  mounted off `PATH`. The OpenCode plugin and aider's command have no guard: they run the
+  binary by the path they were printed with wherever they are loaded, so they report over
+  `ssh` and from a container with nothing passed on.
   `--pull-request <url>` beside any status says which pull request the work is, and the row
   carries it as a chip that opens it — https only, capped, on a sequence of its own,
   `OSC 6342` — until the pane moves to another branch (a rebase is not a move); the Claude

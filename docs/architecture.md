@@ -1520,10 +1520,14 @@ command exits 0 after the report too, whatever the report did: a Crook too old t
 pane from a hook is a line of stderr in Claude Code's debug log, not a notice on every prompt
 and tool call — and GitHub Copilot CLI denies the tool call a `preToolUse` hook failed over, so
 a hook that passed a failed report on would refuse every tool of a `copilot -p` with no terminal.
-The guard is the one place the hooks fall short of the sequence: `ssh` and `docker exec` carry
-neither variable, so an agent on the far side of either reports nothing through them until
-`TERM_PROGRAM` is passed on (`SendEnv`/`AcceptEnv`, `docker exec -e TERM_PROGRAM`), while
-`crook --agent` run there by hand, which has no guard, reaches the pane as it always did. Tests in
+The guard and the lookup are where the hooks fall short of the sequence: `ssh` and
+`docker exec` carry neither variable, nor the `CROOK_BIN` a pane sets, which is a path on the
+pane's machine anyway, so an agent on the far side of either reports nothing through them until
+`TERM_PROGRAM` is passed on (`SendEnv`/`AcceptEnv`, `docker exec -e TERM_PROGRAM`) and a
+`crook` is on that side's `PATH` or `CROOK_BIN` is set there to one
+(`docker exec -e CROOK_BIN=/opt/crook/crook`). `crook --agent` run there by hand, which has no
+guard, reaches the pane as it always did, and so do the OpenCode plugin and aider's command,
+which run the binary by the path they were printed with and have no guard either. Tests in
 `agent.rs` hold the plugin's `hooks/hooks.json` to what `--agent-hooks claude` prints and run
 each of its commands under `sh`, and hold its `SKILL.md` byte for byte to `skill.md`. Codex CLI and Gemini
 CLI read the same object under their own event names, and GitHub Copilot CLI a versioned

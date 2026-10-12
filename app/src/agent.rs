@@ -30,7 +30,8 @@
 //! ones, command for command: each calls `"$CROOK_BIN"` — every pane is told
 //! its binary — behind a guard that makes it nothing outside Crook, which
 //! includes the far side of `ssh` and the inside of a container until
-//! `TERM_PROGRAM` is passed on there, and exits 0 whatever the report did,
+//! `TERM_PROGRAM` is passed on there and a `crook` is on that side's `PATH`
+//! or in its `CROOK_BIN`, and exits 0 whatever the report did,
 //! because a hook that fails can fail its agent;
 //! the tests here hold the plugin's files to what is printed and to
 //! [`SKILL`]. `codex`, `gemini` and `copilot` print the same commands under
@@ -1085,13 +1086,19 @@ fn hooks_object(events: &[(&str, &str)]) -> serde_json::Map<String, Value> {
 /// failure on refused every tool such an agent tried. What went wrong is
 /// still said on stderr, which each agent keeps in its log.
 ///
-/// The guard is also where these hooks stop short of `crook --agent` itself.
-/// The escape sequence crosses `ssh` and `docker exec`, but neither carries
-/// `TERM_PROGRAM` or `CROOK_PANE_ID`, so an agent on the far side of either,
-/// with these hooks in its settings there, reports nothing until
+/// The guard and the lookup are also where these hooks stop short of
+/// `crook --agent` itself. The escape sequence crosses `ssh` and
+/// `docker exec`, but neither carries `TERM_PROGRAM` or `CROOK_PANE_ID`, nor
+/// the `CROOK_BIN` a pane sets, which names a path on the pane's machine
+/// anyway. So an agent on the far side of either, with these hooks in its
+/// settings there, reports nothing until two things hold there.
 /// `TERM_PROGRAM` is passed on: `SendEnv TERM_PROGRAM` in the ssh client's
 /// configuration with `AcceptEnv TERM_PROGRAM` in the server's, or
-/// `docker exec -e TERM_PROGRAM`.
+/// `docker exec -e TERM_PROGRAM`. And a `crook` is on that side's `PATH`, or
+/// `CROOK_BIN` is set there to one, as in
+/// `docker exec -e TERM_PROGRAM -e CROOK_BIN=/opt/crook/crook` for a binary
+/// mounted off `PATH`, since the path `--agent-hooks` was run from is not in
+/// the hook.
 ///
 /// Spelled from the names the code gives the three variables, so renaming
 /// one without the plugin's file is its test failing rather than hooks
@@ -1368,6 +1375,55 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
             checked.push(agent.name);
         }
         assert_eq!(["claude", "codex", "gemini", "copilot"][..], checked);
+    }
+
+    #[test]
+    fn the_help_says_which_printed_hooks_the_guard_covers() {
+        // Only the command hooks carry the guard. OpenCode's plugin and
+        // aider's command run the binary by its path wherever they are
+        // loaded, so they reach the pane over ssh with nothing passed on, and
+        // a --help that said every hook `--agent-hooks` prints did nothing
+        // there sent a person to the server's sshd_config for no reason.
+        // Guard one of those two and this fails, so the help changes with it.
+        use crate::shell_integration::PANE_ID_VARIABLE;
+        let binary = Path::new("/opt/crook/bin/crook");
+        let mut guarded = Vec::new();
+        for agent in AGENTS {
+            match agent.fragment {
+                Fragment::Hooks { .. } | Fragment::Copilot { .. } => {
+                    guarded.push(format!("`{}`", agent.name));
+                }
+                Fragment::Plugin { .. } | Fragment::None(_) => {
+                    let printed = hooks_text(agent.name, binary).unwrap().text;
+                    assert!(
+                        printed.contains("/opt/crook/bin/crook")
+                            && !printed.contains("TERM_PROGRAM")
+                            && !printed.contains(PANE_ID_VARIABLE),
+                        "{} is no longer the bare path: {printed}",
+                        agent.name
+                    );
+                }
+            }
+        }
+        let help = crate::help_text()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for sentence in [
+            format!(
+                "The command hooks ({}) do nothing where neither TERM_PROGRAM=Crook nor \
+{PANE_ID_VARIABLE} is set",
+                guarded.join(", ")
+            ),
+            "the OpenCode plugin and aider's command name the binary by its path and have no \
+such guard"
+                .to_owned(),
+        ] {
+            assert!(
+                help.contains(&sentence),
+                "--help no longer says {sentence:?}"
+            );
+        }
     }
 
     #[test]
@@ -1821,8 +1877,8 @@ its `hooks` should be\n{}",
             // The far side of `ssh`, or the inside of a container: a `crook`
             // on that machine's PATH and neither variable, since neither
             // crosses by itself — nothing, as in any other terminal. With
-            // TERM_PROGRAM passed on, which is what the README tells a person
-            // to do there, that `crook` reports.
+            // TERM_PROGRAM passed on, the first of the two things the README
+            // tells a person to do there, that `crook` reports.
             assert_eq!(
                 (true, String::new(), String::new(), None),
                 run(&[("TERM", "xterm-256color"), ("PATH", path)]),
@@ -1836,6 +1892,24 @@ its `hooks` should be\n{}",
                     ("PATH", path)
                 ]),
                 "{event} over ssh with TERM_PROGRAM passed on"
+            );
+            // The second: a binary that is on no PATH there — bind-mounted
+            // into a container at a path of its own — is not found with
+            // TERM_PROGRAM alone, since the hook carries no path, and is with
+            // CROOK_BIN set there to it.
+            assert_eq!(
+                (true, String::new(), String::new(), None),
+                run(&[("TERM", "xterm-256color"), ("TERM_PROGRAM", "Crook")]),
+                "{event} in a container with crook off PATH"
+            );
+            assert_eq!(
+                (true, String::new(), String::new(), reported.clone()),
+                run(&[
+                    ("TERM", "xterm-256color"),
+                    ("TERM_PROGRAM", "Crook"),
+                    ("CROOK_BIN", binary)
+                ]),
+                "{event} in a container with crook off PATH and CROOK_BIN set"
             );
             // A pane with no binary to reach is quiet too, rather than a
             // "not found" on every prompt.
