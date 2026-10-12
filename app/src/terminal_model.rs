@@ -127,12 +127,18 @@
 //! once a second and in one task for the whole model, so the pane closes when
 //! the shell does whatever the pty is doing.
 //!
-//! The writer is not part of the residue. It holds no reference to the
-//! session at all, only its end of the queue, and the terminal being dropped
-//! closes the queue and the pty both: a write that was waiting on a child
-//! that will never read — even one whose pty an orphan is holding open — is
-//! released by that, and the thread ends. See `crook_terminal`'s
-//! `nonblocking` module for why that takes more than a blocking write on Unix.
+//! The writer is not part of the residue, save in a process short of
+//! descriptors. It holds no reference to the session at all, only its end of
+//! the queue, and the terminal being dropped closes the queue and the pty
+//! both: a write that was waiting on a child that will never read — even one
+//! whose pty an orphan is holding open — is released by that, and the thread
+//! ends. What lets the closing reach it on Unix is a pipe beside the master,
+//! which a write makes when it first has to wait. A process out of
+//! descriptors cannot make one, and the write waits on the master alone; on
+//! macOS, one with more open than `select` can watch cannot wait at all, and
+//! the write blocks on the master. Either way an orphan holding the pty open
+//! then holds the writer too — the thread and its copy of the master — until
+//! the orphan exits. See `crook_terminal`'s `nonblocking` module for both.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -1065,15 +1071,17 @@ impl TerminalModel {
     /// Ends a pane's shell and lets its reader and writer threads finish.
     ///
     /// Killing the child is what closes the pty, which is what returns the
-    /// reader's blocking read; the terminal being dropped once nothing holds
-    /// it any more is what ends the writer, whatever it was waiting on. This
-    /// runs on the thread that draws, so it kills and does not wait: the exit
-    /// status is a line in a log, and a child that takes its time dying would
-    /// otherwise hold the window. Nothing is leaked by not waiting — the kill
-    /// escalates to a signal nothing survives, and the reader reports the
-    /// status if it is still there to see it. The one cost is the escalation's
-    /// own quarter-second grace period, and only for a child that ignores the
-    /// first signal.
+    /// reader's blocking read; the terminal being dropped once nothing holds it
+    /// any more is what ends the writer, whatever it was waiting on — but for a
+    /// write that began to wait in a process short of descriptors, which an
+    /// orphan holding the pty open keeps waiting, as the module docs say under
+    /// "What a closed pane costs". This runs on the thread that draws, so it
+    /// kills and does not wait: the exit status is a line in a log, and a child
+    /// that takes its time dying would otherwise hold the window. Nothing is
+    /// leaked by not waiting — the kill escalates to a signal nothing survives,
+    /// and the reader reports the status if it is still there to see it. The
+    /// one cost is the escalation's own quarter-second grace period, and only
+    /// for a child that ignores the first signal.
     fn close(&mut self, pane: PaneId) {
         let Some(session) = self.sessions.remove(&pane) else {
             return;

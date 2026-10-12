@@ -507,8 +507,10 @@ impl Drop for Pty {
             log::debug!("Could not end the child process while closing a terminal: {error:#}");
         }
         // After the kill, which already ends a write when nothing else holds
-        // the pty open. This ends the rest: the writer is on a thread of its
-        // own and outlives this, and nothing else can reach it.
+        // the pty open. This ends the rest — all but one that could not wait
+        // on a pipe of its own, which the `nonblocking` module explains: the
+        // writer is on a thread of its own and outlives this, and nothing
+        // else can reach it.
         #[cfg(unix)]
         self.closing.close();
     }

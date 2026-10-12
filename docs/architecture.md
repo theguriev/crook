@@ -924,7 +924,10 @@ more is refused; answers are dropped oldest first past 64 KiB, since a program t
 reading can use none of them. On Unix the master is non-blocking and both halves wait in
 `poll`, the writer on a pipe the `Pty` closes as well, because a blocking write on Linux can
 stay asleep after its child has been killed and reaped — and the writer thread must end when
-its pane does.
+its pane does. It does, save for a write that began to wait in a process short of descriptors:
+out of them, so the pipe could not be made, or on macOS past what `select` can watch. That
+wait is on the master alone, and lasts as long as an orphan such as a `sleep 60 &` holds the
+pty open.
 
 The emulator's mutex is never held across a frame, or across a write. The reader takes it to
 parse, and again to build a snapshot, and publishes the `Arc` into a slot of its own before it
