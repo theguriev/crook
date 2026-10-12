@@ -487,6 +487,169 @@ fn a_finished_command_is_handed_over_only_once_its_block_can_be_read() {
     assert_ne!(BlockState::Executing, shared.snapshot().live_block.state);
 }
 
+/// Every update a model handed on, in the order it handed them.
+struct Heard(Vec<TerminalUpdate>);
+
+impl Entity for Heard {
+    type Event = ();
+}
+
+/// A model with one pane, whose bytes a test hands over as the reader thread
+/// would, and what the workspace hears of them.
+struct Batches {
+    queue: Arc<LocalQueue>,
+    app: App,
+    /// Held so the model lives as long as the test: one dropped hands nothing
+    /// on.
+    _model: ModelHandle<TerminalModel>,
+    heard: ModelHandle<Heard>,
+    shared: Arc<Shared>,
+}
+
+impl Batches {
+    /// `marks` is whether the pane's shell reports command marks, which
+    /// decides what its first prompt is. `None` where no pty can be opened.
+    fn new(marks: bool) -> Option<Self> {
+        let shared = session()?;
+        let (queue, mut app) = app();
+        let model = app.update(|ctx| ctx.add_model(TerminalModel::new));
+        let heard = app.update(|ctx| {
+            ctx.add_model(|ctx| {
+                ctx.subscribe_to_model(&model, |heard: &mut Heard, _, update, _| {
+                    heard.0.push(update.clone());
+                });
+                Heard(Vec::new())
+            })
+        });
+        let pane = pane();
+        app.update(|ctx| {
+            model.update(ctx, |model, ctx| {
+                let integration = shell_integration::Session::open(
+                    pane,
+                    &shell_integration::Options {
+                        enabled: false,
+                        ..Default::default()
+                    },
+                );
+                model.sessions.insert(
+                    pane,
+                    Session {
+                        shared: shared.clone(),
+                        _integration: integration,
+                        long_running_timer: false,
+                        snapshot: shared.snapshot(),
+                        title: None,
+                        directory: None,
+                        running: None,
+                        token: None,
+                        marks,
+                        prompted: false,
+                    },
+                );
+                model.watch(pane, ctx);
+            });
+        });
+        Some(Self {
+            queue,
+            app,
+            _model: model,
+            heard,
+            shared,
+        })
+    }
+
+    /// Hands `reads` over as one batch — the reader parsed them all before
+    /// the main thread looked — and answers what the workspace heard of the
+    /// command and its title, in order.
+    fn batch(&mut self, reads: &[&str]) -> Vec<&'static str> {
+        for read in reads {
+            self.shared.feed(read.as_bytes());
+        }
+        self.shared.publish();
+        self.queue.run_until_parked();
+        let heard = self.app.update(|ctx| {
+            self.heard
+                .update(ctx, |heard, _| std::mem::take(&mut heard.0))
+        });
+        heard
+            .iter()
+            .filter_map(|update| match update {
+                TerminalUpdate::Running(_, Some(_)) => Some("start"),
+                TerminalUpdate::Running(_, None) => Some("stop"),
+                TerminalUpdate::Title(..) => Some("title"),
+                TerminalUpdate::CommandFinished { .. } => Some("finished"),
+                TerminalUpdate::Prompted(_) => Some("prompted"),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+const PROMPT: &str = "\x1b]133;A\x07$ ";
+const STARTED: &str = "\x1b]133;B\x07claude\r\n\x1b]133;C\x07";
+
+#[test]
+fn a_command_stopping_is_handed_over_after_the_title_written_before_it() {
+    // The workspace takes back a running a program's title said when the
+    // pane's command stops, since a program killed mid-turn says nothing
+    // more. Its last title and the shell's marks after it come in one batch
+    // whenever the main thread did not look between them, and a stop handed
+    // over ahead of the title was taken back by the title saying running
+    // again, for good. A start still goes first: what the command wrote,
+    // its first title included, came after it.
+    let Some(mut batches) = Batches::new(true) else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    assert_eq!(batches.batch(&[PROMPT]), ["prompted"]);
+
+    let started = format!("{STARTED}\x1b]0;\u{2733} Claude Code\x07");
+    assert_eq!(batches.batch(&[&started]), ["start", "title"]);
+    // An `A` with no `D`: a shell whose marks start prompts and do not end
+    // commands. Two reads in the batch here, and one below.
+    let title = "\x1b]0;\u{25d0} Fix the flaky test\x07";
+    assert_eq!(batches.batch(&[title, PROMPT]), ["title", "stop"]);
+
+    // A `D`: the stop goes out just ahead of the end, so the command is
+    // still heard to stop before it is heard to finish, and a title the
+    // prompt writes after the `A` is heard after both.
+    assert_eq!(batches.batch(&[STARTED]), ["start"]);
+    let ended = format!(
+        "\x1b]0;\u{25d3} Fix the flaky test\x07\x1b]133;D;137\x07{PROMPT}\
+         \x1b]0;eugen@devbox: ~/src\x07"
+    );
+    assert_eq!(
+        batches.batch(&[&ended]),
+        ["title", "stop", "finished", "title"]
+    );
+}
+
+#[test]
+fn a_first_prompt_with_marks_is_handed_over_after_the_title_written_before_it() {
+    // An agent the shell's startup files ran: no command is marked for it, so
+    // the first prompt is the word that it has gone, and it takes back a
+    // running the agent's title said — after that title, as the stop above.
+    let Some(mut batches) = Batches::new(true) else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    let title = "\x1b]0;\u{25d0} Fix the flaky test\x07";
+    assert_eq!(batches.batch(&[title, PROMPT]), ["title", "prompted"]);
+}
+
+#[test]
+fn a_first_prompt_without_marks_is_handed_over_before_the_title_beside_it() {
+    // Where nothing marks a prompt, the first prompt is the first text, and
+    // that can be an agent's own first frame: handed over after the frame's
+    // title, it would take back a running the agent had only just said.
+    let Some(mut batches) = Batches::new(false) else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    let frame = "\x1b]0;\u{25d0} Fix the flaky test\x07Claude Code\r\n";
+    assert_eq!(batches.batch(&[frame]), ["prompted", "title"]);
+}
+
 #[test]
 fn a_closed_pane_frees_its_terminal_even_while_its_reader_is_still_blocked() {
     // A `sleep 60 &` keeps the pty open after the pane is closed, so the read

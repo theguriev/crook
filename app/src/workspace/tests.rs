@@ -31503,17 +31503,19 @@ mod agent_titles {
 
     /// The order the model hands a batch over in when the title and the end
     /// of the command arrive together, in one read or in two the model takes
-    /// at once: what the pane is running is read off the snapshot first, and
-    /// the events follow in the order they were written — which the emulator
-    /// keeps within one read too, handing a title over before the mark after
-    /// it. The end of the command still has to take the title back.
+    /// at once: the events in the order they were written — which the
+    /// emulator keeps within one read too, handing a title over before the
+    /// mark after it — with the pane's command stopping, read off the
+    /// snapshot, just ahead of the end. The stop takes the title back, and
+    /// the end after it finds nothing left to take.
     #[test]
     fn the_end_of_the_command_takes_back_a_title_read_in_the_same_batch() {
         let mut harness = Harness::panel(1);
         let pane = harness.active_pane_ids()[0];
 
-        report(&mut harness, TerminalUpdate::Running(pane, None));
         titled(&mut harness, pane, "\u{25d0} Fix the tab directory");
+        report(&mut harness, TerminalUpdate::Running(pane, None));
+        assert_taken_back(&harness, pane);
         report(
             &mut harness,
             TerminalUpdate::CommandFinished {
@@ -31637,6 +31639,46 @@ mod agent_titles {
              \"Fix the flaky test\"; exec sleep 600'\n",
         );
         await_taken_back(&mut harness, pane);
+        assert_the_title_arrived(&harness, pane);
+    }
+
+    /// The same with an `A` and no `D`, which a shell whose marks start
+    /// prompts and do not end commands writes: the pane's command stopping is
+    /// then the only word that it is over, and it has to be heard after the
+    /// title written before it.
+    ///
+    /// Held at a `read` until the pane is seen running the command, so the
+    /// start is a batch of its own and the stop is news to the next one.
+    #[test]
+    fn a_title_read_with_the_prompt_after_its_command_is_taken_back_with_it() {
+        let mut harness = Harness::panel(1);
+        let Some(pane) = super::shells::marked_shell(&mut harness) else {
+            return;
+        };
+        super::shells::await_prompt(&mut harness, pane);
+
+        harness.type_into(
+            pane,
+            "sh -c 'read line; printf \"\\033]0;\\342\\227\\220 %s\\007\\033]133;A\\007\" \
+             \"Fix the flaky test\"; exec sleep 600'\n",
+        );
+        harness.wait_for("the pane never ran the command", |harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .tabs()
+                    .pane(pane)
+                    .is_some_and(|open| open.session().running_command.is_some())
+            })
+        });
+        harness.type_into(pane, "\n");
+
+        await_taken_back(&mut harness, pane);
+        assert_the_title_arrived(&harness, pane);
+    }
+
+    /// That the running title a test's command wrote reached the pane: the
+    /// running taken back was the one that title said.
+    fn assert_the_title_arrived(harness: &Harness, pane: PaneId) {
         let name = harness.workspace.read(&harness.app, |workspace, _| {
             workspace
                 .tabs()

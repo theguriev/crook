@@ -1136,15 +1136,38 @@ impl TerminalModel {
         // matters here is the resting state after they have. `None` the moment
         // the block stops running, so a tab goes back to naming itself after
         // its directory rather than after the last thing it happened to run.
+        //
+        // A start goes out ahead of the batch's events, since what the command
+        // wrote came after it: its first title is the command's. A stop waits
+        // for the events written before it. A program's last title comes
+        // before the mark that ended it, and the workspace, which takes back a
+        // running the title said when the pane goes back to a prompt, would
+        // otherwise hear the title say running again for a program that had
+        // gone, with nothing left to take it back. The stop goes out just
+        // before the batch's first end of a command, where a `D` stopped the
+        // block, so a command is still heard to stop before it is heard to
+        // finish; or after every event, when an `A` with no `D` stopped it.
         let running = running_command(&session.snapshot.live_block);
+        let mut stopped = None;
         if session.running != running {
             session.running = running.clone();
-            updates.push(TerminalUpdate::Running(pane, running));
+            match running {
+                Some(_) => updates.push(TerminalUpdate::Running(pane, running)),
+                None => stopped = Some(TerminalUpdate::Running(pane, None)),
+            }
         }
         // Read off the snapshot for the reason `running` is: what matters is
         // where the shell has come to rest, not which marks it took to get
         // there. Only until it has been said once, so the text of a grid is
         // built for a shell with no marks until it prints and never after.
+        //
+        // In a shell with marks the first prompt is an `A`, written after
+        // anything the startup files ran, so it waits for the events as a stop
+        // does: it takes back a running title too. In a shell with none it is
+        // the first text printed, which may be a program's own first frame,
+        // and it goes out first, so it cannot take back a running that frame's
+        // title has only just said.
+        let mut prompted_after_the_events = None;
         if !session.prompted {
             let prompted = match session.marks {
                 true => session.snapshot.live_block.state == BlockState::AtPrompt,
@@ -1152,7 +1175,10 @@ impl TerminalModel {
             };
             if prompted {
                 session.prompted = true;
-                updates.push(TerminalUpdate::Prompted(pane));
+                match session.marks {
+                    true => prompted_after_the_events = Some(TerminalUpdate::Prompted(pane)),
+                    false => updates.push(TerminalUpdate::Prompted(pane)),
+                }
             }
         }
         for event in events {
@@ -1186,6 +1212,7 @@ impl TerminalModel {
                     took,
                     ran,
                 } => {
+                    updates.extend(stopped.take());
                     updates.push(TerminalUpdate::CommandFinished {
                         pane,
                         command,
@@ -1239,6 +1266,8 @@ impl TerminalModel {
                 other => log::debug!("pane {pane:?} reported {other:?}, which nothing acts on"),
             }
         }
+        updates.extend(stopped);
+        updates.extend(prompted_after_the_events);
 
         if changed {
             ctx.emit(TerminalUpdate::Repainted(pane));
