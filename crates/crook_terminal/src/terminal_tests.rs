@@ -861,12 +861,29 @@ fn test_a_line_submitted_behind_a_backlog_is_queued_with_its_enter_or_not_at_all
     terminal
         .submit("echo hi")
         .expect("the line that fills the backlog is queued whole, Enter and all");
+
+    // The shell runs it and is back at its prompt, where a line submitted
+    // would open the next block. A refused one is a command the shell never
+    // got, so it must open nothing: a block opened for it would keep its text
+    // and its start time, file whatever the shell runs next under it, and
+    // ignore the line the composer is handed back to try again with.
+    terminal
+        .feed(b"\x1b]133;C\x07hi\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07")
+        .expect("marks owe the child no answer");
+    let at_prompt = terminal.live_block();
+    assert_eq!(BlockState::AtPrompt, at_prompt.state);
+
     assert_eq!(
         io::ErrorKind::WouldBlock,
         terminal
-            .submit("echo again")
+            .submit("rm -rf build")
             .expect_err("a line behind a full backlog is refused")
             .kind(),
         "a line behind a full backlog is refused whole, and as one that may be tried again"
+    );
+    assert_eq!(
+        at_prompt,
+        terminal.live_block(),
+        "a refused line opened a block for a command the shell never got"
     );
 }

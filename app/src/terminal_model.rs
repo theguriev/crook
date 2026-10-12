@@ -78,9 +78,11 @@
 //! onto its one queue under the lock, in the order the lock was taken, which
 //! is the order they were written in when each was written on the spot; the
 //! thread writes them out after, holding nothing of the session's but that
-//! queue. A keystroke costs a copy and a wake. A submit still records its
-//! block boundary first, under the same acquisition as the line it queues, so
-//! the boundary is in place before a byte can reach the child, as it was.
+//! queue. A keystroke costs a copy and a wake. A submit records its block
+//! boundary under the same acquisition as the line it queues, once the queue
+//! has taken the line: one refused behind the backlog below opens no block,
+//! and the reader, which needs the lock to parse, finds the boundary in place
+//! before it can parse anything the shell said in answer.
 //!
 //! What a child that never reads costs is bounded: a person's input is kept
 //! whole, behind a backlog past which more is refused, and the emulator's
@@ -1334,9 +1336,12 @@ impl TerminalHandle {
     ///
     /// Not [`Self::write`] with a newline stuck on the end: this is the block
     /// boundary that does not depend on the shell cooperating. The emulator is
-    /// told the exact text and the exact moment before a byte leaves, which is
-    /// what a shell with no OSC 133 integration can never report and what a
-    /// shell that has one can only report as whatever it echoed.
+    /// told the exact text and the exact moment, under the lock the line is
+    /// queued under and so before the reader can parse what the shell echoes,
+    /// which is what a shell with no OSC 133 integration can never report and
+    /// what a shell that has one can only report as whatever it echoed. A line
+    /// that was not queued is not recorded either, so `false` means nothing
+    /// happened and the line may be tried again.
     pub fn submit(&self, line: &str) -> bool {
         self.drive(|terminal| {
             terminal.scroll_to_bottom();

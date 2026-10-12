@@ -947,13 +947,14 @@ seam between them.
 
 **Where a boundary comes from.** Two things, and only one needs the shell. `Terminal::submit`
 is what the composer calls on Enter: it records the exact command text and the exact moment
-before a byte leaves for the pty, so a block knows what was run even when it never learns how
-it ended. The other is OSC 133 — `A` prompt start, `B` prompt end, `C` output start,
-`D;<exit>` finished — read out of the *same second `vte` pass* the emulator already ran for
-OSC 7, so the mark is applied while the cursor still stands where the shell left it. That is
-also why `Emulator::advance` feeds the stream in pieces cut at the marks: feeding a whole
-chunk and looking for marks afterwards would place every boundary wherever the pty read
-happened to end.
+once the line is on its way, before anything the shell prints in answer is parsed, so a block
+knows what was run even when it never learns how it ended — and a line refused behind the
+backlog opens no block for a command that never ran. The other is OSC 133 — `A` prompt start,
+`B` prompt end, `C` output start, `D;<exit>` finished — read out of the *same second `vte`
+pass* the emulator already ran for OSC 7, so the mark is applied while the cursor still stands
+where the shell left it. That is also why `Emulator::advance` feeds the stream in pieces cut at
+the marks: feeding a whole chunk and looking for marks afterwards would place every boundary
+wherever the pty read happened to end.
 
 `blocks::TABLE` is the whole state machine — one row per state the open block can be in, one
 column per thing it can be told, every cell either a transition or a *named reason* for doing

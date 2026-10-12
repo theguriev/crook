@@ -328,8 +328,8 @@ impl Terminal {
         }
     }
 
-    /// Runs a command line: records the block boundary, then writes the line
-    /// followed by the carriage return the Enter key sends.
+    /// Runs a command line: writes the line followed by the carriage return
+    /// the Enter key sends, then records the block boundary.
     ///
     /// This is the boundary that does not depend on the shell cooperating. A
     /// shell with OSC 133 integration reports where its prompt ended and when
@@ -341,12 +341,22 @@ impl Terminal {
     /// input — see [`PtyWriter`] — refuses them together: a line taken
     /// without its Enter would sit typed at the prompt, and a caller that
     /// tried again would type it a second time.
+    ///
+    /// The boundary comes after the write so that a line that was refused, or
+    /// had no child left to go to, opens no block. A block opened for it would
+    /// keep its text and its start time, and the next command the shell ran
+    /// would be filed under a line it never got — and a line refused behind
+    /// the queue's backlog is one the caller is meant to try again. After is
+    /// still in time, since what the shell prints in answer reaches the
+    /// emulator through [`Self::feed`], which cannot run until this has
+    /// returned.
     pub fn submit(&mut self, line: &str) -> io::Result<()> {
-        self.emulator.command_submitted(line);
         let mut entered = Vec::with_capacity(line.len() + 1);
         entered.extend_from_slice(line.as_bytes());
         entered.push(b'\r');
-        self.write(&entered)
+        self.write(&entered)?;
+        self.emulator.command_submitted(line);
+        Ok(())
     }
 
     /// The finished blocks, oldest first. Empty until the first command ends.

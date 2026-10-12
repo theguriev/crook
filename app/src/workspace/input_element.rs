@@ -410,9 +410,10 @@ impl CommandInput {
     /// Runs a composed line.
     ///
     /// [`TerminalHandle::submit`] rather than a write with a newline stuck on
-    /// the end: the emulator is told the exact command and the exact moment
-    /// before a byte leaves, which is the block boundary that does not depend
-    /// on the shell having any integration at all.
+    /// the end: the emulator is told the exact command and the exact moment,
+    /// before anything the shell prints in answer is parsed, which is the
+    /// block boundary that does not depend on the shell having any integration
+    /// at all.
     fn send(&self, line: &str) {
         let Some(terminal) = self.terminal.as_ref() else {
             log::warn!("a line was composed in a pane with no shell to send it to");
