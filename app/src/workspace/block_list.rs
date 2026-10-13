@@ -72,6 +72,7 @@ use crookui_core::scene::{ClipBounds, CornerRadius, Radius, Scene};
 use crate::browser;
 use crate::clipboard::Clipboard;
 use crate::pane_blocks::{Control, PaneBlocks, ScrollCause};
+use crate::pane_find::Matches;
 use crate::pane_link::{self, LinkRow, LinkSpan, PaneLink};
 use crate::pane_selection::PaneSelection;
 use crate::pane_surface;
@@ -201,21 +202,15 @@ pub struct BlockList {
     /// the move that finds one and the frame that underlines it are different
     /// frames. `None` for a list nothing can be clicked in.
     links: Option<PaneLink>,
-    /// The find matches to highlight, and which of them is the current one.
+    /// The find matches to highlight.
     ///
-    /// Selections rather than resolved regions: a match is a `Selection` the
-    /// same as a drag's, and it is resolved against this frame's blocks in
-    /// [`Self::paint`] beside the drag's own — one resolve per frame, not one
-    /// per row.
-    finds: Vec<crate::selection::Selection>,
+    /// Each one already the cells it covers, so there is nothing to resolve,
+    /// and a row asks for the ones on it rather than trying every match: what
+    /// keeps a frame's share of a find to the matches on screen, however many
+    /// thousand the history holds. See [`Self::paint_finds`].
+    finds: Matches,
     /// Which match is emphasised, as an index into [`Self::finds`].
     find_current: Option<usize>,
-    /// The find matches resolved against this frame's blocks, walked once per
-    /// frame in [`Self::paint`] and read by the row painters. Transient: it is
-    /// rebuilt every frame and means nothing between them.
-    frame_finds: Vec<Region>,
-    /// The emphasised match, resolved, or `None` when there is none on screen.
-    frame_find_current: Option<Region>,
     /// The block whose menu is up, when one is up over this list.
     ///
     /// The workspace's answer rather than this element's: the menu is an
@@ -275,10 +270,8 @@ impl BlockList {
             font,
             view,
             output: Output::detached(),
-            finds: Vec::new(),
+            finds: Matches::default(),
             find_current: None,
-            frame_finds: Vec::new(),
-            frame_find_current: None,
             links: None,
             menu: None,
             menu_available: false,
@@ -328,11 +321,7 @@ impl BlockList {
     }
 
     /// The find matches this list highlights, and which one is emphasised.
-    pub fn with_find(
-        mut self,
-        finds: Vec<crate::selection::Selection>,
-        current: Option<usize>,
-    ) -> Self {
+    pub fn with_find(mut self, finds: Matches, current: Option<usize>) -> Self {
         self.finds = finds;
         self.find_current = current;
         self
@@ -1524,7 +1513,7 @@ impl BlockList {
         scene: &mut Scene,
     ) {
         let (left, top) = (origin.x(), origin.y());
-        for region in &self.frame_finds {
+        for region in self.finds.on_row(item.id, row) {
             if let Some(matched) = region.columns_on(item, row) {
                 paint_wash(
                     clamped(matched, columns),
@@ -1536,7 +1525,7 @@ impl BlockList {
                 );
             }
         }
-        if let Some(region) = &self.frame_find_current
+        if let Some(region) = self.find_current.and_then(|index| self.finds.get(index))
             && let Some(matched) = region.columns_on(item, row)
         {
             paint_wash(
@@ -1694,23 +1683,6 @@ impl Element for BlockList {
             .output
             .selection()
             .and_then(|selection| selection.region(&self.addressed()));
-
-        // The find matches, resolved the same way and against the same blocks.
-        // The current one is pulled out so it can be painted brighter over the
-        // rest — a person needs to see which of a dozen highlights the next
-        // step will move to.
-        let blocks = self.addressed();
-        let find_regions: Vec<Region> = self
-            .finds
-            .iter()
-            .filter_map(|selection| selection.region(&blocks))
-            .collect();
-        let find_current = self
-            .find_current
-            .and_then(|index| self.finds.get(index))
-            .and_then(|selection| selection.region(&blocks));
-        self.frame_finds = find_regions;
-        self.frame_find_current = find_current;
 
         for item in std::mem::take(&mut self.window) {
             self.paint_item(origin, item, region, ctx);
@@ -2011,10 +1983,10 @@ fn paint_selection(
 
 /// How strong a find highlight is, out of 255: the amber that says "here is a
 /// match", faint enough to read the text through.
-const FIND_MATCH_ALPHA: u8 = 64;
+pub(super) const FIND_MATCH_ALPHA: u8 = 64;
 /// The current match, in the accent and brighter, so which of a screenful of
 /// matches the next step goes to is never in doubt.
-const FIND_CURRENT_ALPHA: u8 = 128;
+pub(super) const FIND_CURRENT_ALPHA: u8 = 128;
 
 /// Fills a run of columns of one row with `colour`.
 ///

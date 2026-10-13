@@ -63,9 +63,11 @@
 //! What a find bar looks for is matched against one logical line at a time —
 //! the rows a fold joins, with the blanks the fold trimmed put back — and never
 //! against the output as one string. So a pattern's `^` and `$` are the start
-//! and end of a line, where grep puts them, and a fold is neither; and a match
-//! never runs out of one line into the next, let alone into the next command.
-//! See [`Item::find_with`].
+//! and end of a line, where grep puts them, and a fold is neither; a match
+//! never runs out of one line into the next, let alone into the next command;
+//! and what a block matches depends on nothing outside it, which is what lets
+//! the bar keep a finished block's matches rather than search the whole
+//! history again every frame. See [`Item::find_with`].
 //!
 //! [UAX #29]: https://unicode.org/reports/tr29/
 
@@ -438,8 +440,14 @@ impl Item<'_> {
     /// covers, appended to `found` in reading order.
     ///
     /// One logical line at a time — see the module docs — so the regions it
-    /// adds are in order and none overlaps another.
+    /// adds are in order and none overlaps another, which is what lets
+    /// [`regions_on`] answer for one row with a binary search.
     pub fn find_with(&self, matcher: &LineMatcher, found: &mut Vec<Region>) {
+        #[cfg(test)]
+        if let Rows::Stored(rows) = self.rows {
+            STORED_ROWS_SEARCHED.with(|read| read.set(read.get() + rows.rows()));
+        }
+
         // One line as the matcher reads it, and for each of its characters
         // where in the line it starts and the cell it was drawn in: what takes
         // a match, which is bytes of the line, back to the cells it covers.
@@ -647,6 +655,10 @@ impl<'a> Blocks<'a> {
     /// `$` are the start and end of a line, and a match of nothing — `a*`
     /// before every character — is no match: there is nothing to highlight
     /// in it.
+    ///
+    /// It walks every block, as [`Self::find`] does. A find bar asks the
+    /// blocks one at a time instead and keeps what each one said; see
+    /// [`PaneFind::matches`](crate::pane_find::PaneFind::matches).
     pub fn find_all_with(&self, needle: &str, options: FindOptions) -> Option<Vec<Selection>> {
         if needle.is_empty() {
             return Some(Vec::new());
@@ -744,7 +756,9 @@ impl<'a> Blocks<'a> {
 ///
 /// What filtering a block's output asks — which of its lines to keep — and
 /// what a find asks of every line, with the same rules for both: folded or
-/// told apart, text or a pattern.
+/// told apart, text or a pattern. A find bar compiles one when its search
+/// starts and keeps it, rather than compiling the query again for every frame
+/// drawn while the bar is up.
 pub enum LineMatcher {
     /// Text, already folded when case does not matter.
     Text {
@@ -914,6 +928,20 @@ impl LineMatcher {
     }
 }
 
+/// The regions of `found` that cover any of row `row` of block `block`, in
+/// reading order.
+///
+/// `found` is what a find found: in reading order and none overlapping
+/// another, which makes this two binary searches rather than a walk. A frame
+/// asks it for every row it draws, of however many thousand matches the
+/// history holds.
+pub fn regions_on(found: &[Region], block: BlockId, row: usize) -> &[Region] {
+    let line = (block, row);
+    let from = found.partition_point(|region| region.end.line() < line);
+    let to = from + found[from..].partition_point(|region| region.start.line() <= line);
+    &found[from..to]
+}
+
 /// The columns of a folded row past its last printed character, which were
 /// spaces the program printed rather than the rest of the grid.
 ///
@@ -936,6 +964,22 @@ fn blanks_before_a_fold<'a>(rows: &'a Rows<'_>, row: usize) -> impl Iterator<Ite
             .cell(row, *column)
             .is_some_and(|cell| cell.flags.contains(CellFlags::WIDE_SPACER))
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// See [`stored_rows_searched`].
+    static STORED_ROWS_SEARCHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many rows of finished blocks a find on this thread has read, so far.
+///
+/// What a test of "a frame with the find bar open reads none of them again"
+/// counts. Thread-local because the window's test harness draws on the test's
+/// own thread and the suite runs its tests side by side.
+#[cfg(test)]
+pub(crate) fn stored_rows_searched() -> usize {
+    STORED_ROWS_SEARCHED.with(std::cell::Cell::get)
 }
 
 /// The item a finished block is.

@@ -643,7 +643,7 @@ fn blocks(
     let matches = if finding.is_some() {
         workspace.find_matches(pane, app)
     } else {
-        Vec::new()
+        crate::pane_find::Matches::default()
     };
     let current = finding.and_then(|find| find.clamped(matches.len()));
 
@@ -1652,7 +1652,7 @@ fn find_bar(
     workspace: &Workspace,
     pane: PaneId,
     find: &crate::pane_find::PaneFind,
-    matches: &[crate::selection::Selection],
+    matches: &crate::pane_find::Matches,
     lines: Option<(usize, usize)>,
 ) -> Box<dyn Element> {
     let filtering = find.filter().is_some();

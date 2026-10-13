@@ -40,7 +40,7 @@ use crate::input_keys::{Binding, Intent, Platform};
 use crate::keybindings::{Context, Keybindings, PendingSave, Recording, Resolution};
 use crate::notify::{Cooldown, LONG_COMMAND, Notice, Notifier, Occasion, Silent};
 use crate::pane_blocks::{PAGE_OVERLAP, PaneBlocks, ScrollCause};
-use crate::pane_find::PaneFind;
+use crate::pane_find::{Matches, PaneFind};
 use crate::pane_link::PaneLink;
 use crate::pane_selection::PaneSelection;
 use crate::pane_split::{DividerDrag, PaneExtent};
@@ -3658,26 +3658,22 @@ impl Workspace {
     /// Every place the focused pane\'s find query occurs in its output, in
     /// reading order — or nothing at all when the bar is empty or shut.
     ///
-    /// Walked fresh rather than kept, because the output it searches changes
-    /// under the bar as a command prints: a list of matches held from a frame
-    /// ago would point at rows a `clear` had wiped. The block list is what it
-    /// searches, which is the surface the bar only ever opens over.
-    pub(super) fn find_matches(
-        &self,
-        pane: PaneId,
-        app: &AppContext,
-    ) -> Vec<crate::selection::Selection> {
+    /// Kept by the bar from frame to frame, a finished block at a time, and
+    /// searched again only where the output has changed under it: see
+    /// [`PaneFind::matches`]. The block list is what it searches, which is the
+    /// surface the bar only ever opens over.
+    pub(super) fn find_matches(&self, pane: PaneId, app: &AppContext) -> Matches {
         let Some(find) = self.find(pane) else {
-            return Vec::new();
+            return Matches::default();
         };
         if !find.is_open() {
-            return Vec::new();
+            return Matches::default();
         }
         let query = find.query();
         // Filtering one block is not finding across them all: nothing is
         // highlighted, and there is nothing to step through.
         if query.is_empty() || find.filter().is_some() {
-            return Vec::new();
+            return Matches::default();
         }
         // A changed query is a new search, and a new search starts at its
         // first match rather than at wherever the last one was stepped to.
@@ -3687,11 +3683,9 @@ impl Workspace {
         let (Some(history), Some((_, snapshot))) =
             (self.terminal_blocks(pane, app), self.terminal(pane, app))
         else {
-            return Vec::new();
+            return Matches::default();
         };
-        Blocks::list(&history, &snapshot)
-            .find_all_with(&query, find.options())
-            .unwrap_or_default()
+        find.matches(&history, &snapshot)
     }
 
     /// The rows the find bar's filter keeps of the block it is filtering —
@@ -3789,8 +3783,8 @@ impl Workspace {
                 // reopening a search shows where it left off rather than an
                 // emphasised nothing.
                 let matches = self.find_matches(pane, ctx);
-                if let Some(current) = find.clamped(matches.len()) {
-                    self.scroll_find_into_view(pane, &matches[current], ctx);
+                if let Some(found) = find.clamped(matches.len()).and_then(|at| matches.get(at)) {
+                    self.scroll_find_into_view(pane, found.start, ctx);
                 }
             }
             FindAction::Close => {
@@ -3804,15 +3798,18 @@ impl Workspace {
                 // The first match of the search as it now reads, the way a
                 // changed query lands on its first.
                 let matches = self.find_matches(pane, ctx);
-                if let Some(current) = find.clamped(matches.len()) {
-                    self.scroll_find_into_view(pane, &matches[current], ctx);
+                if let Some(found) = find.clamped(matches.len()).and_then(|at| matches.get(at)) {
+                    self.scroll_find_into_view(pane, found.start, ctx);
                 }
             }
             FindAction::Step { forward } => {
                 let matches = self.find_matches(pane, ctx);
                 let delta = if forward { 1 } else { -1 };
-                if let Some(current) = find.step(delta, matches.len()) {
-                    self.scroll_find_into_view(pane, &matches[current], ctx);
+                if let Some(found) = find
+                    .step(delta, matches.len())
+                    .and_then(|at| matches.get(at))
+                {
+                    self.scroll_find_into_view(pane, found.start, ctx);
                 }
             }
         }
@@ -3823,8 +3820,8 @@ impl Workspace {
     /// Brings a match into view in the pane\'s block list, if it is not
     /// already.
     ///
-    /// The match\'s own top row: `selection.anchor` is the start of it, and a
-    /// match on one line has its start and end on the same row. The line it is
+    /// The match\'s own top row: `start` is the first cell of it, and a match
+    /// on one line has its start and end on the same row. The line it is
     /// on is the block\'s offset in the list plus the block\'s top padding
     /// plus the row within it — the same arithmetic the height index is built
     /// from — and a third of a screen is left above it so it lands in the body
@@ -3832,13 +3829,13 @@ impl Workspace {
     fn scroll_find_into_view(
         &self,
         pane: PaneId,
-        selection: &crate::selection::Selection,
+        start: crate::selection::Place,
         app: &AppContext,
     ) {
         let Some(view) = self.pane_blocks(pane) else {
             return;
         };
-        let block = selection.anchor.block;
+        let block = start.block;
         let (Some(history), Some((_, snapshot))) =
             (self.terminal_blocks(pane, app), self.terminal(pane, app))
         else {
@@ -3852,9 +3849,8 @@ impl Workspace {
             None => return,
         };
         let top_padding = super::block_list::padding_top(history.get(index).map(|block| &**block));
-        let line = view.with_heights(|heights| heights.start(index))
-            + top_padding
-            + selection.anchor.row as f32;
+        let line =
+            view.with_heights(|heights| heights.start(index)) + top_padding + start.row as f32;
 
         let offset = view.offset();
         let viewport = view.viewport();

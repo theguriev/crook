@@ -20570,6 +20570,87 @@ mod shells {
             assert_eq!(Some(1), current(&harness, pane), "back wraps the other way");
         }
 
+        #[test]
+        fn a_frame_with_the_bar_open_reads_no_finished_row_again() {
+            // The bar walked every row of every finished block on every frame
+            // it was open — a tenth of a second a frame on a long-lived tab,
+            // and a caret blink, a keystroke or another pane printing is a
+            // frame — to find matches that cannot have moved, since a finished
+            // block never changes. Each block's are kept now, so a frame over
+            // the same history, and a step through it, read none of it.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = searching(&mut harness, "qvx wqz rqv", "wqz") else {
+                return;
+            };
+            let read = crate::selection::stored_rows_searched;
+
+            let before = read();
+            harness.frame();
+            assert!(
+                read() > before,
+                "the first frame of a search reads the finished blocks"
+            );
+
+            let before = read();
+            harness.frame();
+            step(&mut harness, pane, true);
+            harness.frame();
+            assert_eq!(
+                0,
+                read() - before,
+                "a frame and a step re-read the finished blocks"
+            );
+            assert_eq!(2, matches(&harness, pane), "and still count every match");
+            assert_eq!(Some(1), current(&harness, pane));
+        }
+
+        /// How many washes of `fill` a frame painted inside `panel`.
+        fn washes(scene: &Scene, panel: RectF, fill: Fill) -> usize {
+            scene
+                .layers()
+                .flat_map(|layer| layer.rects.iter())
+                .filter(|rect| rect.background == fill)
+                .filter(|rect| panel.contains_point(rect.bounds.origin()))
+                .count()
+        }
+
+        #[test]
+        fn the_matches_on_screen_are_washed_and_the_current_one_brighter() {
+            // Every match in view gets the amber and the current one the
+            // accent over it — painted from the matches on the rows being
+            // drawn, rather than from every match in the history tried
+            // against every row.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = searching(&mut harness, "qvx wqz rqv", "wqz") else {
+                return;
+            };
+            let panel = panel_of_the_pane(&mut harness);
+            let amber = Fill::Solid(
+                theme()
+                    .usage_high
+                    .with_alpha(crate::workspace::block_list::FIND_MATCH_ALPHA),
+            );
+            let accent = Fill::Solid(
+                theme()
+                    .accent
+                    .with_alpha(crate::workspace::block_list::FIND_CURRENT_ALPHA),
+            );
+
+            let scene = harness.frame();
+            assert_eq!(2, matches(&harness, pane));
+            assert_eq!(
+                2,
+                washes(&scene, panel, amber),
+                "the command line's match and the output's"
+            );
+            assert_eq!(1, washes(&scene, panel, accent), "the current one, once");
+
+            step(&mut harness, pane, true);
+            let scene = harness.frame();
+            assert_eq!(2, washes(&scene, panel, amber));
+            assert_eq!(1, washes(&scene, panel, accent), "still one current match");
+        }
+
         /// The find bar, by its ground: the one `surface_raised` box with the
         /// bar's 7px corners. Read off the raw layers rather than the visible
         /// rects, because the whole point of asking is whether it is inside

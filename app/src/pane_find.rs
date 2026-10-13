@@ -4,12 +4,10 @@
 //! Per pane, and kept on [`PaneInteraction`](crate::workspace) beside the
 //! selection, for the reason the selection is kept there: the element tree
 //! that draws the bar is rebuilt every frame, so anything a keystroke changes
-//! has to outlive it. What the bar is *about* — the matches themselves — is
-//! not here. Those are a walk of the pane's output against the query, and the
-//! output changes under the bar as a command prints, so they are recomputed
-//! from the query each frame rather than kept and invalidated. This holds only
-//! the two things that are not derivable from the output: whether the bar is
-//! open, and which of however many matches is the current one.
+//! has to outlive it. It holds the two things that are not derivable from the
+//! output — whether the bar is open, and which of however many matches is the
+//! current one — and what the query was found to match, kept rather than
+//! derived again.
 //!
 //! It shares the shape the search box has — a [`TextInput`], a wish to have
 //! the keyboard, a hover state — and differs in the one way that matters: the
@@ -17,12 +15,31 @@
 //! per pane because a person can be searching the output of one pane while
 //! another prints. Which pane's bar has the keyboard is the focused pane's,
 //! decided in `Workspace::sync_input_keys` exactly as the search box's wish is.
+//!
+//! # What is kept, and why it cannot go stale
+//!
+//! The matches are a search of the pane's output, and the output changes under
+//! the bar as a command prints. But only one block of it does: a finished
+//! block's rows were harvested once and never change, so what a query matched
+//! in one is what it will always match there. So [`PaneFind::matches`] keeps
+//! the finished blocks' matches from one frame to the next and searches a
+//! block once, when it finishes; the open block, the only part a command can
+//! still be printing into, is searched again when the snapshot it is drawn
+//! from is a new one. A different query or a switch flipped is a different
+//! search and starts again; a block dropped off the front of the history takes
+//! its matches with it. Walking the whole history for every frame instead cost
+//! a tenth of a second a frame on a long-lived tab, for an answer that had not
+//! changed.
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
+use crook_terminal::{BlockId, Rows, Snapshot};
 use crookui_core::elements::MouseStateHandle;
 
+use crate::selection::{Blocks, FindOptions, Item, LineMatcher, Region, regions_on};
+use crate::terminal_model::BlockHistory;
 use crate::text_input::TextInput;
 
 /// One pane's find bar.
@@ -67,6 +84,9 @@ struct State {
     /// match — the way a browser's find does — rather than leaving it
     /// wherever the last query was stepped to.
     last_query: String,
+    /// What the query has been found to match so far. See
+    /// [`PaneFind::matches`].
+    found: Found,
 }
 
 impl Default for PaneFind {
@@ -86,6 +106,7 @@ impl PaneFind {
             close_button: MouseStateHandle::default(),
             current: 0,
             last_query: String::new(),
+            found: Found::default(),
             case_sensitive: false,
             regex: false,
             switches: Default::default(),
@@ -110,6 +131,9 @@ impl PaneFind {
         // A filter is a way of looking at one block while the bar is up, and
         // it goes down with the bar: the block shows all of itself again.
         state.filter = None;
+        // Nothing is drawn from what was found while the bar is down, and the
+        // output goes on changing under it; opening it again searches once.
+        state.found = Found::default();
         std::mem::replace(&mut state.open, false)
     }
 
@@ -157,9 +181,9 @@ impl PaneFind {
     }
 
     /// How the query is matched.
-    pub fn options(&self) -> crate::selection::FindOptions {
+    pub fn options(&self) -> FindOptions {
         let state = self.0.borrow();
-        crate::selection::FindOptions {
+        FindOptions {
             case_sensitive: state.case_sensitive,
             regex: state.regex,
         }
@@ -191,6 +215,23 @@ impl PaneFind {
     /// What is being looked for.
     pub fn query(&self) -> String {
         self.0.borrow().input.editor().text().to_owned()
+    }
+
+    /// Every place the query is in a pane's blocks — `history`'s finished
+    /// ones, then the open one `snapshot` holds — in reading order.
+    ///
+    /// Kept rather than walked fresh: a frame searches only the blocks that
+    /// have finished since the one before it, and the open block when the
+    /// snapshot is a new one, so a frame over an unchanged output reads none
+    /// of it. See the module docs. Nothing at all for an empty query, or for
+    /// a pattern that does not compile.
+    pub fn matches(&self, history: &BlockHistory, snapshot: &Arc<Snapshot>) -> Matches {
+        let query = self.query();
+        let options = self.options();
+        self.0
+            .borrow_mut()
+            .found
+            .refresh(&query, options, history, snapshot)
     }
 
     /// Takes the cursor back to the first match when `query` is not the one
@@ -244,3 +285,158 @@ impl PaneFind {
         Some(next)
     }
 }
+
+/// What a search has found in a pane's blocks, kept between frames.
+///
+/// See the module docs for why none of it can be out of date.
+#[derive(Default)]
+struct Found {
+    /// The query and the switches all of this was found with. Any other is a
+    /// different search, which starts again from nothing.
+    search: Option<(String, FindOptions)>,
+    /// The query, compiled once for the search rather than once a frame, or
+    /// `None` for a pattern that does not compile — which the bar says, and
+    /// which matches nothing.
+    matcher: Option<LineMatcher>,
+    /// The newest finished block searched. Every block the history holds up
+    /// to it has been, since blocks finish in the order of their ids; every
+    /// one after it has not.
+    through: Option<BlockId>,
+    /// Every match in the finished blocks, in reading order.
+    finished: Rc<Vec<Region>>,
+    /// The snapshot the open block was last searched in, and what was found.
+    /// The emulator hands back the very same snapshot until something drawn
+    /// in it changes, so the same one is the same open block.
+    open: Option<(Arc<Snapshot>, Rc<Vec<Region>>)>,
+}
+
+impl Found {
+    /// Brings what is kept up to date with `history` and `snapshot` for
+    /// `query`, matched as `options` says, and hands back every match.
+    fn refresh(
+        &mut self,
+        query: &str,
+        options: FindOptions,
+        history: &BlockHistory,
+        snapshot: &Arc<Snapshot>,
+    ) -> Matches {
+        if query.is_empty() {
+            *self = Self::default();
+            return Matches::default();
+        }
+        if self
+            .search
+            .as_ref()
+            .is_none_or(|(held, how)| held != query || *how != options)
+        {
+            *self = Self {
+                search: Some((query.to_owned(), options)),
+                matcher: LineMatcher::new(query, options),
+                ..Self::default()
+            };
+        }
+        let Some(matcher) = &self.matcher else {
+            return Matches::default();
+        };
+
+        // The blocks dropped off the front of the history since the last
+        // frame, and their matches with them. Ids are handed out in order, so
+        // theirs are the matches before the first block still held.
+        let oldest = history.get(0).map(|block| block.id);
+        let gone = self
+            .finished
+            .partition_point(|found| oldest.is_none_or(|oldest| found.start.block < oldest));
+        if gone > 0 {
+            Rc::make_mut(&mut self.finished).drain(..gone);
+        }
+
+        // The blocks that have finished since: everything after the newest
+        // one searched, or — once that one has been dropped too — everything
+        // the history holds.
+        let new = self.through.map_or(0, |through| {
+            history.position(through).map_or(0, |index| index + 1)
+        });
+        if new < history.len() {
+            let finished = Rc::make_mut(&mut self.finished);
+            for block in history.iter().skip(new) {
+                let item = Item {
+                    id: block.id,
+                    rows: Rows::Stored(&block.rows),
+                    first: 0,
+                };
+                item.find_with(matcher, finished);
+            }
+            self.through = history
+                .len()
+                .checked_sub(1)
+                .and_then(|last| history.get(last))
+                .map(|block| block.id);
+        }
+
+        let open = match &self.open {
+            Some((seen, found)) if Arc::ptr_eq(seen, snapshot) => found.clone(),
+            _ => {
+                let mut found = Vec::new();
+                if let Blocks::List {
+                    open: Some(item), ..
+                } = Blocks::list(history, snapshot)
+                {
+                    item.find_with(matcher, &mut found);
+                }
+                let found = Rc::new(found);
+                self.open = Some((snapshot.clone(), found.clone()));
+                found
+            }
+        };
+        Matches {
+            finished: self.finished.clone(),
+            open,
+        }
+    }
+}
+
+/// Every match a find bar has, in reading order, as a frame is handed them.
+///
+/// Two runs that read as one list — the finished blocks' matches, then the
+/// open block's — because they are kept on two clocks: see
+/// [`PaneFind::matches`]. Each match is the cells it covers, already resolved,
+/// and handing the lot to the element that paints them is two pointers.
+#[derive(Clone, Debug, Default)]
+pub struct Matches {
+    /// The finished blocks', oldest first.
+    finished: Rc<Vec<Region>>,
+    /// The open block's.
+    open: Rc<Vec<Region>>,
+}
+
+impl Matches {
+    /// How many there are.
+    pub fn len(&self) -> usize {
+        self.finished.len() + self.open.len()
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// One match by its place in reading order, counted from zero.
+    pub fn get(&self, index: usize) -> Option<Region> {
+        match index.checked_sub(self.finished.len()) {
+            None => self.finished.get(index).copied(),
+            Some(open) => self.open.get(open).copied(),
+        }
+    }
+
+    /// The matches that cover any of row `row` of block `block`, in reading
+    /// order — what painting one row asks, whatever the history holds.
+    pub fn on_row(&self, block: BlockId, row: usize) -> impl Iterator<Item = &Region> {
+        regions_on(&self.finished, block, row)
+            .iter()
+            .chain(regions_on(&self.open, block, row))
+    }
+}
+
+#[cfg(test)]
+#[path = "pane_find_tests.rs"]
+mod tests;
