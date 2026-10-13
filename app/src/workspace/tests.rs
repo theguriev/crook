@@ -13906,6 +13906,30 @@ fn new_window_starts_crook_again_where_the_focused_pane_is_working() {
             "a window was asked to start in a directory it cannot enter"
         );
     }
+
+    // Nor one whose name is not text. A pane starts where Crook was started,
+    // and a shell's report of such a directory is dropped, so a pane can be
+    // in one. The new window reads its arguments as text and refuses the
+    // word before it gets as far as `chdir`. Linux only, where a name is
+    // bytes: macOS's file systems refuse a name that is not UTF-8.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        let bytes = scratch.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
+        fs::create_dir(&bytes).expect("writable scratch");
+        assert!(
+            bytes.join(".").is_dir(),
+            "the folder is not one this user can enter, so this checks nothing"
+        );
+        let pressed_before = crate::new_window::opened().len();
+        moved(&mut harness, bytes);
+        harness.run_command("crook/window/new-window");
+        assert_eq!(
+            crate::new_window::opened().get(pressed_before),
+            Some(&started_in(&home)),
+            "a window was asked to start in a directory whose name it cannot read"
+        );
+    }
 }
 
 #[test]

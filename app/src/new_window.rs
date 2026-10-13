@@ -44,20 +44,29 @@ pub(crate) fn arguments(directory: &Path) -> Vec<OsString> {
     vec!["--working-directory".into(), directory.into()]
 }
 
-/// Whether a window can start in `directory`: whether a process of this
-/// user's could make it its working directory, which is the first thing a
-/// window started with `--working-directory` does.
+/// Whether a window can start in `directory`: whether the window could read
+/// it off its command line, and a process of this user's could make it its
+/// working directory, which is the first thing a window started with
+/// `--working-directory` does.
 ///
-/// More than `is_dir`, which needs nothing of the directory itself. One can
-/// be there for `stat` and closed to `chdir` — `/root` to anybody but root,
-/// which a pane `ssh`'d into a server as root reports as its directory, or a
-/// folder that lost its search bit — and a window handed one fails on its
-/// first line and never appears. Looking up `.` inside the directory needs
-/// the same search permission `chdir` does, and asks without changing this
-/// process's own directory. On Windows, which drops the `.` before the
-/// system is asked, it is `is_dir`.
+/// Text first. Crook reads every argument as text and refuses a word that is
+/// not, before it looks at what the word names, and on Linux a directory's
+/// name is bytes. A pane can be in one whose name is not UTF-8: it starts
+/// where Crook was started, and a shell's report of such a directory is
+/// dropped.
+///
+/// Then more than `is_dir`, which needs nothing of the directory itself. One
+/// can be there for `stat` and closed to `chdir` — `/root` to anybody but
+/// root, which a pane `ssh`'d into a server as root reports as its
+/// directory, or a folder that lost its search bit. Looking up `.` inside the
+/// directory needs the same search permission `chdir` does, and asks without
+/// changing this process's own directory. On Windows, which drops the `.`
+/// before the system is asked, it is `is_dir`.
+///
+/// A window handed a directory that fails either check exits on its first
+/// line and never appears.
 pub(crate) fn can_start_in(directory: &Path) -> bool {
-    directory.join(".").is_dir()
+    directory.to_str().is_some() && directory.join(".").is_dir()
 }
 
 /// Opens another window whose shells start in `directory`, and does not wait
