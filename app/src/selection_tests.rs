@@ -765,6 +765,87 @@ fn find_all_finds_every_occurrence_across_blocks_and_folds_ascii_case() {
     assert!(session.blocks().find_all("").is_empty());
 }
 
+/// Every match of `pattern` in `blocks`, read as a regular expression with
+/// capitals told apart, or `folded` together.
+fn found_by_pattern(blocks: &Blocks<'_>, pattern: &str, folded: bool) -> Vec<Selection> {
+    blocks
+        .find_all_with(
+            pattern,
+            FindOptions {
+                case_sensitive: !folded,
+                regex: true,
+            },
+        )
+        .expect("the pattern compiles")
+}
+
+#[test]
+fn a_pattern_anchors_at_the_start_and_end_of_every_line_in_every_block() {
+    // `^` and `$` are where grep puts them: at the ends of each line. The find
+    // matched one string of the whole output, whose only start and end were
+    // its first and last characters, so `^BETA` said "No results" while
+    // filtering the same block for it kept both lines it starts.
+    let session = session(40, 12, &["alpha", "beta"]);
+    let blocks = session.blocks();
+    let count = |pattern: &str| found_by_pattern(&blocks, pattern, false).len();
+
+    assert_eq!(2, count("^ALPHA"), "the first block's output lines");
+    assert_eq!(2, count("^BETA"), "and the second block's");
+    assert_eq!(2, count("one$"), "a line's end, once in each block");
+    assert_eq!(1, count("^alpha$"), "the first command line, whole");
+    assert_eq!(1, count(r"^\$ beta$"), "the second, prompt and all");
+
+    // And what is found is the text the anchors were put against.
+    let starts = found_by_pattern(&blocks, "^BETA", false);
+    for found in &starts {
+        assert_eq!(Some("BETA".to_owned()), found.text(&blocks));
+    }
+}
+
+#[test]
+fn a_fold_is_neither_the_end_of_a_line_nor_the_start_of_one() {
+    // The terminal folded the line and the program printed one, so the fold
+    // is not where `$` matches or after which `^` does — and a pattern
+    // anchored at both ends finds the whole line across it.
+    for finished in [true, false] {
+        let session = folded("aaaaaaaaa bbb", finished);
+        let blocks = session.blocks();
+
+        let whole = found_by_pattern(&blocks, "^a+ b+$", true);
+        assert_eq!(1, whole.len(), "finished: {finished}");
+        assert_eq!(
+            Some("aaaaaaaaa bbb".to_owned()),
+            whole[0].text(&blocks),
+            "finished: {finished}"
+        );
+        assert_eq!(1, found_by_pattern(&blocks, "bbb$", true).len());
+        assert!(
+            found_by_pattern(&blocks, "a $", true).is_empty(),
+            "the fold is not a line's end; finished: {finished}"
+        );
+        assert!(
+            found_by_pattern(&blocks, "^bbb", true).is_empty(),
+            "nor the start of one; finished: {finished}"
+        );
+    }
+}
+
+#[test]
+fn a_pattern_never_reaches_across_a_line_or_into_the_next_block() {
+    // A match is one line's, on purpose. A highlight running out of one
+    // command's output into the next command's is not what a search for a
+    // line means — grep agrees, and so does Filter output — and a block whose
+    // matches depend on nothing after it is one whose matches can be worked
+    // out once, when it finishes.
+    let session = session(40, 12, &["alpha", "beta"]);
+    let blocks = session.blocks();
+    let count = |pattern: &str| found_by_pattern(&blocks, pattern, false).len();
+
+    assert_eq!(0, count(r"one\s+ALPHA"), "across a line break");
+    assert_eq!(0, count(r"two\s+\$ beta"), "out of one block into the next");
+    assert_eq!(1, count(r"ALPHA one\s*"), "and within a line, as ever");
+}
+
 /// Ten columns, with `line` printed as the output of one command, finished
 /// or still running.
 fn folded(line: &str, finished: bool) -> Session {
