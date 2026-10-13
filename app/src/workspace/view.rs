@@ -4299,12 +4299,13 @@ impl Workspace {
         // And never on a row the panel is not drawing. The popup is built by
         // the row it hangs off — `tabs_panel::row` is the one caller of
         // `tab_context_menu::render` — so a menu opened on a tab whose section
-        // is covering the list, or whose group is folded away, is state
-        // nothing paints: a popup that takes the keyboard from every pane
-        // through `a_popup_is_open` and can only be left by an Escape nobody
-        // has a reason to press. A pointer cannot ask for that, because the
-        // press it asks with lands on the row; the palette can, and does.
-        if !self.panel_draws_row(pane) {
+        // is covering the list, whose column is hidden, whose group is folded
+        // away or whose row the search filtered out, is state nothing paints:
+        // a popup that takes the keyboard from every pane through
+        // `a_popup_is_open` and can only be left by an Escape nobody has a
+        // reason to press. A pointer cannot ask for that, because the press it
+        // asks with lands on the row; the palette can, and does.
+        if !self.panel_draws_row(pane, ctx) {
             return;
         }
         if self.tab_context_menu.pane == Some(pane) {
@@ -4317,20 +4318,22 @@ impl Workspace {
     /// Whether the tab panel is drawing a row for this pane right now.
     ///
     /// Two questions in one, because a popup anchored to a row needs both
-    /// answered the same way: the tab list has to be the section on screen,
-    /// and the pane has to be one of the rows that list builds — which a tab
-    /// inside a folded group is not.
+    /// answered the same way: the tab list has to be on screen — the section
+    /// showing, and the column not hidden — and the pane has to be one of the
+    /// rows that list builds, which a tab folded into its group is not, and
+    /// neither is one the search box filtered out.
     ///
-    /// The search box is deliberately not asked. A filtered-out row is still a
-    /// row the list would draw if the query changed, and a menu opened on one
-    /// is the same menu; what matters here is whether the list exists at all.
-    pub(crate) fn panel_draws_row(&self, pane: PaneId) -> bool {
+    /// The search box is asked as well, because a filtered-out row is not
+    /// built and a menu opened on one would be drawn by nothing. Asked here,
+    /// before the menu opens, and not again while it is up: the query is
+    /// fixed while the menu holds the keyboard, but what it matches is not —
+    /// a status word, a title, a directory or a branch can move on its own —
+    /// so the list goes on building the row a menu is open on whatever the
+    /// query says. See [`tabs_panel::builds_row`].
+    pub(crate) fn panel_draws_row(&self, pane: PaneId, app: &AppContext) -> bool {
         self.section.is_none()
-            && self
-                .tabs
-                .rows(self.options().granularity)
-                .into_iter()
-                .any(|(_, row)| row == pane)
+            && self.tabs_panel_is_showing()
+            && tabs_panel::builds_row(self, app, pane)
     }
 
     /// Puts it up without the toggle.
@@ -4340,6 +4343,10 @@ impl Workspace {
     /// popup, so a worktree menu asked for on its own — by the entry, by the
     /// keyboard, or by `--worktree-menu` on the command line — would otherwise
     /// be state nothing paints.
+    ///
+    /// It asks nothing about the row. Its callers ask
+    /// [`panel_draws_row`](Self::panel_draws_row) first, all but the snapshot
+    /// flag's, which is told what to photograph.
     fn show_tab_context_menu(&mut self, tab: TabId, pane: PaneId, ctx: &mut ViewContext<Self>) {
         // Two popups are never up at once. See `a_popup_is_open`.
         self.close_menu();
@@ -4804,16 +4811,26 @@ impl Workspace {
     /// about the pane whose row was pressed, which under `Panes` granularity
     /// need not be the one the tab has focused.
     fn open_tab_menu_at(&mut self, tab: TabId, directory: PathBuf, ctx: &mut ViewContext<Self>) {
+        // A submenu is drawn inside the menu it hangs off, so opening this one
+        // opens that one — on the row the tab speaks through, which is its
+        // focused pane. Nothing happens to it when it is already there.
+        let row = (self.tab_context_menu.tab != Some(tab))
+            .then(|| self.tabs.get(tab).map(|tab| tab.panes().focused_id()))
+            .flatten();
+        // And nothing happens at all where the panel is not drawing that row,
+        // for the reason `open_tab_context_menu` gives: the menu, and the list
+        // inside it, would be state nothing paints, holding the keyboard from
+        // every pane. This path used to go round that check, and a rename run
+        // next found the invisible menu already up and was typed into it.
+        // Every caller asks afterwards whether the list came up.
+        if row.is_some_and(|row| !self.panel_draws_row(row, ctx)) {
+            return;
+        }
+
         // The menu on a block is never up at the same time. See
         // `a_popup_is_open`.
         self.close_block_menu(ctx);
-
-        // A submenu is drawn inside the menu it hangs off, so opening this one
-        // opens that one — on the row the tab speaks through, which is its
-        // focused pane. Nothing happens when it is already there.
-        if self.tab_context_menu.tab != Some(tab)
-            && let Some(row) = self.tabs.get(tab).map(|tab| tab.panes().focused_id())
-        {
+        if let Some(row) = row {
             self.show_tab_context_menu(tab, row, ctx);
         }
 
@@ -6577,6 +6594,11 @@ impl Workspace {
         };
 
         self.open_tab_menu_at(tab, directory.clone(), ctx);
+        // Refused where the panel draws no row for the tab, and then there is
+        // nowhere to ask.
+        if self.tab_menu.tab != Some(tab) {
+            return;
+        }
         self.tab_menu.mode = WorktreeMode::Finishing {
             discard,
             losing: false,
@@ -6780,13 +6802,19 @@ impl Workspace {
             self.apply(TabAction::ClosePane(*pane), ctx);
         }
 
-        let opening = landing.map(|tab| {
+        let opening = landing.and_then(|tab| {
             self.open_tab_menu(tab, ctx);
+            // Refused where the panel draws no row for the tab — one the
+            // search does not answer for, say — and then the task is carried
+            // out with nobody waiting, which the log says.
+            if self.tab_menu.tab != Some(tab) {
+                return None;
+            }
             self.tab_menu.mode = WorktreeMode::Finishing { discard, losing };
             self.tab_menu.finishing = Finishing::Working(super::finish::under_way(&plan, discard));
             self.start_chomping(ctx);
             ctx.notify();
-            self.tab_menu.opening
+            Some(self.tab_menu.opening)
         });
 
         let repository = plan.main().path.clone();
@@ -9877,6 +9905,11 @@ impl Workspace {
     /// Reachable from a plugin, because a plugin's surface going up or down is
     /// one of the things that moves the focus and nothing else would say so.
     pub fn sync_input_keys(&self) {
+        // First, because everything below asks whether a surface is up, and a
+        // plugin's surface drawn inside a popup that has closed is not —
+        // whatever its plugin last said, and whichever path closed the popup.
+        // See `Host::claim_surface_inside`.
+        self.host.take_strays_down(self);
         // The menu is modal and the Themes panel owns the arrow keys, so
         // neither leaves the keyboard with a pane.
         // A plugin's surface counts exactly as an open menu does: while a
