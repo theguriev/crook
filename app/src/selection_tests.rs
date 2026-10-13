@@ -786,27 +786,9 @@ fn a_space_in_the_last_column_of_a_fold_is_still_a_space() {
     }
 }
 
-#[test]
-fn a_wide_character_carried_over_a_fold_leaves_no_space_behind() {
-    // Too wide for the last column, so the terminal leaves it blank and
-    // folds: that blank is where the character did not fit, not a space.
-    for finished in [true, false] {
-        let session = folded("aaaaaaaaa漢b", finished);
-        assert_eq!(
-            1,
-            session.blocks().find_all("a漢b").len(),
-            "finished: {finished}"
-        );
-        assert_eq!(
-            Some(String::from("aaaaaaaaa漢b")),
-            session.dragged((0, 1, 0), (0, 2, 2)),
-            "finished: {finished}"
-        );
-    }
-}
-
-/// One finished command in a pane `columns` wide, which printed `output`.
-fn printed(columns: u16, output: &str) -> Session {
+/// One finished command that printed `output`, line breaks and all, in a
+/// pane `columns` wide: narrow enough that a long line of it folds.
+fn narrow(columns: u16, output: &str) -> Session {
     let mut emulator = Emulator::new(TerminalSize::new(columns, 12), 100, Palette::default());
     emulator.advance(format!("{A}{B}x\r\n{C}{output}{D}{A}$ ").as_bytes());
     Session {
@@ -832,7 +814,7 @@ fn a_filter_keeps_a_line_whose_match_crosses_its_fold_and_every_row_of_it() {
     // Twenty columns fold this line inside `needle`, and each row read on its
     // own holds half of it: the filter kept nothing while find found it, and
     // a filter for `error` kept the first row and hid the rest of the line.
-    let session = printed(20, "error: xxxxxxxxxxxneedle yyyy\r\nok\r\n");
+    let session = narrow(20, "error: xxxxxxxxxxxneedle yyyy\r\nok\r\n");
     let block = session.finished.iter().next().expect("a finished block");
     assert!(
         block.rows.wraps(1) && block.rows.text(1).ends_with("ne"),
@@ -858,7 +840,7 @@ fn a_filter_counts_lines_and_drops_a_folded_line_that_does_not_match_whole() {
     // not where the line does is no match: the fold is the terminal's, and
     // keeping that row alone showed the back half of a line.
     let long = "a".repeat(40) + "needle" + &"b".repeat(14);
-    let session = printed(20, &format!("{long}\r\nok\r\n"));
+    let session = narrow(20, &format!("{long}\r\nok\r\n"));
     let block = session.finished.iter().next().expect("a finished block");
     assert!(
         block.rows.wraps(1) && block.rows.wraps(2) && !block.rows.wraps(3),
@@ -887,4 +869,23 @@ fn a_filter_reads_a_fold_the_way_find_does() {
     assert_eq!(1, session.blocks().find_all("a bbb").len());
     assert_eq!(vec![0, 1, 2], filtered(&session, "a bbb", false).rows);
     assert_eq!(vec![0], filtered(&session, "abbb", false).rows);
+}
+
+#[test]
+fn a_wide_character_carried_over_a_fold_leaves_no_space_behind() {
+    // Too wide for the last column, so the terminal leaves it blank and
+    // folds: that blank is where the character did not fit, not a space.
+    for finished in [true, false] {
+        let session = folded("aaaaaaaaa漢b", finished);
+        assert_eq!(
+            1,
+            session.blocks().find_all("a漢b").len(),
+            "finished: {finished}"
+        );
+        assert_eq!(
+            Some(String::from("aaaaaaaaa漢b")),
+            session.dragged((0, 1, 0), (0, 2, 2)),
+            "finished: {finished}"
+        );
+    }
 }
