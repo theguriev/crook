@@ -923,6 +923,16 @@ impl TerminalModel {
             size: self.measured.get(pane).unwrap_or(INITIAL_GRID),
             working_directory: directory,
             palette: self.palette.clone(),
+            // What `TERM_PROGRAM` and `TERM_PROGRAM_VERSION` say, for a
+            // program that asks the terminal instead of its environment.
+            // The answer reaches it through ssh and sudo, where the
+            // variables do not, and Claude Code waits on it before it will
+            // draw its frames whole.
+            name_and_version: Some(format!(
+                "{} {}",
+                shell_integration::TERM_PROGRAM,
+                shell_integration::VERSION
+            )),
             ..Default::default()
         };
         integration.apply(&mut options);

@@ -393,6 +393,12 @@ pub(super) enum Sweep {
         going: Vec<Going>,
         /// The branches of the ones being left alone.
         kept: Vec<String>,
+        /// Those of [`Self::Ready::kept`] left alone only because of a
+        /// submodule — checked out in them, or its repository still kept
+        /// there: nothing in them is work, and git will not remove them
+        /// unforced — which is a reason of its own to give, since "there is
+        /// work in it" would not be true.
+        submodules: Vec<String>,
     },
     /// The button has been pressed and the checkouts are going, one at a time.
     Removing {
@@ -1820,7 +1826,7 @@ fn tidying(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
         // work in it — what is being left: one checkout kept is still "this
         // checkout", and counting the none that go flipped the heading to the
         // plural over "There is work in it."
-        Sweep::Ready { going, kept } if going.is_empty() => kept.len(),
+        Sweep::Ready { going, kept, .. } if going.is_empty() => kept.len(),
         Sweep::Ready { going, .. } => going.len(),
     };
     let mut column = Flex::column()
@@ -1835,7 +1841,7 @@ fn tidying(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
             ui,
         ));
 
-    let (going, kept) = match &state.sweep {
+    let (going, kept, submodules) = match &state.sweep {
         // Every candidate is a `git status`, so the question is on screen
         // before it can be answered — the same order the list itself opens in,
         // and for the same reason: a popup that appeared once git had finished
@@ -1871,7 +1877,11 @@ fn tidying(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
             column.add_child(buttons(workspace, &format!("Remove {of}"), None, ui));
             return column.finish();
         }
-        Sweep::Ready { going, kept } => (going, kept),
+        Sweep::Ready {
+            going,
+            kept,
+            submodules,
+        } => (going, kept, submodules),
     };
 
     for going in going.iter().take(NAMED) {
@@ -1890,13 +1900,23 @@ fn tidying(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
         // Which is a real answer and not an error: every free checkout has
         // something in it. The face still opens, because "nothing to do here"
         // is what the person asked to be told.
-        column.add_child(note(
-            match kept.len() {
-                1 => "There is work in it.",
-                _ => "There is work in every one of them.",
-            },
-            ui,
-        ));
+        //
+        // A checkout left alone only for a submodule has no work in it, and
+        // the line under the list gives its reason instead.
+        match (kept.len() - submodules.len(), kept.len()) {
+            (0, _) => {}
+            (_, 1) => column.add_child(note("There is work in it.", ui)),
+            _ if submodules.is_empty() => {
+                column.add_child(note("There is work in every one of them.", ui));
+            }
+            _ => column.add_child(note(
+                format!(
+                    "There is work in every one of them but {}.",
+                    named(submodules)
+                ),
+                ui,
+            )),
+        }
     } else {
         column.add_child(note(
             match going.len() {
@@ -1921,6 +1941,24 @@ fn tidying(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
 
     if !kept.is_empty() {
         column.add_child(note(format!("Left alone: {}.", named(kept)), ui));
+    }
+    // Said here rather than found out by pressing: the press would only have
+    // git refuse them, one by one, and send the person to the log for why.
+    // "Holds", not "has checked out": a submodule deinitialised in a checkout
+    // leaves its repository there, and git refuses over that too.
+    if !submodules.is_empty() {
+        let hold = if submodules.len() == 1 {
+            "holds"
+        } else {
+            "hold"
+        };
+        column.add_child(note(
+            format!(
+                "{} {hold} a submodule, and git removes a checkout like that only when forced.",
+                named(submodules)
+            ),
+            ui,
+        ));
     }
 
     if let Some(problem) = &state.problem {

@@ -502,7 +502,7 @@ pub fn converse(stream: &UnixStream, deadline: Instant, answer: &Ask, place: &mu
             // only: the reading goes on against the connection's deadline, so
             // a line after a slow one finds that time has run out and the
             // connection closes, rather than one slow verb lending the rest
-            // of the connection its two minutes.
+            // of the connection its own patience.
             let replying_by = match request
                 .as_ref()
                 .ok()

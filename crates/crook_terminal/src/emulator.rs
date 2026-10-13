@@ -217,10 +217,12 @@ impl EventListener for EventProxy {
 /// deliberately does not have — and OSC 133 because `vte::ansi::Handler` has no
 /// hook for it at all, so no amount of implementing that trait can see one.
 /// The notifications other terminals read — OSC 9, 99 and 777 — reach no hook
-/// either, and are logged as unhandled.
+/// either, and are logged as unhandled. So does one question: XTVERSION,
+/// `CSI > q`, which asks for the terminal's name and version, and which `vte`
+/// does not tell apart from the `q`s it has no use for.
 ///
 /// So the bytes get a second pass through `vte`'s own parser with a `Perform`
-/// that implements nothing but `osc_dispatch`. That costs one extra walk of the
+/// that implements little but `osc_dispatch`. That costs one extra walk of the
 /// stream, which is a table-driven byte loop that does nothing at all outside
 /// an escape sequence, and it buys a correct OSC parser instead of a hand-
 /// rolled scanner that has to get chunk boundaries right.
@@ -252,6 +254,9 @@ struct OscWatcher {
     /// Whether the chunk erased the scrollback — `CSI 3 J`, the third thing
     /// `clear` prints.
     history_cleared: bool,
+    /// Whether the program asked which terminal this is, with XTVERSION —
+    /// `CSI > q`, which is where the watcher stops.
+    version_asked: bool,
     /// Keeps an iTerm2 picture that is arriving in pieces.
     images: image::Reader,
     /// A picture to place at the cursor, which is where the watcher stops.
@@ -260,13 +265,19 @@ struct OscWatcher {
 
 impl Perform for OscWatcher {
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
-        // Only the plain form: `CSI ? 3 J` is the selective erase, which
-        // leaves the history alone.
-        if action == 'J'
-            && intermediates.is_empty()
-            && params.iter().next().is_some_and(|param| param == [3])
-        {
-            self.history_cleared = true;
+        let first = params.iter().next();
+        match (action, intermediates) {
+            // Only the plain form: `CSI ? 3 J` is the selective erase, which
+            // leaves the history alone.
+            ('J', []) if first.is_some_and(|param| param == [3]) => {
+                self.history_cleared = true;
+            }
+            // XTVERSION takes no parameter but 0, which is also what an
+            // empty one parses as.
+            ('q', [b'>']) if first.is_none_or(|param| param == [0]) => {
+                self.version_asked = true;
+            }
+            _ => {}
         }
     }
 
@@ -322,10 +333,16 @@ impl Perform for OscWatcher {
     /// `9;done`, `running` went out as the notification and a `running` that
     /// changed nothing. A burst of either with none of the other between
     /// still collapses to its last one, and costs no stop.
+    ///
+    /// And on XTVERSION, whose answer [`Emulator::advance`] makes from here:
+    /// `Term` queues its own answers as it parses, so the version has to be
+    /// answered once everything before the query is parsed and nothing after
+    /// it, or it goes out of order with the answers either side of it.
     fn terminated(&self) -> bool {
         self.mark.is_some()
             || self.image.is_some()
             || (self.agent.is_some() && self.notification.is_some())
+            || self.version_asked
     }
 }
 
@@ -433,6 +450,9 @@ pub struct Emulator {
     agent: AgentReport,
     events: Vec<TerminalEvent>,
     replies: Vec<u8>,
+    /// The whole answer to XTVERSION, made once, when there is a name to
+    /// answer with: see [`Self::set_name_and_version`].
+    version_reply: Option<String>,
     /// Whether this has ever been fed through [`Self::advance_mirrored`],
     /// which makes it an emulator that owes the child nothing for good.
     mirrored: bool,
@@ -484,6 +504,7 @@ impl Emulator {
             agent: AgentReport::default(),
             events: Vec::new(),
             replies: Vec::new(),
+            version_reply: None,
             mirrored: false,
             snapshot,
             dirty: false,
@@ -541,6 +562,19 @@ impl Emulator {
                 && !self.term.mode().contains(TermMode::ALT_SCREEN)
             {
                 self.blocks.history_cleared(&self.term);
+            }
+            // The piece ends on the query, and `Term` has queued the answers
+            // to everything before it on the proxy, so this lands behind
+            // them and ahead of the rest of the read's, in the one queue
+            // `drain` empties. A query inside a synchronized update is the
+            // exception: `vte` holds the update's queries and answers them
+            // when it ends, and this goes at once — ahead of every query
+            // sent after it all the same, which is the order a program
+            // waiting on a sentinel query behind it needs.
+            if std::mem::take(&mut self.osc_watcher.version_asked)
+                && let Some(reply) = &self.version_reply
+            {
+                self.proxy.send_event(Event::PtyWrite(reply.clone()));
             }
             // Wherever the watcher stopped, what it holds was written before
             // the stop and goes out now. A report earlier in this same read
@@ -949,6 +983,21 @@ impl Emulator {
     pub fn set_palette(&mut self, palette: Palette) {
         self.palette = palette;
         self.dirty = true;
+    }
+
+    /// Sets what this answers a program that asks which terminal it is,
+    /// with XTVERSION (`CSI > q`): a name and a version, such as
+    /// `Crook 0.1.21`, which goes back as `DCS > | Crook 0.1.21 ST`.
+    ///
+    /// The embedding application's name rather than this crate's, which is
+    /// why it is handed in: a program asking is asking which terminal it is
+    /// in, and some decide what to use on the answer — Claude Code asks
+    /// whether synchronized output is supported only once this question has
+    /// been answered, and draws frames that can be painted half done when
+    /// it has not. `None`, the default, leaves the question unanswered, as
+    /// a terminal that does not know it would.
+    pub fn set_name_and_version(&mut self, name_and_version: Option<&str>) {
+        self.version_reply = name_and_version.map(|name| format!("\x1bP>|{name}\x1b\\"));
     }
 
     /// Ends a synchronized update that has outstayed its welcome.
