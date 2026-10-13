@@ -2656,6 +2656,14 @@ impl Workspace {
         }
     }
 
+    /// Whether quitting now would stop to ask, which is what the window's
+    /// close would do — answered without putting the question up, for
+    /// macOS's Quit, which has to be told yes or no on the spot. See
+    /// `workspace::closing`.
+    pub fn asks_before_quitting(&self) -> bool {
+        closing::quitting_asks(self.general().ask_before_ending_agents, &self.tabs)
+    }
+
     /// Asks before `close` ends anything still working, and says whether it
     /// asked.
     ///

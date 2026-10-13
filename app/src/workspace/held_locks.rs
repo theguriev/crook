@@ -120,7 +120,7 @@ impl HeldLock {
 /// from the delegate the platform tells. Every way of closing a window
 /// reaches that delegate. Only some of them pass through the workspace's own
 /// quit first — the last tab closing, the header's × — and the window
-/// manager's close and macOS's Quit do not.
+/// manager's close and a macOS Quit with nothing working do not.
 #[derive(Debug, Clone, Default)]
 pub struct HeldLocks(Arc<Mutex<Held>>);
 

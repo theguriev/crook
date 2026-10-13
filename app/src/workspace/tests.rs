@@ -1597,6 +1597,13 @@ impl Harness {
         })
     }
 
+    /// Whether a quit would stop to ask now, which is what macOS's Quit is
+    /// answered with.
+    fn asks_before_quitting(&self) -> bool {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.asks_before_quitting())
+    }
+
     /// Presses the question's button that says `label`, on a fresh frame.
     ///
     /// By its label rather than by a box, because the two buttons are the
@@ -2470,6 +2477,58 @@ fn with_the_question_turned_off_a_working_window_closes_at_once() {
     harness.dispatch_workspace_action(WindowAction::Close.into());
     assert_eq!(harness.quit_requests(), 1, "the window still asked");
     assert_eq!(harness.asking_about(), None);
+}
+
+#[test]
+fn a_quit_asks_exactly_when_the_windows_close_would() {
+    // macOS's Quit is answered on the spot, before anything can be put on
+    // screen, so it is answered with this rather than with the close. The
+    // two must agree both ways: a quit that went at once over a running
+    // command is the bug being fixed, and one that stopped over nothing
+    // would cancel a logout for nothing.
+    let mut harness = Harness::new(3);
+    let panes = harness.pane_ids();
+    harness.update_session(panes[0], |session| {
+        session.attention = Some(Attention::Bell)
+    });
+    harness.update_session(panes[1], |session| session.status = AgentStatus::Failed);
+
+    assert!(
+        !harness.asks_before_quitting(),
+        "a quit with nothing working would have asked"
+    );
+    harness.dispatch_workspace_action(WindowAction::Close.into());
+    assert_eq!(harness.quit_requests(), 1, "the close asked after all");
+    assert_eq!(harness.asking_about(), None);
+
+    harness.update_session(panes[2], |session| {
+        session.running_command = Some("cargo build".to_owned());
+    });
+    assert!(
+        harness.asks_before_quitting(),
+        "a quit over a running command would have gone at once"
+    );
+    harness.dispatch_workspace_action(WindowAction::Close.into());
+    assert_eq!(harness.quit_requests(), 1, "the close went after all");
+    assert_eq!(harness.asking_about(), Some(vec![panes[2]]));
+}
+
+#[test]
+fn with_the_question_turned_off_a_quit_does_not_ask() {
+    let mut harness = Harness::new(2);
+    for pane in harness.pane_ids() {
+        harness.update_session(pane, |session| session.status = AgentStatus::Running);
+    }
+    assert!(harness.asks_before_quitting(), "on by default");
+
+    harness.dispatch_workspace_action(WorkspaceAction::Settings(
+        SettingsAction::ToggleAskBeforeEnding,
+    ));
+
+    assert!(
+        !harness.asks_before_quitting(),
+        "a quit asked with the question turned off"
+    );
 }
 
 #[test]

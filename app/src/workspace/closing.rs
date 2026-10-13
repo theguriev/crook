@@ -93,16 +93,27 @@
 //!
 //! Anything that ends the process from outside it. `SIGTERM`, a logout that
 //! kills rather than closes, a power cut: none of them runs a line of Crook
-//! first, so there is nobody to put a card up. On macOS the application
-//! menu's Quit — and `cmd-q`, its key equivalent, which AppKit takes before
-//! the window sees a key — is the same case for a different reason: winit's
-//! menu sends `terminate:`, and winit answers that with
-//! `applicationWillTerminate:` and no `applicationShouldTerminate:`, so there
-//! is no moment in which to say no. Taking it over needs a menu of Crook's own
-//! and an Objective-C dependency the rest of the window has no use for yet.
-//! The window's own close — the traffic light, `alt-f4`, a window manager's
-//! close — does arrive, as winit's `CloseRequested`, and it is routed here
-//! through the window delegate rather than ending the event loop.
+//! first, so there is nobody to put a card up. The window's own close — the
+//! traffic light, `alt-f4`, a window manager's close — does arrive, as
+//! winit's `CloseRequested`, and it is routed here through the window
+//! delegate rather than ending the event loop.
+//!
+//! # What has to be answered on the spot
+//!
+//! macOS's Quit: the application menu's, `cmd-q` — its key equivalent, which
+//! AppKit takes before the window sees a key — the Dock icon's, and the one a
+//! logout, restart or shutdown sends. All of them are AppKit's `terminate:`,
+//! sent to the application rather than the window, and AppKit wants to know
+//! whether it may go on before the call returns — a question winit's
+//! delegate never answered, so each of them used to end every pane without a
+//! word. `crookui` answers it now (its `windowing::quit`), from
+//! [`quitting_asks`] as it stood when the event loop last went idle. A quit
+//! that would ask is refused — a logout with it, as Terminal and iTerm2
+//! cancel one over a running process — and comes back as the window's close,
+//! which asks here like any other and brings the window forward the same
+//! way; one that would not ends Crook at once, as every quit did before.
+//! "End them and quit" then leaves the way the window's close does, through
+//! the event loop rather than `terminate:`, so it is not asked about twice.
 //!
 //! A run nobody is sitting at never sees the card either. The headless
 //! snapshot's quit is a no-op, so its frames are drawn and written whatever
@@ -220,6 +231,18 @@ impl Close {
     fn quits(self, strip: &TabStrip) -> bool {
         self == Self::Window || self.ends(strip).len() == strip.panes().count()
     }
+}
+
+/// Whether quitting would stop to ask, with `ask` the person's "Ask before
+/// ending working agents".
+///
+/// The question the window's close puts up, decided without putting it up:
+/// for a quit that has to be told yes or no on the spot, which is macOS's —
+/// see "What has to be answered on the spot" in the [module](self). It has to
+/// agree with what the close itself does, or a quit would go at once over
+/// work the close would have asked about.
+pub(super) fn quitting_asks(ask: bool, strip: &TabStrip) -> bool {
+    ask && !Close::Window.working(strip).is_empty()
 }
 
 /// The question, while it is up.

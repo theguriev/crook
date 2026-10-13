@@ -2819,10 +2819,13 @@ has an agent running or waiting on a person, or a shell running a command, and p
 whose default is Cancel (`app/src/workspace/closing.rs`). The window's close includes the
 desktop's: winit's `CloseRequested` goes to the application through the window delegate rather
 than ending the event loop there. What cannot ask is anything that ends the process from outside
-it: a `SIGTERM` or a kill, a logout that kills rather than closes, a power cut — and macOS's Quit
-menu item and `cmd-q`, which winit turns into `applicationWillTerminate:` with no
-`applicationShouldTerminate:` to say no in. A window manager's close is not one of them: it
-arrives as `CloseRequested` and asks like the rest. Because it can come while somebody is typing
+it: a `SIGTERM` or a kill, a logout that kills rather than closes, a power cut. A window manager's
+close is not one of them: it arrives as `CloseRequested` and asks like the rest. Nor is macOS's
+Quit — the menu item, `cmd-q`, the Dock's, a polite logout's — although winit turns it into
+`applicationWillTerminate:` with no `applicationShouldTerminate:` to say no in: Crook adds that
+method to winit's delegate (`crates/crookui/src/windowing/quit.rs`), answers it from what the
+window said when the event loop last went idle, and refuses a quit that would ask, which then
+asks as the window's close. Because it can come while somebody is typing
 elsewhere, the window asks the desktop for attention rather than taking the keyboard, and the
 card's way to End opens only after the keyboard has been still for a second — since the card
 came up, since the window last took the keyboard, and since the last key it had no use for.

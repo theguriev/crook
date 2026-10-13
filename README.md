@@ -319,8 +319,10 @@ Twenty features, and the page that configures them:
   it always did.
   **Ask before ending working agents**, on the Appearance page, turns the question off, and
   **End all agents and quit** in the palette quits without it once. Nothing can ask when the
-  system ends Crook itself — a `SIGTERM`, a logout — and on macOS the Quit menu item and `cmd-q`
-  are that case too: AppKit ends the application before the window hears about either.
+  system ends Crook itself, as a `SIGTERM` or a forced logout does. On macOS `cmd-q`, the Quit
+  menu item, the Dock's Quit and a logout or restart ask too: with something working, the quit
+  is cancelled — a logout with it, as Terminal and iTerm2 cancel one — and the same card comes
+  up as for the window's close. Nobody has watched that happen on a Mac yet.
 - **The window's own title bar.** There is no strip of system chrome above Crook. The window is
   opened with the application's frame, so the header *is* the title bar: dragging its empty
   space moves the window and a double click maximises it. On macOS that surface carries
