@@ -19,7 +19,7 @@ use std::rc::Rc;
 use crook_terminal::{
     BlockId, Key, Modifiers, MouseButton, MouseEventKind, MouseModes, Rows, SelectionKind,
 };
-use crookui_core::event::{Event, Ime};
+use crookui_core::event::{Event, Ime, Keystroke};
 use crookui_core::presenter::EventContext;
 
 use crate::clipboard::Clipboard;
@@ -50,8 +50,41 @@ pub enum Keys {
     /// to end the program these keys would reach: there the pane gets
     /// [`Keys::None`].
     Signals,
+    /// The keys of [`Keys::Signals`], and the copy chord over a selection in
+    /// the output.
+    ///
+    /// What the focused pane's output keeps while that pane's find bar has
+    /// the keyboard. The field takes every key it has a use for before the
+    /// output hears it, and the rest used to fall through to the program: a
+    /// word an input method composed, a chord the field means nothing by, a
+    /// paste chord it does not paste on (`ctrl-shift-v` on macOS) — every one
+    /// of them, over an agent or an `ssh` session with no composer to catch
+    /// them. Unlike under a menu, the bar hides nothing of the output, so a
+    /// selection made in it is still in view, and the copy chord over one —
+    /// the platform's, or `ctrl-c` — still copies it rather than interrupting
+    /// the program. The field leaves the platform's chord to the output
+    /// whenever it has nothing selected of its own to copy.
+    SignalsAndCopy,
     /// Everything the routing rule gives the shell.
     All,
+}
+
+impl Keys {
+    /// Whether a keystroke the routing rule gives the program — typed, or a
+    /// paste — is handed on to it with this much of the keyboard.
+    ///
+    /// Everything, with the whole of it; with less, only the three keys a
+    /// running command must keep hearing. A paste is not one of them, and is
+    /// asked here like any other key: under a menu, or under a find bar whose
+    /// field had no use for the chord, the clipboard going into the program
+    /// would be the one key of all of them that reached it.
+    fn hands_on(self, keystroke: &Keystroke) -> bool {
+        match self {
+            Keys::All => true,
+            Keys::Signals | Keys::SignalsAndCopy => input_keys::is_signal(keystroke),
+            Keys::None => false,
+        }
+    }
 }
 
 /// What became of a keystroke offered to a pane's output.
@@ -278,8 +311,10 @@ impl Output {
             return Typed::Ignored;
         };
 
-        let modal = self.keys == Keys::Signals;
-        let can_copy = !modal && self.mouse.is_some();
+        // Everything but the whole keyboard leaves the program the signals
+        // alone — see [`Keys::hands_on`]; only a menu takes the selection's
+        // claim on `ctrl-c` as well.
+        let can_copy = self.keys != Keys::Signals && self.mouse.is_some();
         let pane = input_keys::Pane {
             // Which screen this is was answered when the frame was built, by
             // the one function that answers it: a composer was attached, or
@@ -301,8 +336,13 @@ impl Output {
             };
         }
         // The program owns the keyboard, so this is the only way the clipboard
-        // reaches it.
+        // reaches it — with the whole of the keyboard, and only then. Under a
+        // find bar this is a chord the field had no use for, `ctrl-shift-v` on
+        // macOS, meant for the query and not for the agent under it.
         if route == Route::PasteToShell {
+            if !self.keys.hands_on(keystroke) {
+                return Typed::Ignored;
+            }
             let text = self
                 .clipboard
                 .as_ref()
@@ -344,9 +384,9 @@ impl Output {
         if !route.reaches_the_shell() {
             return Typed::Ignored;
         }
-        // A modal menu takes the rest away: everything but the three keys a
-        // running command has to keep hearing.
-        if modal && !input_keys::is_signal(keystroke) {
+        // A modal menu, or a find bar, takes the rest away: everything but the
+        // three keys a running command has to keep hearing.
+        if !self.keys.hands_on(keystroke) {
             return Typed::Ignored;
         }
 
@@ -371,8 +411,9 @@ impl Output {
     /// `less`, Claude Code — nothing else read it, and what somebody composed
     /// reached no program at all. So it goes to the pty as typed text, the way
     /// every terminal hands a full-screen program a composed character. Only
-    /// with the whole keyboard: a modal menu leaves the program the signals and
-    /// nothing else, and a composed word is not a signal.
+    /// with the whole keyboard: a modal menu, or a find bar being typed into,
+    /// leaves the program the signals and nothing else, and a composed word is
+    /// not a signal.
     fn commit(&self, text: &str) -> Typed {
         if self.keys != Keys::All || self.input.is_some() || text.is_empty() {
             return Typed::Ignored;
@@ -672,5 +713,80 @@ pub fn selection_kind(click_count: u32, alt: bool) -> SelectionKind {
         (1, _) => SelectionKind::Simple,
         (2, _) => SelectionKind::Semantic,
         _ => SelectionKind::Lines,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crookui_core::event::Modifiers;
+
+    use super::*;
+
+    fn ctrl_shift() -> Modifiers {
+        Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+
+    /// A pane whose program holds the screen: an agent, `ssh`, a REPL.
+    fn program() -> input_keys::Pane {
+        input_keys::Pane {
+            composer: false,
+            line_is_empty: true,
+            grid_has_selection: false,
+        }
+    }
+
+    /// On macOS `ctrl-shift-v` is a paste chord for a program and nothing to
+    /// a text field, so a find bar over an agent let it through to the
+    /// output, which pasted the clipboard into the agent's prompt rather than
+    /// the query. Asked of macOS's keymap on every machine, because the field
+    /// off macOS takes the chord itself and the window's own tests can only
+    /// show the gap on a Mac.
+    #[test]
+    fn a_paste_chord_the_find_field_has_no_use_for_stays_out_of_the_program() {
+        let paste = Keystroke::new("v", ctrl_shift());
+        assert_eq!(
+            None,
+            input_keys::intent(&paste, "", Platform::Mac),
+            "the field leaves the chord to whatever is under it"
+        );
+        assert_eq!(
+            Route::PasteToShell,
+            input_keys::route(&paste, "", program(), Platform::Mac),
+            "and the routing rule gives it to the program as a paste"
+        );
+        assert!(
+            !Keys::SignalsAndCopy.hands_on(&paste),
+            "a paste reached the program under the find bar"
+        );
+        assert!(
+            !Keys::Signals.hands_on(&paste),
+            "a paste reached the program under a menu"
+        );
+        assert!(Keys::All.hands_on(&paste), "the whole keyboard pastes");
+    }
+
+    /// What is left to the program under a menu or a find bar is the three
+    /// keys a running command has to keep hearing, and no other.
+    #[test]
+    fn under_a_menu_or_a_find_bar_only_the_signals_are_handed_on() {
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        for keys in [Keys::Signals, Keys::SignalsAndCopy] {
+            for signal in ["c", "d", "z"] {
+                assert!(
+                    keys.hands_on(&Keystroke::new(signal, ctrl)),
+                    "{keys:?} kept ctrl-{signal} from the program"
+                );
+            }
+            assert!(!keys.hands_on(&Keystroke::new("f5", Modifiers::default())));
+            assert!(!keys.hands_on(&Keystroke::new("a", ctrl)));
+        }
+        assert!(!Keys::None.hands_on(&Keystroke::new("c", ctrl)));
     }
 }

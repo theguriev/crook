@@ -21488,29 +21488,488 @@ mod shells {
             );
         }
 
+        /// Whether a pane is drawing its output as one grid.
+        fn draws_grid(harness: &Harness, pane: PaneId) -> bool {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace.terminal(pane, app).is_some_and(|(_, snapshot)| {
+                    crate::pane_surface::of(&snapshot, std::time::Instant::now()).surface
+                        == crate::pane_surface::Surface::Grid
+                })
+            })
+        }
+
+        /// Types into the bar the way a person does, a key at a time through
+        /// the bindings and then the field, which says each edit.
+        fn type_query(harness: &mut Harness, query: &str) {
+            // The field takes keys in the tree the last frame built.
+            harness.frame();
+            for character in query.chars() {
+                let key = character.to_string();
+                harness.press(&key, Modifiers::default(), &key);
+            }
+        }
+
+        /// The current match and the count, once the grid's search has come
+        /// back with `total` of them.
+        fn await_grid_matches(harness: &mut Harness, pane: PaneId, total: usize) {
+            harness.wait_for("the grid's search never came back", |harness| {
+                matches(harness, pane) == total
+            });
+        }
+
+        /// A marked shell running one command that printed `printed`, then
+        /// four hundred lines, and is still running: its block starts far
+        /// above the viewport, so the pane draws the grid, and what it printed
+        /// first is only in the scrollback. `None` where no shell could be
+        /// started.
+        ///
+        /// The doubled backslashes are the shell's, for its printf.
+        fn overflowed(harness: &mut Harness, printed: &str) -> Option<PaneId> {
+            let pane = marked_shell(harness)?;
+            await_prompt(harness, pane);
+            harness.type_into(pane, &format!("{printed}; seq 1 400; sleep 600\n"));
+            // For a number only the *output* can hold: the command line is
+            // echoed on screen as soon as it is typed.
+            harness.wait_for("the command never overflowed the viewport", |harness| {
+                harness.terminal_text(pane).contains("399") && draws_grid(harness, pane)
+            });
+            harness.frame();
+            Some(pane)
+        }
+
         #[test]
-        fn a_full_screen_program_has_no_find_bar() {
+        fn a_grid_finds_a_line_in_its_scrollback_and_steps_to_it() {
+            // An agent past its first screenful is one running command on the
+            // grid, and the bar used to refuse to open over it: the chord was
+            // swallowed and nothing showed. It searches the scrollback now,
+            // counts what it found, and steps the screen to each match. The
+            // command line says `zq%sxv`, so `q1x` is only ever the output.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = overflowed(&mut harness, "printf 'zq%sxv\\n' 1 1 1") else {
+                return;
+            };
+            assert!(
+                !harness.terminal_text(pane).contains("zq1xv"),
+                "the lines to find are not on screen to begin with"
+            );
+
+            harness.run_command("crook/window/find");
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("the pane has a find bar");
+            assert!(find.is_open(), "the chord opened nothing over the grid");
+            // Long enough for the command's last repaint to have landed, so
+            // that the search which answers the query is the one the
+            // keystrokes in the field start, and not one a repaint did.
+            harness.settle(std::time::Duration::from_millis(500));
+            type_query(&mut harness, "q1x");
+            assert_eq!("q1x", find.query(), "the keys went to the bar");
+            await_grid_matches(&mut harness, pane, 3);
+            // The bar is over the program, and claims what is typed into it: a
+            // key that reached the pty too would be echoed onto the screen.
+            harness.settle(std::time::Duration::from_millis(200));
+            assert!(
+                !harness.terminal_text(pane).contains("q1x"),
+                "the keys typed into the bar reached the program as well"
+            );
+            assert_eq!(Some(0), current(&harness, pane));
+            assert!(
+                frame_text(&harness.frame()).contains("1/3"),
+                "the bar counts the scrollback's matches"
+            );
+
+            step(&mut harness, pane, true);
+            assert_eq!(Some(1), current(&harness, pane));
+            let showing = harness.terminal_text(pane);
+            assert!(
+                showing.contains("zq1xv"),
+                "stepping left the match off screen; the screen showed {showing:?}"
+            );
+            let scene = harness.frame();
+            assert!(frame_text(&scene).contains("2/3"));
+            let current_wash = Fill::Solid(
+                theme()
+                    .accent
+                    .with_alpha(crate::workspace::block_list::FIND_CURRENT_ALPHA),
+            );
+            assert!(
+                scene
+                    .layers()
+                    .flat_map(|layer| layer.rects.iter())
+                    .any(|rect| rect.background == current_wash),
+                "the current match is not highlighted on the grid"
+            );
+
+            step(&mut harness, pane, true);
+            step(&mut harness, pane, true);
+            assert_eq!(
+                Some(0),
+                current(&harness, pane),
+                "forward wraps round the end"
+            );
+        }
+
+        #[test]
+        fn a_bar_open_over_the_list_stays_open_when_the_output_outgrows_the_screen() {
+            // The bar used to close as the pane left the list of commands, so a
+            // search running while a command printed its first screenful went
+            // with it. The pane changing surfaces is not the pane changing
+            // screens: the bar stays, and searches the grid.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = searching(&mut harness, "qvx wqz rqv", "zq1xv") else {
+                return;
+            };
+            assert_eq!(0, matches(&harness, pane));
+
+            // Straight to the pty, because the bar has the keyboard.
+            harness.type_into(pane, "printf 'zq%sxv\\n' 1; seq 1 400; sleep 600\n");
+            harness.wait_for("the command never overflowed the viewport", |harness| {
+                harness.terminal_text(pane).contains("399") && draws_grid(harness, pane)
+            });
+            harness.frame();
+            let open = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.find(pane).unwrap().is_open()
+            });
+            assert!(open, "the bar closed when the output outgrew the screen");
+            await_grid_matches(&mut harness, pane, 1);
+        }
+
+        #[test]
+        fn a_full_screen_program_is_searched_on_its_screen() {
+            // The alternate screen keeps no scrollback — Claude Code's
+            // fullscreen renderer keeps its history itself — so what there is
+            // to search is the screen the program drew, and the field says so.
+            // The bar goes when the program does: the screen it was about has
+            // gone, and the shell's own keys are not the bar's.
             let mut harness = Harness::panel(1);
             let Some(pane) = marked_shell(&mut harness) else {
                 return;
             };
             await_prompt(&mut harness, pane);
-            // The alternate screen: one grid, not a list of commands. The
-            // doubled backslash is the shell's: its printf is what turns \033
-            // into an ESC, so what is typed at it is a backslash and not an
-            // escape this Rust string already resolved.
-            harness.type_into(pane, "printf '\\033[?1049h'\n");
-            harness.wait_for("the alternate screen never came up", |harness| {
-                harness.alt_screen(pane)
+            harness.type_into(
+                pane,
+                "printf '\\033[?1049h'; printf 'zq%sxv\\n' 7; read line; printf '\\033[?1049l'\n",
+            );
+            harness.wait_for("the program never drew its screen", |harness| {
+                harness.alt_screen(pane) && harness.terminal_text(pane).contains("zq7xv")
             });
 
             harness.run_command("crook/window/find");
-            let opened = harness.workspace.read(&harness.app, |workspace, _| {
-                workspace.find(pane).unwrap().is_open()
+            let open = |harness: &Harness| {
+                harness.workspace.read(&harness.app, |workspace, _| {
+                    workspace.find(pane).unwrap().is_open()
+                })
+            };
+            assert!(open(&harness), "the chord opened nothing over the program");
+            assert!(
+                frame_text(&harness.frame()).contains("Find on screen"),
+                "the field does not say that the screen is all it searches"
+            );
+            type_query(&mut harness, "q7x");
+            await_grid_matches(&mut harness, pane, 1);
+
+            // Answered straight to the pty, as the bar has the keyboard.
+            harness.type_into(pane, "\n");
+            harness.wait_for("the program never left its screen", |harness| {
+                !harness.alt_screen(pane)
             });
-            assert!(!opened, "Ctrl-F is the program's key, not a find bar's");
+            // On the repaint that changed screens, not only on a frame.
+            harness.wait_for("the bar outlived the screen it was about", |harness| {
+                !open(harness)
+            });
+
+            // And the keyboard is the composer's again. The bar took it, and a
+            // bar that went away by itself used to leave nobody holding it:
+            // every key typed at the prompt that came back was dropped.
+            await_prompt(&mut harness, pane);
+            assert!(harness.pane_takes_keys(), "the prompt came back deaf");
+            for key in ["a", "b", "c"] {
+                harness.press(key, Modifiers::default(), key);
+            }
+            assert_eq!("abc", harness.field_text(pane));
             // Silence the unused import on machines with no shell.
             let _ = AgentStatus::Idle;
+        }
+
+        /// A marked shell running a full-screen program that has drawn
+        /// `zq7xv` and is waiting on `read`, with the find bar open over it and
+        /// in the tree a frame built. `None` where no shell could be started.
+        ///
+        /// `read` is answered in cooked mode, so whatever reaches the program
+        /// is echoed onto its screen — which is how a test sees a key that
+        /// should have stayed in the bar.
+        fn bar_over_a_program(harness: &mut Harness) -> Option<PaneId> {
+            let pane = marked_shell(harness)?;
+            await_prompt(harness, pane);
+            harness.type_into(
+                pane,
+                "printf '\\033[?1049h'; printf 'zq%sxv\\n' 7; read line; printf '\\033[?1049l'\n",
+            );
+            harness.wait_for("the program never drew its screen", |harness| {
+                harness.alt_screen(pane) && harness.terminal_text(pane).contains("zq7xv")
+            });
+            harness.run_command("crook/window/find");
+            // The field takes events in the tree the last frame built.
+            harness.frame();
+            Some(pane)
+        }
+
+        #[test]
+        fn what_the_bar_has_no_use_for_does_not_reach_the_program_under_it() {
+            // The field takes the keys it has a use for and used to let the
+            // rest fall through to the grid, which gives a program with no
+            // composer every key: a word an input method composed — a dead
+            // key's accent on macOS, a word of Japanese — went into the agent's
+            // prompt while the bar searched for what was left, and a key the
+            // field means nothing by went to the agent instead.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = bar_over_a_program(&mut harness) else {
+                return;
+            };
+
+            harness.dispatch(Event::Ime(crookui_core::event::Ime::Commit(
+                "jjé".to_owned(),
+            )));
+            let query = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.find(pane).map(crate::pane_find::PaneFind::query)
+            });
+            assert_eq!(Some("jjé".to_owned()), query, "the word went into the bar");
+            // And it said so, which is what starts the grid's search.
+            harness.wait_for("the composed query was never searched", |harness| {
+                harness.workspace.read(&harness.app, |workspace, app| {
+                    !workspace.grid_find_pending(pane, app)
+                })
+            });
+
+            // A function key: no use to the field, `ESC [ 1 5 ~` to a program.
+            harness.press("f5", Modifiers::default(), "");
+            harness.settle(std::time::Duration::from_millis(200));
+            let screen = harness.terminal_text(pane);
+            assert!(
+                !screen.contains("jj"),
+                "the composed word reached the program as well: {screen:?}"
+            );
+            assert!(
+                !screen.contains("15~"),
+                "a key the bar has no use for reached the program: {screen:?}"
+            );
+        }
+
+        #[test]
+        fn the_copy_chord_over_a_selection_still_copies_while_the_bar_has_the_keyboard() {
+            // The output under the bar keeps the interrupt, as it does under a
+            // menu — and, unlike under a menu, the selection's claim on the
+            // copy chord: the bar hides none of the output, and a copy over
+            // what somebody can see they selected is a copy, not an interrupt
+            // for the agent it was copied from.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = bar_over_a_program(&mut harness) else {
+                return;
+            };
+            let clipboard = working_clipboard(&harness);
+
+            // The platform's own chord, `cmd-c` or `ctrl-shift-c`, which the
+            // find field means a copy by too: with nothing of its own
+            // selected, it used to take the chord, copy nothing, and keep it
+            // from the output that had the selection.
+            assert!(harness.select_in_output(pane, "zq7xv"));
+            harness.frame();
+            harness.press("c", platform_chord(), "c");
+            assert_eq!(
+                None,
+                harness.terminal_selection(pane),
+                "the platform's copy chord did not reach the selection under the bar"
+            );
+            if let Some((clipboard, _held)) = clipboard.as_ref() {
+                assert_eq!(Some("zq7xv"), clipboard.read().as_deref());
+            }
+
+            // And `ctrl-c`, which is the interrupt with nothing selected.
+            assert!(harness.select_in_output(pane, "zq7xv"));
+            harness.frame();
+            let ctrl = Modifiers {
+                ctrl: true,
+                ..Default::default()
+            };
+            harness.press("c", ctrl, "c");
+            assert_eq!(
+                None,
+                harness.terminal_selection(pane),
+                "the copy did not let go of the selection"
+            );
+            harness.settle(std::time::Duration::from_millis(200));
+            assert!(
+                !harness.terminal_text(pane).contains("^C"),
+                "a copy interrupted the program it was copying from"
+            );
+            assert!(harness.alt_screen(pane), "the program is still running");
+
+            // The field still copies what is selected in it.
+            let Some((clipboard, _held)) = clipboard else {
+                return;
+            };
+            type_query(&mut harness, "q7");
+            harness.press("a", platform_chord(), "a");
+            harness.press("c", platform_chord(), "c");
+            assert_eq!(Some("q7"), clipboard.read().as_deref());
+        }
+
+        #[test]
+        fn a_paste_chord_the_bar_has_no_use_for_does_not_reach_the_program_under_it() {
+            // `ctrl-shift-v` is a paste chord for a program on macOS and
+            // nothing to a text field there, so with the bar over an agent the
+            // field let it through and the output pasted the clipboard into
+            // the agent's prompt rather than the query. Off macOS the field
+            // pastes on it itself; on every platform, nothing reaches the
+            // program.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = bar_over_a_program(&mut harness) else {
+                return;
+            };
+            let Some((clipboard, _held)) = working_clipboard(&harness) else {
+                return;
+            };
+            // Upper case on the clipboard, which only a paste puts on screen:
+            // nothing typed in this test has a capital.
+            clipboard.write("PQ3WK");
+            let ctrl_shift = Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Default::default()
+            };
+            harness.press("v", ctrl_shift, "v");
+            harness.settle(std::time::Duration::from_millis(200));
+            let screen = harness.terminal_text(pane);
+            assert!(
+                !screen.contains("PQ3WK"),
+                "the paste went to the program under the bar: {screen:?}"
+            );
+            assert!(harness.alt_screen(pane), "the program is still running");
+        }
+
+        #[test]
+        fn a_letter_typed_while_a_moving_grid_waits_to_be_read_again_is_searched_at_once() {
+            // A program that never stops drawing keeps a read of its grid
+            // waiting out its pause nearly all the time, and a letter typed
+            // into the bar used to wait behind it — the rest of the pause and
+            // its read — before its own search could start, with the count
+            // blank meanwhile. The pause is for the grid's sake, and a changed
+            // question takes its place.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            await_prompt(&mut harness, pane);
+            harness.type_into(
+                pane,
+                "printf '\\033[?1049h'; printf 'zq%sxv\\n' 7; i=0; \
+                 while :; do i=$((i+1)); printf '%s\\r' \"$i\"; sleep 0.05; done\n",
+            );
+            harness.wait_for("the program never drew its screen", |harness| {
+                harness.alt_screen(pane) && harness.terminal_text(pane).contains("zq7xv")
+            });
+            harness.run_command("crook/window/find");
+            type_query(&mut harness, "q7");
+            await_grid_matches(&mut harness, pane, 1);
+
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("the pane has a find bar");
+            harness.wait_for("the moving grid was never read again", |_| {
+                find.grid_asked() == Some(("q7".to_owned(), true))
+            });
+            harness.press("x", Modifiers::default(), "x");
+            match find.grid_asked() {
+                Some((query, false)) if query == "q7x" => {}
+                // The pause had run out and the read begun, a moment before
+                // the letter: that read is never run beside another.
+                Some((query, false)) if query == "q7" => {}
+                asked => panic!("the letter waited behind a paused read: {asked:?}"),
+            }
+            await_grid_matches(&mut harness, pane, 1);
+        }
+
+        #[test]
+        fn a_bar_over_a_grid_in_a_tab_behind_searches_again_once_it_is_shown() {
+            // A bar left open over an agent in another tab used to read its
+            // whole scrollback after every line it printed, for a count nobody
+            // could see. It waits until the pane is on screen again, and then
+            // answers the grid as it has become.
+            let mut harness = Harness::panel(2);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            await_prompt(&mut harness, pane);
+            // `q1x` is only ever the output: the command line says `zq%sxv`.
+            harness.type_into(
+                pane,
+                "printf 'zq%sxv\\n' 1; seq 1 400; read line; printf 'zq%sxv\\n' 1; sleep 600\n",
+            );
+            harness.wait_for("the command never overflowed the viewport", |harness| {
+                harness.terminal_text(pane).contains("399") && draws_grid(harness, pane)
+            });
+            harness.frame();
+            harness.run_command("crook/window/find");
+            harness.settle(std::time::Duration::from_millis(500));
+            type_query(&mut harness, "q1x");
+            await_grid_matches(&mut harness, pane, 1);
+
+            let shown = harness.active_id();
+            let behind = harness
+                .tab_ids()
+                .into_iter()
+                .find(|tab| *tab != shown)
+                .expect("a second tab");
+            harness.dispatch_action(TabAction::Select(behind));
+            // The program prints the second match while nobody can see it.
+            harness.type_into(pane, "\n");
+            harness.wait_for("the program never printed again", |harness| {
+                harness.terminal_text(pane).contains("zq1xv")
+            });
+            harness.settle(std::time::Duration::from_millis(500));
+            assert_eq!(
+                1,
+                matches(&harness, pane),
+                "a bar nobody can see read the scrollback again"
+            );
+
+            harness.dispatch_action(TabAction::Select(shown));
+            await_grid_matches(&mut harness, pane, 2);
+        }
+
+        #[test]
+        fn a_bar_over_the_list_searches_the_grid_a_resize_turns_it_into() {
+            // A pane that shrinks under a running command can push its block
+            // past the top of the viewport, which puts the pane on the grid
+            // with nothing printed: the program is sleeping. Nothing repainted,
+            // so nothing searched the grid, and the bar stood with no count
+            // until the next keystroke or line of output.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = searching(&mut harness, "qvx wqz rqv", "zq1xv") else {
+                return;
+            };
+            // Straight to the pty, because the bar has the keyboard.
+            harness.type_into(
+                pane,
+                "printf 'zq%sxv\\n' 1; seq 1 29; echo done; sleep 600\n",
+            );
+            harness.wait_for("the command never printed on the list", |harness| {
+                harness.terminal_text(pane).contains("done")
+                    && !draws_grid(harness, pane)
+                    && matches(harness, pane) == 1
+            });
+
+            // Long enough for the last publish the output asked for to have
+            // landed: one still on its way would be a repaint after the resize
+            // that the resize did not make, and the test would prove nothing.
+            harness.settle(std::time::Duration::from_millis(300));
+
+            harness.frame_sized(vec2f(1024., 300.));
+            harness.wait_for("the grid the resize made was never searched", |harness| {
+                draws_grid(harness, pane) && matches(harness, pane) == 1
+            });
         }
     }
 

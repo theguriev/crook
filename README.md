@@ -35,7 +35,8 @@ copy the whole thing, or open its menu — and the block under the prompt is the
 
 Find searches the blocks, not the screenful: every finished command and the open one at once,
 counted in the bar, the current match in the accent and the rest in amber. It is a search and
-not a filter, so the lines between the hits stay where they are.
+not a filter, so the lines between the hits stay where they are. A pane with no blocks to
+search — an agent, an `ssh` session — is searched through its whole scrollback instead.
 
 ![The command palette over the window, reading "rec": two commands under a Commands heading, a tab under Tabs with the directory it is working in, and five settings rows under Settings, each naming the page and category it lives on](docs/images/palette.png)
 
@@ -587,9 +588,19 @@ Twenty features, and the page that configures them:
   then shows its command and only the lines of its output that match — the bar counts them,
   `2/4 lines`, with the same two switches — until the bar closes or its filter switch goes
   back to finding. A copy of a filtered block takes the lines it shows: a drag over it, its
-  copy square, and its menu's **Copy shown lines** and **Copy shown output**. It opens only over
-  the list of commands, never over a full-screen program, where `ctrl-f` is the program's own
-  key.
+  copy square, and its menu's **Copy shown lines** and **Copy shown output**. A pane drawing
+  one grid rather than a list — an agent session past its first screenful, an `ssh` session, a
+  shell without the integration — gets the same bar over its whole scrollback as well as its
+  screen, matched by the same rules and counted the same way, and a step scrolls the grid to
+  the match. It is searched off the thread that draws, so on ten thousand lines of scrollback
+  the count can come a moment after the keystroke. A full-screen program on the alternate
+  screen keeps no scrollback for the terminal to search — Claude Code's fullscreen renderer
+  keeps its history itself — so there the bar reads **Find on screen** and searches what the
+  program has drawn; it closes when the program takes or gives back the screen, and the
+  keyboard goes back to the prompt. While the bar has the keyboard, a word an input method
+  composes goes into the bar, and a key the bar has no use for does not reach the program under
+  it — except `ctrl-c`, `ctrl-d` and `ctrl-z` — while the copy chord over a selection in the
+  output, `ctrl-c` included, still copies it.
 - **Step through the commands with the keyboard.** `cmd-alt-up` and `cmd-alt-down`
   (`ctrl-alt-up` / `ctrl-alt-down` off macOS) move a selection through the finished blocks:
   up from the prompt lands on the last command, up walks to the oldest, down walks back and off

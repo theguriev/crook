@@ -346,6 +346,47 @@ impl BlockRows {
             + combining
     }
 
+    /// Puts `other`'s rows after this store's last, reporting whether it could.
+    ///
+    /// For a harvest taken in pieces: a grid's whole scrollback read a few
+    /// hundred rows at a time, so that the lock the pty's reader parses under
+    /// is let go between the pieces rather than held for the whole of it. The
+    /// pieces must have been harvested at the same width, since every row's
+    /// runs cover exactly [`Self::columns`] cells; a piece of another width —
+    /// a resize that landed between two of them — is refused and left out.
+    pub fn append(&mut self, other: BlockRows) -> bool {
+        if other.is_empty() {
+            return true;
+        }
+        if self.is_empty() {
+            *self = other;
+            return true;
+        }
+        if other.columns != self.columns {
+            return false;
+        }
+        // Each list of starts opens with a zero for its first row, and this
+        // store's own closing entry already says where that row now begins.
+        let (text, runs, combining) = (
+            self.text.len() as u32,
+            self.runs.len() as u32,
+            self.combining.len() as u32,
+        );
+        self.text.push_str(&other.text);
+        self.text_starts
+            .extend(other.text_starts[1..].iter().map(|start| start + text));
+        self.runs.extend_from_slice(&other.runs);
+        self.run_starts
+            .extend(other.run_starts[1..].iter().map(|start| start + runs));
+        self.combining.extend(other.combining);
+        self.combining_starts.extend(
+            other.combining_starts[1..]
+                .iter()
+                .map(|start| start + combining),
+        );
+        true
+    }
+
     /// One row's style runs, or `None` when `row` is out of range.
     pub fn runs(&self, row: usize) -> Option<&[StyleRun]> {
         let start = *self.run_starts.get(row)? as usize;

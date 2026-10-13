@@ -1594,6 +1594,18 @@ impl TerminalHandle {
         })
     }
 
+    /// Whether the shell has exited, asked of the child now rather than of
+    /// the last poll.
+    ///
+    /// For the command line's `--run`, which types into this shell and waits
+    /// for it to go quiet: a shell that has gone is quiet for ever, and the
+    /// wait would otherwise run to its timeout for every command still to
+    /// be typed. Under the terminal's own lock, like every `try_wait`, so
+    /// the exit is cached where the poll that closes the pane reads it.
+    pub fn has_exited(&self) -> bool {
+        self.drive(|terminal| terminal.try_wait().ok().flatten().is_some())
+    }
+
     /// Sets the grid and tells the child about it, reporting whether anything
     /// moved.
     ///
@@ -1607,18 +1619,14 @@ impl TerminalHandle {
     /// answer "unchanged" and never try again — a single failed `ioctl` while a
     /// window edge is being dragged would leave the shell's `$COLUMNS` wrong for
     /// the life of the pane.
-    /// Whether the shell has exited, asked of the child now rather than of
-    /// the last poll.
     ///
-    /// For the command line's `--run`, which types into this shell and waits
-    /// for it to go quiet: a shell that has gone is quiet for ever, and the
-    /// wait would otherwise run to its timeout for every command still to
-    /// be typed. Under the terminal's own lock, like every `try_wait`, so
-    /// the exit is cached where the poll that closes the pane reads it.
-    pub fn has_exited(&self) -> bool {
-        self.drive(|terminal| terminal.try_wait().ok().flatten().is_some())
-    }
-
+    /// One that reached the pty is a repaint, said the way the reader says
+    /// one: the frame that resized was drawn from the picture before, and a
+    /// child that prints nothing in answer — a `sleep`, a quiet `tail -f` —
+    /// would leave that picture up, and a find bar over a grid the resize
+    /// folded again answering the old one. Not one that failed: that is
+    /// tried again on every frame, and a repaint for each try would be a
+    /// frame for each.
     pub fn resize(&self, size: TerminalSize) -> bool {
         let shared = &self.0;
         if !needs_resize(&shared.grid, size) {
@@ -1630,6 +1638,7 @@ impl TerminalHandle {
             Ok(()) => {
                 record_resize(&shared.grid, size);
                 shared.resize_failing.store(false, Ordering::Relaxed);
+                shared.wake.raise();
             }
             // Complained about once: the retry is every frame, and so would the
             // log line be.
@@ -1855,6 +1864,11 @@ impl TerminalHandle {
     /// exactly the store the block list already knows how to read. Also
     /// reports the row the answer starts at, which is later than `first` when
     /// the history has already dropped the line it named.
+    ///
+    /// And what the find bar over such a pane reads the whole scrollback out
+    /// of, a few hundred rows a call and off the thread that draws — see
+    /// [`crate::pane_find::harvest_grid`] — since the lock this takes is the
+    /// one the pty's reader parses under.
     pub fn harvest_rows(&self, first: usize, last: usize) -> (BlockRows, usize) {
         self.0.lock().harvest_rows(first, last)
     }

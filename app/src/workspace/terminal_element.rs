@@ -121,6 +121,7 @@ use crate::terminal_model::TerminalHandle;
 use crate::text_input::TextInput;
 use crate::theme::theme;
 
+use super::block_list::{FIND_CURRENT_ALPHA, FIND_MATCH_ALPHA, paint_wash};
 use super::pane_output::{Keys, Output, Typed, selection_kind};
 
 /// How thick the rules a cell can carry are, as a fraction of the font size.
@@ -223,6 +224,11 @@ pub struct TerminalElement {
     /// frames. `None` for a grid nothing can be clicked in.
     links: Option<PaneLink>,
 
+    /// The find matches on screen, and the current one wherever it is. See
+    /// [`Self::with_find`].
+    finds: Vec<Selection>,
+    find_current: Option<Selection>,
+
     size: Option<Vector2F>,
     origin: Option<Point>,
 }
@@ -235,6 +241,8 @@ impl TerminalElement {
             font,
             output: Output::detached(),
             links: None,
+            finds: Vec::new(),
+            find_current: None,
             size: None,
             origin: None,
         }
@@ -280,6 +288,19 @@ impl TerminalElement {
     /// workspace keeps for this pane.
     pub fn with_links(mut self, links: PaneLink) -> Self {
         self.links = Some(links);
+        self
+    }
+
+    /// The find matches to highlight, and the one the bar is standing on.
+    ///
+    /// The ones on screen rather than all of them: a grid's matches reach back
+    /// through the whole scrollback, and a frame paints a screenful. Each is a
+    /// selection in the grid's own numbering — rows from the oldest line of the
+    /// scrollback — so it is drawn by the very arithmetic a drag's selection
+    /// is, wide characters and folded lines included.
+    pub fn with_find(mut self, finds: Vec<Selection>, current: Option<Selection>) -> Self {
+        self.finds = finds;
+        self.find_current = current;
         self
     }
 
@@ -754,13 +775,24 @@ impl Element for TerminalElement {
         let selected = self.output.selection().and_then(|selection| {
             Some((selection.anchor.block, selection.region(&self.addressed())?))
         });
+        // Each match against the grid under the name it was found by, which
+        // is every match's: one grid is one item, whatever it is called.
+        let found = |selection: &Selection| {
+            let blocks = Blocks::grid(&self.snapshot, selection.anchor.block);
+            Some((selection.anchor.block, selection.region(&blocks)?))
+        };
+        let washes = Washes {
+            finds: self.finds.iter().filter_map(found).collect(),
+            find_current: self.find_current.as_ref().and_then(found),
+            selected,
+        };
         paint_grid(
             &self.snapshot,
             &self.font,
             origin,
             size,
             owns_caret,
-            selected,
+            &washes,
             ctx.scene,
         );
 
@@ -910,6 +942,22 @@ fn bounded(max: f32, min: f32) -> f32 {
     if max.is_finite() { max } else { min }
 }
 
+/// What is washed over a grid's cells, under their glyphs: the find's matches
+/// and the selection, each a region with the name the grid answered to when it
+/// was made.
+#[derive(Default)]
+struct Washes {
+    /// The find matches on screen, in the terminal's amber.
+    finds: Vec<(BlockId, Region)>,
+    /// The match the bar is standing on, brighter and in the accent over the
+    /// rest, so which of a screenful of them the next step leaves is never in
+    /// doubt.
+    find_current: Option<(BlockId, Region)>,
+    /// What the pointer selected, over both: a person can select text a find
+    /// has highlighted, and the selection is the one that has to win.
+    selected: Option<(BlockId, Region)>,
+}
+
 /// Paints one snapshot into `scene`, filling `size` from `origin`.
 ///
 /// `owns_caret` is whether this grid is where typing would go. It is the
@@ -917,15 +965,14 @@ fn bounded(max: f32, min: f32) -> f32 {
 /// outline where a listening one draws the filled block the program asked for,
 /// which is how every terminal with splits says which shell has the keyboard.
 ///
-/// `selected` is the region to highlight and the name the grid answers to
-/// while it is selected, both resolved by the caller.
+/// `washes` are the regions to highlight, resolved by the caller.
 fn paint_grid(
     snapshot: &Snapshot,
     font: &CellFont,
     origin: Vector2F,
     size: Vector2F,
     owns_caret: bool,
-    selected: Option<(BlockId, Region)>,
+    washes: &Washes,
     scene: &mut Scene,
 ) {
     let metrics = font.metrics();
@@ -955,40 +1002,53 @@ fn paint_grid(
     let first = grid_first_row(snapshot);
     // The grid as the one item a selection addresses, which is what carries
     // the numbering its rows are in: screen row zero is `first`, not zero.
-    let selected = selected.map(|(id, region)| {
-        (
-            Item {
-                id,
-                rows: Rows::Live {
-                    snapshot,
-                    top: 0,
-                    count: rows,
-                },
-                first,
-            },
-            region,
-        )
-    });
+    let item = |id| Item {
+        id,
+        rows: Rows::Live {
+            snapshot,
+            top: 0,
+            count: rows,
+        },
+        first,
+    };
+    // The columns of one screen row a region covers, cut to what is drawn.
+    let covered = |(id, region): &(BlockId, Region), row: usize| {
+        region
+            .columns_on(&item(*id), first + row)
+            .filter(|covered| covered.start < columns)
+            .map(|covered| covered.start..covered.end.min(columns))
+    };
     for (row, cells) in snapshot.iter_rows().enumerate().take(rows) {
         let top = origin.y() + row as f32 * metrics.height;
         let cells = &cells[..columns];
 
         paint_backgrounds(cells, snapshot.background, origin.x(), top, metrics, scene);
-        // Over the cells' own backgrounds and under everything else: the
+        // Over the cells' own backgrounds and under everything else: a
         // highlight is translucent, so it takes the colour of whatever the
         // shell painted the cell and the character is still drawn on top of it
-        // in its own ink. Selecting text changes its ground, never its colour.
-        if let Some(selected) = selected
-            .and_then(|(item, region)| region.columns_on(&item, first + row))
-            .filter(|selected| selected.start < columns)
+        // in its own ink. Highlighting text changes its ground, never its
+        // colour. The find's matches go first, the current one over the rest,
+        // and the selection over all of them — the order the list paints in.
+        for found in &washes.finds {
+            if let Some(matched) = covered(found, row) {
+                let wash = theme().usage_high.with_alpha(FIND_MATCH_ALPHA);
+                paint_wash(matched, origin.x(), top, metrics, scene, wash);
+            }
+        }
+        if let Some(matched) = washes
+            .find_current
+            .as_ref()
+            .and_then(|current| covered(current, row))
         {
-            paint_selection(
-                selected.start..selected.end.min(columns),
-                origin.x(),
-                top,
-                metrics,
-                scene,
-            );
+            let wash = theme().accent.with_alpha(FIND_CURRENT_ALPHA);
+            paint_wash(matched, origin.x(), top, metrics, scene, wash);
+        }
+        if let Some(selected) = washes
+            .selected
+            .as_ref()
+            .and_then(|selected| covered(selected, row))
+        {
+            paint_selection(selected, origin.x(), top, metrics, scene);
         }
         paint_rules(cells, origin.x(), top, metrics, scene);
         paint_glyphs(

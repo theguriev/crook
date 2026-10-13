@@ -231,6 +231,10 @@ pub enum FindAction {
     ToggleRegex,
     /// Stop filtering a block and go back to finding across every one.
     StopFiltering,
+    /// A keystroke changed the query. The list is searched as it is drawn and
+    /// needs no word of it; a grid is searched off the thread that draws, and
+    /// this is what starts that search.
+    Edited,
 }
 
 /// What the header does as a title bar.

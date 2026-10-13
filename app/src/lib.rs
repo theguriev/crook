@@ -2450,7 +2450,7 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
         // are on screen to be hovered.
         frame(&mut app, &mut presenter);
         aim_at_blocks(&mut app, &workspace, pane, &overrides);
-        open_find_output(&mut app, &workspace, pane, &overrides);
+        open_find_output(&queue, &mut app, &workspace, pane, &overrides);
 
         // And then, for a menu, a second frame between the hover and the
         // opening: the corner a menu hangs from is where the dots were last
@@ -2688,7 +2688,12 @@ fn compose_pane(app: &mut App, workspace: &ViewHandle<Workspace>, pane: PaneId, 
 /// After [`aim_at_blocks`], so there is output to search and a frame has
 /// measured how far it can scroll — the bar scrolls the first match into view
 /// the way a keypress would.
+///
+/// A pane drawing one grid has its scrollback searched on the pool, so the
+/// picture waits for that answer the way `await_shell` waits for a shell: a
+/// poll and a deadline, because there is no event loop here to be woken by.
 fn open_find_output(
+    queue: &LocalQueue,
     app: &mut App,
     workspace: &ViewHandle<Workspace>,
     pane: PaneId,
@@ -2702,6 +2707,21 @@ fn open_find_output(
             workspace.open_find_with(pane, &query, ctx);
         });
     });
+    let deadline = Instant::now() + RUN_TIMEOUT;
+    loop {
+        queue.run_until_parked();
+        let pending = workspace.read(&*app, |workspace, app| {
+            workspace.grid_find_pending(pane, app)
+        });
+        if !pending {
+            return;
+        }
+        if Instant::now() >= deadline {
+            log::warn!("`--find-output`: the search had not come back within {RUN_TIMEOUT:?}");
+            return;
+        }
+        std::thread::sleep(RUN_POLL);
+    }
 }
 
 fn aim_at_blocks(
