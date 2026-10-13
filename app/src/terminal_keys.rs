@@ -230,25 +230,10 @@ fn typed(keystroke: &Keystroke, chars: &str, origin: &KeyOrigin, alt: Alt) -> Op
         return Some(Key::Char(character));
     }
 
-    // Option as Meta is Meta on the key the layout prints, which the name is
-    // not always. A Mac names an Option press by what Option made of the key
-    // when that was ASCII, `{` for German Option-8, and otherwise by the US key
-    // in the same place, which puts Meta-Y where a German keyboard says Z. So
-    // the layout's own character is sent instead, but only when it is ASCII,
-    // for the reason the name falls back at all: Meta on a Cyrillic letter is
-    // no key any program binds, while Meta-T on the key where a US keyboard has
-    // its T is one readline does.
-    //
-    // Except on the number row, which a digit for a name says the press was
-    // on. Meta-1 to Meta-9 are tmux's, irssi's and weechat's windows, and on a
-    // French keyboard the digits are the row's shifted half, `&` and `"` and
-    // `'` unshifted, which the layout's character cannot give back because it
-    // ignores Shift. So the row keeps its digits, as it always had them.
     if matches!(alt, Alt::Option(_))
         && modifiers.alt
         && !modifiers.ctrl
-        && !single(&keystroke.key).is_some_and(|name| name.is_ascii_digit())
-        && let Some(character) = single(&origin.unmodified).filter(char::is_ascii_graphic)
+        && let Some(character) = meta_on(origin)
     {
         return Some(Key::Char(character));
     }
@@ -256,6 +241,39 @@ fn typed(keystroke: &Keystroke, chars: &str, origin: &KeyOrigin, alt: Alt) -> Op
     // A key with a multi-character name and no text: a media key, a modifier
     // on its own, an IME key. None of them sends anything.
     single(&keystroke.key).map(Key::Char)
+}
+
+/// The key Option as Meta is Meta on, when the press's name is not it.
+///
+/// It is the key the layout prints, which the name is not always. A Mac names
+/// an Option press by what Option made of the key when that was ASCII, `{` for
+/// German Option-8, and otherwise by the US key in the same place, which puts
+/// Meta-Y where a German keyboard says Z. So the layout's own character is the
+/// key, but only when it is ASCII, for the reason the name falls back at all:
+/// Meta on a Cyrillic letter is no key any program binds, while Meta-T on the
+/// key where a US keyboard has its T is one readline does.
+///
+/// Except on a number-row key the layout prints no ASCII letter or digit on,
+/// which is Meta on the US digit in the same place. Meta-1 to Meta-9 are tmux's,
+/// irssi's and weechat's windows, and on a French keyboard the digits are the
+/// row's shifted half, `&` `é` `"` `(` unshifted, which the layout's character
+/// cannot give back because it ignores Shift. Only the key's place can, since
+/// the name is no more the digit than the character is: Option types `{` on
+/// the French `(` key, and the press is named that. A row that prints letters
+/// or digits of its own, as the one-handed Dvoraks do, keeps them, because
+/// Meta-F is a key and the US digit under it is not the one the person
+/// pressed.
+fn meta_on(origin: &KeyOrigin) -> Option<char> {
+    let printed = single(&origin.unmodified);
+    match origin.position.and_then(single) {
+        Some(digit)
+            if digit.is_ascii_digit()
+                && !printed.is_some_and(|printed| printed.is_ascii_alphanumeric()) =>
+        {
+            Some(digit)
+        }
+        _ => printed.filter(char::is_ascii_graphic),
+    }
 }
 
 /// The one character in `text`, when there is exactly one.
@@ -300,12 +318,23 @@ mod tests {
     }
 
     /// A press of the key under `unmodified`, with the left Option or the
-    /// right one, as a Mac reports it.
+    /// right one, as a Mac reports it, at a place the tests using it never
+    /// ask about.
     fn under(unmodified: &str, left: bool) -> KeyOrigin {
         KeyOrigin {
             unmodified: unmodified.to_owned(),
+            position: None,
             left_alt: left,
             right_alt: !left,
+        }
+    }
+
+    /// A press of the key a US keyboard prints `position` on, which the
+    /// layout in force prints `unmodified` on, with the left Option.
+    fn at(position: &'static str, unmodified: &str) -> KeyOrigin {
+        KeyOrigin {
+            position: Some(position),
+            ..under(unmodified, true)
         }
     }
 
@@ -580,50 +609,115 @@ mod tests {
         // where a US keyboard has E, and Meta-. is readline's last argument,
         // where the name the window gives the press would make it Meta-E.
         assert_eq!(
-            bytes(&keystroke("e", option()), "≥", &under(".", true), both),
+            bytes(&keystroke("e", option()), "≥", &at("e", "."), both),
             Some(b"\x1b.".to_vec())
         );
     }
 
     #[test]
     fn option_as_meta_on_the_number_row_is_its_digit() {
-        // A French keyboard's number row prints `&` `"` `'` and the rest, and
-        // its digits are the shifted half, which the key's own character
-        // cannot say because it ignores Shift. What Option makes of these keys
-        // is outside ASCII, so the window names each by the US digit in the
-        // same place, and that digit is Meta-1 to Meta-9 to tmux, irssi and
-        // weechat, with Shift or without, by default or with both Options Meta.
+        // A French keyboard's number row prints `&` `"` `'` `(` and the rest,
+        // and its digits are the shifted half, which the key's own character
+        // cannot say because it ignores Shift. So Meta there is on the digit
+        // a US keyboard has in the same place, Meta-1 to Meta-9 to tmux, irssi
+        // and weechat, with Shift or without. What Option makes of these keys
+        // is outside ASCII, so the window names each by that digit already,
+        // and they are Meta by default as well as with both Options Meta.
         for setting in [OptionAsMeta::Auto, OptionAsMeta::Both] {
-            for (name, modifiers, typed, unmodified) in [
-                ("1", option(), "\u{f8ff}", "&"),
-                ("3", option(), "“", "\""),
-                ("3", option_shift(), "”", "\""),
-                ("4", option(), "‘", "'"),
-                ("8", option(), "¡", "!"),
+            for (name, modifiers, typed, position, unmodified) in [
+                ("1", option(), "\u{f8ff}", "1", "&"),
+                ("2", option(), "ë", "2", "é"),
+                ("3", option(), "“", "3", "\""),
+                ("3", option_shift(), "”", "3", "\""),
+                ("4", option(), "‘", "4", "'"),
+                ("8", option(), "¡", "8", "!"),
             ] {
                 assert_eq!(
                     bytes(
                         &keystroke(name, modifiers),
                         typed,
-                        &under(unmodified, true),
+                        &at(position, unmodified),
                         Alt::Option(setting)
                     ),
-                    Some(format!("\x1b{name}").into_bytes()),
+                    Some(format!("\x1b{position}").into_bytes()),
                     "Option on the {unmodified} key under {setting:?}"
                 );
             }
         }
+
+        // The `(` key is the one Option types ASCII on, `{` and with Shift
+        // `[`, which is how a French keyboard types them, and the window names
+        // the press by that. By default it types them. Where that Option is
+        // Meta, the key is still the 5.
+        for (name, modifiers) in [("{", option()), ("[", option_shift())] {
+            assert_eq!(
+                bytes(
+                    &keystroke(name, modifiers),
+                    name,
+                    &at("5", "("),
+                    Alt::Option(OptionAsMeta::Auto)
+                ),
+                Some(name.as_bytes().to_vec()),
+                "Option on the ( key typing {name}"
+            );
+            for (setting, left) in [
+                (OptionAsMeta::Both, true),
+                (OptionAsMeta::Left, true),
+                (OptionAsMeta::Right, false),
+            ] {
+                let origin = KeyOrigin {
+                    position: Some("5"),
+                    ..under("(", left)
+                };
+                assert_eq!(
+                    bytes(
+                        &keystroke(name, modifiers),
+                        name,
+                        &origin,
+                        Alt::Option(setting)
+                    ),
+                    Some(b"\x1b5".to_vec()),
+                    "Option on the ( key typing {name} as Meta under {setting:?}"
+                );
+            }
+        }
+
         // And a US keyboard's row, where the key's character is the digit
         // already, is unchanged by any of it.
         assert_eq!(
             bytes(
                 &keystroke("1", option()),
                 "¡",
-                &under("1", true),
+                &at("1", "1"),
                 Alt::Option(OptionAsMeta::Both)
             ),
             Some(b"\x1b1".to_vec())
         );
+    }
+
+    #[test]
+    fn option_as_meta_on_a_one_handed_dvorak_row_is_what_the_key_prints() {
+        // The one-handed Dvorak layouts print letters and digits of their own
+        // on the number row: the right-handed one j l m f p where a US
+        // keyboard has 5 to 9, the left-handed one 4 where a US keyboard has
+        // 9. What Option makes of them is outside ASCII, `ƒ` for f as on a US
+        // keyboard, so the window names each press by the US digit. But the
+        // keys say f, j and 4 on them, and Meta-F is readline's word forward
+        // where Meta-8 is a digit argument.
+        for setting in [OptionAsMeta::Auto, OptionAsMeta::Both] {
+            for (name, typed, printed) in [("8", "ƒ", "f"), ("5", "∆", "j"), ("9", "¢", "4")] {
+                assert_eq!(
+                    bytes(
+                        &keystroke(name, option()),
+                        typed,
+                        &at(name, printed),
+                        Alt::Option(setting)
+                    ),
+                    Some(format!("\x1b{printed}").into_bytes()),
+                    "Option on the {printed} key under {setting:?}"
+                );
+            }
+        }
     }
 
     #[test]

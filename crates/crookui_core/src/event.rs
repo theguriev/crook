@@ -57,23 +57,32 @@ impl Keystroke {
 }
 
 /// What a key press was made of beyond the name a chord matches and the text
-/// it typed: the character under the key, and which Alt key was down.
+/// it typed: the character under the key, where the key is, and which Alt key
+/// was down.
 ///
-/// Both answer one question, and only a Mac asks it: whether Option *typed*
-/// the character it produced or meant Meta. On a German layout Option-8 is the
-/// only way to type `{`; on a US one Option-F is an `ƒ` nobody wanted and
-/// readline's Meta-F somebody did. The name and the text cannot tell those
-/// apart, because `{` is the name German Option-8 is known by. Not part of
-/// [`Keystroke`], which is what a chord is matched against and must not stop
-/// matching because of which Option a person reached for.
+/// Only a Mac asks, and it asks two things. The first is whether Option
+/// *typed* the character it produced or meant Meta. On a German layout
+/// Option-8 is the only way to type `{`; on a US one Option-F is an `ƒ` nobody
+/// wanted and readline's Meta-F somebody did. The name and the text cannot
+/// tell those apart, because `{` is the name German Option-8 is known by. The
+/// second, when it meant Meta, is which key it was Meta on, and there the name
+/// is no help either: French Option on the `(` key is named `{` too, and the
+/// key's place is what says it is the 5. Not part of [`Keystroke`], which is
+/// what a chord is matched against and must not stop matching because of which
+/// Option a person reached for.
 ///
-/// A synthetic event carries the default, which knows neither.
+/// A synthetic event carries the default, which knows none of it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct KeyOrigin {
     /// What the key types with no modifier held at all, under the layout in
     /// force: `8` for the key German Option turns into `{`. Empty for a key
     /// that types nothing, and where the platform does not say.
     pub unmodified: String,
+    /// Where the key is, named by what a US keyboard prints there whatever
+    /// the layout in force: `5` for the key a French layout prints `(` on.
+    /// `None` for a key outside the letters, the digits and the punctuation,
+    /// and where the platform does not say.
+    pub position: Option<&'static str>,
     /// Whether the left Alt, Option on a Mac, is among the keys held.
     pub left_alt: bool,
     /// Whether the right one is. Neither, with Alt held, is a platform that

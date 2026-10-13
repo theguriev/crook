@@ -2382,14 +2382,17 @@ decides per key, under `option_as_meta` in the settings. By default Option types
 when it is ASCII and is not what the key types without Option, which is exactly the symbols a
 non-US Mac has no other way to type, and it is Meta for everything else, which on a US keyboard
 is every key: its Option layer has no ASCII in it. `left`, `right`, `both` and `none` are the
-answers kitty, Alacritty and iTerm2 give. The window carries the two facts the decision needs
-and a keystroke's name cannot: the character under the key with no modifier, since German
-Option-8 is *named* `{`, and which Option was held (`KeyOrigin`). Meta on a Mac is the layout's
-own ASCII character for the key, so German Meta-Z is `ESC z`, except on the number row, which
-keeps the digit a French keyboard types with Shift. No setting reaches an Option combination the
-layout makes a dead key (US Option-E, German Option-N for `~`): the input method takes it to
-start an accent before winit sends a key press. The composer never asks. It is a Mac text field,
-and Option types there as it does in every other one.
+answers kitty, Alacritty and iTerm2 give. The window carries what the decision needs and a
+keystroke's name cannot say (`KeyOrigin`): the character under the key with no modifier, since
+German Option-8 is *named* `{`, which Option was held, and where the key is. Meta on a Mac is
+the layout's own ASCII character for the key, so German Meta-Z is `ESC z`, except on a
+number-row key the layout prints no ASCII letter or digit on, which is Meta on the US digit in
+its place. French Meta on the `&` and `(` keys is `ESC 1` and `ESC 5`, the digits a French
+keyboard types there with Shift, while a one-handed Dvorak's `f` up there stays `ESC f`. No
+setting reaches an Option combination the layout makes a dead key (US Option-E, German Option-N
+for `~`): the input method takes it to start an accent before winit sends a key press. The
+composer never asks. It is a Mac text field, and Option types there as it does in every other
+one.
 
 **Most commands ship with no chord, and that is the arrangement.** A shipped chord is a key
 taken away from the shell in every pane forever, so the table spends one only on what somebody

@@ -168,6 +168,7 @@ impl InputState {
                         chars: event.text.as_deref().unwrap_or_default().to_owned(),
                         origin: KeyOrigin {
                             unmodified: unmodified(&event.key_without_modifiers()),
+                            position: physical_key_name(event.physical_key),
                             left_alt: self.left_alt,
                             right_alt: self.right_alt,
                         },
