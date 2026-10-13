@@ -5,6 +5,24 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.23
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.22...v0.1.23)
+
+### Fixes
+
+- **git:** Stop background reads running programs a repository's configuration names ([#491](https://github.com/theguriev/crook/pull/491))
+- **terminal:** Cap a pane's titles, agent messages and directory, so four megabytes of one cannot freeze the window or fill memory ([#486](https://github.com/theguriev/crook/pull/486))
+- **changes:** Find a pane's checkout off the UI thread ([#489](https://github.com/theguriev/crook/pull/489))
+- **session:** Let the first window keep the session and open later ones fresh, with New window ([#490](https://github.com/theguriev/crook/pull/490))
+- **terminal:** End a closed pane's shell off the thread that draws ([#492](https://github.com/theguriev/crook/pull/492))
+- **input:** Let Option type a Mac layout's symbols inside programs ([#488](https://github.com/theguriev/crook/pull/488))
+- **window:** Ask before macOS's Quit ends working agents ([#487](https://github.com/theguriev/crook/pull/487))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.22
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.21...v0.1.22)
