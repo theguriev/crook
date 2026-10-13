@@ -681,9 +681,13 @@ pub struct Workspace {
     /// save that lands. The settings' own is `settings_save_problem`.
     session_problem: Option<String>,
     /// Whether this window writes the session file at all, whatever the
-    /// setting says. False for a window a launcher opened: see
+    /// setting says. False for a window a launcher opened, and for one that
+    /// left the file to another window: see
     /// [`Self::stop_saving_the_session`].
     saves_session: bool,
+    /// Whether this window opened while another one kept the session file,
+    /// and left it to that one. See [`Self::leave_the_session`].
+    left_the_session: bool,
 
     /// How big the window was when it was last laid out, in logical pixels.
     ///
@@ -1146,6 +1150,7 @@ impl Workspace {
             session_saves: Arc::default(),
             session_problem: None,
             saves_session: true,
+            left_the_session: false,
             keybindings,
             pending_keys: std::cell::RefCell::new(Vec::new()),
             recording: std::cell::RefCell::new(None),
@@ -10174,8 +10179,10 @@ impl Workspace {
                 self.set_general(general, ctx);
                 // Turning it on writes the file now rather than at the next
                 // tab action, so a person who switches it on and closes the
-                // window gets what they asked for.
+                // window gets what they asked for. A window that left the
+                // file to another one writes nothing, and says so instead.
                 self.save_session(ctx);
+                self.say_who_keeps_the_session(ctx);
             }
             SettingsAction::ToggleOpenAtLogin => {
                 let mut general = self.general();
@@ -10573,13 +10580,31 @@ impl Workspace {
     /// tabs are the ones that will not come back, and a person who opened
     /// Crook expecting their tabs is owed the reason they are not here. Said
     /// once, and only while restoring tabs is on: with it off no window
-    /// comes back with tabs, and there is nothing to explain.
+    /// comes back with tabs, and there is nothing to explain — until it is
+    /// turned on in this window. See `say_who_keeps_the_session`.
     pub fn leave_the_session(&mut self, ctx: &mut ViewContext<Self>) {
         self.stop_saving_the_session();
-        if self.general().restore_session {
-            self.session_note = Some(SessionNote::default());
-            ctx.notify();
+        self.left_the_session = true;
+        self.say_who_keeps_the_session(ctx);
+    }
+
+    /// Puts the line that says another window keeps the session up in a
+    /// window that left it, while restoring tabs is on, and takes it down
+    /// while it is off.
+    ///
+    /// When the window opens, and again when the setting is switched here.
+    /// Switched on, it asks this window for what it cannot do — its tabs
+    /// still go unwritten, the other window keeps the file — so the line
+    /// comes back even if it was dismissed: before, the switch wrote these
+    /// tabs at once, and a person who switches it and closes the window
+    /// expects them back. Nothing in a window that keeps the file or that a
+    /// launcher opened.
+    fn say_who_keeps_the_session(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self.left_the_session {
+            return;
         }
+        self.session_note = self.general().restore_session.then(SessionNote::default);
+        ctx.notify();
     }
 
     /// The line that says another window keeps the session, while it is up.

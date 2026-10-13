@@ -13779,6 +13779,61 @@ fn a_second_window_says_nothing_when_no_window_brings_its_tabs_back() {
 }
 
 #[test]
+fn a_second_window_says_so_when_bringing_the_tabs_back_is_turned_on_in_it() {
+    // Opened with the setting off, the second window had nothing to explain.
+    // Turned on there, it is asked for what it cannot do: the first window
+    // keeps the file, so these tabs will still not come back, where before
+    // the switch wrote them at once. So the line comes up then, and goes
+    // again when the setting is turned back off. The first window, which
+    // does write its tabs, says nothing either way.
+    let scratch = Scratch::new();
+    fs::write(
+        scratch.path().join("settings.json"),
+        "{ \"restore_session\": false }\n",
+    )
+    .expect("writable scratch");
+    let session = crate::session::session_path_beside(&scratch.path().join("settings.json"));
+    let (mut first, _keeper) = opened_on(scratch.settings());
+    let (mut second, standing) = opened_on(scratch.settings());
+    assert!(matches!(standing, crate::Standing::Second), "{standing:?}");
+    let scene = second.frame();
+    assert!(
+        !says(&scene, super::session_note::SAID),
+        "{}",
+        frame_text(&scene)
+    );
+
+    second.dispatch_workspace_action(SettingsAction::ToggleRestoreSession.into());
+    let scene = second.frame();
+    assert!(
+        says(&scene, super::session_note::SAID),
+        "the setting was turned on in a window that cannot keep its tabs, and it said nothing: {}",
+        frame_text(&scene)
+    );
+    second.settle(std::time::Duration::from_millis(500));
+    assert!(
+        !session.exists(),
+        "the second window wrote the session the first one keeps"
+    );
+
+    second.dispatch_workspace_action(SettingsAction::ToggleRestoreSession.into());
+    let scene = second.frame();
+    assert!(
+        !says(&scene, super::session_note::SAID),
+        "the setting is off again and the line still explains it: {}",
+        frame_text(&scene)
+    );
+
+    first.dispatch_workspace_action(SettingsAction::ToggleRestoreSession.into());
+    let scene = first.frame();
+    assert!(
+        !says(&scene, super::session_note::SAID),
+        "the window that keeps the tabs says another one does: {}",
+        frame_text(&scene)
+    );
+}
+
+#[test]
 fn new_window_starts_crook_again_where_the_focused_pane_is_working() {
     // A window is a process of its own, so New window starts this binary
     // again, in the directory the person was working in. The arguments are
