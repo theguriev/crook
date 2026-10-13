@@ -48,6 +48,8 @@ use crookui_core::text_layout::Line;
 use crate::clipboard::Clipboard;
 use crate::editor::{Editor, Motion};
 use crate::input_keys::{self, Intent, Platform};
+use crate::pane_selection::PaneSelection;
+use crate::selection::Cells;
 use crate::text_input::TextInput;
 use crate::theme::theme;
 
@@ -101,6 +103,9 @@ pub struct TextField {
     /// follows its prompt. Said after the change, and only for one: a caret
     /// moved or a selection made is not an edit.
     edited: Option<WorkspaceAction>,
+    /// The selection in the output this field floats over, for the one field
+    /// that does: the find bar's. See [`Self::over_output`].
+    output: Option<PaneSelection>,
     /// The shaped text, kept from layout for paint and for hit testing.
     line: Option<Line>,
     /// Whether `line` is the placeholder rather than what was typed.
@@ -127,6 +132,7 @@ impl TextField {
             icon: None,
             focus: None,
             edited: None,
+            output: None,
             line: None,
             showing_placeholder: false,
             size: None,
@@ -154,6 +160,34 @@ impl TextField {
     pub fn with_edit(mut self, action: WorkspaceAction) -> Self {
         self.edited = Some(action);
         self
+    }
+
+    /// Lets the copy chord through to a selection in the output under the
+    /// field, while the field has nothing selected of its own.
+    ///
+    /// For the find bar, which floats over a pane's list and so is handed
+    /// every keystroke before the list is. Claiming the chord with nothing to
+    /// copy took it from the drag a person had just made over the output, and
+    /// the clipboard kept whatever it held before. Rule 1 of
+    /// [`input_keys::route`] gives an output selection the chord over the
+    /// composer's; this is that rule for a field drawn on top of the output
+    /// rather than under it, stopping short where the field has text selected
+    /// itself — clicking into this field lets go of no highlight, as clicking
+    /// into the composer does, so an output selection here can be one nobody
+    /// is aiming at any more.
+    pub fn over_output(mut self, selection: PaneSelection) -> Self {
+        self.output = Some(selection);
+        self
+    }
+
+    /// Whether the copy chord belongs to the output under the field rather
+    /// than to the field. See [`Self::over_output`].
+    fn yields_copy(&self) -> bool {
+        self.input.editor().selected_text().is_empty()
+            && self
+                .output
+                .as_ref()
+                .is_some_and(|output| output.has_selection_in(Cells::List))
     }
 
     /// Where the glyphs begin, relative to the field's own origin.
@@ -195,6 +229,9 @@ impl TextField {
         let Some(intent) = input_keys::intent(keystroke, chars, Platform::current()) else {
             return false;
         };
+        if intent == Intent::Copy && self.yields_copy() {
+            return false;
+        }
 
         let intent = match intent {
             Intent::Submit | Intent::Newline => return true,

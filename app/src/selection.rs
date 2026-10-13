@@ -169,7 +169,41 @@ impl Selection {
     /// What a copy of it would put on the clipboard, or `None` when it covers
     /// no cells.
     pub fn text(&self, blocks: &Blocks<'_>) -> Option<String> {
-        self.region(blocks)?.text(blocks)
+        self.text_with(blocks, None)
+    }
+
+    /// [`Self::text`] of a list one block of which is shown filtered: the
+    /// rows the filter hides are left out, and a selection every row of which
+    /// it hides is `None`, as one that covers no cells is. See
+    /// [`Region::text_with`].
+    pub fn text_with(&self, blocks: &Blocks<'_>, filter: Option<Filter<'_>>) -> Option<String> {
+        self.region(blocks)?.text_with(blocks, filter)
+    }
+}
+
+/// One block shown filtered: which block, and which of its rows are drawn, in
+/// the order they are drawn.
+///
+/// What a copy has to be told and a region cannot work out. A drag over a
+/// filtered block is made against the block's own rows — the third line on
+/// screen is whatever row `kept[2]` names — so the rows the filter hides
+/// between the two ends are inside the region, as rows of the block always
+/// are. They are not painted, and a copy that took them would hand over lines
+/// nobody saw.
+#[derive(Copy, Clone, Debug)]
+pub struct Filter<'a> {
+    /// The block that is filtered.
+    pub block: BlockId,
+    /// Its rows that are shown, in the numbering anchors use, as the filter
+    /// gave them.
+    pub kept: &'a [usize],
+}
+
+impl<'a> Filter<'a> {
+    /// The rows of `id` that are shown, or `None` when `id` is not the block
+    /// this filters and all of its rows are.
+    fn kept_of(&self, id: BlockId) -> Option<&'a [usize]> {
+        (self.block == id).then_some(self.kept)
     }
 }
 
@@ -279,6 +313,27 @@ impl Region {
     /// one line they are. And the blanks at the end of a row are the rest of a
     /// grid rather than anything anybody typed, so they stay behind.
     pub fn text(&self, blocks: &Blocks<'_>) -> Option<String> {
+        self.text_with(blocks, None)
+    }
+
+    /// [`Self::text`], leaving out the rows of the filtered block that the
+    /// filter does not show.
+    ///
+    /// The rows it does show are walked in the order it shows them, by the
+    /// same two rules. A fold still joins a row to the one it folded onto when
+    /// the filter shows both, which is a long line kept whole; when the row it
+    /// folded onto is hidden, the next row shown is another line, and it gets
+    /// a line break of its own rather than being run on to a half line.
+    ///
+    /// `None` when a filter is given and the region holds none of the rows
+    /// it shows, as for a selection that covers no cells. The region is
+    /// worked out on the block's own rows, so it outlives the rows it was
+    /// drawn over: narrow the query after a drag, or let go of a drag in the
+    /// rows hidden between two shown ones, and the selection still holds with
+    /// no highlight drawn. An empty string for it would go onto the clipboard
+    /// over whatever the person last copied, for a highlight they could not
+    /// see.
+    pub fn text_with(&self, blocks: &Blocks<'_>, filter: Option<Filter<'_>>) -> Option<String> {
         let last = blocks.len().checked_sub(1)?;
         // An end whose block is gone clamps to the surviving list rather than
         // giving up: everything before the first block left is what was
@@ -295,8 +350,15 @@ impl Region {
             let Some(item) = blocks.item(index) else {
                 continue;
             };
-            for local in 0..item.rows.count() {
-                let row = item.first + local;
+            // The rows the list draws of this item, in the order it draws
+            // them: every one of them, or the ones the filter keeps.
+            let kept = filter.and_then(|filter| filter.kept_of(item.id));
+            let shown = kept.map_or(item.rows.count(), <[usize]>::len);
+            for place in 0..shown {
+                let row = kept.map_or(item.first + place, |kept| kept[place]);
+                let Some(local) = item.local(row) else {
+                    continue;
+                };
                 let Some(columns) = self.columns_on(&item, row) else {
                     continue;
                 };
@@ -306,11 +368,16 @@ impl Region {
                 let end = columns.end.min(item.rows.line_length(local));
                 item.rows
                     .write(local, columns.start..end.max(columns.start), &mut text);
+                // A fold runs on only into the row it folded onto, which a
+                // filter may have hidden.
+                let continued = kept.is_none_or(|kept| kept.get(place + 1) == Some(&(row + 1)));
                 // A rectangle is columns cut out of the rows it crosses, so
                 // every one of them is its own line however the terminal
                 // folded them.
-                folded =
-                    !self.block && columns.end >= item.rows.columns() && item.rows.wraps(local);
+                folded = !self.block
+                    && continued
+                    && columns.end >= item.rows.columns()
+                    && item.rows.wraps(local);
                 if folded {
                     let blanks = blanks_before_a_fold(&item.rows, local)
                         .filter(|column| *column >= columns.start)
@@ -320,7 +387,7 @@ impl Region {
                 written = true;
             }
         }
-        Some(text)
+        (written || filter.is_none()).then_some(text)
     }
 }
 

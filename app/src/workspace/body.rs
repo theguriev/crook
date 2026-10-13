@@ -1660,33 +1660,36 @@ fn find_bar(
     let current = find.clamped(total);
     let has_matches = total > 0;
 
+    let mut field = TextField::new(
+        find.input(),
+        workspace.clipboard().clone(),
+        workspace.fonts(),
+        find.field(),
+        if filtering {
+            "Filter output"
+        } else {
+            "Find in output"
+        },
+    )
+    .with_icon(if filtering {
+        Lucide::ListFilter
+    } else {
+        Lucide::Search
+    })
+    .with_focus(WorkspaceAction::Find {
+        pane,
+        action: FindAction::Open,
+    });
+    // The bar is over the list and has every keystroke first, so a drag made
+    // over the output under it is copied only if the field lets it.
+    if let Some(interaction) = workspace.interaction(pane) {
+        field = field.over_output(interaction.selection.clone());
+    }
     let field = Shrinkable::new(
         1.,
-        ConstrainedBox::new(
-            TextField::new(
-                find.input(),
-                workspace.clipboard().clone(),
-                workspace.fonts(),
-                find.field(),
-                if filtering {
-                    "Filter output"
-                } else {
-                    "Find in output"
-                },
-            )
-            .with_icon(if filtering {
-                Lucide::ListFilter
-            } else {
-                Lucide::Search
-            })
-            .with_focus(WorkspaceAction::Find {
-                pane,
-                action: FindAction::Open,
-            })
+        ConstrainedBox::new(field.finish())
+            .with_max_width(FIND_FIELD_WIDTH)
             .finish(),
-        )
-        .with_max_width(FIND_FIELD_WIDTH)
-        .finish(),
     )
     .finish();
 

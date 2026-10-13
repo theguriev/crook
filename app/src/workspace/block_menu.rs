@@ -198,12 +198,22 @@ pub(super) fn anchor(at: Option<Vector2F>) -> AnchorTo {
 /// The first entry is what the square beside the dots does, spelled out — a
 /// menu that left it out would be one missing the thing everything else in the
 /// group is a variation of.
+///
+/// On a block the find bar is filtering, the square and these two copy the
+/// lines it shows rather than everything it printed, and the two rows say
+/// "shown": somebody who filtered four hundred lines down to three is told
+/// which of the two a copy takes rather than left to find out on pasting.
 pub(crate) fn copy_group(workspace: &Workspace) -> Box<dyn Element> {
     let menu = workspace.block_menu();
     let ui = workspace.fonts().ui;
+    let (whole, output) = if menu.filtered {
+        ("Copy shown lines", "Copy shown output")
+    } else {
+        ("Copy", "Copy output")
+    };
     group([
         entry(
-            "Copy",
+            whole,
             chord_for(workspace, "crook/window/copy-block"),
             Some(dispatching(BlockAction::Copy(BlockPart::Whole))),
             menu.copy.clone(),
@@ -219,7 +229,7 @@ pub(crate) fn copy_group(workspace: &Workspace) -> Box<dyn Element> {
             ui,
         ),
         entry(
-            "Copy output",
+            output,
             chord_for(workspace, "crook/window/copy-block-output"),
             menu.output_from
                 .is_some()

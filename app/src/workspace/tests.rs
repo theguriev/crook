@@ -19296,6 +19296,311 @@ mod shells {
             );
         }
 
+        /// Four lines of output, two of which hold `ap`, from a command line
+        /// that spells none of them in lower case — so `banana` on the
+        /// clipboard is the line the command printed, never its echo.
+        const FRUIT: &str = "printf 'APPLE\\nBANANA\\nCHERRY\\nAPRICOT\\n' | tr A-Z a-z";
+
+        /// Filters the newest block for `query`: its menu's "Filter output",
+        /// then the query typed into the bar that opens.
+        fn filter_newest_block(harness: &mut Harness, pane: PaneId, query: &str) {
+            harness.run_command("crook/window/select-block-up");
+            harness.dispatch_workspace_action(WorkspaceAction::Block(BlockAction::FilterOutput));
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("a find bar");
+            assert!(find.filter().is_some(), "the filter did not open");
+            find.input().edit(|editor| editor.set_text(query));
+            harness.frame();
+        }
+
+        /// Where the cell `column` of the output line that reads `text` is
+        /// drawn, `across` of the way into it.
+        ///
+        /// Found in the frame, because only the list knows where it draws a
+        /// block's rows — a filter puts them at places of its own. Read off
+        /// the output's first columns only: the find bar floats over the
+        /// top-right of the same rows, and a line built from both would be a
+        /// line neither of them drew.
+        fn on_output_line(
+            harness: &mut Harness,
+            text: &str,
+            column: usize,
+            across: f32,
+        ) -> Vector2F {
+            let panel = panel_of_the_pane(harness);
+            let scene = harness.frame();
+            let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+            let left = panel.min_x() + crate::workspace::body::GUTTER;
+            let (baseline, _) = text_lines(&scene, |at| {
+                panel.contains_point(at) && at.x() < left + 12. * cell.width
+            })
+            .into_iter()
+            .find(|(_, line)| line == text)
+            .unwrap_or_else(|| panic!("no line of the output reads {text:?}"));
+            vec2f(
+                left + (column as f32 + across) * cell.width,
+                baseline.y() - cell.baseline + cell.height / 2.,
+            )
+        }
+
+        #[test]
+        fn a_drag_over_a_filtered_block_copies_only_the_lines_it_shows() {
+            // Filtered for `ap`, the block shows `apple` with `apricot` right
+            // under it, and a drag from one to the other highlights the two.
+            // The copy chord took `banana` and `cherry` as well: the drag's
+            // ends are rows of the block, and the copy walked every row
+            // between them, shown or not.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, FRUIT) == 0 {
+                return;
+            }
+            let Some((clipboard, _system)) = working_clipboard(&harness) else {
+                return;
+            };
+            filter_newest_block(&mut harness, pane, "ap");
+
+            let start = on_output_line(&mut harness, "apple", 0, 0.1);
+            let end = on_output_line(&mut harness, "apricot", "apricot".len() - 1, 0.9);
+            harness.hold(start, 1);
+            harness.drag_to(end);
+            harness.let_go(end);
+            assert_eq!(
+                harness.terminal_selection(pane).as_deref(),
+                Some("apple\napricot"),
+                "what the window reports as selected is not what was drawn"
+            );
+            harness.press("c", platform_chord(), "c");
+
+            assert_eq!(
+                clipboard.read().as_deref(),
+                Some("apple\napricot"),
+                "the copy is not the two lines the drag was drawn over"
+            );
+        }
+
+        /// What this thread logged at `level` or above while `f` ran, as
+        /// `(level, message)`.
+        ///
+        /// The test binary installs no logger, so every `log::` line in it
+        /// goes nowhere. This installs one, once, that keeps the lines of a
+        /// thread inside this call and drops every other: the tests run side
+        /// by side, and a line another test logged is not this one's.
+        fn logged_by(level: log::Level, f: impl FnOnce()) -> Vec<(log::Level, String)> {
+            thread_local! {
+                static LINES: RefCell<Option<Vec<(log::Level, String)>>> =
+                    const { RefCell::new(None) };
+            }
+            struct Kept;
+            impl log::Log for Kept {
+                fn enabled(&self, _: &log::Metadata) -> bool {
+                    LINES.with_borrow(Option::is_some)
+                }
+                fn log(&self, record: &log::Record) {
+                    if !self.enabled(record.metadata()) {
+                        return;
+                    }
+                    // Written out before the borrow: a `Display` that logs
+                    // would otherwise borrow the lines twice.
+                    let line = (record.level(), record.args().to_string());
+                    LINES.with_borrow_mut(|lines| {
+                        if let Some(lines) = lines {
+                            lines.push(line);
+                        }
+                    });
+                }
+                fn flush(&self) {}
+            }
+            static INSTALLED: std::sync::Once = std::sync::Once::new();
+            INSTALLED.call_once(|| {
+                log::set_logger(&Kept).expect("a logger in the test binary already");
+                log::set_max_level(log::LevelFilter::Trace);
+            });
+
+            LINES.set(Some(Vec::new()));
+            f();
+            let lines = LINES.take().unwrap_or_default();
+            lines
+                .into_iter()
+                .filter(|(logged, _)| *logged <= level)
+                .collect()
+        }
+
+        #[test]
+        fn a_drag_the_filter_then_hides_leaves_the_clipboard_alone() {
+            // A drag over `apple` in the block filtered for `ap`, and then the
+            // query narrowed to `apr`: `apple` is off the screen and nothing
+            // is highlighted, but the selection still holds its row and still
+            // takes the copy chord. The copy of it was an empty string, put on
+            // the clipboard over whatever the person last copied.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, FRUIT) == 0 {
+                return;
+            }
+            let Some((clipboard, _system)) = working_clipboard(&harness) else {
+                return;
+            };
+            filter_newest_block(&mut harness, pane, "ap");
+
+            let start = on_output_line(&mut harness, "apple", 0, 0.1);
+            let end = on_output_line(&mut harness, "apple", "apple".len() - 1, 0.9);
+            harness.hold(start, 1);
+            harness.drag_to(end);
+            harness.let_go(end);
+            assert_eq!(harness.terminal_selection(pane).as_deref(), Some("apple"));
+
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("a find bar");
+            find.input().edit(|editor| editor.set_text("apr"));
+            harness.frame();
+            assert_eq!(
+                harness.terminal_selection(pane),
+                None,
+                "a selection the filter hides all of reads as text"
+            );
+            let logged = logged_by(log::Level::Debug, || {
+                harness.press("c", platform_chord(), "c");
+            });
+
+            assert_eq!(
+                clipboard.read().as_deref(),
+                Some("crook: nothing was copied over this"),
+                "a copy of a selection nobody could see emptied the clipboard"
+            );
+            // A copy there was nothing to make is not one the clipboard
+            // failed: the warning is what somebody tracing a clipboard that
+            // will not open reads, and this one works.
+            assert_eq!(
+                logged
+                    .iter()
+                    .filter(|(level, _)| *level <= log::Level::Warn)
+                    .collect::<Vec<_>>(),
+                Vec::<&(log::Level, String)>::new(),
+                "a copy with nothing to take was logged as a clipboard that failed"
+            );
+            assert!(
+                logged
+                    .iter()
+                    .any(|(_, line)| line.contains("shows nothing to copy")),
+                "the chord never reached the copy: {logged:?}"
+            );
+            let selected = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .interaction(pane)
+                    .is_some_and(|interaction| interaction.selection.selection().is_some())
+            });
+            assert!(!selected, "the chord did not let go of the selection");
+        }
+
+        #[test]
+        fn with_the_find_bar_open_the_copy_chord_takes_a_drag_over_the_output() {
+            // The bar floats over the list and is handed every keystroke
+            // first, and its field claimed the copy chord with nothing of its
+            // own selected: a drag over the output and a copy left the
+            // clipboard holding whatever it held before. Text selected in the
+            // field is still the field's to copy.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, FRUIT) == 0 {
+                return;
+            }
+            let Some((clipboard, _system)) = working_clipboard(&harness) else {
+                return;
+            };
+            harness.run_command("crook/window/find");
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("a find bar");
+            find.input().edit(|editor| editor.set_text("cherry"));
+            harness.frame();
+
+            let drag = |harness: &mut Harness| {
+                let start = on_output_line(harness, "apple", 0, 0.1);
+                let end = on_output_line(harness, "banana", "banana".len() - 1, 0.9);
+                harness.hold(start, 1);
+                harness.drag_to(end);
+                harness.let_go(end);
+            };
+            drag(&mut harness);
+            harness.press("c", platform_chord(), "c");
+            assert_eq!(
+                clipboard.read().as_deref(),
+                Some("apple\nbanana"),
+                "the field took the copy chord from the drag over the output"
+            );
+
+            drag(&mut harness);
+            find.input().edit(crate::editor::Editor::select_all);
+            harness.press("c", platform_chord(), "c");
+            assert_eq!(
+                clipboard.read().as_deref(),
+                Some("cherry"),
+                "the query selected in the field was not what was copied"
+            );
+        }
+
+        #[test]
+        fn the_copies_of_a_filtered_block_take_the_lines_it_shows_and_say_so() {
+            // The square has no words of its own, so it copies what the block
+            // is showing: its command and the lines the filter kept. The
+            // menu's rows have words, and while the block is filtered they say
+            // that is what they take.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, FRUIT) == 0 {
+                return;
+            }
+            let Some((clipboard, _system)) = working_clipboard(&harness) else {
+                return;
+            };
+            filter_newest_block(&mut harness, pane, "ap");
+
+            let panel = panel_of_the_pane(&mut harness);
+            let scene = hover_block(&mut harness, pane, 0);
+            let controls = block_controls(&scene, panel);
+            assert!(!controls.is_empty(), "the hovered block draws no controls");
+            harness.click(center(controls[0]), MouseButton::Left);
+            let copied = clipboard.read().unwrap_or_default();
+            assert!(
+                copied.ends_with("\napple\napricot") && copied.contains("printf"),
+                "the square did not copy the command and the lines shown: {copied:?}"
+            );
+            assert!(
+                !copied.contains("banana") && !copied.contains("cherry"),
+                "the square copied lines the filter hid: {copied:?}"
+            );
+
+            let shown = frame_text(&open_block_menu(&mut harness, pane, 0));
+            assert!(
+                shown.contains("Copy shown lines") && shown.contains("Copy shown output"),
+                "the menu does not say its copies are of what is shown: {shown}"
+            );
+            click_menu_entry(&mut harness, "Copy shown output");
+            assert_eq!(
+                clipboard.read().as_deref(),
+                Some("apple\napricot"),
+                "the output the menu copied is not the output shown"
+            );
+        }
+
         #[test]
         fn a_block_scrolled_into_its_middle_has_its_command_pinned_over_it() {
             // `seq 1 200` is taller than the pane, so at the bottom of the list

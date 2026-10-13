@@ -586,7 +586,8 @@ Twenty features, and the page that configures them:
   block's own: **Filter output** on its menu opens the same bar filtering that one block, which
   then shows its command and only the lines of its output that match — the bar counts them,
   `2/4 lines`, with the same two switches — until the bar closes or its filter switch goes
-  back to finding. It opens only over
+  back to finding. A copy of a filtered block takes the lines it shows: a drag over it, its
+  copy square, and its menu's **Copy shown lines** and **Copy shown output**. It opens only over
   the list of commands, never over a full-screen program, where `ctrl-f` is the program's own
   key.
 - **Step through the commands with the keyboard.** `cmd-alt-up` and `cmd-alt-down`

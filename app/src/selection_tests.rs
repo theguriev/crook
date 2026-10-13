@@ -67,6 +67,30 @@ impl Session {
         );
         selection.text(&self.blocks())
     }
+
+    /// What a drag from one cell to another would copy while the block at
+    /// `block` is shown filtered to the rows in `kept`.
+    ///
+    /// The ends are rows of the blocks themselves, as a drag over a filtered
+    /// block records them: the list maps the line on screen to the row the
+    /// filter drew there before anything here sees it.
+    fn dragged_filtered(
+        &self,
+        (block, kept): (usize, &[usize]),
+        from: (usize, usize, usize),
+        to: (usize, usize, usize),
+    ) -> Option<String> {
+        let selection = Selection::new(
+            SelectionKind::Simple,
+            Anchor::new(self.id(from.0), from.1, from.2, CellSide::Left),
+            Anchor::new(self.id(to.0), to.1, to.2, CellSide::Right),
+        );
+        let filter = Filter {
+            block: self.id(block),
+            kept,
+        };
+        selection.text_with(&self.blocks(), Some(filter))
+    }
 }
 
 /// Runs `commands` through an emulator that reports command boundaries, and
@@ -888,4 +912,111 @@ fn a_wide_character_carried_over_a_fold_leaves_no_space_behind() {
             "finished: {finished}"
         );
     }
+}
+
+/// One finished command, `x`, that printed `lines` into a grid `columns` wide:
+/// its row 0 is the command line, and each line takes the row after the last
+/// one's, two of them when it folds.
+fn printed(columns: u16, lines: &[&str]) -> Session {
+    let mut emulator = Emulator::new(TerminalSize::new(columns, 12), 100, Palette::default());
+    emulator.advance(format!("{A}{B}x\r\n{C}").as_bytes());
+    for line in lines {
+        emulator.advance(format!("{line}\r\n").as_bytes());
+    }
+    emulator.advance(format!("{D}{A}$ ").as_bytes());
+    Session {
+        finished: BlockHistory::new(emulator.blocks().iter().cloned().map(Arc::new).collect(), 0),
+        snapshot: emulator.snapshot(),
+    }
+}
+
+#[test]
+fn a_drag_over_a_filtered_block_copies_only_the_lines_it_shows() {
+    // Filtered to its failures, the block shows its command and two lines,
+    // and a drag from the first of them to the second highlights exactly
+    // those. Its ends are the block's own rows 2 and 5, and every row between
+    // them is inside the region: the copy took the passing lines too, which
+    // nobody could see.
+    let session = printed(
+        40,
+        &["ok one", "FAILED two", "ok three", "ok four", "FAILED five"],
+    );
+    let failures: &[usize] = &[0, 2, 5];
+
+    assert_eq!(
+        Some("FAILED two\nFAILED five".to_owned()),
+        session.dragged_filtered((0, failures), (0, 2, 0), (0, 5, 10)),
+        "the lines the filter hid came along"
+    );
+    // The same two ends with nothing filtered are a drag over four lines.
+    assert_eq!(
+        Some("FAILED two\nok three\nok four\nFAILED five".to_owned()),
+        session.dragged((0, 2, 0), (0, 5, 10)),
+    );
+}
+
+#[test]
+fn a_drag_through_a_filtered_block_takes_its_neighbours_whole() {
+    // The filter is one block's. The blocks either side of it are drawn whole
+    // and copied whole; only the filtered one loses the lines it is not
+    // showing.
+    let session = session(40, 20, &["one", "two", "three"]);
+    let last_line: &[usize] = &[0, 2];
+
+    assert_eq!(
+        Some("ONE two\n$ two\nTWO two\n$ three\nTHREE one".to_owned()),
+        session.dragged_filtered((1, last_line), (0, 2, 0), (2, 1, 8)),
+    );
+}
+
+#[test]
+fn a_folded_line_a_filter_keeps_whole_still_copies_as_one_line() {
+    // "FAILED one and more" folds at ten columns onto rows 1 and 2. Kept
+    // whole, it copies as the one line it is. With only its first row kept,
+    // the row after it on screen is another line altogether, and joining the
+    // two would make a line nobody printed.
+    let session = printed(10, &["FAILED one and more", "ok", "FAILED x"]);
+
+    assert_eq!(
+        Some("FAILED one and more\nFAILED x".to_owned()),
+        session.dragged_filtered((0, &[0, 1, 2, 4]), (0, 1, 0), (0, 4, 7)),
+        "a fold the filter kept both rows of came back broken"
+    );
+    assert_eq!(
+        Some("FAILED one\nFAILED x".to_owned()),
+        session.dragged_filtered((0, &[0, 1, 4]), (0, 1, 0), (0, 4, 7)),
+        "a row whose fold the filter hid ran on into the next row shown"
+    );
+}
+
+#[test]
+fn a_drag_the_filter_hides_every_row_of_copies_nothing() {
+    // A drag over `FAILED two`, and then the query narrowed to `five`: the
+    // region still holds row 2, and nothing is drawn over it any more. Its
+    // copy was an empty string, which the copy chord put on the clipboard
+    // over whatever the person last copied.
+    let session = printed(
+        40,
+        &["ok one", "FAILED two", "ok three", "ok four", "FAILED five"],
+    );
+    let five: &[usize] = &[0, 5];
+    assert_eq!(
+        None,
+        session.dragged_filtered((0, five), (0, 2, 0), (0, 2, 9)),
+        "a drag the filter hides all of copied something"
+    );
+
+    // Let go of in the rows hidden between two shown lines, which a drag
+    // past the end of one of them and onto the start of the next ends in.
+    let failures: &[usize] = &[0, 2, 5];
+    assert_eq!(
+        None,
+        session.dragged_filtered((0, failures), (0, 3, 0), (0, 4, 6)),
+        "a drag over hidden rows alone copied something"
+    );
+    // One shown row inside it is a copy of that row.
+    assert_eq!(
+        Some("FAILED two".to_owned()),
+        session.dragged_filtered((0, failures), (0, 2, 0), (0, 4, 6)),
+    );
 }
