@@ -1578,6 +1578,25 @@ impl Harness {
         self.presenter.counts().renders(self.workspace.id())
     }
 
+    /// Draws a frame that renders the workspace again, the way a frame drawn
+    /// for anything else on screen — a caret blink, another pane printing —
+    /// does.
+    ///
+    /// [`Self::frame`] alone, with nothing asking for a render, paints the
+    /// tree the last render built and runs none of the code that builds it:
+    /// a test counting what a frame does would count nothing, and pass.
+    fn render_again(&mut self) -> Rc<Scene> {
+        let renders = self.workspace_renders();
+        self.workspace_update(|_, ctx| ctx.notify());
+        let scene = self.frame();
+        assert_eq!(
+            renders + 1,
+            self.workspace_renders(),
+            "the frame did not render the workspace"
+        );
+        scene
+    }
+
     /// How many frames the presenter has built, whether or not anything was
     /// rendered for them.
     fn frames_built(&self) -> u64 {
@@ -20585,16 +20604,16 @@ mod shells {
             let read = crate::selection::stored_rows_searched;
 
             let before = read();
-            harness.frame();
+            harness.render_again();
             assert!(
                 read() > before,
                 "the first frame of a search reads the finished blocks"
             );
 
             let before = read();
-            harness.frame();
+            harness.render_again();
             step(&mut harness, pane, true);
-            harness.frame();
+            harness.render_again();
             assert_eq!(
                 0,
                 read() - before,
@@ -20618,16 +20637,16 @@ mod shells {
                 pane,
                 action: crate::workspace::action::FindAction::ToggleRegex,
             });
-            harness.frame();
+            harness.render_again();
             assert_eq!(2, matches(&harness, pane), "the pattern finds both");
 
             let compiled = crate::selection::patterns_compiled;
             let before = compiled();
             for _ in 0..3 {
-                harness.frame();
+                harness.render_again();
             }
             step(&mut harness, pane, true);
-            harness.frame();
+            harness.render_again();
             assert_eq!(
                 0,
                 compiled() - before,
@@ -20637,9 +20656,17 @@ mod shells {
             // Fits the size limit told apart, not folded, which is how the
             // search reads it with the case switch off.
             retype(&mut harness, pane, "[α-ω]{2000}");
+            let before = compiled();
             assert!(
-                frame_text(&harness.frame()).contains("Bad pattern"),
+                frame_text(&harness.render_again()).contains("Bad pattern"),
                 "a pattern the search could not compile was not said to be one"
+            );
+            harness.render_again();
+            harness.render_again();
+            assert_eq!(
+                1,
+                compiled() - before,
+                "frames compiled a pattern that does not compile again"
             );
         }
 

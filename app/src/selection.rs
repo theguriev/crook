@@ -773,6 +773,15 @@ pub enum LineMatcher {
 
 impl LineMatcher {
     /// A matcher for `needle`, or `None` for a pattern that does not compile.
+    ///
+    /// The one place in the workspace allowed to compile a regular
+    /// expression, so that the count of compiles the find tests read sees
+    /// every compile there is: `.clippy.toml` bans the `regex` constructors
+    /// everywhere else.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this function is the replacement those lints point at"
+    )]
     pub fn new(needle: &str, options: FindOptions) -> Option<Self> {
         if options.regex {
             #[cfg(test)]
