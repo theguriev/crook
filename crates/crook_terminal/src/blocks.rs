@@ -1078,8 +1078,10 @@ impl BlockTracker {
     ///
     /// A history that has only just reached its length is still counted
     /// exactly, but nothing tells it from one that has gone past, so its
-    /// pictures go as well. Not on the alternate screen, whose grid has no
-    /// history, and under which the shell's does not move.
+    /// pictures go as well. Not on the alternate screen, where the grid
+    /// `Term` hands out is the program's, which has no history. The shell's
+    /// is out of sight there, and the one thing that moves it, a shorter
+    /// screen, is [`Self::shortened`]'s.
     ///
     /// Called after anything that can scroll the grid, before anything that
     /// reads the anchors: [`Self::live`] for a frame, and a mark, which may
@@ -1088,6 +1090,24 @@ impl BlockTracker {
         if !term.mode().contains(TermMode::ALT_SCREEN)
             && term.grid().history_size() >= scrollback_lines
         {
+            self.open.images.clear();
+        }
+    }
+
+    /// Forgets the open block's pictures when the screen has just lost rows
+    /// under a full-screen program.
+    ///
+    /// `Term` resizes the shell's grid under the program's as well, and a
+    /// shorter one pushes its top rows into its history, past the history's
+    /// length uncounted, the way [`Self::settle_pictures`] describes. Nothing
+    /// can see it happen: the history `Term` hands out is the program's. Nor
+    /// can anything see it afterwards, because a taller screen before the
+    /// program exits pulls rows back out, and the shell's history is under
+    /// its length again by the time it is on show. So the pictures go
+    /// whether or not the history filled, as they do on a column change.
+    /// Rows pulled back out are counted, so a taller screen needs nothing.
+    pub(crate) fn shortened<T>(&mut self, term: &Term<T>) {
+        if term.mode().contains(TermMode::ALT_SCREEN) {
             self.open.images.clear();
         }
     }

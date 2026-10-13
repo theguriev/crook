@@ -888,6 +888,7 @@ impl Emulator {
     /// [`crate::Terminal::resize`] does both.
     pub fn resize(&mut self, size: TerminalSize) {
         let columns_changed = size.columns != self.size.columns;
+        let shortened = size.rows < self.size.rows;
         let geometry_changed = columns_changed || size.rows != self.size.rows;
         self.size = size;
         if !geometry_changed {
@@ -904,7 +905,11 @@ impl Emulator {
             self.blocks.reflowed(&self.term);
         }
         // A shorter screen pushes its top rows into the history, and into a
-        // full one without counting them.
+        // full one without counting them: the shell's as well under a
+        // full-screen program, where its history cannot be read.
+        if shortened {
+            self.blocks.shortened(&self.term);
+        }
         self.settle_pictures();
         self.dirty = true;
         self.drain();

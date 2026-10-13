@@ -275,6 +275,40 @@ fn a_shorter_pane_that_fills_the_history_takes_its_pictures() {
     assert!(images.is_empty(), "{images:?}");
 }
 
+#[test]
+fn a_shorter_pane_under_a_full_screen_program_takes_its_pictures() {
+    // `Term` resizes the shell's grid under vim too, where nothing here can
+    // read its history: four rows fewer push four lines into it and evict two
+    // uncounted, and four rows more pull four back out, so by the time the
+    // shell's screen is back its history is under its length again and the
+    // anchor is two rows off, on `BELOW`.
+    let mut emulator = picture_after(9, 10);
+    assert_eq!(emulator.history_len(), 8);
+    assert_eq!(emulator.snapshot().live_block.images.len(), 1);
+
+    emulator.advance(b"\x1b[?1049h");
+    emulator.resize(TerminalSize::new(20, 2).with_cell_size(10, 20));
+    emulator.resize(TerminalSize::new(20, 6).with_cell_size(10, 20));
+    emulator.advance(b"\x1b[?1049l");
+    assert_eq!(emulator.history_len(), 6);
+    let images = &emulator.snapshot().live_block.images;
+    assert!(images.is_empty(), "{images:?}");
+}
+
+#[test]
+fn a_taller_pane_under_a_full_screen_program_keeps_its_pictures() {
+    // The lines it pulls back out of the history are counted, full or not.
+    let mut emulator = picture_after(9, 10);
+    emulator.advance(b"\x1b[?1049h");
+    emulator.resize(TerminalSize::new(20, 8).with_cell_size(10, 20));
+    emulator.advance(b"\x1b[?1049l");
+
+    let row = row_saying(&mut emulator, "ABOVE") + 1;
+    let images = &emulator.snapshot().live_block.images;
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].row, row);
+}
+
 /// What `reset` prints, from ncurses 6.6 with `TERM=xterm-256color`: a full
 /// reset (`ESC c`) first, which empties the history along with the screen.
 const RESET: &[u8] = b"\x1bc\x1b]104\x07\x1b[!p\x1b[?3;4l\x1b[4l\x1b>\x1b[?69l\r";
