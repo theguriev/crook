@@ -489,11 +489,17 @@ fn start(
         // off to every git. A `-c` reaches the gits this one starts in a
         // submodule too, through the environment it hands them.
         //
+        // `log.showSignature` has `log` hand every signed commit it shows to
+        // the program `gpg.program` names — or `gpg.ssh.program`, for an SSH
+        // signature — and the proofs in `super::merged` read a base's history
+        // with `log`. No read here wants a signature checked.
+        //
         // What is left is a clean filter, which is how git reads a working
         // tree at all — see `super::changes`. A write keeps all of it: it is
         // something a person asked for, and runs the repository's hooks
         // regardless.
-        git.args(["-c", "core.fsmonitor="]);
+        git.args(["-c", "core.fsmonitor="])
+            .args(["-c", "log.showSignature=false"]);
     }
 
     git.args(args)

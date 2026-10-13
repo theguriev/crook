@@ -1117,6 +1117,61 @@ fn no_read_runs_the_fsmonitor_program_a_repository_names() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn no_read_runs_the_signature_program_a_repository_names() {
+    // `log.showSignature` has `log` hand every signed commit it shows to the
+    // program `gpg.program` names, and the worktree menu proves a branch has
+    // landed by reading the base's history with `log` as it opens.
+    if without_git("no_read_runs_the_signature_program_a_repository_names") {
+        return;
+    }
+    let scratch = ScratchDir::new("signature");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    git(&repo, &["switch", "-c", "agent/task"]);
+    commit(&repo, "notes.txt", "alpha\nbeta\n", "add notes");
+    git(&repo, &["switch", "main"]);
+    commit(&repo, "tracked.txt", "one\ntwo\nthree\nfour\n", "add four");
+    // The base's newest commit again, signed. There is no key here to sign
+    // with and no need of one: a signature is a header, and git hands any
+    // commit that carries one to the program to check.
+    let unsigned = git(&repo, &["cat-file", "commit", "HEAD"]);
+    let (headers, message) = unsigned.split_once("\n\n").expect("a commit has a message");
+    let signed = scratch.path().join("signed-commit");
+    write(
+        &signed,
+        &format!(
+            "{headers}\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n AAAA\n -----END PGP SIGNATURE-----\n\n{message}\n"
+        ),
+    );
+    let signed = git(
+        &repo,
+        &[
+            "hash-object",
+            "-t",
+            "commit",
+            "-w",
+            &signed.display().to_string(),
+        ],
+    );
+    git(&repo, &["update-ref", "refs/heads/main", &signed]);
+    let (program, ran) = tripwire(&scratch, "gpg");
+    git(&repo, &["config", "log.showSignature", "true"]);
+    git(&repo, &["config", "gpg.program", &program]);
+
+    git(&repo, &["log", "-1", "--format=%H", "main"]);
+    assert!(ran.exists(), "git never ran the signature program here");
+    std::fs::remove_file(&ran).expect("the scratch directory is writable");
+
+    let landed = merged::merged(&repo, "refs/heads/main", &["agent/task".to_owned()]);
+
+    assert!(landed.is_empty(), "the branch has not landed: {landed:?}");
+    assert!(
+        !ran.exists(),
+        "a read ran the program the repository names to check signatures"
+    );
+}
+
 // --- parsing and display -------------------------------------------------------
 
 #[test]
