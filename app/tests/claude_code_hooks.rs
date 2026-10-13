@@ -13,6 +13,14 @@
 //! own, the way `claude -p` is when another agent's Bash tool runs it, where
 //! nothing may arrive: that program is not on the pane, and its hooks'
 //! reports are not the pane's agent's.
+//!
+//! The hooks `--agent-hooks` prints for Codex CLI, Gemini CLI and GitHub
+//! Copilot CLI are run the same way, beside Claude Code's, and twice more
+//! where no report can be made — below an agent with no terminal, and with
+//! the binary gone — because there a hook that fails fails its agent: Copilot
+//! CLI denies the tool call whose `preToolUse` hook errored, so a report that
+//! could not be written stopped every tool of a `copilot -p` under CI, and of
+//! every Copilot anywhere once the binary the hooks named had moved.
 
 #![cfg(unix)]
 
@@ -32,6 +40,15 @@ const CROOK: &str = env!("CARGO_BIN_EXE_crook");
 
 /// The Claude Code plugin's hooks, as the repository ships them.
 const PLUGIN_HOOKS: &str = include_str!("../../packaging/claude-code/hooks/hooks.json");
+
+/// The agents whose hooks `--agent-hooks` prints as shell commands. OpenCode
+/// gets a TypeScript plugin and aider a sentence, and neither is a command
+/// an agent runs.
+const AGENTS_WITH_HOOKS: [&str; 4] = ["claude", "codex", "gemini", "copilot"];
+
+/// A binary that is not there: Crook uninstalled, Crook.app moved, or the
+/// build the hooks were printed from deleted since.
+const GONE: &str = "/nonexistent/crook";
 
 /// What every hook is handed on stdin: a prompt to take a title from and a
 /// notification's text to take a message from, so each event's report says
@@ -308,22 +325,90 @@ fn every_plugin_hook_reaches_the_pane_from_a_session_with_no_terminal() {
     }
 }
 
+/// Each command `--agent-hooks <agent>` prints, run from `binary`, beside
+/// the agent and the event it is for: under `command` in a matcher group for
+/// Claude Code, Codex and Gemini CLI, under `bash` for Copilot CLI.
+fn printed_hooks(agent: &str, binary: &str) -> Vec<(String, String)> {
+    let printed = crook::agent::hooks_text(agent, Path::new(binary))
+        .unwrap_or_else(|error| panic!("{agent} has no hooks: {error}"));
+    let fragment: Value = serde_json::from_str(&printed.text)
+        .unwrap_or_else(|error| panic!("{agent}'s fragment is not JSON: {error}"));
+    let events = fragment["hooks"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{agent}'s fragment has no hooks"));
+    assert!(!events.is_empty(), "{agent} prints no hooks");
+    events
+        .iter()
+        .map(|(event, hooks)| {
+            let command = hooks[0]["hooks"][0]["command"]
+                .as_str()
+                .or_else(|| hooks[0]["bash"].as_str())
+                .unwrap_or_else(|| panic!("{agent}'s {event} hook runs no command"));
+            (format!("{agent} {event}"), command.to_owned())
+        })
+        .collect()
+}
+
+/// `command` as a hook in a pane runs it once the binary is gone: the pane
+/// still names the one it was started by, and there is no `crook` on `PATH`
+/// — nor anything else, which the hooks have no need of.
+fn with_crook_gone(command: &str) -> String {
+    format!("CROOK_BIN={GONE}; PATH=/nonexistent; {command}")
+}
+
 #[test]
 fn the_hooks_merged_by_hand_reach_the_pane_from_a_session_with_no_terminal() {
     if !perl_is_here() {
         return;
     }
-    let printed = crook::agent::hooks_text("claude", Path::new(CROOK)).expect("claude has hooks");
-    let fragment: Value = serde_json::from_str(&printed.text).expect("the fragment is JSON");
-    let events = fragment["hooks"]
-        .as_object()
-        .expect("the fragment has hooks");
-    assert!(!events.is_empty());
-    for (event, groups) in events {
-        let command = groups[0]["hooks"][0]["command"]
-            .as_str()
-            .expect("a hook has a command");
-        assert_reaches_the_pane(event, command);
+    for agent in AGENTS_WITH_HOOKS {
+        for (event, command) in printed_hooks(agent, CROOK) {
+            assert_reaches_the_pane(&event, &command);
+        }
+    }
+}
+
+#[test]
+fn no_hook_merged_by_hand_fails_its_agent_when_the_agent_has_no_terminal() {
+    // `copilot -p` under CI, cron, a git hook or `ssh` without `-t`: the
+    // report has nowhere to go, `crook --agent` says so and exits 1, and the
+    // hook has to exit 0 all the same or Copilot CLI refuses the tool call.
+    if !perl_is_here() {
+        return;
+    }
+    for agent in AGENTS_WITH_HOOKS {
+        for (event, command) in printed_hooks(agent, CROOK) {
+            assert_reaches_nothing_from_a_detached_agent(&event, &command);
+        }
+    }
+}
+
+#[test]
+fn no_hook_merged_by_hand_fails_its_agent_once_crook_is_gone() {
+    // The hooks outlive the binary in the agent's own settings: once it has
+    // gone, a hook that ran it would be "not found" before every tool call
+    // of every session, in a message that never says Crook.
+    if !perl_is_here() {
+        return;
+    }
+    for agent in AGENTS_WITH_HOOKS {
+        for (event, command) in printed_hooks(agent, GONE) {
+            let ran = run_as_a_hook(&with_crook_gone(&command), Agent::OnThePane);
+            assert_eq!(
+                ("0\n", "", ""),
+                (
+                    ran.status.as_str(),
+                    ran.stdout.as_str(),
+                    ran.stderr.as_str()
+                ),
+                "{event} with the binary gone runs {command:?}"
+            );
+            assert!(
+                !ran.pane.contains("\x1b]6340;"),
+                "{event} reported with no binary to report through: {:?}",
+                ran.pane
+            );
+        }
     }
 }
 

@@ -26,11 +26,15 @@
 //! hooks, which needs no merging: this repository is a Claude Code plugin
 //! marketplace (`.claude-plugin/marketplace.json`) whose one plugin,
 //! `packaging/claude-code`, carries them and the skill, and installing it is
-//! Claude Code writing its own settings. The plugin's hooks call
-//! `"$CROOK_BIN"` — every pane is told its binary — behind a guard that makes
-//! them nothing outside Crook, and they exit 0 whatever the report did; the
-//! tests here hold its files to the table of Claude Code's events and to
-//! [`SKILL`]. `codex`, `gemini` and `copilot` print the same object under
+//! Claude Code writing its own settings. The plugin's hooks are the printed
+//! ones, command for command: each calls `"$CROOK_BIN"` — every pane is told
+//! its binary — behind a guard that makes it nothing outside Crook, which
+//! includes the far side of `ssh` and the inside of a container until
+//! `TERM_PROGRAM` is passed on there and a `crook` is on that side's `PATH`
+//! or in its `CROOK_BIN`, and exits 0 whatever the report did,
+//! because a hook that fails can fail its agent;
+//! the tests here hold the plugin's files to what is printed and to
+//! [`SKILL`]. `codex`, `gemini` and `copilot` print the same commands under
 //! each one's own event names, which is how those three read their hooks
 //! too; `opencode` has no command hooks and gets the plugin its plugin
 //! directory loads instead; `aider` has no hooks, and gets the sentence that
@@ -960,12 +964,16 @@ pub fn launch_line(agent: &str, prompt: &str) -> Option<String> {
 
 /// The hooks that make `agent` report itself, as a fragment of its settings.
 ///
-/// The binary is named by its full path, because a hook runs in whatever
-/// `PATH` the agent was started with and a development build is on nobody's.
-/// The fragment is printed rather than installed: Crook does not write a file
-/// it does not own, and it has never opened any of these. Where Crook ships
-/// a plugin that carries the same hooks, [`Hooks::lead`] names the commands
-/// that install it, which is the agent writing its own settings.
+/// Every command hook is [`hook_command`], which finds the binary from the
+/// pane it runs in. `binary` is named only in what is not a hook — the
+/// OpenCode plugin's string literal and the commands in aider's sentence —
+/// and by its full path there, because a plugin or a command runs in
+/// whatever `PATH` the agent was started with and a development build is on
+/// nobody's. The fragment is printed rather than installed: Crook does not
+/// write a file it does not own, and it has never opened any of these. Where
+/// Crook ships a plugin that carries the same hooks, [`Hooks::lead`] names
+/// the commands that install it, which is the agent writing its own
+/// settings.
 pub fn hooks_text(agent: &str, binary: &Path) -> Result<Hooks> {
     let Some(known) = AGENTS.iter().find(|known| known.name == agent) else {
         let known: Vec<_> = AGENTS
@@ -983,14 +991,13 @@ pub fn hooks_text(agent: &str, binary: &Path) -> Result<Hooks> {
             known.join(", ")
         );
     };
-    let run = |arguments: &str| format!("{} --agent {arguments}", quoted(binary));
     let (text, note) = match known.fragment {
         Fragment::Hooks {
             file,
             events,
             missing,
         } => {
-            let hooks = hooks_object(events, run);
+            let hooks = hooks_object(events);
             let text = serde_json::to_string_pretty(&json!({ "hooks": hooks }))
                 .context("could not write the hooks as JSON")?;
             let note = format!(
@@ -1004,7 +1011,7 @@ is doing.{missing}",
             let hooks: serde_json::Map<String, Value> = events
                 .iter()
                 .map(|(event, arguments)| {
-                    let hook = json!([{ "type": "command", "bash": run(arguments) }]);
+                    let hook = json!([{ "type": "command", "bash": hook_command(arguments) }]);
                     ((*event).to_owned(), hook)
                 })
                 .collect();
@@ -1047,27 +1054,68 @@ doing.",
 
 /// A `hooks` object in the shape Claude Code, Codex and Gemini CLI read:
 /// each event over one matcher group, with no matcher so it fires every
-/// time, running the one command `command` spells for its `--agent`
-/// arguments.
+/// time, running the [`hook_command`] for its `--agent` arguments.
 ///
-/// One function for two spellings: the binary's quoted path in the fragment
-/// a person merges, and the guarded `"$CROOK_BIN"` of the Claude Code
-/// plugin's `hooks/hooks.json`, which the tests build here to hold the file
-/// to [`CLAUDE_EVENTS`].
-fn hooks_object(
-    events: &[(&str, &str)],
-    command: impl Fn(&str) -> String,
-) -> serde_json::Map<String, Value> {
+/// The Claude Code plugin's `hooks/hooks.json` is this object for
+/// [`CLAUDE_EVENTS`], and the tests hold the file to it.
+fn hooks_object(events: &[(&str, &str)]) -> serde_json::Map<String, Value> {
     events
         .iter()
         .map(|(event, arguments)| {
-            let hook = json!([{ "hooks": [{ "type": "command", "command": command(arguments) }] }]);
+            let hook =
+                json!([{ "hooks": [{ "type": "command", "command": hook_command(arguments) }] }]);
             ((*event).to_owned(), hook)
         })
         .collect()
 }
 
-/// `path`, quoted for the shell a hook runs in.
+/// What a hook runs to report `arguments`: `crook --agent <arguments>`,
+/// written so that a report can never be what stops an agent.
+///
+/// Nothing at all outside Crook — `TERM_PROGRAM` is Crook in a pane, and
+/// under tmux, which says `tmux`, `CROOK_PANE_ID` is still there — because
+/// an agent's hooks go with it into every other terminal. The binary is the
+/// one the pane names in `CROOK_BIN`, else a `crook` on `PATH` — for a pane
+/// that names none, or whose binary has since moved — else there is none and
+/// the hook does nothing. Never a path written into the agent's settings:
+/// those outlive the binary, and a moved Crook.app or a deleted build would
+/// make every hook a "not found". And exit 0 whatever the report did. A
+/// report from an agent with no terminal has nowhere to go — `copilot -p`
+/// under CI or cron, `ssh` without `-t` — and GitHub Copilot CLI denies the
+/// tool call a `preToolUse` hook failed over, so an exit that passed the
+/// failure on refused every tool such an agent tried. What went wrong is
+/// still said on stderr, which each agent keeps in its log.
+///
+/// The guard and the lookup are also where these hooks stop short of
+/// `crook --agent` itself. The escape sequence crosses `ssh` and
+/// `docker exec`, but neither carries `TERM_PROGRAM` or `CROOK_PANE_ID`, nor
+/// the `CROOK_BIN` a pane sets, which names a path on the pane's machine
+/// anyway. So an agent on the far side of either, with these hooks in its
+/// settings there, reports nothing until two things hold there.
+/// `TERM_PROGRAM` is passed on: `SendEnv TERM_PROGRAM` in the ssh client's
+/// configuration with `AcceptEnv TERM_PROGRAM` in the server's, or
+/// `docker exec -e TERM_PROGRAM`. And a `crook` is on that side's `PATH`, or
+/// `CROOK_BIN` is set there to one, as in
+/// `docker exec -e TERM_PROGRAM -e CROOK_BIN=/opt/crook/crook` for a binary
+/// mounted off `PATH`, since the path `--agent-hooks` was run from is not in
+/// the hook.
+///
+/// Spelled from the names the code gives the three variables, so renaming
+/// one without the plugin's file is its test failing rather than hooks
+/// gating on a variable no pane has. Written for a POSIX shell, which is
+/// what these agents run a hook's command in on macOS and Linux — Copilot
+/// CLI the one under its `bash` key; an agent on Windows that runs hooks
+/// under `cmd.exe` or PowerShell reads none of it.
+fn hook_command(arguments: &str) -> String {
+    use crate::shell_integration::{BIN_VARIABLE, PANE_ID_VARIABLE, TERM_PROGRAM};
+    format!(
+        "[ \"$TERM_PROGRAM\" = {TERM_PROGRAM} ] || [ -n \"${PANE_ID_VARIABLE}\" ] || exit 0; \
+crook=${BIN_VARIABLE}; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \
+\"$crook\" --agent {arguments} || exit 0"
+    )
+}
+
+/// `path`, quoted for a POSIX shell.
 ///
 /// Single quotes, which quote everything but themselves, and a quote inside
 /// the path closed, escaped and reopened — the one spelling every POSIX
@@ -1166,7 +1214,7 @@ mod tests {
     }
 
     #[test]
-    fn the_hooks_name_the_binary_by_path_and_cover_every_moment() {
+    fn the_hooks_call_the_panes_binary_behind_the_guard_and_cover_every_moment() {
         let printed = hooks_text("claude", Path::new("/Applications/Crook's.app/crook")).unwrap();
         let parsed: Value = serde_json::from_str(&printed.text).expect("the fragment is JSON");
         let hooks = parsed["hooks"].as_object().unwrap();
@@ -1180,9 +1228,16 @@ mod tests {
         ] {
             let command = hooks[event][0]["hooks"][0]["command"].as_str().unwrap();
             assert!(
-                command.starts_with("'/Applications/Crook'\\''s.app/crook' --agent "),
+                command.starts_with(
+                    "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || exit 0; \
+crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent "
+                ),
                 "{event} runs {command}"
             );
+            assert!(command.ends_with(" || exit 0"), "{event} runs {command}");
+            // The path it was printed from is one a moved or deleted binary
+            // leaves behind in the agent's settings.
+            assert!(!command.contains("/Applications"), "{event} runs {command}");
         }
         // The notification's text is what the agent is waiting for, and it
         // comes in on stdin: the hook pipes it through rather than needing
@@ -1191,13 +1246,13 @@ mod tests {
             hooks["Notification"][0]["hooks"][0]["command"]
                 .as_str()
                 .unwrap()
-                .ends_with("needs-input --message -")
+                .ends_with("needs-input --message - || exit 0")
         );
         assert!(
             hooks["UserPromptSubmit"][0]["hooks"][0]["command"]
                 .as_str()
                 .unwrap()
-                .ends_with("running --title -")
+                .ends_with("running --title - || exit 0")
         );
         assert!(
             printed.note.unwrap().contains("~/.claude/settings.json"),
@@ -1206,7 +1261,7 @@ mod tests {
     }
 
     #[test]
-    fn every_known_agent_prints_its_own_fragment_with_the_binary_in_it() {
+    fn every_known_agent_prints_its_own_fragment() {
         let binary = Path::new("/opt/crook/bin/crook");
         // Codex reads Claude Code's object with one event of its own.
         let codex = hooks_text("codex", binary).unwrap();
@@ -1214,10 +1269,7 @@ mod tests {
         let command = parsed["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
-        assert_eq!(
-            "'/opt/crook/bin/crook' --agent needs-input --message -",
-            command
-        );
+        assert_eq!(hook_command("needs-input --message -"), command);
         assert!(parsed["hooks"].get("Notification").is_none());
         assert!(codex.note.unwrap().contains("~/.codex/hooks.json"));
 
@@ -1244,7 +1296,7 @@ mod tests {
         let parsed: Value = serde_json::from_str(&copilot.text).unwrap();
         assert_eq!(1, parsed["version"]);
         assert_eq!(
-            "'/opt/crook/bin/crook' --agent idle",
+            hook_command("idle"),
             parsed["hooks"]["agentStop"][0]["bash"].as_str().unwrap()
         );
         assert!(
@@ -1283,6 +1335,95 @@ mod tests {
                 .unwrap()
                 .contains("~/.config/opencode/plugins/crook.ts")
         );
+    }
+
+    #[test]
+    fn every_hook_printed_for_every_agent_is_guarded_and_names_no_binary() {
+        // A hook that is the binary's path and nothing else fails whenever
+        // the report does, and Copilot CLI refuses the tool call such a hook
+        // was about: every tool of a run with no terminal, and of every run
+        // anywhere once the path has gone.
+        let binary = Path::new("/opt/crook/bin/crook");
+        let mut checked = Vec::new();
+        for agent in AGENTS {
+            let (events, copilot) = match agent.fragment {
+                Fragment::Hooks { events, .. } => (events, false),
+                Fragment::Copilot { events, .. } => (events, true),
+                Fragment::Plugin { .. } | Fragment::None(_) => continue,
+            };
+            let printed = hooks_text(agent.name, binary).unwrap().text;
+            assert!(
+                !printed.contains("/opt/crook"),
+                "{} names the binary it was printed from: {printed}",
+                agent.name
+            );
+            let parsed: Value = serde_json::from_str(&printed).unwrap();
+            for (event, arguments) in events {
+                let hook = &parsed["hooks"][event][0];
+                let command = if copilot {
+                    &hook["bash"]
+                } else {
+                    &hook["hooks"][0]["command"]
+                };
+                assert_eq!(
+                    Some(hook_command(arguments).as_str()),
+                    command.as_str(),
+                    "{} {event}",
+                    agent.name
+                );
+            }
+            checked.push(agent.name);
+        }
+        assert_eq!(["claude", "codex", "gemini", "copilot"][..], checked);
+    }
+
+    #[test]
+    fn the_help_says_which_printed_hooks_the_guard_covers() {
+        // Only the command hooks carry the guard. OpenCode's plugin and
+        // aider's command run the binary by its path wherever they are
+        // loaded, so they reach the pane over ssh with nothing passed on, and
+        // a --help that said every hook `--agent-hooks` prints did nothing
+        // there sent a person to the server's sshd_config for no reason.
+        // Guard one of those two and this fails, so the help changes with it.
+        use crate::shell_integration::PANE_ID_VARIABLE;
+        let binary = Path::new("/opt/crook/bin/crook");
+        let mut guarded = Vec::new();
+        for agent in AGENTS {
+            match agent.fragment {
+                Fragment::Hooks { .. } | Fragment::Copilot { .. } => {
+                    guarded.push(format!("`{}`", agent.name));
+                }
+                Fragment::Plugin { .. } | Fragment::None(_) => {
+                    let printed = hooks_text(agent.name, binary).unwrap().text;
+                    assert!(
+                        printed.contains("/opt/crook/bin/crook")
+                            && !printed.contains("TERM_PROGRAM")
+                            && !printed.contains(PANE_ID_VARIABLE),
+                        "{} is no longer the bare path: {printed}",
+                        agent.name
+                    );
+                }
+            }
+        }
+        let help = crate::help_text()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for sentence in [
+            format!(
+                "The command hooks ({}) do nothing where neither TERM_PROGRAM=Crook nor \
+{PANE_ID_VARIABLE} is set",
+                guarded.join(", ")
+            ),
+            "the OpenCode plugin and aider's command name the binary by its path and have no \
+such guard"
+                .to_owned(),
+        ] {
+            assert!(
+                help.contains(&sentence),
+                "--help no longer says {sentence:?}"
+            );
+        }
     }
 
     #[test]
@@ -1561,7 +1702,7 @@ mod tests {
             let printed = hooks_text(agent, Path::new("/usr/bin/crook")).unwrap();
             let parsed: Value = serde_json::from_str(&printed.text).unwrap();
             assert_eq!(
-                "'/usr/bin/crook' --agent running --pull-request -",
+                hook_command("running --pull-request -"),
                 parsed["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
                     .as_str()
                     .unwrap(),
@@ -1583,37 +1724,23 @@ mod tests {
     /// The marketplace the repository is, which lists the plugin.
     const MARKETPLACE: &str = include_str!("../../.claude-plugin/marketplace.json");
 
-    /// What the plugin runs for `arguments`: the `--agent` report, behind the
-    /// guard that makes it nothing outside Crook, and exiting 0 whatever the
-    /// report did.
-    ///
-    /// Built from the names the code gives the three variables, so renaming
-    /// one without the plugin is this test failing rather than hooks gating on
-    /// a variable no pane has.
-    fn plugin_command(arguments: &str) -> String {
-        use crate::shell_integration::{BIN_VARIABLE, PANE_ID_VARIABLE, TERM_PROGRAM};
-        format!(
-            "[ \"$TERM_PROGRAM\" = {TERM_PROGRAM} ] || [ -n \"${PANE_ID_VARIABLE}\" ] || exit 0; \
-crook=${BIN_VARIABLE}; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \
-\"$crook\" --agent {arguments} || exit 0"
-        )
-    }
-
     #[test]
-    fn the_plugin_hooks_are_the_printed_hooks_behind_a_guard() {
-        // The plugin is a second copy of CLAUDE_EVENTS, in a file Claude Code
-        // reads and Rust does not, so nothing but this keeps the two saying
-        // the same thing: an event added to the table and not the file would
-        // be a status the plugin never reports.
+    fn the_plugin_hooks_are_the_printed_hooks() {
+        // The plugin is a second copy of what `--agent-hooks claude` prints,
+        // in a file Claude Code reads and Rust does not, so nothing but this
+        // keeps the two saying the same thing: an event added to the table
+        // and not the file would be a status the plugin never reports, and a
+        // guard changed in one and not the other a way to fail an agent.
         let shipped: Value =
             serde_json::from_str(PLUGIN_HOOKS).expect("the plugin's hooks.json is JSON");
-        let expected = Value::Object(hooks_object(CLAUDE_EVENTS, plugin_command));
+        let printed = hooks_text("claude", Path::new("/usr/bin/crook")).unwrap();
+        let printed: Value = serde_json::from_str(&printed.text).expect("the fragment is JSON");
         assert_eq!(
-            expected,
+            printed["hooks"],
             shipped["hooks"],
-            "packaging/claude-code/hooks/hooks.json has drifted from CLAUDE_EVENTS; its \
-`hooks` should be\n{}",
-            serde_json::to_string_pretty(&expected).unwrap()
+            "packaging/claude-code/hooks/hooks.json has drifted from `--agent-hooks claude`; \
+its `hooks` should be\n{}",
+            serde_json::to_string_pretty(&printed["hooks"]).unwrap()
         );
         assert!(
             shipped["description"].as_str().is_some(),
@@ -1747,6 +1874,43 @@ crook=${BIN_VARIABLE}; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0;
                     "{event} with {stale:?}"
                 );
             }
+            // The far side of `ssh`, or the inside of a container: a `crook`
+            // on that machine's PATH and neither variable, since neither
+            // crosses by itself — nothing, as in any other terminal. With
+            // TERM_PROGRAM passed on, the first of the two things the README
+            // tells a person to do there, that `crook` reports.
+            assert_eq!(
+                (true, String::new(), String::new(), None),
+                run(&[("TERM", "xterm-256color"), ("PATH", path)]),
+                "{event} over ssh"
+            );
+            assert_eq!(
+                (true, String::new(), String::new(), reported.clone()),
+                run(&[
+                    ("TERM", "xterm-256color"),
+                    ("TERM_PROGRAM", "Crook"),
+                    ("PATH", path)
+                ]),
+                "{event} over ssh with TERM_PROGRAM passed on"
+            );
+            // The second: a binary that is on no PATH there — bind-mounted
+            // into a container at a path of its own — is not found with
+            // TERM_PROGRAM alone, since the hook carries no path, and is with
+            // CROOK_BIN set there to it.
+            assert_eq!(
+                (true, String::new(), String::new(), None),
+                run(&[("TERM", "xterm-256color"), ("TERM_PROGRAM", "Crook")]),
+                "{event} in a container with crook off PATH"
+            );
+            assert_eq!(
+                (true, String::new(), String::new(), reported.clone()),
+                run(&[
+                    ("TERM", "xterm-256color"),
+                    ("TERM_PROGRAM", "Crook"),
+                    ("CROOK_BIN", binary)
+                ]),
+                "{event} in a container with crook off PATH and CROOK_BIN set"
+            );
             // A pane with no binary to reach is quiet too, rather than a
             // "not found" on every prompt.
             assert_eq!(
