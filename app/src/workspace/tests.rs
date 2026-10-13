@@ -19384,6 +19384,53 @@ mod shells {
             );
         }
 
+        /// What this thread logged at `level` or above while `f` ran, as
+        /// `(level, message)`.
+        ///
+        /// The test binary installs no logger, so every `log::` line in it
+        /// goes nowhere. This installs one, once, that keeps the lines of a
+        /// thread inside this call and drops every other: the tests run side
+        /// by side, and a line another test logged is not this one's.
+        fn logged_by(level: log::Level, f: impl FnOnce()) -> Vec<(log::Level, String)> {
+            thread_local! {
+                static LINES: RefCell<Option<Vec<(log::Level, String)>>> =
+                    const { RefCell::new(None) };
+            }
+            struct Kept;
+            impl log::Log for Kept {
+                fn enabled(&self, _: &log::Metadata) -> bool {
+                    LINES.with_borrow(Option::is_some)
+                }
+                fn log(&self, record: &log::Record) {
+                    if !self.enabled(record.metadata()) {
+                        return;
+                    }
+                    // Written out before the borrow: a `Display` that logs
+                    // would otherwise borrow the lines twice.
+                    let line = (record.level(), record.args().to_string());
+                    LINES.with_borrow_mut(|lines| {
+                        if let Some(lines) = lines {
+                            lines.push(line);
+                        }
+                    });
+                }
+                fn flush(&self) {}
+            }
+            static INSTALLED: std::sync::Once = std::sync::Once::new();
+            INSTALLED.call_once(|| {
+                log::set_logger(&Kept).expect("a logger in the test binary already");
+                log::set_max_level(log::LevelFilter::Trace);
+            });
+
+            LINES.set(Some(Vec::new()));
+            f();
+            let lines = LINES.take().unwrap_or_default();
+            lines
+                .into_iter()
+                .filter(|(logged, _)| *logged <= level)
+                .collect()
+        }
+
         #[test]
         fn a_drag_the_filter_then_hides_leaves_the_clipboard_alone() {
             // A drag over `apple` in the block filtered for `ap`, and then the
@@ -19422,12 +19469,31 @@ mod shells {
                 None,
                 "a selection the filter hides all of reads as text"
             );
-            harness.press("c", platform_chord(), "c");
+            let logged = logged_by(log::Level::Debug, || {
+                harness.press("c", platform_chord(), "c");
+            });
 
             assert_eq!(
                 clipboard.read().as_deref(),
                 Some("crook: nothing was copied over this"),
                 "a copy of a selection nobody could see emptied the clipboard"
+            );
+            // A copy there was nothing to make is not one the clipboard
+            // failed: the warning is what somebody tracing a clipboard that
+            // will not open reads, and this one works.
+            assert_eq!(
+                logged
+                    .iter()
+                    .filter(|(level, _)| *level <= log::Level::Warn)
+                    .collect::<Vec<_>>(),
+                Vec::<&(log::Level, String)>::new(),
+                "a copy with nothing to take was logged as a clipboard that failed"
+            );
+            assert!(
+                logged
+                    .iter()
+                    .any(|(_, line)| line.contains("shows nothing to copy")),
+                "the chord never reached the copy: {logged:?}"
             );
             let selected = harness.workspace.read(&harness.app, |workspace, _| {
                 workspace

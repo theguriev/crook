@@ -400,16 +400,31 @@ impl Output {
     /// that is a terminal whose interrupt never works again. A copy that did
     /// not happen costs a highlight and a line in the log; one that disarmed
     /// the interrupt would cost the pane.
+    ///
+    /// And on the copy there was nothing to make: a selection the find bar's
+    /// filter shows none of, which [`Self::selected_text`] says is `None`. The
+    /// clipboard keeps what it held, and the highlight nobody could see is let
+    /// go of all the same.
     fn copy_selection(&self, ctx: &mut EventContext) -> bool {
         if self.mouse.is_none() {
             return false;
         }
-        if !self
-            .selected_text()
-            .zip(self.clipboard.as_ref())
-            .is_some_and(|(copied, clipboard)| clipboard.write(&copied))
-        {
-            log::warn!("the selection could not be put on the clipboard; letting go of it anyway");
+        match self.selected_text() {
+            // Not a failure, so not the warning below: that line is what
+            // somebody tracing a clipboard that will not open goes looking
+            // for, and a filter narrowed after a drag is not one.
+            None => log::debug!("the selection shows nothing to copy; letting go of it"),
+            Some(copied) => {
+                if !self
+                    .clipboard
+                    .as_ref()
+                    .is_some_and(|clipboard| clipboard.write(&copied))
+                {
+                    log::warn!(
+                        "the selection could not be put on the clipboard; letting go of it anyway"
+                    );
+                }
+            }
         }
         self.release_selection(ctx);
         true
@@ -432,7 +447,11 @@ impl Output {
             .is_some_and(|mouse| mouse.gesture.has_selection_in(mouse.cells))
     }
 
-    /// What a copy would take, or `None` when nothing is selected.
+    /// What a copy would take, or `None` when there is nothing to take:
+    /// nothing is selected, or the find bar's filter hides every row of what
+    /// is — a drag the query was narrowed under, or one let go of in the rows
+    /// hidden between two shown lines. See
+    /// [`Region::text_with`](crate::selection::Region::text_with).
     ///
     /// The blocks are asked for at the moment of the copy rather than kept
     /// from the frame that built this: a command may have finished since, and
