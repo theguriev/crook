@@ -1,7 +1,7 @@
 //! What a find bar keeps of a search between frames, over blocks a real
 //! emulator made: that a finished block is read once, that what is kept is
 //! what a fresh walk of the same blocks would find, and that the query is
-//! compiled once for both the search and the bar's word on it.
+//! compiled once for the search, the bar's word on it and the filter.
 
 use std::sync::Arc;
 
@@ -178,6 +178,35 @@ fn a_bad_pattern_is_said_by_the_search_that_compiled_it_once() {
     assert!(find.pattern_is_bad(), "folded, it is past the size limit");
     find.toggle(false);
     assert!(!find.pattern_is_bad(), "told apart, it compiles");
+}
+
+#[test]
+fn the_filter_is_handed_the_pattern_the_search_compiled() {
+    // The filter compiled the query for itself on every frame that had no
+    // answer kept, which for a pattern that does not compile was every frame.
+    let mut pane = Pane::new();
+    pane.run("a", "one");
+    let find = bar("o.e");
+    find.toggle(true);
+
+    let before = patterns_compiled();
+    let first = find.matcher().expect("it compiles");
+    found(&find, &mut pane, 0);
+    let again = find.matcher().expect("it still compiles");
+    assert!(Rc::ptr_eq(&first, &again), "the filter compiled its own");
+    assert!(first.matches("one") && !first.matches("two"));
+    assert_eq!(1, patterns_compiled() - before, "one search, one compile");
+
+    find.input().edit(|editor| editor.set_text("(one"));
+    let before = patterns_compiled();
+    for _ in 0..3 {
+        assert!(find.matcher().is_none(), "an unclosed group");
+    }
+    assert_eq!(
+        1,
+        patterns_compiled() - before,
+        "a pattern that does not compile was compiled for every ask"
+    );
 }
 
 #[test]

@@ -242,14 +242,23 @@ impl PaneFind {
     /// the search could not compile — as it did when it built its own without
     /// the search's case folding.
     pub fn pattern_is_bad(&self) -> bool {
+        !self.query().is_empty() && self.matcher().is_none()
+    }
+
+    /// The query, compiled the way the search reads it, or `None` for a
+    /// pattern that does not compile.
+    ///
+    /// The very one the search keeps, compiled when the query or a switch
+    /// last changed: what the bar's filter matches a block's lines with too,
+    /// so that a frame of the filter compiles nothing either — a pattern that
+    /// does not compile included, which leaves the filter no answer of its own
+    /// to remember.
+    pub fn matcher(&self) -> Option<Rc<LineMatcher>> {
         let query = self.query();
-        if query.is_empty() {
-            return false;
-        }
         let options = self.options();
         let mut state = self.0.borrow_mut();
         state.found.start(&query, options);
-        state.found.matcher.is_none()
+        state.found.matcher.clone()
     }
 
     /// Takes the cursor back to the first match when `query` is not the one
@@ -314,8 +323,9 @@ struct Found {
     search: Option<(String, FindOptions)>,
     /// The query, compiled once for the search rather than once a frame, or
     /// `None` for a pattern that does not compile — which the bar says, and
-    /// which matches nothing.
-    matcher: Option<LineMatcher>,
+    /// which matches nothing. Shared with the filter: see
+    /// [`PaneFind::matcher`].
+    matcher: Option<Rc<LineMatcher>>,
     /// The newest finished block searched. Every block the history holds up
     /// to it has been, since blocks finish in the order of their ids; every
     /// one after it has not.
@@ -340,7 +350,7 @@ impl Found {
         {
             *self = Self {
                 search: Some((query.to_owned(), options)),
-                matcher: LineMatcher::new(query, options),
+                matcher: LineMatcher::new(query, options).map(Rc::new),
                 ..Self::default()
             };
         }

@@ -3698,7 +3698,11 @@ impl Workspace {
     ///
     /// Remembered between frames for as long as nothing it was worked out
     /// from changes, since a block of fifty thousand lines is fifty thousand
-    /// lines read for every frame drawn while the filter is up.
+    /// lines read for every frame drawn while the filter is up. The query is
+    /// the one the bar's search compiled, [`PaneFind::matcher`], rather than
+    /// compiled here: all this remembers is an answer, and a pattern that
+    /// does not compile has none, so one compiled here was compiled again for
+    /// every frame.
     pub(super) fn filtered_rows(
         &self,
         pane: PaneId,
@@ -3720,7 +3724,7 @@ impl Workspace {
         {
             return Some((block, kept.clone(), *shown, *total));
         }
-        let matcher = crate::selection::LineMatcher::new(&query, options)?;
+        let matcher = find.matcher()?;
         let filtered = matcher.keep(Rows::Stored(&found.rows), found.output_from.unwrap_or(0));
         let (shown, total) = (filtered.shown, filtered.lines);
         let kept = Rc::new(filtered.rows);

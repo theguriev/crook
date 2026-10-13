@@ -19621,6 +19621,64 @@ mod shells {
         }
 
         #[test]
+        fn a_frame_filtering_a_block_by_a_pattern_compiles_it_no_more() {
+            // The filter compiled the query for itself, beside the bar's
+            // search, and remembered only the lines a pattern kept — so a
+            // pattern that did not compile, which keeps none, was compiled
+            // again for every frame the bar was up. It filters with the
+            // search's own now.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "printf 'qvx\\nwqz\\nrqv\\nwaz\\n'") == 0 {
+                return;
+            }
+            harness.run_command("crook/window/select-block-up");
+            harness.dispatch_workspace_action(WorkspaceAction::Block(BlockAction::FilterOutput));
+            harness.dispatch_workspace_action(WorkspaceAction::Find {
+                pane,
+                action: crate::workspace::action::FindAction::ToggleRegex,
+            });
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("a find bar");
+            assert!(find.filter().is_some(), "the filter did not open");
+            let compiled = crate::selection::patterns_compiled;
+
+            let before = compiled();
+            find.input().edit(|editor| editor.set_text("w.z"));
+            let shown = frame_text(&harness.render_again());
+            assert!(
+                shown.contains("2/4 lines"),
+                "the pattern did not filter: {shown}"
+            );
+            harness.render_again();
+            harness.render_again();
+            assert_eq!(
+                1,
+                compiled() - before,
+                "the filter and the bar compiled the pattern apart, or again"
+            );
+
+            // Past the size limit once folded, as it is with the case switch
+            // off.
+            let before = compiled();
+            find.input().edit(|editor| editor.set_text("[α-ω]{2000}"));
+            let shown = frame_text(&harness.render_again());
+            assert!(shown.contains("Bad pattern"), "not said to be one: {shown}");
+            harness.render_again();
+            harness.render_again();
+            assert_eq!(
+                1,
+                compiled() - before,
+                "frames compiled a pattern that does not compile again"
+            );
+        }
+
+        #[test]
         fn a_block_scrolled_into_its_middle_has_its_command_pinned_over_it() {
             // `seq 1 200` is taller than the pane, so at the bottom of the list
             // the window starts in its middle and nothing printed says which

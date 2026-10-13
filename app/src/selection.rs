@@ -757,8 +757,9 @@ impl<'a> Blocks<'a> {
 /// What filtering a block's output asks — which of its lines to keep — and
 /// what a find asks of every line, with the same rules for both: folded or
 /// told apart, text or a pattern. A find bar compiles one when its search
-/// starts and keeps it, rather than compiling the query again for every frame
-/// drawn while the bar is up.
+/// starts and keeps it, and its filter matches with that same one, rather
+/// than either compiling the query again for every frame drawn while the bar
+/// is up: see [`PaneFind::matcher`](crate::pane_find::PaneFind::matcher).
 pub enum LineMatcher {
     /// Text, already folded when case does not matter.
     Text {
