@@ -2755,9 +2755,13 @@ shape). A launcher's window does neither and says nothing, as before. The lock i
 place and the lock would stay on the old one. The lock file is never deleted, because deleting it
 races the next window opening it. The system releases the lock when the process ends, crash
 included. **New window** (`crook/window/new-window`) starts the binary again with
-`--working-directory` set to the focused pane's directory (`app/src/new_window.rs`). That makes
-it a launcher's window, so it leaves the session to whichever window opened it. One file per
-window, all of them restored at the next launch, is the fuller answer.
+`--working-directory` set to the focused pane's directory (`app/src/new_window.rs`), or the home
+directory when this user could not enter that one. That makes it a launcher's window, so it
+leaves the session to whichever window opened it. On Windows the new window does not attach to
+the console the first one did, so closing the shell that started the first window does not end
+the second. A window that left the session and then has restoring turned on in it shows its line
+again, since its tabs still will not be written. One file per window, all of them restored at
+the next launch, is the fuller answer.
 
 What is *not* remembered is the point: no scrollback, no output, no process. A window that
 redrew yesterday's output over a shell that had never run any of it would be lying about the
