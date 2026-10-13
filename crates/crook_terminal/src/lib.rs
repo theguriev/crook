@@ -96,6 +96,8 @@ mod pty;
 mod rows;
 pub mod selection;
 mod snapshot;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod typeahead;
 pub mod url;
 mod writer;
 
