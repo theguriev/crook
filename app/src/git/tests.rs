@@ -1053,6 +1053,70 @@ fn a_repository_no_gather_asked_about_for_a_whole_cycle_is_looked_up_afresh() {
     assert_eq!(LOOKUPS.load(Ordering::Relaxed), 2);
 }
 
+// --- what a repository's configuration may run ---------------------------------
+//
+// A read is git run on nobody's say-so: the row's counts, every fifteen seconds
+// in every directory a pane is in, and the menus as they open. A repository
+// somebody unpacked brings its own `.git/config`, and some of its settings name
+// a program for git to run. Each case first has plain git run that program,
+// here and on this git, because a git that never asks would pass the rest.
+
+/// A program at `<scratch>/<name>` that leaves `<scratch>/<name>.ran` behind
+/// when it runs and then fails, so that git carries on without it. The
+/// program's path, for a setting to name, and the file's.
+#[cfg(unix)]
+fn tripwire(scratch: &ScratchDir, name: &str) -> (String, PathBuf) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let ran = scratch.path().join(format!("{name}.ran"));
+    let program = scratch.path().join(name);
+    write(
+        &program,
+        &format!("#!/bin/sh\ntouch '{}'\nexit 1\n", ran.display()),
+    );
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+        .expect("the scratch directory is writable");
+    (program.display().to_string(), ran)
+}
+
+#[cfg(unix)]
+#[test]
+fn no_read_runs_the_fsmonitor_program_a_repository_names() {
+    // `core.fsmonitor` is the program git asks what changed in the working
+    // tree, and every read that looks at the working tree asks it.
+    if without_git("no_read_runs_the_fsmonitor_program_a_repository_names") {
+        return;
+    }
+    let scratch = ScratchDir::new("fsmonitor");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    git(&repo, &["switch", "-c", "agent/task"]);
+    commit(&repo, "notes.txt", "alpha\nbeta\n", "add notes");
+    write(&repo.join("tracked.txt"), "uno\ntwo\nthree\n");
+    let (program, ran) = tripwire(&scratch, "fsmonitor");
+    git(&repo, &["config", "core.fsmonitor", &program]);
+
+    git(&repo, &["status", "--porcelain"]);
+    assert!(ran.exists(), "git never ran the fsmonitor program here");
+    std::fs::remove_file(&ran).expect("the scratch directory is writable");
+
+    // The row's two counts, the worktree menu's listing and what removing a
+    // checkout would lose, and the Changes column.
+    let facts = gather(&repo, &mut Bases::default());
+    worktree::list(&repo).expect("the worktrees are listed");
+    worktree::local_work(&repo).expect("what is loose is read");
+    worktree::loose_files(&repo).expect("the loose files are read");
+    changes::overview(&repo).expect("the changes are read");
+
+    assert!(
+        facts.diff.is_some() && facts.since_base.is_some(),
+        "a count was not read, so it may never have asked: {facts:?}"
+    );
+    assert!(
+        !ran.exists(),
+        "a read ran the program the repository names as its fsmonitor"
+    );
+}
+
 // --- parsing and display -------------------------------------------------------
 
 #[test]

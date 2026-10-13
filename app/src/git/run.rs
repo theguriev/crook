@@ -13,6 +13,10 @@
 //! [`super::changes`] is another, and the one that asked for
 //! [`run_capped`]: the diff of a single file is as long as the file is.
 //!
+//! Every read goes through [`start`], so that is where the rule
+//! [`super::changes`] states is kept for all of them: a repository's
+//! configuration runs nothing but a clean filter.
+//!
 //! The deadline bounds the *call*, not only git. Killing a process does not
 //! reach what it left behind: a hook that backgrounds a helper — `direnv
 //! reload &`, a file watcher, a dev server — hands that helper the two pipes
@@ -116,8 +120,9 @@ pub(super) fn git_is_missing() -> bool {
 
 /// Whether an invocation only reads.
 ///
-/// One enum for two decisions, because they are the same decision: how long a
-/// call may take, and whether it is allowed to take git's locks.
+/// One enum for three decisions, because they are the same decision: how long
+/// a call may take, whether it is allowed to take git's locks, and whether it
+/// may run what a repository's configuration names.
 #[derive(Copy, Clone)]
 pub(super) enum Intent {
     /// `worktree list`, `status`: answers a question and changes nothing.
@@ -472,6 +477,23 @@ fn start(
         git.arg("--no-optional-locks")
             .args(["-c", "diff.autoRefreshIndex=false"])
             .env("GIT_OPTIONAL_LOCKS", "0");
+
+        // A read also runs no program a repository's configuration names. It
+        // is git run on nobody's say-so — the row's counts, every fifteen
+        // seconds in every directory a pane is in — and a repository somebody
+        // unpacked brings its own `.git/config`, so a pane that only `cd`s
+        // into one would start whatever that names. `core.fsmonitor` is the
+        // program git asks what changed in the working tree; off, git looks
+        // for itself. Empty rather than `false`, which git before 2.36 takes
+        // for a program's path and runs whatever `false` it finds; empty is
+        // off to every git. A `-c` reaches the gits this one starts in a
+        // submodule too, through the environment it hands them.
+        //
+        // What is left is a clean filter, which is how git reads a working
+        // tree at all — see `super::changes`. A write keeps all of it: it is
+        // something a person asked for, and runs the repository's hooks
+        // regardless.
+        git.args(["-c", "core.fsmonitor="]);
     }
 
     git.args(args)
