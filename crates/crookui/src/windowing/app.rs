@@ -81,7 +81,7 @@ impl Default for WindowOptions {
 /// What the window asks of the application above it.
 ///
 /// This is the whole seam between the platform layer and the application:
-/// six methods, three of them with a default, no winit types, no wgpu types. A
+/// seven methods, four of them with a default, no winit types, no wgpu types. A
 /// headless test double implements it in a dozen lines.
 pub trait WindowDelegate: 'static {
     /// Lays out and paints the frame to draw.
@@ -102,7 +102,9 @@ pub trait WindowDelegate: 'static {
     fn frame_drawn(&mut self);
 
     /// The window's own close was asked for: its close button, the desktop's
-    /// shortcut for closing a window, a window manager closing it.
+    /// shortcut for closing a window, a window manager closing it — or, on
+    /// macOS, the application's Quit, when [`Self::asks_before_quitting`]
+    /// said a quit would ask.
     ///
     /// Return `true` to leave the event loop now. An application that has
     /// something to ask first returns `false`, puts its question on screen —
@@ -114,6 +116,24 @@ pub trait WindowDelegate: 'static {
     /// process itself: that does not come through the window.
     fn close_requested(&mut self) -> bool {
         true
+    }
+
+    /// Whether quitting now would stop to ask first, as
+    /// [`Self::close_requested`] would by putting a question up.
+    ///
+    /// For macOS's Quit — the application menu's, `cmd-q`, the Dock's, a
+    /// logout's — which AppKit sends the application rather than the window
+    /// and wants answered before the call returns, where the application
+    /// cannot be reached. So this is asked each time the event loop goes
+    /// idle, and the answer written down: `false` lets the next Quit end the
+    /// process at once, as it always has, and `true` refuses it and asks
+    /// [`Self::close_requested`] instead. Nothing else asks it, and nothing
+    /// asks it off macOS.
+    ///
+    /// The default never asks, which is right for a window with nothing in it
+    /// to lose.
+    fn asks_before_quitting(&self) -> bool {
+        false
     }
 
     /// The window has just taken the keyboard: a click on it, the desktop's
@@ -129,10 +149,10 @@ pub trait WindowDelegate: 'static {
     /// Runs once, as the event loop stops, whatever stopped it.
     ///
     /// The one place an application hears that it is ending. Only some of
-    /// the ways a window closes pass through the application first — the
-    /// window manager's close and macOS's Quit go straight to the platform,
-    /// and Quit ends the process without [`run`] ever returning — and every
-    /// one of them passes through here.
+    /// the ways a window closes pass through the application first — macOS's
+    /// Quit with nothing to ask about goes straight to the platform, and ends
+    /// the process without [`run`] ever returning — and every one of them
+    /// passes through here.
     ///
     /// Nothing is drawn after it, so work done here is work the person
     /// waits for with the window up and unanswering: bound it.
@@ -294,6 +314,10 @@ enum CrookEvent {
     SetBadge(usize),
     /// Set the dock icon's badge again, as it stands.
     ShowBadgeAgain,
+    /// macOS's Quit was refused because a quit would ask: ask, as the
+    /// window's own close does. See [`quit`](super::quit).
+    #[cfg(target_os = "macos")]
+    QuitRequested,
     /// Leave the event loop.
     Exit,
 }
@@ -322,6 +346,15 @@ pub fn run(
     init_wgpu_instance(Box::new(event_loop.owned_display_handle()));
 
     let proxy = Proxy(Arc::new(Mutex::new(event_loop.create_proxy())));
+
+    // Now, because winit hands the application its delegate as the loop is
+    // built, and before the loop runs, which is when a Quit can first come.
+    #[cfg(target_os = "macos")]
+    super::quit::install({
+        let proxy = proxy.clone();
+        move || proxy.send(CrookEvent::QuitRequested)
+    });
+
     let controls = WindowControls::default();
     let platform = Platform {
         foreground: proxy.foreground(),
@@ -394,10 +427,19 @@ impl ApplicationHandler<CrookEvent> for App {
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
+        // A Quit that comes after this has no loop left to ask in, and a
+        // refused one would leave a process that will not quit.
+        #[cfg(target_os = "macos")]
+        super::quit::set_asks(false);
         self.delegate.exiting();
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Every batch of events ends here, and a Quit that comes before the
+        // next one is answered with what is written down now.
+        #[cfg(target_os = "macos")]
+        super::quit::set_asks(self.delegate.asks_before_quitting());
+
         event_loop.set_control_flow(match self.frame_retry {
             Some(delay) => ControlFlow::WaitUntil(Instant::now() + delay),
             None => ControlFlow::Wait,
@@ -470,6 +512,13 @@ impl ApplicationHandler<CrookEvent> for App {
             }
             CrookEvent::SetBadge(waiting) => dock::set_badge(dock::label(waiting).as_deref()),
             CrookEvent::ShowBadgeAgain => dock::show_again(),
+            // The same answer as `CloseRequested`'s, for the same reason.
+            #[cfg(target_os = "macos")]
+            CrookEvent::QuitRequested => {
+                if self.delegate.close_requested() {
+                    event_loop.exit();
+                }
+            }
             CrookEvent::Exit => event_loop.exit(),
         }
     }

@@ -4211,7 +4211,7 @@ impl WindowDelegate for Shell {
     /// the window goes instead — so nothing working in a checkout Crook made
     /// ever left it, and every agent in one ends with the process. Here
     /// rather than wherever the window asks to quit, because the window
-    /// manager's close and macOS's Quit never ask.
+    /// manager's close and a macOS Quit with nothing working never ask.
     ///
     /// The shells are ended here for the same reason, and because macOS's
     /// Quit ends the process without dropping the model whose `Drop` would
@@ -4363,6 +4363,20 @@ impl WindowDelegate for Shell {
             &WorkspaceAction::Window(WindowAction::Close),
         );
         false
+    }
+
+    /// Whether the window's close would put a question up now, which is what
+    /// macOS's Quit is answered with: a quit that would ask is refused and
+    /// comes back as [`Self::close_requested`], and one that would not ends
+    /// Crook at once.
+    ///
+    /// Never in a run with a frame budget, whose close never asks either.
+    /// See `workspace::closing`.
+    fn asks_before_quitting(&self) -> bool {
+        self.frame_budget.is_none()
+            && self
+                .workspace
+                .read(&self.app, |workspace, _| workspace.asks_before_quitting())
     }
 
     /// The window took the keyboard, which the question a close asks has to

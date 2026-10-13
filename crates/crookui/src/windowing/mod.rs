@@ -32,6 +32,8 @@ mod app;
 mod chrome;
 mod dock;
 mod event;
+#[cfg(any(target_os = "macos", test))]
+mod quit;
 mod window;
 
 pub use app::{Platform, Proxy, WindowDelegate, WindowOptions, run};
