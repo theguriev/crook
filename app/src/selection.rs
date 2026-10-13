@@ -696,6 +696,62 @@ impl LineMatcher {
             Self::Pattern(pattern) => pattern.is_match(line),
         }
     }
+
+    /// What filtering one block for the query keeps of it, when its output
+    /// starts at row `from`: every row before that, and every row of each
+    /// output line that holds the query.
+    ///
+    /// A line, not a row. A line too long for the pane is folded over
+    /// several rows, and each read on its own holds a piece of it: a query
+    /// that crossed the fold matched none of them while find found it, and
+    /// one that matched kept its row and hid the rest of the line. So the
+    /// rows are read back into lines exactly as [`Blocks::find_all`] reads
+    /// them, blanks before a fold and all, and a line is kept or dropped
+    /// whole — and counted once.
+    pub fn keep(&self, rows: Rows<'_>, from: usize) -> Filtered {
+        let count = rows.count();
+        let from = from.min(count);
+        let mut filtered = Filtered {
+            rows: (0..from).collect(),
+            ..Filtered::default()
+        };
+        // One buffer down the whole block rather than a string a line: the
+        // block can be fifty thousand lines, read again at every change to
+        // the query.
+        let mut line = String::new();
+        let mut starts = from;
+        for row in from..count {
+            rows.visit_line(row, rows.line_length(row), |character, _| {
+                line.push(character);
+            });
+            line.extend(blanks_before_a_fold(&rows, row).map(|_| ' '));
+            // Never true of the block's last row, so its last line is closed.
+            if rows.wraps(row) {
+                continue;
+            }
+            filtered.lines += 1;
+            if self.matches(&line) {
+                filtered.shown += 1;
+                filtered.rows.extend(starts..=row);
+            }
+            line.clear();
+            starts = row + 1;
+        }
+        filtered
+    }
+}
+
+/// What a block's filter keeps of it: see [`LineMatcher::keep`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Filtered {
+    /// The block's own rows that stay on screen, in order: rows, because a
+    /// row is what the list draws and what a press on it is about.
+    pub rows: Vec<usize>,
+    /// How many of the output's lines hold the query.
+    pub shown: usize,
+    /// How many lines the output has, a line folded over three rows being
+    /// one: what a person reading the bar's count sees as lines.
+    pub lines: usize,
 }
 
 /// How a find matches its query against the output.
