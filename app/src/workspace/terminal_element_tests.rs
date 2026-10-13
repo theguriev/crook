@@ -634,14 +634,20 @@ fn a_folded_url_on_the_grid_is_one_link_from_either_row() {
 /// emulator is told, so the picture's `width=4;height=2` is four columns and
 /// two rows. `ABOVE` is the line printed just before it.
 fn grid_with_a_picture(args: &str) -> Emulator {
+    grid_with_a_picture_after(10, 100, args)
+}
+
+/// [`grid_with_a_picture`], after `lines` of output into a history that
+/// keeps `scrollback` of them.
+fn grid_with_a_picture_after(lines: usize, scrollback: usize, args: &str) -> Emulator {
     use base64::Engine as _;
 
     let mut emulator = Emulator::new(
         TerminalSize::new(20, 6).with_cell_size(10, 20),
-        100,
+        scrollback,
         Palette::default(),
     );
-    for line in 0..10 {
+    for line in 0..lines {
         emulator.advance(format!("log {line}\r\n").as_bytes());
     }
     emulator.advance(b"ABOVE\r\n");
@@ -770,4 +776,30 @@ fn a_full_screen_program_does_not_show_the_pictures_of_the_screen_under_it() {
         1,
         "and it is back when the program leaves"
     );
+}
+
+#[test]
+fn a_picture_past_a_full_scrollback_is_not_drawn_over_the_rows_after_it() {
+    // A session longer than its scrollback — ten thousand lines in a pane,
+    // ten here — has a history that no longer grows, and nothing then says
+    // which rows a picture printed into it is over: told where the cursor
+    // was, the grid would draw it over `BELOW` and, at the bottom of the
+    // screen, over the prompt and what is typed at it. It leaves the blank
+    // rows it took instead.
+    let mut emulator = grid_with_a_picture_after(30, 10, "width=4;height=2;");
+    let snapshot = emulator.snapshot();
+    assert_eq!(
+        pane_surface::of(&snapshot, std::time::Instant::now()).surface,
+        pane_surface::Surface::Grid
+    );
+    let below = row_saying(&snapshot, "BELOW");
+    let drawn = pictures(&painted(&snapshot));
+    let metrics = font().metrics();
+    assert!(
+        drawn
+            .iter()
+            .all(|(bounds, _)| bounds.max_y() <= below as f32 * metrics.height),
+        "nothing over BELOW, on row {below}: {drawn:?}"
+    );
+    assert!(drawn.is_empty(), "{drawn:?}");
 }

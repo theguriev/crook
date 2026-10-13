@@ -52,7 +52,9 @@
 //! oldest line we have" is not an approximation, it is the truth — and a
 //! column change, which reflows every stored line number into meaninglessness,
 //! can be answered by looking for the first line with anything on it. See
-//! [`BlockTracker::reflowed`].
+//! [`BlockTracker::reflowed`]. A picture's anchor has no such answer, and a
+//! picture drawn over the wrong rows covers text, so the open block's are
+//! dropped once its history is full: see [`BlockTracker::settle_pictures`].
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -301,7 +303,9 @@ pub struct LiveBlock {
     /// `block_list::inline_start`, which is the caller this exists for.
     pub prompt_end: Option<PromptEnd>,
     /// The pictures printed in it, at viewport rows the way
-    /// [`Self::top_row`] is. None on the alternate screen.
+    /// [`Self::top_row`] is. None on the alternate screen, and none once the
+    /// history is full, when nothing says which rows they are over any more:
+    /// see [`crate::image`].
     pub images: Vec<ImagePlacement>,
 }
 
@@ -1051,6 +1055,36 @@ impl BlockTracker {
     pub(crate) fn settle_reflow<T>(&mut self, term: &Term<T>) {
         if self.reflow_owed && !term.mode().contains(TermMode::ALT_SCREEN) {
             self.reflowed(term);
+        }
+    }
+
+    /// Forgets the open block's pictures once the history is
+    /// `scrollback_lines` long, because from then on nothing can say which
+    /// rows they are over.
+    ///
+    /// An [`Anchor`] follows its row by how much the history has grown, and
+    /// a full history does not grow: every line scrolled into it evicts one
+    /// off the top, uncounted, and the anchor stays on the screen row it
+    /// named while the text moves on. A picture drawn there covers whatever
+    /// scrolled under it — and output prints a picture at the foot of the
+    /// screen, so that is the row the prompt comes to, and what is typed at
+    /// it.
+    /// Without the picture the block shows the blank rows it was printed
+    /// over, which is what a reflow leaves too, and for the same reason.
+    ///
+    /// A history that has only just reached its length is still counted
+    /// exactly, but nothing tells it from one that has gone past, so its
+    /// pictures go as well. Not on the alternate screen, whose grid has no
+    /// history, and under which the shell's does not move.
+    ///
+    /// Called after anything that can scroll the grid, before anything that
+    /// reads the anchors: [`Self::live`] for a frame, and a mark, which may
+    /// harvest the block with its pictures at the rows their anchors name.
+    pub(crate) fn settle_pictures<T>(&mut self, term: &Term<T>, scrollback_lines: usize) {
+        if !term.mode().contains(TermMode::ALT_SCREEN)
+            && term.grid().history_size() >= scrollback_lines
+        {
+            self.open.images.clear();
         }
     }
 

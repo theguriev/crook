@@ -53,8 +53,11 @@
 //! a screenful, a REPL or a training run printing its plot. The open block's
 //! pictures arrive at viewport rows, numbered the way the snapshot's rows are,
 //! so a grid scrolled back into its history finds them on the rows their text
-//! went to without any arithmetic of its own. The alternate screen has none to
-//! draw: the emulator does not place a picture there.
+//! went to without any arithmetic of its own. Nor does it check them: once the
+//! history is full the emulator can no longer say which rows a picture is
+//! over, and hands over none rather than a row the text has moved on from —
+//! the bottom one, often, where the prompt is. The alternate screen has none
+//! to draw either: the emulator does not place a picture there.
 //!
 //! # Selecting the output
 //!

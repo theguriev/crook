@@ -29,6 +29,15 @@
 //! [`crate::LiveBlock::images`]), so on the grid they move through the
 //! scrollback with the text around them.
 //!
+//! Until the scrollback is full. A picture's row is kept by counting the
+//! lines that scroll into the history under it, and a full history stops
+//! counting: each line scrolled in evicts one, and its size stays put. From
+//! then on the open block's pictures are forgotten, the ones it had and the
+//! ones printed into it after, and it keeps the blank rows they took — see
+//! `BlockTracker::settle_pictures`, in `blocks.rs`. With shell integration
+//! that takes one command printing more than the whole scrollback; without
+//! it the session is one block, and it takes the session doing so.
+//!
 //! # The bytes came from anything that can print
 //!
 //! So a picture is believed only within limits: PNG alone, whose size is read

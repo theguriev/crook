@@ -634,6 +634,10 @@ impl Emulator {
             if let Some(bytes) = self.osc_watcher.long_title.take() {
                 exited = self.cut_grid_title(bytes).or(exited);
             }
+            // After everything in the piece that scrolled, the update a long
+            // title ended included, and before the mark, which may harvest
+            // the pictures at the rows their anchors name.
+            self.settle_pictures();
             if let Some(mark) = self.osc_watcher.mark.take() {
                 // A directory too, and for the same reason: bash and zsh print
                 // `D`, the directory and the next `A` back to back, and the
@@ -729,6 +733,16 @@ impl Emulator {
             moves.extend_from_slice(format!("\x1b[{}G", column + columns + 1).as_bytes());
         }
         self.parser.advance(&mut self.term, &moves);
+        // The rows it took may be the ones that filled the history, and the
+        // picture is then already past where its anchor can follow it.
+        self.settle_pictures();
+    }
+
+    /// Forgets the open block's pictures if the history is full: see
+    /// [`BlockTracker::settle_pictures`].
+    fn settle_pictures(&mut self) {
+        self.blocks
+            .settle_pictures(&self.term, self.scrollback_lines);
     }
 
     /// Feeds one item of a stream that another emulator is also being fed,
@@ -876,6 +890,9 @@ impl Emulator {
         if columns_changed {
             self.blocks.reflowed(&self.term);
         }
+        // A shorter screen pushes its top rows into the history, and into a
+        // full one without counting them.
+        self.settle_pictures();
         self.dirty = true;
         self.drain();
     }
@@ -1072,6 +1089,7 @@ impl Emulator {
         // any other.
         let view = self.view();
         self.parser.stop_sync(&mut self.term);
+        self.settle_pictures();
         self.keep_view(view);
         self.dirty = true;
         self.drain();
