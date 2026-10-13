@@ -66,6 +66,7 @@ pub mod inline_image;
 pub mod input_keys;
 pub mod keybindings;
 pub mod login_item;
+pub mod new_window;
 pub mod notify;
 pub mod order;
 pub mod pane_blocks;
@@ -636,20 +637,101 @@ fn shell_word(word: &str) -> String {
     spelled
 }
 
-/// What a window opens with: the tabs the last one had, or none.
+/// How a window stands to the session file: whether it opens on the tabs the
+/// file holds, and whether it writes its own back.
 ///
-/// None for a window a launcher opened — see [`Overrides::launched`] — and
-/// none when the setting is off. Read from beside the settings file, which is
-/// where the window writes it, so a window whose settings are somewhere else
-/// reads and writes one file rather than reading one and writing another.
-fn opening_session(settings: &Settings, overrides: &Overrides) -> crate::session::Session {
-    if overrides.launched() || !settings.general().restore_session {
-        return crate::session::Session::default();
+/// Only one window may write the file, and that window is the first ordinary
+/// one; see [`crate::session`] for the windows that used to overwrite each
+/// other's tabs.
+#[derive(Debug)]
+enum Standing {
+    /// The window the file is kept for. It opens on `session`, and writes
+    /// what it shows back.
+    Keeper {
+        /// What it opens with: the tabs the last window had, or none when
+        /// the setting is off.
+        session: crate::session::Session,
+        /// The lock that says this window keeps the file, held for as long
+        /// as the window is open.
+        ///
+        /// `None` when there was no lock to take: a run with nowhere to
+        /// write, like a test's, or a file system that keeps no locks. That
+        /// window keeps the file the way every window did before there was a
+        /// lock.
+        lock: Option<crate::session::Lock>,
+    },
+    /// A launcher's window: see [`Overrides::launched`]. It opens fresh, and
+    /// it says nothing about the session, as it never has.
+    Launched,
+    /// An ordinary window opened while another one keeps the file.
+    ///
+    /// It opens fresh, like a launcher's window, and it never writes the
+    /// file. Unlike a launcher's window it says so; see
+    /// [`Workspace::leave_the_session`]. A plain `crook` is what a person
+    /// runs to get their tabs back, and a window that opens without them
+    /// should say why.
+    Second,
+}
+
+impl Standing {
+    /// How a window opened with `overrides` on `settings` stands. The first
+    /// ordinary window takes the lock and reads the file here.
+    ///
+    /// The file is read from beside the settings file, which is where the
+    /// window writes it. A window whose settings are somewhere else then reads
+    /// and writes one file, rather than reading one and writing another.
+    fn of(settings: &Settings, overrides: &Overrides) -> Self {
+        if overrides.launched() {
+            return Self::Launched;
+        }
+        let Some(path) = settings.path().map(crate::session::session_path_beside) else {
+            return Self::Keeper {
+                session: crate::session::Session::default(),
+                lock: None,
+            };
+        };
+        let lock = match crate::session::claim(&path) {
+            Ok(Some(lock)) => Some(lock),
+            Ok(None) => {
+                log::info!(
+                    "another Crook window keeps {}; this one opens fresh and leaves it alone",
+                    path.display()
+                );
+                return Self::Second;
+            }
+            // Without a lock this window can only do what every window did
+            // before there was one. Refusing to restore here would cost a
+            // person their tabs on every launch, on a file system no window
+            // could ever lock.
+            Err(error) => {
+                log::warn!("{error:#}; keeping the session without a lock");
+                None
+            }
+        };
+        let session = if settings.general().restore_session {
+            crate::session::Session::load(&path)
+        } else {
+            crate::session::Session::default()
+        };
+        Self::Keeper { session, lock }
     }
-    settings
-        .path()
-        .map(|path| crate::session::Session::load(crate::session::session_path_beside(path)))
-        .unwrap_or_default()
+
+    /// What the window opens with, when it is the one that keeps the file.
+    fn session(&self) -> Option<&crate::session::Session> {
+        match self {
+            Self::Keeper { session, .. } => Some(session),
+            Self::Launched | Self::Second => None,
+        }
+    }
+
+    /// The lock this window holds on the file, if it keeps it, for the window
+    /// to hold until it closes.
+    fn into_lock(self) -> Option<crate::session::Lock> {
+        match self {
+            Self::Keeper { lock, .. } => lock,
+            Self::Launched | Self::Second => None,
+        }
+    }
 }
 
 /// Runs Crook.
@@ -1631,6 +1713,7 @@ EXIT STATUS:
 KEYS (macOS):
     cmd+t                      New agent tab
     shift+cmd+t                Reopen the tab closed last, where it was
+    cmd+n                      New window, fresh, where the focused pane works
     cmd+,                      Show the settings
     shift+cmd+p                Open the command palette
     cmd+d / shift+cmd+d        Split the focused pane to the right / downwards
@@ -1654,6 +1737,7 @@ KEYS (macOS):
 KEYS (Linux and Windows):
     ctrl+shift+t               New agent tab
     ctrl+shift+alt+t           Reopen the tab closed last, where it was
+    ctrl+shift+n               New window, fresh, where the focused pane works
     ctrl+,                     Show the settings
     ctrl+shift+p               Open the command palette
     ctrl+shift+d / ctrl+shift+e  Split the focused pane to the right / downwards
@@ -1880,10 +1964,12 @@ fn resolve_fonts(font_db: &CosmicFontDb, monospace: Option<&str>) -> Result<Font
 /// One function rather than three steps in [`Shell::new`] because the order
 /// is the point, and a test can hold a function to it:
 ///
-/// - The restore first. The overrides open a settings page in whatever strip
-///   is there, and a session that describes nothing leaves the strip a fresh
-///   window's, which is what every launch had before there was a file to
-///   read.
+/// - The restore first, for the window that keeps the session file. The
+///   overrides open a settings page in whatever strip is there, and a session
+///   that describes nothing leaves the strip a fresh window's, which is what
+///   every launch had before there was a file to read. A second window leaves
+///   the file to the keeper at this point, before any override can change the
+///   strip, because every change to the strip is a save. See [`Standing`].
 /// - The overrides next. See [`apply_overrides`].
 /// - Last, for `--run` and `--type`, the focused pane's resume line taken back
 ///   out of its field. Both type into that field as though it were empty, and
@@ -1893,12 +1979,20 @@ fn resolve_fonts(font_db: &CosmicFontDb, monospace: Option<&str>) -> Result<Font
 ///   have run; after the restore, because until then there is no line.
 fn restore_and_override(
     workspace: &mut Workspace,
-    session: &crate::session::Session,
+    standing: &Standing,
     overrides: &Overrides,
     ctx: &mut ViewContext<Workspace>,
 ) {
-    if let Some(strip) = session.restore() {
-        workspace.restore(strip, ctx);
+    match standing {
+        Standing::Keeper { session, .. } => {
+            if let Some(strip) = session.restore() {
+                workspace.restore(strip, ctx);
+            }
+        }
+        Standing::Second => workspace.leave_the_session(ctx),
+        // `apply_overrides` stops a launcher's window saving, because the
+        // overrides are what make it one.
+        Standing::Launched => {}
     }
     apply_overrides(workspace, overrides, ctx);
     if overrides.types_into_the_field()
@@ -2079,11 +2173,11 @@ fn open_window(
 
     // Read here, before the window exists, because the window opens at the
     // size it names. An empty one — a first run, an unreadable file, the
-    // setting turned off, or a window a launcher opened — is the default
-    // window and one tab, which is exactly what every launch did before this
-    // file existed.
-    let session = opening_session(&settings, &launch.overrides);
-    let options = window_options(channel, &launch.overrides, &session);
+    // setting turned off, a window a launcher opened, or one opened while
+    // another keeps the file — is the default window and one tab, which is
+    // exactly what every launch did before this file existed.
+    let standing = Standing::of(&settings, &launch.overrides);
+    let options = window_options(channel, &launch.overrides, standing.session());
 
     crookui::run(options, Box::new(font_db), move |platform| {
         Box::new(Shell::new(
@@ -2093,7 +2187,7 @@ fn open_window(
             settings.clone(),
             text_layout.clone(),
             &launch,
-            session.clone(),
+            standing,
         ))
     })
 }
@@ -2103,7 +2197,7 @@ fn open_window(
 fn window_options(
     channel: Channel,
     overrides: &Overrides,
-    session: &crate::session::Session,
+    session: Option<&crate::session::Session>,
 ) -> WindowOptions {
     let defaults = WindowOptions::default();
     // The flag first, the session's size second, the default last: a
@@ -2117,7 +2211,7 @@ fn window_options(
             .map(|[width, height]| vec2f(width as f32, height as f32))
             .or_else(|| {
                 session
-                    .window_size()
+                    .and_then(crate::session::Session::window_size)
                     .map(|[width, height]| vec2f(width, height))
             })
             .unwrap_or(WINDOW_SIZE),
@@ -3248,6 +3342,10 @@ struct Shell {
     /// window is open; dropping it closes the socket and removes its file.
     /// `None` where there is none — see [`control::Control::open`].
     _control: Option<control::Control>,
+    /// The lock that says this window keeps the session file, when it does.
+    /// Dropping it with the window lets the next ordinary window keep the
+    /// file. See [`Standing`].
+    _session_lock: Option<crate::session::Lock>,
 }
 
 /// The real window, behind the handle the workspace holds.
@@ -3765,7 +3863,7 @@ impl Shell {
         settings: Settings,
         text_layout: Arc<dyn TextLayoutSystem>,
         launch: &Launch,
-        session: crate::session::Session,
+        standing: Standing,
     ) -> Self {
         let mut app = App::new(platform.foreground.clone(), background_pool());
 
@@ -3819,7 +3917,7 @@ impl Shell {
                 // the density it finds, and a density the command line asked
                 // for that arrived later would leave the first cycle
                 // gathering the wrong half.
-                restore_and_override(workspace, &session, &launch.overrides, ctx);
+                restore_and_override(workspace, &standing, &launch.overrides, ctx);
                 // This window is on a desktop, which is the one place a
                 // notification is for: a snapshot and a test keep the silent
                 // one the workspace opens with.
@@ -3890,6 +3988,7 @@ impl Shell {
             window,
             window_state: WindowState::default(),
             _control: control,
+            _session_lock: standing.into_lock(),
         }
     }
 
@@ -5780,11 +5879,11 @@ mod tests {
     #[test]
     fn the_window_is_opened_with_the_title_and_the_app_id_the_command_line_named() {
         let overrides = window_overrides(&["--title", "notes", "--app-id", "crook-notes"]);
-        let options = window_options(Channel::Stable, &overrides, &Default::default());
+        let options = window_options(Channel::Stable, &overrides, None);
         assert_eq!(options.title, "notes");
         assert_eq!(options.app_id, "crook-notes");
 
-        let plain = window_options(Channel::Stable, &Overrides::default(), &Default::default());
+        let plain = window_options(Channel::Stable, &Overrides::default(), None);
         assert_eq!(plain.title, "Crook");
         assert_eq!(plain.app_id, "crook", "the id every window rule matches");
 
@@ -5804,11 +5903,14 @@ mod tests {
         .expect("writable scratch");
         let settings = Settings::load(scratch.path().join("settings.json"));
         assert!(
-            !opening_session(&settings, &Overrides::default()).is_empty(),
+            opens_on_the_last_tabs(&Standing::of(&settings, &Overrides::default())),
             "an ordinary launch comes back as the last window"
         );
 
-        for launched in [
+        // Held open across the ordinary launch below, so that a launcher's
+        // window that took the session's lock would show as a second window
+        // there.
+        let launched: Vec<Standing> = [
             Overrides {
                 command: vec!["htop".to_owned()],
                 ..Overrides::default()
@@ -5817,12 +5919,91 @@ mod tests {
                 working_directory: Some(scratch.path().to_owned()),
                 ..Overrides::default()
             },
-        ] {
+        ]
+        .iter()
+        .map(|overrides| Standing::of(&settings, overrides))
+        .collect();
+        for standing in &launched {
             assert!(
-                opening_session(&settings, &launched).is_empty(),
-                "{launched:?} opened as the last window"
+                matches!(standing, Standing::Launched) && standing.session().is_none(),
+                "a launcher's window opened as the last window: {standing:?}"
             );
         }
+        assert!(
+            opens_on_the_last_tabs(&Standing::of(&settings, &Overrides::default())),
+            "a launcher's window kept the session from the ordinary launch after it"
+        );
+    }
+
+    /// Whether a window that stands this way opens on the tabs the session
+    /// file holds.
+    fn opens_on_the_last_tabs(standing: &Standing) -> bool {
+        standing
+            .session()
+            .is_some_and(|session| !session.is_empty())
+    }
+
+    #[test]
+    fn a_new_window_is_a_launchers_window_in_the_directory_it_was_asked_for() {
+        use crate::plugins::wasm::tests::Scratch;
+
+        // What New window starts, read back by the parser that will read it
+        // in the new process. A window that opens fresh where the person was
+        // working, and so never comes back as the last window, never writes
+        // the session file and never takes it from the window that opened it.
+        let scratch = Scratch::new("new-window");
+        let arguments: Vec<String> = crate::new_window::arguments(scratch.path())
+            .into_iter()
+            .map(|argument| argument.into_string().expect("a scratch path that is text"))
+            .collect();
+        let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        let overrides = window_overrides(&arguments);
+        assert_eq!(overrides.working_directory.as_deref(), Some(scratch.path()));
+
+        let settings = Settings::load(scratch.path().join("settings.json"));
+        let keeper = Standing::of(&settings, &Overrides::default());
+        let opened = Standing::of(&settings, &overrides);
+        assert!(
+            matches!(keeper, Standing::Keeper { lock: Some(_), .. })
+                && matches!(opened, Standing::Launched),
+            "the new window does not leave the session to the one that opened it: \
+             {keeper:?} and {opened:?}"
+        );
+    }
+
+    #[test]
+    fn a_second_ordinary_window_opens_fresh_while_the_first_keeps_the_session() {
+        use crate::plugins::wasm::tests::Scratch;
+
+        // Crook launched from the application menu twice: the second window
+        // used to open on a copy of the first one's tabs, with each agent's
+        // resume line typed in where that agent was still running.
+        let scratch = Scratch::new("second-window");
+        std::fs::write(
+            scratch.path().join("session.json"),
+            r#"{ "tabs": [ { "name": "the agents", "panes": [ { "title": "agent 1" } ] } ] }"#,
+        )
+        .expect("writable scratch");
+        let settings = Settings::load(scratch.path().join("settings.json"));
+
+        let first = Standing::of(&settings, &Overrides::default());
+        assert!(
+            opens_on_the_last_tabs(&first),
+            "the first window did not come back as the last one: {first:?}"
+        );
+        let second = Standing::of(&settings, &Overrides::default());
+        assert!(
+            matches!(second, Standing::Second) && second.session().is_none(),
+            "the second window opened on the first one's tabs: {second:?}"
+        );
+
+        // Closing the first window takes its lock with it, so the next launch
+        // keeps the session in its place.
+        drop(first);
+        assert!(
+            opens_on_the_last_tabs(&Standing::of(&settings, &Overrides::default())),
+            "the session stayed kept after the window that kept it closed"
+        );
     }
 
     #[test]
@@ -5851,15 +6032,15 @@ mod tests {
     #[test]
     fn the_desktop_entry_parses_and_hands_crook_only_flags_it_knows() {
         // A line-based read of the file the archive, the AUR package and
-        // `script/install --desktop` all install: one group, `key=value`
-        // lines, no key twice. `desktop-file-validate` checks more, and is
-        // what was run by hand; this is what fails in `cargo test` when the
-        // entry and the binary drift apart.
+        // `script/install --desktop` all install: the entry's group first and
+        // then one group per action, `key=value` lines, no group and no key
+        // twice. `desktop-file-validate` checks more, and is what was run by
+        // hand; this is what fails in `cargo test` when the entry and the
+        // binary drift apart.
         const ENTRY: &str = include_str!("../../packaging/linux/crook.desktop");
         const METAINFO: &str = include_str!("../../packaging/linux/id.crook.Crook.metainfo.xml");
 
-        let mut group = None;
-        let mut keys = std::collections::BTreeMap::new();
+        let mut groups: Vec<(&str, std::collections::BTreeMap<&str, &str>)> = Vec::new();
         for (number, line) in ENTRY.lines().enumerate() {
             let number = number + 1;
             if line.is_empty() || line.starts_with('#') {
@@ -5869,18 +6050,23 @@ mod tests {
                 .strip_prefix('[')
                 .and_then(|rest| rest.strip_suffix(']'))
             {
-                assert!(group.is_none(), "line {number}: a second group, {name}");
-                group = Some(name);
+                assert!(
+                    groups.iter().all(|(seen, _)| *seen != name),
+                    "line {number}: {name} twice"
+                );
+                assert!(
+                    groups.is_empty() == (name == "Desktop Entry"),
+                    "line {number}: {name} where the entry's own group should be"
+                );
+                groups.push((name, std::collections::BTreeMap::new()));
                 continue;
             }
             let (key, value) = line
                 .split_once('=')
                 .unwrap_or_else(|| panic!("line {number}: {line:?} is not key=value"));
-            assert_eq!(
-                group,
-                Some("Desktop Entry"),
-                "line {number}: {key} is outside the group"
-            );
+            let (_, keys) = groups
+                .last_mut()
+                .unwrap_or_else(|| panic!("line {number}: {key} is outside a group"));
             assert!(
                 !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
                 "line {number}: {key:?} is not a key"
@@ -5888,6 +6074,41 @@ mod tests {
             assert!(
                 keys.insert(key, value).is_none(),
                 "line {number}: {key} twice"
+            );
+        }
+        let keys = &groups.first().expect("the entry's own group").1;
+
+        // Each action the entry names has a group, and each group an action
+        // names: one a launcher lists and cannot run, or one it never
+        // lists, is an entry `desktop-file-validate` refuses. An action's
+        // command is an ordinary window: which window keeps the tabs is the
+        // session lock's decision, not the launcher's.
+        let actions: Vec<&str> = keys
+            .get("Actions")
+            .expect("New Window is offered where the launcher lists actions")
+            .split_terminator(';')
+            .collect();
+        assert_eq!(actions, ["new-window"]);
+        assert_eq!(
+            groups[1..]
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>(),
+            actions
+                .iter()
+                .map(|action| format!("Desktop Action {action}"))
+                .collect::<Vec<_>>(),
+        );
+        for (name, action) in &groups[1..] {
+            assert!(action.contains_key("Name"), "{name} has no Name");
+            let exec = action
+                .get("Exec")
+                .unwrap_or_else(|| panic!("{name} has no Exec"));
+            let words: Vec<&str> = exec.split_whitespace().collect();
+            assert_eq!(words.first(), Some(&"crook"), "{name}: Exec={exec}");
+            assert!(
+                !window_overrides(&words[1..]).launched(),
+                "{name} opens a launcher's window, which never comes back with the tabs: {exec}"
             );
         }
 

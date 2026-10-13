@@ -133,6 +133,8 @@
 pub mod launch;
 mod scratch;
 
+pub(crate) use scratch::running_binary;
+
 #[cfg(test)]
 mod tests;
 

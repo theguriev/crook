@@ -13657,6 +13657,177 @@ fn a_window_a_launcher_opened_leaves_the_last_session_file_alone() {
     );
 }
 
+/// A window opened on `settings` the way the launch opens one: standing to
+/// the session file however [`crate::Standing::of`] finds it, through the
+/// function a real window opens with.
+///
+/// The standing comes back beside the window, because the keeper's lock is
+/// in it and goes when it is dropped.
+fn opened_on(settings: Settings) -> (Harness, crate::Standing) {
+    let standing = crate::Standing::of(&settings, &crate::Overrides::default());
+    let mut harness = Harness::with_settings(1, settings);
+    harness.workspace_update(|workspace, ctx| {
+        crate::restore_and_override(workspace, &standing, &crate::Overrides::default(), ctx);
+    });
+    (harness, standing)
+}
+
+#[test]
+fn a_second_window_leaves_the_session_to_the_first() {
+    // Crook launched twice on one configuration folder, from the
+    // application menu say. The first window comes back with the tabs and
+    // goes on saving them. The second used to come back with a copy of them
+    // and then write over the first one's file with every change it made.
+    let scratch = Scratch::new();
+    let path = crate::session::session_path_beside(&scratch.path().join("settings.json"));
+    let left_by_the_agents = "{ \"tabs\": [ { \"name\": \"the-agents\", \"panes\": [ { \"title\": \"agent 1\" } ] } ] }\n";
+    fs::write(&path, left_by_the_agents).expect("writable scratch");
+
+    let (mut first, _keeper) = opened_on(scratch.settings());
+    let (mut second, _) = opened_on(scratch.settings());
+    let first_tab = first.tab_ids()[0];
+    let second_tab = second.tab_ids()[0];
+    assert_eq!(first.tab_name(first_tab), "the-agents");
+    assert_ne!(
+        second.tab_name(second_tab),
+        "the-agents",
+        "the second window came back with the first one's tabs"
+    );
+
+    // A gesture that saves at once in a window that writes the file: see
+    // `a_rename_is_in_the_session_file_before_anything_else_saves_it`.
+    second.workspace_update(|workspace, ctx| {
+        workspace.rename_tab(second_tab, Some("the-second-window".to_owned()), ctx);
+    });
+    second.settle(std::time::Duration::from_millis(500));
+    assert_eq!(
+        fs::read_to_string(&path).expect("the file is still there"),
+        left_by_the_agents,
+        "the second window wrote over the session the first one keeps"
+    );
+
+    first.workspace_update(|workspace, ctx| {
+        workspace.rename_tab(first_tab, Some("the-first-window".to_owned()), ctx);
+    });
+    let written = session_written(&scratch, "the-first-window");
+    assert!(
+        !written.contains("the-second-window"),
+        "the second window's tab reached the file: {written}"
+    );
+}
+
+#[test]
+fn a_second_window_says_once_under_the_header_that_another_keeps_the_tabs() {
+    // The window opened without the tabs a person launched Crook to get back,
+    // and what they open in it will not come back either. Both are a surprise
+    // unless the window says so, which it does until it is told it was heard.
+    let scratch = Scratch::new();
+    let (mut first, _keeper) = opened_on(scratch.settings());
+    let (mut second, _) = opened_on(scratch.settings());
+
+    let scene = first.frame();
+    assert!(
+        !says(&scene, super::session_note::SAID),
+        "the window that keeps the tabs says another one does: {}",
+        frame_text(&scene)
+    );
+
+    let scene = second.frame();
+    let header = header_box(&scene);
+    let said = word_in(&scene, whole_window(&scene), super::session_note::SAID);
+    assert!(
+        said.y() > header.max_y(),
+        "the line is not under the header: it is at {said:?}, the header ends at {}",
+        header.max_y()
+    );
+    let dismiss = word_in(&scene, whole_window(&scene), "Dismiss");
+    assert!(
+        (dismiss.y() - said.y()).abs() < 4.,
+        "Dismiss is not on the line: {dismiss:?} against {said:?}"
+    );
+
+    second.click(dismiss + vec2f(4., 4.), MouseButton::Left);
+    let scene = second.frame();
+    assert!(
+        !says(&scene, super::session_note::SAID),
+        "the line is still up after it was dismissed: {}",
+        frame_text(&scene)
+    );
+}
+
+#[test]
+fn a_second_window_says_nothing_when_no_window_brings_its_tabs_back() {
+    // With the setting off every window opens fresh, the first included, so
+    // there is nothing for the second one to explain. It still leaves the
+    // file alone: the setting can be turned on in either window.
+    let scratch = Scratch::new();
+    fs::write(
+        scratch.path().join("settings.json"),
+        "{ \"restore_session\": false }\n",
+    )
+    .expect("writable scratch");
+    let (_first, _keeper) = opened_on(scratch.settings());
+    let (mut second, standing) = opened_on(scratch.settings());
+    assert!(matches!(standing, crate::Standing::Second), "{standing:?}");
+
+    let scene = second.frame();
+    assert!(
+        !says(&scene, super::session_note::SAID),
+        "{}",
+        frame_text(&scene)
+    );
+}
+
+#[test]
+fn new_window_starts_crook_again_where_the_focused_pane_is_working() {
+    // A window is a process of its own, so New window starts this binary
+    // again, in the directory the person was working in. The arguments are
+    // the ones `crate::new_window::arguments` builds, which the crate's
+    // own test reads back as a launcher's window that leaves the session
+    // alone.
+    crate::new_window::record_opens();
+    let scratch = Scratch::new();
+    let mut harness = Harness::new(1);
+    let pane = harness.pane_ids()[0];
+    let moved = |harness: &mut Harness, to: PathBuf| {
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &crate::terminal_model::TerminalUpdate::WorkingDirectory(pane, to),
+                ctx,
+            );
+        });
+    };
+    let binary = std::env::current_exe()
+        .and_then(std::path::absolute)
+        .expect("the test binary has a path");
+    let started_in = |directory: &Path| {
+        vec![
+            binary.clone().into_os_string(),
+            "--working-directory".into(),
+            directory.as_os_str().to_owned(),
+        ]
+    };
+
+    moved(&mut harness, scratch.path().to_owned());
+    harness.run_command("crook/window/new-window");
+    assert_eq!(
+        crate::new_window::opened(),
+        [started_in(scratch.path())],
+        "the window was not started where the pane is working"
+    );
+
+    // A directory deleted since is not handed over. The new window would
+    // refuse it and never appear, so the home directory is used instead.
+    moved(&mut harness, scratch.path().join("deleted-since"));
+    harness.run_command("crook/window/new-window");
+    let home = std::env::home_dir().expect("the test runs with a home directory");
+    assert_eq!(
+        crate::new_window::opened().last(),
+        Some(&started_in(&home)),
+        "a window was asked to start in a directory that is not there"
+    );
+}
+
 #[test]
 fn a_session_save_that_fails_says_so_under_the_tabs_until_one_lands() {
     // The file the next launch reads is written beside the settings, and a
@@ -21465,8 +21636,12 @@ mod restoring {
         let session = remembered(&[(scratch.path(), Some("claude"))]);
         let opened = |overrides: crate::Overrides| {
             let mut harness = Harness::with_settings(1, Settings::ephemeral());
+            let keeper = crate::Standing::Keeper {
+                session: session.clone(),
+                lock: None,
+            };
             harness.workspace_update(|workspace, ctx| {
-                crate::restore_and_override(workspace, &session, &overrides, ctx);
+                crate::restore_and_override(workspace, &keeper, &overrides, ctx);
             });
             harness.frame();
             let pane = harness.focused_pane_id().expect("a focused pane");

@@ -2742,6 +2742,23 @@ outcome both files exist to prevent. What the salvage drops is not lost either: 
 the file is copied as it was into `session-backups/` beside it — the three newest kept — since
 the next save writes a file that parses over the only evidence of what could not be read.
 
+A fifth came from a second window. `crookui` runs one window per process, so two windows are two
+processes sharing one file. When each one read the file at startup and wrote it on every change,
+the second window came back with a copy of the first one's tabs, each agent's resume line typed
+in where that agent was still running, and from then on whichever window saved last decided
+which tabs the next launch got back. Now the first ordinary window takes an advisory lock
+(`session::claim`, through std's `File::try_lock`: `flock` on macOS and Linux, `LockFileEx` on
+Windows), and only that window restores and saves. A later ordinary window opens fresh, never
+saves, and says so in a line under its header (`workspace/session_note.rs`, in the crash note's
+shape). A launcher's window does neither and says nothing, as before. The lock is on
+`session.lock` rather than on the session file, because a save renames a new session file into
+place and the lock would stay on the old one. The lock file is never deleted, because deleting it
+races the next window opening it. The system releases the lock when the process ends, crash
+included. **New window** (`crook/window/new-window`) starts the binary again with
+`--working-directory` set to the focused pane's directory (`app/src/new_window.rs`). That makes
+it a launcher's window, so it leaves the session to whichever window opened it. One file per
+window, all of them restored at the next launch, is the fuller answer.
+
 What is *not* remembered is the point: no scrollback, no output, no process. A window that
 redrew yesterday's output over a shell that had never run any of it would be lying about the
 state of the machine. The settings section is left out too — it is something somebody opened to

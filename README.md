@@ -122,6 +122,9 @@ refused rather than cut short.
 beside your work rather than the work: it opens fresh instead of as the last window, and nothing it
 does is written to the session file, so closing it leaves the agent tabs your next ordinary launch
 comes back to exactly as they were. `--title` and `--app-id` alone open an ordinary window.
+The entry also offers **New Window** to launchers that list actions. It runs a plain `crook`,
+so while Crook is open it gives you a second, fresh window that leaves your tabs to the first
+(see Tabs below).
 
 That covers every window a launcher opens with a directory, including one that always names a
 directory. Omarchy's terminal key is one: it runs `xdg-terminal-exec --dir=…` with the focused
@@ -287,6 +290,16 @@ Twenty features, and the page that configures them:
   give them one: OpenCode's `--continue` reaches across a repository's worktrees, and aider's
   `--restore-chat-history` is left for you to choose. No output comes back, and no process
   does.
+  **The first window you open keeps them.** Open Crook again while it is running, from the
+  application menu or with a plain `crook`, and the second window opens fresh, with a line
+  under its header that says another window keeps your tabs. It does not come back with a copy
+  of the first window's tabs, which would offer to resume agents still running there, and
+  nothing it does is written over them, so its own tabs are not there at the next launch. Once
+  the first window closes, the next one you open keeps the tabs. A lock on `session.lock`
+  beside the session file says which window that is, and the system lets go of it when that
+  window's process ends, crash included. **New window**, `cmd-n` (`ctrl-shift-n` off macOS),
+  opens another window, fresh, in the focused pane's directory, as `--working-directory`
+  would.
   **Closing asks first when it would end something still working.** The window's close — the
   desktop's close button, `alt-f4`, the palette's Close the window — a row's ×, a group's and
   `cmd-w` (`ctrl-shift-w`) on a pane all end whatever runs in the panes they take, so while an
@@ -710,7 +723,8 @@ Twenty features, and the page that configures them:
   only`. `New task…` in the palette (`crook/worktrees/new-task`) is the same creator with the
   first agent found already picked and the keyboard in the prompt, so a task is a sentence and
   Enter; it ships with no chord, and `{ "key": "cmd+shift+n", "command":
-  "crook/worktrees/new-task" }` (`ctrl+shift+n` off macOS) is one that nothing else takes. In a
+  "crook/worktrees/new-task" }` (`ctrl+shift+alt+n` off macOS, where `ctrl+shift+n` opens a
+  new window) is one that nothing else takes. In a
   shell whose quoting Crook has not proven — anything but sh, dash, bash, zsh and fish, and
   every shell on Windows for now — the line is the agent's name alone and there is no prompt
   field. A repository with a [`.worktreeinclude`](https://code.claude.com/docs/en/worktrees) at
@@ -843,7 +857,7 @@ Twenty features, and the page that configures them:
   page tells you where it is.
 
 - **Everything the window does has a name, and most of it has a key.** The window registers
-  fifty-six commands of its own and ships chords for thirty-eight; the other eighteen are
+  fifty-seven commands of its own and ships chords for thirty-nine; the other eighteen are
   reached by name, from the palette or from a chord of your own. That split is deliberate — a
   shipped chord is a key taken away from the shell in every pane, forever, so it is spent on
   what is pressed often and not on what is done once a week.

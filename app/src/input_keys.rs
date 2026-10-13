@@ -208,6 +208,8 @@ pub enum Binding {
     NewTab,
     /// Bring back the tab closed most recently.
     ReopenClosedTab,
+    /// Open another window, fresh, in the focused pane's directory.
+    NewWindow,
     /// Close the focused pane, and its tab with the last one.
     ClosePane,
     /// Split the focused pane to the right.

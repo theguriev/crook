@@ -80,6 +80,7 @@ use super::crash_note::CrashNote;
 use super::finish::{Again, Finishing};
 use super::held_locks::HeldLocks;
 use super::row_content::row_name;
+use super::session_note::SessionNote;
 use super::settings_page::SettingsState;
 use super::tab_context_menu::TabContextMenuState;
 use super::tab_menu::{
@@ -90,7 +91,7 @@ use super::tabs_panel::edge::PanelResize;
 use super::tabs_panel::geometry::RowGeometry;
 use super::tabs_panel::search::SearchState;
 use super::theme_panel::{Mode, ThemePanelState};
-use super::{body, crash_note, header_toolbar, tabs_panel};
+use super::{body, crash_note, header_toolbar, session_note, tabs_panel};
 
 /// How far into a panel row `--carry` presses.
 ///
@@ -821,6 +822,9 @@ pub struct Workspace {
     /// The line under the header about a crash an earlier run left, while
     /// nobody has dismissed it. See [`crash_note`].
     crash_note: Option<CrashNote>,
+    /// The line under the header that says another window keeps the session,
+    /// until it is dismissed. See [`session_note`].
+    session_note: Option<SessionNote>,
     /// The options, kept beside [`Self::settings`] rather than read out of it
     /// on every access. A renderer reads this dozens of times per frame and
     /// wants a `Copy` snapshot, not a borrow of the thing a save is cloning.
@@ -1168,6 +1172,7 @@ impl Workspace {
             newer_release: None,
             diagnostics_folder: None,
             crash_note: None,
+            session_note: None,
             options,
             overridden: Overridden::default(),
             menu: MenuState::default(),
@@ -8476,6 +8481,29 @@ impl Workspace {
         self.settle(effect, before, ctx)
     }
 
+    /// Opens another window, fresh, where the focused pane is working.
+    ///
+    /// The directory the pane's shell last reported, which is where a new tab
+    /// would open. Failing that, the home directory. A pane whose directory
+    /// has been deleted since would hand the new window a
+    /// `--working-directory` it refuses, and that window would never appear,
+    /// saying why only on a stderr nobody reads. See [`crate::new_window`]
+    /// for why the window is a process of its own.
+    fn open_new_window(&self) {
+        let Some(directory) = self
+            .tabs
+            .focused_directory()
+            .filter(|directory| directory.is_dir())
+            .or_else(std::env::home_dir)
+        else {
+            log::warn!("there is no directory to open a new window in");
+            return;
+        };
+        if let Err(error) = crate::new_window::open(&directory) {
+            log::warn!("could not open a new window: {error}");
+        }
+    }
+
     /// Brings back the tab closed most recently, where it was.
     ///
     /// The same snapshot a restart restores from, so it comes back the way a
@@ -9100,6 +9128,9 @@ impl Workspace {
             Binding::ReopenClosedTab => {
                 return (!self.closed_tabs.is_empty()).then_some(WorkspaceAction::ReopenClosedTab);
             }
+            // Never declined: there is always somewhere to open it, the home
+            // directory when the pane says nothing. See `open_new_window`.
+            Binding::NewWindow => return Some(WorkspaceAction::NewWindow),
             // Warp's `pane_group:close_current_session`: the pane goes, and
             // the tab only goes with it when it was the tab's last one.
             Binding::ClosePane => TabAction::ClosePane(self.tabs.focused_pane_id()?),
@@ -10535,6 +10566,27 @@ impl Workspace {
         self.saves_session = false;
     }
 
+    /// Leaves the session file to the window that keeps it: this one never
+    /// writes it, and says so under the header.
+    ///
+    /// For an ordinary window opened while another one keeps the file. Its
+    /// tabs are the ones that will not come back, and a person who opened
+    /// Crook expecting their tabs is owed the reason they are not here. Said
+    /// once, and only while restoring tabs is on: with it off no window
+    /// comes back with tabs, and there is nothing to explain.
+    pub fn leave_the_session(&mut self, ctx: &mut ViewContext<Self>) {
+        self.stop_saving_the_session();
+        if self.general().restore_session {
+            self.session_note = Some(SessionNote::default());
+            ctx.notify();
+        }
+    }
+
+    /// The line that says another window keeps the session, while it is up.
+    pub(crate) fn session_note(&self) -> Option<&SessionNote> {
+        self.session_note.as_ref()
+    }
+
     /// Writes what the window is showing, so the next one can come back to it.
     ///
     /// **On a change rather than on the way out**, because there is no reliable
@@ -10710,6 +10762,9 @@ impl View for Workspace {
             .with_main_axis_size(MainAxisSize::Max)
             .with_child(header_toolbar::render(self, app));
         if let Some(note) = crash_note::render(self) {
+            main.add_child(note);
+        }
+        if let Some(note) = session_note::render(self) {
             main.add_child(note);
         }
         let main = main.with_child(Expanded::new(1., body).finish()).finish();
@@ -11082,6 +11137,10 @@ impl TypedActionView for Workspace {
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),
             WorkspaceAction::Complete(pane) => self.request_completions(pane, ctx),
             WorkspaceAction::CrashNote(action) => self.apply_crash_note(action, ctx),
+            WorkspaceAction::DismissSessionNote => {
+                self.session_note = None;
+                ctx.notify();
+            }
             WorkspaceAction::ResumeAgents => self.resume_every_agent(ctx),
             WorkspaceAction::Run(id) => self.run_action(id, ctx),
             WorkspaceAction::RunAbout(id, subject) => {
@@ -11104,6 +11163,7 @@ impl TypedActionView for Workspace {
             // same reason and is swallowed the same way.
             WorkspaceAction::Chord => {}
             WorkspaceAction::ReopenClosedTab => self.reopen_closed_tab(ctx),
+            WorkspaceAction::NewWindow => self.open_new_window(),
         }
     }
 }

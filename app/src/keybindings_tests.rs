@@ -201,9 +201,11 @@ fn the_shipped_table_binds_the_chords_each_platform_is_used_to() {
 
     for (keybindings, text, expected) in [
         (&mac, "cmd+t", "crook/window/new-tab"),
+        (&mac, "cmd+n", "crook/window/new-window"),
         (&mac, "alt+cmd+left", "crook/window/previous-tab"),
         (&mac, "cmd+,", "crook/window/open-settings"),
         (&other, "ctrl+shift+t", "crook/window/new-tab"),
+        (&other, "ctrl+shift+n", "crook/window/new-window"),
         (&other, "ctrl+pagedown", "crook/window/next-tab"),
         (&other, "ctrl+,", "crook/window/open-settings"),
         // The one chord the two tables spell the same way, which is the whole
@@ -251,6 +253,7 @@ fn every_shipped_binding_names_a_command_of_the_window() {
 /// are there, which is what this names.
 const MUST_HAVE_A_CHORD: &[&str] = &[
     "new-tab",
+    "new-window",
     "close-pane",
     "split-right",
     "split-down",
