@@ -30934,22 +30934,187 @@ mod changes_column {
                 session.working_directory = Some(directory);
             });
         }
-        let target = |harness: &Harness| {
-            harness.workspace.read(&harness.app, |workspace, _| {
-                workspace.changes_panel().target.clone()
-            })
-        };
+        let (one, two) = (scratch.path().join("one"), scratch.path().join("two"));
 
+        // Found on the background pool, so each answer is waited for.
         harness.dispatch_action(TabAction::Select(first));
         harness.run_command("crook/changes/toggle");
-        assert_eq!(target(&harness), Some(scratch.path().join("one")));
+        harness.wait_for(
+            "the column never found where the first tab works",
+            |harness| changes_target(harness).as_ref() == Some(&one),
+        );
 
         harness.dispatch_action(TabAction::Select(second));
-        assert_eq!(
-            target(&harness),
-            Some(scratch.path().join("two")),
-            "the column stayed on the tab that was left"
+        harness.wait_for("the column stayed on the tab that was left", |harness| {
+            changes_target(harness).as_ref() == Some(&two)
+        });
+    }
+
+    /// Where the column is looking, once it has found out.
+    fn changes_target(harness: &Harness) -> Option<PathBuf> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.changes_panel().target.clone()
+        })
+    }
+
+    /// Whether the column is still waiting to hear which checkout
+    /// `directory` is in.
+    fn looking_for(harness: &Harness, directory: &Path) -> bool {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.changes_panel().is_looking_for(directory)
+        })
+    }
+
+    #[test]
+    fn switching_tabs_looks_for_the_checkout_off_the_thread_that_draws() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // A shell sitting in a mount whose server has gone: every `stat` of
+        // the walk up for `.git` blocks for as long as the mount does, which
+        // on a hard NFS mount is for good. On the thread that draws, that is
+        // a window that neither draws nor takes a key. The stand-in counts
+        // every walk asked of that thread, and holds the one about the dead
+        // directory until the test lets it go.
+        let scratch = Scratch::new();
+        let checkout = scratch.path().join("checkout");
+        let dead = checkout.join("src").join("mount");
+        let elsewhere = scratch.path().join("elsewhere");
+        for directory in [&dead, &elsewhere] {
+            fs::create_dir_all(directory).expect("writable");
+        }
+        // A checkout as the walk recognises one, so no git is needed.
+        fs::create_dir_all(checkout.join(".git")).expect("writable");
+        fs::write(checkout.join(".git").join("HEAD"), "ref: refs/heads/main\n").expect("writable");
+
+        let mut harness = Harness::new(2);
+        let [here, there] = harness.tab_ids()[..] else {
+            panic!("two tabs were asked for");
+        };
+        for (tab, directory) in [(here, &elsewhere), (there, &dead)] {
+            let pane = harness.panes_of(tab)[0];
+            harness.update_session(pane, |session| {
+                session.working_directory = Some(directory.clone());
+            });
+        }
+
+        let drawing = std::thread::current().id();
+        let asked_while_drawing = Arc::new(AtomicUsize::new(0));
+        let asked_about_the_mount = Arc::new(AtomicUsize::new(0));
+        let (unblock, blocked) = std::sync::mpsc::channel::<()>();
+        let blocked = Mutex::new(blocked);
+        {
+            let asked_while_drawing = asked_while_drawing.clone();
+            let asked_about_the_mount = asked_about_the_mount.clone();
+            let dead = dead.clone();
+            harness.workspace_update(move |workspace, _| {
+                workspace.find_checkouts_with(move |directory| {
+                    if std::thread::current().id() == drawing {
+                        // Counted and never held: held here, the test would
+                        // hang where it ought to fail.
+                        asked_while_drawing.fetch_add(1, Ordering::SeqCst);
+                    } else if directory == dead {
+                        asked_about_the_mount.fetch_add(1, Ordering::SeqCst);
+                        // Until the sender goes, which answers at once every
+                        // wait after it. The timeout is for a test that
+                        // failed before it let go.
+                        let _ = blocked
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .recv_timeout(SHELL_TIMEOUT);
+                    }
+                    crate::git::discover(&directory)
+                        .and_then(|layout| layout.work_tree)
+                        .unwrap_or(directory)
+                });
+            });
+        }
+        let not_while_drawing = |what: &str| {
+            assert_eq!(
+                asked_while_drawing.load(Ordering::SeqCst),
+                0,
+                "{what} looked for the checkout on the thread that draws"
+            );
+        };
+
+        harness.dispatch_action(TabAction::Select(here));
+        harness.run_command("crook/changes/toggle");
+        not_while_drawing("opening the column");
+        harness.wait_for(
+            "the column never found where the first tab works",
+            |harness| changes_target(harness).as_ref() == Some(&elsewhere),
         );
+
+        // The tab in the dead mount: the press is answered, and a frame
+        // drawn, while the walk is stuck.
+        harness.dispatch_action(TabAction::Select(there));
+        not_while_drawing("choosing a tab");
+        let scene = harness.frame();
+        assert!(
+            column_lines(&scene)
+                .iter()
+                .any(|(_, line)| line.contains("Reading the repository")),
+            "the column does not say it is looking: {:?}",
+            column_lines(&scene)
+        );
+        assert_eq!(
+            changes_target(&harness),
+            None,
+            "the column still shows the tab that was left"
+        );
+
+        // Closed and opened again on that tab while the walk is stuck: the
+        // column says it is looking, and not that the tab has not said where
+        // it works, for as long as the mount holds the walk.
+        harness.run_command("crook/changes/toggle");
+        harness.run_command("crook/changes/toggle");
+        not_while_drawing("opening the column again");
+        let lines = column_lines(&harness.frame());
+        assert!(
+            lines
+                .iter()
+                .any(|(_, line)| line.contains("Reading the repository")),
+            "the column does not say it is looking: {lines:?}"
+        );
+
+        // Away and back while it is stuck. The column follows the first tab
+        // at once, and a second visit waits for the walk already on its way
+        // rather than starting another: every walk into the dead mount is a
+        // worker of the pool that never comes back.
+        harness.dispatch_action(TabAction::Select(here));
+        harness.wait_for("the column stayed stuck on the dead mount", |harness| {
+            changes_target(harness).as_ref() == Some(&elsewhere)
+        });
+        harness.dispatch_action(TabAction::Select(there));
+        harness.dispatch_action(TabAction::Select(here));
+        harness.wait_for("the column stayed stuck on the dead mount", |harness| {
+            changes_target(harness).as_ref() == Some(&elsewhere)
+        });
+        assert_eq!(
+            asked_about_the_mount.load(Ordering::SeqCst),
+            1,
+            "the dead mount was walked into again while the first walk was stuck"
+        );
+
+        // The mount answers while the first tab is in front: the answer is
+        // about a tab the column has left, and moves nothing.
+        drop(unblock);
+        harness.wait_for("the stuck walk never came home", |harness| {
+            !looking_for(harness, &dead)
+        });
+        assert_eq!(
+            changes_target(&harness).as_ref(),
+            Some(&elsewhere),
+            "the answer about the tab that was left took the column there"
+        );
+
+        // And back on the second tab, the column is on the checkout above
+        // the shell's directory, not on the directory.
+        harness.dispatch_action(TabAction::Select(there));
+        harness.wait_for(
+            "the column never found the checkout the second tab is in",
+            |harness| changes_target(harness).as_ref() == Some(&checkout),
+        );
+        not_while_drawing("following the tabs");
     }
 
     #[test]

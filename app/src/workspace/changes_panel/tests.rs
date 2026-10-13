@@ -41,8 +41,11 @@ fn showing(overview: Overview) -> ChangesPanelState {
 /// A column that is up and has read `overview`, for `tab`.
 fn showing_for(tab: TabId, overview: Overview) -> ChangesPanelState {
     let mut state = ChangesPanelState::default();
-    let epoch = state
+    let directory = state
         .open(Some(tab), Some(overview.repository.clone()), None)
+        .expect("there is somewhere to look");
+    let epoch = state
+        .found(&directory, overview.repository.clone())
         .expect("there is somewhere to read");
     state
         .land(epoch, Ok(overview))
@@ -132,9 +135,9 @@ fn a_diff_that_could_not_be_read_is_asked_for_again_next_time() {
 fn an_answer_to_a_question_nobody_is_asking_any_more_is_dropped() {
     let mut state = ChangesPanelState::default();
     let tab = Some(TabId::next());
-    let first = state
-        .open(tab, Some(PathBuf::from("/work/one")), None)
-        .expect("somewhere to read");
+    let one = PathBuf::from("/work/one");
+    state.open(tab, Some(one.clone()), None);
+    let first = state.found(&one, one.clone()).expect("somewhere to read");
     let second = state
         .retarget(tab, Some(PathBuf::from("/work/two")))
         .expect("somewhere to read");
@@ -159,6 +162,192 @@ fn a_diff_asked_for_in_another_repository_is_not_shown_in_this_one() {
 
     assert!(!state.land_hunks(Path::new("a.rs"), read.ticket, Ok(one_line())));
     assert!(!state.is_expanded(Path::new("a.rs")));
+}
+
+// --- following the focused pane ------------------------------------------------
+
+#[test]
+fn a_cd_inside_the_checkout_keeps_what_the_column_shows() {
+    let mut state = showing(overview(&["a.rs"]));
+    let read = state.toggle(0).expect("asked");
+    state.land_hunks(Path::new("a.rs"), read.ticket, Ok(one_line()));
+    let tab = state.tab();
+
+    // Until the walk up answers, a `cd` inside the checkout is no different
+    // from one into another, and the column keeps what it shows.
+    let source = PathBuf::from("/work/repo/src");
+    assert_eq!(
+        state.follow(tab, Some(source.clone())),
+        Some(source.clone()),
+        "the new directory is not looked for"
+    );
+    assert!(
+        state.overview().is_some() && state.is_expanded(Path::new("a.rs")),
+        "the column was emptied before it knew it had moved"
+    );
+
+    assert!(
+        state.found(&source, PathBuf::from("/work/repo")).is_none(),
+        "the same checkout was read again"
+    );
+    assert!(state.overview().is_some());
+    assert!(
+        state.is_expanded(Path::new("a.rs")) && state.diff(Path::new("a.rs")).is_some(),
+        "a cd inside the checkout folded the file"
+    );
+}
+
+#[test]
+fn a_cd_into_another_checkout_reads_that_one() {
+    let mut state = showing(overview(&["a.rs"]));
+    let tab = state.tab();
+    let other = PathBuf::from("/work/other/src");
+
+    state.follow(tab, Some(other.clone())).expect("looked for");
+    let epoch = state
+        .found(&other, PathBuf::from("/work/other"))
+        .expect("another checkout is read");
+    assert_eq!(state.target, Some(PathBuf::from("/work/other")));
+    assert!(
+        state.overview().is_none(),
+        "the last checkout's files are shown as this one's"
+    );
+    assert!(state.land(epoch, Ok(overview(&["b.rs"]))).is_some());
+}
+
+#[test]
+fn another_tab_starts_over_before_its_checkout_is_found() {
+    let mut state = showing(overview(&["a.rs"]));
+    let other = Some(TabId::next());
+
+    let directory = state
+        .follow(other, Some(PathBuf::from("/work/repo")))
+        .expect("looked for");
+    assert!(
+        state.overview().is_none() && state.target.is_none(),
+        "the tab that was left is still shown"
+    );
+    assert_eq!(
+        state.rows(),
+        [Row::Message("Reading the repository…".to_owned())]
+    );
+    assert!(
+        state.is_reading(),
+        "Refresh is offered with nothing to refresh"
+    );
+
+    // The same repository, and still a read of its own: another tab's
+    // review is its own.
+    assert!(
+        state
+            .found(&directory, PathBuf::from("/work/repo"))
+            .is_some()
+    );
+    assert_eq!(state.tab(), other);
+}
+
+/// What the column says while it looks for the checkout a pane is in.
+const LOOKING: &str = "Reading the repository…";
+/// What it says for a pane that has not said where it is.
+const NOWHERE: &str = "This tab has not said where it is working yet.";
+
+#[test]
+fn opening_on_a_pane_that_has_said_where_it_is_says_the_column_is_looking() {
+    // The walk up from a mount whose server has gone does not come back,
+    // and what the column says meanwhile is what it says for good.
+    let tab = Some(TabId::next());
+    let here = PathBuf::from("/mnt/gone/work");
+
+    let mut state = ChangesPanelState::default();
+    state.open(tab, Some(here.clone()), None);
+    assert_eq!(state.rows(), [Row::Message(LOOKING.to_owned())]);
+    assert!(state.is_reading());
+
+    // And opened again, after closing forgot where the pane was.
+    state.close();
+    state.open(tab, Some(here), None);
+    assert_eq!(state.rows(), [Row::Message(LOOKING.to_owned())]);
+}
+
+#[test]
+fn a_tab_that_has_not_said_where_it_is_says_so_after_one_that_had() {
+    let mut state = showing(overview(&["a.rs"]));
+
+    assert_eq!(state.follow(Some(TabId::next()), None), None);
+    assert_eq!(
+        state.rows(),
+        [Row::Message(NOWHERE.to_owned())],
+        "the column says it is reading with nothing to read"
+    );
+    assert!(!state.is_reading());
+}
+
+#[test]
+fn a_pane_saying_where_it_is_for_the_first_time_is_looked_for_on_screen() {
+    let tab = Some(TabId::next());
+    let mut state = ChangesPanelState::default();
+    state.open(tab, None, None);
+    assert_eq!(state.rows(), [Row::Message(NOWHERE.to_owned())]);
+
+    let here = PathBuf::from("/work/repo");
+    assert_eq!(state.follow(tab, Some(here.clone())), Some(here.clone()));
+    assert_eq!(
+        state.rows(),
+        [Row::Message(LOOKING.to_owned())],
+        "the column goes on saying the pane has not said where it is"
+    );
+
+    // The same pane saying nothing again, before the answer: it says so,
+    // and the answer about where it was moves nothing.
+    state.follow(tab, None);
+    assert_eq!(state.rows(), [Row::Message(NOWHERE.to_owned())]);
+    assert!(state.found(&here, here.clone()).is_none());
+    assert!(state.target.is_none());
+}
+
+#[test]
+fn an_answer_about_a_directory_the_column_has_left_is_dropped() {
+    let mut state = ChangesPanelState::default();
+    let first = PathBuf::from("/work/one");
+    let second = PathBuf::from("/work/two");
+    state.open(Some(TabId::next()), Some(first.clone()), None);
+    state.follow(Some(TabId::next()), Some(second.clone()));
+
+    assert!(
+        state.found(&first, first.clone()).is_none(),
+        "the checkout of the tab that was left was taken for this one's"
+    );
+    assert!(state.target.is_none());
+    assert!(state.found(&second, second.clone()).is_some());
+    assert_eq!(state.target, Some(second));
+}
+
+#[test]
+fn a_directory_still_being_looked_for_is_not_looked_for_again() {
+    // A mount whose server has gone holds its walk on a worker for as long
+    // as it is gone; another walk each visit would be another worker.
+    let mut state = ChangesPanelState::default();
+    let (stuck_tab, other_tab) = (Some(TabId::next()), Some(TabId::next()));
+    let stuck = PathBuf::from("/mnt/gone/work");
+    let here = PathBuf::from("/work/here");
+
+    assert!(state.open(stuck_tab, Some(stuck.clone()), None).is_some());
+    state.follow(other_tab, Some(here.clone()));
+    assert!(
+        state.follow(stuck_tab, Some(stuck.clone())).is_none(),
+        "the stuck directory was looked for twice"
+    );
+    state.close();
+    assert!(
+        state.open(stuck_tab, Some(stuck.clone()), None).is_none(),
+        "closing the column forgot the walk still out there"
+    );
+
+    // The walk on its way is the answer this visit waits for, and once it
+    // is home the directory is looked for again next time.
+    assert!(state.found(&stuck, PathBuf::from("/mnt/gone")).is_some());
+    state.follow(other_tab, Some(here));
+    assert_eq!(state.follow(stuck_tab, Some(stuck.clone())), Some(stuck));
 }
 
 #[test]
