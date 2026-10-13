@@ -24,8 +24,9 @@ use crate::clipboard::Clipboard;
 use crate::input_keys::{self, Platform, Route};
 use crate::pane_selection::PaneSelection;
 use crate::selection::{Anchor, Blocks, Cells, Selection};
+use crate::settings::OptionAsMeta;
 use crate::tab::PaneId;
-use crate::terminal_keys;
+use crate::terminal_keys::{self, Alt};
 use crate::terminal_model::TerminalHandle;
 use crate::text_input::TextInput;
 
@@ -114,6 +115,9 @@ pub struct Output {
     /// near it, and a clipboard reachable only through a selection would make
     /// the paste chord depend on whether anything had ever been selected.
     clipboard: Option<Clipboard>,
+
+    /// What Option means to the program on a Mac. See [`OptionAsMeta`].
+    option_as_meta: OptionAsMeta,
 }
 
 impl Output {
@@ -126,6 +130,7 @@ impl Output {
             input: None,
             mouse: None,
             clipboard: None,
+            option_as_meta: OptionAsMeta::default(),
         }
     }
 
@@ -134,6 +139,13 @@ impl Output {
     pub fn with_terminal(mut self, handle: TerminalHandle, keys: Keys) -> Self {
         self.handle = Some(handle);
         self.keys = keys;
+        self
+    }
+
+    /// Says what Option means to the program on a Mac, which is the person's
+    /// setting and not the output's to decide.
+    pub fn with_option_as_meta(mut self, option_as_meta: OptionAsMeta) -> Self {
+        self.option_as_meta = option_as_meta;
         self
     }
 
@@ -221,7 +233,12 @@ impl Output {
     /// An output with nowhere to copy *to* reports the same, so the interrupt
     /// is never taken by a chord that could not have answered it.
     pub fn type_key(&self, event: &Event, ctx: &mut EventContext) -> Typed {
-        let Event::KeyDown { keystroke, chars } = event else {
+        let Event::KeyDown {
+            keystroke,
+            chars,
+            origin,
+        } = event
+        else {
             return match event {
                 Event::Ime(Ime::Commit(text)) => self.commit(text),
                 _ => Typed::Ignored,
@@ -306,7 +323,8 @@ impl Output {
             return Typed::Ignored;
         }
 
-        let Some((key, modifiers)) = terminal_keys::key_for(keystroke, chars) else {
+        let alt = Alt::on(Platform::current(), self.option_as_meta);
+        let Some((key, modifiers)) = terminal_keys::key_for(keystroke, chars, origin, alt) else {
             return Typed::Ignored;
         };
         if handle.send_key(key, modifiers) {

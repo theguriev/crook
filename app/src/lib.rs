@@ -2951,6 +2951,7 @@ fn press(app: &mut App, presenter: &mut Presenter, window_id: WindowId, key: &st
     let event = Event::KeyDown {
         keystroke: Keystroke::new(key, Modifiers::default()),
         chars: chars.to_owned(),
+        origin: Default::default(),
     };
     app.update(|ctx| ctx.dispatch_window_event(window_id, event, presenter));
 }

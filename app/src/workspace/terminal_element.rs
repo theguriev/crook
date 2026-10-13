@@ -231,6 +231,13 @@ impl TerminalElement {
         self
     }
 
+    /// Says what Option means to the program on a Mac. See
+    /// [`OptionAsMeta`](crate::settings::OptionAsMeta).
+    pub fn with_option_as_meta(mut self, option_as_meta: crate::settings::OptionAsMeta) -> Self {
+        self.output = self.output.with_option_as_meta(option_as_meta);
+        self
+    }
+
     /// Attaches the field under this grid, whose line decides what Ctrl-D
     /// means.
     pub fn with_input(mut self, input: TextInput) -> Self {

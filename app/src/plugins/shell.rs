@@ -5,16 +5,21 @@
 //! check when the blocks are not there. The switch decides which of the
 //! person's own files the shell reads. `shell_integration::login_by_default`
 //! is where that default is argued; this is where it is overridden.
+//!
+//! On a Mac it also says what Option is to a program, because that is a
+//! question about what the shell and what runs in it are sent, and there is no
+//! keyboard page but the shortcuts.
 
 use crookui_core::prelude::*;
 
 use crook_plugin::{Manifest, PluginId, Tier};
 
+use crate::input_keys::Platform;
 use crate::plugin::{BuildError, Host, Plugin};
-use crate::settings::TabKey;
+use crate::settings::{OptionAsMeta, TabKey};
 use crate::shell_integration::{Marks, OPT_OUT_VARIABLE};
 use crate::workspace::settings_page::search::Words;
-use crate::workspace::settings_page::widgets::{self, Category, Segment};
+use crate::workspace::settings_page::widgets::{self, Category, Entry, Segment};
 use crate::workspace::settings_page::{keyed, named};
 use crate::workspace::{SettingsAction, Workspace};
 
@@ -199,7 +204,7 @@ fn shell(workspace: &Workspace, app: &AppContext) -> Vec<Category> {
         ui,
     );
 
-    vec![
+    let mut categories = vec![
         widgets::category("What a pane runs", vec![program, marks]),
         widgets::category("Startup", vec![login]),
         widgets::category("The command line", vec![tab_key]),
@@ -217,7 +222,51 @@ fn shell(workspace: &Workspace, app: &AppContext) -> Vec<Category> {
                 ui,
             )],
         ),
-    ]
+    ];
+    // A Mac's only: Alt off one is never the key a layout types with, so
+    // there is nothing to choose. Last, so that the page above it is the
+    // same page on every platform.
+    if Platform::current() == Platform::Mac {
+        categories.push(widgets::category(
+            "Keyboard",
+            vec![option_as_meta(workspace)],
+        ));
+    }
+    categories
+}
+
+/// The row that says what Option is to a program: Meta, or the key a layout
+/// types its symbols with. See [`OptionAsMeta`].
+fn option_as_meta(workspace: &Workspace) -> Entry {
+    let ui = workspace.fonts().ui;
+    let state = workspace.settings_page();
+    widgets::row(
+        Words::new("Option as Meta")
+            .with_description(
+                "Whether Option is Meta in a program like vim or Claude Code, or types what your \
+                 keyboard puts on it. Auto types the symbols a layout keeps on Option, like @ [ ] \
+                 { } on a German keyboard, and is Meta for the rest. Left and Right make one \
+                 Option Meta and let the other type.",
+            )
+            .with_keywords(&[
+                "option", "alt", "meta", "esc", "escape", "compose", "keyboard", "layout",
+                "german", "symbols", "readline", "emacs", "vim",
+            ]),
+        true,
+        widgets::segmented(
+            OptionAsMeta::ALL
+                .into_iter()
+                .map(|option| Segment {
+                    label: option.label(),
+                    selected: workspace.general().option_as_meta == option,
+                    command: Some(SettingsAction::SetOptionAsMeta(option).into()),
+                    state: state.control(keyed("option-as-meta", option)),
+                })
+                .collect(),
+            ui,
+        ),
+        ui,
+    )
 }
 
 /// The marks fact's value: what a pane gets, and when it gets nothing, why.

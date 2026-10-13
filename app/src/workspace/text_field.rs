@@ -404,7 +404,9 @@ impl Element for TextField {
         };
 
         match event {
-            Event::KeyDown { keystroke, chars } => self.type_key(keystroke, chars, ctx),
+            Event::KeyDown {
+                keystroke, chars, ..
+            } => self.type_key(keystroke, chars, ctx),
             Event::MouseDown {
                 position,
                 button: MouseButton::Left,
