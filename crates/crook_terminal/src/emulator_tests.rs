@@ -228,6 +228,69 @@ fn test_a_title_is_kept_whole_up_to_its_cap_and_cut_where_a_character_ends() {
     assert_eq!(Some(kept.as_str()), emulator.title());
 }
 
+/// The title the grid itself pushed last with `CSI 22 t`, popped back off
+/// its stack: what `Term` holds there, before this crate cuts anything.
+fn pushed_title(emulator: &mut Emulator) -> Option<String> {
+    emulator.proxy.take();
+    Handler::pop_title(&mut emulator.term);
+    emulator
+        .proxy
+        .take()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Title(title) => Some(title),
+            _ => None,
+        })
+}
+
+#[test]
+fn test_an_over_long_title_is_cut_in_the_copy_the_grid_pushes() {
+    // `Term` keeps a title of its own, and `CSI 22 t` pushes a copy of it on
+    // a stack 4096 deep: four megabytes of title and twenty kilobytes of
+    // pushes after it, in the same file, are 4096 copies: sixteen gigabytes.
+    let mut emulator = emulator();
+    let huge = huge();
+    emulator.advance(format!("\x1b]2;{huge}\x07\x1b[22t\x1b]2;short\x07").as_bytes());
+
+    let kept = cut_at(&huge, agent::TITLE_BYTES);
+    let pushed = pushed_title(&mut emulator);
+    let length = pushed.as_ref().map(String::len);
+    assert_eq!(Some(kept.len()), length, "the grid pushed {length:?} bytes");
+    assert_eq!(Some(kept.clone()), pushed);
+
+    // Telling the grid the cut title is no news of its own.
+    let events = emulator.take_events();
+    assert!(
+        matches!(
+            &events[..],
+            [TerminalEvent::Title(Some(first)), TerminalEvent::Title(Some(second))]
+                if *first == kept && second == "short"
+        ),
+        "{} events, not the cut title and then the short one",
+        events.len()
+    );
+}
+
+#[test]
+fn test_an_over_long_title_in_a_synchronized_update_is_cut_before_what_follows_it() {
+    // `vte` holds an update's bytes until it ends and then plays them to the
+    // grid in one go, the title and the pushes after it together. So the
+    // update ends at the title, the way one nobody ended does, and what is
+    // left of it is drawn as it comes. One megabyte, because past two `vte`
+    // gives up on the update by itself.
+    let mut emulator = emulator();
+    let long = "x".repeat(1 << 20);
+    emulator.advance(
+        format!("\x1b[?2026h\x1b]2;{long}\x07\x1b[22t\x1b]2;short\x07\x1b[?2026l").as_bytes(),
+    );
+
+    let kept = cut_at(&long, agent::TITLE_BYTES);
+    let pushed = pushed_title(&mut emulator);
+    let length = pushed.as_ref().map(String::len);
+    assert_eq!(Some(kept.len()), length, "the grid pushed {length:?} bytes");
+    assert_eq!(Some("short"), emulator.title());
+}
+
 #[test]
 fn test_a_report_longer_than_a_row_is_kept_cut_to_its_caps() {
     // Anything in the pane can write the sequence — a forged report is a

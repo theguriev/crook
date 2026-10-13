@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{Handler, Processor};
 use alacritty_terminal::vte::{Params, Parser, Perform};
 use parking_lot::Mutex;
 
@@ -262,6 +262,9 @@ struct OscWatcher {
     images: image::Reader,
     /// A picture to place at the cursor, which is where the watcher stops.
     image: Option<image::Requested>,
+    /// Whether an OSC 0 or 2 set a title longer than [`agent::TITLE_BYTES`],
+    /// which is where the watcher stops: see [`Emulator::cut_grid_title`].
+    long_title: bool,
 }
 
 impl Perform for OscWatcher {
@@ -310,6 +313,15 @@ impl Perform for OscWatcher {
                     self.notified_last = true;
                 }
             }
+            // `Term` reads the title itself. This only measures it, as the
+            // text `vte` joins the pieces back into, or a little over: `vte`
+            // also trims it and drops a piece that is not UTF-8, so a title
+            // just past the cap can stop the watcher and be cut to itself.
+            Some(&(b"0" | b"2")) if params.len() >= 2 => {
+                let joined =
+                    params[1..].iter().map(|piece| piece.len()).sum::<usize>() + (params.len() - 2);
+                self.long_title |= joined > agent::TITLE_BYTES;
+            }
             // A status means the same thing wherever in the chunk the program
             // wrote it, so the last one wins, which is the last thing the
             // program said — up to a mark or a notification, which it has to
@@ -339,11 +351,15 @@ impl Perform for OscWatcher {
     /// `Term` queues its own answers as it parses, so the version has to be
     /// answered once everything before the query is parsed and nothing after
     /// it, or it goes out of order with the answers either side of it.
+    ///
+    /// And on a title longer than [`agent::TITLE_BYTES`], so that the grid's
+    /// own copy of it is cut before the rest of the read can push it.
     fn terminated(&self) -> bool {
         self.mark.is_some()
             || self.image.is_some()
             || (self.agent.is_some() && self.notification.is_some())
             || self.version_asked
+            || self.long_title
     }
 }
 
@@ -601,6 +617,9 @@ impl Emulator {
             // stops again on the next byte having read nothing.
             if self.osc_watcher.terminated() {
                 self.apply_reports();
+            }
+            if std::mem::take(&mut self.osc_watcher.long_title) {
+                exited = self.cut_grid_title().or(exited);
             }
             if let Some(mark) = self.osc_watcher.mark.take() {
                 // A directory too, and for the same reason: bash and zsh print
@@ -1273,6 +1292,35 @@ impl Emulator {
         self.title = title.clone();
         self.dirty = true;
         self.events.push(TerminalEvent::Title(title));
+    }
+
+    /// Hands `Term` the cut title in place of the over-long one it was just
+    /// given, which the watcher stopped on.
+    ///
+    /// `Term` keeps a title of its own, whole, and `CSI 22 t` pushes a copy
+    /// of it onto a stack 4096 deep: four megabytes of title with twenty
+    /// kilobytes of pushes behind it are 4096 copies, sixteen gigabytes,
+    /// however short [`Self::set_title`] made the one this crate keeps.
+    /// Given the cut one before the rest of the read is parsed, the pushes
+    /// copy that instead.
+    ///
+    /// Inside a synchronized update `vte` holds the bytes and plays them to
+    /// `Term` when the update ends, the title and the pushes after it
+    /// together, so the update ends here, as one nobody ended does: what is
+    /// left of it is drawn as it arrives. A program that writes a title this
+    /// long is not one whose frames are worth that title's gigabytes.
+    ///
+    /// The cut title goes back to the proxy as `Term` sends it, and is no
+    /// news when it is handed over: it is the title this already has.
+    fn cut_grid_title(&mut self) -> Option<ChildExit> {
+        if self.parser.sync_timeout().sync_timeout().is_some() {
+            self.parser.stop_sync(&mut self.term);
+        }
+        let exited = self.hand_over_term_events();
+        if let Some(title) = &self.title {
+            Handler::set_title(&mut self.term, Some(title.clone()));
+        }
+        exited
     }
 }
 
