@@ -1432,11 +1432,14 @@ thousand lines — both say so on screen, and "Copy diff" is not offered for a d
 whole.
 
 **It reads on beats that already exist.** On opening, when the focused pane moves to another
-repository (a walk up for `.git`, no subprocess), on its Refresh button, and at the end of every
-cycle of `GitModel` — which now emits an event per cycle, changed or not, because what the column
-shows is nothing the cycle gathers. No timer of its own; a cycle that arrives while a read is in
-flight is not a second read, and an answer is taken only if it is for the question still being
-asked.
+repository, on its Refresh button, and at the end of every cycle of `GitModel` — which now emits
+an event per cycle, changed or not, because what the column shows is nothing the cycle gathers.
+No timer of its own; a cycle that arrives while a read is in flight is not a second read, and an
+answer is taken only if it is for the question still being asked. Which repository the pane is
+in is a walk up for `.git` — no subprocess, but on a network mount whose server has gone a `stat`
+that blocks for as long as the mount does — so it is found on the background pool too, once per
+directory however often the pane is gone back to while it is stuck, and the column keeps what it
+shows through a `cd` until the walk says the checkout is another one.
 
 **A frame costs a screenful.** Every row — headings, commits, files, a file's hunk lines — is
 one entry of one flat list with a fixed height per kind and a running sum of heights beside it,

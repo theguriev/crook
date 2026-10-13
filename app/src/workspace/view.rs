@@ -889,6 +889,13 @@ pub struct Workspace {
     panel: ThemePanelState,
     /// The Changes column: what the focused tab's agent changed.
     changes: ChangesPanelState,
+    /// How the Changes column finds the checkout a directory is in:
+    /// [`checkout_of`], everywhere but a test.
+    ///
+    /// A field for the reason [`Self::gh`] is one: a test puts a stand-in
+    /// here that says which thread it was asked on, or that holds its answer
+    /// the way a mount whose server has gone holds a `stat`.
+    find_checkout: Arc<dyn Fn(PathBuf) -> PathBuf + Send + Sync>,
     /// Every theme that can be chosen, as of the last time a surface that
     /// lists them was opened.
     ///
@@ -1183,6 +1190,7 @@ impl Workspace {
             block_menu: BlockMenuState::default(),
             panel: ThemePanelState::default(),
             changes: ChangesPanelState::default(),
+            find_checkout: Arc::new(checkout_of),
             themes: crate::theme::available(),
             unreadable_themes: Vec::new(),
             theme_before_draft: None,
@@ -2778,11 +2786,11 @@ impl Workspace {
         // so to anything outside it. Read once per opening rather than on the
         // render path, where the button would read it every frame.
         let editor = Editor::from_environment();
-        if let Some(epoch) = self
-            .changes
-            .open(self.changes_tab(), self.changes_target(), editor)
+        if let Some(directory) =
+            self.changes
+                .open(self.changes_tab(), self.changes_directory(), editor)
         {
-            self.read_changes(epoch, ctx);
+            self.look_for_checkout(directory, ctx);
         }
         ctx.notify();
     }
@@ -2799,20 +2807,13 @@ impl Workspace {
         ctx.notify();
     }
 
-    /// Where the Changes column should be looking: the top of the repository
-    /// the focused pane is in, or the pane's own directory when that is in
-    /// none — which the read then says, rather than this guessing.
-    ///
-    /// The walk up for `.git` is a handful of syscalls and no subprocess,
-    /// which is what lets it run on every move of the strip: a pane's `cd`
-    /// inside one repository is the same target, and nothing is read again.
-    fn changes_target(&self) -> Option<PathBuf> {
-        let directory = self
-            .tabs
+    /// Where the focused pane says it is: what the Changes column looks for
+    /// the checkout of. Read off the session, never off the disk.
+    fn changes_directory(&self) -> Option<PathBuf> {
+        self.tabs
             .focused_pane_id()
             .and_then(|pane| self.tabs.pane(pane))
-            .and_then(|pane| pane.session().working_directory.clone())?;
-        Some(checkout_of(directory))
+            .and_then(|pane| pane.session().working_directory.clone())
     }
 
     /// The tab the Changes column is about: the one in front, whose focused
@@ -2828,6 +2829,11 @@ impl Workspace {
     /// pane focused or closed, a shell reporting a new directory. Another
     /// tab on the same repository is a move too, because its review is its
     /// own and its comments are anchored against a read of their own.
+    ///
+    /// Only the pane's directory is compared here. Which repository that is
+    /// in is found on the background pool, by [`Self::look_for_checkout`],
+    /// and a `cd` inside the one the column shows reads nothing again once
+    /// the answer says so: see [`ChangesPanelState::follow`].
     fn follow_changes(&mut self, ctx: &mut ViewContext<Self>) {
         // Whether the column is up or not: a review is kept while the column
         // is down, and a closed tab's is one nobody can come back to.
@@ -2836,16 +2842,45 @@ impl Workspace {
         if !self.changes.open {
             return;
         }
-        let target = self.changes_target();
+        let directory = self.changes_directory();
         let tab = self.changes_tab();
-        if target == self.changes.target && tab == self.changes.tab() {
+        if directory == self.changes.directory && tab == self.changes.tab() {
             return;
         }
-        if let Some(epoch) = self.changes.retarget(tab, target) {
-            self.read_changes(epoch, ctx);
+        if let Some(directory) = self.changes.follow(tab, directory) {
+            self.look_for_checkout(directory, ctx);
         }
         self.sync_input_keys();
         ctx.notify();
+    }
+
+    /// Finds the checkout `directory` is in on the background pool, and
+    /// points the Changes column there if the focused pane is still in it.
+    ///
+    /// The walk up for `.git` was done on this thread once, on the ground
+    /// that it is a handful of syscalls and no subprocess, cheap enough for
+    /// every move of the strip. It is, on a local disk. On a network mount
+    /// whose server has gone, each of those syscalls blocks for as long as
+    /// the mount does — for good, on a hard NFS mount — and with the column
+    /// open, choosing the tab whose shell is there, or any report from that
+    /// shell, would stop the window drawing and taking keys.
+    fn look_for_checkout(&mut self, directory: PathBuf, ctx: &mut ViewContext<Self>) {
+        let find = self.find_checkout.clone();
+        let finding = ctx.background().spawn(async move {
+            let target = find(directory.clone());
+            (directory, target)
+        });
+        ctx.spawn(finding, |workspace, (directory, target), ctx| {
+            let Some(epoch) = workspace.changes.found(&directory, target) else {
+                return;
+            };
+            workspace.read_changes(epoch, ctx);
+            // Another checkout is another review, and a comment field on
+            // the last one goes with it: the keyboard goes back to the pane.
+            workspace.sync_input_keys();
+            ctx.notify();
+        })
+        .detach();
     }
 
     /// Reads the column's repository again, unless it is down or a read is
@@ -3212,13 +3247,15 @@ impl Workspace {
         overview: crate::git::changes::Overview,
         ctx: &mut ViewContext<Self>,
     ) {
-        let target = Some(overview.repository.clone());
-        let epoch = if self.changes.open {
-            self.changes.retarget(self.changes_tab(), target)
-        } else {
-            self.changes
-                .open(self.changes_tab(), target, Editor::from_environment())
-        };
+        let tab = self.changes_tab();
+        if !self.changes.open {
+            // Opened with nothing to look for: the overview in hand already
+            // says where the focused pane's checkout is.
+            self.changes.open(tab, None, Editor::from_environment());
+        }
+        let epoch = self
+            .changes
+            .show(tab, self.changes_directory(), overview.repository.clone());
         if let Some(epoch) = epoch
             && let Some(again) = self.changes.land(epoch, Ok(overview))
         {
@@ -3246,15 +3283,18 @@ impl Workspace {
                 session.working_directory = Some(directory);
             });
         }
-        let Some(target) = self.changes_target() else {
+        let Some(directory) = self.changes_directory() else {
             return;
         };
+        let target = checkout_of(directory.clone());
         let overview = match crate::git::changes::overview(&target) {
             Ok(overview) => overview,
             Err(problem) => {
                 // The picture is of the column saying so, which is what a
                 // person would see.
-                if let Some(epoch) = self.changes.open(self.changes_tab(), Some(target), None) {
+                let tab = self.changes_tab();
+                self.changes.open(tab, None, None);
+                if let Some(epoch) = self.changes.show(tab, Some(directory), target) {
                     self.changes.land(epoch, Err(problem));
                 }
                 ctx.notify();
@@ -7660,6 +7700,17 @@ impl Workspace {
         .detach();
     }
 
+    /// Finds the checkout a directory is in with `find` rather than
+    /// [`checkout_of`], for a test that has to see where the Changes column
+    /// asks, or has to hold the answer back.
+    #[cfg(test)]
+    pub(super) fn find_checkouts_with(
+        &mut self,
+        find: impl Fn(PathBuf) -> PathBuf + Send + Sync + 'static,
+    ) {
+        self.find_checkout = Arc::new(find);
+    }
+
     /// Points "Check pull request" at another program than the person's own
     /// `gh`, for a test that hands it a fake.
     #[cfg(test)]
@@ -10897,6 +10948,9 @@ fn agent_report(pane: &Pane) -> Option<Instant> {
 
 /// The top of the working tree `directory` is in, or `directory` itself when
 /// it is in none: what the Changes column looks at for a pane there.
+///
+/// Reads the disk, so it runs on the background pool: see
+/// [`Workspace::look_for_checkout`].
 fn checkout_of(directory: PathBuf) -> PathBuf {
     crate::git::discover(&directory)
         .and_then(|layout| layout.work_tree)

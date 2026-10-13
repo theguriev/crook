@@ -63,7 +63,9 @@
 //! tab rows — the fifteen seconds the branch chip already runs on. No timer
 //! of its own: the window keeps one poll chain, and this rides it. Everything
 //! is read on the background pool and lands through `ctx.spawn`; nothing
-//! git-shaped is on the render path.
+//! git-shaped is on the render path. That includes the walk up for `.git`
+//! that says which repository the focused pane is in, which is found before
+//! anything is read — see [`ChangesPanelState::follow`].
 
 mod launch;
 mod review;
@@ -347,8 +349,17 @@ pub(super) struct ChangesPanelState {
     pub(super) open: bool,
     /// Where it is looking: the top of the repository the focused pane is
     /// in, or the pane's directory when that is in none. `None` for a pane
-    /// that has not said where it is.
+    /// that has not said where it is, and until the background pool has
+    /// found where that is.
     pub(super) target: Option<PathBuf>,
+    /// Where the focused pane said it is: the question [`Self::target`] is
+    /// the answer to, kept apart from it because only the background pool
+    /// may turn the one into the other. See [`Self::follow`].
+    pub(super) directory: Option<PathBuf>,
+    /// The directories whose checkout is being looked for, so that one
+    /// already on its way is not looked for again — kept when the column
+    /// closes, because the walks are still out there.
+    looking: HashSet<PathBuf>,
     /// What was read there.
     reading: Reading,
     /// Whether a read of the overview is under way, so a refresh arriving
@@ -444,22 +455,107 @@ impl ChangesPanelState {
         self.tab
     }
 
-    /// Whether a read is under way.
+    /// Whether a read is under way, or the look for where to read that comes
+    /// before it.
     pub(super) fn is_reading(&self) -> bool {
-        self.in_flight
+        self.in_flight || (self.target.is_none() && self.directory.is_some())
     }
 
-    /// Puts the column up, looking at `target`, and answers the read to
-    /// start: `None` when there is nowhere to read.
+    /// Whether the checkout `directory` is in is still being looked for.
+    #[cfg(test)]
+    pub(super) fn is_looking_for(&self, directory: &Path) -> bool {
+        self.looking.contains(directory)
+    }
+
+    /// Puts the column up on `tab`, whose focused pane is in `directory`,
+    /// and answers the directory whose checkout the background pool has to
+    /// find before anything can be read: `None` when the pane has not said
+    /// where it is, or when that is already being looked for.
     pub(super) fn open(
         &mut self,
         tab: Option<TabId>,
-        target: Option<PathBuf>,
+        directory: Option<PathBuf>,
         editor: Option<Editor>,
-    ) -> Option<u64> {
+    ) -> Option<PathBuf> {
         self.open = true;
         self.editor = editor;
-        self.retarget(tab, target)
+        self.start_over(tab, directory)
+    }
+
+    /// The focused pane is somewhere else: in another tab, or after a `cd`.
+    /// Answers what to look for, as [`Self::open`] does.
+    ///
+    /// The column cannot know which repository `directory` is in until the
+    /// background pool has walked up from it for `.git` — a handful of
+    /// syscalls on a local disk, and on a network mount whose server has
+    /// gone, a `stat` that blocks for as long as the mount does — so what
+    /// it does meanwhile depends on what moved.
+    ///
+    /// Another tab is a move whatever its directory, because its review is
+    /// its own, and the column starts over at once rather than go on showing
+    /// the tab that was left. The same tab somewhere else is most often a
+    /// `cd` inside the checkout the column is already showing, which must
+    /// not fold every file and take away the comment being typed: what is
+    /// showing stays until [`Self::found`] says the directory is in another
+    /// checkout.
+    pub(super) fn follow(
+        &mut self,
+        tab: Option<TabId>,
+        directory: Option<PathBuf>,
+    ) -> Option<PathBuf> {
+        if tab != self.tab {
+            return self.start_over(tab, directory);
+        }
+        let Some(directory) = directory else {
+            self.start_over(tab, None);
+            return None;
+        };
+        self.directory = Some(directory.clone());
+        self.look_for(directory)
+    }
+
+    /// The checkout `directory` is in came home as `target`. Answers the
+    /// read to start: `None` when the focused pane is no longer there — the
+    /// answer is about a tab or a directory the column has left — and when
+    /// it is the checkout the column is showing, which a `cd` inside it is.
+    pub(super) fn found(&mut self, directory: &Path, target: PathBuf) -> Option<u64> {
+        self.looking.remove(directory);
+        if !self.open
+            || self.directory.as_deref() != Some(directory)
+            || self.target.as_ref() == Some(&target)
+        {
+            return None;
+        }
+        self.retarget(self.tab, Some(target))
+    }
+
+    /// Points the column at `target`, which the caller has found to be the
+    /// checkout `directory` is in, and answers the read to start.
+    pub(super) fn show(
+        &mut self,
+        tab: Option<TabId>,
+        directory: Option<PathBuf>,
+        target: PathBuf,
+    ) -> Option<u64> {
+        let epoch = self.retarget(tab, Some(target));
+        self.directory = directory;
+        epoch
+    }
+
+    /// Shows nothing for `tab` until the checkout `directory` is in is
+    /// found, and answers what to look for.
+    fn start_over(&mut self, tab: Option<TabId>, directory: Option<PathBuf>) -> Option<PathBuf> {
+        self.retarget(tab, None);
+        self.directory = directory.clone();
+        self.look_for(directory?)
+    }
+
+    /// `directory`, unless it is already being looked for: the answer on its
+    /// way is the one this would wait for. On a mount whose server has gone,
+    /// every walk is a worker of the pool that does not come back, and a
+    /// tab gone back to while the first is stuck would be one more each time.
+    fn look_for(&mut self, directory: PathBuf) -> Option<PathBuf> {
+        self.looking.insert(directory.clone()).then_some(directory)
     }
 
     /// Takes the column down, and everything it read with it: a column
@@ -467,6 +563,7 @@ impl ChangesPanelState {
     pub(super) fn close(&mut self) {
         self.open = false;
         self.target = None;
+        self.directory = None;
         self.reading = Reading::Nothing;
         self.in_flight = false;
         self.epoch = self.epoch.wrapping_add(1);
@@ -998,9 +1095,12 @@ impl ChangesPanelState {
             return Vec::new();
         }
         if self.target.is_none() {
-            return vec![Row::Message(
-                "This tab has not said where it is working yet.".to_owned(),
-            )];
+            let message = if self.directory.is_none() {
+                "This tab has not said where it is working yet."
+            } else {
+                "Reading the repository…"
+            };
+            return vec![Row::Message(message.to_owned())];
         }
         let overview = match &self.reading {
             Reading::Nothing => return vec![Row::Message("Reading the repository…".to_owned())],
