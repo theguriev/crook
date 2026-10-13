@@ -889,8 +889,8 @@ pub struct Workspace {
     panel: ThemePanelState,
     /// The Changes column: what the focused tab's agent changed.
     changes: ChangesPanelState,
-    /// How the Changes column finds the checkout a directory is in:
-    /// [`checkout_of`], everywhere but a test.
+    /// How the Changes column finds, on the background pool, the checkout
+    /// the focused pane is in: [`checkout_of`], everywhere but a test.
     ///
     /// A field for the reason [`Self::gh`] is one: a test puts a stand-in
     /// here that says which thread it was asked on, or that holds its answer
@@ -10949,8 +10949,12 @@ fn agent_report(pane: &Pane) -> Option<Instant> {
 /// The top of the working tree `directory` is in, or `directory` itself when
 /// it is in none: what the Changes column looks at for a pane there.
 ///
-/// Reads the disk, so it runs on the background pool: see
-/// [`Workspace::look_for_checkout`].
+/// Reads the disk, so following the focused pane runs it on the background
+/// pool: see [`Workspace::look_for_checkout`]. Two callers still run it on
+/// the thread that draws. The snapshot does on purpose, since it draws one
+/// frame and has to have the answer first. [`Workspace::review_pane`] does
+/// it for every agent pane of the tab on a press of Send, which stops the
+/// window for as long as a pane's mount does when its server has gone.
 fn checkout_of(directory: PathBuf) -> PathBuf {
     crate::git::discover(&directory)
         .and_then(|layout| layout.work_tree)
