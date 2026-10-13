@@ -710,6 +710,12 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.worktree_menu_chomp())
     }
 
+    /// Whether the worktree list is up, on whichever face.
+    fn worktree_menu_is_open(&self) -> bool {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.worktree_menu_is_open())
+    }
+
     /// Whether the menu is making a worktree.
     fn worktree_menu_is_creating(&self) -> bool {
         self.workspace.read(&self.app, |workspace, _| {
@@ -6338,56 +6344,81 @@ fn renaming_from_the_palette_brings_up_the_menu_the_name_is_typed_in() {
     assert!(harness.pane_takes_keys());
 }
 
-/// Runs `command` with no menu up, where the panel draws no row for the
-/// active tab, and checks it put nothing up: no menu opened as state that
-/// nothing paints, and no rename typed into a field nobody can see.
-fn assert_starts_nothing_without_a_row(harness: &mut Harness, command: &str) {
+/// Everything that puts a tab's menu up from the palette or a chord when no
+/// menu is up: the worktree list and the task creator drawn inside it, the
+/// two names typed into it, the menu itself and the panel that hangs off it.
+///
+/// The worktree pair first. They reach the menu by a path of their own, and a
+/// menu either of them left up is one the rename after it would be typed into
+/// rather than one it would have to open.
+const OPENS_A_TAB_S_MENU: [&str; 6] = [
+    "crook/worktrees/menu",
+    "crook/worktrees/new-task",
+    "crook/tabs/rename-tab",
+    "crook/tabs/rename-pane",
+    "crook/tabs/open-menu",
+    "crook/tabs/explain-status",
+];
+
+/// Runs each of those where the panel draws no row for the active tab, and
+/// checks each put nothing up: no menu opened as state that nothing paints,
+/// no worktree list inside one, no rename typed into a field nobody can see,
+/// and the keyboard left where `keeps_keys` says it was.
+fn assert_nothing_opens_without_a_row(harness: &mut Harness, keeps_keys: fn(&Harness) -> bool) {
     let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the active tab has a pane");
+    // The worktree list is about the repository a pane is in, and a pane in
+    // no directory gets none whatever the panel draws: without one the two
+    // worktree commands would pass here for the wrong reason.
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(PathBuf::from(DIRECTORY));
+    });
     let was = harness.tab_name(tab);
-    harness.run_command(command);
-    harness.frame();
-    assert_eq!(
-        harness.tab_menu_row(),
-        None,
-        "{command} opened the menu on a row nothing draws"
-    );
-    assert!(
-        !harness.a_popup_is_open(),
-        "{command} left a popup up that nothing draws"
-    );
-    assert!(
-        !harness.a_plugin_field_has_keys(),
-        "{command} gave the keyboard to a field nobody can see"
-    );
-    assert_eq!(harness.tab_name(tab), was);
-}
 
-#[test]
-fn a_rename_behind_a_hidden_panel_starts_nothing() {
-    // The column hidden, there is no row for the menu to hang off, so the
-    // menu a rename is typed in cannot be put up — and neither can the menu
-    // itself, or "Why this status" off it, which used to come up as state
-    // nothing paints and leave the shell deaf until an Escape.
-    let mut harness = Harness::seeded();
-    harness.run_command("crook/window/toggle-panel");
-    assert!(!harness.general().show_tabs_panel);
-
-    for command in [
-        "crook/tabs/rename-tab",
-        "crook/tabs/rename-pane",
-        "crook/tabs/open-menu",
-        "crook/tabs/explain-status",
-    ] {
-        assert_starts_nothing_without_a_row(&mut harness, command);
-        assert!(
-            harness.pane_takes_keys(),
-            "{command} took the keyboard from the shell"
+    for command in OPENS_A_TAB_S_MENU {
+        harness.run_command(command);
+        harness.frame();
+        assert_eq!(
+            harness.tab_menu_row(),
+            None,
+            "{command} opened the menu on a row nothing draws"
         );
+        assert!(
+            !harness.worktree_menu_is_open(),
+            "{command} opened the worktree list in a menu nothing draws"
+        );
+        assert!(
+            !harness.a_popup_is_open(),
+            "{command} left a popup up that nothing draws"
+        );
+        assert!(
+            !harness.a_plugin_field_has_keys(),
+            "{command} gave the keyboard to a field nobody can see"
+        );
+        assert!(keeps_keys(harness), "{command} moved the keyboard");
+        assert_eq!(harness.tab_name(tab), was);
     }
 }
 
 #[test]
-fn a_rename_of_a_tab_folded_into_its_group_starts_nothing() {
+fn a_tab_s_menu_does_not_open_behind_a_hidden_panel() {
+    // The column hidden, there is no row for the menu to hang off, so the
+    // menu a rename is typed in cannot be put up — and neither can the menu
+    // itself, "Why this status" off it, or the worktree list inside it, all
+    // of which used to come up as state nothing paints and leave the shell
+    // deaf until an Escape. A rename run after the list then went into the
+    // invisible menu the list had opened.
+    let mut harness = Harness::seeded();
+    harness.run_command("crook/window/toggle-panel");
+    assert!(!harness.general().show_tabs_panel);
+
+    assert_nothing_opens_without_a_row(&mut harness, Harness::pane_takes_keys);
+}
+
+#[test]
+fn a_tab_s_menu_does_not_open_on_a_tab_folded_into_its_group() {
     // A folded group draws its heading and none of its members, so the
     // active tab inside one has no row to put a menu on.
     let (mut harness, group) = Harness::grouped_panel(2);
@@ -6399,25 +6430,147 @@ fn a_rename_of_a_tab_folded_into_its_group_starts_nothing() {
     harness.dispatch_action(TabAction::ToggleGroup(group));
     harness.frame();
 
-    assert_starts_nothing_without_a_row(&mut harness, "crook/tabs/rename-tab");
-    assert!(harness.pane_takes_keys());
+    assert_nothing_opens_without_a_row(&mut harness, Harness::pane_takes_keys);
 }
 
 #[test]
-fn a_rename_of_a_tab_the_search_filtered_out_starts_nothing() {
+fn a_tab_s_menu_does_not_open_on_a_row_the_search_filtered_out() {
     // A row the query does not answer for is not built, so a menu opened on
     // it would be drawn by nothing — and the box would lose the keyboard to
-    // a field that is not on screen either.
+    // a menu, or a field, that is not on screen either.
     let mut harness = Harness::panel(2);
     harness.press_search_chord();
     harness.type_text("qxqxq");
     assert!(harness.panel_search_takes_keys());
 
-    assert_starts_nothing_without_a_row(&mut harness, "crook/tabs/rename-tab");
+    assert_nothing_opens_without_a_row(&mut harness, Harness::panel_search_takes_keys);
+}
+
+#[test]
+fn the_worktree_list_asked_for_over_a_section_brings_the_tabs_up_first() {
+    // The list and the creator are drawn inside a tab's menu, which is drawn
+    // by a row of the tab list. From the palette with the settings on screen
+    // there would be nowhere to put them, so the tabs come up first, the way
+    // "Tab menu" brings them up: asking for the list is asking to look at it.
+    for command in ["crook/worktrees/menu", "crook/worktrees/new-task"] {
+        let mut harness = Harness::seeded();
+        let pane = harness
+            .focused_pane_id()
+            .expect("the seeded tab has a pane");
+        harness.open_settings_page();
+        let settings = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.is_settings_page_open()
+            })
+        };
+        assert!(settings(&harness));
+
+        harness.run_command(command);
+        assert!(
+            !settings(&harness),
+            "{command} left the settings over the list"
+        );
+        assert_eq!(
+            harness.tab_menu_row(),
+            Some(pane),
+            "{command} did not open the menu on the row being looked at"
+        );
+        assert!(harness.worktree_menu_is_open(), "{command} opened no list");
+        let scene = harness.frame();
+        assert!(
+            tab_menu_box(&scene).is_some() && worktree_menu_box(&scene).is_some(),
+            "{command} opened a menu nothing draws"
+        );
+    }
+}
+
+#[test]
+fn finish_and_discard_behind_a_hidden_panel_ask_nothing() {
+    // The two questions about a task hang where the worktree list would,
+    // inside a tab's menu, and they reach it by the list's path rather than
+    // by the menu's own. Behind a hidden column that path used to open the
+    // menu anyway, with the question in it and nothing on screen.
+    let scratch = Scratch::new();
+    let Some((mut harness, _, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let (_, pane) = task_checkout(&mut harness, tab, &store);
+    harness.run_command("crook/window/toggle-panel");
+    assert!(!harness.general().show_tabs_panel);
+    assert_eq!(harness.focused_pane_id(), Some(pane));
+
+    for command in [
+        "crook/worktrees/finish-task",
+        "crook/worktrees/discard-task",
+    ] {
+        harness.run_command(command);
+        harness.frame();
+        assert_eq!(
+            harness.worktree_menu_finishing(),
+            None,
+            "{command} asked its question in a menu nothing draws"
+        );
+        assert_eq!(harness.tab_menu_row(), None, "{command} opened the menu");
+        assert!(!harness.a_popup_is_open(), "{command} left a popup up");
+        assert!(harness.pane_takes_keys(), "{command} took the shell's keys");
+    }
+
+    // And the same command with the column back does ask, so the refusal
+    // above was the hidden row's and not a task that could not be asked about.
+    harness.run_command("crook/window/toggle-panel");
+    harness.run_command("crook/worktrees/finish-task");
+    assert_eq!(harness.worktree_menu_finishing(), Some((false, false)));
+    assert_eq!(harness.tab_menu_row(), Some(pane));
+}
+
+#[test]
+fn a_finished_task_opens_no_menu_where_the_search_hides_the_tab_it_lands_on() {
+    // Finish closes the task's tab and says what it did on a menu it opens on
+    // a tab in the main checkout, by the list's path. With the search
+    // filtering that tab's row out, the menu came up with nothing to draw it
+    // and held the shell's keys until an Escape. The task is carried out all
+    // the same; only the report has nowhere to go, and the log has it.
+    let scratch = Scratch::new();
+    let Some((mut harness, _, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let main = harness.panes_of(tab)[0];
+    let (checkout, pane) = task_checkout(&mut harness, tab, &store);
+    harness.dispatch_workspace_action(TabMenuAction::Close.into());
+    // The task's checkout is in the store and the main one is not.
+    harness.press_search_chord();
+    harness.type_text("store");
+    harness.frame();
+    let draws_row = |harness: &Harness, pane| {
+        harness.workspace.read(&harness.app, |workspace, app| {
+            workspace.panel_draws_row(pane, app)
+        })
+    };
     assert!(
-        harness.panel_search_takes_keys(),
-        "the search box lost the keyboard"
+        draws_row(&harness, pane) && !draws_row(&harness, main),
+        "the search does not tell the task's row from the main checkout's"
     );
+
+    ask_about_the_task(&mut harness, pane, false);
+    harness.dispatch_worktree(WorktreeAction::Finish);
+    harness.wait_for("the checkout to be removed", |_| !checkout.exists());
+    harness.frame();
+
+    assert!(
+        !harness.pane_ids().contains(&pane),
+        "the task's pane is still open"
+    );
+    assert_eq!(
+        harness.tab_menu_row(),
+        None,
+        "the report opened a menu on a row nothing draws"
+    );
+    assert_eq!(
+        harness.worktree_menu_finishing(),
+        None,
+        "a task is being reported on in a menu that is not up"
+    );
+    assert!(!harness.a_popup_is_open(), "a popup nothing draws is up");
 }
 
 #[test]

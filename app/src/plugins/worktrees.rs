@@ -88,6 +88,7 @@ impl Plugin for Worktrees {
             let Some((tab, _)) = workspace.menu_target() else {
                 return;
             };
+            bring_up_the_tabs(workspace, ctx);
             workspace.handle_action(
                 &WorkspaceAction::Worktree(WorktreeAction::OpenMenu(tab)),
                 ctx,
@@ -104,6 +105,7 @@ impl Plugin for Worktrees {
             let Some((tab, _)) = workspace.menu_target() else {
                 return;
             };
+            bring_up_the_tabs(workspace, ctx);
             workspace.handle_action(
                 &WorkspaceAction::Worktree(WorktreeAction::NewTask(tab)),
                 ctx,
@@ -145,6 +147,7 @@ impl Plugin for Worktrees {
                 let Some((_, pane)) = workspace.menu_target() else {
                     return;
                 };
+                bring_up_the_tabs(workspace, ctx);
                 workspace.handle_action(
                     &WorkspaceAction::Worktree(WorktreeAction::AskFinish { pane, discard }),
                     ctx,
@@ -166,6 +169,21 @@ impl Plugin for Worktrees {
         }
 
         Ok(())
+    }
+}
+
+/// Shows the tabs when no tab's menu is up, for a command about to open one.
+///
+/// The list and the questions about a task are drawn inside a tab's menu, and
+/// that menu is drawn by a row of the tab list. Asked for from the palette or
+/// a chord with a section covering the list there would be nowhere to put
+/// them, and the workspace refuses to open them as state nothing paints — see
+/// [`Workspace::panel_draws_row`]. Somebody asking for the list is asking to
+/// look at it, which is what "Tab menu" decides too. Not when a menu is up:
+/// its entries run these same commands, and the list is already on screen.
+fn bring_up_the_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace>) {
+    if !workspace.tab_context_menu().is_open() {
+        workspace.handle_action(&WorkspaceAction::ShowSection(None), ctx);
     }
 }
 

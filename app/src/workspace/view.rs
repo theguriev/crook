@@ -4338,6 +4338,10 @@ impl Workspace {
     /// popup, so a worktree menu asked for on its own — by the entry, by the
     /// keyboard, or by `--worktree-menu` on the command line — would otherwise
     /// be state nothing paints.
+    ///
+    /// It asks nothing about the row. Its callers ask
+    /// [`panel_draws_row`](Self::panel_draws_row) first, all but the snapshot
+    /// flag's, which is told what to photograph.
     fn show_tab_context_menu(&mut self, tab: TabId, pane: PaneId, ctx: &mut ViewContext<Self>) {
         // Two popups are never up at once. See `a_popup_is_open`.
         self.close_menu();
@@ -4802,16 +4806,26 @@ impl Workspace {
     /// about the pane whose row was pressed, which under `Panes` granularity
     /// need not be the one the tab has focused.
     fn open_tab_menu_at(&mut self, tab: TabId, directory: PathBuf, ctx: &mut ViewContext<Self>) {
+        // A submenu is drawn inside the menu it hangs off, so opening this one
+        // opens that one — on the row the tab speaks through, which is its
+        // focused pane. Nothing happens to it when it is already there.
+        let row = (self.tab_context_menu.tab != Some(tab))
+            .then(|| self.tabs.get(tab).map(|tab| tab.panes().focused_id()))
+            .flatten();
+        // And nothing happens at all where the panel is not drawing that row,
+        // for the reason `open_tab_context_menu` gives: the menu, and the list
+        // inside it, would be state nothing paints, holding the keyboard from
+        // every pane. This path used to go round that check, and a rename run
+        // next found the invisible menu already up and was typed into it.
+        // Every caller asks afterwards whether the list came up.
+        if row.is_some_and(|row| !self.panel_draws_row(row, ctx)) {
+            return;
+        }
+
         // The menu on a block is never up at the same time. See
         // `a_popup_is_open`.
         self.close_block_menu(ctx);
-
-        // A submenu is drawn inside the menu it hangs off, so opening this one
-        // opens that one — on the row the tab speaks through, which is its
-        // focused pane. Nothing happens when it is already there.
-        if self.tab_context_menu.tab != Some(tab)
-            && let Some(row) = self.tabs.get(tab).map(|tab| tab.panes().focused_id())
-        {
+        if let Some(row) = row {
             self.show_tab_context_menu(tab, row, ctx);
         }
 
@@ -6549,6 +6563,11 @@ impl Workspace {
         };
 
         self.open_tab_menu_at(tab, directory.clone(), ctx);
+        // Refused where the panel draws no row for the tab, and then there is
+        // nowhere to ask.
+        if self.tab_menu.tab != Some(tab) {
+            return;
+        }
         self.tab_menu.mode = WorktreeMode::Finishing {
             discard,
             losing: false,
@@ -6752,13 +6771,19 @@ impl Workspace {
             self.apply(TabAction::ClosePane(*pane), ctx);
         }
 
-        let opening = landing.map(|tab| {
+        let opening = landing.and_then(|tab| {
             self.open_tab_menu(tab, ctx);
+            // Refused where the panel draws no row for the tab — one the
+            // search does not answer for, say — and then the task is carried
+            // out with nobody waiting, which the log says.
+            if self.tab_menu.tab != Some(tab) {
+                return None;
+            }
             self.tab_menu.mode = WorktreeMode::Finishing { discard, losing };
             self.tab_menu.finishing = Finishing::Working(super::finish::under_way(&plan, discard));
             self.start_chomping(ctx);
             ctx.notify();
-            self.tab_menu.opening
+            Some(self.tab_menu.opening)
         });
 
         let repository = plan.main().path.clone();
