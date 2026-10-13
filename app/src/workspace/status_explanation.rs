@@ -97,6 +97,11 @@ pub(super) fn lines(session: &AgentSession, now: Instant) -> Vec<String> {
             "Status: {status} — the agent's title said so {}.",
             since(at, now)
         ),
+        StatusSource::TitleAtStart(at) => format!(
+            "Status: {status} — the agent's title said {} that it was there, and no turn has \
+             started since.",
+            since(at, now)
+        ),
         StatusSource::CommandEnded(at) => format!(
             "Status: {status} — the command ended {} and took the agent's last report back.",
             since(at, now)

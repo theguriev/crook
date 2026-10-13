@@ -175,11 +175,22 @@ pub enum StatusSource {
     /// The agent said so, at this instant.
     Agent(Instant),
     /// The command the agent was ended and took its last report back, at
-    /// this instant. See `Emulator::settle_agent` in `crook_terminal`.
+    /// this instant. See `Emulator::settle_agent` in `crook_terminal` for a
+    /// hook's report, and `Workspace::take_back_a_running_title` for a
+    /// running the title said — which a cleared title takes back too, since
+    /// that is how Claude Code leaves.
     CommandEnded(Instant),
     /// The program's terminal title said so, at this instant. See
     /// [`AgentStatus::from_title`].
     Title(Instant),
+    /// The program's terminal title has said since this instant that an
+    /// agent is there and at rest, and has not yet said it is at work: the
+    /// `✳` Claude Code draws from the moment it starts, before anybody has
+    /// asked it anything. No report of idle — the idle is the one the pane
+    /// already had, and `crook pane wait --until idle` is not answered by it
+    /// — but word that an agent is in the pane, which is where the Changes
+    /// column sends a review. See `Workspace::title_reported`.
+    TitleAtStart(Instant),
 }
 
 /// The pull request a session's work belongs to.

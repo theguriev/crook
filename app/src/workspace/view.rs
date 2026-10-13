@@ -7791,6 +7791,11 @@ impl Workspace {
     /// is to running, which is an agent getting on with it and the one
     /// change nobody needs to see. Running also *takes back* the attention
     /// a stop asked for, since the stop it announced is over.
+    ///
+    /// Every status a row shows is written here, whoever said it — a hook,
+    /// the title's glyph, the shell ending a command — so this is also where
+    /// the control socket's watches hear one, and a `crook pane wait` hears
+    /// the title the way the row does. See [`Self::tell_watches_the_status`].
     fn agent_reported(
         &mut self,
         pane: PaneId,
@@ -7802,6 +7807,7 @@ impl Workspace {
     ) -> bool {
         let looking = self.looking_at() == Some(pane);
         let was = self.shown_status(pane);
+        let said = self.said(pane);
         let reported = self.update_session(pane, ctx, |session| {
             if let Some(title) = title {
                 session.derived_title = Some(title);
@@ -7817,10 +7823,48 @@ impl Workspace {
             }
         });
         self.tell_the_desktop(pane, was, ctx);
+        self.tell_watches_the_status(pane, said);
         if status == AgentStatus::Running {
             self.start_breathing(ctx);
         }
         reported
+    }
+
+    /// What a pane's agent has said so far — its status and its question —
+    /// when something on the control socket is watching, for
+    /// [`Self::tell_watches_the_status`] to tell a change from a repeat.
+    ///
+    /// `None` when nothing is: an agent reports running around every tool it
+    /// calls, and copying its question each time for nobody is waste.
+    fn said(&self, pane: PaneId) -> Option<(AgentStatus, Option<String>)> {
+        if self.watches.is_empty() {
+            return None;
+        }
+        let session = self.tabs.pane(pane)?.session();
+        Some((session.status, session.message.clone()))
+    }
+
+    /// Tells what the control socket is watching that a pane's status
+    /// changed, now that the session has taken it in. `before` is what
+    /// [`Self::said`] read before it did.
+    ///
+    /// Only a change: a stream of the same word is noise, and a wait that
+    /// was not answered by a status is not answered by it again.
+    fn tell_watches_the_status(
+        &mut self,
+        pane: PaneId,
+        before: Option<(AgentStatus, Option<String>)>,
+    ) {
+        let Some((status, message)) = before else {
+            return;
+        };
+        let Some(session) = self.tabs.pane(pane).map(Pane::session) else {
+            return;
+        };
+        if session.status == status && session.message == message {
+            return;
+        }
+        self.watches.heard(pane, session, watch::Heard::Status);
     }
 
     /// Takes the status a program's title glyph said, for a pane whose agent
@@ -7831,22 +7875,71 @@ impl Workspace {
     /// listening only to them. And only a change is a report — the glyph
     /// turns several times a second while the agent works, and each turn
     /// is the same running.
+    ///
+    /// Idle only ends a running the title said. Claude Code draws `✳` from
+    /// the moment it starts, before anybody has asked it anything, and that
+    /// is the idle a new tab starts in rather than a turn that ended — the
+    /// one a lead's `crook pane wait --until idle` must not be answered by.
+    /// A running taken back when its command ended is not the title's any
+    /// more either, so the `✳` of the next agent in the same pane waits for
+    /// its own `◐` too.
+    ///
+    /// Such a `✳` still says that an agent has come, though, and the
+    /// Changes column needs to know where one is to send it a review — most
+    /// often before its first turn. So it is kept, as
+    /// [`StatusSource::TitleAtStart`]: the status stays the idle the pane
+    /// had, and nothing that waits for idle takes it for one.
     fn title_reported(&mut self, pane: PaneId, status: AgentStatus, ctx: &mut ViewContext<Self>) {
         let Some(open) = self.tabs.pane(pane) else {
             return;
         };
         let session = open.session();
-        if matches!(session.source, StatusSource::Agent(_))
-            || (matches!(session.source, StatusSource::Title(_)) && session.status == status)
-        {
+        let titled_running = matches!(session.source, StatusSource::Title(_))
+            && session.status == AgentStatus::Running;
+        let now = Instant::now();
+        let source = match (status, session.source) {
+            (_, StatusSource::Agent(_)) => return,
+            (AgentStatus::Running, _) if titled_running => return,
+            (AgentStatus::Running, _) => StatusSource::Title(now),
+            _ if titled_running => StatusSource::Title(now),
+            (_, StatusSource::NoReport | StatusSource::CommandEnded(_)) => {
+                StatusSource::TitleAtStart(now)
+            }
+            _ => return,
+        };
+        self.agent_reported(pane, status, None, None, source, ctx);
+    }
+
+    /// Takes back a running the title said, now that the pane has said the
+    /// program behind the title is no longer at work.
+    ///
+    /// A program that sets its glyph says nothing more when it is killed,
+    /// crashes or is suspended mid-turn, so the running it last drew would
+    /// otherwise stay on the row for good: breathing, repainting, and asking
+    /// about a working agent when the tab is closed. What says it has gone
+    /// is the pane: the shell ending the command, the pane's command going
+    /// back to a prompt, the first prompt of a shell whose startup files ran
+    /// it, or the title being cleared — which Claude Code does on its way
+    /// out, and which is the only word a shell over `ssh` passes on. The
+    /// status goes back to idle as the shell's `D` takes back a hook's
+    /// report, and is said to have come from there.
+    ///
+    /// Only a running, and only the title's: a hook's report has the
+    /// emulator's own settle, and an idle has nothing to take back.
+    fn take_back_a_running_title(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        let titled_running = self.tabs.pane(pane).is_some_and(|open| {
+            matches!(open.session().source, StatusSource::Title(_))
+                && open.session().status == AgentStatus::Running
+        });
+        if !titled_running {
             return;
         }
         self.agent_reported(
             pane,
-            status,
+            AgentStatus::Idle,
             None,
             None,
-            StatusSource::Title(Instant::now()),
+            StatusSource::CommandEnded(Instant::now()),
             ctx,
         );
     }
@@ -8028,13 +8121,13 @@ impl Workspace {
     /// at.
     ///
     /// Whatever is watched from the control socket is told here too, after
-    /// the session has taken it in — see [`Self::tell_watches`].
+    /// the session has taken it in — see [`Self::tell_watches`], and
+    /// [`Self::agent_reported`] for a status.
     pub(crate) fn apply_terminal_update(
         &mut self,
         update: &TerminalUpdate,
         ctx: &mut ViewContext<Self>,
     ) {
-        let said = self.agent_said(update);
         let reported = match update {
             // The one update that is about pixels, and the gate that keeps a
             // tab nobody is looking at from rebuilding the window every time
@@ -8048,6 +8141,7 @@ impl Workspace {
                 self.tabs.pane(*pane).is_some()
             }
             TerminalUpdate::Title(pane, title) => {
+                let cleared = title.is_none();
                 let status = title.as_deref().and_then(AgentStatus::from_title);
                 let title = match status {
                     Some((_, name)) => Some(name.to_owned()).filter(|name| !name.is_empty()),
@@ -8058,6 +8152,8 @@ impl Workspace {
                     self.update_session(*pane, ctx, |session| session.derived_title = title);
                 if let Some(status) = status {
                     self.title_reported(*pane, status, ctx);
+                } else if cleared {
+                    self.take_back_a_running_title(*pane, ctx);
                 }
                 titled
             }
@@ -8090,6 +8186,8 @@ impl Workspace {
                 // it was sent, or the person did something else first.
                 if starts {
                     self.resume_offers.remove(pane);
+                } else {
+                    self.take_back_a_running_title(*pane, ctx);
                 }
                 // The agent a pane runs is what the next window offers back,
                 // and every Crook update is a restart: an agent that started
@@ -8134,6 +8232,10 @@ impl Workspace {
                 if *ran {
                     self.spend_restored_agent(*pane, ctx);
                 }
+                // Before the plugins hear it, as the emulator settles a hook's
+                // report before it hands the end over: the row is idle by the
+                // time anything is told the command ended.
+                self.take_back_a_running_title(*pane, ctx);
                 self.command_finished(*pane, *exit, *took, ctx);
                 self.tell_the_desktop_a_command_ended(*pane, *exit, *took, ctx);
                 true
@@ -8173,22 +8275,7 @@ impl Workspace {
             ),
             TerminalUpdate::Prompted(pane) => {
                 self.submit_first_line(*pane, ctx);
-                // A title that said running is never taken back by the agent
-                // that set it when it exits mid-turn, so the prompt it exits
-                // to does, as the shell's `D` does for a hook's report.
-                if self.tabs.pane(*pane).is_some_and(|open| {
-                    matches!(open.session().source, StatusSource::Title(_))
-                        && open.session().status == AgentStatus::Running
-                }) {
-                    self.agent_reported(
-                        *pane,
-                        AgentStatus::Idle,
-                        None,
-                        None,
-                        StatusSource::CommandEnded(Instant::now()),
-                        ctx,
-                    );
-                }
+                self.take_back_a_running_title(*pane, ctx);
                 self.tabs.pane(*pane).is_some()
             }
             TerminalUpdate::Notification { pane, title, body } => {
@@ -8204,51 +8291,23 @@ impl Workspace {
             // thread hearing it. Nothing to write it into, and nothing wrong.
             log::debug!("a terminal reported {update:?} for a pane that has gone");
         }
-        self.tell_watches(update, said);
+        self.tell_watches(update);
     }
 
-    /// What a pane's agent had said before `update`, when `update` is a report
-    /// that could change it and something is watching.
-    fn agent_said(&self, update: &TerminalUpdate) -> Option<(AgentStatus, Option<String>)> {
-        if self.watches.is_empty() {
-            return None;
-        }
-        let (TerminalUpdate::Agent { pane, .. } | TerminalUpdate::AgentSettled(pane)) = update
-        else {
-            return None;
-        };
-        let session = self.tabs.pane(*pane)?.session();
-        Some((session.status, session.message.clone()))
-    }
-
-    /// Tells what the control socket is watching about `update`, now that the
-    /// session has taken it in.
+    /// Tells what the control socket is watching about the command in
+    /// `update`, now that the session has taken it in.
     ///
-    /// A status is told only when it changed — an agent reports `running`
-    /// around every tool it calls, and a stream of the same word is noise —
-    /// and `before` is what it was. A command starting and a command finishing
-    /// are told as they come. A pane closing is not here: a pane closes by
-    /// more roads than its shell ending, and every one of them comes through
-    /// [`Self::settle`].
-    fn tell_watches(
-        &mut self,
-        update: &TerminalUpdate,
-        before: Option<(AgentStatus, Option<String>)>,
-    ) {
+    /// A command starting and a command finishing are told as they come. A
+    /// status is not here: it changes by more roads than one update, a
+    /// title's glyph and the end of a command among them, and every one of
+    /// them comes through [`Self::agent_reported`]. Nor is a pane closing: a
+    /// pane closes by more roads than its shell ending, and every one of
+    /// them comes through [`Self::settle`].
+    fn tell_watches(&mut self, update: &TerminalUpdate) {
         if self.watches.is_empty() {
             return;
         }
         let (pane, heard) = match update {
-            TerminalUpdate::Agent { pane, .. } | TerminalUpdate::AgentSettled(pane) => {
-                let Some(session) = self.tabs.pane(*pane).map(Pane::session) else {
-                    return;
-                };
-                let now = (session.status, session.message.clone());
-                if before.as_ref() == Some(&now) {
-                    return;
-                }
-                (*pane, watch::Heard::Status)
-            }
             TerminalUpdate::Running(pane, Some(command)) => (*pane, watch::Heard::Started(command)),
             TerminalUpdate::CommandFinished {
                 pane,
@@ -10825,10 +10884,13 @@ pub(super) fn a_shell_is_listening(
 
 /// When the agent in `pane` last reported, if the pane's status came from
 /// one — rather than from nothing, or from the shell ending the command a
-/// report came from.
+/// report came from. The title an agent starts with counts: it says no
+/// status, but it is the agent saying it is there.
 fn agent_report(pane: &Pane) -> Option<Instant> {
     match pane.session().source {
-        StatusSource::Agent(at) | StatusSource::Title(at) => Some(at),
+        StatusSource::Agent(at) | StatusSource::Title(at) | StatusSource::TitleAtStart(at) => {
+            Some(at)
+        }
         StatusSource::NoReport | StatusSource::CommandEnded(_) => None,
     }
 }

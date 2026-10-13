@@ -517,11 +517,17 @@ impl Emulator {
     /// cut by the OSC 133 marks in it: the watcher runs first and stops on a
     /// mark, the grid is advanced only as far as the watcher got, and the mark
     /// is then applied while the cursor still stands where the shell left it.
-    /// Feeding the whole chunk first and looking for marks afterwards — which
-    /// is all a title needs — would put every boundary wherever the end of the
-    /// chunk happened to land, and a mark split across two calls to this method
-    /// would land nowhere at all. `vte` keeps the state that spans the split, so
-    /// a mark arriving one byte at a time works exactly as one arriving whole.
+    /// Feeding the whole chunk first and looking for marks afterwards would put
+    /// every boundary wherever the end of the chunk happened to land, and a
+    /// mark split across two calls to this method would land nowhere at all.
+    /// `vte` keeps the state that spans the split, so a mark arriving one byte
+    /// at a time works exactly as one arriving whole. What the grid reported
+    /// in a piece — a title, a bell — goes out before the mark that ends it,
+    /// so a title or a bell and a mark written after it come out in the order
+    /// they were written however the pty cut the stream. That is the whole of
+    /// the promise: a title and an OSC 6340 report or a notification in one
+    /// read can still come out in another order than two reads give them,
+    /// since the watcher keeps no note of where in a piece each one sat.
     ///
     /// The one case this cannot place exactly is a mark inside a synchronized
     /// update: `vte` buffers those bytes and applies them when the update
@@ -537,6 +543,7 @@ impl Emulator {
         }
 
         let view = self.view();
+        let mut exited = None;
         let mut rest = bytes;
         while !rest.is_empty() {
             let consumed = self
@@ -589,6 +596,15 @@ impl Emulator {
                 // sees. Applied after the loop, it would file `pwd` after a
                 // `cd` under the directory the `cd` left.
                 self.apply_working_directory();
+                // And what the grid itself reported in the piece — a title
+                // above all — for the same reason again: it was written before
+                // the mark, and goes out ahead of what the mark settles. Left
+                // to `drain`, a program's last title and the shell's `D` after
+                // it came out the other way round whenever one read held both,
+                // and the workspace, which takes back a running the title said
+                // when the command ends, heard the title say running again for
+                // a program that had gone and would say nothing more.
+                exited = self.hand_over_term_events().or(exited);
                 self.settle_agent(mark);
                 let finished = self.blocks.mark(
                     mark,
@@ -613,6 +629,9 @@ impl Emulator {
         self.keep_view(view);
         self.dirty = true;
         self.drain();
+        if let Some(exit) = exited {
+            self.child_exited(exit);
+        }
     }
 
     /// Puts a picture at the cursor, in the open block, and moves the cursor
@@ -1066,6 +1085,42 @@ impl Emulator {
 
     /// Translates everything `Term` reported during the last operation.
     fn drain(&mut self) {
+        let exited = self.hand_over_term_events();
+
+        if let Some(serial) = self.osc_watcher.completions.take() {
+            self.events.push(TerminalEvent::Completions(serial));
+        }
+
+        // A mirror's stream is answered by the emulator it mirrors. Here and
+        // not at the end of a mirrored feed, because this is also where a
+        // synchronized update that a snapshot let go gets its answers.
+        if self.mirrored {
+            self.replies.clear();
+        }
+
+        self.apply_reports();
+        if let Some(url) = self.osc_watcher.pull_request.take() {
+            self.events.push(TerminalEvent::PullRequest(url));
+        }
+        self.apply_working_directory();
+
+        // Last, because it closes the open block: a working directory reported
+        // on the way out belongs to the block that is still open.
+        if let Some(exit) = exited {
+            self.child_exited(exit);
+        }
+    }
+
+    /// Translates what `Term` has reported since this was last called, in
+    /// the order it reported it: [`Self::drain`] after every operation, and
+    /// [`Self::advance`] before each mark too, ahead of what the mark settles.
+    ///
+    /// A child's exit is returned rather than applied: it closes the open
+    /// block, which is the last thing done with a feed, so the caller applies
+    /// it once everything else is in. `Term` itself never reports one — the
+    /// exit comes from [`crate::Terminal::try_wait`] — so this only keeps the
+    /// arm where it always was.
+    fn hand_over_term_events(&mut self) -> Option<ChildExit> {
         let mut exited = None;
         for event in self.proxy.take() {
             match event {
@@ -1104,29 +1159,7 @@ impl Emulator {
                 | Event::Wakeup => {}
             }
         }
-
-        if let Some(serial) = self.osc_watcher.completions.take() {
-            self.events.push(TerminalEvent::Completions(serial));
-        }
-
-        // A mirror's stream is answered by the emulator it mirrors. Here and
-        // not at the end of a mirrored feed, because this is also where a
-        // synchronized update that a snapshot let go gets its answers.
-        if self.mirrored {
-            self.replies.clear();
-        }
-
-        self.apply_reports();
-        if let Some(url) = self.osc_watcher.pull_request.take() {
-            self.events.push(TerminalEvent::PullRequest(url));
-        }
-        self.apply_working_directory();
-
-        // Last, because it closes the open block: a working directory reported
-        // on the way out belongs to the block that is still open.
-        if let Some(exit) = exited {
-            self.child_exited(exit);
-        }
+        exited
     }
 
     /// Hands over the pending agent report and notification, in the order

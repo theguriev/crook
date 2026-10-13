@@ -2198,6 +2198,14 @@ mod socket {
             self.update(|workspace, ctx| workspace.apply_terminal_update(&update, ctx));
         }
 
+        /// What a pane's program set its terminal title to, through the call
+        /// the terminal model's subscription makes: how Claude Code with no
+        /// hooks says what it is doing.
+        fn titled(&mut self, pane: PaneId, title: &str) {
+            let update = TerminalUpdate::Title(pane, Some(title.to_owned()));
+            self.update(|workspace, ctx| workspace.apply_terminal_update(&update, ctx));
+        }
+
         /// How many waits the window holds that have not got there.
         fn waiting(&self) -> usize {
             self.read(|workspace, _| workspace.watches().waiting())
@@ -3013,6 +3021,136 @@ mod socket {
             .ask(wait(&token, worker, Until::Idle, 0, false))
             .expect("answered");
         assert_eq!((printed.text.as_str(), printed.failure), ("idle", None));
+    }
+
+    /// Claude Code with no hooks draws `✳` from the moment it starts. A lead
+    /// that asks straight after opening it must not read that as the work
+    /// being done — nor, in a pane whose last agent's running was taken back
+    /// when it left, the `✳` of the next one.
+    #[test]
+    fn a_wait_for_idle_is_not_answered_by_the_title_claude_starts_with() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["claude"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+        let idle_now = |served: &mut Served| {
+            let printed = served
+                .ask(wait(&token, worker, Until::Idle, 0, false))
+                .expect("answered");
+            assert_eq!(printed.text, "idle");
+            printed.failure.is_none()
+        };
+
+        served.titled(worker, "\u{2733} Claude Code");
+        assert!(
+            !idle_now(&mut served),
+            "the title it starts with answered a wait for idle"
+        );
+
+        served.titled(worker, "\u{25d0} Fix the flaky test");
+        served.update(|workspace, ctx| {
+            workspace.apply_terminal_update(&TerminalUpdate::Title(worker, None), ctx);
+        });
+        assert!(idle_now(&mut served), "the agent that left is not idle");
+        served.titled(worker, "\u{2733} Claude Code");
+        assert!(
+            !idle_now(&mut served),
+            "the next agent's startup title answered a wait for idle"
+        );
+    }
+
+    /// The title is the only word a worker with no hooks says, and a wait
+    /// registered before it says it hears it as it comes, rather than when
+    /// the wait runs out.
+    #[test]
+    fn a_wait_for_idle_hears_the_title_say_the_turn_is_over() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["claude"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+
+        // Long, so that the answer the time running out gives — idle by
+        // then too — cannot pass for the one the title should give at once.
+        let asking = served.start(wait(&token, worker, Until::Idle, 120, false));
+        served.pump_until("the wait was never registered", |served| {
+            served.waiting() == 1
+        });
+        served.titled(worker, "\u{2733} Claude Code");
+        served.titled(worker, "\u{25d0} Fix the flaky test");
+        served.titled(worker, "\u{25d1} Fix the flaky test");
+        assert_eq!(served.waiting(), 1, "answered before the turn was over");
+
+        served.titled(worker, "\u{2733} Fix the flaky test");
+        assert_eq!(served.waiting(), 0, "not answered when the title said so");
+        let printed = served.finish(asking).expect("answered");
+        assert_eq!((printed.text.as_str(), printed.failure), ("idle", None));
+    }
+
+    /// A status the title says is a status like any other on the stream, and
+    /// so is the idle the end of its command takes it back to.
+    #[test]
+    fn a_stream_carries_what_the_title_says_and_the_end_that_takes_it_back() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["claude"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+
+        let following = served.start(follow(Some(&token), Some(worker)));
+        served.pump_until("the stream never started", |served| served.following() == 1);
+        served.titled(worker, "\u{2733} Claude Code");
+        served.titled(worker, "\u{25d0} Fix the flaky test");
+        served.titled(worker, "\u{25d1} Fix the flaky test");
+        served.titled(worker, "\u{2733} Fix the flaky test");
+        served.titled(worker, "\u{25d2} Fix the flaky test");
+        // Killed mid-turn, in the order the model hands it over: what the
+        // pane runs, read off the snapshot, and then the shell's end.
+        served.update(|workspace, ctx| {
+            workspace.apply_terminal_update(&TerminalUpdate::Running(worker, None), ctx);
+            workspace.apply_terminal_update(
+                &TerminalUpdate::CommandFinished {
+                    pane: worker,
+                    command: Some("claude".to_owned()),
+                    exit: Some(137),
+                    took: None,
+                    ran: true,
+                },
+                ctx,
+            );
+            workspace.apply(TabAction::ClosePane(worker), ctx);
+        });
+
+        let events = served.finish(following).expect("followed until it closed");
+        let pane_id = opened.pane_id;
+        let status = |status: &str| PaneEvent::Status {
+            pane_id,
+            status: status.to_owned(),
+            message: None,
+        };
+        assert_eq!(
+            events,
+            vec![
+                status("running"),
+                status("idle"),
+                status("running"),
+                status("idle"),
+                PaneEvent::Finished {
+                    pane_id,
+                    command: Some("claude".to_owned()),
+                    exit: Some(137),
+                    duration_ms: None,
+                },
+                PaneEvent::Closed { pane_id },
+            ]
+        );
     }
 
     #[test]
@@ -3935,6 +4073,46 @@ mod socket {
         assert_eq!(*pane_id, lead.as_u64());
         assert_eq!(command.as_deref(), Some("true"), "{events:?}");
         assert_eq!(*exit, Some(0));
+    }
+
+    /// The whole of it against a real shell: a worker with no hooks, which
+    /// says it is running only in its title, is suspended mid-turn, and the
+    /// lead's wait hears the shell's end of the command take the running
+    /// back — the title itself never says another word.
+    #[test]
+    fn a_wait_for_idle_hears_a_worker_with_no_hooks_suspended_mid_turn() {
+        let Some(mut served) = marked_bash() else {
+            return;
+        };
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(
+                Some(token.clone()),
+                new_tab(&[
+                    "sh",
+                    "-c",
+                    "printf '\\033]0;\\342\\227\\220 %s\\007' 'Fix the flaky test'; \
+                     exec sleep 600",
+                ]),
+            )
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+        served.shell.open();
+        served.pump_until("the worker's title never said running", |served| {
+            served.session(worker, |session| session.status == AgentStatus::Running)
+        });
+
+        let asking = served.start(wait(&token, worker, Until::Idle, 120, false));
+        served.pump_until("the wait was never registered", |served| {
+            served.waiting() == 1
+        });
+        served.update(|workspace, ctx| workspace.type_into(worker, "\u{1a}", ctx));
+        served.pump_until("the suspend never answered the wait", |served| {
+            served.waiting() == 0
+        });
+        let printed = served.finish(asking).expect("answered");
+        assert_eq!((printed.text.as_str(), printed.failure), ("idle", None));
     }
 
     #[test]
