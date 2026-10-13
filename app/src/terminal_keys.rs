@@ -226,15 +226,23 @@ fn typed(keystroke: &Keystroke, chars: &str, origin: &KeyOrigin, alt: Alt) -> Op
     }
 
     // Option as Meta is Meta on the key the layout prints, which the name is
-    // not always. It is what Option made of the key when that was ASCII, `{`
-    // for German Option-8, and otherwise the US key in the same place, which
-    // puts Meta-Y where a German keyboard says Z. The layout's own character
-    // only when it is ASCII, for the reason the name falls back at all: Meta on
-    // a Cyrillic letter is no key any program binds, while Meta-T on the key
-    // where a US keyboard has its T is one readline does.
+    // not always. A Mac names an Option press by what Option made of the key
+    // when that was ASCII, `{` for German Option-8, and otherwise by the US key
+    // in the same place, which puts Meta-Y where a German keyboard says Z. So
+    // the layout's own character is sent instead, but only when it is ASCII,
+    // for the reason the name falls back at all: Meta on a Cyrillic letter is
+    // no key any program binds, while Meta-T on the key where a US keyboard has
+    // its T is one readline does.
+    //
+    // Except on the number row, which a digit for a name says the press was
+    // on. Meta-1 to Meta-9 are tmux's, irssi's and weechat's windows, and on a
+    // French keyboard the digits are the row's shifted half, `&` and `"` and
+    // `'` unshifted, which the layout's character cannot give back because it
+    // ignores Shift. So the row keeps its digits, as it always had them.
     if matches!(alt, Alt::Option(_))
         && modifiers.alt
         && !modifiers.ctrl
+        && !single(&keystroke.key).is_some_and(|name| name.is_ascii_digit())
         && let Some(character) = single(&origin.unmodified).filter(char::is_ascii_graphic)
     {
         return Some(Key::Char(character));
@@ -562,6 +570,54 @@ mod tests {
         assert_eq!(
             bytes(&keystroke("t", option()), "†", &under("е", true), both),
             Some(b"\x1bt".to_vec())
+        );
+        // Punctuation the layout prints is Meta on that too. Dvorak has `.`
+        // where a US keyboard has E, and Meta-. is readline's last argument,
+        // where the name the window gives the press would make it Meta-E.
+        assert_eq!(
+            bytes(&keystroke("e", option()), "≥", &under(".", true), both),
+            Some(b"\x1b.".to_vec())
+        );
+    }
+
+    #[test]
+    fn option_as_meta_on_the_number_row_is_its_digit() {
+        // A French keyboard's number row prints `&` `"` `'` and the rest, and
+        // its digits are the shifted half, which the key's own character
+        // cannot say because it ignores Shift. What Option makes of these keys
+        // is outside ASCII, so the window names each by the US digit in the
+        // same place, and that digit is Meta-1 to Meta-9 to tmux, irssi and
+        // weechat, with Shift or without, by default or with both Options Meta.
+        for setting in [OptionAsMeta::Auto, OptionAsMeta::Both] {
+            for (name, modifiers, typed, unmodified) in [
+                ("1", option(), "\u{f8ff}", "&"),
+                ("3", option(), "“", "\""),
+                ("3", option_shift(), "”", "\""),
+                ("4", option(), "‘", "'"),
+                ("8", option(), "¡", "!"),
+            ] {
+                assert_eq!(
+                    bytes(
+                        &keystroke(name, modifiers),
+                        typed,
+                        &under(unmodified, true),
+                        Alt::Option(setting)
+                    ),
+                    Some(format!("\x1b{name}").into_bytes()),
+                    "Option on the {unmodified} key under {setting:?}"
+                );
+            }
+        }
+        // And a US keyboard's row, where the key's character is the digit
+        // already, is unchanged by any of it.
+        assert_eq!(
+            bytes(
+                &keystroke("1", option()),
+                "¡",
+                &under("1", true),
+                Alt::Option(OptionAsMeta::Both)
+            ),
+            Some(b"\x1b1".to_vec())
         );
     }
 
