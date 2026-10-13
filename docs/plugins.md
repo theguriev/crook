@@ -131,7 +131,11 @@ description of something that was never built.
     field has moved onto it, so it now goes out with `crook/worktrees` when that is switched
     off, even though the popup that draws it has not moved yet. `crook/tabs` renames a tab and
     a pane through one of its own, and nothing about renaming is in the menu's shell — it
-    draws the field, and that is the whole of its involvement.
+    draws the field, and that is the whole of its involvement. Its Enter and Escape are claimed
+    with `Host::claim_surface_inside`, a surface that says which popup it is drawn in: the
+    workspace asks on every `sync_input_keys` whether that popup is still up, so a menu closed
+    by a press outside it, by the question a close asks or by its tab going ends the rename,
+    rather than leaving the shell under it deaf to everything but the next Enter.
   - The menu is thirteen entries from three plugins across seven bands — `crook/changes` puts
     its "Show changes" among the copies — and one of them is not a line
     of text: the colour swatches are a row of controls the shell offers and the plugin fills,

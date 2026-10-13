@@ -80,6 +80,20 @@
 //! about renaming is in the menu's shell — it draws the field, and that is the
 //! whole of its involvement.
 //!
+//! **A rename lives exactly as long as the menu it is typed in.** The field is
+//! a row of that menu and has nowhere else to be drawn, so the menu going is
+//! the rename being given up, by whatever path it went. Escape and Enter end
+//! it here; everything else that closes the menu — a press outside it, the
+//! question a close asks, a section covering the list, its tab closing — is
+//! the workspace's, and a rename that waited to be told by each of them used
+//! to outlive the ones that did not tell it: the shell under the menu took no
+//! letters, and the next Enter gave the half-typed name to whatever tab was
+//! active. So the surface is claimed with
+//! [`claim_surface_inside`](crate::plugin::Host::claim_surface_inside), which
+//! asks on every `sync_input_keys` whether that menu is still up, and the
+//! field's claim asks the same question; neither has a path to be forgotten
+//! by.
+//!
 //! The state is a `Cell` on an `Rc` the contributions and the handlers share,
 //! which is how a native plugin owns anything: `build` runs before the
 //! workspace exists, so a plugin's state cannot live in the workspace and its
@@ -275,10 +289,17 @@ const RENAME_PLACEHOLDER: &str = "name";
 /// with nothing being renamed would go on eating Escape from the menu, and one
 /// left down would leave Enter to be typed into a shell nobody can see.
 /// Setting them apart is a bug waiting for the one path that forgets.
+///
+/// The menu it is typed in is kept here for the same reason. Which menu is up
+/// is the workspace's to say, and a rename that did not know which one it
+/// belonged to could only be told when that one closed — by every path that
+/// closes it, which is the list nobody keeps.
 #[derive(Default)]
 struct Rename {
     /// What is being renamed, if anything.
     what: Cell<Option<Renaming>>,
+    /// The menu it is being typed in: the tab and row that menu was opened on.
+    menu: Cell<Option<(TabId, PaneId)>>,
     /// The name the field opened with, which an Enter that changed nothing
     /// hands back unchanged.
     opened: RefCell<String>,
@@ -287,9 +308,10 @@ struct Rename {
 }
 
 impl Rename {
-    /// Starts one, with the field showing `opened`.
-    fn begin(&self, what: Renaming, opened: String) {
+    /// Starts one in `menu`, with the field showing `opened`.
+    fn begin(&self, what: Renaming, menu: (TabId, PaneId), opened: String) {
         self.what.set(Some(what));
+        self.menu.set(Some(menu));
         self.opened.replace(opened);
         self.raise();
     }
@@ -297,6 +319,7 @@ impl Rename {
     /// Ends one, and says what it was about and what the field opened with.
     fn end(&self) -> Option<(Renaming, String)> {
         let was = self.what.take();
+        self.menu.take();
         let opened = self.opened.take();
         self.raise();
         was.map(|what| (what, opened))
@@ -305,6 +328,18 @@ impl Rename {
     /// What is being renamed, if anything.
     fn what(&self) -> Option<Renaming> {
         self.what.get()
+    }
+
+    /// Whether one is being typed and the menu it is typed in is still the
+    /// one that is up.
+    ///
+    /// The same menu rather than any menu: one put up on another row without
+    /// this one closing first would otherwise draw this field, and hand what
+    /// was typed for one tab to the next.
+    fn is_in_its_menu(&self, workspace: &Workspace) -> bool {
+        self.menu
+            .get()
+            .is_some_and(|menu| open_menu(workspace) == Some(menu))
     }
 
     /// Puts the surface's flag where the answer is.
@@ -335,6 +370,19 @@ impl Tabs {
     pub fn new() -> Self {
         Self::default()
     }
+}
+
+/// The tab's menu that is up, as the tab and row it was opened on.
+///
+/// Not [`Workspace::menu_target`] alone, which answers with the active tab
+/// when no menu is up — the right thing for a command to act on, and no menu
+/// at all to type a name in.
+fn open_menu(workspace: &Workspace) -> Option<(TabId, PaneId)> {
+    workspace
+        .tab_context_menu()
+        .is_open()
+        .then(|| workspace.menu_target())
+        .flatten()
 }
 
 /// What the thing a rename is about is called right now.
@@ -670,7 +718,7 @@ impl Plugin for Tabs {
         // be a second place the same answer could be kept.
         let field = host.claim_field("rename", {
             let rename = self.rename.clone();
-            move |workspace| rename.what().is_some() && workspace.tab_context_menu().is_open()
+            move |workspace| rename.is_in_its_menu(workspace)
         });
 
         for (name, title, what) in [
@@ -680,6 +728,23 @@ impl Plugin for Tabs {
             let rename = self.rename.clone();
             let field = field.clone();
             host.register_command(action(name), title, move |workspace, ctx| {
+                let Some((tab, pane)) = workspace.menu_target() else {
+                    return;
+                };
+                // The field is a row of the menu and has nowhere else to be
+                // drawn, so from the palette or a chord the menu comes up
+                // first, on the row being looked at — the way "Why this
+                // status" brings it up. A rename started with no menu round
+                // it took the keyboard into a field nobody could see.
+                if !workspace.tab_context_menu().is_open() {
+                    workspace.handle_action(&WorkspaceAction::ShowSection(None), ctx);
+                    workspace.handle_action(&TabMenuAction::Open { tab, pane }.into(), ctx);
+                }
+                // Refused where the panel is not drawing that row, and then
+                // there is nothing to type in.
+                let Some(menu) = open_menu(workspace) else {
+                    return;
+                };
                 let Some(current) = current_name(workspace, what) else {
                     return;
                 };
@@ -691,7 +756,7 @@ impl Plugin for Tabs {
                     editor.set_text(&current);
                     editor.select_all();
                 });
-                rename.begin(what, current);
+                rename.begin(what, menu, current);
                 workspace.sync_input_keys();
                 ctx.notify();
             });
@@ -746,17 +811,32 @@ impl Plugin for Tabs {
 
         // Enter and Escape, while a rename is being typed. A surface rather
         // than bindings, because these two keys belong to whatever is in front
-        // of a person and this is only in front of them sometimes.
-        let showing = host.claim_surface(|keystroke| {
-            if !keystroke.modifiers.is_empty() {
-                return None;
-            }
-            match keystroke.key.as_str() {
-                "enter" => Some(action("commit-rename")),
-                "escape" => Some(action("cancel-rename")),
-                _ => None,
-            }
-        });
+        // of a person and this is only in front of them sometimes. Inside the
+        // menu, because that is where the field is: the menu closing by any
+        // path but these two keys ends the rename, rather than leaving them
+        // claimed for a field nobody can see.
+        let showing = host.claim_surface_inside(
+            |keystroke| {
+                if !keystroke.modifiers.is_empty() {
+                    return None;
+                }
+                match keystroke.key.as_str() {
+                    "enter" => Some(action("commit-rename")),
+                    "escape" => Some(action("cancel-rename")),
+                    _ => None,
+                }
+            },
+            {
+                let rename = self.rename.clone();
+                move |workspace| rename.is_in_its_menu(workspace)
+            },
+            {
+                let rename = self.rename.clone();
+                move || {
+                    rename.end();
+                }
+            },
+        );
         *self.rename.surface.borrow_mut() = Some(showing);
 
         // Warp's grouping, band for band. Band 0: whether it stays put.

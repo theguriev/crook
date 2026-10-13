@@ -9843,6 +9843,11 @@ impl Workspace {
     /// Reachable from a plugin, because a plugin's surface going up or down is
     /// one of the things that moves the focus and nothing else would say so.
     pub fn sync_input_keys(&self) {
+        // First, because everything below asks whether a surface is up, and a
+        // plugin's surface drawn inside a popup that has closed is not —
+        // whatever its plugin last said, and whichever path closed the popup.
+        // See `Host::claim_surface_inside`.
+        self.host.take_strays_down(self);
         // The menu is modal and the Themes panel owns the arrow keys, so
         // neither leaves the keyboard with a pane.
         // A plugin's surface counts exactly as an open menu does: while a

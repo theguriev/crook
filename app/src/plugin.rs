@@ -183,6 +183,16 @@ impl Showing {
 /// it is up, and how to take it down. See [`Host::claim_panel`].
 type Panel = (PluginId, Showing, Rc<dyn Fn()>);
 
+/// One surface drawn inside a popup the workspace owns: whose it is, whether
+/// it is up, whether the popup it is drawn in still is, and how to take it
+/// down. See [`Host::claim_surface_inside`].
+type Nested = (
+    PluginId,
+    Showing,
+    Box<dyn Fn(&Workspace) -> bool>,
+    Box<dyn Fn()>,
+);
+
 /// What a surface does with a keystroke while it is up.
 ///
 /// It names an action rather than doing anything, which is what keeps one
@@ -344,6 +354,10 @@ pub struct Host {
     /// The surfaces among those that hang off a *place* rather than over the
     /// window, and how to take each one down. See [`Host::claim_panel`].
     panels: Vec<Panel>,
+    /// The surfaces among those that are drawn *inside* a popup the workspace
+    /// owns, and how each one tells that popup has gone. See
+    /// [`Host::claim_surface_inside`].
+    nested: Vec<Nested>,
     /// Whose registrations are being made right now. Set around each plugin's
     /// `build` so a plugin cannot register in another's name by accident.
     building: Option<PluginId>,
@@ -443,6 +457,7 @@ impl Host {
             watchers: Vec::new(),
             fields: Vec::new(),
             panels: Vec::new(),
+            nested: Vec::new(),
             building: None,
             kept: Vec::new(),
             readied: Vec::new(),
@@ -983,6 +998,56 @@ impl Host {
         any
     }
 
+    /// Registers a surface drawn *inside* a popup the workspace owns, and how
+    /// to take it down once that popup has gone.
+    ///
+    /// [`Host::claim_panel`]'s rule, asked the other way round. A panel hangs
+    /// off a place, and the workspace takes it down at the moments it moves
+    /// the attention away from there. A field in a row of a tab's menu lives
+    /// in a popup the workspace closes by more paths than anybody keeps a list
+    /// of — a press outside it, the question a close asks, a section covering
+    /// the list, the tab under it closing — and a list of those moments is one
+    /// the next path forgets. A surface left up after its popup has gone is a
+    /// keyboard owned by nothing on screen: the pane under it deaf, and its
+    /// next Enter handed to a field nobody can see.
+    ///
+    /// So the plugin says where the surface lives instead — `inside` answers
+    /// whether that popup is still up — and the workspace asks on every
+    /// [`sync_input_keys`](Workspace::sync_input_keys), which every one of
+    /// those paths already owes, because closing a popup is handing the
+    /// keyboard back. A surface whose popup has gone is lowered there, and
+    /// `close` is how the plugin holding it finds out.
+    pub fn claim_surface_inside(
+        &mut self,
+        keys: impl Fn(&Keystroke) -> Option<ActionName> + 'static,
+        inside: impl Fn(&Workspace) -> bool + 'static,
+        close: impl Fn() + 'static,
+    ) -> Showing {
+        let showing = self.claim_surface(keys);
+        let who = self.who();
+        self.nested.push((
+            who,
+            showing.clone(),
+            Box::new(inside) as Box<dyn Fn(&Workspace) -> bool>,
+            Box::new(close) as Box<dyn Fn()>,
+        ));
+        showing
+    }
+
+    /// Takes down every surface that is up inside a popup that is not.
+    ///
+    /// Asked first thing in
+    /// [`sync_input_keys`](Workspace::sync_input_keys), before anything there
+    /// reads whether a surface is up. See [`Host::claim_surface_inside`].
+    pub fn take_strays_down(&self, workspace: &Workspace) {
+        for (_, showing, inside, close) in &self.nested {
+            if showing.get() && !inside(workspace) {
+                close();
+                showing.set(false);
+            }
+        }
+    }
+
     /// Whether any plugin's surface is up.
     ///
     /// What takes the keyboard away from the focused pane, the same way an
@@ -1432,6 +1497,7 @@ impl Host {
         }
         self.fields.retain(|(by, _, _, _)| by != plugin);
         self.panels.retain(|(by, _, _)| by != plugin);
+        self.nested.retain(|(by, _, _, _)| by != plugin);
         // And what it asked to be *told*. A watcher is the one registration
         // that draws nothing, which is exactly why it was the one missing
         // here: a plugin switched off went on being handed every command that

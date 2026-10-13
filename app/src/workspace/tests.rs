@@ -6153,6 +6153,191 @@ fn escape_abandons_a_rename_and_leaves_the_menu_standing() {
     );
 }
 
+/// Opens the menu on a row, turns "Rename tab" into its field and types a
+/// name nobody is going to keep.
+fn half_type_a_rename(harness: &mut Harness, tab: TabId, pane: PaneId) {
+    harness.open_tab_menu_on(tab, pane);
+    harness.run_command("crook/tabs/rename-tab");
+    // The field is only in the tree once the menu has been drawn with it, and
+    // a keystroke lands in an element rather than in a state.
+    harness.frame();
+    harness.type_text("oops");
+    assert!(
+        harness.a_plugin_field_has_keys(),
+        "the rename field never had the keyboard"
+    );
+}
+
+/// What a rename whose menu has gone must leave behind: nothing up, the
+/// keyboard back with the shell, and an Enter that is the shell's.
+fn assert_the_shell_has_the_keyboard_again(harness: &mut Harness) {
+    assert!(
+        !harness.a_popup_is_open(),
+        "the rename outlived the menu it was typed in"
+    );
+    assert!(
+        harness.pane_takes_keys(),
+        "the shell did not get the keyboard back"
+    );
+    assert!(
+        !harness.press_key("enter", Modifiers::default()),
+        "the next Enter was taken before it reached the shell"
+    );
+}
+
+#[test]
+fn a_press_outside_the_menu_abandons_a_rename_and_gives_the_shell_its_keys_back() {
+    // The field is a row of the menu, so the menu going is the rename being
+    // given up — however it went. A press off the menu used to take the menu
+    // down and leave the rename's claim on Enter and Escape standing: the
+    // shell took no letters, nothing on screen said why, and the next Enter
+    // renamed the tab to what had been half typed.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+    let was = harness.tab_name(tab);
+
+    half_type_a_rename(&mut harness, tab, pane);
+    let menu = tab_menu_box(&harness.frame()).expect("the menu is drawn");
+    // Over the pane and well clear of the menu: the press a person makes to
+    // get back to the shell.
+    let outside = vec2f(WINDOW.x() - 20., WINDOW.y() - 20.);
+    assert!(!menu.contains_point(outside));
+    harness.click(outside, MouseButton::Left);
+    assert_eq!(harness.tab_menu_row(), None, "the press left the menu up");
+
+    assert_the_shell_has_the_keyboard_again(&mut harness);
+    assert_eq!(harness.tab_name(tab), was, "the abandoned name was kept");
+
+    // Over rather than hidden: the menu opened again offers the entry, not a
+    // field still holding what was given up.
+    harness.open_tab_menu_on(tab, pane);
+    let scene = harness.frame();
+    assert!(
+        tab_menu_offers(&scene, "Rename tab"),
+        "the menu came back with the abandoned rename in it"
+    );
+    assert!(!harness.a_plugin_field_has_keys());
+}
+
+#[test]
+fn the_question_a_close_asks_abandons_a_rename_it_takes_the_menu_down_from() {
+    // Another popup is the other way a menu goes without its own Escape:
+    // two are never up at once, so the card a close asks with takes the
+    // menu down — and with it the rename, or answering the card would hand
+    // the keyboard to a field nobody can see.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+    harness.update_session(pane, |session| session.status = AgentStatus::Running);
+    let was = harness.tab_name(tab);
+
+    half_type_a_rename(&mut harness, tab, pane);
+    harness.dispatch_workspace_action(WindowAction::Close.into());
+    assert_eq!(harness.asking_about(), Some(vec![pane]), "nothing asked");
+    assert_eq!(harness.tab_menu_row(), None, "the card left the menu up");
+    assert!(harness.press_key("escape", Modifiers::default()));
+    assert_eq!(harness.asking_about(), None, "Escape left the question up");
+
+    assert_the_shell_has_the_keyboard_again(&mut harness);
+    assert_eq!(harness.tab_name(tab), was, "the abandoned name was kept");
+}
+
+#[test]
+fn a_rename_whose_tab_closes_under_it_renames_no_other_tab() {
+    // The worst of it. With the menu gone, what a rename is about falls back
+    // to the active tab — which is the right answer for a command run from
+    // the palette and the wrong one for a name typed into another tab's
+    // menu. A tab that closed under its own menu left the rename standing,
+    // and the next Enter gave the half-typed name to whichever tab was left.
+    let mut harness = Harness::seeded();
+    harness.dispatch_action(TabAction::New);
+    harness.frame();
+    let tabs = harness.tab_ids();
+    let (first, active) = (tabs[0], harness.active_id());
+    assert_ne!(first, active, "the new tab is the active one");
+    let pane = harness.panes_of(first)[0];
+    let was = harness.tab_name(active);
+
+    half_type_a_rename(&mut harness, first, pane);
+    // As its shell exiting would: nothing about the menu is asked.
+    harness.dispatch_action(TabAction::Close(first));
+    assert_eq!(harness.tab_ids(), [active]);
+
+    assert_the_shell_has_the_keyboard_again(&mut harness);
+    assert_eq!(
+        harness.tab_name(active),
+        was,
+        "the abandoned name landed on another tab"
+    );
+}
+
+#[test]
+fn a_rename_stays_with_its_own_row_when_the_menu_moves_to_another() {
+    // A menu put up on another row is a different menu, even when nothing
+    // closed in between: the field drawn in it would be about a tab it was
+    // not opened on, and its Enter would give that tab the name typed for
+    // this one.
+    let mut harness = Harness::seeded();
+    harness.dispatch_action(TabAction::New);
+    harness.frame();
+    let tabs = harness.tab_ids();
+    let (first, active) = (tabs[0], harness.active_id());
+    let (typed_in, moved_to) = (harness.panes_of(first)[0], harness.panes_of(active)[0]);
+    let names = [harness.tab_name(first), harness.tab_name(active)];
+
+    half_type_a_rename(&mut harness, first, typed_in);
+    harness.open_tab_menu_on(active, moved_to);
+    assert_eq!(harness.tab_menu_row(), Some(moved_to));
+    assert!(
+        tab_menu_offers(&harness.frame(), "Rename tab"),
+        "the field followed the menu to another row"
+    );
+    assert!(!harness.a_plugin_field_has_keys());
+    harness.press_key("enter", Modifiers::default());
+
+    assert_eq!(
+        [harness.tab_name(first), harness.tab_name(active)],
+        names,
+        "a name typed for one tab landed on another"
+    );
+}
+
+#[test]
+fn renaming_from_the_palette_brings_up_the_menu_the_name_is_typed_in() {
+    // The field is a row of the menu and has nowhere else to be drawn. Run
+    // with no menu up — from the palette, or a chord — the rename used to
+    // start anyway: the keyboard went to a field nobody could see, and the
+    // shell under it went deaf. The menu comes up first instead, on the row
+    // being looked at, the way "Why this status" brings it up.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+
+    harness.run_command("crook/tabs/rename-tab");
+    assert_eq!(
+        harness.tab_menu_row(),
+        Some(pane),
+        "the rename started with no menu to type it in"
+    );
+    harness.frame();
+    assert!(
+        harness.a_plugin_field_has_keys(),
+        "the menu came up without the field taking the keyboard"
+    );
+    harness.type_text("from the palette");
+    assert!(harness.press_key("enter", Modifiers::default()));
+
+    assert_eq!(harness.tab_name(tab), "from the palette");
+    assert!(harness.pane_takes_keys());
+}
+
 #[test]
 fn a_person_s_name_for_a_pane_beats_the_one_its_agent_chose() {
     // The precedence, through the gesture. An agent that renames its work
