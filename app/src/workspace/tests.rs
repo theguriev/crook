@@ -13881,6 +13881,31 @@ fn new_window_starts_crook_again_where_the_focused_pane_is_working() {
         Some(&started_in(&home)),
         "a window was asked to start in a directory that is not there"
     );
+
+    // Nor is one that is there but closed to this user: `/root`, to anybody
+    // but root, which is what a pane that `ssh`'d in as root reports. It
+    // passes `is_dir` and fails the `chdir` the new window starts with.
+    // Root can enter it anyway, so there is nothing to check as root.
+    #[cfg(unix)]
+    if crate::control::server::euid() != 0 {
+        use std::os::unix::fs::PermissionsExt as _;
+        let closed = scratch.path().join("closed");
+        fs::create_dir(&closed).expect("writable scratch");
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o600)).expect("our own folder");
+        moved(&mut harness, closed.clone());
+        harness.run_command("crook/window/new-window");
+        let could_stat = closed.is_dir();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o700)).expect("our own folder");
+        assert!(
+            could_stat,
+            "the folder is not one `is_dir` sees, so this checks nothing"
+        );
+        assert_eq!(
+            crate::new_window::opened().get(2),
+            Some(&started_in(&home)),
+            "a window was asked to start in a directory it cannot enter"
+        );
+    }
 }
 
 #[test]

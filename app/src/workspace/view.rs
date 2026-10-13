@@ -8490,15 +8490,16 @@ impl Workspace {
     ///
     /// The directory the pane's shell last reported, which is where a new tab
     /// would open. Failing that, the home directory. A pane whose directory
-    /// has been deleted since would hand the new window a
-    /// `--working-directory` it refuses, and that window would never appear,
-    /// saying why only on a stderr nobody reads. See [`crate::new_window`]
-    /// for why the window is a process of its own.
+    /// has been deleted since, or is one this user cannot enter, would hand
+    /// the new window a directory it cannot start in, and that window would
+    /// never appear, saying why only in its own log. See
+    /// [`crate::new_window::can_start_in`], and [`crate::new_window`] for
+    /// why the window is a process of its own.
     fn open_new_window(&self) {
         let Some(directory) = self
             .tabs
             .focused_directory()
-            .filter(|directory| directory.is_dir())
+            .filter(|directory| crate::new_window::can_start_in(directory))
             .or_else(std::env::home_dir)
         else {
             log::warn!("there is no directory to open a new window in");

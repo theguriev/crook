@@ -15,10 +15,10 @@
 //! window that is, and nobody is told about a session they did not ask for.
 //!
 //! Nothing waits for the window. The child is reaped on a thread of its own
-//! when it closes, hours later or never — see [`crate::process::reap`] — and
-//! on Unix it is put in a process group of its own, so a Ctrl-C or a hangup
-//! aimed at the shell the first Crook was started from does not close the
-//! window it opened.
+//! when it closes, hours later or never — see [`crate::process::reap_at`] —
+//! and on Unix it is put in a process group of its own, so a Ctrl-C or a
+//! hangup aimed at the shell the first Crook was started from does not close
+//! the window it opened.
 
 use std::ffi::OsString;
 use std::io;
@@ -28,6 +28,22 @@ use std::path::Path;
 /// `directory`.
 pub(crate) fn arguments(directory: &Path) -> Vec<OsString> {
     vec!["--working-directory".into(), directory.into()]
+}
+
+/// Whether a window can start in `directory`: whether a process of this
+/// user's could make it its working directory, which is the first thing a
+/// window started with `--working-directory` does.
+///
+/// More than `is_dir`, which needs nothing of the directory itself. One can
+/// be there for `stat` and closed to `chdir` — `/root` to anybody but root,
+/// which a pane `ssh`'d into a server as root reports as its directory, or a
+/// folder that lost its search bit — and a window handed one fails on its
+/// first line and never appears. Looking up `.` inside the directory needs
+/// the same search permission `chdir` does, and asks without changing this
+/// process's own directory. On Windows, which drops the `.` before the
+/// system is asked, it is `is_dir`.
+pub(crate) fn can_start_in(directory: &Path) -> bool {
+    directory.join(".").is_dir()
 }
 
 /// Opens another window whose shells start in `directory`, and does not wait
@@ -73,7 +89,10 @@ pub fn open(directory: &Path) -> io::Result<()> {
         launcher.process_group(0);
     }
     let child = launcher.spawn()?;
-    crate::process::reap(child, "window");
+    // A warning rather than the debug line other children get: a window that
+    // exits unhappily is one that never appeared or one that went, and this
+    // is the only line about it in the log of the window it was opened from.
+    crate::process::reap_at(child, "new window", log::Level::Warn);
     Ok(())
 }
 
