@@ -573,6 +573,11 @@ pub struct TerminalModel {
 
     /// The shells of closed panes that are still being ended.
     endings: Endings,
+
+    /// Variables every shell opened from now on is given last, over its own.
+    /// See [`Self::set_environment`].
+    #[cfg(test)]
+    environment: Vec<(String, String)>,
 }
 
 /// One running shell, as the model holds it.
@@ -631,6 +636,8 @@ impl TerminalModel {
             flusher: Arc::new(Flusher::default()),
             flushing: false,
             endings: Endings::default(),
+            #[cfg(test)]
+            environment: Vec::new(),
         }
     }
 
@@ -717,6 +724,19 @@ impl TerminalModel {
         self.shell
             .clone()
             .unwrap_or_else(|| PathBuf::from(crook_terminal::default_shell()))
+    }
+
+    /// Says what shells opened from now on are given in their environment,
+    /// over what they inherit and what the integration sets. For tests.
+    ///
+    /// A shell a test starts inherits the home of whoever runs the suite, and
+    /// an interactive bash reads its history file there as it starts, cutting
+    /// it to `HISTFILESIZE` lines — 500 where no rc file says otherwise — and
+    /// saves into it as it ends. Only the environment it starts with keeps it
+    /// out: a line typed into it afterwards comes after the cut.
+    #[cfg(test)]
+    pub fn set_environment(&mut self, environment: Vec<(String, String)>) {
+        self.environment = environment;
     }
 
     /// Whether a shell was named, rather than the user's own resolved.
@@ -942,6 +962,8 @@ impl TerminalModel {
             ..Default::default()
         };
         integration.apply(&mut options);
+        #[cfg(test)]
+        options.environment.extend(self.environment.iter().cloned());
         if !marks {
             log::debug!(
                 "pane {pane:?} is running {:?}, which Crook has no command marks for; \
