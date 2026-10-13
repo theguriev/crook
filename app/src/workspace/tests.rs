@@ -19385,6 +19385,59 @@ mod shells {
         }
 
         #[test]
+        fn a_drag_the_filter_then_hides_leaves_the_clipboard_alone() {
+            // A drag over `apple` in the block filtered for `ap`, and then the
+            // query narrowed to `apr`: `apple` is off the screen and nothing
+            // is highlighted, but the selection still holds its row and still
+            // takes the copy chord. The copy of it was an empty string, put on
+            // the clipboard over whatever the person last copied.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, FRUIT) == 0 {
+                return;
+            }
+            let Some((clipboard, _system)) = working_clipboard(&harness) else {
+                return;
+            };
+            filter_newest_block(&mut harness, pane, "ap");
+
+            let start = on_output_line(&mut harness, "apple", 0, 0.1);
+            let end = on_output_line(&mut harness, "apple", "apple".len() - 1, 0.9);
+            harness.hold(start, 1);
+            harness.drag_to(end);
+            harness.let_go(end);
+            assert_eq!(harness.terminal_selection(pane).as_deref(), Some("apple"));
+
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("a find bar");
+            find.input().edit(|editor| editor.set_text("apr"));
+            harness.frame();
+            assert_eq!(
+                harness.terminal_selection(pane),
+                None,
+                "a selection the filter hides all of reads as text"
+            );
+            harness.press("c", platform_chord(), "c");
+
+            assert_eq!(
+                clipboard.read().as_deref(),
+                Some("crook: nothing was copied over this"),
+                "a copy of a selection nobody could see emptied the clipboard"
+            );
+            let selected = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .interaction(pane)
+                    .is_some_and(|interaction| interaction.selection.selection().is_some())
+            });
+            assert!(!selected, "the chord did not let go of the selection");
+        }
+
+        #[test]
         fn with_the_find_bar_open_the_copy_chord_takes_a_drag_over_the_output() {
             // The bar floats over the list and is handed every keystroke
             // first, and its field claimed the copy chord with nothing of its

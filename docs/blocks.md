@@ -286,12 +286,15 @@ about where a folded line ends.
 A block the find bar is filtering copies as it is shown. A drag over it records the block's own
 rows at its two ends, so the rows the filter hides between them are inside the region; the copy
 is handed the filter the list was drawn with (`selection::Filter`) and leaves them out, and a
-fold joins a row to the next only when that row is shown too. The copy square takes the same —
-the command and the kept lines — because it has no words with which to say otherwise, and the
-menu's two copies of the block's rows read **Copy shown lines** and **Copy shown output** while
-the filter is up. Closing the bar puts the whole block back under all three. What reads a block
-rather than looking at it — a plugin's menu entry, `crook pane`, the run report — gets everything
-it printed either way.
+fold joins a row to the next only when that row is shown too. A drag the filter shows none of —
+the query narrowed after it, or let go of in the hidden rows between two shown lines — copies
+nothing and leaves the clipboard as it was, rather than putting an empty string over it for a
+highlight nobody can see. The copy square takes what is shown too — the command and the kept
+lines — because it has no words with which to say otherwise, and the menu's two copies of the
+block's rows read **Copy shown lines** and **Copy shown output** while the filter is up.
+Closing the bar puts the whole block back under all three. What reads a block rather than
+looking at it — a plugin's menu entry, `crook pane`, the run report — gets everything it
+printed either way.
 
 A resize that changes the column count re-wraps the rows under a selection, so the selection is
 let go of rather than re-anchored onto text nobody selected.

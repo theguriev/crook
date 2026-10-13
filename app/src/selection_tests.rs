@@ -903,3 +903,35 @@ fn a_folded_line_a_filter_keeps_whole_still_copies_as_one_line() {
         "a row whose fold the filter hid ran on into the next row shown"
     );
 }
+
+#[test]
+fn a_drag_the_filter_hides_every_row_of_copies_nothing() {
+    // A drag over `FAILED two`, and then the query narrowed to `five`: the
+    // region still holds row 2, and nothing is drawn over it any more. Its
+    // copy was an empty string, which the copy chord put on the clipboard
+    // over whatever the person last copied.
+    let session = printed(
+        40,
+        &["ok one", "FAILED two", "ok three", "ok four", "FAILED five"],
+    );
+    let five: &[usize] = &[0, 5];
+    assert_eq!(
+        None,
+        session.dragged_filtered((0, five), (0, 2, 0), (0, 2, 9)),
+        "a drag the filter hides all of copied something"
+    );
+
+    // Let go of in the rows hidden between two shown lines, which a drag
+    // past the end of one of them and onto the start of the next ends in.
+    let failures: &[usize] = &[0, 2, 5];
+    assert_eq!(
+        None,
+        session.dragged_filtered((0, failures), (0, 3, 0), (0, 4, 6)),
+        "a drag over hidden rows alone copied something"
+    );
+    // One shown row inside it is a copy of that row.
+    assert_eq!(
+        Some("FAILED two".to_owned()),
+        session.dragged_filtered((0, failures), (0, 2, 0), (0, 4, 6)),
+    );
+}

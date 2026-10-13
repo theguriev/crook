@@ -173,7 +173,9 @@ impl Selection {
     }
 
     /// [`Self::text`] of a list one block of which is shown filtered: the
-    /// rows the filter hides are left out. See [`Region::text_with`].
+    /// rows the filter hides are left out, and a selection every row of which
+    /// it hides is `None`, as one that covers no cells is. See
+    /// [`Region::text_with`].
     pub fn text_with(&self, blocks: &Blocks<'_>, filter: Option<Filter<'_>>) -> Option<String> {
         self.region(blocks)?.text_with(blocks, filter)
     }
@@ -322,6 +324,15 @@ impl Region {
     /// the filter shows both, which is a long line kept whole; when the row it
     /// folded onto is hidden, the next row shown is another line, and it gets
     /// a line break of its own rather than being run on to a half line.
+    ///
+    /// `None` when a filter is given and the region holds none of the rows
+    /// it shows, as for a selection that covers no cells. The region is
+    /// worked out on the block's own rows, so it outlives the rows it was
+    /// drawn over: narrow the query after a drag, or let go of a drag in the
+    /// rows hidden between two shown ones, and the selection still holds with
+    /// no highlight drawn. An empty string for it would go onto the clipboard
+    /// over whatever the person last copied, for a highlight they could not
+    /// see.
     pub fn text_with(&self, blocks: &Blocks<'_>, filter: Option<Filter<'_>>) -> Option<String> {
         let last = blocks.len().checked_sub(1)?;
         // An end whose block is gone clamps to the surviving list rather than
@@ -376,7 +387,7 @@ impl Region {
                 written = true;
             }
         }
-        Some(text)
+        (written || filter.is_none()).then_some(text)
     }
 }
 

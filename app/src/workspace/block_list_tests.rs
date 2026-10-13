@@ -215,6 +215,25 @@ fn a_filtered_block_copies_back_as_the_lines_it_shows() {
         .as_deref(),
         Some("FAILED b\nFAILED d"),
     );
+
+    // A filter that keeps none of the output shows an empty one, and the
+    // menu's copy of it is that: an empty string, as for a command that
+    // printed nothing, and not the `None` a drag over hidden rows alone is.
+    let command: Vec<usize> = (0..from).collect();
+    let filter = Filter {
+        block: block.id,
+        kept: &command,
+    };
+    assert_eq!(
+        block_text(
+            &Blocks::list(&history, &snapshot),
+            block.id,
+            from,
+            Some(filter)
+        )
+        .as_deref(),
+        Some(""),
+    );
 }
 
 /// What `inline_start` is asked, for a pane that is drawing blocks with a

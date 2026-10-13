@@ -1591,7 +1591,10 @@ impl BlockList {
 /// a command that printed nothing has an output, and it is empty.
 ///
 /// `filter` is the find bar's, while one is up: a filtered block copies as the
-/// rows it is showing, which is what the same drag over it would take.
+/// rows it is showing, which is what the same drag over it would take. When
+/// it shows none of them, that is an empty string too: the region's `None`
+/// for rows a filter hides every one of keeps a drag nobody can see off the
+/// clipboard, and this is a copy somebody asked for by name.
 pub(super) fn block_text(
     blocks: &Blocks<'_>,
     id: BlockId,
@@ -1614,6 +1617,7 @@ pub(super) fn block_text(
         ),
     )
     .text_with(blocks, filter)
+    .or(filter.map(|_| String::new()))
 }
 
 /// The icon inside a control's plate.
