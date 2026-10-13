@@ -1511,6 +1511,7 @@ impl Harness {
         self.dispatch(Event::KeyDown {
             keystroke,
             chars: chars.to_owned(),
+            origin: Default::default(),
         });
     }
 
@@ -15396,6 +15397,40 @@ fn the_shell_page_names_the_shell_a_pane_runs_and_whether_it_gets_the_marks() {
     assert!(
         text.contains("Command marks") && text.contains(marks),
         "the page does not say whether the marks are installed: {text:?}"
+    );
+}
+
+#[test]
+fn the_shell_page_asks_what_option_is_on_a_mac_and_nowhere_else() {
+    // Off a Mac the key a layout types its symbols with is AltGr, which is
+    // not Alt, so a row about Option would be a question with nothing behind
+    // it. A window tall enough for the whole page, since the row is its last.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.select_settings_section("Shell");
+    let scene = harness.frame_sized(vec2f(WINDOW.x(), 2400.));
+    let text = text_where(&scene, |position| {
+        settings_pane_box(&scene).contains_point(position)
+    });
+
+    let mac = crate::input_keys::Platform::current() == crate::input_keys::Platform::Mac;
+    assert_eq!(text.contains("Option as Meta"), mac, "{text:?}");
+}
+
+#[test]
+fn which_option_is_meta_is_kept_with_the_general_options() {
+    let mut harness = Harness::new(1);
+    assert_eq!(
+        harness.general().option_as_meta,
+        crate::settings::OptionAsMeta::Auto
+    );
+
+    harness.dispatch_workspace_action(
+        SettingsAction::SetOptionAsMeta(crate::settings::OptionAsMeta::Left).into(),
+    );
+    assert_eq!(
+        harness.general().option_as_meta,
+        crate::settings::OptionAsMeta::Left
     );
 }
 

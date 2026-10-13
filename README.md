@@ -615,6 +615,13 @@ Twenty features, and the page that configures them:
   longer than a blink: the field goes away and its space goes to the block. `ctrl-c`, `ctrl-z`
   and an end-of-input `ctrl-d` always reach the shell. That line is drawn in one function,
   `app/src/input_keys.rs`, and the architecture doc's §7 says why it is drawn there.
+- **Option types on a non-US Mac.** In vim, Claude Code or any program holding the keyboard,
+  Option is Meta (Esc in front of the key) except where your layout puts an ASCII symbol on it:
+  German Option-L types `@` and Option-8 types `{`, British Option-3 types `#`, and US Option-F
+  is still Meta-F. Settings → Shell → *Option as Meta* (`option_as_meta` in the settings file)
+  makes the left, the right or both Option keys Meta, or neither. An Option combination your
+  layout makes a dead key (US Option-E or Option-U, German Option-N for `~`) starts an accent
+  under every choice, because macOS takes it before Crook sees the key.
 - **The shell your other terminal gives you.** A pane starts a *login* shell, which is what
   Terminal.app, iTerm2 and WezTerm start and what `login(1)` itself starts. That is the
   difference between the environment you configured and a subset of it: only a login shell

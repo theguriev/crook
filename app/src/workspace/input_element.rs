@@ -717,7 +717,9 @@ impl Element for CommandInput {
         };
 
         match event {
-            Event::KeyDown { keystroke, chars } => self.type_key(keystroke, chars, ctx),
+            Event::KeyDown {
+                keystroke, chars, ..
+            } => self.type_key(keystroke, chars, ctx),
             Event::Ime(ime) => self.compose(ime, ctx),
             Event::MouseDown {
                 button: MouseButton::Left,

@@ -280,6 +280,67 @@ impl TabKey {
     }
 }
 
+/// Which Option key a program reads as Meta on a Mac, and which one types
+/// what the keyboard layout puts on it.
+///
+/// Every Mac terminal has this, as `macos_option_as_alt` in kitty,
+/// `option_as_alt` in Alacritty, `macos-option-as-alt` in Ghostty and a menu
+/// per Option key in iTerm2, with the same four answers. The fifth, the
+/// default, is Crook's: a rule per key rather than per keyboard. See
+/// [`crate::terminal_keys::Alt`] for what each one sends.
+///
+/// Linux and Windows never read it: their layouts type with AltGr, which is
+/// not Alt, so Alt there is only ever Meta.
+///
+/// No value reaches an Option combination the layout makes a dead key: US
+/// Option-E, -U, -I, -N and Option-backtick, and German Option-N, which is
+/// how `~` is typed there. The Mac's input method takes those to start an accent before
+/// Crook is sent a key press, so under every value they start one, as they
+/// always have.
+#[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OptionAsMeta {
+    /// Option types the ASCII symbols a layout puts on it, `@ [ ] { } | \`
+    /// on a German keyboard and `#` on a British one, and is Meta for every
+    /// other key. A US keyboard's Option layer has no ASCII in it, so there
+    /// Option is Meta throughout, as it always was in Crook, dead keys aside.
+    #[default]
+    Auto,
+    /// The left Option is Meta and the right one types.
+    Left,
+    /// The right Option is Meta and the left one types.
+    Right,
+    /// Both are Meta, and Option types nothing in a program but the accents
+    /// of the layout's dead keys.
+    Both,
+    /// Neither is Meta: Option types whatever the layout puts on it, `ƒ` and
+    /// `å` included, as it does in Terminal.app out of the box.
+    #[serde(rename = "none")]
+    Neither,
+}
+
+impl OptionAsMeta {
+    /// Every value, in the order the page offers them.
+    pub const ALL: [Self; 5] = [
+        Self::Auto,
+        Self::Left,
+        Self::Right,
+        Self::Both,
+        Self::Neither,
+    ];
+
+    /// What the page calls this.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Left => "Left",
+            Self::Right => "Right",
+            Self::Both => "Both",
+            Self::Neither => "None",
+        }
+    }
+}
+
 impl StatusMarks {
     /// What the page calls this.
     pub fn label(self) -> &'static str {
@@ -385,6 +446,13 @@ pub struct GeneralOptions {
     /// What Tab does while a suggestion stands after the caret. See
     /// [`TabKey`].
     pub tab_key: TabKey,
+    /// What Option means to a program on a Mac: Meta, or the key a layout
+    /// types its symbols with. See [`OptionAsMeta`].
+    ///
+    /// The composer is not a program and does not read it. There Option
+    /// always types, as it does in every Mac text field, and Option-Left and
+    /// Option-Right are already its word motions.
+    pub option_as_meta: OptionAsMeta,
     /// Whether a close that would end something still working asks first.
     ///
     /// The window's close, a tab's, a group's and a pane's all end the
@@ -447,6 +515,7 @@ impl Default for GeneralOptions {
             show_tabs_panel: true,
             tabs_panel_width: DEFAULT_TABS_PANEL_WIDTH,
             tab_key: TabKey::Completions,
+            option_as_meta: OptionAsMeta::Auto,
             ask_before_ending_agents: true,
             notify_on_needs_input: true,
             notify_on_failed: false,
@@ -1801,6 +1870,57 @@ mod tests {
     }
 
     #[test]
+    fn test_option_as_meta_is_written_as_the_five_words_a_person_would_type() {
+        // The file is hand-edited, so the spellings are the ones the other
+        // terminals' documentation leads a person to: `none` rather than the
+        // `neither` the code calls it, because `None` is Alacritty's word.
+        for (option, word) in [
+            (OptionAsMeta::Auto, "auto"),
+            (OptionAsMeta::Left, "left"),
+            (OptionAsMeta::Right, "right"),
+            (OptionAsMeta::Both, "both"),
+            (OptionAsMeta::Neither, "none"),
+        ] {
+            let scratch = ScratchDirectory::new("option-as-meta");
+            let mut settings = Settings::load(scratch.settings_file());
+            settings.set_general(GeneralOptions {
+                option_as_meta: option,
+                ..settings.general()
+            });
+            settings.save_blocking().expect("the save should succeed");
+
+            let written: Map<String, Value> = serde_json::from_str(
+                &fs::read_to_string(scratch.settings_file()).expect("the file should be readable"),
+            )
+            .expect("the file should be a JSON object");
+            assert_eq!(Some(&Value::from(word)), written.get("option_as_meta"));
+            assert_eq!(
+                Settings::load(scratch.settings_file())
+                    .general()
+                    .option_as_meta,
+                option,
+                "{word} did not come back"
+            );
+        }
+    }
+
+    #[test]
+    fn test_an_option_as_meta_this_build_cannot_read_is_auto() {
+        // `true` is what Ghostty takes, and a person moving a setting across
+        // would try it. It costs that key and nothing beside it.
+        let scratch = ScratchDirectory::new("option-as-meta-unknown");
+        fs::write(
+            scratch.settings_file(),
+            r#"{"option_as_meta": true, "restore_session": false}"#,
+        )
+        .expect("the file should be writable");
+
+        let general = Settings::load(scratch.settings_file()).general();
+        assert_eq!(general.option_as_meta, OptionAsMeta::Auto);
+        assert!(!general.restore_session);
+    }
+
+    #[test]
     fn test_the_file_uses_warps_key_names_and_spellings() {
         let scratch = ScratchDirectory::new("key-names");
         let mut settings = Settings::load(scratch.settings_file());
@@ -1839,6 +1959,9 @@ mod tests {
                 // Crook's own: an entry in the system's own list of programs
                 // to open at login.
                 "open_at_login",
+                // Crook's own spelling of what kitty calls
+                // `macos_option_as_alt`: which Option is Meta on a Mac.
+                "option_as_meta",
                 "primary_info",
                 "restore_session",
                 "show_details_on_hover",
@@ -2043,11 +2166,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Nine tab options, thirteen general ones and three theme names, and
+        // Nine tab options, fourteen general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(25, written.len());
+        assert_eq!(26, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),

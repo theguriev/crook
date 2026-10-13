@@ -13,11 +13,12 @@
 use std::time::{Duration, Instant};
 
 use crookui_core::event::{
-    Event, Ime, Keystroke, Modifiers, MouseButton, ScrollDelta, SystemTheme,
+    Event, Ime, KeyOrigin, Keystroke, Modifiers, MouseButton, ScrollDelta, SystemTheme,
 };
 use crookui_core::geometry::{Vector2F, vec2f};
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, ModifiersKeyState, ModifiersState, NamedKey};
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement as _;
 
 /// How long after a press a second one still counts as a double click.
 const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
@@ -35,6 +36,10 @@ const MULTI_CLICK_SLOP: f32 = 4.;
 #[derive(Debug, Default)]
 pub(super) struct InputState {
     modifiers: Modifiers,
+    /// Which of the two Alt keys are down, which [`Modifiers`] does not say
+    /// and a key press needs to: see [`KeyOrigin`].
+    left_alt: bool,
+    right_alt: bool,
     cursor: Vector2F,
     buttons_down: Vec<MouseButton>,
     last_click: Option<Click>,
@@ -60,6 +65,8 @@ impl InputState {
         match event {
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = to_modifiers(modifiers.state());
+                self.left_alt = modifiers.lalt_state() == ModifiersKeyState::Pressed;
+                self.right_alt = modifiers.ralt_state() == ModifiersKeyState::Pressed;
                 Some(Event::ModifiersChanged {
                     position: self.cursor,
                     modifiers: self.modifiers,
@@ -159,6 +166,12 @@ impl InputState {
                     ElementState::Pressed => Some(Event::KeyDown {
                         keystroke,
                         chars: event.text.as_deref().unwrap_or_default().to_owned(),
+                        origin: KeyOrigin {
+                            unmodified: unmodified(&event.key_without_modifiers()),
+                            position: physical_key_name(event.physical_key),
+                            left_alt: self.left_alt,
+                            right_alt: self.right_alt,
+                        },
                     }),
                     ElementState::Released => Some(Event::KeyUp { keystroke }),
                 }
@@ -360,6 +373,18 @@ fn physical_key_name(physical: winit::keyboard::PhysicalKey) -> Option<&'static 
         KeyCode::Slash => "/",
         _ => return None,
     })
+}
+
+/// What a key types with no modifier held, as [`KeyOrigin::unmodified`] carries
+/// it: the character for a key that has one, and nothing for a named key.
+///
+/// Winit reads it off the layout in force, ignoring Shift as well as the rest,
+/// so on a German Mac the key Option turns into `{` answers `8`.
+fn unmodified(key: &Key) -> String {
+    match key {
+        Key::Character(text) => text.to_string(),
+        Key::Named(_) | Key::Dead(_) | Key::Unidentified(_) => String::new(),
+    }
 }
 
 /// The `numpad*` name for a keypad key that is typing rather than navigating,
@@ -573,6 +598,15 @@ mod tests {
         let brace = Key::Character("}".into());
         let bracket = PhysicalKey::Code(KeyCode::BracketRight);
         assert_eq!(chord_key_name(&brace, bracket, ctrl).as_deref(), Some("}"));
+    }
+
+    #[test]
+    fn a_press_carries_the_character_under_its_key_and_a_named_key_carries_none() {
+        // What tells German Option-8, named `{`, apart from the `{` key: the
+        // `8` under it. A named or dead key has no character to compare with.
+        assert_eq!(unmodified(&Key::Character("8".into())), "8");
+        assert_eq!(unmodified(&Key::Named(NamedKey::Enter)), "");
+        assert_eq!(unmodified(&Key::Dead(Some('^'))), "");
     }
 
     #[test]

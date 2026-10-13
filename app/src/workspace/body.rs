@@ -650,6 +650,7 @@ fn blocks(
     let filtered = workspace.filtered_rows(pane, app);
     let mut list = BlockList::new(history, snapshot, font, view.clone())
         .with_terminal(handle.clone(), keyboard.keys)
+        .with_option_as_meta(workspace.general().option_as_meta)
         .with_menu(available, menu)
         .with_find(matches.clone(), current)
         .with_filter(
@@ -760,7 +761,9 @@ fn grid(
     // [`pane_surface::of`] — and a field attached here would be a field the
     // keyboard policy believes in and nobody can see. Every key on this
     // surface is the program's.
-    let mut grid = TerminalElement::new(snapshot, font).with_terminal(handle.clone(), keys);
+    let mut grid = TerminalElement::new(snapshot, font)
+        .with_terminal(handle.clone(), keys)
+        .with_option_as_meta(workspace.general().option_as_meta);
     if let Some(interaction) = workspace.interaction(pane) {
         grid = grid
             .with_selection(

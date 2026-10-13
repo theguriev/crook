@@ -787,6 +787,8 @@ pub enum SettingsAction {
     ToggleAudibleBell,
     /// "Tab key": whether Tab completes the word or takes the suggestion.
     SetTabKey(crate::settings::TabKey),
+    /// "Option as Meta": which Option key a program on a Mac reads as Meta.
+    SetOptionAsMeta(crate::settings::OptionAsMeta),
     /// "Show the tabs panel": whether the column of tabs is drawn at all.
     ///
     /// Here beside the other switches on the general options because that is
