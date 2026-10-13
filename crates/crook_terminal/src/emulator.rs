@@ -101,7 +101,8 @@ pub enum Fed<'a> {
 #[non_exhaustive]
 pub enum TerminalEvent {
     /// The title changed — `None` when the child reset it to the default. The
-    /// current value is also on every [`Snapshot`].
+    /// current value is also on every [`Snapshot`]. At most
+    /// [`agent::TITLE_BYTES`] of what the child wrote.
     Title(Option<String>),
     /// The child reported its working directory with OSC 7.
     WorkingDirectory(PathBuf),
@@ -353,11 +354,23 @@ impl Perform for OscWatcher {
 /// stream carrying one came from a shell Crook set up.
 const COMPLETIONS_OSC: &[u8] = b"6339";
 
+/// The longest working directory OSC 7 is believed for, in bytes.
+///
+/// Linux's `PATH_MAX`: four times macOS's, and past it Linux opens no path
+/// by name. Windows goes further only once long paths are switched on, and
+/// a directory that deep is not one anybody works in. Bounded at all because
+/// the row prints the directory and shapes it again on every frame it draws;
+/// refused rather than cut, as [`agent::pull_request_url`] refuses an
+/// address, because a cut path is another directory, and the row, git, the
+/// next pane's start and the session file would all be told that one.
+const DIRECTORY_BYTES: usize = 4096;
+
 /// Reads the payload of OSC 7, which is a `file://` URL or a bare path.
 ///
 /// The host in the URL is ignored: a shell on the far end of an ssh session
 /// reports a path that means nothing locally, but showing it still beats
-/// showing nothing, and the caller can decide.
+/// showing nothing, and the caller can decide. A path longer than
+/// [`DIRECTORY_BYTES`] once decoded is no answer at all.
 fn parse_working_directory(value: &[u8]) -> Option<PathBuf> {
     let value = str::from_utf8(value).ok()?;
     let path = match value.strip_prefix("file://") {
@@ -381,7 +394,7 @@ fn parse_working_directory(value: &[u8]) -> Option<PathBuf> {
     // integrations write — or a stray word came through as a *relative* path,
     // and everything that uses the directory resolved it against Crook's own.
     let rooted = decoded.starts_with(['/', '\\']) || Path::new(&decoded).is_absolute();
-    rooted.then(|| PathBuf::from(decoded))
+    (rooted && decoded.len() <= DIRECTORY_BYTES).then(|| PathBuf::from(decoded))
 }
 
 /// Whether a URL path is a Windows path with its leading slash still attached.
@@ -1247,7 +1260,13 @@ impl Emulator {
     }
 
     /// Records a new title, which every future snapshot carries.
+    ///
+    /// Cut to [`agent::TITLE_BYTES`] first, and compared after, so the same
+    /// over-long title twice is no news: it is whatever the program wrote,
+    /// `vte` keeps an OSC however long it runs, and the row shapes the title
+    /// again on every frame it draws.
     fn set_title(&mut self, title: Option<String>) {
+        let title = title.map(|title| agent::capped(title, agent::TITLE_BYTES));
         if self.title == title {
             return;
         }

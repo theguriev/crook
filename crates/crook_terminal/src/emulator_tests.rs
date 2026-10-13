@@ -170,6 +170,132 @@ fn test_setting_the_same_title_twice_reports_it_once() {
     assert!(emulator.take_events().is_empty());
 }
 
+/// Four megabytes of `x`, the length of title that froze the window.
+fn huge() -> String {
+    "x".repeat(4 << 20)
+}
+
+/// `text` cut at `bytes` the way a pane's string is, for a text of one-byte
+/// characters.
+fn cut_at(text: &str, bytes: usize) -> String {
+    format!("{}\u{2026}", &text[..bytes])
+}
+
+#[test]
+fn test_a_title_longer_than_a_row_is_kept_cut_to_its_cap() {
+    // A title is whatever the program in the pane wrote, and `vte` keeps an
+    // OSC however long it runs: `cat` a file holding `ESC ] 2 ;` and four
+    // megabytes, and that was the tab's name — shaped whole by every frame
+    // that drew its row, seconds each, until something set another.
+    let mut emulator = emulator();
+    let huge = huge();
+    emulator.advance(format!("\x1b]2;{huge}\x07").as_bytes());
+
+    let kept = cut_at(&huge, agent::TITLE_BYTES);
+    let title = emulator.title().map(str::len);
+    assert_eq!(Some(kept.len()), title, "the title kept {title:?} bytes");
+    assert_eq!(Some(kept.as_str()), emulator.title());
+    assert_eq!(Some(&kept), emulator.snapshot().title.as_ref());
+    let events = emulator.take_events();
+    assert!(
+        matches!(&events[..], [TerminalEvent::Title(Some(title))] if *title == kept),
+        "the event carried {:?} bytes",
+        events.iter().map(|event| match event {
+            TerminalEvent::Title(title) => title.as_ref().map(String::len),
+            _ => None,
+        })
+    );
+
+    // The same title again is the same name, cut the same way, and no news.
+    emulator.advance(format!("\x1b]0;{huge}\x07").as_bytes());
+    assert!(emulator.take_events().is_empty());
+}
+
+#[test]
+fn test_a_title_is_kept_whole_up_to_its_cap_and_cut_where_a_character_ends() {
+    let mut emulator = emulator();
+    let whole = "x".repeat(agent::TITLE_BYTES);
+    emulator.advance(format!("\x1b]2;{whole}\x07").as_bytes());
+    assert_eq!(Some(whole.as_str()), emulator.title());
+
+    // Three bytes each, against a cap that is no multiple of three, so the
+    // cap falls inside a character: it goes whole, rather than leaving half
+    // of itself before the mark.
+    assert_ne!(0, agent::TITLE_BYTES % 3);
+    let wide = "語".repeat(agent::TITLE_BYTES);
+    emulator.advance(format!("\x1b]2;{wide}\x07").as_bytes());
+    let kept = format!("{}\u{2026}", "語".repeat(agent::TITLE_BYTES / 3));
+    assert_eq!(Some(kept.as_str()), emulator.title());
+}
+
+#[test]
+fn test_a_report_longer_than_a_row_is_kept_cut_to_its_caps() {
+    // Anything in the pane can write the sequence — a forged report is a
+    // `printf` away — and its title and message reach the same row a
+    // terminal title does, the message on a line of its own.
+    let mut emulator = emulator();
+    let huge = huge();
+    emulator.advance(format!("\x1b]6340;needs-input;{huge};;{huge}\x07").as_bytes());
+
+    let reported = match &emulator.take_events()[..] {
+        [TerminalEvent::Agent(reported)] => reported.clone(),
+        events => panic!("{} events, not one report", events.len()),
+    };
+    let length = |text: &Option<String>| text.as_ref().map(String::len);
+    let (title, message) = (length(&reported.title), length(&reported.message));
+    assert_eq!(
+        (
+            Some(cut_at(&huge, agent::TITLE_BYTES).len()),
+            Some(cut_at(&huge, agent::MESSAGE_BYTES).len())
+        ),
+        (title, message),
+        "the title kept {title:?} bytes and the message {message:?}"
+    );
+    assert_eq!(
+        Reported {
+            status: AgentReport::NeedsInput,
+            title: Some(cut_at(&huge, agent::TITLE_BYTES)),
+            message: Some(cut_at(&huge, agent::MESSAGE_BYTES)),
+        },
+        reported
+    );
+}
+
+#[test]
+fn test_a_working_directory_longer_than_any_path_is_refused_rather_than_cut() {
+    // Cut, it would be another directory, which the row, git and the next
+    // pane would all be told about; refused, the pane is where it last said.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]7;file:///tmp\x07");
+    emulator.take_events();
+
+    emulator.advance(format!("\x1b]7;file://host/{}\x07", huge()).as_bytes());
+    let directory = emulator
+        .working_directory()
+        .map(|path| path.as_os_str().len());
+    assert_eq!(
+        Some(4),
+        directory,
+        "the directory is {directory:?} bytes long"
+    );
+    assert_eq!(Some(Path::new("/tmp")), emulator.working_directory());
+    assert!(emulator.take_events().is_empty());
+
+    let longest = format!("/{}", "d".repeat(DIRECTORY_BYTES - 1));
+    assert_eq!(
+        Some(PathBuf::from(&longest)),
+        parse_working_directory(longest.as_bytes())
+    );
+    let over = format!("{longest}d");
+    assert_eq!(None, parse_working_directory(over.as_bytes()));
+    // Measured as the path it decodes to, not the escapes it arrived in.
+    let escaped = format!("/{}", "%64".repeat(DIRECTORY_BYTES - 1));
+    assert_eq!(
+        Some(PathBuf::from(&longest)),
+        parse_working_directory(escaped.as_bytes())
+    );
+}
+
 #[test]
 fn test_what_the_grid_reports_before_a_mark_is_handed_over_before_it() {
     // A program's last title and the shell's `D` after it land in one read
