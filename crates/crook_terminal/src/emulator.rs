@@ -262,9 +262,10 @@ struct OscWatcher {
     images: image::Reader,
     /// A picture to place at the cursor, which is where the watcher stops.
     image: Option<image::Requested>,
-    /// Whether an OSC 0 or 2 set a title longer than [`agent::TITLE_BYTES`],
-    /// which is where the watcher stops: see [`Emulator::cut_grid_title`].
-    long_title: bool,
+    /// How long a title an OSC 0 or 2 set, when it was longer than
+    /// [`agent::TITLE_BYTES`], which is where the watcher stops: see
+    /// [`Emulator::cut_grid_title`].
+    long_title: Option<usize>,
 }
 
 impl Perform for OscWatcher {
@@ -320,7 +321,9 @@ impl Perform for OscWatcher {
             Some(&(b"0" | b"2")) if params.len() >= 2 => {
                 let joined =
                     params[1..].iter().map(|piece| piece.len()).sum::<usize>() + (params.len() - 2);
-                self.long_title |= joined > agent::TITLE_BYTES;
+                if joined > agent::TITLE_BYTES {
+                    self.long_title = Some(joined);
+                }
             }
             // A status means the same thing wherever in the chunk the program
             // wrote it, so the last one wins, which is the last thing the
@@ -353,13 +356,13 @@ impl Perform for OscWatcher {
     /// it, or it goes out of order with the answers either side of it.
     ///
     /// And on a title longer than [`agent::TITLE_BYTES`], so that the grid's
-    /// own copy of it is cut before the rest of the read can push it.
+    /// own copy of it can be cut before the rest of the read pushes it.
     fn terminated(&self) -> bool {
         self.mark.is_some()
             || self.image.is_some()
             || (self.agent.is_some() && self.notification.is_some())
             || self.version_asked
-            || self.long_title
+            || self.long_title.is_some()
     }
 }
 
@@ -380,6 +383,16 @@ const COMPLETIONS_OSC: &[u8] = b"6339";
 /// address, because a cut path is another directory, and the row, git, the
 /// next pane's start and the session file would all be told that one.
 const DIRECTORY_BYTES: usize = 4096;
+
+/// The longest title, in bytes, that a synchronized update is left to carry
+/// to the grid whole, rather than ended at it: see
+/// [`Emulator::cut_grid_title`].
+///
+/// The same 4096 as [`DIRECTORY_BYTES`], because what makes a title long is
+/// most often the path in it. 4096 copies of a title this long, a full
+/// `CSI 22 t` stack, are 16 MiB, which is the most leaving an update alone
+/// can cost; ending it costs a frame drawn half done.
+const UPDATE_TITLE_BYTES: usize = 4096;
 
 /// Reads the payload of OSC 7, which is a `file://` URL or a bare path.
 ///
@@ -618,8 +631,8 @@ impl Emulator {
             if self.osc_watcher.terminated() {
                 self.apply_reports();
             }
-            if std::mem::take(&mut self.osc_watcher.long_title) {
-                exited = self.cut_grid_title().or(exited);
+            if let Some(bytes) = self.osc_watcher.long_title.take() {
+                exited = self.cut_grid_title(bytes).or(exited);
             }
             if let Some(mark) = self.osc_watcher.mark.take() {
                 // A directory too, and for the same reason: bash and zsh print
@@ -1306,14 +1319,24 @@ impl Emulator {
     ///
     /// Inside a synchronized update `vte` holds the bytes and plays them to
     /// `Term` when the update ends, the title and the pushes after it
-    /// together, so the update ends here, as one nobody ended does: what is
-    /// left of it is drawn as it arrives. A program that writes a title this
-    /// long is not one whose frames are worth that title's gigabytes.
+    /// together, and `Term` has not seen the title yet. Cutting it there
+    /// means ending the update, as one nobody ended is ended, and what is
+    /// left of the frame is then drawn as it arrives. A title of `bytes` up
+    /// to [`UPDATE_TITLE_BYTES`] is left to the update instead, `Term` keeps
+    /// it whole, and its copies come to 16 MiB at most. A torn frame only
+    /// pays for itself past that: a megabyte of title pushed 4096 times is
+    /// four gigabytes. [`Self::set_title`] cuts the copy this crate keeps
+    /// either way, once `Term` hands the title over.
     ///
     /// The cut title goes back to the proxy as `Term` sends it, and is no
     /// news when it is handed over: it is the title this already has.
-    fn cut_grid_title(&mut self) -> Option<ChildExit> {
+    fn cut_grid_title(&mut self, bytes: usize) -> Option<ChildExit> {
         if self.parser.sync_timeout().sync_timeout().is_some() {
+            // `self.title` is still the one from before the update, and
+            // handing `Term` that would only be undone when the update ends.
+            if bytes <= UPDATE_TITLE_BYTES {
+                return None;
+            }
             self.parser.stop_sync(&mut self.term);
         }
         let exited = self.hand_over_term_events();

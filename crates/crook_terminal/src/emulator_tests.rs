@@ -276,19 +276,54 @@ fn test_an_over_long_title_in_a_synchronized_update_is_cut_before_what_follows_i
     // `vte` holds an update's bytes until it ends and then plays them to the
     // grid in one go, the title and the pushes after it together. So the
     // update ends at the title, the way one nobody ended does, and what is
-    // left of it is drawn as it comes. One megabyte, because past two `vte`
-    // gives up on the update by itself.
-    let mut emulator = emulator();
-    let long = "x".repeat(1 << 20);
-    emulator.advance(
-        format!("\x1b[?2026h\x1b]2;{long}\x07\x1b[22t\x1b]2;short\x07\x1b[?2026l").as_bytes(),
-    );
+    // left of it is drawn as it comes. One byte past what an update is left
+    // to carry, and one megabyte, because past two `vte` gives up on the
+    // update by itself.
+    for bytes in [UPDATE_TITLE_BYTES + 1, 1 << 20] {
+        let mut emulator = emulator();
+        let long = "x".repeat(bytes);
+        emulator.advance(
+            format!("\x1b[?2026h\x1b]2;{long}\x07\x1b[22t\x1b]2;short\x07\x1b[?2026l").as_bytes(),
+        );
 
-    let kept = cut_at(&long, agent::TITLE_BYTES);
-    let pushed = pushed_title(&mut emulator);
-    let length = pushed.as_ref().map(String::len);
-    assert_eq!(Some(kept.len()), length, "the grid pushed {length:?} bytes");
-    assert_eq!(Some("short"), emulator.title());
+        let kept = cut_at(&long, agent::TITLE_BYTES);
+        let pushed = pushed_title(&mut emulator);
+        let length = pushed.as_ref().map(String::len);
+        assert_eq!(
+            Some(kept.len()),
+            length,
+            "a {bytes}-byte title: the grid pushed {length:?} bytes"
+        );
+        assert_eq!(Some("short"), emulator.title());
+    }
+}
+
+#[test]
+fn test_a_title_a_program_could_write_leaves_its_synchronized_update_whole() {
+    // Past the cap, but no more than an update is left to carry: ending the
+    // update at the title drew half a frame each time a program that
+    // brackets its frames set a title a few hundred bytes long, to save
+    // copies that come to 16 MiB at most. The update is held until it ends,
+    // and its title is cut when the grid hands it over.
+    for bytes in [agent::TITLE_BYTES + 1, 300, UPDATE_TITLE_BYTES] {
+        let mut emulator = emulator();
+        let title = "t".repeat(bytes);
+        emulator.advance(format!("\x1b[?2026h\x1b]2;{title}\x07\x1b[22tframe").as_bytes());
+        assert_eq!(
+            Some(""),
+            emulator.snapshot().text().lines().next(),
+            "a {bytes}-byte title drew the update before it ended"
+        );
+
+        emulator.advance(b"\x1b[?2026l");
+        assert_eq!(Some("frame"), emulator.snapshot().text().lines().next());
+        let kept = cut_at(&title, agent::TITLE_BYTES);
+        assert_eq!(Some(kept.as_str()), emulator.title());
+        // The cost of leaving the update alone: the copy pushed inside it is
+        // whole, and no copy can be longer than this.
+        let length = pushed_title(&mut emulator).as_ref().map(String::len);
+        assert_eq!(Some(bytes), length, "a {bytes}-byte title");
+    }
 }
 
 #[test]
