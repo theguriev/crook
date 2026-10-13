@@ -790,9 +790,25 @@ fn command_line(words: impl Iterator<Item = std::ffi::OsString>) -> Result<Vec<S
 /// message a failed startup dies with would all vanish, exactly the way they
 /// do not on macOS and Linux — which is why this cannot be noticed in
 /// development.
+///
+/// Except in a window New window opened, whose parent is the first Crook and
+/// whose parent's console is the shell that one was started from: attached
+/// there, it would be ended with that shell's tab. See
+/// `new_window::OPENED_BY_A_WINDOW`.
 fn attach_to_parent_console() {
     #[cfg(windows)]
     {
+        let opened_by_a_window = crate::new_window::OPENED_BY_A_WINDOW;
+        if std::env::var_os(opened_by_a_window).is_some() {
+            // Taken out before a pane can inherit it, so a `crook --help`
+            // typed into this window's shells still prints.
+            //
+            // SAFETY: the first thing `run` does, before Crook has started a
+            // thread that could read the environment at the same time.
+            unsafe { std::env::remove_var(opened_by_a_window) };
+            return;
+        }
+
         /// `ATTACH_PARENT_PROCESS`: attach to whatever console the parent has.
         const PARENT_PROCESS: u32 = u32::MAX;
 

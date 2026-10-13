@@ -16,13 +16,27 @@
 //!
 //! Nothing waits for the window. The child is reaped on a thread of its own
 //! when it closes, hours later or never — see [`crate::process::reap_at`] —
-//! and on Unix it is put in a process group of its own, so a Ctrl-C or a
-//! hangup aimed at the shell the first Crook was started from does not close
-//! the window it opened.
+//! and a Ctrl-C or a hangup aimed at the shell the first Crook was started
+//! from does not close the window it opened. On Unix the window is put in a
+//! process group of its own. On Windows it is told, by
+//! `OPENED_BY_A_WINDOW`, not to attach to the console the first Crook
+//! attached to, since closing a console ends every process attached to it.
 
 use std::ffi::OsString;
 use std::io;
 use std::path::Path;
+
+/// Set in the environment of a window [`open`] starts on Windows, so that it
+/// stays off the console the window it was opened from is attached to.
+///
+/// That console is the shell the first Crook was started from, if it was
+/// started from one, and a release build attaches to its parent's console so
+/// that `--help` and a failed startup print where they were typed. Attached
+/// there too, a window New window opened would be ended with the first one
+/// when that shell's tab closes. Read and taken out of the environment again
+/// as the window starts, so nothing its panes run is told the same.
+#[cfg(windows)]
+pub(crate) const OPENED_BY_A_WINDOW: &str = "CROOK_OPENED_BY_A_WINDOW";
 
 /// The arguments that open another window whose shells start in
 /// `directory`.
@@ -88,6 +102,8 @@ pub fn open(directory: &Path) -> io::Result<()> {
         use std::os::unix::process::CommandExt as _;
         launcher.process_group(0);
     }
+    #[cfg(windows)]
+    launcher.env(OPENED_BY_A_WINDOW, "1");
     let child = launcher.spawn()?;
     // A warning rather than the debug line other children get: a window that
     // exits unhappily is one that never appeared or one that went, and this
