@@ -804,3 +804,87 @@ fn a_wide_character_carried_over_a_fold_leaves_no_space_behind() {
         );
     }
 }
+
+/// One finished command in a pane `columns` wide, which printed `output`.
+fn printed(columns: u16, output: &str) -> Session {
+    let mut emulator = Emulator::new(TerminalSize::new(columns, 12), 100, Palette::default());
+    emulator.advance(format!("{A}{B}x\r\n{C}{output}{D}{A}$ ").as_bytes());
+    Session {
+        finished: BlockHistory::new(emulator.blocks().iter().cloned().map(Arc::new).collect(), 0),
+        snapshot: emulator.snapshot(),
+    }
+}
+
+/// What filtering the session's first block for `query` keeps of it.
+fn filtered(session: &Session, query: &str, regex: bool) -> Filtered {
+    let block = session.finished.iter().next().expect("a finished block");
+    let options = FindOptions {
+        regex,
+        ..FindOptions::default()
+    };
+    LineMatcher::new(query, options)
+        .expect("the query compiles")
+        .keep(Rows::Stored(&block.rows), block.output_from.unwrap_or(0))
+}
+
+#[test]
+fn a_filter_keeps_a_line_whose_match_crosses_its_fold_and_every_row_of_it() {
+    // Twenty columns fold this line inside `needle`, and each row read on its
+    // own holds half of it: the filter kept nothing while find found it, and
+    // a filter for `error` kept the first row and hid the rest of the line.
+    let session = printed(20, "error: xxxxxxxxxxxneedle yyyy\r\nok\r\n");
+    let block = session.finished.iter().next().expect("a finished block");
+    assert!(
+        block.rows.wraps(1) && block.rows.text(1).ends_with("ne"),
+        "the premise: the line folds inside the needle"
+    );
+    assert_eq!(1, session.blocks().find_all("needle").len());
+
+    for query in ["needle", "error", "yyyy"] {
+        assert_eq!(
+            vec![0, 1, 2],
+            filtered(&session, query, false).rows,
+            "`{query}` did not keep its line whole"
+        );
+    }
+    let kept = filtered(&session, "error.*yyyy", true);
+    assert_eq!(vec![0, 1, 2], kept.rows, "a pattern did not read the line");
+}
+
+#[test]
+fn a_filter_counts_lines_and_drops_a_folded_line_that_does_not_match_whole() {
+    // Sixty characters folded over three rows are one line, so the bar says
+    // 1/2 lines, not 1/4. And a pattern that matches where a row starts but
+    // not where the line does is no match: the fold is the terminal's, and
+    // keeping that row alone showed the back half of a line.
+    let long = "a".repeat(40) + "needle" + &"b".repeat(14);
+    let session = printed(20, &format!("{long}\r\nok\r\n"));
+    let block = session.finished.iter().next().expect("a finished block");
+    assert!(
+        block.rows.wraps(1) && block.rows.wraps(2) && !block.rows.wraps(3),
+        "the premise: one line on rows 1 to 3"
+    );
+
+    let ok = filtered(&session, "ok", false);
+    assert_eq!(vec![0, 4], ok.rows, "the folded line was not dropped whole");
+    assert_eq!((1, 2), (ok.shown, ok.lines), "the count is not in lines");
+
+    let needle = filtered(&session, "needle", false);
+    assert_eq!(vec![0, 1, 2, 3], needle.rows);
+    assert_eq!((1, 2), (needle.shown, needle.lines));
+
+    let start = filtered(&session, "^needle", true);
+    assert_eq!(vec![0], start.rows, "a row's start was taken for a line's");
+    assert_eq!((0, 2), (start.shown, start.lines));
+}
+
+#[test]
+fn a_filter_reads_a_fold_the_way_find_does() {
+    // A space in a fold's last column is trimmed off the row it was printed
+    // on, and find puts it back; the filter has to read the same line, or
+    // the two disagree about what the output says.
+    let session = folded("aaaaaaaaa bbb", true);
+    assert_eq!(1, session.blocks().find_all("a bbb").len());
+    assert_eq!(vec![0, 1, 2], filtered(&session, "a bbb", false).rows);
+    assert_eq!(vec![0], filtered(&session, "abbb", false).rows);
+}

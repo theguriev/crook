@@ -3691,11 +3691,12 @@ impl Workspace {
     }
 
     /// The rows the find bar's filter keeps of the block it is filtering —
-    /// every row before the block's output, and the output rows that hold
-    /// the query — with how many output rows that keeps, out of how many
-    /// there were. `None` while nothing
-    /// is being filtered, or the query is empty or not a pattern: the block
-    /// then shows all of itself.
+    /// every row before the block's output, and every row of each output
+    /// line that holds the query — with how many output lines that keeps,
+    /// out of how many there were: see
+    /// [`LineMatcher::keep`](crate::selection::LineMatcher::keep). `None`
+    /// while nothing is being filtered, or the query is empty or not a
+    /// pattern: the block then shows all of itself.
     ///
     /// Remembered between frames for as long as nothing it was worked out
     /// from changes, since a block of fifty thousand lines is fifty thousand
@@ -3722,13 +3723,9 @@ impl Workspace {
             return Some((block, kept.clone(), *shown, *total));
         }
         let matcher = crate::selection::LineMatcher::new(&query, options)?;
-        let from = found.output_from.unwrap_or(0).min(rows);
-        let kept: Vec<usize> = (0..from)
-            .chain((from..rows).filter(|row| matcher.matches(found.rows.text(*row))))
-            .collect();
-        let shown = kept.len() - from;
-        let kept = Rc::new(kept);
-        let total = rows - from;
+        let filtered = matcher.keep(Rows::Stored(&found.rows), found.output_from.unwrap_or(0));
+        let (shown, total) = (filtered.shown, filtered.lines);
+        let kept = Rc::new(filtered.rows);
         *self.filter_cache.borrow_mut() = Some((key, kept.clone(), shown, total));
         Some((block, kept, shown, total))
     }
