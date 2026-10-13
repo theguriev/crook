@@ -19296,6 +19296,92 @@ mod shells {
             );
         }
 
+        /// Four lines of output, two of which hold `ap`, from a command line
+        /// that spells none of them in lower case — so `banana` on the
+        /// clipboard is the line the command printed, never its echo.
+        const FRUIT: &str = "printf 'APPLE\\nBANANA\\nCHERRY\\nAPRICOT\\n' | tr A-Z a-z";
+
+        /// Where the cell `column` of the output line that reads `text` is
+        /// drawn, `across` of the way into it.
+        ///
+        /// Found in the frame, because only the list knows where it draws a
+        /// block's rows — a filter puts them at places of its own. Read off
+        /// the output's first columns only: the find bar floats over the
+        /// top-right of the same rows, and a line built from both would be a
+        /// line neither of them drew.
+        fn on_output_line(
+            harness: &mut Harness,
+            text: &str,
+            column: usize,
+            across: f32,
+        ) -> Vector2F {
+            let panel = panel_of_the_pane(harness);
+            let scene = harness.frame();
+            let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+            let left = panel.min_x() + crate::workspace::body::GUTTER;
+            let (baseline, _) = text_lines(&scene, |at| {
+                panel.contains_point(at) && at.x() < left + 12. * cell.width
+            })
+            .into_iter()
+            .find(|(_, line)| line == text)
+            .unwrap_or_else(|| panic!("no line of the output reads {text:?}"));
+            vec2f(
+                left + (column as f32 + across) * cell.width,
+                baseline.y() - cell.baseline + cell.height / 2.,
+            )
+        }
+
+        #[test]
+        fn with_the_find_bar_open_the_copy_chord_takes_a_drag_over_the_output() {
+            // The bar floats over the list and is handed every keystroke
+            // first, and its field claimed the copy chord with nothing of its
+            // own selected: a drag over the output and a copy left the
+            // clipboard holding whatever it held before. Text selected in the
+            // field is still the field's to copy.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, FRUIT) == 0 {
+                return;
+            }
+            let Some((clipboard, _system)) = working_clipboard(&harness) else {
+                return;
+            };
+            harness.run_command("crook/window/find");
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("a find bar");
+            find.input().edit(|editor| editor.set_text("cherry"));
+            harness.frame();
+
+            let drag = |harness: &mut Harness| {
+                let start = on_output_line(harness, "apple", 0, 0.1);
+                let end = on_output_line(harness, "banana", "banana".len() - 1, 0.9);
+                harness.hold(start, 1);
+                harness.drag_to(end);
+                harness.let_go(end);
+            };
+            drag(&mut harness);
+            harness.press("c", platform_chord(), "c");
+            assert_eq!(
+                clipboard.read().as_deref(),
+                Some("apple\nbanana"),
+                "the field took the copy chord from the drag over the output"
+            );
+
+            drag(&mut harness);
+            find.input().edit(crate::editor::Editor::select_all);
+            harness.press("c", platform_chord(), "c");
+            assert_eq!(
+                clipboard.read().as_deref(),
+                Some("cherry"),
+                "the query selected in the field was not what was copied"
+            );
+        }
+
         #[test]
         fn a_block_scrolled_into_its_middle_has_its_command_pinned_over_it() {
             // `seq 1 200` is taller than the pane, so at the bottom of the list
