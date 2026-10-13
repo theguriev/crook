@@ -4323,8 +4323,12 @@ impl Workspace {
     /// neither is one the search box filtered out.
     ///
     /// The search box is asked as well, because a filtered-out row is not
-    /// built: a menu opened on one is drawn by nothing until the query
-    /// changes, and the query cannot change while the menu holds the keyboard.
+    /// built and a menu opened on one would be drawn by nothing. Asked here,
+    /// before the menu opens, and not again while it is up: the query is
+    /// fixed while the menu holds the keyboard, but what it matches is not —
+    /// a status word, a title, a directory or a branch can move on its own —
+    /// so the list goes on building the row a menu is open on whatever the
+    /// query says. See [`tabs_panel::builds_row`].
     pub(crate) fn panel_draws_row(&self, pane: PaneId, app: &AppContext) -> bool {
         self.section.is_none()
             && self.tabs_panel_is_showing()

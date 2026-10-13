@@ -6574,6 +6574,58 @@ fn a_finished_task_opens_no_menu_where_the_search_hides_the_tab_it_lands_on() {
 }
 
 #[test]
+fn a_menu_keeps_its_row_when_the_row_stops_answering_the_search() {
+    // The query cannot change while the menu holds the keyboard, but what it
+    // matches can: a status word, a title, a directory and a branch all move
+    // on their own. A row that went out of the list under its open menu took
+    // the menu off screen and left it up — and a rename typed into it, with
+    // the shell deaf and the next Enter committing a name nobody could see.
+    let mut harness = Harness::panel(2);
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the active tab has a pane");
+    let draws_row = |harness: &Harness| {
+        harness.workspace.read(&harness.app, |workspace, app| {
+            workspace.panel_draws_row(pane, app)
+        })
+    };
+    harness.update_session(pane, |session| session.status = AgentStatus::Running);
+    harness.press_search_chord();
+    harness.type_text("running");
+    harness.frame();
+    assert!(
+        draws_row(&harness),
+        "the search did not keep the running row"
+    );
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.run_command("crook/tabs/rename-pane");
+    harness.frame();
+    harness.type_text("the long build");
+    assert!(harness.a_plugin_field_has_keys());
+
+    // As the agent finishing would.
+    harness.update_session(pane, |session| session.status = AgentStatus::Idle);
+    let scene = harness.frame();
+    assert!(
+        tab_menu_box(&scene).is_some(),
+        "the menu stayed up with no row to draw it"
+    );
+    assert!(draws_row(&harness), "the row went out from under its menu");
+    assert!(harness.a_plugin_field_has_keys());
+    assert!(harness.press_key("enter", Modifiers::default()));
+    assert_eq!(harness.pane_title(pane), "the long build");
+
+    // The menu gone, the row answers to the query again like any other.
+    assert_eq!(harness.tab_menu_row(), None);
+    assert!(
+        !draws_row(&harness),
+        "a row the query does not answer for outlived its menu"
+    );
+}
+
+#[test]
 fn a_person_s_name_for_a_pane_beats_the_one_its_agent_chose() {
     // The precedence, through the gesture. An agent that renames its work
     // every few turns would otherwise take the name back within the minute,

@@ -1075,7 +1075,18 @@ fn rows_by_tab(
         // the query does not answer for is not built, so nothing downstream —
         // the chrome, the group header, the geometry a scroll reads — has to
         // know that a filter exists.
-        if !search::keeps(workspace, app, query, granularity, tab, pane) {
+        //
+        // Less the row a tab's menu is open on, which stays whatever the query
+        // says. The menu is drawn by that row and by nothing else, and the
+        // query is fixed while the menu holds the keyboard, but what it
+        // matches is not: a status word, a title, a directory or a branch can
+        // move on its own. A row that went out of the list under its menu took
+        // the menu off screen and left it up, holding the keyboard — and any
+        // rename being typed into it — with nothing drawn to say so. The row
+        // goes when the menu does.
+        if workspace.tab_context_menu().pane != Some(pane)
+            && !search::keeps(workspace, app, query, granularity, tab, pane)
+        {
             continue;
         }
         match grouped.last_mut() {
@@ -1091,8 +1102,9 @@ fn rows_by_tab(
 
 /// Whether the list builds a row for `pane`, asked with the list's own rules
 /// rather than a copy of them: the rows the search left, from
-/// [`rows_by_tab`], less the members of a folded group, which
-/// [`group_block`] draws a heading for and nothing under.
+/// [`rows_by_tab`] — which always leaves the one a tab's menu is open on —
+/// less the members of a folded group, which [`group_block`] draws a heading
+/// for and nothing under.
 ///
 /// Whether the list is on screen at all is the caller's to ask. See
 /// [`Workspace::panel_draws_row`].
