@@ -24,11 +24,14 @@
 //! `--no-ext-diff` and `--no-textconv`: `diff.external` and a `textconv`
 //! driver are programs named by configuration, and git runs them for every
 //! file it diffs, so without the two flags a column that only looks would
-//! start whatever a repository's `.git/config` named. `core.fsmonitor` is
-//! switched off for the same reason — it is a program too. What is left is
-//! git's own clean filter, which is how git reads a working tree at all (Git
-//! LFS is one) and which the agent's own `git status` runs in the same
-//! repository.
+//! start whatever a repository's `.git/config` named. `core.fsmonitor` is a
+//! program too, and the shared runner, `run.rs`, switches it off for every
+//! read. What is left is git's own clean filter, which is how git reads a
+//! working tree at all (Git LFS is one) and which the agent's own
+//! `git status` runs in the same repository — and, in a partial clone, the
+//! fetch of what the clone lacks, by whatever means its configuration names.
+//! A diff cannot be shown without the files it compares, and `run.rs` says
+//! why only the row's counts go without them.
 //!
 //! The settings that change the *text* this reads are pinned too: colour,
 //! `diff.relative`, the `a/` and `b/` a patch names its sides with, how a
@@ -122,17 +125,14 @@ const DIFF_FLAGS: [&str; 6] = [
 ///
 /// `--literal-pathspecs` because a path is handed to `diff` as a pathspec,
 /// and a pathspec is a glob: a file called `page[1].html` would otherwise be
-/// asked about as `page1.html`. `core.fsmonitor` names a program git runs to
-/// ask what changed; off, git looks for itself. `diff.relative` would narrow
-/// every diff to the directory it runs in, which is the top of the
-/// repository here, but a setting is not a promise and the paths have to be
-/// from the top. `diff.suppressBlankEmpty` prints a blank context line as
-/// nothing at all rather than as one space, and a line that is neither added,
-/// removed nor context is one the count to the first changed line skips.
-const GLOBAL: [&str; 7] = [
+/// asked about as `page1.html`. `diff.relative` would narrow every diff to
+/// the directory it runs in, which is the top of the repository here, but a
+/// setting is not a promise and the paths have to be from the top.
+/// `diff.suppressBlankEmpty` prints a blank context line as nothing at all
+/// rather than as one space, and a line that is neither added, removed nor
+/// context is one the count to the first changed line skips.
+const GLOBAL: [&str; 5] = [
     "--literal-pathspecs",
-    "-c",
-    "core.fsmonitor=false",
     "-c",
     "diff.relative=false",
     "-c",

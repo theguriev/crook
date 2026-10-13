@@ -13,6 +13,11 @@
 //! [`super::changes`] is another, and the one that asked for
 //! [`run_capped`]: the diff of a single file is as long as the file is.
 //!
+//! Every read goes through [`start`], so that is where the rule
+//! [`super::changes`] states is kept for all of them: a repository's
+//! configuration runs nothing but a clean filter — and, for a read a person
+//! opened something for, a partial clone's fetch of what it lacks.
+//!
 //! The deadline bounds the *call*, not only git. Killing a process does not
 //! reach what it left behind: a hook that backgrounds a helper — `direnv
 //! reload &`, a file watcher, a dev server — hands that helper the two pipes
@@ -114,12 +119,18 @@ pub(super) fn git_is_missing() -> bool {
     GIT_MISSING.load(Ordering::Relaxed)
 }
 
-/// Whether an invocation only reads.
+/// Whether an invocation only reads, and whether anybody asked for it.
 ///
-/// One enum for two decisions, because they are the same decision: how long a
-/// call may take, and whether it is allowed to take git's locks.
+/// One enum for four decisions, because they are the same decision: how long
+/// a call may take, whether it is allowed to take git's locks, whether it may
+/// run what a repository's configuration names, and whether it may fetch what
+/// a partial clone lacks.
 #[derive(Copy, Clone)]
 pub(super) enum Intent {
+    /// The tab row's counts: a [`Self::Read`] nobody asked for, run every
+    /// fifteen seconds in every directory a pane is in. It also fetches
+    /// nothing — see `start`.
+    Poll,
     /// `worktree list`, `status`: answers a question and changes nothing.
     Read,
     /// `worktree add`, `lock`, `unlock`: writes the repository.
@@ -134,10 +145,15 @@ impl Intent {
     /// The deadline this kind of call gets.
     fn timeout(self) -> Duration {
         match self {
-            Self::Read => READ_TIMEOUT,
+            Self::Poll | Self::Read => READ_TIMEOUT,
             Self::Write => write_timeout(),
             Self::Delete => DELETE_TIMEOUT,
         }
+    }
+
+    /// Whether the call only reads.
+    fn reads(self) -> bool {
+        matches!(self, Self::Poll | Self::Read)
     }
 }
 
@@ -338,7 +354,7 @@ fn run_with(
         // a daemon the hook started still holds a pipe would be telling a
         // person the directory they are looking at is not there. Its stdout is
         // never parsed, and its stderr only ever matters when it failed.
-        matches!(intent, Intent::Read) && stdout.is_none()
+        intent.reads() && stdout.is_none()
     } else {
         // Every failure is classified out of stderr, and classifying a
         // fragment of one names the wrong error or, more often, none at all.
@@ -459,7 +475,7 @@ fn start(
 ) -> Result<Child, Failure> {
     let mut git = command("git");
 
-    if matches!(intent, Intent::Read) {
+    if intent.reads() {
         // `diff`'s treatment, for `diff`'s reason: a background read must not
         // take `.git/index.lock`, or it races the user's own commit, and must
         // not rewrite the index as a side effect of refreshing it. The
@@ -472,16 +488,67 @@ fn start(
         git.arg("--no-optional-locks")
             .args(["-c", "diff.autoRefreshIndex=false"])
             .env("GIT_OPTIONAL_LOCKS", "0");
+
+        // A read also runs no program a repository's configuration names. It
+        // is git run on nobody's say-so — the row's counts, every fifteen
+        // seconds in every directory a pane is in — and a repository somebody
+        // unpacked brings its own `.git/config`, so a pane that only `cd`s
+        // into one would start whatever that names. `core.fsmonitor` is the
+        // program git asks what changed in the working tree; off, git looks
+        // for itself. Empty rather than `false`, which git before 2.36 takes
+        // for a program's path and runs whatever `false` it finds; empty is
+        // off to every git. A `-c` reaches the gits this one starts in a
+        // submodule too, through the environment it hands them.
+        //
+        // `log.showSignature` has `log` hand every signed commit it shows to
+        // the program `gpg.program` names — or `gpg.ssh.program`, for an SSH
+        // signature — and the proofs in `super::merged` read a base's history
+        // with `log`. No read here wants a signature checked.
+        //
+        // What is left is a clean filter, which is how git reads a working
+        // tree at all — see `super::changes` — and a partial clone's fetch,
+        // below. A write keeps all of it: it is something a person asked
+        // for, and runs the repository's hooks regardless.
+        git.args(["-c", "core.fsmonitor="])
+            .args(["-c", "log.showSignature=false"]);
+    }
+
+    if matches!(intent, Intent::Poll) {
+        // A partial clone fetches an object it was cloned without the moment
+        // a command needs one, from the remote its configuration names and by
+        // the means it names — `remote.<name>.uploadpack`, `core.sshCommand`,
+        // a credential helper. The row's counts go without: they are the
+        // reads nobody asked for, and a count git cannot take without an
+        // object it lacks is no count, which a row already shows as nothing.
+        // git honours the variable from the May 2024 security releases on —
+        // 2.39.4, 2.40.2, 2.41.1, 2.42.2, 2.43.4, 2.44.1, 2.45.1 and every
+        // git since; one from before the fix in its own line, 2.44.0 and
+        // 2.45.0 among them, still fetches.
+        //
+        // Every other read still fetches, because each is something a person
+        // opened — the Changes column, the worktree menu, Finish — and in a
+        // blobless clone what it reads is what was never fetched. The proof
+        // that a squash landed reads the patches of every commit the base
+        // gained since the fork, whose files no checkout here has needed; the
+        // Changes column's list finds a rename by reading the old file as the
+        // fork had it. Without the fetch, the one proves nothing and the other
+        // can list nothing, and they would stay that way, since nothing else
+        // in Crook would ever fetch those files. That leaves a fetch a
+        // repository can make Crook run: a Changes column left open reads
+        // whichever repository the focused pane is in.
+        git.env("GIT_NO_LAZY_FETCH", "1");
     }
 
     git.args(args)
         .current_dir(directory)
-        // No command here touches a remote — `add` is handed an explicit branch
-        // and start point precisely so nothing can decide to go and fetch one —
-        // so there is no credential to be asked for. These two make that a
-        // guarantee rather than an argument: git may not prompt on a terminal,
-        // and has no terminal on stdin to prompt on — a pipe, when there is
-        // input, is no terminal either.
+        // No command here sets out to touch a remote — `add` is handed an
+        // explicit branch and start point precisely so nothing can decide to
+        // go and fetch one — and the one way a remote is touched anyway, a
+        // partial clone fetching what it lacks, is no reason to stop and ask a
+        // person for a credential. These two make that a guarantee rather
+        // than an argument: git may not prompt on a terminal, and has no
+        // terminal on stdin to prompt on — a pipe, when there is input, is no
+        // terminal either.
         .env("GIT_TERMINAL_PROMPT", "0");
 
     let [stdin, stdout, stderr] = stdio;
