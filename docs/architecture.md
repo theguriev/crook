@@ -1285,15 +1285,27 @@ them — the checks are what `-d` stood in for. Three gestures reach it:
   the tab's group: a worktree opens into the group of the tab it came from, so a group is the
   repository, and closing it would end the main checkout and every task beside this one. It is
   refused, in a sentence naming the pane, while an agent there is running or waiting on an
-  answer or a command is open in its shell. The panes close first — a shell sitting in a
-  directory keeps Windows from deleting it — and since the menu hung off a row that is now
-  gone, it moves to a tab in the main checkout and says what happened under the list.
+  answer or a command is open in its shell — and, in a sentence naming it, over a checkout with
+  a submodule checked out in it, however clean, or still holding the repository of one that was
+  deinitialised or `git rm`ed there, which git removes only when forced. The panes
+  close first — a shell sitting in a directory keeps Windows from deleting it — and since the
+  menu hung off a row that is now gone, it moves to a tab in the main checkout and says what
+  happened under the list.
 - **Discard task** is the one way to delete a branch nobody proved, and it asks twice. The
   second question names the commits only that branch holds — on no other branch, tag or
   remote, since one that is elsewhere is not lost — and the modified or untracked files the
   forced removal throws away, six of each by name and the rest counted, over a button that
   says "for good" and is never Enter's. The branch is deleted only if its tip is still the one
-  those commits were counted from.
+  those commits were counted from. It names the commits only a submodule of the checkout holds
+  too, checked out or only kept, and counts its stashes: its repository lives in the checkout's
+  own git directory, and the forced removal deletes it. A commit counts when nothing says a
+  remote has it: no remote-tracking branch reaches it, it is not a commit a shallow clone's
+  history stops at, and no tag at or under the commit the superproject points at reaches it. A
+  tag anywhere else, on a branch or past that commit, may be one made by hand in the repository
+  the removal deletes, over the very work it marks. The commit the superproject points at is
+  taken for the remote's when a `--depth 1` fetch brought it; one a deeper or full clone
+  fetched by name, on no remote branch, is still counted, since nothing tells it from the
+  commit an agent made there and pointed the superproject at.
 
 What a question says is what its press does, however long it was up. It stays up while an agent
 finishes — that is what lights its button — and an agent's last act is often a file or a

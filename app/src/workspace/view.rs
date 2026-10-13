@@ -4980,16 +4980,25 @@ impl Workspace {
 
         let mut going = Vec::new();
         let mut kept = Vec::new();
+        let mut submodules = Vec::new();
         for (path, label) in free {
             match crate::git::worktree::local_work(&path) {
                 Ok(local) if !local.blocks_removal() => going.push(Going { path, label, local }),
+                Ok(local) if !local.holds_work() => {
+                    submodules.push(label.clone());
+                    kept.push(label);
+                }
                 _ => kept.push(label),
             }
         }
 
         self.tab_menu.next_epoch();
         self.tab_menu.mode = WorktreeMode::Tidying;
-        self.tab_menu.sweep = Sweep::Ready { going, kept };
+        self.tab_menu.sweep = Sweep::Ready {
+            going,
+            kept,
+            submodules,
+        };
         self.tab_menu.problem = None;
         self.tab_menu.forget_hover_state();
         ctx.notify();
@@ -6062,7 +6071,7 @@ impl Workspace {
         self.start_chomping(ctx);
         ctx.notify();
 
-        self.look_in_next(free.into(), Vec::new(), Vec::new(), epoch, ctx);
+        self.look_in_next(free.into(), Vec::new(), Vec::new(), Vec::new(), epoch, ctx);
     }
 
     /// Looks in the next free checkout, and then the one after it.
@@ -6081,11 +6090,16 @@ impl Workspace {
         mut remaining: std::collections::VecDeque<(PathBuf, String)>,
         mut going: Vec<Going>,
         mut kept: Vec<String>,
+        mut submodules: Vec<String>,
         epoch: u64,
         ctx: &mut ViewContext<Self>,
     ) {
         let Some((path, label)) = remaining.pop_front() else {
-            self.tab_menu.sweep = Sweep::Ready { going, kept };
+            self.tab_menu.sweep = Sweep::Ready {
+                going,
+                kept,
+                submodules,
+            };
             ctx.notify();
             return;
         };
@@ -6106,6 +6120,13 @@ impl Workspace {
                 // the module's header. A checkout git would not answer about
                 // at all is kept for the same reason, one step further out.
                 Ok(local) if !local.blocks_removal() => going.push(Going { path, label, local }),
+                // Not work, and git refuses it all the same: a submodule is
+                // checked out in it, or its repository is still kept there.
+                // Kept, and kept apart, to say so.
+                Ok(local) if !local.holds_work() => {
+                    submodules.push(label.clone());
+                    kept.push(label);
+                }
                 Ok(_) => kept.push(label),
                 Err(problem) => {
                     log::warn!("could not look in {}: {problem}", path.display());
@@ -6116,7 +6137,7 @@ impl Workspace {
                 *looked += 1;
                 ctx.notify();
             }
-            workspace.look_in_next(remaining, going, kept, epoch, ctx);
+            workspace.look_in_next(remaining, going, kept, submodules, epoch, ctx);
         })
         .detach();
     }
