@@ -255,6 +255,10 @@ struct OscWatcher {
     /// Whether the chunk erased the scrollback — `CSI 3 J`, the third thing
     /// `clear` prints.
     history_cleared: bool,
+    /// Whether the chunk reset the terminal — `ESC c`, the first thing
+    /// `reset` prints — which empties the shell's history along with
+    /// everything else, from either screen, and leaves the alternate one.
+    reset: bool,
     /// Whether the program asked which terminal this is, with XTVERSION —
     /// `CSI > q`, which is where the watcher stops.
     version_asked: bool,
@@ -269,6 +273,12 @@ struct OscWatcher {
 }
 
 impl Perform for OscWatcher {
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        if intermediates.is_empty() && byte == b'c' {
+            self.reset = true;
+        }
+    }
+
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         let first = params.iter().next();
         match (action, intermediates) {
@@ -600,9 +610,12 @@ impl Emulator {
             // Before the mark, which the piece ends on and so comes after
             // anything else in it. On the alternate screen the erase is the
             // full-screen program's own and touches no history of the shell's.
-            if std::mem::take(&mut self.osc_watcher.history_cleared)
-                && !self.term.mode().contains(TermMode::ALT_SCREEN)
-            {
+            // A reset empties the shell's whichever screen the piece ends on:
+            // under a program started after it, the block is found again once
+            // the shell's screen is back, as it is after a reflow there.
+            let erased = std::mem::take(&mut self.osc_watcher.history_cleared)
+                && !self.term.mode().contains(TermMode::ALT_SCREEN);
+            if std::mem::take(&mut self.osc_watcher.reset) || erased {
                 self.blocks.history_cleared(&self.term);
             }
             // The piece ends on the query, and `Term` has queued the answers

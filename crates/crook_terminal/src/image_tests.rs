@@ -275,6 +275,46 @@ fn a_shorter_pane_that_fills_the_history_takes_its_pictures() {
     assert!(images.is_empty(), "{images:?}");
 }
 
+/// What `reset` prints, from ncurses 6.6 with `TERM=xterm-256color`: a full
+/// reset (`ESC c`) first, which empties the history along with the screen.
+const RESET: &[u8] = b"\x1bc\x1b]104\x07\x1b[!p\x1b[?3;4l\x1b[4l\x1b>\x1b[?69l\r";
+
+#[test]
+fn a_reset_takes_the_pictures_with_the_history() {
+    // The anchor is measured against a history the reset emptied, so it
+    // names a row far below the screen, and output growing the history
+    // again brings it back up, onto whatever is on that row by then.
+    let mut emulator = picture_after(50, 10_000);
+    for line in 0..50 {
+        emulator.advance(format!("log {line}\r\n").as_bytes());
+    }
+    emulator.advance(RESET);
+    emulator.advance(b"$ ");
+    for line in 0..52 {
+        emulator.advance(format!("new {line}\r\n").as_bytes());
+    }
+    emulator.advance(b"$ ");
+
+    let images = &emulator.snapshot().live_block.images;
+    assert!(images.is_empty(), "{images:?}");
+}
+
+#[test]
+fn a_reset_read_with_a_full_screen_program_starting_takes_the_pictures() {
+    // The shell's history is gone whichever screen the read ends on.
+    let mut emulator = picture_after(50, 10_000);
+    let mut read = RESET.to_vec();
+    read.extend_from_slice(b"\x1b[?1049h");
+    emulator.advance(&read);
+    emulator.advance(b"\x1b[?1049l$ ");
+    for line in 0..52 {
+        emulator.advance(format!("new {line}\r\n").as_bytes());
+    }
+
+    let images = &emulator.snapshot().live_block.images;
+    assert!(images.is_empty(), "{images:?}");
+}
+
 #[test]
 fn a_block_longer_than_the_history_keeps_no_picture() {
     // With shell integration the history is dropped at every block, and

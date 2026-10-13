@@ -1278,6 +1278,25 @@ fn test_what_a_command_prints_after_clearing_the_screen_is_its_own() {
 }
 
 #[test]
+fn test_what_a_command_prints_after_a_reset_is_its_own() {
+    // `reset` empties the screen and the history with `ESC c` rather than
+    // `CSI 3 J`, and the anchor went on naming the row the block opened on,
+    // as it did under `clear`.
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}$ {B}true\r\n{C}\x1b]133;D;0\x07").as_bytes());
+    emulator.advance(format!("{A}$ {B}reset; echo hi\r\n{C}").as_bytes());
+    emulator.advance(b"\x1bchi\r\n");
+
+    assert_eq!(
+        "hi",
+        live_text(&mut emulator),
+        "the open block does not hold the output"
+    );
+    emulator.advance(format!("\x1b]133;D;0\x07{A}$ {B}").as_bytes());
+    assert_eq!("hi", emulator.blocks()[1].rows.to_text());
+}
+
+#[test]
 fn test_erasing_only_the_history_keeps_the_block_where_it_was() {
     // `CSI 3 J` on its own, with the screen left standing: the block is the
     // prompt on its row and what follows, not the blank rows the block before

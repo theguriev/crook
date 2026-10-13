@@ -961,9 +961,10 @@ ones. It is sized the way iTerm2 sizes it: by `width` and `height` in cells, pix
 the pane, fitted with its shape kept unless `preserveAspectRatio=0`, and never wider or taller
 than the pane. PNG only, at most 16 MB and 4096 pixels a side; and not on the alternate screen,
 which a full-screen program redraws cell by cell at will — so yazi's previewer and an `imgcat`
-inside tmux, both of which draw from there, show none. A `clear`, or a resize that reflows the
-rows under it, takes a picture away. Kitty's graphics protocol is not read yet. The list of what
-is absent — and what adding each item would touch — is the last section of the architecture doc.
+inside tmux, both of which draw from there, show none. A `clear` or a `reset`, or a resize that
+reflows the rows under it, takes a picture away. Kitty's graphics protocol is not read yet. The
+list of what is absent — and what adding each item would touch — is the last section of the
+architecture doc.
 
 ## Which files your shell reads
 

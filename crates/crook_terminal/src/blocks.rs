@@ -1046,6 +1046,10 @@ impl BlockTracker {
     /// above a prompt are not this block's either. The boundaries inside it
     /// go the same way, since the command line they were measured from may
     /// have been erased with the rest.
+    ///
+    /// `reset` comes here too. Its `ESC c` empties the history and the
+    /// screen, so the anchor names a row below the screen, which output
+    /// growing the history again brings back up onto other text.
     pub(crate) fn history_cleared<T>(&mut self, term: &Term<T>) {
         self.reflowed(term);
     }
