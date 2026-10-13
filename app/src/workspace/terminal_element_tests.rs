@@ -95,7 +95,10 @@ fn paint(snapshot: &Snapshot, selected: Option<(BlockId, Region)>, owns_caret: b
         Vector2F::zero(),
         size,
         owns_caret,
-        selected,
+        &Washes {
+            selected,
+            ..Washes::default()
+        },
         &mut scene,
     );
     scene.stop_layer();
@@ -250,7 +253,7 @@ fn a_cursor_scrolled_out_of_the_visible_grid_is_not_drawn() {
         Vector2F::zero(),
         vec2f(metrics.width, metrics.height * 2.),
         true,
-        None,
+        &Washes::default(),
         &mut scene,
     );
 
@@ -515,6 +518,126 @@ fn a_selection_made_in_the_scrollback_is_drawn_against_the_lines_it_holds() {
         selection_rects(&painted_selected(&scrolled, region)).is_empty(),
         "scrolling back to the live output left the highlight behind on screen"
     );
+}
+
+/// Paints a snapshot at its natural size with the find's matches washed over
+/// it.
+fn painted_found(
+    snapshot: &Snapshot,
+    finds: Vec<(BlockId, Region)>,
+    current: Option<(BlockId, Region)>,
+) -> Scene {
+    let font = font();
+    let metrics = font.metrics();
+    let size = vec2f(
+        snapshot.columns as f32 * metrics.width,
+        snapshot.rows as f32 * metrics.height,
+    );
+    let mut scene = Scene::new(1.);
+    scene.start_layer(ClipBounds::None);
+    paint_grid(
+        snapshot,
+        &font,
+        Vector2F::zero(),
+        size,
+        true,
+        &Washes {
+            finds,
+            find_current: current,
+            selected: None,
+        },
+        &mut scene,
+    );
+    scene.stop_layer();
+    scene
+}
+
+/// The rectangles washed in `colour`, as (origin, size) pairs.
+fn washes_in(scene: &Scene, colour: Color) -> Vec<(Vector2F, Vector2F)> {
+    rects(scene)
+        .into_iter()
+        .filter(|rect| rect.background == Fill::Solid(colour))
+        .map(|rect| (rect.bounds.origin(), rect.bounds.size()))
+        .collect()
+}
+
+#[test]
+fn a_find_on_the_grid_washes_its_matches_and_the_current_one_brighter() {
+    // The list's two washes on the grid: every match in the amber, the one the
+    // bar is standing on in the accent over it, both under the text — and a
+    // match that ends on a double-width character takes both its columns.
+    let font = font();
+    let metrics = font.metrics();
+    let mut grid = snapshot(&["ab \u{6f22} ab"], 7);
+    grid.cells[3].flags = CellFlags::WIDE;
+    grid.cells[4].c = ' ';
+    grid.cells[4].flags = CellFlags::WIDE_SPACER;
+    let first = region((0, 0), (0, 1));
+    let wide = region((0, 1), (0, 3));
+    let last = region((0, 5), (0, 6));
+
+    let scene = painted_found(&grid, vec![first, wide, last], Some(last));
+
+    let amber = washes_in(
+        &scene,
+        crate::theme::theme()
+            .usage_high
+            .with_alpha(super::FIND_MATCH_ALPHA),
+    );
+    assert_eq!(
+        vec![
+            (vec2f(0., 0.), vec2f(2. * metrics.width, metrics.height)),
+            (
+                vec2f(metrics.width, 0.),
+                vec2f(4. * metrics.width, metrics.height)
+            ),
+            (
+                vec2f(5. * metrics.width, 0.),
+                vec2f(2. * metrics.width, metrics.height)
+            ),
+        ],
+        amber,
+        "one wash a match, the wide character's two columns both inside it"
+    );
+    let accent = washes_in(
+        &scene,
+        crate::theme::theme()
+            .accent
+            .with_alpha(super::FIND_CURRENT_ALPHA),
+    );
+    assert_eq!(
+        vec![(
+            vec2f(5. * metrics.width, 0.),
+            vec2f(2. * metrics.width, metrics.height)
+        )],
+        accent,
+        "the current match, over its own amber"
+    );
+    assert!(
+        glyphs(&scene).iter().all(|glyph| glyph.color == color(INK)),
+        "a highlight repainted the text"
+    );
+}
+
+#[test]
+fn a_find_match_in_the_scrollback_is_drawn_against_the_line_it_is_on() {
+    // A grid's matches are numbered from the oldest line of the scrollback,
+    // as its selection is: the same match is the top row of a viewport
+    // scrolled two lines back and nowhere once it is back at the live output.
+    let mut scrolled = snapshot(&["abcd", "efgh"], 4);
+    scrolled.history_len = 2;
+    let matched = region((0, 1), (0, 2));
+    let amber = crate::theme::theme()
+        .usage_high
+        .with_alpha(super::FIND_MATCH_ALPHA);
+
+    scrolled.display_offset = 2;
+    assert_eq!(
+        1,
+        washes_in(&painted_found(&scrolled, vec![matched], None), amber).len()
+    );
+    scrolled.display_offset = 0;
+    assert!(washes_in(&painted_found(&scrolled, vec![matched], None), amber).is_empty());
 }
 
 #[test]

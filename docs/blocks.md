@@ -454,11 +454,56 @@ state, beside its selection — so a search in one pane holds while another prin
 pane's bar has the keyboard is the focused pane's, decided in `Workspace::sync_input_keys`
 exactly as the tab search box's is.
 
-Two things it is not. It is not a filter: every block stays where it is and the matches are
-marked in place, because the output is a transcript and hiding the lines between the hits would
-be hiding what a command did. And it is over the list of commands only — a full-screen program
-has taken the whole pane and draws one grid, so the bar does not open there, where `ctrl-f` is
-one of the program's own keys.
+It is not a filter: every block stays where it is and the matches are marked in place, because
+the output is a transcript and hiding the lines between the hits would be hiding what a command
+did.
+
+**Over the grid.** A pane drawing one grid — an agent past its first screenful, an `ssh`
+session, a shell without the marks — gets the same bar, searching the emulator's scrollback as
+well as its screen. The grid is a list of one block here as it is for a selection, so the walk
+is the list's own `Blocks::find_all_with`, the switches and the folding of capitals included,
+and the matches are rows numbered from the oldest line of the scrollback. What differs is where
+the text is: ten thousand lines of it behind the terminal's lock rather than in a snapshot. So
+it is read off the thread that draws, `GRID_PIECE` rows per hold of the lock
+(`TerminalHandle::harvest_rows`, pieces joined with `BlockRows::append`), searched there, and
+kept on the pane's `PaneFind` with the question it answers — the query, the switches, the
+snapshot revision and the grid's width — and the rows it read, so the next letter of a query
+searches those rows again rather than reading the scrollback once more. A repaint of the grid
+(a resize is one), a keystroke in the field, a switch and the pane coming back on screen each
+ask again; one search runs at a time, and its landing asks again if the question moved on while
+it was out. A pane nobody can see — a tab behind, a section over the tabs — is not searched
+until it is shown. A picture of the live screen whose text is the text the rows were read for
+(`same_text`: the title a working agent animates, the cursor and the colours do not count)
+keeps the rows and their answer (`PaneFind::carry_over`) — not a picture scrolled back, whose
+snapshot does not hold the bottom of the screen a program can rewrite in place. One whose text
+changed under an answer already on screen is read again after `GRID_PAUSE`, so a program
+printing or redrawing without stop has its scrollback read a few times a second rather than
+back to back; a question that changes during that pause — a letter typed, a switch flipped —
+takes the paused read's place and starts at once (`GridPause`), rather than waiting the pause
+out behind it. The bar's count is blank while the answer for the query as it now reads is on its
+way, rather than saying "No results" about a search that has not finished, and an answer found
+at another width is not shown: the resize folded the grid again under it. Only the matches on
+screen go to the grid to be washed, and a step scrolls the emulator's display — the path the
+wheel and the paging chords take — to put the match a third of a screen down. The limit is the
+selection's: once the scrollback is full every new line drops the oldest, and until the search
+the new line's repaint starts has come back a highlight can sit a few rows from its text.
+
+A full-screen program's alternate screen keeps no scrollback, so the bar there reads **Find on
+screen** and searches what the program has drawn; Claude Code's fullscreen renderer, which keeps
+its history in itself, is such a program. A bar is about the screen it was opened over: the pane
+changing screens under it — a full-screen program starting or ending — closes it, so a bar left
+open never keeps Enter from a program that has just taken the pane, and the keyboard goes back
+to the composer (`Workspace::close_find_over_another_screen`, on the repaint and again on the
+frame). A pane only changing surface, a command printing past the top of the viewport, leaves
+it open. The chord is `cmd-f` or `ctrl-shift-f`, never a program's own `ctrl-f`.
+
+While the bar has the keyboard the field takes every key it has a use for, and a word an input
+method composes, before the output hears it. The output under it is given
+`Keys::SignalsAndCopy`: the interrupt, end and suspend keys a menu leaves it, and the copy chord
+over a selection, which the bar hides none of — `cmd-c` or `ctrl-shift-c` as well as `ctrl-c`,
+since the field leaves the platform's chord alone while nothing in the field is selected.
+Nothing else falls through to the program, a paste chord the field does not paste on included
+(`ctrl-shift-v` on macOS) — over an agent with no composer, everything else used to.
 
 ## Navigating the blocks
 

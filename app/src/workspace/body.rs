@@ -93,6 +93,7 @@ use crookui_core::prelude::*;
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 
 use crate::pane_blocks::PaneBlocks;
+use crate::pane_find;
 use crate::pane_split::{DividerDrag, Drag, PaneExtent};
 use crate::pane_surface::{self, Surface};
 use crate::tab::{Pane, PaneId, SplitAxis, TabAction};
@@ -508,23 +509,39 @@ fn contents(
     // theme's, so that a shell which changed them takes the field with it.
     let ink = Ink::of(&snapshot);
     let surface = pane_surface::of(&snapshot, Instant::now());
-    // The find bar is over the list of commands. A full-screen program takes
-    // the whole pane and draws one grid, so a bar left open from before it
-    // started would steal Enter from it — close it as the surface leaves the
-    // list, which is where the snapshot to see that is.
+    // The find bar searches the grid's scrollback as readily as the list, so a
+    // command printing past the top of the viewport leaves it where it is.
+    // What takes it down is the pane changing *screens* under it, which the
+    // repaint that changed them has usually seen to already; this frame may
+    // have been drawn from the new screen before that repaint was heard.
+    workspace.close_find_over_another_screen(id, &snapshot);
+    // An open bar has the keyboard, and the output under it keeps only the
+    // three keys a running command must never lose, and the copy chord over
+    // what is selected in it. See [`Keys::SignalsAndCopy`].
+    let output_keys = if keys == Keys::All && workspace.find_takes_keys() {
+        Keys::SignalsAndCopy
+    } else {
+        keys
+    };
+    // The block the keyboard was standing on goes as the surface leaves the
+    // list. A selection that outlived the list would keep Escape and the copy
+    // chord away from the program that now owns the screen —
+    // `block_selection_action_for` claims both while one is set — and would
+    // leave every command about *the* block acting on one nothing is drawing:
+    // `rerun-block` would type into a composer that is not on screen, and the
+    // `blockSelected` clause would hold over vim.
+    //
+    // And a find bar's filter, which is a way of looking at one block of the
+    // list: the grid draws no block to filter, so the bar goes back to finding,
+    // over the grid and with the same query.
     if surface.surface != Surface::Blocks {
-        if let Some(find) = workspace.find(id) {
-            find.close();
-        }
-        // And the block the keyboard was standing on, for the same reason and
-        // in the same place. A selection that outlived the list would keep
-        // Escape and the copy chord away from the program that now owns the
-        // screen — `block_selection_action_for` claims both while one is set —
-        // and would leave every command about *the* block acting on one
-        // nothing is drawing: `rerun-block` would type into a composer that is
-        // not on screen, and the `blockSelected` clause would hold over vim.
         if let Some(blocks) = workspace.pane_blocks(id) {
             blocks.select(None);
+        }
+        if let Some(find) = workspace.find(id)
+            && find.filter().is_some()
+        {
+            find.set_filter(None);
         }
     }
     // Read before the snapshot goes to the surface, and from the same three
@@ -540,12 +557,12 @@ fn contents(
             snapshot,
             font.clone(),
             Keyboard {
-                keys,
+                keys: output_keys,
                 composer: surface.composer,
             },
             app,
         ),
-        Surface::Grid => grid(workspace, id, &handle, snapshot, font.clone(), keys),
+        Surface::Grid => grid(workspace, id, &handle, snapshot, font.clone(), output_keys),
     };
 
     // The pty is told the *pane's* size, so it is measured here — outside the
@@ -643,7 +660,7 @@ fn blocks(
     let matches = if finding.is_some() {
         workspace.find_matches(pane, app)
     } else {
-        crate::pane_find::Matches::default()
+        pane_find::Matches::default()
     };
     let current = finding.and_then(|find| find.clamped(matches.len()));
 
@@ -695,11 +712,6 @@ fn blocks(
     );
     let list = stack.finish();
 
-    // The bar floats over the top-right of the output, the way a browser's
-    // does: it is about the whole pane, so it does not take a row from it —
-    // and, being about the pane, it is laid out against the pane, so that in
-    // one narrower than the bar would like to be the field gives way rather
-    // than the bar running over the pane next door.
     let list = match finding {
         Some(find) => {
             // How many of the filtered block's output lines are shown, out of
@@ -707,19 +719,8 @@ fn blocks(
             let lines = filtered
                 .as_ref()
                 .map(|(_, _, shown, total)| (*shown, *total));
-            let bar = find_bar(workspace, pane, find, &matches, lines);
-            let mut stack = Stack::new().with_child(list);
-            stack.add_anchored_overlay_child_within(
-                bar,
-                AnchorTo {
-                    parent: Corner::TopRight,
-                    child: Corner::TopRight,
-                    offset: vec2f(-FIND_BAR_INSET, FIND_BAR_INSET),
-                    keep_on_screen: true,
-                    keep_clear_of_parent: false,
-                },
-            );
-            stack.finish()
+            let bar = find_bar(workspace, pane, find, &matches, lines, Searched::Blocks);
+            float_find_bar(list, bar)
         }
         None => list,
     };
@@ -747,6 +748,27 @@ fn blocks(
     stack.finish()
 }
 
+/// Floats a find bar over the top-right of a pane's output.
+///
+/// The way a browser's does: it is about the whole pane, so it does not take a
+/// row from it — and, being about the pane, it is laid out against the pane,
+/// so that in one narrower than the bar would like to be the field gives way
+/// rather than the bar running over the pane next door.
+fn float_find_bar(output: Box<dyn Element>, bar: Box<dyn Element>) -> Box<dyn Element> {
+    let mut stack = Stack::new().with_child(output);
+    stack.add_anchored_overlay_child_within(
+        bar,
+        AnchorTo {
+            parent: Corner::TopRight,
+            child: Corner::TopRight,
+            offset: vec2f(-FIND_BAR_INSET, FIND_BAR_INSET),
+            keep_on_screen: true,
+            keep_clear_of_parent: false,
+        },
+    );
+    stack.finish()
+}
+
 /// The pane's output as one grid: a full-screen program, or a shell with no
 /// command marks.
 fn grid(
@@ -757,10 +779,27 @@ fn grid(
     font: CellFont,
     keys: Keys,
 ) -> Box<dyn Element> {
+    // The find is the same bar the list has, over the scrollback as well as
+    // the screen. Its matches are searched off this thread, so what is here is
+    // the last answer for the query as it now reads — `None` until that has
+    // come back — and only the screenful of it the grid can paint goes to the
+    // grid: the scrollback may hold thousands.
+    let finding = workspace.find(pane).filter(|find| find.is_open());
+    let found = finding.map(|_| workspace.grid_find_matches(pane, &snapshot));
+    let alt_screen = snapshot.alt_screen;
+    let on_screen = found.as_ref().and_then(|found| {
+        let matches = found.as_ref()?;
+        let current = finding
+            .and_then(|find| find.clamped(matches.len()))
+            .map(|index| matches[index]);
+        let showing = matches[pane_find::on_screen(matches, &snapshot)].to_vec();
+        Some((showing, current))
+    });
+
     // No composer is attached, because the grid never has one under it — see
     // [`pane_surface::of`] — and a field attached here would be a field the
     // keyboard policy believes in and nobody can see. Every key on this
-    // surface is the program's.
+    // surface is the program's, but for what an open find bar over it takes.
     let mut grid = TerminalElement::new(snapshot, font)
         .with_terminal(handle.clone(), keys)
         .with_option_as_meta(workspace.general().option_as_meta);
@@ -773,12 +812,33 @@ fn grid(
             )
             .with_links(interaction.links.clone());
     }
+    if let Some((showing, current)) = on_screen {
+        grid = grid.with_find(showing, current);
+    }
     // The grid's own gutter, rather than the pane's: the pane has none, so
     // that the composer's rule can run edge to edge.
-    Container::new(grid.finish())
+    let grid = Container::new(grid.finish())
         .with_horizontal_padding(GUTTER)
         .with_vertical_padding(GRID_VERTICAL_PADDING)
-        .finish()
+        .finish();
+
+    let Some(find) = finding else {
+        return grid;
+    };
+    let pending = matches!(found, Some(None));
+    let matches = pane_find::Matches::over_grid(found.flatten().unwrap_or_default());
+    let bar = find_bar(
+        workspace,
+        pane,
+        find,
+        &matches,
+        None,
+        Searched::Grid {
+            screen_only: alt_screen,
+            pending,
+        },
+    );
+    float_find_bar(grid, bar)
 }
 
 /// How much of the keyboard a pane's block list takes, and whether there is a
@@ -1641,35 +1701,60 @@ const FIND_FIELD_WIDTH: f32 = 190.;
 /// out off the bar.
 const FIND_COUNT_SLOT: f32 = 64.;
 
+/// What a find bar is searching, which is what its field calls the search and
+/// how its count reads.
+#[derive(Copy, Clone)]
+enum Searched {
+    /// The list of commands — or, filtering, one block of it — walked as the
+    /// frame is drawn.
+    Blocks,
+    /// One grid, searched off the thread that draws.
+    Grid {
+        /// Whether its screen is all there is to search: a full-screen
+        /// program's alternate screen keeps no scrollback, and the field says
+        /// so rather than let "No results" stand for the program's own history.
+        screen_only: bool,
+        /// Whether the answer for the query as it now reads is still on its
+        /// way. The count is left blank meanwhile: "No results" would be a
+        /// claim about a search that has not finished.
+        pending: bool,
+    },
+}
+
 /// The find bar itself: a field, a count, two steps and a way out.
 ///
 /// Everything on it dispatches a [`FindAction`] about `pane`, named rather
 /// than done here for the reason every control does: the handler runs with a
 /// `&mut Workspace` this render pass does not have. The field is the tab
 /// search box's, one screen over — it announces a press and lets the workspace
-/// decide what the press means.
+/// decide what the press means, and it announces an edit, which is what starts
+/// a grid's search.
 fn find_bar(
     workspace: &Workspace,
     pane: PaneId,
-    find: &crate::pane_find::PaneFind,
-    matches: &crate::pane_find::Matches,
+    find: &pane_find::PaneFind,
+    matches: &pane_find::Matches,
     lines: Option<(usize, usize)>,
+    searched: Searched,
 ) -> Box<dyn Element> {
     let filtering = find.filter().is_some();
     let total = matches.len();
     let current = find.clamped(total);
     let has_matches = total > 0;
 
+    let placeholder = match searched {
+        _ if filtering => "Filter output",
+        Searched::Grid {
+            screen_only: true, ..
+        } => "Find on screen",
+        _ => "Find in output",
+    };
     let mut field = TextField::new(
         find.input(),
         workspace.clipboard().clone(),
         workspace.fonts(),
         find.field(),
-        if filtering {
-            "Filter output"
-        } else {
-            "Find in output"
-        },
+        placeholder,
     )
     .with_icon(if filtering {
         Lucide::ListFilter
@@ -1679,8 +1764,12 @@ fn find_bar(
     .with_focus(WorkspaceAction::Find {
         pane,
         action: FindAction::Open,
+    })
+    .with_edit(WorkspaceAction::Find {
+        pane,
+        action: FindAction::Edited,
     });
-    // The bar is over the list and has every keystroke first, so a drag made
+    // The bar is over the output and has every keystroke first, so a drag made
     // over the output under it is copied only if the field lets it.
     if let Some(interaction) = workspace.interaction(pane) {
         field = field.over_output(interaction.selection.clone());
@@ -1697,6 +1786,8 @@ fn find_bar(
         String::new()
     } else if workspace.find_pattern_is_bad(pane) {
         "Bad pattern".to_owned()
+    } else if matches!(searched, Searched::Grid { pending: true, .. }) {
+        String::new()
     } else if let Some((shown, of)) = lines.filter(|_| filtering) {
         format!("{shown}/{of} lines")
     } else if !has_matches {

@@ -1993,7 +1993,7 @@ pub(super) const FIND_CURRENT_ALPHA: u8 = 128;
 /// One rectangle for the run, the shape [`paint_selection`] and the find
 /// highlights are both drawn as — over the cells' own backgrounds and under
 /// the glyphs, so a wash changes a cell's ground and never its ink.
-fn paint_wash(
+pub(super) fn paint_wash(
     columns: Range<usize>,
     left: f32,
     top: f32,

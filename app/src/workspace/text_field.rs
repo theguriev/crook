@@ -37,7 +37,7 @@
 //! a dozen comparisons.
 
 use crookui_core::elements::MouseStateHandle;
-use crookui_core::event::{DispatchedEvent, Event, Keystroke, MouseButton};
+use crookui_core::event::{DispatchedEvent, Event, Ime, Keystroke, MouseButton};
 use crookui_core::fonts::{LineStyle, Properties, StyleAndFont, TextStyle};
 use crookui_core::geometry::Point;
 use crookui_core::icons::IconKey;
@@ -208,6 +208,12 @@ impl TextField {
     /// on the keystroke that changed the text — and the arrows that would walk
     /// a shell's history move the caret instead, which in a single-line field
     /// means the two ends of it.
+    ///
+    /// And the copy chord is declined while nothing in the field is selected,
+    /// so that it reaches what is under the field. The find bar floats over a
+    /// pane's output, and with the bar holding the keyboard a line dragged out
+    /// of that output is the only thing the copy chord can mean: claimed here,
+    /// it copied nothing and the output that had the selection never heard it.
     fn type_key(&self, keystroke: &Keystroke, chars: &str, ctx: &mut EventContext) -> bool {
         if !self.input.has_keys() {
             return false;
@@ -237,6 +243,7 @@ impl TextField {
             Intent::Submit | Intent::Newline => return true,
             Intent::HistoryUp => Intent::Move(Motion::LineStart),
             Intent::HistoryDown => Intent::Move(Motion::LineEnd),
+            Intent::Copy if self.input.editor().selection().is_empty() => return false,
             other => other,
         };
 
@@ -267,6 +274,28 @@ impl TextField {
             self.say_edited(ctx);
         }
         ctx.notify();
+        true
+    }
+
+    /// Takes what an input method composed, if this field is the one
+    /// listening: a dead key's accent, a word of Japanese, inserted as typed
+    /// text is and on one line, as a paste is.
+    ///
+    /// Claimed rather than left to whatever is under the field, which may be
+    /// a full-screen program that would be handed the word instead — a find
+    /// bar over Claude Code searching `caf` while `é` went into the prompt
+    /// below it. The composition on its way is not drawn: the field shows
+    /// what it holds, and the word arrives in it whole.
+    fn commit(&self, text: &str, ctx: &mut EventContext) -> bool {
+        if !self.input.has_keys() {
+            return false;
+        }
+        let line = one_line(text);
+        if !line.is_empty() {
+            self.input.edit(|editor| editor.insert(&line));
+            self.say_edited(ctx);
+            ctx.notify();
+        }
         true
     }
 
@@ -444,6 +473,7 @@ impl Element for TextField {
             Event::KeyDown {
                 keystroke, chars, ..
             } => self.type_key(keystroke, chars, ctx),
+            Event::Ime(Ime::Commit(text)) => self.commit(text, ctx),
             Event::MouseDown {
                 position,
                 button: MouseButton::Left,

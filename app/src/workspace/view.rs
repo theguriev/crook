@@ -3660,8 +3660,9 @@ impl Workspace {
     ///
     /// Kept by the bar from frame to frame, a finished block at a time, and
     /// searched again only where the output has changed under it: see
-    /// [`PaneFind::matches`]. The block list is what it searches, which is the
-    /// surface the bar only ever opens over.
+    /// [`PaneFind::matches`]. That is the block list's answer. A pane drawing
+    /// one grid has its matches searched off this thread instead, and gets the
+    /// last answer that came back — see [`Self::grid_find_matches`].
     pub(super) fn find_matches(&self, pane: PaneId, app: &AppContext) -> Matches {
         let Some(find) = self.find(pane) else {
             return Matches::default();
@@ -3680,12 +3681,229 @@ impl Workspace {
         // Here, where the matches are counted, because the query lives in the
         // field and this is the one place that reads it back.
         find.follow_query(&query);
+        if !self.draws_blocks(pane, app) {
+            return self
+                .terminal(pane, app)
+                .and_then(|(_, snapshot)| self.grid_find_matches(pane, &snapshot))
+                .map(Matches::over_grid)
+                .unwrap_or_default();
+        }
         let (Some(history), Some((_, snapshot))) =
             (self.terminal_blocks(pane, app), self.terminal(pane, app))
         else {
             return Matches::default();
         };
         find.matches(&history, &snapshot)
+    }
+
+    /// The matches a pane's grid search last found for what its bar holds now
+    /// — empty for an empty query or a pattern that does not compile — or
+    /// `None` while the answer to that is still on its way.
+    ///
+    /// The grid's text is mostly scrollback, behind the terminal's lock, so it
+    /// is read and searched off this thread by [`Self::search_grid`] and kept
+    /// on the pane's [`PaneFind`] until the grid or the question changes. See
+    /// [`crate::pane_find`], "Over the grid". An answer found at another width
+    /// than `snapshot`'s is no answer: a resize has folded the grid again.
+    pub(super) fn grid_find_matches(
+        &self,
+        pane: PaneId,
+        snapshot: &Snapshot,
+    ) -> Option<Rc<Vec<crate::selection::Selection>>> {
+        let find = self.find(pane).filter(|find| find.is_open())?;
+        let query = find.query();
+        if query.is_empty() || self.find_pattern_is_bad(pane) {
+            return Some(Rc::default());
+        }
+        find.follow_query(&query);
+        find.grid_matches(&query, snapshot.columns)
+    }
+
+    /// Whether a pane's find bar is over a grid whose answer for the query
+    /// as it now reads has not come back yet.
+    ///
+    /// For the command line's `--find-output`, which has to wait for it before
+    /// it can take a picture of what it found.
+    pub(crate) fn grid_find_pending(&self, pane: PaneId, app: &AppContext) -> bool {
+        !self.draws_blocks(pane, app)
+            && self
+                .terminal(pane, app)
+                .is_some_and(|(_, snapshot)| self.grid_find_matches(pane, &snapshot).is_none())
+    }
+
+    /// Starts a search of a pane's grid for what its find bar holds, unless
+    /// the last answer was to that very question or a search is already on
+    /// its way — whose landing asks again, so the question is never left
+    /// unanswered for having changed while it was out.
+    ///
+    /// Off this thread, because the grid's text is ten thousand lines of
+    /// scrollback behind the lock the pty's reader parses under: it is read a
+    /// [`GRID_PIECE`](crate::pane_find::GRID_PIECE) of rows per hold of the
+    /// lock, and searched with the list's own walk. The rows are kept with the
+    /// answer, so another question about the same picture — the next letter
+    /// of a query, a switch flipped — searches them again without reading
+    /// anything out of the emulator.
+    ///
+    /// Started wherever the question can change: the bar opening, a switch, a
+    /// keystroke in the field, a repaint of the grid, which is what says the
+    /// program has printed, and the pane coming back on screen.
+    ///
+    /// Only for a pane that is on screen. A bar left open over an agent in a
+    /// tab behind this one would otherwise read its scrollback after every
+    /// line it printed, for an answer nobody can see; it is asked again when
+    /// the pane is shown — see [`Self::search_grids_on_screen`].
+    ///
+    /// A grid whose text is unchanged is not read again — see
+    /// [`PaneFind::carry_over`] — and one that changed under an answer already
+    /// on screen is read after [`GRID_PAUSE`](crate::pane_find::GRID_PAUSE),
+    /// so a program that prints or redraws without stopping has its
+    /// scrollback read a few times a second rather than back to back. A
+    /// question that changes during that pause takes the paused read's place
+    /// and starts at once — see [`GridPause`](crate::pane_find::GridPause).
+    fn search_grid(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        let Some(find) = self.find(pane).cloned() else {
+            return;
+        };
+        if !find.is_open() || !self.pane_is_on_screen(pane) {
+            return;
+        }
+        let Some((handle, snapshot)) = self.terminal(pane, ctx) else {
+            return;
+        };
+        if pane_surface::of(&snapshot, Instant::now()).surface != Surface::Grid {
+            // Back on its list of commands, which is searched as it is drawn:
+            // the copy of the scrollback is let go, and the next grid is
+            // another picture.
+            find.forget_grid();
+            return;
+        }
+        let query = find.query();
+        if query.is_empty() || self.find_pattern_is_bad(pane) {
+            return;
+        }
+        find.carry_over(&snapshot);
+        let asked = crate::pane_find::GridAsk {
+            query,
+            options: find.options(),
+            revision: snapshot.revision,
+            columns: snapshot.columns,
+        };
+        if !find.ask_grid(&asked) {
+            return;
+        }
+        let read = find.grid_rows(asked.revision);
+        // The grid moved under an answer the bar is showing, rather than the
+        // question changing: that answer stands while this one waits its turn
+        // — unless the question changes meanwhile, and takes its place.
+        let pause = (read.is_none() && find.grid_matches(&asked.query, asked.columns).is_some())
+            .then(|| find.pause_grid());
+        // The name the matches go by. One grid is one item, whatever it is
+        // called, so any name will do as long as every match has the same one.
+        let id = snapshot.live_block.id;
+        let searching = ctx.background().spawn(async move {
+            let rows = match read {
+                Some(rows) => rows,
+                None => {
+                    if pause.is_some_and(|pause| !pause.wait(crate::pane_find::GRID_PAUSE)) {
+                        // A changed question took this read's place, or the
+                        // bar let go of it: nobody is waiting for it.
+                        return None;
+                    }
+                    Arc::new(crate::pane_find::harvest_grid(
+                        |first, last| handle.harvest_rows(first, last).0,
+                        crate::pane_find::GRID_PIECE,
+                    ))
+                }
+            };
+            let matches = crate::pane_find::find_in_grid(&rows, id, &asked.query, asked.options);
+            Some((asked, rows, matches))
+        });
+        ctx.spawn(searching, move |workspace, searched, ctx| {
+            if let Some((asked, rows, matches)) = searched {
+                workspace.grid_searched(pane, asked, snapshot, rows, matches, ctx);
+            }
+        })
+        .detach();
+    }
+
+    /// Asks every find bar open over a grid on screen to search it again.
+    ///
+    /// For a pane coming back on screen — a tab switched to, a zoom let go of,
+    /// a section closed — whose repaints were not searched while it was
+    /// hidden. A bar whose answer is still to the picture on screen asks
+    /// nothing.
+    fn search_grids_on_screen(&mut self, ctx: &mut ViewContext<Self>) {
+        let open: Vec<PaneId> = self
+            .interactions
+            .iter()
+            .filter(|(_, interaction)| interaction.find.is_open())
+            .map(|(pane, _)| *pane)
+            .collect();
+        for pane in open {
+            self.search_grid(pane, ctx);
+        }
+    }
+
+    /// Takes in what a search of a pane's grid found, and brings the current
+    /// match into view if the bar asked for that before there was one.
+    fn grid_searched(
+        &mut self,
+        pane: PaneId,
+        asked: crate::pane_find::GridAsk,
+        read_for: Arc<Snapshot>,
+        rows: Arc<crook_terminal::BlockRows>,
+        matches: Vec<crate::selection::Selection>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(find) = self.find(pane).cloned() else {
+            return;
+        };
+        if !find.land_grid(asked, read_for, rows, matches) {
+            return;
+        }
+        if find.take_reveal() {
+            self.reveal_current_match(pane, &find, ctx);
+        }
+        // The grid may have printed, or the query changed, while this was out.
+        self.search_grid(pane, ctx);
+        ctx.notify();
+    }
+
+    /// Closes a pane's find bar when the pane has changed screens under it,
+    /// and settles who has the keyboard now that the bar does not.
+    ///
+    /// A bar is about the screen it was opened over: a full-screen program
+    /// starting would have Enter stolen from it by a bar left open from
+    /// before, and one ending takes away the screen the bar was searching.
+    /// The keyboard is the half that cannot be left for later. The bar took
+    /// it from the composer, and nothing else gives it back: a prompt coming
+    /// back under a bar that went away by itself would drop every key typed
+    /// at it.
+    ///
+    /// Asked when the grid repaints, which is how a pane changes screens, and
+    /// again by the frame, which may be drawn from the new screen before the
+    /// repaint is heard.
+    pub(super) fn close_find_over_another_screen(&self, pane: PaneId, snapshot: &Snapshot) {
+        let Some(find) = self.find(pane) else {
+            return;
+        };
+        if !find.is_open() || find.over_alt_screen() == snapshot.alt_screen {
+            return;
+        }
+        find.close();
+        self.sync_input_keys();
+    }
+
+    /// Brings the bar's current match into view — or, over a grid whose
+    /// answer has not come back yet, asks for it to be brought there when it
+    /// does.
+    fn reveal_current_match(&self, pane: PaneId, find: &PaneFind, app: &AppContext) {
+        let matches = self.find_matches(pane, app);
+        if let Some(start) = find.clamped(matches.len()).and_then(|at| matches.start(at)) {
+            self.scroll_find_into_view(pane, start, app);
+        } else if self.grid_find_pending(pane, app) {
+            find.reveal_when_found();
+        }
     }
 
     /// The rows the find bar's filter keeps of the block it is filtering —
@@ -3765,13 +3983,19 @@ impl Workspace {
         };
         match action {
             FindAction::Open => {
-                // Over the list of commands, never over a full-screen program:
-                // there the pane is one grid, the bar has nothing to search,
-                // and Ctrl-F is one of the program's own keys.
-                if !self.draws_blocks(pane, ctx) {
+                // Over whatever the pane draws: the list of commands, or the
+                // one grid — an agent past its first screenful, an ssh
+                // session, a shell without the marks — whose scrollback is
+                // searched with it. A full-screen program's grid as well, as
+                // far as it goes: the alternate screen keeps no scrollback, so
+                // what is searched is the screen the program drew, and the
+                // field says so. The chord is `cmd-f` or `ctrl-shift-f`, never
+                // a program's own `ctrl-f`. Only a pane with no shell has
+                // nothing to search.
+                let Some((_, snapshot)) = self.terminal(pane, ctx) else {
                     return;
-                }
-                find.open();
+                };
+                find.open(snapshot.alt_screen);
                 // Opening the bar is asking to type into it, so a comment
                 // being typed in the Changes column lets go of the keyboard
                 // and keeps its words.
@@ -3779,10 +4003,7 @@ impl Workspace {
                 // Come back onto a match if the query already found some, so
                 // reopening a search shows where it left off rather than an
                 // emphasised nothing.
-                let matches = self.find_matches(pane, ctx);
-                if let Some(found) = find.clamped(matches.len()).and_then(|at| matches.get(at)) {
-                    self.scroll_find_into_view(pane, found.start, ctx);
-                }
+                self.reveal_current_match(pane, &find, ctx);
             }
             FindAction::Close => {
                 find.close();
@@ -3794,22 +4015,27 @@ impl Workspace {
                 find.toggle(action == FindAction::ToggleRegex);
                 // The first match of the search as it now reads, the way a
                 // changed query lands on its first.
-                let matches = self.find_matches(pane, ctx);
-                if let Some(found) = find.clamped(matches.len()).and_then(|at| matches.get(at)) {
-                    self.scroll_find_into_view(pane, found.start, ctx);
-                }
+                self.reveal_current_match(pane, &find, ctx);
             }
             FindAction::Step { forward } => {
                 let matches = self.find_matches(pane, ctx);
                 let delta = if forward { 1 } else { -1 };
-                if let Some(found) = find
+                if let Some(start) = find
                     .step(delta, matches.len())
-                    .and_then(|at| matches.get(at))
+                    .and_then(|at| matches.start(at))
                 {
-                    self.scroll_find_into_view(pane, found.start, ctx);
+                    self.scroll_find_into_view(pane, start, ctx);
+                } else if self.grid_find_pending(pane, ctx) {
+                    // Enter pressed before the grid's answer came back: the
+                    // match it lands on is the one to go to.
+                    find.reveal_when_found();
                 }
             }
+            FindAction::Edited => {}
         }
+        // Whatever changed the question, a grid answers it off this thread;
+        // the list is searched as it is drawn, and this does nothing there.
+        self.search_grid(pane, ctx);
         self.sync_input_keys();
         ctx.notify();
     }
@@ -3823,12 +4049,24 @@ impl Workspace {
     /// plus the row within it — the same arithmetic the height index is built
     /// from — and a third of a screen is left above it so it lands in the body
     /// of the viewport rather than jammed against its top edge.
+    ///
+    /// A grid is scrolled through the emulator's own history instead, the way
+    /// the wheel and the paging chords scroll it, by the same rule: see
+    /// [`crate::pane_find::scroll_to_show`].
     fn scroll_find_into_view(
         &self,
         pane: PaneId,
         start: crate::selection::Place,
         app: &AppContext,
     ) {
+        if !self.draws_blocks(pane, app) {
+            if let Some((handle, snapshot)) = self.terminal(pane, app)
+                && let Some(lines) = crate::pane_find::scroll_to_show(&snapshot, start.row)
+            {
+                handle.scroll_lines(lines);
+            }
+            return;
+        }
         let Some(view) = self.pane_blocks(pane) else {
             return;
         };
@@ -4094,6 +4332,9 @@ impl Workspace {
         if self.settings_are_showing() {
             self.ask_default_terminal(ctx);
         }
+        // Back to the tabs: a find bar over a grid there has not searched what
+        // it printed while the section covered it.
+        self.search_grids_on_screen(ctx);
         ctx.notify();
     }
 
@@ -8281,6 +8522,15 @@ impl Workspace {
                 if self.pane_is_on_screen(*pane) {
                     ctx.notify();
                 }
+                // A full-screen program starting or ending under a find bar
+                // takes the bar down, and the keyboard back to the composer.
+                if let Some((_, snapshot)) = self.terminal(*pane, ctx) {
+                    self.close_find_over_another_screen(*pane, &snapshot);
+                }
+                // A grid's find answers the grid as it was; what it printed
+                // since is searched again, off this thread. Nothing when no
+                // bar is open over a grid on screen.
+                self.search_grid(*pane, ctx);
                 self.tabs.pane(*pane).is_some()
             }
             TerminalUpdate::Title(pane, title) => {
@@ -8954,6 +9204,9 @@ impl Workspace {
         // A window closing with its last tab is not one of them — the strip
         // keeps that tab — and its locks come off with the process instead.
         self.release_vacated(ctx);
+        // A find bar over a grid that has just come on screen answers the grid
+        // as it was when it went off: its repaints were not searched meanwhile.
+        self.search_grids_on_screen(ctx);
 
         // An action that changed nothing repaints nothing: holding down
         // cmd-alt-left on the leftmost tab must not put the window on a
@@ -9317,9 +9570,8 @@ impl Workspace {
             // sends the same one. Never declined — hiding a column nobody
             // is looking at is still the thing that was asked for.
             Binding::TogglePanel => return Some(SettingsAction::ToggleTabsPanel.into()),
-            // The bar is over the *list of commands*, so it opens only where
-            // there is one: a full-screen program has taken the whole pane and
-            // draws no blocks, and Ctrl-F is one of its own keys there.
+            // Over whatever the pane draws, the list of commands or the grid;
+            // see `apply_find`.
             Binding::FindInOutput => return self.find_open_action(),
             Binding::SelectBlockUp => {
                 return Some(WorkspaceAction::Block(BlockAction::SelectUp(
@@ -9441,9 +9693,9 @@ impl Workspace {
 
     /// Opening the find bar for the focused pane.
     ///
-    /// Whether it may actually open — the pane must be drawing its output as a
-    /// list of blocks, not as one full-screen grid — is decided in
-    /// [`Self::apply_find`], which has the snapshot this does not.
+    /// Whether it may actually open — the pane must have a shell to search —
+    /// and over which screen is decided in [`Self::apply_find`], which has
+    /// the snapshot this does not.
     fn find_open_action(&self) -> Option<WorkspaceAction> {
         let pane = self.tabs.focused_pane_id()?;
         Some(WorkspaceAction::Find {

@@ -247,3 +247,53 @@ fn a_command_kept_without_its_rows_is_laid_out_the_way_the_grid_drew_it() {
         );
     }
 }
+
+#[test]
+fn a_harvest_taken_in_pieces_is_the_harvest_taken_whole() {
+    // A grid's scrollback is read a few hundred rows at a time, so that the
+    // reader is not kept off the lock for the whole of it. Put back together,
+    // the pieces have to be the very store one harvest makes: the text, the
+    // runs that colour it and the accents stacked on it, each row where it was.
+    let size = TerminalSize::new(12, 6);
+    let palette = Palette::default();
+    let term = term(
+        size,
+        "plain\r\n\x1b[31mred\x1b[0m and not\r\n\u{65e5}\u{672c}x\r\ne\u{301}f\r\n\x1b[42mgreen\x1b[K\x1b[0m\r\nlast",
+    );
+    let whole = harvest(&term, &palette, 0, 5);
+
+    for cut in 1..5 {
+        let mut pieces = harvest(&term, &palette, 0, cut - 1);
+        assert!(pieces.append(harvest(&term, &palette, cut, 5)));
+        assert_eq!(whole.rows(), pieces.rows(), "cut before row {cut}");
+        assert_eq!(cells(&whole), cells(&pieces), "cut before row {cut}");
+        assert_eq!(whole.to_text(), pieces.to_text(), "cut before row {cut}");
+        for row in 0..whole.rows() {
+            assert_eq!(
+                whole.zerowidth(row, 0),
+                pieces.zerowidth(row, 0),
+                "row {row}, cut before row {cut}"
+            );
+        }
+    }
+
+    // An empty store takes the first piece as it is, and an empty piece adds
+    // nothing.
+    let mut started = BlockRows::default();
+    assert!(started.append(harvest(&term, &palette, 0, 5)));
+    assert!(started.append(BlockRows::default()));
+    assert_eq!(cells(&whole), cells(&started));
+}
+
+#[test]
+fn a_piece_of_another_width_is_refused() {
+    // A resize between two pieces: the second's runs cover another number of
+    // columns, and a store that took it would paint those rows misaligned.
+    let palette = Palette::default();
+    let mut narrow = harvest(&term(TerminalSize::new(10, 2), "one"), &palette, 0, 0);
+    let wide = harvest(&term(TerminalSize::new(20, 2), "two"), &palette, 0, 0);
+
+    assert!(!narrow.append(wide));
+    assert_eq!(1, narrow.rows(), "the refused piece was left out");
+    assert_eq!("one", narrow.text(0));
+}
