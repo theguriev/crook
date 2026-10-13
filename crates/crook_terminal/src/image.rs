@@ -1,8 +1,7 @@
 //! Pictures a program prints into the output: iTerm2's inline images.
 //!
-//! `imgcat`, `yazi`'s previewer, `chafa -f iterm`, `viu` and a great many
-//! scripts speak iTerm2's sequence, which WezTerm, Konsole and VS Code's
-//! terminal read too:
+//! `imgcat`, `chafa -f iterm`, `viu` and a great many scripts speak iTerm2's
+//! sequence, which WezTerm, Konsole and VS Code's terminal read too:
 //!
 //! ```text
 //! OSC 1337 ; File = [args] : <base64 file> BEL
@@ -14,7 +13,8 @@
 //! `auto`; and `preserveAspectRatio=0`, which stretches the picture to the
 //! box instead of fitting it inside. The same file may arrive in pieces —
 //! `MultipartFile=[args]`, any number of `FilePart=<base64>`, then `FileEnd`
-//! — which is what iTerm2's own `imgcat` sends inside tmux.
+//! — which is how iTerm2's own `imgcat` sends one from inside tmux. Read,
+//! and then dropped: tmux draws on the alternate screen (see below).
 //!
 //! # What happens to one
 //!
@@ -23,7 +23,11 @@
 //! so the rows it covers are rows of the grid like any other, scrolled and
 //! harvested with the block it was printed in. The block keeps the picture
 //! beside its text (see [`crate::Block::images`]) and the renderer draws it
-//! over the rows it covers.
+//! over the rows it covers: in the list of blocks, or over the grid while
+//! the pane draws one, which it does once the open block has grown past the
+//! top of the screen. The open block's pictures are at viewport rows (see
+//! [`crate::LiveBlock::images`]), so on the grid they move through the
+//! scrollback with the text around them.
 //!
 //! # The bytes came from anything that can print
 //!
@@ -34,6 +38,13 @@
 //! bytes, at most [`MAX_SIDE`] pixels a side, and never on the alternate
 //! screen, whose program owns every cell. A picture past any of them is
 //! dropped and the stream goes on as if it had not been there.
+//!
+//! The alternate screen is the one that costs something a person would ask
+//! for. A full-screen program redraws its cells whenever it likes, and
+//! nothing here can tell which of them it has drawn over a picture, so none
+//! is placed there at all — and `yazi`'s previewer and an `imgcat` inside
+//! tmux both draw from there, so neither shows a picture in Crook, though
+//! both speak the sequence.
 
 use std::fmt;
 use std::sync::Arc;
