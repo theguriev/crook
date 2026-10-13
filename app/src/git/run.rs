@@ -449,7 +449,8 @@ pub(super) fn run_capped(directory: &Path, args: &[&OsStr], cap: usize) -> Resul
 /// Starts `git <args>` in `directory`, set up the way every call here is,
 /// with `stdio` as its stdin, stdout and stderr.
 ///
-/// Latches [`GIT_MISSING`] when there is no git to start.
+/// Latches [`GIT_MISSING`] when there is no git to start — but not when it
+/// is the directory that has gone; see [`why_it_did_not_start`].
 fn start(
     directory: &Path,
     args: &[&OsStr],
@@ -485,15 +486,34 @@ fn start(
 
     let [stdin, stdout, stderr] = stdio;
     git.stdin(stdin).stdout(stdout).stderr(stderr);
-    match git.spawn() {
-        Ok(child) => Ok(child),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if !GIT_MISSING.swap(true, Ordering::Relaxed) {
-                log::warn!("git is not on PATH; its features are off for this session");
-            }
-            Err(Failure::GitMissing)
-        }
-        Err(error) => Err(Failure::CouldNotRun(error)),
+    let error = match git.spawn() {
+        Ok(child) => return Ok(child),
+        Err(error) => error,
+    };
+    let failure = why_it_did_not_start(error, directory);
+    if matches!(failure, Failure::GitMissing) && !GIT_MISSING.swap(true, Ordering::Relaxed) {
+        log::warn!("git is not on PATH; its features are off for this session");
+    }
+    Err(failure)
+}
+
+/// What a `spawn` of git in `directory` that failed with `error` means.
+///
+/// `NotFound` is two different answers. It is what a missing `git` binary
+/// gives, and it is what a `current_dir` that is not there gives, and the
+/// callers' check that the directory exists cannot settle which, because the
+/// directory can go between that check and the spawn. It does, routinely: a
+/// background read of a checkout starts while Finish or the sweep is deleting
+/// it. Read as a missing git, that one lost race latched [`GIT_MISSING`] and
+/// switched every git feature off until Crook was restarted, the worktree menu
+/// saying git was not installed. So the directory is looked at again *after*
+/// the failure, and only a spawn that failed in a directory that is still
+/// there is taken to mean there is no git.
+fn why_it_did_not_start(error: std::io::Error, directory: &Path) -> Failure {
+    match error.kind() {
+        std::io::ErrorKind::NotFound if !directory.is_dir() => Failure::NoDirectory,
+        std::io::ErrorKind::NotFound => Failure::GitMissing,
+        _ => Failure::CouldNotRun(error),
     }
 }
 
