@@ -795,6 +795,35 @@ pub fn claim(session: &Path) -> Result<Option<Lock>> {
     }
 }
 
+/// Waits, for a few seconds at most, until nothing holds the lock on the
+/// session file at `session`, and says whether that happened.
+///
+/// For a test that closes the window keeping the file and then needs the
+/// next one to find it free. In a test process the lock can outlive the
+/// window for a moment: every other test that starts a shell forks this
+/// process, and a child holds a copy of each open file — this lock's
+/// included — until it replaces itself with the shell, and a pty's child
+/// closes every other descriptor it has before it does, which is not quick.
+/// A window of Crook has no such neighbours, and its lock goes with its
+/// process.
+///
+/// The look takes the lock itself for an instant, and a fork in that instant
+/// would hold it again; that is microseconds against the milliseconds a
+/// child takes to let go, which is the race this waits out.
+#[cfg(test)]
+pub(crate) fn wait_until_free(session: &Path) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if matches!(claim(session), Ok(Some(_))) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 #[cfg(test)]
 #[path = "session_tests.rs"]
 mod tests;
