@@ -291,20 +291,27 @@ impl TabKey {
 ///
 /// Linux and Windows never read it: their layouts type with AltGr, which is
 /// not Alt, so Alt there is only ever Meta.
+///
+/// No value reaches an Option combination the layout makes a dead key: US
+/// Option-E, -U, -I, -N and Option-backtick, and German Option-N, which is
+/// how `~` is typed there. The Mac's input method takes those to start an accent before
+/// Crook is sent a key press, so under every value they start one, as they
+/// always have.
 #[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OptionAsMeta {
-    /// Option types the ASCII symbols a layout puts on it, `@ [ ] { } | \ ~`
+    /// Option types the ASCII symbols a layout puts on it, `@ [ ] { } | \`
     /// on a German keyboard and `#` on a British one, and is Meta for every
     /// other key. A US keyboard's Option layer has no ASCII in it, so there
-    /// Option is Meta throughout, as it always was in Crook.
+    /// Option is Meta throughout, as it always was in Crook, dead keys aside.
     #[default]
     Auto,
     /// The left Option is Meta and the right one types.
     Left,
     /// The right Option is Meta and the left one types.
     Right,
-    /// Both are Meta, and Option types nothing in a program.
+    /// Both are Meta, and Option types nothing in a program but the accents
+    /// of the layout's dead keys.
     Both,
     /// Neither is Meta: Option types whatever the layout puts on it, `ƒ` and
     /// `å` included, as it does in Terminal.app out of the box.

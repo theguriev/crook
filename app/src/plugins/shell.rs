@@ -246,7 +246,8 @@ fn option_as_meta(workspace: &Workspace) -> Entry {
                 "Whether Option is Meta in a program like vim or Claude Code, or types what your \
                  keyboard puts on it. Auto types the symbols a layout keeps on Option, like @ [ ] \
                  { } on a German keyboard, and is Meta for the rest. Left and Right make one \
-                 Option Meta and let the other type.",
+                 Option Meta and let the other type. A dead key on Option, like Option-E on a \
+                 US keyboard, starts an accent whichever you choose.",
             )
             .with_keywords(&[
                 "option", "alt", "meta", "esc", "escape", "compose", "keyboard", "layout",

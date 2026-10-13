@@ -22,6 +22,11 @@
 //! Code at all. Which of the two a press was is [`Alt`]'s to say, under the
 //! person's [`OptionAsMeta`]. Off a Mac a layout types with AltGr, which never
 //! arrives as Alt, and Alt is Meta and nothing else.
+//!
+//! An Option combination the layout makes a dead key never gets here to be
+//! asked: US Option-E or Option-U, German Option-N for `~`. The Mac's input
+//! method takes it to start an accent before a key press is sent, under every
+//! setting, and the accented character reaches the program as committed text.
 
 use crook_terminal::{Key, KeypadKey, Modifiers};
 use crookui_core::event::{KeyOrigin, Keystroke};

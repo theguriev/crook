@@ -2375,7 +2375,7 @@ The platform is a parameter of the keymap rather than a `cfg!` inside it, so bot
 tested on either machine.
 
 **Option on a Mac is two keys in one.** To a terminal program Alt is Meta, ESC in front of the
-key, and on a Mac Option is also the key a layout types its third level with: `@ [ ] { } | \ ~`
+key, and on a Mac Option is also the key a layout types its third level with: `@ [ ] { } | \`
 on a German keyboard, `#` on a British one. Linux and Windows give that job to AltGr, which
 arrives as no Alt at all, so there Alt is only ever Meta. On a Mac `terminal_keys::key_for`
 decides per key, under `option_as_meta` in the settings. By default Option types a character
@@ -2386,8 +2386,10 @@ answers kitty, Alacritty and iTerm2 give. The window carries the two facts the d
 and a keystroke's name cannot: the character under the key with no modifier, since German
 Option-8 is *named* `{`, and which Option was held (`KeyOrigin`). Meta on a Mac is the layout's
 own ASCII character for the key, so German Meta-Z is `ESC z`, except on the number row, which
-keeps the digit a French keyboard types with Shift. The composer never asks. It is a Mac text
-field, and Option types there as it does in every other one.
+keeps the digit a French keyboard types with Shift. No setting reaches an Option combination the
+layout makes a dead key (US Option-E, German Option-N for `~`): the input method takes it to
+start an accent before winit sends a key press. The composer never asks. It is a Mac text field,
+and Option types there as it does in every other one.
 
 **Most commands ship with no chord, and that is the arrangement.** A shipped chord is a key
 taken away from the shell in every pane forever, so the table spends one only on what somebody
