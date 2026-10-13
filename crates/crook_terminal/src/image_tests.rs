@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use base64::Engine as _;
 
 use super::*;
@@ -350,24 +352,45 @@ fn a_reset_read_with_a_full_screen_program_starting_takes_the_pictures() {
 }
 
 #[test]
+fn a_picture_whose_history_fills_in_an_expired_update_is_no_longer_placed() {
+    // The update's lines reach the grid when it expires, which is a snapshot
+    // with no output after it to settle against.
+    let mut emulator = picture_after(2, 10);
+    assert_eq!(emulator.snapshot().live_block.images.len(), 1);
+
+    let mut update = b"\x1b[?2026h".to_vec();
+    for line in 0..20 {
+        update.extend_from_slice(format!("more {line}\r\n").as_bytes());
+    }
+    emulator.advance(&update);
+    std::thread::sleep(Duration::from_millis(200));
+    let images = &emulator.snapshot().live_block.images;
+    assert!(images.is_empty(), "{images:?}");
+}
+
+#[test]
 fn a_block_longer_than_the_history_keeps_no_picture() {
     // With shell integration the history is dropped at every block, and
-    // fills only under one command that prints more than all of it.
+    // fills only under one command that prints more than all of it. The
+    // picture is placed while the history has room, and the lines that fill
+    // it arrive in the one read with the `D` that harvests the block: only a
+    // look at the history before the mark is applied stands between the two.
     let mut emulator = Emulator::new(
         TerminalSize::new(20, 6).with_cell_size(10, 20),
         10,
         Palette::default(),
     );
     emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07train\r\n\x1b]133;C\x07");
-    for line in 0..30 {
-        emulator.advance(format!("log {line}\r\n").as_bytes());
-    }
-    // On the second row, as a program that moves the cursor puts one, so
-    // that the rows its anchor has lost track of are rows the block keeps.
-    emulator.advance(b"\x1b[2;1H");
+    emulator.advance(b"log\r\n");
     emulator.advance(&osc("width=4;height=2;", &png(8, 8)));
-    emulator.advance(b"\x1b[6;1Ha\r\nb\r\nc\r\n");
-    emulator.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    assert_eq!(emulator.snapshot().live_block.images.len(), 1);
+
+    let mut read = b"\r\n".to_vec();
+    for line in 0..30 {
+        read.extend_from_slice(format!("log {line}\r\n").as_bytes());
+    }
+    read.extend_from_slice(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    emulator.advance(&read);
 
     let block = &emulator.blocks()[0];
     assert!(block.images.is_empty(), "{:?}", block.images);
