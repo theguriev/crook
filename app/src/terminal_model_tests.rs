@@ -1172,3 +1172,199 @@ fn a_program_that_floods_queries_and_never_reads_does_not_stop_another_pane_draw
     drop(flooded);
     flusher.stop();
 }
+
+/// The longest closing a handful of panes may hold the thread that draws.
+///
+/// A fifth of what the four closes in the first test below took there when
+/// each ended its shell in place, one after another: the first look at the
+/// child comes before it can have gone, so a shell that goes at the hang-up
+/// cost 50 ms and one that ignores it 200. Handed to threads of their own,
+/// the four take well under a millisecond.
+const CLOSE_BUDGET: Duration = Duration::from_millis(100);
+
+/// A model with a `/bin/sh` running in each of its panes.
+struct Shells {
+    queue: Arc<LocalQueue>,
+    app: App,
+    model: ModelHandle<TerminalModel>,
+    panes: Vec<PaneId>,
+}
+
+impl Shells {
+    /// One shell per entry, ignoring the hang-up a close sends first where
+    /// its entry says so, once every one has said it is ready — or `None`
+    /// where none can be started, and on Windows, whose close is
+    /// `TerminateProcess` and has no hang-up to ignore.
+    fn start(ignoring_the_hang_up: &[bool]) -> Option<Self> {
+        if cfg!(windows) {
+            return None;
+        }
+        let (queue, mut app) = app();
+        let model = app.update(|ctx| ctx.add_model(TerminalModel::new));
+        let panes: Vec<_> = ignoring_the_hang_up.iter().map(|_| pane()).collect();
+        let open: Vec<_> = panes.iter().map(|pane| (*pane, None)).collect();
+        app.update(|ctx| {
+            model.update(ctx, |model, ctx| {
+                model.set_shell(Some(PathBuf::from("/bin/sh")));
+                model.set_shell_marks(false);
+                model.set_shell_login(false);
+                // The order a window takes: the shells are expected before
+                // its first frame, and started after it.
+                model.expect();
+                model.start(&open, ctx);
+            });
+        });
+        let shells = Self {
+            queue,
+            app,
+            model,
+            panes,
+        };
+
+        let handles = shells.handles();
+        if handles.len() < shells.panes.len() {
+            eprintln!("skipped: no shell could be started here");
+            return None;
+        }
+        for ((pane, handle), deaf) in shells.panes.iter().zip(&handles).zip(ignoring_the_hang_up) {
+            // Printed by pieces, so the marker is nowhere in the line the pty
+            // echoes: on screen, it is the shell having run the trap before it.
+            let line = match deaf {
+                true => "trap '' HUP; printf 'crook-%s\\n' ready\n",
+                false => "printf 'crook-%s\\n' ready\n",
+            };
+            shells
+                .app
+                .read(|ctx| shells.model.as_ref(ctx).type_into(*pane, line));
+            assert!(
+                comes_to_show(&handle.0, "crook-ready"),
+                "a shell never got ready"
+            );
+        }
+        Some(shells)
+    }
+
+    /// The terminal of every pane that still has one.
+    fn handles(&self) -> Vec<TerminalHandle> {
+        self.app.read(|ctx| {
+            self.panes
+                .iter()
+                .filter_map(|pane| self.model.as_ref(ctx).handle(*pane))
+                .collect()
+        })
+    }
+}
+
+/// Whether the session's child has been ended and reaped, by the model's own
+/// threads: [`Terminal::has_exited`] reaps nothing, so a test asking it cannot
+/// be what collected the child.
+fn comes_to_be_reaped(shared: &Shared) -> bool {
+    let deadline = Instant::now() + REPLY_TIMEOUT;
+    while Instant::now() < deadline {
+        if shared.lock().has_exited() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+#[test]
+fn closing_panes_returns_at_once_and_their_shells_still_end_even_ignoring_the_hang_up() {
+    // A close ended its shell on the thread that draws, through a kill that
+    // sleeps: every tab closed was a three-frame hitch, and "Close other
+    // tabs" on fifteen froze the window for most of a second.
+    let Some(mut shells) = Shells::start(&[false, false, true, true]) else {
+        return;
+    };
+    let handles = shells.handles();
+
+    let closing = Instant::now();
+    let model = &shells.model;
+    shells.app.update(|ctx| {
+        model.update(ctx, |model, ctx| model.sync(&[], ctx));
+    });
+    let took = closing.elapsed();
+    assert!(
+        took < CLOSE_BUDGET,
+        "closing four panes held the thread that draws for {took:?}"
+    );
+
+    for handle in &handles {
+        assert!(
+            comes_to_be_reaped(&handle.0),
+            "a closed pane's shell was never ended, or never reaped"
+        );
+        let exit = handle.0.lock().try_wait().ok().flatten();
+        assert!(
+            exit.as_ref().is_some_and(|exit| exit.signal.is_some()),
+            "a closed pane's shell was not ended by a signal: {exit:?}"
+        );
+    }
+
+    // And nothing is left holding a session: the threads that ended the shells
+    // let go of theirs, the readers saw the ptys close, and the one chain that
+    // asks after every shell came round once more and found none.
+    let sessions: Vec<_> = handles
+        .into_iter()
+        .map(|handle| Arc::downgrade(&handle.0))
+        .collect();
+    let deadline = Instant::now() + REPLY_TIMEOUT;
+    while sessions.iter().any(|session| session.upgrade().is_some()) {
+        assert!(
+            Instant::now() < deadline,
+            "a closed pane's session is still held by something"
+        );
+        shells.queue.run_until_parked();
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_window_that_goes_hears_its_shells_ended_before_its_wait_for_them_returns() {
+    // The threads that end the shells die with the process, and a shell that
+    // ignores the hang-up outlives Crook if its thread never had the 200 ms
+    // to kill it — so a window that is going ends them all at once and waits.
+    let Some(mut shells) = Shells::start(&[true, true, false]) else {
+        return;
+    };
+    let handles = shells.handles();
+
+    let closing = Instant::now();
+    let model = &shells.model;
+    let endings = shells
+        .app
+        .update(|ctx| model.update(ctx, |model, _| model.close_all()));
+    let took = closing.elapsed();
+    assert!(
+        took < CLOSE_BUDGET,
+        "ending a window's shells held the thread that draws for {took:?}"
+    );
+
+    assert!(
+        endings.wait(REPLY_TIMEOUT),
+        "a window that is going gave up waiting for its shells"
+    );
+    for handle in &handles {
+        assert!(
+            handle.0.lock().has_exited(),
+            "the wait came back before a shell it was waiting for had been ended and reaped"
+        );
+    }
+
+    // And the panes the strip still holds, which the session file brings
+    // back, are not given a shell again on the way out: not by the strip
+    // moving, and not by a frame drawn after this one.
+    let open: Vec<_> = shells.panes.iter().map(|pane| (*pane, None)).collect();
+    shells.app.update(|ctx| {
+        model.update(ctx, |model, ctx| model.sync(&open, ctx));
+    });
+    assert!(
+        shells.handles().is_empty(),
+        "a window that is going opened a shell again"
+    );
+    assert!(
+        !shells.app.read(|ctx| model.as_ref(ctx).is_expected()),
+        "a window that is going would start its shells again at its next frame"
+    );
+}

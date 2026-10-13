@@ -109,10 +109,11 @@
 //! # What a closed pane costs
 //!
 //! Nothing, in every case a pane can be closed in — with one residue. Closing
-//! kills the child, which closes the pty, which returns the reader's blocking
+//! kills the child, on a thread of its own rather than the one that draws (see
+//! [`Endings`]), which closes the pty, which returns the reader's blocking
 //! read; and the reader holds only a [`Weak`] on the session, so the terminal,
-//! its ten thousand lines of scrollback and the pty go the moment the model
-//! drops its own reference, whether or not the reader has noticed yet.
+//! its ten thousand lines of scrollback and the pty go once the child has been
+//! ended, whether or not the reader has noticed yet.
 //!
 //! The residue is a pane closed while something *other than the child* is
 //! holding the pty open — a `sleep 60 &`, a server that outlived the shell that
@@ -190,7 +191,8 @@ const PAINT_INTERVAL: Duration = Duration::from_millis(16);
 /// frame.
 const READ_CHUNK: usize = 16 * 1024;
 
-/// How long the reader waits for a child to be reapable after the pty closed.
+/// How long a child that has gone is waited for to be reapable: by the reader
+/// once the pty has closed, and by a closed pane's ending once the kill is sent.
 ///
 /// End-of-file on the master means every slave descriptor is shut, which in
 /// practice means the child has exited — but "has exited" and "has been reaped"
@@ -568,6 +570,9 @@ pub struct TerminalModel {
     /// thread either.
     flusher: Arc<Flusher>,
     flushing: bool,
+
+    /// The shells of closed panes that are still being ended.
+    endings: Endings,
 }
 
 /// One running shell, as the model holds it.
@@ -625,6 +630,7 @@ impl TerminalModel {
             control_socket: None,
             flusher: Arc::new(Flusher::default()),
             flushing: false,
+            endings: Endings::default(),
         }
     }
 
@@ -1085,21 +1091,42 @@ impl TerminalModel {
     /// any more is what ends the writer, whatever it was waiting on — but for a
     /// write that began to wait in a process short of descriptors, which an
     /// orphan holding the pty open keeps waiting, as the module docs say under
-    /// "What a closed pane costs". This runs on the thread that draws, so it
-    /// kills and does not wait: the exit status is a line in a log, and a child
-    /// that takes its time dying would otherwise hold the window. Nothing is
-    /// leaked by not waiting — the kill escalates to a signal nothing survives,
-    /// and the reader reports the status if it is still there to see it. The
-    /// one cost is the escalation's own quarter-second grace period, and only
-    /// for a child that ignores the first signal.
+    /// "What a closed pane costs".
+    ///
+    /// **The kill is not done here.** This runs on the thread that draws, and
+    /// a kill waits: it hangs the child up and looks at once, before any child
+    /// can have gone, so it costs a 50 ms sleep for every shell and 200 ms for
+    /// one that ignores the hang-up. Done here, every pane closed was a
+    /// three-frame hitch, and "Close other tabs" on fifteen froze the window
+    /// for most of a second. The session leaves the model now, so the pane is
+    /// gone from the window at once, and [`Endings`] kills and reaps its child
+    /// on a thread of its own.
     fn close(&mut self, pane: PaneId) {
         let Some(session) = self.sessions.remove(&pane) else {
             return;
         };
-        if let Err(error) = session.shared.lock().kill() {
-            log::debug!("the shell in pane {pane:?} could not be ended: {error:#}");
-        }
         session.shared.wake.finish();
+        self.endings.end(pane, session.shared, session._integration);
+    }
+
+    /// Ends the shell in every pane, for a window that is going, and opens
+    /// none from now on — not even for a pane the strip still holds.
+    ///
+    /// Hands back what to wait on before the process ends: the threads ending
+    /// the shells die with it, and a shell that ignores the hang-up would
+    /// outlive Crook if the thread that was to kill it never had the time.
+    /// Called by the window's delegate as the event loop stops rather than
+    /// left to [`Drop`], because macOS's Quit ends the process there and drops
+    /// nothing.
+    pub fn close_all(&mut self) -> Endings {
+        // Both, since a model that is expecting shells and has none live is
+        // one whose next frame starts them.
+        self.live = false;
+        self.expected = false;
+        for pane in self.sessions.keys().copied().collect::<Vec<_>>() {
+            self.close(pane);
+        }
+        self.endings.clone()
     }
 
     /// Waits for one pane's reader to post, then absorbs what it posted.
@@ -1345,13 +1372,145 @@ impl Drop for TerminalModel {
     /// Dropping the sessions alone would not: the reader threads hold the other
     /// half of every terminal, so nothing would be killed until the process
     /// itself went away — which is usually the next instant, and is not the same
-    /// promise.
+    /// promise. Nor would closing them and returning, since the next instant
+    /// takes the threads ending them too, so this waits for those as well. The
+    /// window's delegate has usually ended every shell and waited for it by
+    /// now, as the event loop stopped, and then there is nothing left here to
+    /// wait for.
     fn drop(&mut self) {
-        for pane in self.sessions.keys().copied().collect::<Vec<_>>() {
-            self.close(pane);
-        }
+        let endings = self.close_all();
         self.flusher.stop();
+        endings.wait(ENDING_PATIENCE);
     }
+}
+
+/// The longest a window that is going waits for its shells to be ended.
+///
+/// They are ended all at once, so the wait is the slowest one's rather than
+/// the sum: 50 ms for a window of shells that go when told, 200 if one ignores
+/// the hang-up. A second leaves room for a machine under load and is still
+/// short to sit through with the window up and no longer answering. Past it
+/// the process ends anyway, and its ptys closing with it hang up whatever is
+/// left once more.
+pub const ENDING_PATIENCE: Duration = Duration::from_secs(1);
+
+/// The shells of closed panes that are still being ended, each on a thread of
+/// its own.
+///
+/// Ending a shell is a wait. `portable-pty` hangs the child up and then looks
+/// at it every 50 ms for 200, sending `SIGKILL` after that, and its first look
+/// comes straight after the hang-up, before any child can have acted on it:
+/// a shell that goes when told costs 50 ms, and one that ignores it 200. So a
+/// closed pane goes from the window at once and its shell is ended here, with
+/// the kill and the reap under the terminal's lock as they always were — which
+/// is what stops a kill from signalling a process id the system has since
+/// handed to somebody else.
+///
+/// A thread rather than the background pool, for the reason the reader is one:
+/// the kill sleeps, and fifteen closes would hold the pool's workers for most
+/// of a second, with the chains it is sized for queued behind them. Nothing
+/// ticks: a close starts the thread, and the thread ends with its shell.
+///
+/// What is left to wait for is the process ending. The threads die with it,
+/// and a shell that ignores the hang-up would outlive Crook if the thread that
+/// was to kill it never had its 200 ms — so a window that is going waits here
+/// for all of them at once. See [`TerminalModel::close_all`].
+#[derive(Clone, Default)]
+pub struct Endings(Arc<EndingState>);
+
+#[derive(Default)]
+struct EndingState {
+    /// How many shells are being ended.
+    running: Mutex<usize>,
+    /// Signalled as each one has been.
+    ended: Condvar,
+}
+
+impl EndingState {
+    fn running(&self) -> MutexGuard<'_, usize> {
+        self.running.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Endings {
+    /// Ends `pane`'s shell on a thread of its own, then lets go of its session
+    /// and of the scratch its shell was started against.
+    fn end(&self, pane: PaneId, shared: Arc<Shared>, integration: shell_integration::Session) {
+        let ending = Ending::start(self);
+        // Kept back so that a process with no thread left to give still ends
+        // the shell, here, the way every close used to.
+        let in_place = shared.clone();
+        let started = thread::Builder::new()
+            .name(format!("crook-pty-end-{pane:?}"))
+            .spawn(move || {
+                end(pane, &shared);
+                // The scratch after the shell, which may have been reading it
+                // still; the count last, so that a wait that has returned
+                // finds both gone.
+                drop(shared);
+                drop(integration);
+                drop(ending);
+            });
+        if let Err(error) = started {
+            log::error!("could not start a thread to end the shell in pane {pane:?}: {error}");
+            end(pane, &in_place);
+        }
+    }
+
+    /// Waits until every shell being ended has been ended and reaped, for at
+    /// most `patience`, and says whether they all were.
+    pub fn wait(&self, patience: Duration) -> bool {
+        let deadline = Instant::now() + patience;
+        let mut running = self.0.running();
+        while *running > 0 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                log::warn!(
+                    "left {} shells to end with the process after waiting {patience:?} for them",
+                    *running
+                );
+                return false;
+            }
+            running = self
+                .0
+                .ended
+                .wait_timeout(running, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        true
+    }
+}
+
+/// One shell being ended, counted for [`Endings::wait`] until this is dropped:
+/// at the end of its thread, or as the thread unwinds.
+struct Ending(Endings);
+
+impl Ending {
+    fn start(endings: &Endings) -> Self {
+        *endings.0.running() += 1;
+        Self(endings.clone())
+    }
+}
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        *self.0.0.running() -= 1;
+        self.0.0.ended.notify_all();
+    }
+}
+
+/// Ends a closed pane's shell and collects its exit status. See [`Endings`].
+fn end(pane: PaneId, shared: &Shared) {
+    if let Err(error) = shared.lock().kill() {
+        log::debug!("the shell in pane {pane:?} could not be ended: {error:#}");
+    }
+    // A child the escalation had to `SIGKILL` has not gone the moment the
+    // signal is sent, and the kill's own last look is usually too soon to reap
+    // it. Reaped here rather than left to whatever drops the terminal last,
+    // which would kill it again and wait again — on the thread that draws, as
+    // often as not.
+    collect_exit(shared);
 }
 
 /// A running terminal, as the element that draws it holds it.
@@ -2316,12 +2475,26 @@ fn flush_loop(flusher: &Arc<Flusher>) {
     }
 }
 
-/// Collects the child's exit status once its pty has closed.
+/// Collects the child's exit status once its pty has closed, and draws the
+/// grid the reader leaves behind.
+fn reap(shared: &Shared) {
+    collect_exit(shared);
+
+    // One publish rather than one per attempt: the grid did not move while the
+    // child was being waited for, and a wake-up per five milliseconds would be
+    // a hundred frames nobody asked for. This one ignores the interval, because
+    // there is no later batch to fold it into.
+    shared.publish_state().pending = false;
+    shared.publish();
+}
+
+/// Waits for a child that has gone, or been told to, to be reapable, and
+/// reaps it.
 ///
 /// Bounded, because a child that has closed its pty and then refuses to be
 /// reaped must not hold a thread — and the status is a nicety, while the pane
 /// closing is not.
-fn reap(shared: &Shared) {
+fn collect_exit(shared: &Shared) {
     let deadline = Instant::now() + REAP_TIMEOUT;
     loop {
         let reaped = match shared.lock().try_wait() {
@@ -2337,13 +2510,6 @@ fn reap(shared: &Shared) {
         }
         thread::sleep(REAP_INTERVAL);
     }
-
-    // One publish rather than one per attempt: the grid did not move while the
-    // child was being waited for, and a wake-up per five milliseconds would be
-    // a hundred frames nobody asked for. This one ignores the interval, because
-    // there is no later batch to fold it into.
-    shared.publish_state().pending = false;
-    shared.publish();
 }
 
 /// Whether the pty still has to be told about this size.

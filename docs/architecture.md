@@ -935,6 +935,17 @@ out of them, so the pipe could not be made, or on macOS past what `select` can w
 wait is on the master alone, and lasts as long as an orphan such as a `sleep 60 &` holds the
 pty open.
 
+**Nothing ends a child on the UI thread either.** `portable-pty`'s kill hangs the child up and
+looks at once, before any child can have gone, then every 50 ms until it sends `SIGKILL` at
+200: on the thread that draws, a close cost 50 ms, or 200 for a shell that ignores the hang-up,
+one pane after another — "Close other tabs" on fifteen froze the window for most of a second.
+A closed pane leaves the model at once, and its shell is killed and reaped on a thread of its
+own (`Endings` in `terminal_model.rs`), under the emulator's mutex as before, which is what
+keeps a kill from signalling a process id the system has handed out again. Those threads die
+with the process, so the window's delegate ends every shell as the event loop stops and waits
+for all of them at once, a second at most: macOS's Quit ends the process there, without
+dropping the model whose `Drop` would do the same.
+
 **On macOS the writer never lets unread input wrap the kernel's ring.** XNU keeps a child's
 unread input in a ring of 1024 bytes, and when the child turns canonical mode on, the kernel
 feeds what is unread through the line discipline again by reading the ring into itself:

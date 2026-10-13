@@ -4086,18 +4086,30 @@ impl Shell {
 }
 
 impl WindowDelegate for Shell {
-    /// Takes off the locks the window still holds on the checkouts it made.
+    /// Ends every pane's shell, and takes off the locks the window still holds
+    /// on the checkouts it made.
     ///
     /// Closing the window closes no pane — the strip keeps its last tab and
     /// the window goes instead — so nothing working in a checkout Crook made
     /// ever left it, and every agent in one ends with the process. Here
     /// rather than wherever the window asks to quit, because the window
     /// manager's close and macOS's Quit never ask.
+    ///
+    /// The shells are ended here for the same reason, and because macOS's
+    /// Quit ends the process without dropping the model whose `Drop` would
+    /// end them otherwise. They are hung up first and waited for last, so
+    /// that their grace period runs while git takes the locks off rather than
+    /// after it.
     fn exiting(&mut self) {
+        let workspace = &self.workspace;
+        let endings = self
+            .app
+            .update(|ctx| workspace.update(ctx, |workspace, ctx| workspace.end_terminals(ctx)));
         let held = self
             .workspace
             .read(&self.app, |workspace, _| workspace.held_locks());
         held.release_all(RELEASE_PATIENCE);
+        endings.wait(terminal_model::ENDING_PATIENCE);
     }
 
     fn build_scene(&mut self, size: Vector2F, scale_factor: f32) -> Rc<Scene> {
