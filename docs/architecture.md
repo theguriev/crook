@@ -1254,13 +1254,28 @@ re-indents a line of Python or YAML is still work the squash does not have; a gi
 2.39, which lacks the flag, proves nothing by patch and only by ancestry. Neither proof counts
 for a branch whose own reflog records no commit made on it: a checkout nobody has committed
 in — fresh, only brought up to date, or cut from the tip of a branch that was squashed — is
-not "merged", whatever `--merged` says. A reflog is not a complete record,
-though: a month after an amend or a rebase, `gc` expires the entry of every commit it replaced
-and leaves only the branch's creation. So a reflog git has pruned, told by a newest entry that
-no longer ends at the branch's tip, is left to the proofs, as is no reflog at all; a rebase
-less than a month old of commits more than a month old still goes unproved until its own entry
-expires. The base is what `origin/HEAD` names, then `init.defaultBranch` if that branch exists,
-then `main`, then `master`.
+not "merged", whatever `--merged` says. Nor is one that moved off work of its own on the way:
+a branch committed on and then reset back onto the base has its tip there and a commit in its
+reflog, and that commit is on no branch — the reflog is the last thing that remembers it, and
+deleting the branch deletes the reflog. So every commit the reflog records as made on the
+branch has to be on a branch, tag or remote still, or its change has to be in what the tip or
+the base holds: copied by a rebase, replaced by an amend, or the whole branch as it stood then
+found as one commit, which is a squash. That change is looked for by the lines added and
+removed alone (`--unified=0`), since a rebase onto a base that edited a line near the branch's,
+or one whose conflict was settled by keeping both sides, gives a copy new surroundings and the
+same lines. The lines only find it: the same edit made to another, identical line of the same
+file has them too and leaves the branch's own line as it was, so a match counts only from a
+commit that is a copy git made — the same author at the same second, which a rebase and a
+cherry-pick keep — or that has the same lines around them, which is all a squash can show. A
+conflict settled by rewriting the branch's own lines leaves the branch unproved until `gc`
+expires the entry, and a git older than 2.39 accounts for no change at all, only for an amend.
+The whole look, its passes and every read after them, shares one more ten-second deadline. A
+reflog is not a complete record, though: a month after an amend or a rebase, `gc` expires the
+entry of every commit it replaced and leaves only the branch's creation. So a reflog git has
+pruned, told by a newest entry that no longer ends at the branch's tip, is left to the proofs,
+as is no reflog at all; a rebase less than a month old of commits more than a month old still
+goes unproved until its own entry expires. The base is what `origin/HEAD` names, then
+`init.defaultBranch` if that branch exists, then `main`, then `master`.
 Anything it cannot prove — a stack squashed in pieces, a branch reworked during review, a pass
 cut off by its cap — is simply unproved, because a miss costs a badge and a false proof costs
 somebody's branch: a branch is deleted on the strength of one, below. The menu asks after the
@@ -1304,7 +1319,8 @@ them — the checks are what `-d` stood in for. Three gestures reach it:
   happened under the list.
 - **Discard task** is the one way to delete a branch nobody proved, and it asks twice. The
   second question names the commits only that branch holds — on no other branch, tag or
-  remote, since one that is elsewhere is not lost — and the modified or untracked files the
+  remote, since one that is elsewhere is not lost — then those only its history holds, which
+  it was moved off and its reflog still remembers, and the modified or untracked files the
   forced removal throws away, six of each by name and the rest counted, over a button that
   says "for good" and is never Enter's. The branch is deleted only if its tip is still the one
   those commits were counted from. It names the commits only a submodule of the checkout holds

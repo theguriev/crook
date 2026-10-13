@@ -1634,6 +1634,67 @@ pub fn held_only_by(repository: &Path, branch: &str, tip: &str) -> Result<Vec<Co
         .collect())
 }
 
+/// The commits only `branch`'s history holds, newest first: ones it was
+/// moved off — by a reset, most often — that nothing else holds and whose
+/// change nothing else does either. Deleting `branch` at `tip` deletes its
+/// reflog, the last thing that remembers them.
+///
+/// **Blocking**, background executor only: [`dropped`](super::merged::dropped),
+/// which says what "nothing else" is, and one more subprocess for the
+/// subjects when there is anything to name.
+///
+/// What [`held_only_by`] cannot see, because `tip` does not reach them: an
+/// agent that committed and was then told to start over leaves a branch on
+/// the base that holds nothing, and a commit only its reflog remembers.
+/// `base` is `None` only in a repository
+/// [`base_of`](super::merged::base_of) found none in.
+pub fn held_only_by_history(
+    repository: &Path,
+    branch: &str,
+    tip: &str,
+    base: Option<&str>,
+) -> Result<Vec<Commit>, Error> {
+    let Some(dropped) = super::merged::dropped(repository, base, branch, tip) else {
+        return Err(Error::Failed {
+            message: format!("Could not read the history of {branch}"),
+        });
+    };
+    if dropped.is_empty() {
+        return Ok(Vec::new());
+    }
+    // On stdin, which `--no-walk=unsorted` keeps in the order given rather
+    // than on the command line: past the few dozen the proof looks for the
+    // change of, `dropped` is every commit the branch was moved off, however
+    // many, and Windows gives a command line 32,767 characters — eight
+    // hundred object ids.
+    let mut input = String::new();
+    for commit in &dropped {
+        input.push_str(commit);
+        input.push('\n');
+    }
+    let args = [
+        "log",
+        "--no-show-signature",
+        "--no-walk=unsorted",
+        "--format=%H %s",
+        "--stdin",
+        "--",
+    ]
+    .map(OsStr::new);
+    let finished = run_fed(repository, &args, input.into_bytes())?;
+    if !finished.success {
+        return Err(classify(&finished.stderr));
+    }
+    Ok(String::from_utf8_lossy(&finished.stdout)
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .map(|(id, subject)| Commit {
+            id: short_sha(id.as_bytes()),
+            subject: subject.to_owned(),
+        })
+        .collect())
+}
+
 /// What a forced [`remove`] of `worktree` throws away that a plain one would
 /// have refused over — its modified and untracked files — by path.
 ///
