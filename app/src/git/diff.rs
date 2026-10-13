@@ -118,7 +118,8 @@ pub fn git_is_missing() -> bool {
 /// already has a pool for exactly this.
 ///
 /// Through the git module's shared runner, `run.rs`, and so under its read
-/// deadline, with its locks rule and its no-prompt rule. This count used to
+/// deadline, with its locks rule and its no-prompt rule — and as a poll,
+/// which fetches nothing a partial clone lacks. This count used to
 /// spawn git itself with no deadline at all, and it runs on the tab strip's
 /// gather chain: a git that never came back — an `fsmonitor` hook that hung,
 /// a network filesystem that stopped answering — held a pool worker for the
@@ -147,7 +148,7 @@ pub fn diff_stats_blocking(work_tree: &Path) -> Option<DiffStats> {
         OsStr::new("--shortstat"),
         OsStr::new("HEAD"),
     ];
-    let finished = run(work_tree, &args, Intent::Read).ok()?;
+    let finished = run(work_tree, &args, Intent::Poll).ok()?;
 
     // Never `from_utf8`: a path in a shortstat line can be any bytes the
     // filesystem accepted, and a rename clause prints one.
@@ -218,7 +219,7 @@ pub fn base_name(base: &str) -> &str {
 ///
 /// **Blocking**: one subprocess, and a second when there are commits to
 /// count lines for. Background executor only. Both go through the git
-/// module's shared runner, `run.rs`, and its deadline, as
+/// module's shared runner, `run.rs`, and its deadline, as a poll, as
 /// [`diff_stats_blocking`] does.
 ///
 /// `base` is a full ref, the form [`super::merged::base_of`] answers in, so
@@ -238,8 +239,9 @@ pub fn base_name(base: &str) -> &str {
 /// `None` is "nothing to add to the plain count": no commits ahead, which is
 /// the base or a branch that has not started yet; a `HEAD` with no commit
 /// behind it; a base this repository has no history in common with, or more
-/// than one merge-base with; and every failure git can have, none of which a
-/// row should render.
+/// than one merge-base with; a partial clone that lacks the files as the
+/// branch left the base, which a poll does not fetch; and every failure git
+/// can have, none of which a row should render.
 pub fn since_base_blocking(work_tree: &Path, base: &str) -> Option<SinceBase> {
     let range = format!("{base}..HEAD");
     let commits: u32 = read(work_tree, &["rev-list", "--count", &range, "--"])?
@@ -263,7 +265,7 @@ pub fn since_base_blocking(work_tree: &Path, base: &str) -> Option<SinceBase> {
 /// What git printed for `args`, when it succeeded.
 fn read(work_tree: &Path, args: &[&str]) -> Option<String> {
     let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
-    let finished = run(work_tree, &args, Intent::Read).ok()?;
+    let finished = run(work_tree, &args, Intent::Poll).ok()?;
     if !finished.success {
         log::debug!(
             "no count since the base for {}: {}",

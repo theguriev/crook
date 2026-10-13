@@ -108,6 +108,11 @@ fn git(dir: &Path, args: &[&str]) -> String {
 /// [`git`], for a command that is expected to fail — a rebase that stops on
 /// a conflict — handing back whatever it did.
 fn git_output(dir: &Path, args: &[&str]) -> std::process::Output {
+    git_output_with(dir, args, &[])
+}
+
+/// [`git_output`], with `env` set on top.
+fn git_output_with(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> std::process::Output {
     let nowhere = dir.join("no-such-gitconfig");
     command("git")
         .args(["-c", "init.defaultBranch=main"])
@@ -122,6 +127,7 @@ fn git_output(dir: &Path, args: &[&str]) -> std::process::Output {
         .env("GIT_AUTHOR_EMAIL", "tests@crook.invalid")
         .env("GIT_COMMITTER_NAME", "Crook Tests")
         .env("GIT_COMMITTER_EMAIL", "tests@crook.invalid")
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .output()
         .expect("git is installed; the caller checked")
@@ -1060,23 +1066,63 @@ fn a_repository_no_gather_asked_about_for_a_whole_cycle_is_looked_up_afresh() {
 // somebody unpacked brings its own `.git/config`, and some of its settings name
 // a program for git to run. Each case first has plain git run that program,
 // here and on this git, because a git that never asks would pass the rest.
+//
+// A partial clone's fetch is the exception, and the last three cases are its
+// two sides: the row's counts go without, and the reads a person opens
+// something for still fetch, because without it they would show nothing.
 
 /// A program at `<scratch>/<name>` that leaves `<scratch>/<name>.ran` behind
 /// when it runs and then fails, so that git carries on without it. The
 /// program's path, for a setting to name, and the file's.
 #[cfg(unix)]
 fn tripwire(scratch: &ScratchDir, name: &str) -> (String, PathBuf) {
+    marked(scratch, name, "exit 1")
+}
+
+/// A program like [`tripwire`]'s that then does the job: hands on to the
+/// real `git upload-pack`, so that a fetch it is named for goes through.
+#[cfg(unix)]
+fn relay(scratch: &ScratchDir, name: &str) -> (String, PathBuf) {
+    marked(scratch, name, "exec git upload-pack \"$@\"")
+}
+
+/// A shell program at `<scratch>/<name>` that leaves `<scratch>/<name>.ran`
+/// behind and then runs `then`.
+#[cfg(unix)]
+fn marked(scratch: &ScratchDir, name: &str, then: &str) -> (String, PathBuf) {
     use std::os::unix::fs::PermissionsExt as _;
 
     let ran = scratch.path().join(format!("{name}.ran"));
     let program = scratch.path().join(name);
     write(
         &program,
-        &format!("#!/bin/sh\ntouch '{}'\nexit 1\n", ran.display()),
+        &format!("#!/bin/sh\ntouch '{}'\n{then}\n", ran.display()),
     );
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
         .expect("the scratch directory is writable");
     (program.display().to_string(), ran)
+}
+
+/// A clone of `server`'s `branch` at `<scratch>/clone` that has only the
+/// files its checkout needed: `--filter=blob:none`, a blobless clone, which
+/// fetches any other the moment a command asks for it.
+#[cfg(unix)]
+fn blobless_clone(scratch: &ScratchDir, server: &Path, branch: &str) -> PathBuf {
+    git(server, &["config", "uploadpack.allowFilter", "true"]);
+    let url = format!("file://{}", server.display());
+    git(
+        scratch.path(),
+        &[
+            "clone",
+            "--quiet",
+            "--filter=blob:none",
+            "--branch",
+            branch,
+            &url,
+            "clone",
+        ],
+    );
+    scratch.path().join("clone")
 }
 
 #[cfg(unix)]
@@ -1169,6 +1215,150 @@ fn no_read_runs_the_signature_program_a_repository_names() {
     assert!(
         !ran.exists(),
         "a read ran the program the repository names to check signatures"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn no_row_count_fetches_what_a_partial_clone_lacks() {
+    // A partial clone fetches an object it was cloned without the moment a
+    // command needs one, from the remote its configuration names and by the
+    // means it names: `remote.<name>.uploadpack` here, `core.sshCommand` or a
+    // credential helper as easily. The count since the base needs the files
+    // as they were where the branch left it, which a clone of the branch
+    // never had.
+    if without_git("no_row_count_fetches_what_a_partial_clone_lacks") {
+        return;
+    }
+    let scratch = ScratchDir::new("partial");
+    let server = repo_with_a_commit(&scratch, "server");
+    commit(
+        &server,
+        "tracked.txt",
+        "one\ntwo\nthree\nfour\n",
+        "add four",
+    );
+    git(&server, &["switch", "-c", "agent/task"]);
+    commit(&server, "tracked.txt", "uno\ntwo\nthree\nfour\n", "uno");
+    let clone = blobless_clone(&scratch, &server, "agent/task");
+    let (program, ran) = tripwire(&scratch, "upload-pack");
+    git(&clone, &["config", "remote.origin.uploadpack", &program]);
+    let base = "refs/remotes/origin/main";
+    let count = ["diff", "--shortstat", "--merge-base", base, "--"];
+
+    // Fails, since the program it runs to fetch with does.
+    git_output(&clone, &count);
+    assert!(ran.exists(), "git never fetched here");
+    std::fs::remove_file(&ran).expect("the scratch directory is writable");
+    // A git from before the fix that taught it the variable — 2.44.0 and
+    // 2.45.0 among them — fetches whatever it says, and so would the row.
+    git_output_with(&clone, &count, &[("GIT_NO_LAZY_FETCH", "1")]);
+    if ran.exists() {
+        eprintln!(
+            "skipping no_row_count_fetches_what_a_partial_clone_lacks: \
+             this git fetches whatever GIT_NO_LAZY_FETCH says"
+        );
+        return;
+    }
+
+    let since = since_base_blocking(&clone, base);
+
+    assert!(
+        !ran.exists(),
+        "the row's count fetched from the remote the repository names"
+    );
+    // What not fetching costs: no count, which a row already reads as a
+    // number it does not have.
+    assert_eq!(since, None);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_landed_proof_still_fetches_what_a_blobless_clone_lacks() {
+    // The menu proves a squash landed by reading the patch of every commit
+    // the base gained since the branch left it, and a blobless clone has the
+    // files of none of them: `fetch` brings their commits and no files. A
+    // read that went without would prove nothing in such a clone for as long
+    // as the base had moved on, which is always.
+    if without_git("a_landed_proof_still_fetches_what_a_blobless_clone_lacks") {
+        return;
+    }
+    let scratch = ScratchDir::new("partial-proof");
+    let server = repo_with_a_commit(&scratch, "server");
+    commit(&server, "other.txt", "x\n", "add other");
+    let clone = blobless_clone(&scratch, &server, "main");
+    git(&clone, &["switch", "-c", "agent/task"]);
+    commit(&clone, "tracked.txt", "one\ntwo\nthree\nfour\n", "add four");
+    // On the forge, somebody else's change, and then the task's, squashed.
+    commit(&server, "other.txt", "y\n", "change other");
+    commit(
+        &server,
+        "tracked.txt",
+        "one\ntwo\nthree\nfour\n",
+        "add four (#1)",
+    );
+    let squash = git(&server, &["rev-parse", "HEAD"]);
+    git(&clone, &["fetch", "--quiet"]);
+    let (program, ran) = relay(&scratch, "upload-pack");
+    git(&clone, &["config", "remote.origin.uploadpack", &program]);
+
+    let landed = merged::merged(
+        &clone,
+        "refs/remotes/origin/main",
+        &["agent/task".to_owned()],
+    );
+
+    assert_eq!(
+        landed.get("agent/task").map(merged::Landed::proof),
+        Some(&merged::Proof::Patch { commit: squash }),
+        "a squash on a base that moved on is not proved in a blobless clone"
+    );
+    assert!(
+        ran.exists(),
+        "the proof found every file it read already here, so it fetched nothing"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_changes_column_still_fetches_what_a_blobless_clone_lacks() {
+    // The column finds a rename by comparing the file that went with the one
+    // that came, as the fork had the first — which a clone of the branch
+    // never checked out. A read that went without would list nothing at all.
+    if without_git("the_changes_column_still_fetches_what_a_blobless_clone_lacks") {
+        return;
+    }
+    let scratch = ScratchDir::new("partial-changes");
+    let server = repo_with_a_commit(&scratch, "server");
+    let lines = "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\neta\ntheta\niota\nkappa\n";
+    commit(&server, "old.txt", lines, "add old");
+    git(&server, &["switch", "-c", "agent/task"]);
+    git(&server, &["mv", "old.txt", "new.txt"]);
+    commit(
+        &server,
+        "new.txt",
+        &lines.replace("kappa", "lambda"),
+        "rename old to new",
+    );
+    git(&server, &["switch", "main"]);
+    let clone = blobless_clone(&scratch, &server, "agent/task");
+    let (program, ran) = relay(&scratch, "upload-pack");
+    git(&clone, &["config", "remote.origin.uploadpack", &program]);
+
+    let overview = changes::overview(&clone);
+
+    let overview = overview.expect("the Changes column lists nothing in a blobless clone");
+    assert_eq!(
+        overview.files,
+        vec![changes::FileChange {
+            status: changes::Status::Renamed,
+            path: PathBuf::from("new.txt"),
+            from: Some(PathBuf::from("old.txt")),
+        }]
+    );
+    assert!(
+        ran.exists(),
+        "the column found every file it read already here, so it fetched nothing"
     );
 }
 

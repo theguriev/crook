@@ -28,7 +28,10 @@
 //! program too, and the shared runner, `run.rs`, switches it off for every
 //! read. What is left is git's own clean filter, which is how git reads a
 //! working tree at all (Git LFS is one) and which the agent's own
-//! `git status` runs in the same repository.
+//! `git status` runs in the same repository — and, in a partial clone, the
+//! fetch of what the clone lacks, by whatever means its configuration names.
+//! A diff cannot be shown without the files it compares, and `run.rs` says
+//! why only the row's counts go without them.
 //!
 //! The settings that change the *text* this reads are pinned too: colour,
 //! `diff.relative`, the `a/` and `b/` a patch names its sides with, how a
