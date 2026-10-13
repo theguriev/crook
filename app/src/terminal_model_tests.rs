@@ -1229,9 +1229,15 @@ impl Shells {
         for ((pane, handle), deaf) in shells.panes.iter().zip(&handles).zip(ignoring_the_hang_up) {
             // Printed by pieces, so the marker is nowhere in the line the pty
             // echoes: on screen, it is the shell having run the trap before it.
+            //
+            // And with no history file. An interactive bash hung up saves its
+            // history first, into the real `$HOME`, and under a busy disk that
+            // write held a shell past its `SIGKILL` for longer than its ending
+            // waits to reap it — besides adding these lines to somebody's
+            // `~/.bash_history` every run.
             let line = match deaf {
-                true => "trap '' HUP; printf 'crook-%s\\n' ready\n",
-                false => "printf 'crook-%s\\n' ready\n",
+                true => "unset HISTFILE; trap '' HUP; printf 'crook-%s\\n' ready\n",
+                false => "unset HISTFILE; printf 'crook-%s\\n' ready\n",
             };
             shells
                 .app
@@ -1345,10 +1351,22 @@ fn a_window_that_goes_hears_its_shells_ended_before_its_wait_for_them_returns() 
         endings.wait(REPLY_TIMEOUT),
         "a window that is going gave up waiting for its shells"
     );
+    let waited = closing.elapsed();
     for handle in &handles {
+        if handle.0.lock().has_exited() {
+            continue;
+        }
+        // What the wait promises is the kill, and the reap only as a rule: a
+        // shell the kernel is finishing a write for goes once the write is
+        // done, which can be after its ending stopped waiting to reap it. The
+        // wait must still not have come back before that ending did.
         assert!(
-            handle.0.lock().has_exited(),
-            "the wait came back before a shell it was waiting for had been ended and reaped"
+            waited >= REAP_TIMEOUT,
+            "the wait came back after {waited:?}, before a shell it was waiting for had been ended"
+        );
+        assert!(
+            comes_to_be_reaped(&handle.0),
+            "a shell the wait said was ended never went"
         );
     }
 

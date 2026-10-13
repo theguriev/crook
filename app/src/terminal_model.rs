@@ -1457,8 +1457,15 @@ impl Endings {
         }
     }
 
-    /// Waits until every shell being ended has been ended and reaped, for at
-    /// most `patience`, and says whether they all were.
+    /// Waits until every shell being ended has been killed and its reap tried,
+    /// for at most `patience`, and says whether they all were.
+    ///
+    /// Killed is the promise, and all a process on its way out needs: the
+    /// escalation has sent its `SIGKILL` by then, which nothing survives.
+    /// Reaped is usual and not promised. A child the kernel is finishing a
+    /// write for — a shell saving its history to a busy disk — goes once the
+    /// write is done, which can be after its ending stopped waiting
+    /// `REAP_TIMEOUT` to reap it, and the ending says so in the log.
     pub fn wait(&self, patience: Duration) -> bool {
         let deadline = Instant::now() + patience;
         let mut running = self.0.running();
@@ -1510,7 +1517,11 @@ fn end(pane: PaneId, shared: &Shared) {
     // it. Reaped here rather than left to whatever drops the terminal last,
     // which would kill it again and wait again — on the thread that draws, as
     // often as not.
-    collect_exit(shared);
+    if !collect_exit(shared) {
+        log::debug!(
+            "the shell in pane {pane:?} was killed and still had not gone {REAP_TIMEOUT:?} later"
+        );
+    }
 }
 
 /// A running terminal, as the element that draws it holds it.
@@ -2489,12 +2500,12 @@ fn reap(shared: &Shared) {
 }
 
 /// Waits for a child that has gone, or been told to, to be reapable, and
-/// reaps it.
+/// reaps it. Says whether it stopped for any reason but the time.
 ///
 /// Bounded, because a child that has closed its pty and then refuses to be
 /// reaped must not hold a thread — and the status is a nicety, while the pane
 /// closing is not.
-fn collect_exit(shared: &Shared) {
+fn collect_exit(shared: &Shared) -> bool {
     let deadline = Instant::now() + REAP_TIMEOUT;
     loop {
         let reaped = match shared.lock().try_wait() {
@@ -2505,8 +2516,11 @@ fn collect_exit(shared: &Shared) {
             }
         };
 
-        if reaped || Instant::now() >= deadline {
-            break;
+        if reaped {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
         }
         thread::sleep(REAP_INTERVAL);
     }
