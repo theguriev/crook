@@ -400,6 +400,36 @@ fn test_a_real_child_is_told_which_terminal_it_is_on() {
     );
 }
 
+#[test]
+fn test_a_real_child_that_asks_for_the_terminal_version_reads_the_answer() {
+    if cfg!(windows) {
+        return;
+    }
+    // The answer arrives as input, so the child stops its tty echoing it
+    // back as output and holding it for a newline, reads exactly its 17
+    // bytes, and prints them with the two escapes made visible.
+    let Some(program) = shell_command(
+        "stty -echo -icanon; printf '\\033[>q'; \
+         dd bs=1 count=17 2>/dev/null | tr -c '[:print:]' .",
+    ) else {
+        return;
+    };
+    let mut terminal = Terminal::spawn(TerminalOptions {
+        program,
+        size: TerminalSize::new(60, 6),
+        name_and_version: Some("Crook 1.2.3".to_owned()),
+        ..TerminalOptions::default()
+    })
+    .expect("a shell should start on a pty");
+    let output = read_on_a_thread(terminal.take_reader().expect("a reader"));
+
+    assert!(
+        feed_until(&mut terminal, &output, ".P>|Crook 1.2.3.\\"),
+        "the name a terminal is spawned with is what its child is told, got: {:?}",
+        terminal.snapshot().text()
+    );
+}
+
 /// A line of shell that prints the directory it started in, bracketed.
 ///
 /// Bracketed because the check is otherwise a substring, and the directory
