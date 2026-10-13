@@ -42,6 +42,17 @@
 //! And never once the pane is stopped: a worktree agreed to before the stop
 //! can finish after it, and the tab still opens, but the stop stands.
 //!
+//! # The worktree
+//!
+//! Made through the one function the worktree menu's creator makes its
+//! checkouts with, `HeldLocks::make_checkout`, so a worker's checkout is the
+//! one a person would have got from the menu: locked while the window works
+//! in it, and given what the main checkout's `.worktreeinclude` names before
+//! the tab's shell starts. Only its base differs — the caller's `HEAD`, where
+//! the menu offers a choice. What the copy left out is said in the answer's
+//! `note`, where the menu would reopen on the new tab to say it: a tab that
+//! never takes the keyboard has no business opening a menu that does.
+//!
 //! # The command
 //!
 //! Words rather than a line, joined here with the quoting the plugin host
@@ -248,9 +259,8 @@ pub fn open(
     spawns.borrow_mut().accept(root);
 
     let Some(branch) = plan.branch.clone() else {
-        let directory = plan.directory.clone();
         spawns.borrow_mut().settled(root);
-        finish(workspace, plan, directory, None, spawns, answer, ctx);
+        finish(workspace, plan, None, spawns, answer, ctx);
         return;
     };
     let (Some(repository), Some(store)) = (
@@ -267,9 +277,11 @@ pub fn open(
         return;
     };
 
-    // The worktree menu's own two steps, in its order: the listing names the
-    // repository the checkout is filed under, and `add` makes it from the
-    // caller's `HEAD`.
+    // The worktree menu's own steps, in its order: the listing names the
+    // repository the checkout is filed under, and the checkout is made the
+    // one way the menu's creator makes its own — locked, and given what
+    // `.worktreeinclude` names — from the caller's `HEAD`.
+    let held = workspace.held_locks();
     let made = ctx.background().spawn(async move {
         let listed = worktree::list(&repository)?;
         let name = listed
@@ -278,22 +290,18 @@ pub fn open(
             .map(|name| name.to_string_lossy().into_owned())
             .ok_or(worktree::Error::NotARepository)?;
         let path = worktree::checkout_path(&store, &name, &branch);
-        worktree::add(&repository, &path, &branch, None)?;
-        Ok::<_, worktree::Error>((path, name))
+        let included = held.make_checkout(&repository, &path, &branch, None)?;
+        Ok::<_, worktree::Error>(Made {
+            path,
+            repository: name,
+            lacks: included.problem(),
+        })
     });
     let spawns = spawns.clone();
     ctx.spawn(made, move |workspace, made, ctx| {
         spawns.borrow_mut().settled(root);
         match made {
-            Ok((path, repository)) => finish(
-                workspace,
-                plan,
-                Some(path),
-                Some(repository),
-                &spawns,
-                answer,
-                ctx,
-            ),
+            Ok(made) => finish(workspace, plan, Some(made), &spawns, answer, ctx),
             Err(error) => {
                 let refusal = Refusal::new(
                     code::FAILED,
@@ -305,6 +313,18 @@ pub fn open(
         }
     })
     .detach();
+}
+
+/// A worktree git has made for a tab that is not open yet.
+struct Made {
+    /// Where it is, which is where the tab opens.
+    path: PathBuf,
+    /// The name of the repository it is a checkout of, which names the group
+    /// the tab joins, as the worktree menu names the group it opens into.
+    repository: String,
+    /// What the main checkout's `.worktreeinclude` named that the worktree
+    /// was not given, as a sentence: see `Included::problem`.
+    lacks: Option<String>,
 }
 
 /// A `tab.new` the window has agreed to, before the tab is open.
@@ -422,7 +442,8 @@ fn plan(
     })
 }
 
-/// Opens the tab a [`Plan`] describes, in `directory`, and answers with it.
+/// Opens the tab a [`Plan`] describes, in the worktree `made` for it or the
+/// caller's own directory, and answers with it.
 ///
 /// The one place a caller's run of refusals ends, since it is the one place a
 /// tab is known to have opened — short of a stop, which [`Spawns::opened`]
@@ -430,8 +451,7 @@ fn plan(
 fn finish(
     workspace: &mut Workspace,
     plan: Plan,
-    directory: Option<PathBuf>,
-    heading: Option<String>,
+    made: Option<Made>,
     spawns: &RefCell<Spawns>,
     answer: Answering,
     ctx: &mut ViewContext<Workspace>,
@@ -439,12 +459,18 @@ fn finish(
     let Plan {
         beside,
         grouped,
+        directory,
         title,
         line,
         lineage,
         ..
     } = plan;
     let caller = lineage.caller;
+    let checkout = made.as_ref().map(|made| made.path.clone());
+    let (directory, heading, lacks) = match made {
+        Some(made) => (Some(made.path), Some(made.repository), made.lacks),
+        None => (directory, None, None),
+    };
     let cwd = directory
         .as_deref()
         .map(|directory| directory.to_string_lossy().into_owned());
@@ -454,6 +480,14 @@ fn finish(
             session.custom_title = title;
         }
     });
+    // Held from here, as the menu's creator holds the checkouts it opens: the
+    // lock comes off when no pane in the window is working in the checkout.
+    // Whether or not the tab opened, since one that did not leaves nobody in
+    // it, and a lock still waiting for its tab would stay on until the window
+    // closed.
+    if let Some(checkout) = &checkout {
+        workspace.held_locks().opened(checkout);
+    }
     let Some((tab, pane)) = opened else {
         let refusal = Refusal::new(code::FAILED, "the tab could not be opened");
         spawns.borrow_mut().refuse(caller, &refusal);
@@ -471,9 +505,10 @@ fn finish(
         pane_id: pane.as_u64(),
         tab_id: tab.as_u64(),
         cwd,
+        note: lacks,
     };
     answer.send(Ok(
-        serde_json::to_value(opened).expect("an opened tab is numbers and a string, which encode")
+        serde_json::to_value(opened).expect("an opened tab is numbers and text, which encode")
     ));
 }
 

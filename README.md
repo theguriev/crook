@@ -450,9 +450,11 @@ Twenty features, and the page that configures them:
   the one Crook that is running and refuses to guess among several. Not on Windows yet.
   **And an agent can fan its work out where you can see it.** From inside a pane,
   `crook tab new --worktree fix-x --in-my-group -- claude "fix the flaky test"` opens a tab
-  beside it — in a new worktree on `fix-x` from the pane's `HEAD`, folded into the pane's group —
+  beside it — in a new worktree on `fix-x` from the pane's `HEAD`, locked and given what
+  `.worktreeinclude` names as one made from the menu is, folded into the pane's group —
   without taking your keyboard, and runs the command at the new shell's first prompt, every word
-  as itself; it prints the new pane's number for `crook pane list` to watch. A pane is known by
+  as itself; it prints the new pane's number for `crook pane list` to watch, and on standard
+  error what the worktree was not given, if anything. A pane is known by
   the secret in its own `CROOK_TOKEN`, so a script that is not in a pane can list but cannot
   open anything; eight tabs may be open on behalf of one pane you opened, a worker's own workers
   counted in, and the new row's card says which pane opened it. `sh`, `bash`, `zsh` and `fish`

@@ -1131,7 +1131,9 @@ copies nothing — half a `node_modules` a `*` caught is worse than none — and
 MB is left out alone. None of that can fail the checkout, which exists by then: it is logged,
 and what did not arrive is said on the worktree menu reopened on the new tab, since the
 creator has closed. A copy that went as asked says nothing, because a menu that came back
-after every checkout would take the keyboard from the tab a person had just asked for.
+after every checkout would take the keyboard from the tab a person had just asked for. A
+checkout `crook tab new --worktree` asks for is made by the same function, and says what did
+not arrive in its answer instead, since that tab never takes the keyboard.
 
 The same creator starts the agent, which is the other half of "one agent, one worktree", and
 it is the creator rather than a dialog or a `Task` object of its own for the reason the session
@@ -1855,22 +1857,26 @@ machine under one user could.
 about is its own window's, and no token names a pane of another — beside the caller's tab, in
 its group when `in_my_group` says so (a group of the two is made when there is none), and never
 selected: the person may be typing, and a tab that took the keyboard would take the rest of
-their line with it. With `worktree`, the window makes the checkout the tab menu's creator makes —
-the branch name trimmed and required and otherwise git's to judge, the checkout filed under
-Crook's store by repository, `git worktree add -b` from the caller's `HEAD` — on the pool, and
-the tab opens in it when git is done. The command arrives as words, and the window joins them
-with the quoting the plugin host types an argument with, which is proven to read back word for
-word in `sh`, `bash`, `zsh` and `fish` (#342). A new pane that would run any other shell is
-refused as `unsupported-shell`, and a word holding a control character as `bad-request`, since a
-newline in a command line is a second command. A word arrives as itself: an alias is not
-expanded, `&&` is an argument, and a pipeline is `sh -c '…'`. The line is typed into the new
-pane's field at once, where a person can see it, and sent by the field's own submit at the
-shell's first prompt — the first `A` for a shell with marks, since a line submitted into the
-block open from before it is one the shell never reports a boundary for, and the first thing it
-prints for a shell without. That is an event and not a clock, so a shell whose integration never
-marks a prompt keeps the line in its field for a person to send, and a person who edits the line
-before its prompt owns it, and it is not sent. The reply is the new pane's number, its tab's
-and its directory. The new row's hover card and its "Why this status" say which pane opened it.
+their line with it. With `worktree`, the window makes the checkout the tab menu's creator makes
+— the branch name trimmed and required and otherwise git's to judge, the checkout filed under
+Crook's store by repository, `git worktree add -b` from the caller's `HEAD`, locked and given
+what `.worktreeinclude` names, through the one function the creator makes its checkouts with —
+on the pool, and the tab opens in it when git is done. The command arrives as words, and the
+window joins them with the quoting the plugin host types an argument with, which is proven to
+read back word for word in `sh`, `bash`, `zsh` and `fish` (#342). A new pane that would run any
+other shell is refused as `unsupported-shell`, and a word holding a control character as
+`bad-request`, since a newline in a command line is a second command. A word arrives as itself:
+an alias is not expanded, `&&` is an argument, and a pipeline is `sh -c '…'`. The line is typed
+into the new pane's field at once, where a person can see it, and sent by the field's own submit
+at the shell's first prompt — the first `A` for a shell with marks, since a line submitted into
+the block open from before it is one the shell never reports a boundary for, and the first thing
+it prints for a shell without. That is an event and not a clock, so a shell whose integration
+never marks a prompt keeps the line in its field for a person to send, and a person who edits
+the line before its prompt owns it, and it is not sent. The reply is the new pane's number, its
+tab's and its directory, and a `note` when the worktree was not given everything its
+`.worktreeinclude` names — left out when there is nothing to say, so the reply is the three
+fields it always was. The new row's hover card and its "Why this status" say which pane opened
+it.
 
 **The budget, and refusals.** Eight tabs at once on behalf of one pane a person opened. The
 count is by *root*: a tab opened by a tab that was itself opened counts against the pane the
@@ -1984,8 +1990,9 @@ long as nobody connects — the reason a pty reader is a thread and not a pool w
 connection gets a short-lived thread of its own, eight at once and the ninth refused as `busy`.
 A connection has five seconds all told and a line 64 KiB; a longer line is refused as `too-long`
 and the connection closed, since nothing says where the next line starts. The one exception is a
-tab in a new worktree, which waits on git and its `post-checkout` hook: that reply is given the
-worktree module's own read and write budgets and a margin, and the connection closes after it. A question that needs
+tab in a new worktree, which waits on git, its `post-checkout` hook, the lock and the
+`.worktreeinclude` copy: that reply is given every deadline the making of the checkout runs
+under, an allowance for the copy and a margin, and the connection closes after it. A question that needs
 the window is posted to it and answered on the main thread through the `ctx.spawn` a pty's
 output comes home by, while the connection's thread waits for the answer until a quarter of a
 second before its five are up — the quarter being what it writes `timeout` back in, so a window
@@ -2025,7 +2032,9 @@ there is exactly one, and refuses when there are several, naming them: each wind
 process, and choosing the newest would be a guess that hands a script another window's panes.
 `crook tab new [--worktree B] [--in-my-group] [--title T] [--json] -- CMD…` prints the new
 pane's number, or the window's answer with `--json`; the `--` is required, since a command is
-the part of the line most likely to hold a word that starts with a dash.
+the part of the line most likely to hold a word that starts with a dash. A `note` in the answer
+goes to standard error beside the number, so `id=$(crook tab new …)` still reads a number and
+whoever ran it still sees what the worktree was not given.
 `crook pane wait <ID> --until <STATE> [--timeout <SECS>]` prints where the pane got to and exits
 with a failure, having printed where it is, when it did not get there, so `&&` after it reads
 the way it looks; `crook pane blocks <ID> [--last <N>]` prints each block as its command line,
