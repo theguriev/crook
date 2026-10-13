@@ -6045,6 +6045,9 @@ mod tests {
         // Closing the first window takes its lock with it, so the next launch
         // keeps the session in its place.
         drop(first);
+        assert!(crate::session::wait_until_free(
+            &crate::session::session_path_beside(&scratch.path().join("settings.json"))
+        ));
         assert!(
             opens_on_the_last_tabs(&Standing::of(&settings, &Overrides::default())),
             "the session stayed kept after the window that kept it closed"

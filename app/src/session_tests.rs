@@ -1225,7 +1225,7 @@ fn one_window_keeps_the_session_file_until_it_closes() {
 
     drop(first);
     assert!(
-        claim(&session).expect("still answerable").is_some(),
+        wait_until_free(&session),
         "the file stayed kept after its window closed"
     );
 }

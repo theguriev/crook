@@ -13930,6 +13930,10 @@ fn a_second_window_keeps_the_session_when_restoring_is_turned_on_after_the_first
     assert!(matches!(standing, crate::Standing::Second), "{standing:?}");
     drop(first);
     drop(keeper);
+    assert!(
+        crate::session::wait_until_free(&session),
+        "the first window's hold on the session outlived it"
+    );
 
     let tab = second.tab_ids()[0];
     second.workspace_update(|workspace, ctx| {
