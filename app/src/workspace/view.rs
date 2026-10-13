@@ -80,6 +80,7 @@ use super::crash_note::CrashNote;
 use super::finish::{Again, Finishing};
 use super::held_locks::HeldLocks;
 use super::row_content::row_name;
+use super::session_note::SessionNote;
 use super::settings_page::SettingsState;
 use super::tab_context_menu::TabContextMenuState;
 use super::tab_menu::{
@@ -90,7 +91,7 @@ use super::tabs_panel::edge::PanelResize;
 use super::tabs_panel::geometry::RowGeometry;
 use super::tabs_panel::search::SearchState;
 use super::theme_panel::{Mode, ThemePanelState};
-use super::{body, crash_note, header_toolbar, tabs_panel};
+use super::{body, crash_note, header_toolbar, session_note, tabs_panel};
 
 /// How far into a panel row `--carry` presses.
 ///
@@ -680,9 +681,20 @@ pub struct Workspace {
     /// save that lands. The settings' own is `settings_save_problem`.
     session_problem: Option<String>,
     /// Whether this window writes the session file at all, whatever the
-    /// setting says. False for a window a launcher opened: see
-    /// [`Self::stop_saving_the_session`].
+    /// setting says. False for a window a launcher opened, and for one that
+    /// left the file to another window until it takes the file back: see
+    /// [`Self::stop_saving_the_session`] and
+    /// [`Self::keep_the_session_if_its_keeper_closed`].
     saves_session: bool,
+    /// Whether this window opened while another one kept the session file,
+    /// and left it to that one. See [`Self::leave_the_session`].
+    left_the_session: bool,
+    /// The lock a window that left the session took when restoring was
+    /// turned on in it after the window keeping the file had closed. See
+    /// [`Self::keep_the_session_if_its_keeper_closed`]. A window that keeps
+    /// the file from the start holds its lock beside the window instead, in
+    /// `Shell`, because it is taken before the window exists.
+    session_lock: Option<crate::session::Lock>,
 
     /// How big the window was when it was last laid out, in logical pixels.
     ///
@@ -821,6 +833,9 @@ pub struct Workspace {
     /// The line under the header about a crash an earlier run left, while
     /// nobody has dismissed it. See [`crash_note`].
     crash_note: Option<CrashNote>,
+    /// The line under the header that says another window keeps the session,
+    /// until it is dismissed. See [`session_note`].
+    session_note: Option<SessionNote>,
     /// The options, kept beside [`Self::settings`] rather than read out of it
     /// on every access. A renderer reads this dozens of times per frame and
     /// wants a `Copy` snapshot, not a borrow of the thing a save is cloning.
@@ -1149,6 +1164,8 @@ impl Workspace {
             session_saves: Arc::default(),
             session_problem: None,
             saves_session: true,
+            left_the_session: false,
+            session_lock: None,
             keybindings,
             pending_keys: std::cell::RefCell::new(Vec::new()),
             recording: std::cell::RefCell::new(None),
@@ -1175,6 +1192,7 @@ impl Workspace {
             newer_release: None,
             diagnostics_folder: None,
             crash_note: None,
+            session_note: None,
             options,
             overridden: Overridden::default(),
             menu: MenuState::default(),
@@ -8527,6 +8545,31 @@ impl Workspace {
         self.settle(effect, before, ctx)
     }
 
+    /// Opens another window, fresh, where the focused pane is working.
+    ///
+    /// The directory the pane's shell last reported, which is where a new tab
+    /// would open. Failing that, the home directory. A pane whose directory
+    /// has been deleted since, is one this user cannot enter, or has a name
+    /// that is not text would hand the new window a directory it cannot
+    /// start in, and that window would never appear, saying why only in its
+    /// own log. See
+    /// [`crate::new_window::can_start_in`], and [`crate::new_window`] for
+    /// why the window is a process of its own.
+    fn open_new_window(&self) {
+        let Some(directory) = self
+            .tabs
+            .focused_directory()
+            .filter(|directory| crate::new_window::can_start_in(directory))
+            .or_else(std::env::home_dir)
+        else {
+            log::warn!("there is no directory to open a new window in");
+            return;
+        };
+        if let Err(error) = crate::new_window::open(&directory) {
+            log::warn!("could not open a new window: {error}");
+        }
+    }
+
     /// Brings back the tab closed most recently, where it was.
     ///
     /// The same snapshot a restart restores from, so it comes back the way a
@@ -9151,6 +9194,9 @@ impl Workspace {
             Binding::ReopenClosedTab => {
                 return (!self.closed_tabs.is_empty()).then_some(WorkspaceAction::ReopenClosedTab);
             }
+            // Never declined: there is always somewhere to open it, the home
+            // directory when the pane says nothing. See `open_new_window`.
+            Binding::NewWindow => return Some(WorkspaceAction::NewWindow),
             // Warp's `pane_group:close_current_session`: the pane goes, and
             // the tab only goes with it when it was the tab's last one.
             Binding::ClosePane => TabAction::ClosePane(self.tabs.focused_pane_id()?),
@@ -10194,8 +10240,16 @@ impl Workspace {
                 self.set_general(general, ctx);
                 // Turning it on writes the file now rather than at the next
                 // tab action, so a person who switches it on and closes the
-                // window gets what they asked for.
+                // window gets what they asked for. A second ordinary window
+                // takes the file first if the window keeping it has closed,
+                // and otherwise writes nothing and says so instead. A
+                // launcher's window, New window's included, writes nothing
+                // and says nothing, as it never has.
+                if general.restore_session {
+                    self.keep_the_session_if_its_keeper_closed();
+                }
                 self.save_session(ctx);
+                self.say_who_keeps_the_session(session_note::SAID_WHEN_TURNED_ON, ctx);
             }
             SettingsAction::ToggleOpenAtLogin => {
                 let mut general = self.general();
@@ -10572,8 +10626,10 @@ impl Workspace {
         ctx.spawn(written, Self::note_settings_save).detach();
     }
 
-    /// Never writes the session file again, for as long as this window is
-    /// open.
+    /// Stops this window writing the session file. A launcher's window never
+    /// writes it again, for as long as it is open. A window that left the
+    /// file to another one may take it back: see
+    /// `keep_the_session_if_its_keeper_closed`.
     ///
     /// For a window a launcher opened — `crook -e`, `--working-directory` —
     /// which is a quick terminal beside somebody's work rather than the work,
@@ -10584,6 +10640,90 @@ impl Workspace {
     /// `settings.json` the next time anything saved the settings.
     pub fn stop_saving_the_session(&mut self) {
         self.saves_session = false;
+    }
+
+    /// Leaves the session file to the window that keeps it: this one does
+    /// not write it, and says so under the header.
+    ///
+    /// For an ordinary window opened while another one keeps the file. Its
+    /// tabs are the ones that will not come back, and a person who opened
+    /// Crook expecting their tabs is owed the reason they are not here. Said
+    /// once, and only while restoring tabs is on: with it off no window
+    /// comes back with tabs, and there is nothing to explain — until it is
+    /// turned on in this window. See `say_who_keeps_the_session`.
+    pub fn leave_the_session(&mut self, ctx: &mut ViewContext<Self>) {
+        self.stop_saving_the_session();
+        self.left_the_session = true;
+        self.say_who_keeps_the_session(session_note::SAID, ctx);
+    }
+
+    /// Makes a window that left the session the one that keeps it, if the
+    /// window it left it to has closed since.
+    ///
+    /// When restoring is turned on here, which asks for this window's tabs to
+    /// come back. Once the keeper has gone no window is left that would write
+    /// any, and the file still holds what was written the last time restoring
+    /// was on: the next launch would bring those tabs back instead, resume
+    /// lines and all, so this window takes the file and the save after the
+    /// switch writes its own over them. This is the one time a second window
+    /// takes over. It does not when the keeper merely closes, because which
+    /// window's tabs win is not this window's to decide until a person asks
+    /// it for its own.
+    fn keep_the_session_if_its_keeper_closed(&mut self) {
+        if !self.left_the_session {
+            return;
+        }
+        let Some(path) = self
+            .settings
+            .path()
+            .map(crate::session::session_path_beside)
+        else {
+            return;
+        };
+        match crate::session::claim(&path) {
+            Ok(Some(lock)) => {
+                log::info!(
+                    "the window that kept {} has closed; this one keeps it now",
+                    path.display()
+                );
+                self.session_lock = Some(lock);
+                self.left_the_session = false;
+                self.saves_session = true;
+                self.session_note = None;
+            }
+            Ok(None) => {}
+            // This window was able to ask when it opened, so the keeper is
+            // most likely still there. Leaving the file to it is what this
+            // window has done all along.
+            Err(error) => log::warn!("{error:#}; leaving the session to the window that keeps it"),
+        }
+    }
+
+    /// Puts the line that says another window keeps the session up in a
+    /// window that left it, saying `said`, while restoring tabs is on, and
+    /// takes it down while it is off.
+    ///
+    /// When the window opens, and again when the setting is switched here.
+    /// Switched on, it asks this window for what it cannot do — its tabs
+    /// still go unwritten, the other window keeps the file — so the line
+    /// comes back even if it was dismissed: before, the switch wrote these
+    /// tabs at once, and a person who switches it and closes the window
+    /// expects them back. Nothing in a window that keeps the file or that a
+    /// launcher opened.
+    fn say_who_keeps_the_session(&mut self, said: &'static str, ctx: &mut ViewContext<Self>) {
+        if !self.left_the_session {
+            return;
+        }
+        self.session_note = self
+            .general()
+            .restore_session
+            .then(|| SessionNote::saying(said));
+        ctx.notify();
+    }
+
+    /// The line that says another window keeps the session, while it is up.
+    pub(crate) fn session_note(&self) -> Option<&SessionNote> {
+        self.session_note.as_ref()
     }
 
     /// Writes what the window is showing, so the next one can come back to it.
@@ -10761,6 +10901,9 @@ impl View for Workspace {
             .with_main_axis_size(MainAxisSize::Max)
             .with_child(header_toolbar::render(self, app));
         if let Some(note) = crash_note::render(self) {
+            main.add_child(note);
+        }
+        if let Some(note) = session_note::render(self) {
             main.add_child(note);
         }
         let main = main.with_child(Expanded::new(1., body).finish()).finish();
@@ -11140,6 +11283,10 @@ impl TypedActionView for Workspace {
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),
             WorkspaceAction::Complete(pane) => self.request_completions(pane, ctx),
             WorkspaceAction::CrashNote(action) => self.apply_crash_note(action, ctx),
+            WorkspaceAction::DismissSessionNote => {
+                self.session_note = None;
+                ctx.notify();
+            }
             WorkspaceAction::ResumeAgents => self.resume_every_agent(ctx),
             WorkspaceAction::Run(id) => self.run_action(id, ctx),
             WorkspaceAction::RunAbout(id, subject) => {
@@ -11162,6 +11309,7 @@ impl TypedActionView for Workspace {
             // same reason and is swallowed the same way.
             WorkspaceAction::Chord => {}
             WorkspaceAction::ReopenClosedTab => self.reopen_closed_tab(ctx),
+            WorkspaceAction::NewWindow => self.open_new_window(),
         }
     }
 }

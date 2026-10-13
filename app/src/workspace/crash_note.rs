@@ -21,6 +21,7 @@
 use std::path::{Path, PathBuf};
 
 use crookui_core::elements::{MouseStateHandle, Padding};
+use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
 use crate::theme::theme;
@@ -83,50 +84,67 @@ pub(super) fn render(workspace: &Workspace) -> Option<Box<dyn Element>> {
     let note = workspace.crash_note()?;
     let ui = workspace.fonts().ui;
 
-    let row = Flex::row()
+    Some(line(
+        SAID,
+        [
+            widgets::text_button(
+                "Show",
+                Some(WorkspaceAction::CrashNote(CrashNoteAction::Show)),
+                note.show.clone(),
+                ui,
+            ),
+            widgets::text_button(
+                "Dismiss",
+                Some(WorkspaceAction::CrashNote(CrashNoteAction::Dismiss)),
+                note.dismiss.clone(),
+                ui,
+            ),
+        ],
+        ui,
+    ))
+}
+
+/// One line under the header: a sentence, and the buttons that answer it.
+///
+/// The shape of every line that stands where this one does. A window with
+/// two things to say, a crash and a session another window keeps, shows them
+/// as two rows of one strip rather than as two kinds of banner.
+pub(super) fn line(
+    said: &'static str,
+    buttons: impl IntoIterator<Item = Box<dyn Element>>,
+    ui: FamilyId,
+) -> Box<dyn Element> {
+    let mut row = Flex::row()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_child(
             // The flexible child, so it is the sentence that gives way in a
-            // narrow window and never the two buttons after it.
+            // narrow window and never the buttons after it.
             Expanded::new(
                 1.,
-                Text::new(SAID, ui, widgets::LABEL_SIZE)
+                Text::new(said, ui, widgets::LABEL_SIZE)
                     .with_color(theme().text_primary)
                     .with_ellipsis(Cut::End)
                     .finish(),
             )
             .finish(),
-        )
-        .with_child(widgets::text_button(
-            "Show",
-            Some(WorkspaceAction::CrashNote(CrashNoteAction::Show)),
-            note.show.clone(),
-            ui,
-        ))
-        .with_child(
-            Container::new(widgets::text_button(
-                "Dismiss",
-                Some(WorkspaceAction::CrashNote(CrashNoteAction::Dismiss)),
-                note.dismiss.clone(),
-                ui,
-            ))
-            .with_margin_left(6.)
-            .finish(),
-        )
-        .finish();
+        );
+    for (index, button) in buttons.into_iter().enumerate() {
+        row.add_child(match index {
+            0 => button,
+            _ => Container::new(button).with_margin_left(6.).finish(),
+        });
+    }
 
-    Some(
-        Container::new(row)
-            .with_padding(Padding {
-                top: 4.,
-                left: 12.,
-                bottom: 6.,
-                right: 10.,
-            })
-            // The header's own ground, so the line reads as the header's
-            // second row rather than as a strip laid over the work.
-            .with_background_color(theme().surface)
-            .finish(),
-    )
+    Container::new(row.finish())
+        .with_padding(Padding {
+            top: 4.,
+            left: 12.,
+            bottom: 6.,
+            right: 10.,
+        })
+        // The header's own ground, so the line reads as the header's
+        // second row rather than as a strip laid over the work.
+        .with_background_color(theme().surface)
+        .finish()
 }

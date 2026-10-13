@@ -329,7 +329,8 @@ impl Drop for Session {
     }
 }
 
-/// The absolute path of the binary this process is, for [`BIN_VARIABLE`];
+/// The absolute path of the binary this process is, for [`BIN_VARIABLE`]
+/// and for the window New window starts — see [`crate::new_window`];
 /// `None` when it has none that is text.
 ///
 /// Read once, at the first pane, rather than at each: on Linux the path of a
@@ -339,7 +340,7 @@ impl Drop for Session {
 /// the path the binary was started by, which can be relative, and resolving
 /// a `/usr/local/bin/crook` link to the versioned directory behind it would
 /// name a path the next upgrade removes.
-fn running_binary() -> Option<&'static str> {
+pub(crate) fn running_binary() -> Option<&'static str> {
     static BINARY: LazyLock<Option<String>> = LazyLock::new(|| {
         let path = std::env::current_exe().and_then(std::path::absolute).ok()?;
         path.into_os_string().into_string().ok()

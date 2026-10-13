@@ -54,6 +54,19 @@
 //! copied, byte for byte, into `session-backups/` beside it before anything
 //! can overwrite it — see [`back_up_unreadable`] — so that the tab a build
 //! dropped is still there to be read by a person.
+//!
+//! # One window keeps the file
+//!
+//! There is one file and Crook can have several windows, each its own
+//! process. When every ordinary window read the file and wrote it, a second
+//! one opened with a copy of the first one's tabs, each offering to resume
+//! an agent already running in the first, and from then on each window's
+//! changes overwrote the other's. The next launch got back whichever window
+//! saved last, and the other window's tabs were gone without a word. So the
+//! first ordinary window [`claim`]s the file, and only that window reads it
+//! and writes it. A later one opens fresh and leaves the file alone. One file
+//! per window, all of them restored at the next launch, would be the fuller
+//! answer, and is a much larger change than this one.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -70,6 +83,19 @@ const SESSION_FILE: &str = "session.json";
 /// The directory beside it that keeps copies of session files this build
 /// could not read whole — see [`back_up_unreadable`].
 const BACKUP_DIRECTORY: &str = "session-backups";
+/// The file beside the session file whose lock says which window keeps it.
+///
+/// A file of its own rather than a lock on the session file, for two
+/// reasons. A save replaces the session file by renaming a new one over it —
+/// see [`atomic_write`] — and a lock belongs to the file it was taken on, so
+/// the first save would leave the lock on a file nobody opens any more.
+/// And on Windows a lock is mandatory: one on the session file would refuse
+/// the keeper's own saves.
+///
+/// Never removed. Deleting it while the next window opens it would let two
+/// windows hold locks on two different files of the same name. An empty
+/// file left beside the session is a smaller cost than that.
+const LOCK_FILE: &str = "session.lock";
 /// How many of those copies are kept. Three is enough to see what a run of
 /// bad launches left behind and few enough that the directory never grows
 /// into a thing that needs its own tidying.
@@ -722,6 +748,51 @@ pub fn user_session_path() -> Option<PathBuf> {
 /// is [`user_session_path`].
 pub fn session_path_beside(settings: &Path) -> PathBuf {
     settings.with_file_name(SESSION_FILE)
+}
+
+/// The hold one window has on the session file, for as long as it is open.
+///
+/// An advisory lock on [`LOCK_FILE`], taken through the standard library:
+/// `flock` on macOS and Linux, `LockFileEx` on Windows. The lock belongs to
+/// the open file this holds, so it goes when the window goes, however that
+/// happens. Dropped with the window, or released by the system when the
+/// process ends without running another line, as after a kill or a crash.
+/// A window that crashed never leaves the next one locked out.
+#[derive(Debug)]
+pub struct Lock {
+    /// Never read. Keeping it open is what holds the lock.
+    _file: fs::File,
+}
+
+/// Makes this window the one that keeps the session file at `session`,
+/// unless another open window already does.
+///
+/// `Ok(None)` when another window holds the lock. An error when there is no
+/// way to ask: the folder cannot be made, or the file system keeps no locks.
+/// The caller then keeps the file the way every window did before there was
+/// a lock.
+pub fn claim(session: &Path) -> Result<Option<Lock>> {
+    let path = session.with_file_name(LOCK_FILE);
+    if let Some(directory) = path.parent() {
+        ensure_directory(directory)?;
+    }
+    // Open for writing as well as reading, although nothing is written. NFS
+    // on Linux carries `flock` to the server as a byte-range lock, and it
+    // refuses an exclusive lock on a file opened only for reading.
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("could not open {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(Lock { _file: file })),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(error)) => {
+            Err(error).with_context(|| format!("could not lock {}", path.display()))
+        }
+    }
 }
 
 #[cfg(test)]

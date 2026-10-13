@@ -1206,3 +1206,67 @@ fn two_panes_of_one_agent_in_one_directory_are_each_offered_the_picker() {
         ]
     );
 }
+
+#[test]
+fn one_window_keeps_the_session_file_until_it_closes() {
+    // Two ordinary windows of one person: the first keeps the file, the
+    // second is told another one does, and once the first has gone the next
+    // window to open keeps it in its place.
+    let directory = scratch("one-keeper");
+    let session = directory.join(SESSION_FILE);
+
+    let first = claim(&session)
+        .expect("a folder that takes locks")
+        .expect("nobody else keeps it");
+    assert!(
+        claim(&session).expect("still answerable").is_none(),
+        "a second window was handed a session another one keeps"
+    );
+
+    drop(first);
+    assert!(
+        claim(&session).expect("still answerable").is_some(),
+        "the file stayed kept after its window closed"
+    );
+}
+
+#[test]
+fn a_save_does_not_take_the_hold_off_the_session_file() {
+    // A save renames a new file over the session file, so a lock taken on
+    // that file would be on a file nobody opens after the first save, and the
+    // next window would find the new one free.
+    let directory = scratch("save-keeps-hold");
+    let session = directory.join(SESSION_FILE);
+    let _first = claim(&session)
+        .expect("a folder that takes locks")
+        .expect("nobody else keeps it");
+
+    Session::default()
+        .save_blocking(&session)
+        .expect("writable scratch");
+    Session::default()
+        .save_blocking(&session)
+        .expect("writable scratch");
+
+    assert!(
+        claim(&session).expect("still answerable").is_none(),
+        "a save handed the session to the next window"
+    );
+}
+
+#[test]
+fn the_first_window_makes_the_folder_it_keeps_the_session_in() {
+    // A first run, before anything has written the configuration folder:
+    // without the folder there is no lock, and two windows opened together
+    // would each keep the file.
+    let directory = scratch("no-folder-yet").join("crook");
+    let session = directory.join(SESSION_FILE);
+
+    let _first = claim(&session)
+        .expect("the folder is made")
+        .expect("nobody else keeps it");
+    assert!(
+        claim(&session).expect("still answerable").is_none(),
+        "a window on a first run kept a session another window keeps"
+    );
+}

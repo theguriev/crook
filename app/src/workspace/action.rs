@@ -148,6 +148,12 @@ pub enum WorkspaceAction {
     ResumeAgents,
     /// One of the two buttons on the line that says the last run crashed.
     CrashNote(CrashNoteAction),
+    /// Take down the line that says another window keeps the session. See
+    /// `session_note`.
+    DismissSessionNote,
+    /// Open another window, in the focused pane's directory. See
+    /// [`crate::new_window`].
+    NewWindow,
 }
 
 /// What the line under the header that reports a crash can be asked.

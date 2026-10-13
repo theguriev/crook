@@ -10,7 +10,12 @@ Terminal=false
 Categories=System;TerminalEmulator;
 Keywords=terminal;shell;agent;prompt;command;
 StartupWMClass=crook
+Actions=new-window;
 X-TerminalArgExec=-e
 X-TerminalArgDir=--working-directory
 X-TerminalArgTitle=--title
 X-TerminalArgAppId=--app-id
+
+[Desktop Action new-window]
+Name=New Window
+Exec=crook

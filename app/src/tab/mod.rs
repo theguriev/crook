@@ -1358,7 +1358,7 @@ impl TabStrip {
     }
 
     /// Where the focused pane's shell last said it was, for what opens from it.
-    fn focused_directory(&self) -> Option<PathBuf> {
+    pub(crate) fn focused_directory(&self) -> Option<PathBuf> {
         self.pane(self.focused_pane_id()?)?
             .session()
             .working_directory

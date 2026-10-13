@@ -53,11 +53,21 @@ pub fn command(program: &str) -> std::process::Command {
 ///
 /// `name` is what the program is called in the log: a non-zero exit is a
 /// debug line and nothing more, since nobody is waiting on the outcome.
-pub fn reap(mut child: std::process::Child, name: &'static str) {
+pub fn reap(child: std::process::Child, name: &'static str) {
+    reap_at(child, name, log::Level::Debug);
+}
+
+/// [`reap`], with a non-zero exit logged at `level` rather than as a debug
+/// line.
+///
+/// For a child whose failure is worth finding in the log even though nobody
+/// waits on it: a window New window opened, which otherwise just never
+/// appears. See [`crate::new_window`].
+pub fn reap_at(mut child: std::process::Child, name: &'static str, level: log::Level) {
     let reaper = std::thread::Builder::new()
         .name(format!("crook-reap-{name}"))
         .spawn(move || match child.wait() {
-            Ok(status) if !status.success() => log::debug!("{name} exited {status}"),
+            Ok(status) if !status.success() => log::log!(level, "{name} exited {status}"),
             Ok(_) => {}
             Err(why) => log::debug!("{name} could not be waited on: {why}"),
         });

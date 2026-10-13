@@ -38,6 +38,7 @@ mod input_element;
 mod pane_output;
 mod row_content;
 pub(crate) mod section;
+mod session_note;
 pub(crate) mod settings_page;
 mod status_explanation;
 pub(crate) mod tab_context_menu;

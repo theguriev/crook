@@ -1067,6 +1067,10 @@ pub const DEFAULTS_MAC: &[(&str, &str)] = &[
     ("cmd+t", "crook/window/new-tab"),
     // Every browser's, and Warp's: the tab that was just closed, back.
     ("shift+cmd+t", "crook/window/reopen-closed-tab"),
+    // Every Mac application's New Window, and Terminal.app's and iTerm2's.
+    // Free of the field: the cmd branch of `chord_intent` names five letters
+    // and N is not one of them.
+    ("cmd+n", "crook/window/new-window"),
     ("cmd+w", "crook/window/close-pane"),
     ("cmd+d", "crook/window/split-right"),
     ("shift+cmd+d", "crook/window/split-down"),
@@ -1167,6 +1171,9 @@ pub const DEFAULTS_OTHER: &[(&str, &str)] = &[
     // The browsers' ctrl+shift+t is the new tab here, as in every Linux
     // terminal, so the closed one comes back with an Alt beside it.
     ("ctrl+shift+alt+t", "crook/window/reopen-closed-tab"),
+    // GNOME Terminal's, Konsole's and kitty's new window. With the Shift,
+    // because bare ctrl-n is readline's "next history line".
+    ("ctrl+shift+n", "crook/window/new-window"),
     ("ctrl+shift+w", "crook/window/close-pane"),
     ("ctrl+shift+d", "crook/window/split-right"),
     // Not ctrl+shift+D with a Shift already spent: the split pair takes the
