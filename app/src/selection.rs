@@ -775,6 +775,8 @@ impl LineMatcher {
     /// A matcher for `needle`, or `None` for a pattern that does not compile.
     pub fn new(needle: &str, options: FindOptions) -> Option<Self> {
         if options.regex {
+            #[cfg(test)]
+            PATTERNS_COMPILED.with(|compiled| compiled.set(compiled.get() + 1));
             return regex::RegexBuilder::new(needle)
                 .case_insensitive(!options.case_sensitive)
                 .size_limit(1 << 20)
@@ -980,6 +982,22 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn stored_rows_searched() -> usize {
     STORED_ROWS_SEARCHED.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// See [`patterns_compiled`].
+    static PATTERNS_COMPILED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many regular expressions [`LineMatcher::new`] has compiled on this
+/// thread, so far, whether they compiled or not.
+///
+/// What a test of "a frame with a pattern in the find bar does not compile
+/// it again" counts, on the same terms as [`stored_rows_searched`].
+#[cfg(test)]
+pub(crate) fn patterns_compiled() -> usize {
+    PATTERNS_COMPILED.with(std::cell::Cell::get)
 }
 
 /// The item a finished block is.

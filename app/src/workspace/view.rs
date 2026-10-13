@@ -3730,18 +3730,11 @@ impl Workspace {
 
     /// Whether the find bar's query is a regular expression that does not
     /// compile, which the bar says rather than counting no results.
+    ///
+    /// Asked of the bar's own search, which compiled the query once when it
+    /// started: see [`PaneFind::pattern_is_bad`].
     pub(super) fn find_pattern_is_bad(&self, pane: PaneId) -> bool {
-        let Some(find) = self.find(pane) else {
-            return false;
-        };
-        let options = find.options();
-        let query = find.query();
-        options.regex
-            && !query.is_empty()
-            && regex::RegexBuilder::new(&query)
-                .size_limit(1 << 20)
-                .build()
-                .is_err()
+        self.find(pane).is_some_and(PaneFind::pattern_is_bad)
     }
 
     /// Opens a pane's find bar with `query` already in it.

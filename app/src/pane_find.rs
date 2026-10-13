@@ -234,6 +234,24 @@ impl PaneFind {
             .refresh(&query, options, history, snapshot)
     }
 
+    /// Whether the query is a regular expression that does not compile, which
+    /// the bar says rather than counting no results.
+    ///
+    /// Answered by the matcher the search keeps, so a frame does not compile
+    /// the pattern again to ask, and the bar cannot call a pattern fine that
+    /// the search could not compile — as it did when it built its own without
+    /// the search's case folding.
+    pub fn pattern_is_bad(&self) -> bool {
+        let query = self.query();
+        if query.is_empty() {
+            return false;
+        }
+        let options = self.options();
+        let mut state = self.0.borrow_mut();
+        state.found.start(&query, options);
+        state.found.matcher.is_none()
+    }
+
     /// Takes the cursor back to the first match when `query` is not the one
     /// the cursor was last counted against.
     ///
@@ -311,6 +329,23 @@ struct Found {
 }
 
 impl Found {
+    /// Makes this the search for `query`, matched as `options` says: kept as
+    /// it is when it already is that search, and begun again from nothing,
+    /// with the query compiled afresh, when it is any other.
+    fn start(&mut self, query: &str, options: FindOptions) {
+        if self
+            .search
+            .as_ref()
+            .is_none_or(|(held, how)| held != query || *how != options)
+        {
+            *self = Self {
+                search: Some((query.to_owned(), options)),
+                matcher: LineMatcher::new(query, options),
+                ..Self::default()
+            };
+        }
+    }
+
     /// Brings what is kept up to date with `history` and `snapshot` for
     /// `query`, matched as `options` says, and hands back every match.
     fn refresh(
@@ -324,17 +359,7 @@ impl Found {
             *self = Self::default();
             return Matches::default();
         }
-        if self
-            .search
-            .as_ref()
-            .is_none_or(|(held, how)| held != query || *how != options)
-        {
-            *self = Self {
-                search: Some((query.to_owned(), options)),
-                matcher: LineMatcher::new(query, options),
-                ..Self::default()
-            };
-        }
+        self.start(query, options);
         let Some(matcher) = &self.matcher else {
             return Matches::default();
         };

@@ -1,13 +1,14 @@
 //! What a find bar keeps of a search between frames, over blocks a real
-//! emulator made: that a finished block is read once, and that what is kept
-//! is what a fresh walk of the same blocks would find.
+//! emulator made: that a finished block is read once, that what is kept is
+//! what a fresh walk of the same blocks would find, and that the query is
+//! compiled once for both the search and the bar's word on it.
 
 use std::sync::Arc;
 
 use crook_terminal::{Emulator, Palette, TerminalSize};
 
 use super::*;
-use crate::selection::stored_rows_searched;
+use crate::selection::{patterns_compiled, stored_rows_searched};
 
 /// OSC 133 prompt start.
 const A: &str = "\x1b]133;A\x07";
@@ -138,6 +139,45 @@ fn another_query_or_a_switch_is_a_new_search() {
         found(&find, &mut pane, 0).0.is_empty(),
         "nothing finds nothing"
     );
+}
+
+#[test]
+fn a_bad_pattern_is_said_by_the_search_that_compiled_it_once() {
+    // The bar compiled the query again on every frame to say whether it was a
+    // bad pattern, beside the copy the search keeps, and without the search's
+    // case folding — so it could call a pattern fine that the search itself
+    // could not compile, and count it "No results". It asks the search now.
+    let mut pane = Pane::new();
+    pane.run("a", "one");
+    let find = bar("(one");
+    assert!(!find.pattern_is_bad(), "as text, no query is a bad pattern");
+
+    find.toggle(true);
+    let before = patterns_compiled();
+    for _ in 0..3 {
+        assert!(find.pattern_is_bad(), "an unclosed group");
+        assert!(
+            found(&find, &mut pane, 0).0.is_empty(),
+            "and it finds nothing"
+        );
+    }
+    assert_eq!(
+        1,
+        patterns_compiled() - before,
+        "three frames of the bar and the search compiled it more than once"
+    );
+
+    find.input().edit(|editor| editor.set_text("o.e"));
+    assert!(!find.pattern_is_bad());
+    assert_eq!(vec!["one"], texts(&found(&find, &mut pane, 0).0, &mut pane));
+
+    // Two thousand Greek small letters in a row fit the size limit, but not
+    // once folding has made each one a class of its capital too: the search
+    // cannot compile that, so the bar says so.
+    find.input().edit(|editor| editor.set_text("[α-ω]{2000}"));
+    assert!(find.pattern_is_bad(), "folded, it is past the size limit");
+    find.toggle(false);
+    assert!(!find.pattern_is_bad(), "told apart, it compiles");
 }
 
 #[test]

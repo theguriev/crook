@@ -20604,6 +20604,45 @@ mod shells {
             assert_eq!(Some(1), current(&harness, pane));
         }
 
+        #[test]
+        fn a_frame_with_a_pattern_in_the_bar_compiles_it_no_more() {
+            // The search kept the pattern it compiled, but the bar compiled
+            // it again on every frame to ask whether it was a bad one — and
+            // without the search's case folding, so a pattern only the
+            // folded search could not compile was counted "No results".
+            let mut harness = Harness::panel(1);
+            let Some(pane) = searching(&mut harness, "qvx wqz rqv", "w.z") else {
+                return;
+            };
+            harness.dispatch_workspace_action(WorkspaceAction::Find {
+                pane,
+                action: crate::workspace::action::FindAction::ToggleRegex,
+            });
+            harness.frame();
+            assert_eq!(2, matches(&harness, pane), "the pattern finds both");
+
+            let compiled = crate::selection::patterns_compiled;
+            let before = compiled();
+            for _ in 0..3 {
+                harness.frame();
+            }
+            step(&mut harness, pane, true);
+            harness.frame();
+            assert_eq!(
+                0,
+                compiled() - before,
+                "frames and a step compiled the pattern again"
+            );
+
+            // Fits the size limit told apart, not folded, which is how the
+            // search reads it with the case switch off.
+            retype(&mut harness, pane, "[α-ω]{2000}");
+            assert!(
+                frame_text(&harness.frame()).contains("Bad pattern"),
+                "a pattern the search could not compile was not said to be one"
+            );
+        }
+
         /// How many washes of `fill` a frame painted inside `panel`.
         fn washes(scene: &Scene, panel: RectF, fill: Fill) -> usize {
             scene
