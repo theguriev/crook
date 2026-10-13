@@ -32555,6 +32555,77 @@ mod agent_titles {
     }
 }
 
+/// What a pane's own output can make the window print, and what drawing it
+/// costs.
+mod pane_strings {
+    use std::time::{Duration, Instant};
+
+    use crook_terminal::{Emulator, Palette, TerminalEvent, TerminalSize};
+
+    use super::*;
+    use crate::terminal_model::TerminalUpdate;
+
+    /// What one frame may take here: six at sixty a second. A frame of this
+    /// window takes about a millisecond in an unoptimized build, so this is
+    /// room for a machine busy building six other things; one with a
+    /// four-megabyte title took seconds, shaping it whole.
+    const FRAME_BUDGET: Duration = Duration::from_millis(100);
+
+    /// Feeds `output` to an emulator and hands the window what it reported,
+    /// as the terminal model does: the road a pane's bytes take to its row,
+    /// short of the pty.
+    fn printed(harness: &mut Harness, pane: PaneId, output: &str) {
+        let mut emulator = Emulator::new(TerminalSize::new(80, 24), 0, Palette::default());
+        emulator.advance(output.as_bytes());
+        for event in emulator.take_events() {
+            let update = match event {
+                TerminalEvent::Title(title) => TerminalUpdate::Title(pane, title),
+                TerminalEvent::Agent(reported) => TerminalUpdate::Agent {
+                    pane,
+                    status: reported.status.into(),
+                    title: reported.title,
+                    message: reported.message,
+                },
+                _ => continue,
+            };
+            harness.workspace_update(|workspace, ctx| {
+                workspace.apply_terminal_update(&update, ctx);
+            });
+        }
+    }
+
+    /// `cat` of a corrupted file, or a forged report: four megabytes of
+    /// title and of question. Every frame shaped all of it again, for
+    /// seconds each, until something said another — and a frame is asked
+    /// for by the next line of output, a hover, a running agent's mark.
+    #[test]
+    fn a_four_megabyte_title_and_question_still_draw_within_a_frame() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+        let huge = "x".repeat(4 << 20);
+        printed(
+            &mut harness,
+            pane,
+            &format!("\x1b]2;{huge}\x07\x1b]6340;needs-input;;{huge}\x07"),
+        );
+        harness.frame();
+
+        let started = Instant::now();
+        harness.workspace_update(|_, ctx| ctx.notify());
+        let scene = harness.frame();
+        let took = started.elapsed();
+
+        assert!(
+            strip_text(&scene).contains("xxxxxxxx"),
+            "the row never showed the title"
+        );
+        assert!(
+            took < FRAME_BUDGET,
+            "a frame of a pane titled with four megabytes took {took:?}"
+        );
+    }
+}
+
 /// The tabs panel's right edge, dragged and double-clicked.
 mod panel_edge {
     use super::*;

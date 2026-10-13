@@ -1207,6 +1207,34 @@ mod tests {
     }
 
     #[test]
+    fn the_longest_title_and_message_sent_arrive_uncut() {
+        // The reading side caps both, since anything in a pane can write the
+        // sequence at any length; what this side cuts to a row has to be
+        // under those caps, at four bytes a character, or a title cut once
+        // here is cut again there.
+        let title = presentable(&"🦀".repeat(TITLE_CHARS * 2)).unwrap();
+        let message = presentable_message(&"🦀".repeat(MESSAGE_CHARS * 2)).unwrap();
+        let mut emulator = crook_terminal::Emulator::new(
+            crook_terminal::TerminalSize::new(80, 24),
+            0,
+            crook_terminal::Palette::default(),
+        );
+        emulator.advance(
+            sequence(AgentReport::NeedsInput, Some(&title), Some(&message), None).as_bytes(),
+        );
+        assert_eq!(
+            vec![crook_terminal::TerminalEvent::Agent(
+                crook_terminal::Reported {
+                    status: AgentReport::NeedsInput,
+                    title: Some(title),
+                    message: Some(message),
+                }
+            )],
+            emulator.take_events()
+        );
+    }
+
+    #[test]
     fn a_hook_input_with_no_prompt_names_nothing() {
         assert_eq!(None, title_from_hook("not json"));
         assert_eq!(None, title_from_hook(r#"{"tool_name": "Bash"}"#));

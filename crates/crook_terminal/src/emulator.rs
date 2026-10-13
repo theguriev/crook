@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{Handler, Processor};
 use alacritty_terminal::vte::{Params, Parser, Perform};
 use parking_lot::Mutex;
 
@@ -101,7 +101,8 @@ pub enum Fed<'a> {
 #[non_exhaustive]
 pub enum TerminalEvent {
     /// The title changed — `None` when the child reset it to the default. The
-    /// current value is also on every [`Snapshot`].
+    /// current value is also on every [`Snapshot`]. At most
+    /// [`agent::TITLE_BYTES`] of what the child wrote.
     Title(Option<String>),
     /// The child reported its working directory with OSC 7.
     WorkingDirectory(PathBuf),
@@ -261,6 +262,10 @@ struct OscWatcher {
     images: image::Reader,
     /// A picture to place at the cursor, which is where the watcher stops.
     image: Option<image::Requested>,
+    /// How long a title an OSC 0 or 2 set, when it was longer than
+    /// [`agent::TITLE_BYTES`], which is where the watcher stops: see
+    /// [`Emulator::cut_grid_title`].
+    long_title: Option<usize>,
 }
 
 impl Perform for OscWatcher {
@@ -309,6 +314,17 @@ impl Perform for OscWatcher {
                     self.notified_last = true;
                 }
             }
+            // `Term` reads the title itself. This only measures it, as the
+            // text `vte` joins the pieces back into, or a little over: `vte`
+            // also trims it and drops a piece that is not UTF-8, so a title
+            // just past the cap can stop the watcher and be cut to itself.
+            Some(&(b"0" | b"2")) if params.len() >= 2 => {
+                let joined =
+                    params[1..].iter().map(|piece| piece.len()).sum::<usize>() + (params.len() - 2);
+                if joined > agent::TITLE_BYTES {
+                    self.long_title = Some(joined);
+                }
+            }
             // A status means the same thing wherever in the chunk the program
             // wrote it, so the last one wins, which is the last thing the
             // program said — up to a mark or a notification, which it has to
@@ -338,11 +354,15 @@ impl Perform for OscWatcher {
     /// `Term` queues its own answers as it parses, so the version has to be
     /// answered once everything before the query is parsed and nothing after
     /// it, or it goes out of order with the answers either side of it.
+    ///
+    /// And on a title longer than [`agent::TITLE_BYTES`], so that the grid's
+    /// own copy of it can be cut before the rest of the read pushes it.
     fn terminated(&self) -> bool {
         self.mark.is_some()
             || self.image.is_some()
             || (self.agent.is_some() && self.notification.is_some())
             || self.version_asked
+            || self.long_title.is_some()
     }
 }
 
@@ -353,11 +373,33 @@ impl Perform for OscWatcher {
 /// stream carrying one came from a shell Crook set up.
 const COMPLETIONS_OSC: &[u8] = b"6339";
 
+/// The longest working directory OSC 7 is believed for, in bytes.
+///
+/// Linux's `PATH_MAX`: four times macOS's, and past it Linux opens no path
+/// by name. Windows goes further only once long paths are switched on, and
+/// a directory that deep is not one anybody works in. Bounded at all because
+/// the row prints the directory and shapes it again on every frame it draws;
+/// refused rather than cut, as [`agent::pull_request_url`] refuses an
+/// address, because a cut path is another directory, and the row, git, the
+/// next pane's start and the session file would all be told that one.
+const DIRECTORY_BYTES: usize = 4096;
+
+/// The longest title, in bytes, that a synchronized update is left to carry
+/// to the grid whole, rather than ended at it: see
+/// [`Emulator::cut_grid_title`].
+///
+/// The same 4096 as [`DIRECTORY_BYTES`], because what makes a title long is
+/// most often the path in it. 4096 copies of a title this long, a full
+/// `CSI 22 t` stack, are 16 MiB, which is the most leaving an update alone
+/// can cost; ending it costs a frame drawn half done.
+const UPDATE_TITLE_BYTES: usize = 4096;
+
 /// Reads the payload of OSC 7, which is a `file://` URL or a bare path.
 ///
 /// The host in the URL is ignored: a shell on the far end of an ssh session
 /// reports a path that means nothing locally, but showing it still beats
-/// showing nothing, and the caller can decide.
+/// showing nothing, and the caller can decide. A path longer than
+/// [`DIRECTORY_BYTES`] once decoded is no answer at all.
 fn parse_working_directory(value: &[u8]) -> Option<PathBuf> {
     let value = str::from_utf8(value).ok()?;
     let path = match value.strip_prefix("file://") {
@@ -381,7 +423,7 @@ fn parse_working_directory(value: &[u8]) -> Option<PathBuf> {
     // integrations write — or a stray word came through as a *relative* path,
     // and everything that uses the directory resolved it against Crook's own.
     let rooted = decoded.starts_with(['/', '\\']) || Path::new(&decoded).is_absolute();
-    rooted.then(|| PathBuf::from(decoded))
+    (rooted && decoded.len() <= DIRECTORY_BYTES).then(|| PathBuf::from(decoded))
 }
 
 /// Whether a URL path is a Windows path with its leading slash still attached.
@@ -588,6 +630,9 @@ impl Emulator {
             // stops again on the next byte having read nothing.
             if self.osc_watcher.terminated() {
                 self.apply_reports();
+            }
+            if let Some(bytes) = self.osc_watcher.long_title.take() {
+                exited = self.cut_grid_title(bytes).or(exited);
             }
             if let Some(mark) = self.osc_watcher.mark.take() {
                 // A directory too, and for the same reason: bash and zsh print
@@ -1247,13 +1292,58 @@ impl Emulator {
     }
 
     /// Records a new title, which every future snapshot carries.
+    ///
+    /// Cut to [`agent::TITLE_BYTES`] first, and compared after, so the same
+    /// over-long title twice is no news: it is whatever the program wrote,
+    /// `vte` keeps an OSC however long it runs, and the row shapes the title
+    /// again on every frame it draws.
     fn set_title(&mut self, title: Option<String>) {
+        let title = title.map(|title| agent::capped(title, agent::TITLE_BYTES));
         if self.title == title {
             return;
         }
         self.title = title.clone();
         self.dirty = true;
         self.events.push(TerminalEvent::Title(title));
+    }
+
+    /// Hands `Term` the cut title in place of the over-long one it was just
+    /// given, which the watcher stopped on.
+    ///
+    /// `Term` keeps a title of its own, whole, and `CSI 22 t` pushes a copy
+    /// of it onto a stack 4096 deep: four megabytes of title with twenty
+    /// kilobytes of pushes behind it are 4096 copies, sixteen gigabytes,
+    /// however short [`Self::set_title`] made the one this crate keeps.
+    /// Given the cut one before the rest of the read is parsed, the pushes
+    /// copy that instead.
+    ///
+    /// Inside a synchronized update `vte` holds the bytes and plays them to
+    /// `Term` when the update ends, the title and the pushes after it
+    /// together, and `Term` has not seen the title yet. Cutting it there
+    /// means ending the update, as one nobody ended is ended, and what is
+    /// left of the frame is then drawn as it arrives. A title of `bytes` up
+    /// to [`UPDATE_TITLE_BYTES`] is left to the update instead, `Term` keeps
+    /// it whole, and its copies come to 16 MiB at most. A torn frame only
+    /// pays for itself past that: a megabyte of title pushed 4096 times is
+    /// four gigabytes. [`Self::set_title`] cuts the copy this crate keeps
+    /// either way, once `Term` hands the title over.
+    ///
+    /// The cut title goes back to the proxy as `Term` sends it, and is no
+    /// news when it is handed over: it is the title this already has.
+    fn cut_grid_title(&mut self, bytes: usize) -> Option<ChildExit> {
+        if self.parser.sync_timeout().sync_timeout().is_some() {
+            // `self.title` is still the one from before the update, and
+            // handing `Term` that would only be undone when the update ends.
+            if bytes <= UPDATE_TITLE_BYTES {
+                return None;
+            }
+            self.parser.stop_sync(&mut self.term);
+        }
+        let exited = self.hand_over_term_events();
+        if let Some(title) = &self.title {
+            Handler::set_title(&mut self.term, Some(title.clone()));
+        }
+        exited
     }
 }
 

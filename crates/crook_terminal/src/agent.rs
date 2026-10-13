@@ -44,6 +44,17 @@
 //! nothing worse than wrong, which is what makes the field safe to send to
 //! a pane whose Crook is not known.
 //!
+//! # How long the fields may be
+//!
+//! The reader keeps at most [`TITLE_BYTES`] of a title and [`MESSAGE_BYTES`]
+//! of a message, cut where a character ends and marked `…`. Anything in the
+//! pane can write the sequence — a forged report, or a corrupted file
+//! somebody `cat`s — and `vte` keeps an OSC however long it runs, while a
+//! row shapes its text again on every frame it draws: four megabytes of
+//! title held the window for seconds a frame, until something said another.
+//! Both caps are far above what `crook --agent` hands [`report`], so nothing
+//! a hook says is cut on the way in.
+//!
 //! # The pull request, on a channel of its own
 //!
 //! An agent that has opened a pull request can say which, and the row links
@@ -195,14 +206,50 @@ fn field(text: &str) -> Option<String> {
     Some(squeezed)
 }
 
+/// The longest title a pane's output can give a row, in bytes: a report's,
+/// and the one OSC 0 and 2 set, which is the same name on the same row.
+///
+/// The row prints a title on one line a few dozen characters wide, and the
+/// widest place one goes — the window's own title bar — shows a few hundred
+/// at most. The 60 characters `crook --agent` cuts a title to fit with room
+/// to spare, even at four bytes each, with the mark they may end in.
+pub const TITLE_BYTES: usize = 256;
+
+/// The longest message a report keeps, in bytes.
+///
+/// A question rather than a name, so longer than [`TITLE_BYTES`]: the row
+/// gives it a line of its own, and what it asks has to survive being cut.
+/// The 200 characters `crook --agent` cuts one to fit at four bytes each,
+/// with room left for a writer that cut nothing.
+pub const MESSAGE_BYTES: usize = 1024;
+
+/// `text` whole up to `bytes`, and past that its beginning and an ellipsis,
+/// cut where a character ends.
+///
+/// Where a character ends rather than where a grapheme does: the cut is far
+/// past anything a row has room to print, and the row cuts again at its own
+/// width, so what a split grapheme would spoil is never drawn there.
+pub(crate) fn capped(mut text: String, bytes: usize) -> String {
+    if text.len() <= bytes {
+        return text;
+    }
+    let mut end = bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text.push('\u{2026}');
+    text
+}
+
 /// One report, as it arrived.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reported {
     /// What the program said it was doing.
     pub status: AgentReport,
-    /// What it called its work, when it said.
+    /// What it called its work, when it said: at most [`TITLE_BYTES`] of it.
     pub title: Option<String>,
-    /// What it is waiting for, when it said.
+    /// What it is waiting for, when it said: at most [`MESSAGE_BYTES`] of it.
     pub message: Option<String>,
 }
 
@@ -227,8 +274,8 @@ pub(crate) fn parse(parameters: &[&[u8]]) -> Option<Reported> {
     };
     Some(Reported {
         status,
-        title: joined(title),
-        message: joined(message),
+        title: joined(title, TITLE_BYTES),
+        message: joined(message, MESSAGE_BYTES),
     })
 }
 
@@ -321,15 +368,16 @@ pub(crate) fn parse_pull_request(parameters: &[&[u8]]) -> Option<String> {
     pull_request_url(&url).map(str::to_owned)
 }
 
-/// `pieces` as the one text `vte` cut them out of, or `None` for no text.
-fn joined(pieces: &[&[u8]]) -> Option<String> {
+/// `pieces` as the one text `vte` cut them out of, [`capped`] at `bytes`, or
+/// `None` for no text.
+fn joined(pieces: &[&[u8]], bytes: usize) -> Option<String> {
     let text = pieces
         .iter()
         .map(|piece| String::from_utf8_lossy(piece))
         .collect::<Vec<_>>()
         .join(";");
     let text = text.trim();
-    (!text.is_empty()).then(|| text.to_owned())
+    (!text.is_empty()).then(|| capped(text.to_owned(), bytes))
 }
 
 #[cfg(test)]
