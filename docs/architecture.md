@@ -1215,8 +1215,19 @@ sweep; Crook's own lock on a checkout no pane in the window is working in is tak
 crashed or killed Crook left behind, so that checkout is free, and removing it takes the lock off
 first. That reading has one blind spot, which the menu had before there was a lock at all: a
 window knows only its own panes, so a second Crook window's checkout looks the same as an
-abandoned one. A removal aimed at a checkout a pane of *this* window is in meets Crook's own
-lock like any other, and git refuses it. All of it — the lock, reading whose a lock is, the
+abandoned one. A removal is not asked of git for a checkout a pane of *this* window is in,
+and the lock is not what stops it: a checkout opened again from the list or a restored
+session, or `cd`ed into, has a pane in it and no lock, so git would have nothing to refuse
+over. The × and each step of a sweep ask where the panes are at the moment they would start —
+the sweep runs on after its popup closes, for minutes when there is a build in each
+checkout — and compare with links resolved, on the background pool, because a shell reports
+the directory it `cd`ed into spelled through whatever link it took, and git lists the real
+path. A checkout a pane has entered since is left standing, and the list says it is in use.
+The list itself compares spellings, so it can still offer a checkout a pane is in through a
+link; the removal is what leaves it. The lock is the second line: a removal never takes off a
+lock the window holds for a pane of its own, which covers a checkout this window has just made
+and whose tab has not opened yet, and, while the lock is on, a pane that arrives between that
+question and git. All of it — the lock, reading whose a lock is, the
 unlock — runs on the background pool like the rest of the menu's git, except the unlocks at
 exit, which have no frame left to hold up.
 

@@ -2516,14 +2516,15 @@ impl Workspace {
     /// Whether any pane in the window is working in `checkout` or anywhere
     /// under it.
     ///
-    /// The one question asked before Crook takes its own lock off a checkout,
-    /// wherever that happens — a pane leaving one this window locked, a
-    /// removal, a sweep. A plain prefix rather than
+    /// The question asked before Crook takes its own lock off a checkout as a
+    /// pane leaves one this window locked, under each spelling the lock knows.
+    /// A plain prefix rather than
     /// [`tab_menu::holding`](super::tab_menu::holding)'s longest match,
     /// because this needs no listing to answer and it errs the right way: a
     /// pane in a checkout nested inside this one counts as being in this one
     /// too, and all that costs is a lock left standing that the menu
-    /// recognises as Crook's own anyway.
+    /// recognises as Crook's own anyway. A removal asks something wider, with
+    /// links resolved, off the frame: see [`remove_unless_in_use`].
     pub(super) fn a_pane_is_in(&self, checkout: &Path) -> bool {
         self.tabs.panes().any(|(_, pane)| {
             pane.session()
@@ -6175,7 +6176,7 @@ impl Workspace {
         self.start_chomping(ctx);
         ctx.notify();
 
-        self.remove_next(repository, remaining, 0, epoch, ctx);
+        self.remove_next(repository, remaining, 0, 0, epoch, ctx);
     }
 
     /// Removes the next checkout of a sweep, and then the one after it.
@@ -6184,6 +6185,12 @@ impl Workspace {
     /// refusal does not stop the others: a checkout somebody started working
     /// in between the counting and the button is a checkout to leave
     /// standing, not a reason to abandon the five that are finished.
+    ///
+    /// `in_use` counts the ones a pane of this window had entered by their
+    /// turn, which are left standing without asking git: a checkout is on the
+    /// list for having no pane in it, and nothing locks it again when one
+    /// comes back — a reopened tab, a restored session, a shell's `cd` — so
+    /// git would have nothing to refuse over. See [`remove_unless_in_use`].
     ///
     /// The chain runs to the end whether or not the menu is still up — the
     /// removals were asked for, and closing a popup is not a way of asking
@@ -6195,6 +6202,7 @@ impl Workspace {
         repository: PathBuf,
         mut remaining: std::collections::VecDeque<Going>,
         refused: usize,
+        in_use: usize,
         epoch: u64,
         ctx: &mut ViewContext<Self>,
     ) {
@@ -6228,6 +6236,13 @@ impl Workspace {
             if stopped {
                 sentences.push(format!("Stopped after {done} of {of}."));
             }
+            match in_use {
+                0 => {}
+                1 => sentences.push("One checkout is in use now and was kept.".to_owned()),
+                in_use => {
+                    sentences.push(format!("{in_use} checkouts are in use now and were kept."));
+                }
+            }
             match refused {
                 0 => {}
                 1 => sentences.push("One checkout would not go; the log says why.".to_owned()),
@@ -6244,28 +6259,39 @@ impl Workspace {
             return;
         };
 
-        // Asked again at each step rather than once when the list was made: a
-        // pane that moved into one of these since is working in it now, and
-        // Crook's own lock is then what makes git leave it standing.
-        let release = !self.a_pane_is_in(&going.path);
+        // Where the panes are is asked again at each step rather than once
+        // when the list was made: the chain runs on after the popup closes,
+        // for minutes when there is a build in each checkout, and a pane can
+        // walk into one of these while the ones ahead of it are going.
+        let panes: Vec<PathBuf> = self
+            .pane_directories()
+            .into_iter()
+            .map(|(_, directory)| directory)
+            .collect();
+        let release = !self.held.keeps(&going.path);
         let removing = ctx.background().spawn({
             let repository = repository.clone();
             let path = going.path.clone();
             let store = self.tab_menu.store.clone();
             async move {
-                if release {
-                    crate::git::worktree::release(&repository, &path)?;
-                }
-                remove_checkout(&repository, &path, false, store.as_deref())
+                remove_unless_in_use(&repository, &path, &panes, release, false, store.as_deref())
             }
         });
 
+        // The pirate moves past one it leaves standing as past one that went.
         ctx.spawn(removing, move |workspace, removed, ctx| {
-            let refused = match removed {
-                Ok(()) => refused,
+            let (refused, in_use) = match removed {
+                Ok(Removal::Gone) => (refused, in_use),
+                Ok(Removal::InUse) => {
+                    log::info!(
+                        "{} was kept: a pane is working in it now",
+                        going.path.display()
+                    );
+                    (refused, in_use + 1)
+                }
                 Err(problem) => {
                     log::warn!("{} was not removed: {problem}", going.path.display());
-                    refused + 1
+                    (refused + 1, in_use)
                 }
             };
             if workspace.tab_menu.epoch == epoch
@@ -6275,7 +6301,7 @@ impl Workspace {
                 *current = remaining.front().map(|going| going.label.clone());
                 ctx.notify();
             }
-            workspace.remove_next(repository, remaining, refused, epoch, ctx);
+            workspace.remove_next(repository, remaining, refused, in_use, epoch, ctx);
         })
         .detach();
     }
@@ -6295,6 +6321,7 @@ impl Workspace {
             return;
         };
         let path = worktree.path.clone();
+        let label = super::tab_menu::branch_label(worktree);
 
         self.tab_menu.working = true;
         self.tab_menu.problem = None;
@@ -6304,18 +6331,23 @@ impl Workspace {
         let asked_about = index;
         let opened_on = self.tab_menu.tab;
         let opening = self.tab_menu.opening;
-        // Decided here, where the panes are, rather than trusted to the × that
-        // led here: a removal dispatched at a checkout a pane is working in
-        // must meet Crook's own lock, which is what the lock is for.
-        let release = !self.a_pane_is_in(&path);
+        // Where the panes are is asked at the press rather than trusted to
+        // the × that led here. The × is offered for a checkout nothing is
+        // working in, and a pane can arrive while the question is up — a
+        // shell's `cd`, a tab the control socket opened — with no lock behind
+        // it. That holds for a forced removal too, which would take modified
+        // files with it.
+        let panes: Vec<PathBuf> = self
+            .pane_directories()
+            .into_iter()
+            .map(|(_, directory)| directory)
+            .collect();
+        let release = !self.held.keeps(&path);
         let removed = ctx.background().spawn({
             let path = path.clone();
             let store = self.tab_menu.store.clone();
             async move {
-                if release {
-                    crate::git::worktree::release(&repository, &path)?;
-                }
-                remove_checkout(&repository, &path, force, store.as_deref())
+                remove_unless_in_use(&repository, &path, &panes, release, force, store.as_deref())
             }
         });
 
@@ -6323,20 +6355,38 @@ impl Workspace {
             // The same tab is not the same menu: this one may have been taken
             // down and opened again while git was at it. See `opening`.
             if workspace.tab_menu.tab != opened_on || workspace.tab_menu.opening != opening {
-                if let Err(problem) = removed {
-                    log::warn!("a removal nobody is waiting for failed: {problem}");
+                match removed {
+                    Ok(Removal::Gone) => {}
+                    Ok(Removal::InUse) => {
+                        log::info!("{label} was kept: a pane is working in it now")
+                    }
+                    Err(problem) => log::warn!("a removal nobody is waiting for failed: {problem}"),
                 }
                 return;
             }
             workspace.tab_menu.working = false;
             match removed {
-                Ok(()) => {
+                Ok(Removal::Gone) => {
                     // Back to the list, which has to be read again: the thing
                     // it was listing is gone.
                     if let Some(tab) = workspace.tab_menu.tab {
                         workspace.tab_menu.tab = None;
                         workspace.open_tab_menu(tab, ctx);
                     }
+                }
+                // Back to the list too, saying why: staying on the
+                // confirmation would leave a Remove button that can do nothing
+                // while the pane is there. The list compares spellings, so it
+                // can still offer a checkout a pane reached through a link;
+                // pressing × again gets the same answer.
+                Ok(Removal::InUse) => {
+                    if let Some(tab) = workspace.tab_menu.tab {
+                        workspace.tab_menu.tab = None;
+                        workspace.open_tab_menu(tab, ctx);
+                    }
+                    workspace.tab_menu.problem =
+                        Some(format!("{label} is in use now and was kept."));
+                    ctx.notify();
                 }
                 // The one refusal that is a question rather than an error:
                 // there is work in there, and the person can still say yes.
@@ -10789,6 +10839,67 @@ fn checkout_of(directory: PathBuf) -> PathBuf {
     crate::git::discover(&directory)
         .and_then(|layout| layout.work_tree)
         .unwrap_or(directory)
+}
+
+/// What became of a checkout the × or a sweep asked to remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Removal {
+    /// git removed it.
+    Gone,
+    /// A pane of the window is working in it, so git was not asked.
+    InUse,
+}
+
+/// Removes the checkout at `path` unless one of `panes` — where the window's
+/// panes were as the removal started — is in it, taking Crook's lock off it
+/// first when `release` says to.
+///
+/// **Blocking**: resolving where the panes are, and then git. The panes are
+/// asked about here, off the frame, because a shell reports the directory it
+/// `cd`ed into spelled the way it got there — through `~/code`, linked to
+/// another disk — while git lists a checkout by its real path, and only
+/// resolving both finds that shell. Nothing else would stop git over it:
+/// a checkout is offered for having no pane in it, Crook's lock comes off as
+/// the last pane leaves, and a pane that comes back — a reopened tab, a
+/// restored session, a `cd` — brings no lock with it.
+fn remove_unless_in_use(
+    repository: &Path,
+    path: &Path,
+    panes: &[PathBuf],
+    release: bool,
+    force: bool,
+    store: Option<&Path>,
+) -> Result<Removal, crate::git::worktree::Error> {
+    if a_directory_is_in(panes, path) {
+        return Ok(Removal::InUse);
+    }
+    if release {
+        crate::git::worktree::release(repository, path)?;
+    }
+    remove_checkout(repository, path, force, store)?;
+    Ok(Removal::Gone)
+}
+
+/// Whether any of `directories` is `checkout` or under it, spelled the way
+/// git spells the checkout or reached through a link.
+///
+/// **Blocking**, when none is under it as spelled: a `realpath` for the
+/// checkout and for each directory. A directory that no longer resolves is
+/// counted by its spelling alone. Resolving also matches a Windows short name
+/// (`RUNNER~1`) against git's long one.
+fn a_directory_is_in(directories: &[PathBuf], checkout: &Path) -> bool {
+    if directories
+        .iter()
+        .any(|directory| directory.starts_with(checkout))
+    {
+        return true;
+    }
+    let Ok(checkout) = std::fs::canonicalize(checkout) else {
+        return false;
+    };
+    directories.iter().any(|directory| {
+        std::fs::canonicalize(directory).is_ok_and(|directory| directory.starts_with(&checkout))
+    })
 }
 
 /// Removes the checkout at `path`, and then the directories of `store` it

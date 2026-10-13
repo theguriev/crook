@@ -402,7 +402,8 @@ pub(super) enum Sweep {
     },
     /// The button has been pressed and the checkouts are going, one at a time.
     Removing {
-        /// How many `git worktree remove` has finished with, refused or not.
+        /// How many have been dealt with: removed, refused by git, or left
+        /// standing for a pane that had entered by their turn.
         done: usize,
         /// How many were going.
         of: usize,
@@ -2436,7 +2437,7 @@ pub(super) fn checkout_for(workspace: &Workspace) -> Option<PathBuf> {
 }
 
 /// What a worktree is called: its branch, or the head it is sitting on.
-fn branch_label(worktree: &Worktree) -> String {
+pub(super) fn branch_label(worktree: &Worktree) -> String {
     match (&worktree.branch, &worktree.head) {
         (Some(branch), _) => branch.clone(),
         (None, Some(head)) => format!("detached at {head}"),
