@@ -665,8 +665,9 @@ enum Standing {
     Launched,
     /// An ordinary window opened while another one keeps the file.
     ///
-    /// It opens fresh, like a launcher's window, and it never writes the
-    /// file. Unlike a launcher's window it says so; see
+    /// It opens fresh, like a launcher's window, and it does not write the
+    /// file, unless restoring is turned on in it after the keeper closed.
+    /// Unlike a launcher's window it says so; see
     /// [`Workspace::leave_the_session`]. A plain `crook` is what a person
     /// runs to get their tabs back, and a window that opens without them
     /// should say why.
@@ -3358,9 +3359,10 @@ struct Shell {
     /// window is open; dropping it closes the socket and removes its file.
     /// `None` where there is none — see [`control::Control::open`].
     _control: Option<control::Control>,
-    /// The lock that says this window keeps the session file, when it does.
-    /// Dropping it with the window lets the next ordinary window keep the
-    /// file. See [`Standing`].
+    /// The lock that says this window keeps the session file, when it has
+    /// from the start. Dropping it with the window lets the next ordinary
+    /// window keep the file. See [`Standing`]. A second window that takes the
+    /// file later holds its lock in the workspace.
     _session_lock: Option<crate::session::Lock>,
 }
 

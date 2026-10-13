@@ -13783,9 +13783,13 @@ fn a_second_window_says_so_when_bringing_the_tabs_back_is_turned_on_in_it() {
     // Opened with the setting off, the second window had nothing to explain.
     // Turned on there, it is asked for what it cannot do: the first window
     // keeps the file, so these tabs will still not come back, where before
-    // the switch wrote them at once. So the line comes up then, and goes
-    // again when the setting is turned back off. The first window, which
-    // does write its tabs, says nothing either way.
+    // the switch wrote them at once. So a line comes up then, and goes again
+    // when the setting is turned back off. Not the line the window opens
+    // with, which says another window keeps the tabs: the first window was
+    // opened with the setting off and still has it off, since no window reads
+    // another's settings, so it writes no tabs either until the setting is
+    // turned on there too. The first window, which does write its tabs once
+    // it is, says nothing either way.
     let scratch = Scratch::new();
     fs::write(
         scratch.path().join("settings.json"),
@@ -13798,7 +13802,8 @@ fn a_second_window_says_so_when_bringing_the_tabs_back_is_turned_on_in_it() {
     assert!(matches!(standing, crate::Standing::Second), "{standing:?}");
     let scene = second.frame();
     assert!(
-        !says(&scene, super::session_note::SAID),
+        !says(&scene, super::session_note::SAID)
+            && !says(&scene, super::session_note::SAID_WHEN_TURNED_ON),
         "{}",
         frame_text(&scene)
     );
@@ -13806,8 +13811,13 @@ fn a_second_window_says_so_when_bringing_the_tabs_back_is_turned_on_in_it() {
     second.dispatch_workspace_action(SettingsAction::ToggleRestoreSession.into());
     let scene = second.frame();
     assert!(
-        says(&scene, super::session_note::SAID),
+        says(&scene, super::session_note::SAID_WHEN_TURNED_ON),
         "the setting was turned on in a window that cannot keep its tabs, and it said nothing: {}",
+        frame_text(&scene)
+    );
+    assert!(
+        !says(&scene, super::session_note::SAID),
+        "the line says another window keeps the tabs, which has the setting off: {}",
         frame_text(&scene)
     );
     second.settle(std::time::Duration::from_millis(500));
@@ -13819,7 +13829,7 @@ fn a_second_window_says_so_when_bringing_the_tabs_back_is_turned_on_in_it() {
     second.dispatch_workspace_action(SettingsAction::ToggleRestoreSession.into());
     let scene = second.frame();
     assert!(
-        !says(&scene, super::session_note::SAID),
+        !says(&scene, super::session_note::SAID_WHEN_TURNED_ON),
         "the setting is off again and the line still explains it: {}",
         frame_text(&scene)
     );
@@ -13827,9 +13837,62 @@ fn a_second_window_says_so_when_bringing_the_tabs_back_is_turned_on_in_it() {
     first.dispatch_workspace_action(SettingsAction::ToggleRestoreSession.into());
     let scene = first.frame();
     assert!(
-        !says(&scene, super::session_note::SAID),
+        !says(&scene, super::session_note::SAID)
+            && !says(&scene, super::session_note::SAID_WHEN_TURNED_ON),
         "the window that keeps the tabs says another one does: {}",
         frame_text(&scene)
+    );
+}
+
+#[test]
+fn a_second_window_keeps_the_session_when_restoring_is_turned_on_after_the_first_closed() {
+    // Two windows opened with restoring off, and the first closed. Turned on
+    // in the second, the setting asks for that window's tabs to come back,
+    // and no window is left that would write any: the file holds whatever a
+    // window wrote the last time restoring was on, and the next launch would
+    // bring those back instead. So the second window takes the file, writes
+    // its own tabs over it at once, and says nothing, as a first window
+    // would. A window opened after that is a second one.
+    let scratch = Scratch::new();
+    fs::write(
+        scratch.path().join("settings.json"),
+        "{ \"restore_session\": false }\n",
+    )
+    .expect("writable scratch");
+    let session = crate::session::session_path_beside(&scratch.path().join("settings.json"));
+    fs::write(
+        &session,
+        "{ \"tabs\": [ { \"name\": \"from-long-ago\", \"panes\": [ { \"title\": \"agent 1\" } ] } ] }\n",
+    )
+    .expect("writable scratch");
+    let (first, keeper) = opened_on(scratch.settings());
+    let (mut second, standing) = opened_on(scratch.settings());
+    assert!(matches!(standing, crate::Standing::Second), "{standing:?}");
+    drop(first);
+    drop(keeper);
+
+    let tab = second.tab_ids()[0];
+    second.workspace_update(|workspace, ctx| {
+        workspace.rename_tab(tab, Some("the-second-window".to_owned()), ctx);
+    });
+    second.dispatch_workspace_action(SettingsAction::ToggleRestoreSession.into());
+    let scene = second.frame();
+    assert!(
+        !says(&scene, super::session_note::SAID)
+            && !says(&scene, super::session_note::SAID_WHEN_TURNED_ON),
+        "the window that now keeps the tabs says another one does: {}",
+        frame_text(&scene)
+    );
+    let written = session_written(&scratch, "the-second-window");
+    assert!(
+        !written.contains("from-long-ago"),
+        "the tabs from long ago are still in the file: {written}"
+    );
+
+    let (_third, standing) = opened_on(scratch.settings());
+    assert!(
+        matches!(standing, crate::Standing::Second),
+        "a window opened after the second one took the file keeps it too: {standing:?}"
     );
 }
 

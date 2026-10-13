@@ -682,12 +682,19 @@ pub struct Workspace {
     session_problem: Option<String>,
     /// Whether this window writes the session file at all, whatever the
     /// setting says. False for a window a launcher opened, and for one that
-    /// left the file to another window: see
-    /// [`Self::stop_saving_the_session`].
+    /// left the file to another window until it takes the file back: see
+    /// [`Self::stop_saving_the_session`] and
+    /// [`Self::keep_the_session_if_its_keeper_closed`].
     saves_session: bool,
     /// Whether this window opened while another one kept the session file,
     /// and left it to that one. See [`Self::leave_the_session`].
     left_the_session: bool,
+    /// The lock a window that left the session took when restoring was
+    /// turned on in it after the window keeping the file had closed. See
+    /// [`Self::keep_the_session_if_its_keeper_closed`]. A window that keeps
+    /// the file from the start holds its lock beside the window instead, in
+    /// `Shell`, because it is taken before the window exists.
+    session_lock: Option<crate::session::Lock>,
 
     /// How big the window was when it was last laid out, in logical pixels.
     ///
@@ -1151,6 +1158,7 @@ impl Workspace {
             session_problem: None,
             saves_session: true,
             left_the_session: false,
+            session_lock: None,
             keybindings,
             pending_keys: std::cell::RefCell::new(Vec::new()),
             recording: std::cell::RefCell::new(None),
@@ -10181,10 +10189,16 @@ impl Workspace {
                 self.set_general(general, ctx);
                 // Turning it on writes the file now rather than at the next
                 // tab action, so a person who switches it on and closes the
-                // window gets what they asked for. A window that left the
-                // file to another one writes nothing, and says so instead.
+                // window gets what they asked for. A second ordinary window
+                // takes the file first if the window keeping it has closed,
+                // and otherwise writes nothing and says so instead. A
+                // launcher's window, New window's included, writes nothing
+                // and says nothing, as it never has.
+                if general.restore_session {
+                    self.keep_the_session_if_its_keeper_closed();
+                }
                 self.save_session(ctx);
-                self.say_who_keeps_the_session(ctx);
+                self.say_who_keeps_the_session(session_note::SAID_WHEN_TURNED_ON, ctx);
             }
             SettingsAction::ToggleOpenAtLogin => {
                 let mut general = self.general();
@@ -10561,8 +10575,10 @@ impl Workspace {
         ctx.spawn(written, Self::note_settings_save).detach();
     }
 
-    /// Never writes the session file again, for as long as this window is
-    /// open.
+    /// Stops this window writing the session file. A launcher's window never
+    /// writes it again, for as long as it is open. A window that left the
+    /// file to another one may take it back: see
+    /// `keep_the_session_if_its_keeper_closed`.
     ///
     /// For a window a launcher opened — `crook -e`, `--working-directory` —
     /// which is a quick terminal beside somebody's work rather than the work,
@@ -10575,8 +10591,8 @@ impl Workspace {
         self.saves_session = false;
     }
 
-    /// Leaves the session file to the window that keeps it: this one never
-    /// writes it, and says so under the header.
+    /// Leaves the session file to the window that keeps it: this one does
+    /// not write it, and says so under the header.
     ///
     /// For an ordinary window opened while another one keeps the file. Its
     /// tabs are the ones that will not come back, and a person who opened
@@ -10587,12 +10603,54 @@ impl Workspace {
     pub fn leave_the_session(&mut self, ctx: &mut ViewContext<Self>) {
         self.stop_saving_the_session();
         self.left_the_session = true;
-        self.say_who_keeps_the_session(ctx);
+        self.say_who_keeps_the_session(session_note::SAID, ctx);
+    }
+
+    /// Makes a window that left the session the one that keeps it, if the
+    /// window it left it to has closed since.
+    ///
+    /// When restoring is turned on here, which asks for this window's tabs to
+    /// come back. Once the keeper has gone no window is left that would write
+    /// any, and the file still holds what was written the last time restoring
+    /// was on: the next launch would bring those tabs back instead, resume
+    /// lines and all, so this window takes the file and the save after the
+    /// switch writes its own over them. This is the one time a second window
+    /// takes over. It does not when the keeper merely closes, because which
+    /// window's tabs win is not this window's to decide until a person asks
+    /// it for its own.
+    fn keep_the_session_if_its_keeper_closed(&mut self) {
+        if !self.left_the_session {
+            return;
+        }
+        let Some(path) = self
+            .settings
+            .path()
+            .map(crate::session::session_path_beside)
+        else {
+            return;
+        };
+        match crate::session::claim(&path) {
+            Ok(Some(lock)) => {
+                log::info!(
+                    "the window that kept {} has closed; this one keeps it now",
+                    path.display()
+                );
+                self.session_lock = Some(lock);
+                self.left_the_session = false;
+                self.saves_session = true;
+                self.session_note = None;
+            }
+            Ok(None) => {}
+            // This window was able to ask when it opened, so the keeper is
+            // most likely still there. Leaving the file to it is what this
+            // window has done all along.
+            Err(error) => log::warn!("{error:#}; leaving the session to the window that keeps it"),
+        }
     }
 
     /// Puts the line that says another window keeps the session up in a
-    /// window that left it, while restoring tabs is on, and takes it down
-    /// while it is off.
+    /// window that left it, saying `said`, while restoring tabs is on, and
+    /// takes it down while it is off.
     ///
     /// When the window opens, and again when the setting is switched here.
     /// Switched on, it asks this window for what it cannot do — its tabs
@@ -10601,11 +10659,14 @@ impl Workspace {
     /// tabs at once, and a person who switches it and closes the window
     /// expects them back. Nothing in a window that keeps the file or that a
     /// launcher opened.
-    fn say_who_keeps_the_session(&mut self, ctx: &mut ViewContext<Self>) {
+    fn say_who_keeps_the_session(&mut self, said: &'static str, ctx: &mut ViewContext<Self>) {
         if !self.left_the_session {
             return;
         }
-        self.session_note = self.general().restore_session.then(SessionNote::default);
+        self.session_note = self
+            .general()
+            .restore_session
+            .then(|| SessionNote::saying(said));
         ctx.notify();
     }
 
