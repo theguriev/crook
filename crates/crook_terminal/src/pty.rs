@@ -477,11 +477,16 @@ impl PtyLink for Pty {
     /// This goes through the child itself rather than through the detachable
     /// killer `portable-pty` also offers, and the difference is the whole
     /// behaviour: the detached killer sends `SIGHUP` once and reports success,
-    /// while the child's own kill sends `SIGHUP`, gives it a quarter of a
-    /// second to go, and then sends `SIGKILL`. A shell whose dotfiles trap
-    /// `HUP` — or any child running under a wrapper that does — survives the
-    /// first and not the second, and anything that waits for a survivor waits
-    /// forever.
+    /// while the child's own kill sends `SIGHUP`, gives it 200 ms to go, and
+    /// then sends `SIGKILL`. A shell whose dotfiles trap `HUP` — or any child
+    /// running under a wrapper that does — survives the first and not the
+    /// second, and anything that waits for a survivor waits forever.
+    ///
+    /// **It blocks the caller while it does.** The first look at the child
+    /// comes straight after the hang-up, before any child can have acted on
+    /// it, and every later one after a 50 ms sleep: a child that goes when it
+    /// is told costs 50 ms, and one that ignores it the whole 200, which is a
+    /// stall a person can see on a thread that draws.
     fn kill(&mut self) -> Result<()> {
         if self.exit.is_some() {
             return Ok(());

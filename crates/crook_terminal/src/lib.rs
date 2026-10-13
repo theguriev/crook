@@ -616,12 +616,14 @@ impl Terminal {
         self.exit.is_some()
     }
 
-    /// Ends the child without waiting for it.
+    /// Ends the child without waiting to collect its exit status.
     ///
-    /// For a caller that wants the pty closed now and does not need the exit
-    /// status — closing a pane on the thread that draws, where the wait
-    /// [`Self::shutdown`] does would be a stall a person can see. The kill
-    /// escalates, so "without waiting" is not "without dying".
+    /// For a caller that wants the pty closed and does not need the status
+    /// that [`Self::shutdown`] waits for. It is not for the thread that draws
+    /// all the same, because on Unix the kill itself waits: 50 ms for a child
+    /// that goes when it is hung up, and 200 for one that ignores it — see
+    /// [`Pty`]'s `kill`. The kill escalates, so "without waiting for it" is not
+    /// "without dying".
     pub fn kill(&mut self) -> Result<()> {
         self.link.kill()
     }

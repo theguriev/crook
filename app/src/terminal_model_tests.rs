@@ -933,17 +933,59 @@ fn repainting() -> Arc<Flusher> {
     flusher
 }
 
+/// What every shell this file starts is given in its environment: `given`,
+/// then an empty `HISTFILE` over it and over the one the shell inherits.
+///
+/// The shells inherit the home of whoever runs the suite. An interactive bash
+/// — the one a test starts by name, and `/bin/sh` where that is bash — reads
+/// its history file as it starts and cuts it to `HISTFILESIZE` lines, 500
+/// where no rc file says otherwise, then saves its own lines into it as it
+/// ends: every run replaced somebody's `~/.bash_history` with a test's filler.
+/// Empty, because unset is `~/.bash_history` again; and from the start, since
+/// a line typed into the shell comes after the cut. A hung-up bash with a
+/// history file also kept writing it past its `SIGKILL` on a busy disk, for
+/// longer than a closed pane's ending waits to reap it.
+fn without_history(given: &[(&str, &str)]) -> Vec<(String, String)> {
+    given
+        .iter()
+        .chain(&[("HISTFILE", "")])
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect()
+}
+
 /// A session started the way [`TerminalModel::open`] starts one — its reader
 /// and its writer each on a thread, its deferred batches drawn by `flusher` —
 /// running `program`, or `None` where it cannot be started.
 fn started(program: Program, flusher: &Arc<Flusher>) -> Option<Arc<Shared>> {
+    started_with(program, &[], flusher)
+}
+
+/// [`started`], with `given` in the shell's environment. See
+/// [`without_history`].
+fn started_with(
+    program: Program,
+    given: &[(&str, &str)],
+    flusher: &Arc<Flusher>,
+) -> Option<Arc<Shared>> {
     let terminal = Terminal::spawn(TerminalOptions {
         program,
         size: TerminalSize::new(80, 24),
+        environment: without_history(given),
         ..TerminalOptions::default()
     })
     .ok()?;
     start(terminal, PaneId::next(), flusher).ok()
+}
+
+/// Where bash is, or `None` where it is not installed — and on Windows, whose
+/// shell is cmd.
+fn bash() -> Option<&'static str> {
+    if cfg!(windows) {
+        return None;
+    }
+    ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"]
+        .into_iter()
+        .find(|bash| std::path::Path::new(bash).exists())
 }
 
 /// `script`, run by `sh`. Not on Windows, whose shell is cmd.
@@ -1044,13 +1086,7 @@ fn a_long_composed_line_submitted_to_an_interactive_shell_returns_at_once() {
     // what it reads, so it stops reading once its echo has nowhere to go —
     // and the echo went nowhere while the submit held the lock the reader
     // needed. Thirty-two kilobytes froze bash and sixteen zsh and fish.
-    if cfg!(windows) {
-        return;
-    }
-    let Some(bash) = ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"]
-        .into_iter()
-        .find(|bash| std::path::Path::new(bash).exists())
-    else {
+    let Some(bash) = bash() else {
         eprintln!("skipped: no bash here");
         return;
     };
@@ -1171,4 +1207,286 @@ fn a_program_that_floods_queries_and_never_reads_does_not_stop_another_pane_draw
     );
     drop(flooded);
     flusher.stop();
+}
+
+/// The longest closing a handful of panes may hold the thread that draws.
+///
+/// A fifth of what the four closes in the first test below took there when
+/// each ended its shell in place, one after another: the first look at the
+/// child comes before it can have gone, so a shell that goes at the hang-up
+/// cost 50 ms and one that ignores it 200. Handed to threads of their own,
+/// the four take well under a millisecond.
+const CLOSE_BUDGET: Duration = Duration::from_millis(100);
+
+/// A model with a `/bin/sh` running in each of its panes.
+struct Shells {
+    queue: Arc<LocalQueue>,
+    app: App,
+    model: ModelHandle<TerminalModel>,
+    panes: Vec<PaneId>,
+}
+
+impl Shells {
+    /// One shell per entry, ignoring the hang-up a close sends first where
+    /// its entry says so, once every one has said it is ready — or `None`
+    /// where none can be started, and on Windows, whose close is
+    /// `TerminateProcess` and has no hang-up to ignore.
+    fn start(ignoring_the_hang_up: &[bool]) -> Option<Self> {
+        Self::start_with(ignoring_the_hang_up, &[])
+    }
+
+    /// [`Self::start`], with `given` in every shell's environment. See
+    /// [`without_history`].
+    fn start_with(ignoring_the_hang_up: &[bool], given: &[(&str, &str)]) -> Option<Self> {
+        if cfg!(windows) {
+            return None;
+        }
+        let (queue, mut app) = app();
+        let model = app.update(|ctx| ctx.add_model(TerminalModel::new));
+        let panes: Vec<_> = ignoring_the_hang_up.iter().map(|_| pane()).collect();
+        let open: Vec<_> = panes.iter().map(|pane| (*pane, None)).collect();
+        app.update(|ctx| {
+            model.update(ctx, |model, ctx| {
+                model.set_shell(Some(PathBuf::from("/bin/sh")));
+                model.set_environment(without_history(given));
+                model.set_shell_marks(false);
+                model.set_shell_login(false);
+                // The order a window takes: the shells are expected before
+                // its first frame, and started after it.
+                model.expect();
+                model.start(&open, ctx);
+            });
+        });
+        let shells = Self {
+            queue,
+            app,
+            model,
+            panes,
+        };
+
+        let handles = shells.handles();
+        if handles.len() < shells.panes.len() {
+            eprintln!("skipped: no shell could be started here");
+            return None;
+        }
+        for ((pane, handle), deaf) in shells.panes.iter().zip(&handles).zip(ignoring_the_hang_up) {
+            // Printed by pieces, so the marker is nowhere in the line the pty
+            // echoes: on screen, it is the shell having run the trap before it.
+            let line = match deaf {
+                true => "trap '' HUP; printf 'crook-%s\\n' ready\n",
+                false => "printf 'crook-%s\\n' ready\n",
+            };
+            shells
+                .app
+                .read(|ctx| shells.model.as_ref(ctx).type_into(*pane, line));
+            assert!(
+                comes_to_show(&handle.0, "crook-ready"),
+                "a shell never got ready"
+            );
+        }
+        Some(shells)
+    }
+
+    /// The terminal of every pane that still has one.
+    fn handles(&self) -> Vec<TerminalHandle> {
+        self.app.read(|ctx| {
+            self.panes
+                .iter()
+                .filter_map(|pane| self.model.as_ref(ctx).handle(*pane))
+                .collect()
+        })
+    }
+}
+
+/// Whether the session's child has been ended and reaped, by the model's own
+/// threads: [`Terminal::has_exited`] reaps nothing, so a test asking it cannot
+/// be what collected the child.
+fn comes_to_be_reaped(shared: &Shared) -> bool {
+    let deadline = Instant::now() + REPLY_TIMEOUT;
+    while Instant::now() < deadline {
+        if shared.lock().has_exited() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+#[test]
+fn closing_panes_returns_at_once_and_their_shells_still_end_even_ignoring_the_hang_up() {
+    // A close ended its shell on the thread that draws, through a kill that
+    // sleeps: every tab closed was a three-frame hitch, and "Close other
+    // tabs" on fifteen froze the window for most of a second.
+    let Some(mut shells) = Shells::start(&[false, false, true, true]) else {
+        return;
+    };
+    let handles = shells.handles();
+
+    let closing = Instant::now();
+    let model = &shells.model;
+    shells.app.update(|ctx| {
+        model.update(ctx, |model, ctx| model.sync(&[], ctx));
+    });
+    let took = closing.elapsed();
+    assert!(
+        took < CLOSE_BUDGET,
+        "closing four panes held the thread that draws for {took:?}"
+    );
+
+    for handle in &handles {
+        assert!(
+            comes_to_be_reaped(&handle.0),
+            "a closed pane's shell was never ended, or never reaped"
+        );
+        let exit = handle.0.lock().try_wait().ok().flatten();
+        assert!(
+            exit.as_ref().is_some_and(|exit| exit.signal.is_some()),
+            "a closed pane's shell was not ended by a signal: {exit:?}"
+        );
+    }
+
+    // And nothing is left holding a session: the threads that ended the shells
+    // let go of theirs, the readers saw the ptys close, and the one chain that
+    // asks after every shell came round once more and found none.
+    let sessions: Vec<_> = handles
+        .into_iter()
+        .map(|handle| Arc::downgrade(&handle.0))
+        .collect();
+    let deadline = Instant::now() + REPLY_TIMEOUT;
+    while sessions.iter().any(|session| session.upgrade().is_some()) {
+        assert!(
+            Instant::now() < deadline,
+            "a closed pane's session is still held by something"
+        );
+        shells.queue.run_until_parked();
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_window_that_goes_hears_its_shells_ended_before_its_wait_for_them_returns() {
+    // The threads that end the shells die with the process, and a shell that
+    // ignores the hang-up outlives Crook if its thread never had the 200 ms
+    // to kill it — so a window that is going ends them all at once and waits.
+    let Some(mut shells) = Shells::start(&[true, true, false]) else {
+        return;
+    };
+    let handles = shells.handles();
+
+    let closing = Instant::now();
+    let model = &shells.model;
+    let endings = shells
+        .app
+        .update(|ctx| model.update(ctx, |model, _| model.close_all()));
+    let took = closing.elapsed();
+    assert!(
+        took < CLOSE_BUDGET,
+        "ending a window's shells held the thread that draws for {took:?}"
+    );
+
+    assert!(
+        endings.wait(REPLY_TIMEOUT),
+        "a window that is going gave up waiting for its shells"
+    );
+    let waited = closing.elapsed();
+    for handle in &handles {
+        if handle.0.lock().has_exited() {
+            continue;
+        }
+        // What the wait promises is the kill, and the reap only as a rule: a
+        // shell the kernel is finishing a write for goes once the write is
+        // done, which can be after its ending stopped waiting to reap it. The
+        // wait must still not have come back before that ending did.
+        assert!(
+            waited >= REAP_TIMEOUT,
+            "the wait came back after {waited:?}, before a shell it was waiting for had been ended"
+        );
+        assert!(
+            comes_to_be_reaped(&handle.0),
+            "a shell the wait said was ended never went"
+        );
+    }
+
+    // And the panes the strip still holds, which the session file brings
+    // back, are not given a shell again on the way out: not by the strip
+    // moving, and not by a frame drawn after this one.
+    let open: Vec<_> = shells.panes.iter().map(|pane| (*pane, None)).collect();
+    shells.app.update(|ctx| {
+        model.update(ctx, |model, ctx| model.sync(&open, ctx));
+    });
+    assert!(
+        shells.handles().is_empty(),
+        "a window that is going opened a shell again"
+    );
+    assert!(
+        !shells.app.read(|ctx| model.as_ref(ctx).is_expected()),
+        "a window that is going would start its shells again at its next frame"
+    );
+}
+
+#[test]
+fn a_shell_started_here_leaves_the_history_file_it_was_handed_alone() {
+    // A shell started both of the ways this file starts one, each handed a
+    // history longer than bash keeps by default: a bash that read it would
+    // cut it as it started, and add to it as it ended. Handed here, rather
+    // than found in the home of whoever runs the suite, so the test risks
+    // nobody's history to see it.
+    let Some(bash) = bash() else {
+        eprintln!("skipped: no bash here");
+        return;
+    };
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let history = Removed(std::env::temp_dir().join(format!(
+        "crook-history-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )));
+    let kept: String = (0..600).map(|line| format!(": kept {line}\n")).collect();
+    std::fs::write(&history.0, &kept).expect("the history is written");
+    let modified = || std::fs::metadata(&history.0).and_then(|file| file.modified());
+    let written = modified().expect("the history is there");
+    let path = history.0.to_string_lossy().into_owned();
+    let given = [("HISTFILE", path.as_str())];
+
+    // As a pane opens one, and hung up as a pane is closed.
+    if let Some(mut shells) = Shells::start_with(&[false], &given) {
+        let handles = shells.handles();
+        let model = &shells.model;
+        shells.app.update(|ctx| {
+            model.update(ctx, |model, ctx| model.sync(&[], ctx));
+        });
+        for handle in &handles {
+            assert!(
+                comes_to_be_reaped(&handle.0),
+                "a closed pane's shell was never ended"
+            );
+        }
+    }
+
+    // As the tests that drive one shell start it, here ended by `exit`.
+    let flusher = repainting();
+    let Some(shared) = started_with(
+        Program::command(bash, ["--norc", "--noprofile", "-i"]),
+        &given,
+        &flusher,
+    ) else {
+        eprintln!("skipped: no shell could be started here");
+        return;
+    };
+    assert!(
+        TerminalHandle(shared.clone()).write(": typed\nexit\n"),
+        "the shell could not be typed into"
+    );
+    assert!(comes_to_be_reaped(&shared), "the shell never exited");
+    flusher.stop();
+
+    assert!(
+        std::fs::read(&history.0).ok().as_deref() == Some(kept.as_bytes()),
+        "a shell started here cut or added to the history file it was handed"
+    );
+    assert_eq!(
+        modified().ok(),
+        Some(written),
+        "a shell started here rewrote the history file it was handed"
+    );
 }

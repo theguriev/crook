@@ -3,7 +3,7 @@
 //! # Why a close asks at all
 //!
 //! Every agent in Crook is a child of the window. A pane's pty hangs its
-//! child up when it goes and kills it a quarter of a second later — see
+//! child up when it goes and kills it 200 ms later — see
 //! `crook_terminal::pty` — so closing the window, a tab, a group or a pane is
 //! also ending whatever was running there: a conversation halfway through a
 //! turn, a build, an `ssh` session. The title bar's close, the desktop's, a

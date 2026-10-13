@@ -60,7 +60,7 @@ use crate::tab::{
 };
 use crate::terminal_font::CellFont;
 use crate::terminal_model::{
-    BlockHistory, BracketedPaste, TerminalHandle, TerminalModel, TerminalUpdate,
+    BlockHistory, BracketedPaste, Endings, TerminalHandle, TerminalModel, TerminalUpdate,
 };
 use crate::text_input::{CARET_PHASE, TextInput};
 use crate::theme::creator::Draft;
@@ -7109,6 +7109,17 @@ impl Workspace {
         let panes = self.open_panes();
         self.terminals
             .update(ctx, |model, ctx| model.start(&panes, ctx));
+    }
+
+    /// Ends the shell in every pane, for a window whose event loop is
+    /// stopping, and hands back what to wait on before the process ends.
+    ///
+    /// The panes stay in the strip, which is what the session file brings
+    /// back, and no shell opens in them again. Asked by the window's delegate
+    /// rather than here because the window manager's close and macOS's Quit
+    /// never reach the workspace — see [`TerminalModel::close_all`].
+    pub fn end_terminals(&self, ctx: &mut ViewContext<Self>) -> Endings {
+        self.terminals.update(ctx, |model, _| model.close_all())
     }
 
     /// Says whether shells opened from now on report command boundaries.
