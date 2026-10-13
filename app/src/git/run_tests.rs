@@ -62,3 +62,59 @@ fn a_process_that_finishes_in_time_is_not_killed() {
 
     assert!(status.success());
 }
+
+#[test]
+fn a_directory_deleted_before_git_starts_is_not_taken_for_a_missing_git() {
+    // The race Finish and the sweep run every time: a background read checks
+    // that the checkout is there, the removal deletes it, and the spawn in it
+    // fails with the `NotFound` a missing git binary gives too. `start` is
+    // called past the callers' own check here, which is that race with the
+    // gap held open. Latched, it said "git is not installed" until a restart.
+    let gone = std::env::temp_dir().join(format!(
+        "crook-run-tests-gone-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    assert!(
+        !gone.exists(),
+        "{} is not supposed to exist",
+        gone.display()
+    );
+
+    let started = start(
+        &gone,
+        &[OsStr::new("--version")],
+        Intent::Read,
+        [Stdio::null(), Stdio::null(), Stdio::null()],
+    );
+
+    assert!(
+        matches!(started, Err(Failure::NoDirectory)),
+        "expected NoDirectory, got {:?}",
+        started.map(|_| ())
+    );
+    assert!(
+        !git_is_missing(),
+        "a deleted directory switched git off for the session"
+    );
+}
+
+#[test]
+fn a_spawn_that_finds_nothing_in_a_directory_that_is_there_means_no_git() {
+    // The other half of the rule, and why it still latches: the directory is
+    // there after the failure, so it was the program that was not found.
+    // Asked of the classifier rather than of a spawn, because a real one would
+    // latch the switch for every test in this process.
+    let here = std::env::temp_dir();
+    let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+    assert!(matches!(
+        why_it_did_not_start(missing, &here),
+        Failure::GitMissing
+    ));
+
+    let refused = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+    assert!(matches!(
+        why_it_did_not_start(refused, &here),
+        Failure::CouldNotRun(_)
+    ));
+}
