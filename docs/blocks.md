@@ -427,11 +427,24 @@ measured for the grid the last frame had is refreshed rather than painted into t
 
 `cmd-f` (`ctrl-shift-f` off macOS) opens a bar over the top-right of the output, and it
 searches the *blocks* — every command that has finished and the one still open — rather than
-the screenful the grid is showing. It is the same walk a copy is: `Blocks::find_all` in
-`app/src/selection.rs` turns a query into a list of `Selection`s, one per match, in reading
-order and ASCII-case-insensitive. Each match is highlighted where it is, the current one in
-the accent and the rest in the terminal's amber, painted the way a drag's selection is — over
-the cell's own background and under its glyph, so the text stays legible through the wash.
+the screenful the grid is showing. It reads them the way a copy does, one logical line at a
+time: `Item::find_with` in `app/src/selection.rs` joins the rows a fold split, puts back the
+blanks the fold trimmed, and matches the query against that line — case-insensitive in every
+script unless the bar's switch tells capitals apart, or as a regular expression when the other
+switch says so. A match never runs past the end of its line, so a pattern's `^` and `$` are the
+ends of a line, as they are to grep, and a fold is neither. Each match is highlighted where it
+is, the current one in the accent and the rest in the terminal's amber, painted the way a drag's
+selection is — over the cell's own background and under its glyph, so the text stays legible
+through the wash.
+
+**What it found is kept, a block at a time.** A finished block never changes, so
+`PaneFind::matches` searches one once, when it finishes, and keeps its matches until the query
+or a switch changes or the block is dropped off the front of the history; the open block, which
+a command can still be printing into, is searched again only when its snapshot is a new one. A
+frame over an unchanged output therefore reads none of it, where walking the whole history
+every frame cost a tenth of a second on a long-lived tab — and the list paints only the matches
+on the rows it draws, found by a binary search rather than tried one by one against every row.
+Typing into the bar is a new query each keystroke, and that is still one walk of the history.
 
 The bar counts the matches (`3/12`), steps between them with Enter and Shift-Enter or its two
 buttons, and brings the current one into view if it is not already, a third of a screen down.

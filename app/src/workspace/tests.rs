@@ -1584,6 +1584,25 @@ impl Harness {
         self.presenter.counts().renders(self.workspace.id())
     }
 
+    /// Draws a frame that renders the workspace again, the way a frame drawn
+    /// for anything else on screen — a caret blink, another pane printing —
+    /// does.
+    ///
+    /// [`Self::frame`] alone, with nothing asking for a render, paints the
+    /// tree the last render built and runs none of the code that builds it:
+    /// a test counting what a frame does would count nothing, and pass.
+    fn render_again(&mut self) -> Rc<Scene> {
+        let renders = self.workspace_renders();
+        self.workspace_update(|_, ctx| ctx.notify());
+        let scene = self.frame();
+        assert_eq!(
+            renders + 1,
+            self.workspace_renders(),
+            "the frame did not render the workspace"
+        );
+        scene
+    }
+
     /// How many frames the presenter has built, whether or not anything was
     /// rendered for them.
     fn frames_built(&self) -> u64 {
@@ -20074,6 +20093,64 @@ mod shells {
         }
 
         #[test]
+        fn a_frame_filtering_a_block_by_a_pattern_compiles_it_no_more() {
+            // The filter compiled the query for itself, beside the bar's
+            // search, and remembered only the lines a pattern kept — so a
+            // pattern that did not compile, which keeps none, was compiled
+            // again for every frame the bar was up. It filters with the
+            // search's own now.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "printf 'qvx\\nwqz\\nrqv\\nwaz\\n'") == 0 {
+                return;
+            }
+            harness.run_command("crook/window/select-block-up");
+            harness.dispatch_workspace_action(WorkspaceAction::Block(BlockAction::FilterOutput));
+            harness.dispatch_workspace_action(WorkspaceAction::Find {
+                pane,
+                action: crate::workspace::action::FindAction::ToggleRegex,
+            });
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("a find bar");
+            assert!(find.filter().is_some(), "the filter did not open");
+            let compiled = crate::selection::patterns_compiled;
+
+            let before = compiled();
+            find.input().edit(|editor| editor.set_text("w.z"));
+            let shown = frame_text(&harness.render_again());
+            assert!(
+                shown.contains("2/4 lines"),
+                "the pattern did not filter: {shown}"
+            );
+            harness.render_again();
+            harness.render_again();
+            assert_eq!(
+                1,
+                compiled() - before,
+                "the filter and the bar compiled the pattern apart, or again"
+            );
+
+            // Past the size limit once folded, as it is with the case switch
+            // off.
+            let before = compiled();
+            find.input().edit(|editor| editor.set_text("[α-ω]{2000}"));
+            let shown = frame_text(&harness.render_again());
+            assert!(shown.contains("Bad pattern"), "not said to be one: {shown}");
+            harness.render_again();
+            harness.render_again();
+            assert_eq!(
+                1,
+                compiled() - before,
+                "frames compiled a pattern that does not compile again"
+            );
+        }
+
+        #[test]
         fn a_block_scrolled_into_its_middle_has_its_command_pinned_over_it() {
             // `seq 1 200` is taller than the pane, so at the bottom of the list
             // the window starts in its middle and nothing printed says which
@@ -21040,6 +21117,134 @@ mod shells {
             );
             step(&mut harness, pane, false);
             assert_eq!(Some(1), current(&harness, pane), "back wraps the other way");
+        }
+
+        #[test]
+        fn a_frame_with_the_bar_open_reads_no_finished_row_again() {
+            // The bar walked every row of every finished block on every frame
+            // it was open — a tenth of a second a frame on a long-lived tab,
+            // and a caret blink, a keystroke or another pane printing is a
+            // frame — to find matches that cannot have moved, since a finished
+            // block never changes. Each block's are kept now, so a frame over
+            // the same history, and a step through it, read none of it.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = searching(&mut harness, "qvx wqz rqv", "wqz") else {
+                return;
+            };
+            let read = crate::selection::stored_rows_searched;
+
+            let before = read();
+            harness.render_again();
+            assert!(
+                read() > before,
+                "the first frame of a search reads the finished blocks"
+            );
+
+            let before = read();
+            harness.render_again();
+            step(&mut harness, pane, true);
+            harness.render_again();
+            assert_eq!(
+                0,
+                read() - before,
+                "a frame and a step re-read the finished blocks"
+            );
+            assert_eq!(2, matches(&harness, pane), "and still count every match");
+            assert_eq!(Some(1), current(&harness, pane));
+        }
+
+        #[test]
+        fn a_frame_with_a_pattern_in_the_bar_compiles_it_no_more() {
+            // The search kept the pattern it compiled, but the bar compiled
+            // it again on every frame to ask whether it was a bad one — and
+            // without the search's case folding, so a pattern only the
+            // folded search could not compile was counted "No results".
+            let mut harness = Harness::panel(1);
+            let Some(pane) = searching(&mut harness, "qvx wqz rqv", "w.z") else {
+                return;
+            };
+            harness.dispatch_workspace_action(WorkspaceAction::Find {
+                pane,
+                action: crate::workspace::action::FindAction::ToggleRegex,
+            });
+            harness.render_again();
+            assert_eq!(2, matches(&harness, pane), "the pattern finds both");
+
+            let compiled = crate::selection::patterns_compiled;
+            let before = compiled();
+            for _ in 0..3 {
+                harness.render_again();
+            }
+            step(&mut harness, pane, true);
+            harness.render_again();
+            assert_eq!(
+                0,
+                compiled() - before,
+                "frames and a step compiled the pattern again"
+            );
+
+            // Fits the size limit told apart, not folded, which is how the
+            // search reads it with the case switch off.
+            retype(&mut harness, pane, "[α-ω]{2000}");
+            let before = compiled();
+            assert!(
+                frame_text(&harness.render_again()).contains("Bad pattern"),
+                "a pattern the search could not compile was not said to be one"
+            );
+            harness.render_again();
+            harness.render_again();
+            assert_eq!(
+                1,
+                compiled() - before,
+                "frames compiled a pattern that does not compile again"
+            );
+        }
+
+        /// How many washes of `fill` a frame painted inside `panel`.
+        fn washes(scene: &Scene, panel: RectF, fill: Fill) -> usize {
+            scene
+                .layers()
+                .flat_map(|layer| layer.rects.iter())
+                .filter(|rect| rect.background == fill)
+                .filter(|rect| panel.contains_point(rect.bounds.origin()))
+                .count()
+        }
+
+        #[test]
+        fn the_matches_on_screen_are_washed_and_the_current_one_brighter() {
+            // Every match in view gets the amber and the current one the
+            // accent over it — painted from the matches on the rows being
+            // drawn, rather than from every match in the history tried
+            // against every row.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = searching(&mut harness, "qvx wqz rqv", "wqz") else {
+                return;
+            };
+            let panel = panel_of_the_pane(&mut harness);
+            let amber = Fill::Solid(
+                theme()
+                    .usage_high
+                    .with_alpha(crate::workspace::block_list::FIND_MATCH_ALPHA),
+            );
+            let accent = Fill::Solid(
+                theme()
+                    .accent
+                    .with_alpha(crate::workspace::block_list::FIND_CURRENT_ALPHA),
+            );
+
+            let scene = harness.frame();
+            assert_eq!(2, matches(&harness, pane));
+            assert_eq!(
+                2,
+                washes(&scene, panel, amber),
+                "the command line's match and the output's"
+            );
+            assert_eq!(1, washes(&scene, panel, accent), "the current one, once");
+
+            step(&mut harness, pane, true);
+            let scene = harness.frame();
+            assert_eq!(2, washes(&scene, panel, amber));
+            assert_eq!(1, washes(&scene, panel, accent), "still one current match");
         }
 
         /// The find bar, by its ground: the one `surface_raised` box with the

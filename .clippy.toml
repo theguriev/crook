@@ -6,8 +6,16 @@
 # (`let c: std::process::Command`); it does NOT catch `Command::new(..)` in
 # expression position, which is how the type is actually reached. Only
 # `disallowed-methods` catches that, and that is the form worth banning.
+#
+# A regular expression is compiled in one place, `LineMatcher::new` in
+# app/src/selection.rs, because that is where the find tests count compiles.
+# The find bar once compiled its query for every frame drawn, through a
+# `RegexBuilder` of its own; put back, that compile is one the count cannot
+# see, and the test that a frame compiles nothing passes with it.
 disallowed-methods = [
   { path = "std::process::Command::new", reason = "use crook::process::command, which sets CREATE_NO_WINDOW on Windows" },
+  { path = "regex::Regex::new", reason = "compile through crook::selection::LineMatcher::new, whose compiles the find tests count" },
+  { path = "regex::RegexBuilder::new", reason = "compile through crook::selection::LineMatcher::new, whose compiles the find tests count" },
 ]
 
 disallowed-types = [

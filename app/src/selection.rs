@@ -58,6 +58,17 @@
 //! fold is a place the terminal put the text rather than something the shell
 //! printed. It never crosses a block, because that is a different command.
 //!
+//! # A find is a line at a time
+//!
+//! What a find bar looks for is matched against one logical line at a time —
+//! the rows a fold joins, with the blanks the fold trimmed put back — and never
+//! against the output as one string. So a pattern's `^` and `$` are the start
+//! and end of a line, where grep puts them, and a fold is neither; a match
+//! never runs out of one line into the next, let alone into the next command;
+//! and what a block matches depends on nothing outside it, which is what lets
+//! the bar keep a finished block's matches rather than search the whole
+//! history again every frame. See [`Item::find_with`].
+//!
 //! [UAX #29]: https://unicode.org/reports/tr29/
 
 use std::ops::Range;
@@ -424,6 +435,67 @@ impl Item<'_> {
         row.checked_sub(self.first)
             .filter(|local| *local < self.rows.count())
     }
+
+    /// Every place `matcher` matches this item's text, as the cells each match
+    /// covers, appended to `found` in reading order.
+    ///
+    /// One logical line at a time — see the module docs — so the regions it
+    /// adds are in order and none overlaps another, which is what lets
+    /// [`regions_on`] answer for one row with a binary search.
+    pub fn find_with(&self, matcher: &LineMatcher, found: &mut Vec<Region>) {
+        #[cfg(test)]
+        if let Rows::Stored(rows) = self.rows {
+            STORED_ROWS_SEARCHED.with(|read| read.set(read.get() + rows.rows()));
+        }
+
+        // One line as the matcher reads it, and for each of its characters
+        // where in the line it starts and the cell it was drawn in: what takes
+        // a match, which is bytes of the line, back to the cells it covers.
+        // Kept from one line to the next, so that a block of fifty thousand
+        // rows costs two buffers rather than a hundred thousand.
+        let mut line = String::new();
+        let mut cells: Vec<(usize, usize, usize)> = Vec::new();
+        let count = self.rows.count();
+        let mut local = 0;
+        while local < count {
+            line.clear();
+            cells.clear();
+            loop {
+                let row = self.first + local;
+                self.rows
+                    .visit_line(local, self.rows.line_length(local), |character, column| {
+                        cells.push((line.len(), row, column));
+                        line.push(matcher.searched(character));
+                    });
+                for column in blanks_before_a_fold(&self.rows, local) {
+                    cells.push((line.len(), row, column));
+                    line.push(' ');
+                }
+                let folds = self.rows.wraps(local);
+                local += 1;
+                if !folds {
+                    break;
+                }
+            }
+
+            matcher.each_in(&line, |start, end| {
+                // Both ends of a match are on character boundaries, so the
+                // first character is the one starting at `start` and the last
+                // is the one before `end`.
+                let first = cells.partition_point(|cell| cell.0 < start);
+                let last = cells.partition_point(|cell| cell.0 < end).checked_sub(1);
+                if let (Some(first), Some(last)) =
+                    (cells.get(first), last.and_then(|last| cells.get(last)))
+                {
+                    found.push(Region {
+                        start: Place::new(self.id, first.1, first.2),
+                        end: Place::new(self.id, last.1, last.2),
+                        block: false,
+                    });
+                }
+            });
+        }
+    }
 }
 
 /// Every block a selection can address, in the order a pane draws them.
@@ -568,9 +640,8 @@ impl<'a> Blocks<'a> {
     ///
     /// What a find bar highlights and steps through. Case-insensitive — a
     /// `grep` for `error` finds `Error`, and `ошибка` finds `Ошибка` — one
-    /// character for one: see [`fold`]. A match never crosses the line break
-    /// [`Blocks::walk`] writes between two rows, so a query with no newline in it is
-    /// found within one logical line, folds and all.
+    /// character for one: see [`fold`]. Found one logical line at a time,
+    /// folds and all, and never across two: see the module docs.
     pub fn find_all(&self, needle: &str) -> Vec<Selection> {
         self.find_all_with(needle, FindOptions::default())
             .unwrap_or_default()
@@ -580,80 +651,47 @@ impl<'a> Blocks<'a> {
     /// or reading `needle` as a regular expression. `None` for a pattern that
     /// is not one, which a find bar says rather than showing "no results".
     ///
-    /// A regular expression is matched against the output as it reads, line
-    /// breaks included, and a match of nothing — `a*` before every character
-    /// — is no match: there is nothing to highlight in it.
+    /// A regular expression is matched a line at a time too, so its `^` and
+    /// `$` are the start and end of a line, and a match of nothing — `a*`
+    /// before every character — is no match: there is nothing to highlight
+    /// in it.
+    ///
+    /// It walks every block, as [`Self::find`] does. A find bar asks the
+    /// blocks one at a time instead and keeps what each one said; see
+    /// [`PaneFind::matches`](crate::pane_find::PaneFind::matches).
     pub fn find_all_with(&self, needle: &str, options: FindOptions) -> Option<Vec<Selection>> {
         if needle.is_empty() {
             return Some(Vec::new());
         }
-
-        let mut showing = String::new();
-        let mut at = Vec::new();
-        self.walk(|character, place| {
-            showing.push(character);
-            at.push(place);
-        });
-
-        // Every span is in bytes of `haystack`, which has exactly as many
-        // characters as `at` has places: the output itself, or its fold —
-        // one character for one, see [`fold`].
-        let (haystack, spans): (String, Vec<(usize, usize)>) = if options.regex {
-            let pattern = regex::RegexBuilder::new(needle)
-                .case_insensitive(!options.case_sensitive)
-                // A pattern a person typed, compiled on every frame the bar is
-                // open: bounded, so a pathological one is refused rather than
-                // building an automaton the size of the output.
-                .size_limit(1 << 20)
-                .build()
-                .ok()?;
-            let spans = pattern
-                .find_iter(&showing)
-                .filter(|found| !found.is_empty())
-                .map(|found| (found.start(), found.end()))
-                .collect();
-            (showing, spans)
-        } else {
-            let (haystack, needle): (String, String) = if options.case_sensitive {
-                (showing, needle.to_owned())
-            } else {
-                (
-                    showing.chars().map(fold).collect(),
-                    needle.chars().map(fold).collect(),
-                )
-            };
-            let mut spans = Vec::new();
-            let mut from = 0;
-            // Past the whole match each time, so overlapping runs of a repeated
-            // needle are counted once each rather than at every offset.
-            while let Some(relative) = haystack[from..].find(&needle) {
-                let start = from + relative;
-                spans.push((start, start + needle.len()));
-                from = start + needle.len();
-            }
-            (haystack, spans)
-        };
-
-        let mut found = Vec::with_capacity(spans.len());
-        // How many chars come before `counted`, carried forward from one match
-        // to the next: counting from the start for each match made a search
-        // that matched often in a long output quadratic, on every frame the
-        // find bar is open.
-        let (mut counted, mut chars) = (0, 0);
-        for (start, end) in spans {
-            chars += haystack[counted..start].chars().count();
-            counted = start;
-            let first = chars;
-            let last = first + haystack[start..end].chars().count() - 1;
-            if let (Some(start), Some(end)) = (at.get(first), at.get(last)) {
-                found.push(Selection::new(
-                    SelectionKind::Simple,
-                    Anchor::new(start.block, start.row, start.column, CellSide::Left),
-                    Anchor::new(end.block, end.row, end.column, CellSide::Right),
-                ));
+        let matcher = LineMatcher::new(needle, options)?;
+        let mut found = Vec::new();
+        for index in 0..self.len() {
+            if let Some(item) = self.item(index) {
+                item.find_with(&matcher, &mut found);
             }
         }
-        Some(found)
+        Some(
+            found
+                .iter()
+                .map(|region| {
+                    Selection::new(
+                        SelectionKind::Simple,
+                        Anchor::new(
+                            region.start.block,
+                            region.start.row,
+                            region.start.column,
+                            CellSide::Left,
+                        ),
+                        Anchor::new(
+                            region.end.block,
+                            region.end.row,
+                            region.end.column,
+                            CellSide::Right,
+                        ),
+                    )
+                })
+                .collect(),
+        )
     }
 
     /// The selection that runs from the start of the first `from` to the end
@@ -713,10 +751,15 @@ impl<'a> Blocks<'a> {
     }
 }
 
-/// One query, ready to ask of a line at a time: whether the line holds it.
+/// One query, ready to ask of a line at a time: whether the line holds it,
+/// and where.
 ///
-/// What filtering a block's output asks — which of its lines to keep — with
-/// the find's own rules: folded or told apart, text or a pattern.
+/// What filtering a block's output asks — which of its lines to keep — and
+/// what a find asks of every line, with the same rules for both: folded or
+/// told apart, text or a pattern. A find bar compiles one when its search
+/// starts and keeps it, and its filter matches with that same one, rather
+/// than either compiling the query again for every frame drawn while the bar
+/// is up: see [`PaneFind::matcher`](crate::pane_find::PaneFind::matcher).
 pub enum LineMatcher {
     /// Text, already folded when case does not matter.
     Text {
@@ -731,8 +774,19 @@ pub enum LineMatcher {
 
 impl LineMatcher {
     /// A matcher for `needle`, or `None` for a pattern that does not compile.
+    ///
+    /// The one place in the workspace allowed to compile a regular
+    /// expression, so that the count of compiles the find tests read sees
+    /// every compile there is: `.clippy.toml` bans the `regex` constructors
+    /// everywhere else.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this function is the replacement those lints point at"
+    )]
     pub fn new(needle: &str, options: FindOptions) -> Option<Self> {
         if options.regex {
+            #[cfg(test)]
+            PATTERNS_COMPILED.with(|compiled| compiled.set(compiled.get() + 1));
             return regex::RegexBuilder::new(needle)
                 .case_insensitive(!options.case_sensitive)
                 .size_limit(1 << 20)
@@ -847,6 +901,59 @@ fn fold(character: char) -> char {
     }
 }
 
+impl LineMatcher {
+    /// `character` as [`Self::each_in`] wants the line it searches written:
+    /// folded when the needle was, and as it is otherwise — a pattern folds
+    /// for itself.
+    fn searched(&self, character: char) -> char {
+        match self {
+            Self::Text { folded: true, .. } => fold(character),
+            _ => character,
+        }
+    }
+
+    /// Every place the query is in `line` — a line written through
+    /// [`Self::searched`] — as the byte range it covers, in order, none of
+    /// them overlapping and none of them empty.
+    fn each_in(&self, line: &str, mut found: impl FnMut(usize, usize)) {
+        match self {
+            Self::Text { needle, .. } => {
+                if needle.is_empty() {
+                    return;
+                }
+                let mut from = 0;
+                // Past the whole match each time, so overlapping runs of a
+                // repeated needle are counted once each rather than at every
+                // offset.
+                while let Some(relative) = line[from..].find(needle.as_str()) {
+                    let start = from + relative;
+                    from = start + needle.len();
+                    found(start, from);
+                }
+            }
+            Self::Pattern(pattern) => {
+                for matched in pattern.find_iter(line).filter(|found| !found.is_empty()) {
+                    found(matched.start(), matched.end());
+                }
+            }
+        }
+    }
+}
+
+/// The regions of `found` that cover any of row `row` of block `block`, in
+/// reading order.
+///
+/// `found` is what a find found: in reading order and none overlapping
+/// another, which makes this two binary searches rather than a walk. A frame
+/// asks it for every row it draws, of however many thousand matches the
+/// history holds.
+pub fn regions_on(found: &[Region], block: BlockId, row: usize) -> &[Region] {
+    let line = (block, row);
+    let from = found.partition_point(|region| region.end.line() < line);
+    let to = from + found[from..].partition_point(|region| region.start.line() <= line);
+    &found[from..to]
+}
+
 /// The columns of a folded row past its last printed character, which were
 /// spaces the program printed rather than the rest of the grid.
 ///
@@ -869,6 +976,38 @@ fn blanks_before_a_fold<'a>(rows: &'a Rows<'_>, row: usize) -> impl Iterator<Ite
             .cell(row, *column)
             .is_some_and(|cell| cell.flags.contains(CellFlags::WIDE_SPACER))
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// See [`stored_rows_searched`].
+    static STORED_ROWS_SEARCHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many rows of finished blocks a find on this thread has read, so far.
+///
+/// What a test of "a frame with the find bar open reads none of them again"
+/// counts. Thread-local because the window's test harness draws on the test's
+/// own thread and the suite runs its tests side by side.
+#[cfg(test)]
+pub(crate) fn stored_rows_searched() -> usize {
+    STORED_ROWS_SEARCHED.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// See [`patterns_compiled`].
+    static PATTERNS_COMPILED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many regular expressions [`LineMatcher::new`] has compiled on this
+/// thread, so far, whether they compiled or not.
+///
+/// What a test of "a frame with a pattern in the find bar does not compile
+/// it again" counts, on the same terms as [`stored_rows_searched`].
+#[cfg(test)]
+pub(crate) fn patterns_compiled() -> usize {
+    PATTERNS_COMPILED.with(std::cell::Cell::get)
 }
 
 /// The item a finished block is.
