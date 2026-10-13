@@ -75,7 +75,7 @@ use crate::pane_blocks::{Control, PaneBlocks, ScrollCause};
 use crate::pane_link::{self, LinkRow, LinkSpan, PaneLink};
 use crate::pane_selection::PaneSelection;
 use crate::pane_surface;
-use crate::selection::{Anchor, Blocks, Cells, Item, Region, Selection};
+use crate::selection::{Anchor, Blocks, Cells, Filter, Item, Region, Selection};
 use crate::tab::PaneId;
 use crate::terminal_font::{CellFont, CellMetrics};
 use crate::terminal_model::{BlockHistory, TerminalHandle};
@@ -343,9 +343,15 @@ impl BlockList {
     /// The rows stay the block's own, addressed by their place in the block:
     /// what is on screen as the third line of a filtered block is whatever
     /// row of it `kept[2]` names, and a press, a selection and a link on it
-    /// are about that row. Only where it is drawn, and how tall the block is,
-    /// change.
+    /// are about that row. Only where it is drawn, how tall the block is, and
+    /// what a copy of it takes change.
+    ///
+    /// The copy is told here, beside the drawing, so that the two are one
+    /// answer: a drag over the block highlights only the rows it shows, and a
+    /// copy that took the rows between them too would hand over lines nobody
+    /// saw.
     pub fn with_filter(mut self, filter: Option<(BlockId, Rc<Vec<usize>>)>) -> Self {
+        self.output = self.output.with_filter(filter.clone());
         self.filter = filter;
         self
     }
@@ -966,6 +972,12 @@ impl BlockList {
     /// rows: the rows were harvested when the command ended, so this is what
     /// was on screen and nothing else. This is the thing scrollback cannot do.
     ///
+    /// **A filtered block copies as the rows it shows.** The square has no
+    /// words to say "and the lines you cannot see", so it takes what is in
+    /// front of the person pressing it; the whole block is one Escape away,
+    /// which closes the bar and its filter with it. The menu's rows, which do
+    /// have words, say so while the filter is up.
+    ///
     /// **Through the same region a drag over the block makes**, rather than
     /// through a second walk of the store. Two implementations disagree, and
     /// these two disagreed about the one thing a terminal must not get wrong
@@ -981,7 +993,7 @@ impl BlockList {
 
     /// One whole block as a copy of it would read.
     fn whole_block(&self, id: BlockId) -> Option<String> {
-        block_text(&self.addressed(), id, 0)
+        block_text(&self.addressed(), id, 0, self.output.filter())
     }
 
     /// Paints one item of the list.
@@ -1577,7 +1589,15 @@ impl BlockList {
 ///
 /// A row past the block's last is an empty string rather than nothing at all:
 /// a command that printed nothing has an output, and it is empty.
-pub(super) fn block_text(blocks: &Blocks<'_>, id: BlockId, from: usize) -> Option<String> {
+///
+/// `filter` is the find bar's, while one is up: a filtered block copies as the
+/// rows it is showing, which is what the same drag over it would take.
+pub(super) fn block_text(
+    blocks: &Blocks<'_>,
+    id: BlockId,
+    from: usize,
+    filter: Option<Filter<'_>>,
+) -> Option<String> {
     let item = blocks.item(blocks.index_of(id)?)?;
     let last = item.rows.count().checked_sub(1)?;
     if from > last {
@@ -1593,7 +1613,7 @@ pub(super) fn block_text(blocks: &Blocks<'_>, id: BlockId, from: usize) -> Optio
             CellSide::Right,
         ),
     )
-    .text(blocks)
+    .text_with(blocks, filter)
 }
 
 /// The icon inside a control's plate.

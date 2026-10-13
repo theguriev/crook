@@ -49,7 +49,7 @@ use crate::platform_insets::{ControlLayout, LayoutInsets, WindowChrome};
 use crate::plugin::{ActionId, ActionName, Host, PageId, PluginId, SectionId, Watch};
 use crate::plugins::settings::SETTINGS_SECTION;
 use crate::plugins::store::index::{self, Heard, Release};
-use crate::selection::{Blocks, Cells};
+use crate::selection::{Blocks, Cells, Filter};
 use crate::settings::{
     DEFAULT_FONT_SIZE, Density, FONT_SIZE_STEP, GeneralOptions, Granularity, Settings, TabOptions,
 };
@@ -320,6 +320,10 @@ pub struct BlockMenuState {
     /// Whether the block was bookmarked when the menu opened, which is what
     /// the row says it will do.
     pub(super) bookmarked: bool,
+    /// Whether the find bar was filtering the block when the menu opened,
+    /// which makes "Copy" and "Copy output" copies of the lines it shows —
+    /// and the two rows say so.
+    pub(super) filtered: bool,
     /// "Bookmark" / "Remove bookmark".
     pub(super) bookmark: MouseStateHandle,
     /// "Filter output".
@@ -5472,20 +5476,14 @@ impl Workspace {
         self.pane_blocks(pane).is_some_and(|view| view.select(None))
     }
 
-    /// Puts the selected block's whole text on the clipboard.
+    /// Puts the selected block's whole text on the clipboard — the rows it
+    /// shows, when it is the block the find bar is filtering, as its copy
+    /// square takes.
     fn copy_selected_block(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
-        let (Some(view), Some(history), Some((_, snapshot))) = (
-            self.pane_blocks(pane),
-            self.terminal_blocks(pane, ctx),
-            self.terminal(pane, ctx),
-        ) else {
+        let Some(block) = self.pane_blocks(pane).and_then(PaneBlocks::selected) else {
             return;
         };
-        let Some(block) = view.selected() else {
-            return;
-        };
-        let blocks = crate::selection::Blocks::list(&history, &snapshot);
-        if let Some(text) = super::block_list::block_text(&blocks, block, 0) {
+        if let Some(text) = self.shown_rows_text(pane, block, 0, ctx) {
             self.clipboard.write(text.trim_end());
         }
     }
@@ -5554,6 +5552,12 @@ impl Workspace {
         self.block_menu.bookmarked = self
             .pane_blocks(pane)
             .is_some_and(|view| view.is_bookmarked(block));
+        // Read once, like the bookmark: the menu is a popup, and the bar
+        // cannot be typed into under one, so what the filter shows holds
+        // still for as long as the rows saying so are up.
+        self.block_menu.filtered = self
+            .filtered_rows(pane, ctx)
+            .is_some_and(|(filtered, ..)| filtered == block);
         // The corner the popup hangs off is written by the *paint* of the
         // frame that draws the block's controls, so a menu opened from the
         // keyboard on a block the pointer has never been over has no corner
@@ -5644,7 +5648,7 @@ impl Workspace {
         let facts = self.block_facts(pane, block, ctx);
 
         let text = match part {
-            BlockPart::Whole => self.block_rows_text(pane, block, 0, ctx),
+            BlockPart::Whole => self.shown_rows_text(pane, block, 0, ctx),
             // Nothing at all for a block whose shell never said where its
             // output starts — the row that would ask for it is drawn as one
             // that cannot be pressed, and this is the same answer from the
@@ -5652,7 +5656,7 @@ impl Workspace {
             BlockPart::Output => facts
                 .as_ref()
                 .and_then(|facts| facts.output_from)
-                .and_then(|from| self.block_rows_text(pane, block, from, ctx)),
+                .and_then(|from| self.shown_rows_text(pane, block, from, ctx)),
             BlockPart::Command => facts.and_then(|facts| facts.command),
             BlockPart::Directory => facts
                 .and_then(|facts| facts.directory)
@@ -5681,6 +5685,11 @@ impl Workspace {
     }
 
     /// One block's rows from `from` onwards, as a copy of them would read.
+    ///
+    /// Every row, whether or not the find bar is filtering the block: this is
+    /// what the block printed, for the readers that are not looking at it —
+    /// a plugin's menu entry, `crook pane`, the run report. A copy a person
+    /// makes is [`Self::shown_rows_text`].
     pub(crate) fn block_rows_text(
         &self,
         pane: PaneId,
@@ -5690,7 +5699,28 @@ impl Workspace {
     ) -> Option<String> {
         let (_, snapshot) = self.terminal(pane, app)?;
         let history = self.terminal_blocks(pane, app)?;
-        block_text(&Blocks::list(&history, &snapshot), block, from)
+        block_text(&Blocks::list(&history, &snapshot), block, from, None)
+    }
+
+    /// One block's rows from `from` onwards as a copy a person makes of it
+    /// reads: only the rows the find bar's filter is showing, when it is
+    /// filtering this block.
+    ///
+    /// The copy square on the block takes the same, through the filter the
+    /// list was drawn with — see
+    /// [`BlockList::with_filter`](super::BlockList::with_filter).
+    fn shown_rows_text(
+        &self,
+        pane: PaneId,
+        block: BlockId,
+        from: usize,
+        app: &AppContext,
+    ) -> Option<String> {
+        let (_, snapshot) = self.terminal(pane, app)?;
+        let history = self.terminal_blocks(pane, app)?;
+        let filtered = self.filtered_rows(pane, app);
+        let filter = as_filter(filtered.as_ref());
+        block_text(&Blocks::list(&history, &snapshot), block, from, filter)
     }
 
     /// Whether a pane's shell has gone: it has exited, or it never opened.
@@ -7425,6 +7455,9 @@ impl Workspace {
     /// pane is showing now. The two are the same for as long as a selection
     /// lives — a pane that changes surface lets go of it — and asking the
     /// selection is what makes that a fact rather than a hope.
+    ///
+    /// Without the rows the find bar's filter hides, as the copy chord takes
+    /// it: see [`Output::selected_text`](super::Output::selected_text).
     pub fn terminal_selection(&self, pane: PaneId, app: &AppContext) -> Option<String> {
         let interaction = self.interaction(pane)?;
         let selection = interaction.selection.selection()?;
@@ -7450,7 +7483,11 @@ impl Workspace {
             ));
         }
         let blocks = model.blocks(pane)?;
-        selection.text(&Blocks::list(&blocks, &snapshot))
+        let filtered = self.filtered_rows(pane, app);
+        selection.text_with(
+            &Blocks::list(&blocks, &snapshot),
+            as_filter(filtered.as_ref()),
+        )
     }
 
     /// Selects the first occurrence of `text` in a pane's output, reporting
@@ -11207,6 +11244,15 @@ pub(super) fn remove_checkout(
         crate::git::worktree::prune_empty_parents(store, path);
     }
     Ok(())
+}
+
+/// What [`Workspace::filtered_rows`] answered, as the copy of a selection is
+/// handed it.
+fn as_filter(filtered: Option<&(BlockId, Rc<Vec<usize>>, usize, usize)>) -> Option<Filter<'_>> {
+    filtered.map(|(block, kept, ..)| Filter {
+        block: *block,
+        kept,
+    })
 }
 
 /// Whether a keystroke is this platform's "copy" chord: cmd-c on macOS, and

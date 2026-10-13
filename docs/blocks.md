@@ -283,6 +283,16 @@ own copy control takes the same region — the whole block, with the blank rows 
 trimmed off — rather than walking the store its own way, which is how the two came to disagree
 about where a folded line ends.
 
+A block the find bar is filtering copies as it is shown. A drag over it records the block's own
+rows at its two ends, so the rows the filter hides between them are inside the region; the copy
+is handed the filter the list was drawn with (`selection::Filter`) and leaves them out, and a
+fold joins a row to the next only when that row is shown too. The copy square takes the same —
+the command and the kept lines — because it has no words with which to say otherwise, and the
+menu's two copies of the block's rows read **Copy shown lines** and **Copy shown output** while
+the filter is up. Closing the bar puts the whole block back under all three. What reads a block
+rather than looking at it — a plugin's menu entry, `crook pane`, the run report — gets everything
+it printed either way.
+
 A resize that changes the column count re-wraps the rows under a selection, so the selection is
 let go of rather than re-anchored onto text nobody selected.
 
@@ -471,6 +481,7 @@ Stage 1 of the port. These are absent on purpose, not overlooked:
   be addressable rather than merely visible. Running a command a second time is in the menu —
   as text put back in the composer, which needs nothing of the sort — and so are filters,
   which draw a block's kept rows at the places the filter gives them while every press and
-  selection still names the block's own row, and bookmarks,
+  selection still names the block's own row (a copy leaves out the rows between that it does
+  not show), and bookmarks,
   kept by `BlockId` on the pane's `PaneBlocks` beside the selection, which is all the
   addressing they need: the jump between them is the keyboard selection's own landing.

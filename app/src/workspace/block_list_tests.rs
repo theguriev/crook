@@ -160,6 +160,63 @@ fn a_block_copies_back_as_exactly_its_own_text() {
     assert!(!second.contains("ONE"), "that block's output: {second:?}");
 }
 
+#[test]
+fn a_filtered_block_copies_back_as_the_lines_it_shows() {
+    // The copy square on a block filtered to its failures takes what the
+    // block is showing — its command and the two lines kept — through the
+    // same region a drag over all of it makes. Unfiltered, the same square
+    // takes everything the command printed.
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    let mut emulator = emulator();
+    cycle(&mut emulator, "t", "ok a\nFAILED b\nok c\nFAILED d", 1);
+    let block = finished(&emulator).clone();
+    let from = block
+        .output_from
+        .expect("the shell said where its output starts");
+    let kept: Vec<usize> = (0..from).chain([from + 1, from + 3]).collect();
+    let history = Arc::new(BlockHistory::new(vec![Arc::new(block.clone())], 0));
+    let snapshot = emulator.snapshot();
+    let list = |filter| {
+        BlockList::new(
+            history.clone(),
+            snapshot.clone(),
+            crate::terminal_font::CellFont::headless(12.),
+            PaneBlocks::new(),
+        )
+        .with_filter(filter)
+    };
+
+    let filtered = list(Some((block.id, Rc::new(kept.clone()))));
+    assert_eq!(
+        filtered.whole_block(block.id).as_deref().map(str::trim_end),
+        Some("$ t\nFAILED b\nFAILED d"),
+        "the square took lines the filter hid"
+    );
+    let whole = list(None);
+    assert_eq!(
+        whole.whole_block(block.id).as_deref().map(str::trim_end),
+        Some("$ t\nok a\nFAILED b\nok c\nFAILED d"),
+    );
+
+    // From where the output starts, which is the menu's "Copy shown output".
+    let filter = Filter {
+        block: block.id,
+        kept: &kept,
+    };
+    assert_eq!(
+        block_text(
+            &Blocks::list(&history, &snapshot),
+            block.id,
+            from,
+            Some(filter)
+        )
+        .as_deref(),
+        Some("FAILED b\nFAILED d"),
+    );
+}
+
 /// What `inline_start` is asked, for a pane that is drawing blocks with a
 /// composer under it and is scrolled to its own end.
 fn inline(emulator: &mut Emulator) -> Option<usize> {

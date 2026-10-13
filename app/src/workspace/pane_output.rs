@@ -14,8 +14,10 @@
 //! emulator's, because that is the only place it stays anchored to its text
 //! while the shell prints underneath it. What this owns is the routing.
 
+use std::rc::Rc;
+
 use crook_terminal::{
-    Key, Modifiers, MouseButton, MouseEventKind, MouseModes, Rows, SelectionKind,
+    BlockId, Key, Modifiers, MouseButton, MouseEventKind, MouseModes, Rows, SelectionKind,
 };
 use crookui_core::event::{Event, Ime};
 use crookui_core::presenter::EventContext;
@@ -23,7 +25,7 @@ use crookui_core::presenter::EventContext;
 use crate::clipboard::Clipboard;
 use crate::input_keys::{self, Platform, Route};
 use crate::pane_selection::PaneSelection;
-use crate::selection::{Anchor, Blocks, Cells, Selection};
+use crate::selection::{Anchor, Blocks, Cells, Filter, Selection};
 use crate::settings::OptionAsMeta;
 use crate::tab::PaneId;
 use crate::terminal_keys::{self, Alt};
@@ -118,6 +120,14 @@ pub struct Output {
 
     /// What Option means to the program on a Mac. See [`OptionAsMeta`].
     option_as_meta: OptionAsMeta,
+
+    /// The block the list shows filtered, and the rows of it that it shows.
+    /// See [`BlockList::with_filter`](super::BlockList::with_filter).
+    ///
+    /// Here because a copy is: a drag over the filtered block names the
+    /// block's own rows at its two ends, and only this says which of the rows
+    /// between them were on screen.
+    filter: Option<(BlockId, Rc<Vec<usize>>)>,
 }
 
 impl Output {
@@ -131,6 +141,7 @@ impl Output {
             mouse: None,
             clipboard: None,
             option_as_meta: OptionAsMeta::default(),
+            filter: None,
         }
     }
 
@@ -147,6 +158,22 @@ impl Output {
     pub fn with_option_as_meta(mut self, option_as_meta: OptionAsMeta) -> Self {
         self.option_as_meta = option_as_meta;
         self
+    }
+
+    /// Says which block the list shows filtered, and which of its rows it
+    /// shows, so that a copy takes those rows and no others.
+    pub fn with_filter(mut self, filter: Option<(BlockId, Rc<Vec<usize>>)>) -> Self {
+        self.filter = filter;
+        self
+    }
+
+    /// The block shown filtered and the rows of it that are shown, when the
+    /// list is filtering one.
+    pub fn filter(&self) -> Option<Filter<'_>> {
+        self.filter.as_ref().map(|(block, kept)| Filter {
+            block: *block,
+            kept,
+        })
     }
 
     /// Attaches the composer under this output: the field a key that is not
@@ -410,7 +437,8 @@ impl Output {
     /// The blocks are asked for at the moment of the copy rather than kept
     /// from the frame that built this: a command may have finished since, and
     /// a block that has been harvested holds exactly the rows it did while it
-    /// was open.
+    /// was open. The filter is the frame's, because it is what that frame
+    /// drew — and what the highlight being copied was painted over.
     pub fn selected_text(&self) -> Option<String> {
         let mouse = self.mouse.as_ref()?;
         let handle = self.handle.as_ref()?;
@@ -420,7 +448,7 @@ impl Output {
         match mouse.cells {
             Cells::List => {
                 let blocks = handle.blocks();
-                selection.text(&Blocks::list(&blocks, &snapshot))
+                selection.text_with(&Blocks::list(&blocks, &snapshot), self.filter())
             }
             // The rows a drag covered may have scrolled out of the viewport,
             // and a snapshot only ever holds the viewport — so they come back

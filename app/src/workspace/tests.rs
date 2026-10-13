@@ -19301,6 +19301,20 @@ mod shells {
         /// clipboard is the line the command printed, never its echo.
         const FRUIT: &str = "printf 'APPLE\\nBANANA\\nCHERRY\\nAPRICOT\\n' | tr A-Z a-z";
 
+        /// Filters the newest block for `query`: its menu's "Filter output",
+        /// then the query typed into the bar that opens.
+        fn filter_newest_block(harness: &mut Harness, pane: PaneId, query: &str) {
+            harness.run_command("crook/window/select-block-up");
+            harness.dispatch_workspace_action(WorkspaceAction::Block(BlockAction::FilterOutput));
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("a find bar");
+            assert!(find.filter().is_some(), "the filter did not open");
+            find.input().edit(|editor| editor.set_text(query));
+            harness.frame();
+        }
+
         /// Where the cell `column` of the output line that reads `text` is
         /// drawn, `across` of the way into it.
         ///
@@ -19329,6 +19343,45 @@ mod shells {
                 left + (column as f32 + across) * cell.width,
                 baseline.y() - cell.baseline + cell.height / 2.,
             )
+        }
+
+        #[test]
+        fn a_drag_over_a_filtered_block_copies_only_the_lines_it_shows() {
+            // Filtered for `ap`, the block shows `apple` with `apricot` right
+            // under it, and a drag from one to the other highlights the two.
+            // The copy chord took `banana` and `cherry` as well: the drag's
+            // ends are rows of the block, and the copy walked every row
+            // between them, shown or not.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, FRUIT) == 0 {
+                return;
+            }
+            let Some((clipboard, _system)) = working_clipboard(&harness) else {
+                return;
+            };
+            filter_newest_block(&mut harness, pane, "ap");
+
+            let start = on_output_line(&mut harness, "apple", 0, 0.1);
+            let end = on_output_line(&mut harness, "apricot", "apricot".len() - 1, 0.9);
+            harness.hold(start, 1);
+            harness.drag_to(end);
+            harness.let_go(end);
+            assert_eq!(
+                harness.terminal_selection(pane).as_deref(),
+                Some("apple\napricot"),
+                "what the window reports as selected is not what was drawn"
+            );
+            harness.press("c", platform_chord(), "c");
+
+            assert_eq!(
+                clipboard.read().as_deref(),
+                Some("apple\napricot"),
+                "the copy is not the two lines the drag was drawn over"
+            );
         }
 
         #[test]
@@ -19379,6 +19432,53 @@ mod shells {
                 clipboard.read().as_deref(),
                 Some("cherry"),
                 "the query selected in the field was not what was copied"
+            );
+        }
+
+        #[test]
+        fn the_copies_of_a_filtered_block_take_the_lines_it_shows_and_say_so() {
+            // The square has no words of its own, so it copies what the block
+            // is showing: its command and the lines the filter kept. The
+            // menu's rows have words, and while the block is filtered they say
+            // that is what they take.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, FRUIT) == 0 {
+                return;
+            }
+            let Some((clipboard, _system)) = working_clipboard(&harness) else {
+                return;
+            };
+            filter_newest_block(&mut harness, pane, "ap");
+
+            let panel = panel_of_the_pane(&mut harness);
+            let scene = hover_block(&mut harness, pane, 0);
+            let controls = block_controls(&scene, panel);
+            assert!(!controls.is_empty(), "the hovered block draws no controls");
+            harness.click(center(controls[0]), MouseButton::Left);
+            let copied = clipboard.read().unwrap_or_default();
+            assert!(
+                copied.ends_with("\napple\napricot") && copied.contains("printf"),
+                "the square did not copy the command and the lines shown: {copied:?}"
+            );
+            assert!(
+                !copied.contains("banana") && !copied.contains("cherry"),
+                "the square copied lines the filter hid: {copied:?}"
+            );
+
+            let shown = frame_text(&open_block_menu(&mut harness, pane, 0));
+            assert!(
+                shown.contains("Copy shown lines") && shown.contains("Copy shown output"),
+                "the menu does not say its copies are of what is shown: {shown}"
+            );
+            click_menu_entry(&mut harness, "Copy shown output");
+            assert_eq!(
+                clipboard.read().as_deref(),
+                Some("apple\napricot"),
+                "the output the menu copied is not the output shown"
             );
         }
 
