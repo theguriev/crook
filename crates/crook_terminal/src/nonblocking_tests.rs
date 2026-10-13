@@ -1,6 +1,7 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::link::PtyLink as _;
 use crate::pty::{Program, Pty};
@@ -149,4 +150,212 @@ fn test_a_write_that_cannot_watch_for_the_pty_closing_still_waits_for_the_child(
         "a write that could not watch for the pty closing gave up on a child that reads: {first:?}"
     );
     assert!(next.is_ok(), "the write after it was refused: {next:?}");
+}
+
+/// A file that is removed when the test is done with it, passed or not.
+struct Removed(std::path::PathBuf);
+
+impl Drop for Removed {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[test]
+fn test_input_a_child_has_not_read_comes_through_whole_when_it_turns_canonical_mode_on() {
+    // A shell running a pasted block turns canonical mode on to run each line,
+    // with the lines after it still unread. macOS then feeds that input
+    // through the line discipline again, garbling whatever of it had wrapped
+    // around the end of the queue's ring — which, from a writer that kept the
+    // queue full while the shell read a byte at a time, was nearly all of it.
+    // See the `typeahead` module. This child reads the start of what it is
+    // sent a byte at a time, as a line editor does, then turns canonical mode
+    // on and keeps the rest, which has to be exactly what followed.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let kept = Removed(std::env::temp_dir().join(format!(
+        "crook-typeahead-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )));
+    const READ_FIRST: usize = 600;
+    let mut pty = spawn(&format!(
+        "stty raw -echo; echo crook-ready; \
+         dd bs=1 count={READ_FIRST} of=/dev/null 2>/dev/null; \
+         stty icanon; exec cat > '{}'",
+        kept.0.display()
+    ));
+    let mut reader = pty.take_reader().expect("a fresh pty has its reader");
+    let mut heard = String::new();
+    let mut buffer = [0; 256];
+    while !heard.contains("crook-ready") {
+        let read = reader
+            .read(&mut buffer)
+            .expect("the child says it is ready");
+        assert!(read > 0, "the child ended before it was ready");
+        heard.push_str(&String::from_utf8_lossy(&buffer[..read]));
+    }
+
+    // Lines, since canonical mode holds at most a kilobyte of one.
+    let mut sent = Vec::new();
+    for line in 0..256 {
+        sent.extend_from_slice(format!("line {line:05} {}\n", "x".repeat(50)).as_bytes());
+    }
+    let mut writer = pty.writer().expect("a pty hands out a writer");
+    let sending = sent.clone();
+    thread::spawn(move || writer.write_all(&sending));
+
+    let wanted = &sent[READ_FIRST..];
+    let deadline = Instant::now() + DEADLINE;
+    let got = loop {
+        let got = std::fs::read(&kept.0).unwrap_or_default();
+        if got.len() >= wanted.len() || Instant::now() > deadline {
+            break got;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let differs = got
+        .iter()
+        .zip(wanted)
+        .position(|(got, wanted)| got != wanted)
+        .unwrap_or(got.len().min(wanted.len()));
+    assert!(
+        got == wanted,
+        "{} of {} bytes came through, and from byte {differs} they read {:?} where {:?} was sent",
+        got.len(),
+        wanted.len(),
+        from(&got, differs),
+        from(wanted, differs),
+    );
+}
+
+/// A few bytes of `bytes` from `at`, to show where two runs part.
+fn from(bytes: &[u8], at: usize) -> String {
+    let rest = bytes.get(at..).unwrap_or_default();
+    String::from_utf8_lossy(&rest[..rest.len().min(40)]).into_owned()
+}
+
+/// Reads from `reader` until `marker` has been said.
+fn hear(reader: &mut impl Read, marker: &str) {
+    let mut heard = String::new();
+    let mut buffer = [0; 256];
+    while !heard.contains(marker) {
+        let read = reader
+            .read(&mut buffer)
+            .unwrap_or_else(|error| panic!("the child never said {marker}: {error}"));
+        assert!(read > 0, "the child ended before it said {marker}");
+        heard.push_str(&String::from_utf8_lossy(&buffer[..read]));
+    }
+}
+
+/// Reads from `reader` on a thread of its own, and tells the receiver once
+/// `marker` has been said.
+fn hearing(mut reader: impl Read + Send + 'static, marker: &'static str) -> mpsc::Receiver<()> {
+    let (said, heard) = mpsc::channel();
+    thread::spawn(move || {
+        let mut text = String::new();
+        let mut buffer = [0; 256];
+        while let Ok(read) = reader.read(&mut buffer)
+            && read > 0
+        {
+            text.push_str(&String::from_utf8_lossy(&buffer[..read]));
+            if text.contains(marker) {
+                let _ = said.send(());
+                return;
+            }
+        }
+    });
+    heard
+}
+
+/// A child that reads nothing until a Ctrl-C stops it, and then says
+/// `crook-42-stopped`; `setup` runs first, and `then` once it is ready.
+fn stoppable(setup: &str, then: &str) -> Pty {
+    spawn(&format!(
+        "trap 'echo crook-$((6 * 7))-stopped; exit' INT; {setup} echo crook-ready; \
+         {then} while :; do sleep 1; done"
+    ))
+}
+
+#[test]
+fn test_a_ctrl_c_behind_lines_a_busy_program_has_not_read_still_stops_it() {
+    // A command that reads nothing is running — `tail -f`, a server — and the
+    // person presses Enter twice to space out what it prints, then Ctrl-C.
+    // Each Enter finishes a line the command never reads. A writer on macOS
+    // that held every write until the child had read all it was sent held the
+    // second Enter, and the Ctrl-C behind it, for as long as the command ran.
+    let mut pty = stoppable("", "");
+    let mut reader = pty.take_reader().expect("a fresh pty has its reader");
+    hear(&mut reader, "crook-ready");
+    let stopped = hearing(reader, "crook-42-stopped");
+
+    let mut writer = pty.writer().expect("a pty hands out a writer");
+    thread::spawn(move || {
+        for key in [&b"\r"[..], b"\r", b"\x03"] {
+            if writer.write_all(key).is_err() {
+                return;
+            }
+        }
+    });
+    assert!(
+        stopped.recv_timeout(DEADLINE).is_ok(),
+        "the Ctrl-C typed behind two Enters never reached the program"
+    );
+}
+
+#[test]
+fn test_a_ctrl_c_behind_a_line_corrected_ahead_of_a_busy_program_still_stops_it() {
+    // The same command, with Enter pressed ahead of it, and then the next
+    // command typed ahead too and corrected as it goes: more keys than the
+    // queue holds, though no more than a byte or two of them are ever in it,
+    // since canonical mode takes each Backspace and the letter before it out
+    // of the line. A writer on macOS that counted every key it sent held the
+    // next one, and the Ctrl-C behind it, for as long as the command ran.
+    const CORRECTED: usize = 600;
+    let mut pty = stoppable("stty erase '^?';", "");
+    let mut reader = pty.take_reader().expect("a fresh pty has its reader");
+    hear(&mut reader, "crook-ready");
+    let stopped = hearing(reader, "crook-42-stopped");
+
+    let mut writer = pty.writer().expect("a pty hands out a writer");
+    thread::spawn(move || {
+        let corrected = [&b"a"[..], b"\x7f"].repeat(CORRECTED);
+        let keys = std::iter::once(&b"\r"[..])
+            .chain(corrected)
+            .chain([&b"\x03"[..]]);
+        for key in keys {
+            if writer.write_all(key).is_err() {
+                return;
+            }
+        }
+    });
+    assert!(
+        stopped.recv_timeout(DEADLINE).is_ok(),
+        "the Ctrl-C typed behind a corrected line never reached the program"
+    );
+}
+
+#[test]
+fn test_a_ctrl_c_goes_at_once_however_much_input_is_waiting() {
+    // The kernel acts on a Ctrl-C as it arrives and never queues it, so it is
+    // not held back for the queue's sake — not even when as much has gone in
+    // since the child last read everything as the writer lets in, and the
+    // child, having read some of it, has stopped.
+    let mut pty = stoppable(
+        "stty -icanon -echo;",
+        "dd bs=1 count=500 of=/dev/null 2>/dev/null; echo crook-read;",
+    );
+    let mut reader = pty.take_reader().expect("a fresh pty has its reader");
+    hear(&mut reader, "crook-ready");
+    let mut writer = pty.writer().expect("a pty hands out a writer");
+    writer
+        .write_all(&[b'x'; crate::typeahead::ROOM])
+        .expect("an empty queue takes this much at once");
+    hear(&mut reader, "crook-read");
+    let stopped = hearing(reader, "crook-42-stopped");
+
+    thread::spawn(move || writer.write_all(b"\x03"));
+    assert!(
+        stopped.recv_timeout(DEADLINE).is_ok(),
+        "the Ctrl-C never reached a program with input it had not read"
+    );
 }

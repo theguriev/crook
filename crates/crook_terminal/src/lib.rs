@@ -96,6 +96,8 @@ mod pty;
 mod rows;
 pub mod selection;
 mod snapshot;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod typeahead;
 pub mod url;
 mod writer;
 
@@ -155,6 +157,10 @@ pub struct TerminalOptions {
     pub scrollback_lines: Option<usize>,
     /// The colours the grid is drawn in.
     pub palette: Palette,
+    /// What the terminal tells a program that asks which terminal it is:
+    /// see [`Emulator::set_name_and_version`]. `None` leaves the question
+    /// unanswered.
+    pub name_and_version: Option<String>,
 }
 
 /// A running terminal session.
@@ -202,14 +208,16 @@ impl Terminal {
             environment,
             scrollback_lines,
             palette,
+            name_and_version,
         } = options;
 
         let pty = Pty::spawn(&program, size, working_directory.as_deref(), &environment)?;
-        let emulator = Emulator::new(
+        let mut emulator = Emulator::new(
             size,
             scrollback_lines.unwrap_or(DEFAULT_SCROLLBACK_LINES),
             palette,
         );
+        emulator.set_name_and_version(name_and_version.as_deref());
         Self::with_link(Box::new(pty), emulator)
     }
 

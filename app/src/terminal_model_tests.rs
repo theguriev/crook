@@ -233,6 +233,67 @@ fn a_shell_prints_what_it_was_asked_to_and_the_pane_learns_about_it() {
     });
 }
 
+#[test]
+fn a_program_that_asks_which_terminal_it_is_in_is_told_crook_and_its_version() {
+    // cmd has no `stty`, `dd` or `tr` to read the answer with.
+    if cfg!(windows) {
+        return;
+    }
+    let (queue, mut app) = app();
+    let model = app.update(|ctx| ctx.add_model(TerminalModel::new));
+    let pane = pane();
+    app.update(|ctx| {
+        model.update(ctx, |model, ctx| {
+            model.set_shell_marks(false);
+            model.start(&[(pane, None)], ctx)
+        });
+    });
+    let failure = app.read(|ctx| model.as_ref(ctx).failure(pane).map(str::to_owned));
+    if let Some(failure) = failure {
+        eprintln!("skipped: no shell could be started here ({failure})");
+        return;
+    }
+
+    // The answer arrives as input, so the line stops the tty echoing it and
+    // holding it for a newline, reads exactly its length, and prints it with
+    // the two escapes made visible — which nothing in the typed line is.
+    let told = format!(
+        ".P>|{} {}.\\",
+        shell_integration::TERM_PROGRAM,
+        shell_integration::VERSION
+    );
+    let line = format!(
+        "stty -echo -icanon; printf '\\033[>q'; \
+         dd bs=1 count={} 2>/dev/null | tr -c '[:print:]' .\n",
+        told.len()
+    );
+    app.read(|ctx| model.as_ref(ctx).type_into(pane, &line));
+
+    let deadline = Instant::now() + REPLY_TIMEOUT;
+    loop {
+        queue.run_until_parked();
+        let answered = app.read(|ctx| {
+            model
+                .as_ref(ctx)
+                .snapshot(pane)
+                .is_some_and(|snapshot| snapshot.text().contains(&told))
+        });
+        if answered {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the program was never told {told:?}, got: {:?}",
+            app.read(|ctx| model.as_ref(ctx).snapshot(pane).map(|grid| grid.text()))
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    app.update(|ctx| {
+        model.update(ctx, |model, ctx| model.sync(&[], ctx));
+    });
+}
+
 /// A session with a real pty behind it, or `None` where one cannot be opened.
 ///
 /// The child is `cat`, which says nothing until it is spoken to; the bytes
