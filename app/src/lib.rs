@@ -820,7 +820,11 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
         return Ok(Startup::Answered);
     }
     if args.next_if(|word| word == "tab").is_some() {
-        println!("{}", control::cli::tab(args)?);
+        let printed = control::cli::tab(args)?;
+        println!("{}", printed.text);
+        if let Some(note) = printed.note {
+            eprintln!("{note}");
+        }
         return Ok(Startup::Answered);
     }
     let mut frames = None;

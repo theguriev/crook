@@ -32,13 +32,28 @@
 //! fails puts the master back to blocking and carries on — a write that waits
 //! on a closed pane, as every write did before, rather than a pane that
 //! cannot be read at all.
+//!
+//! On macOS a write may wait for one thing more before it starts: for the
+//! child to read what it was sent, until no more than the kernel's input
+//! queue holds has gone in since it last read everything. That kernel garbles
+//! input a child has not read when the child turns canonical mode on, once
+//! there is enough of it to wrap around the queue — which a shell running a
+//! pasted block line by line does between every two lines. Keys typed ahead
+//! of a busy program go at once until there is that much, and a Ctrl-C does
+//! not wait on the count at all. See the `typeahead` module, and its wait,
+//! which is a `kqueue` with the pipe in it beside the master.
 
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
+use std::time::Instant;
 
 use filedescriptor::{FileDescriptor, POLLIN, POLLOUT, Pipe, pollfd};
 use parking_lot::Mutex;
+
+#[cfg(target_os = "macos")]
+use crate::typeahead::{self, Next, Pacing, Reads, Woke};
 
 /// What a wait for the master came to.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -154,6 +169,11 @@ impl Closing {
 
 /// The writable half: a write waits for the child to read, and gives up when
 /// the pty closes.
+///
+/// On macOS a write also waits, when the child has not read enough of what
+/// it was sent, so that what it has not read stays within a ring's worth: the
+/// kernel garbles input a child has not read once there is more of it than
+/// that. See the `typeahead` module.
 pub(crate) struct Writable {
     master: FileDescriptor,
     closing: Arc<Closing>,
@@ -162,6 +182,17 @@ pub(crate) struct Writable {
     /// Whether a failure to make that pipe has been logged already, so a
     /// process out of descriptors logs it once per writer, not once per wait.
     unwatched: bool,
+    /// The wait for the child to read what it was given, once there has been
+    /// something to wait for.
+    #[cfg(target_os = "macos")]
+    reads: Option<Reads>,
+    /// Whether a write that could not be paced has been logged already.
+    #[cfg(target_os = "macos")]
+    unpaced: bool,
+    /// What has gone into the child's queues, by the count that keeps it
+    /// from wrapping them.
+    #[cfg(target_os = "macos")]
+    pacing: Pacing,
 }
 
 impl Writable {
@@ -173,49 +204,145 @@ impl Writable {
             closing,
             watching: None,
             unwatched: false,
+            #[cfg(target_os = "macos")]
+            reads: None,
+            #[cfg(target_os = "macos")]
+            unpaced: false,
+            #[cfg(target_os = "macos")]
+            pacing: Pacing::default(),
         }
+    }
+
+    /// Makes the pipe a wait watches beside the master, the first time there
+    /// is a wait. An error is the pty having closed on this side already.
+    fn watch_closing(&mut self) -> io::Result<()> {
+        if self.watching.is_some() {
+            return Ok(());
+        }
+        match self.closing.watch() {
+            Ok(Some(watching)) => self.watching = Some(watching),
+            Ok(None) => return Err(closed()),
+            // Out of descriptors, most likely, which may not last: waited out
+            // on the master alone, where a hang-up still ends it, and tried
+            // again at the next wait. Ending the write here would end the
+            // writer, and the pane would take no key again.
+            Err(error) => {
+                if !std::mem::replace(&mut self.unwatched, true) {
+                    log::warn!(
+                        "could not watch for a pty closing ({error}); \
+                         a write waiting on it ends only when the program reads \
+                         or hangs up"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Writable {
+    /// The part of `bytes` the child's input queues take now without
+    /// wrapping, once the child has read enough for there to be one.
+    ///
+    /// All of them, as every write was before, when the kernel will not say
+    /// how much is unread or cannot be waited on for a read: input that may
+    /// arrive garbled is better than a pane whose input has stopped.
+    fn paced<'a>(&mut self, bytes: &'a [u8]) -> io::Result<&'a [u8]> {
+        // Set the first time a line longer than the queue holds the rest back,
+        // and cleared whenever the child is found reading, which a program
+        // stuck on such a line is not.
+        let mut deadline = None;
+        loop {
+            // Not knowing is taken for canonical mode with no key acted on,
+            // which can only hold more back.
+            let modes = typeahead::modes(&self.master).unwrap_or_default();
+            let unread = match typeahead::unread(&self.master) {
+                Ok(unread) => unread,
+                Err(error) => return Ok(self.unpaced(bytes, &error)),
+            };
+            let (patience, rest) = match self.pacing.next(bytes, unread, &modes) {
+                Next::Write(paced) => return Ok(paced),
+                Next::Wait => {
+                    deadline = None;
+                    (None, bytes)
+                }
+                Next::WaitAtMost(rest) => (
+                    Some(
+                        *deadline
+                            .get_or_insert_with(|| Instant::now() + typeahead::LONG_LINE_PATIENCE),
+                    ),
+                    rest,
+                ),
+            };
+            self.watch_closing()?;
+            match self.next_read(patience) {
+                Ok(Woke::Read) => {}
+                Ok(Woke::HungUp) => return Err(hung_up()),
+                Ok(Woke::Closed) => return Err(closed()),
+                // A program that has stayed in canonical mode with a line it
+                // cannot finish: see `LONG_LINE_PATIENCE`.
+                Ok(Woke::Waited) => {
+                    self.pacing.give_up();
+                    return Ok(rest);
+                }
+                Err(error) => return Ok(self.unpaced(bytes, &error)),
+            }
+        }
+    }
+
+    /// Waits for the child's next read, in a wait made the first time one is
+    /// needed and watching the pipe from the first time there is one.
+    fn next_read(&mut self, deadline: Option<Instant>) -> io::Result<Woke> {
+        let reads = match self.reads.take() {
+            Some(reads) => reads,
+            None => Reads::new(self.master.as_raw_fd())?,
+        };
+        let reads = self.reads.insert(reads);
+        if let Some(watching) = &self.watching {
+            reads.watch_closing(watching.as_raw_fd())?;
+        }
+        reads.wait(deadline)
+    }
+
+    /// `bytes` whole, written as every write was before pacing, with the
+    /// reason logged the first time.
+    fn unpaced<'a>(&mut self, bytes: &'a [u8], error: &io::Error) -> &'a [u8] {
+        if !std::mem::replace(&mut self.unpaced, true) {
+            log::warn!(
+                "could not wait for a program to read its input ({error}); \
+                 a long paste may reach it garbled"
+            );
+        }
+        bytes
     }
 }
 
 impl Write for Writable {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        #[cfg(target_os = "macos")]
+        let bytes = self.paced(bytes)?;
         loop {
             match self.master.write(bytes) {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    if self.watching.is_none() {
-                        match self.closing.watch() {
-                            Ok(Some(watching)) => self.watching = Some(watching),
-                            Ok(None) => return Err(closed()),
-                            // Out of descriptors, most likely, which may not
-                            // last: waited out on the master alone, where a
-                            // hang-up still ends it, and tried again at the
-                            // next wait. Ending the write here would end the
-                            // writer, and the pane would take no key again.
-                            Err(error) => {
-                                if !std::mem::replace(&mut self.unwatched, true) {
-                                    log::warn!(
-                                        "could not watch for a pty closing ({error}); \
-                                         a write waiting on it ends only when the program reads \
-                                         or hangs up"
-                                    );
-                                }
-                            }
-                        }
-                    }
+                    self.watch_closing()?;
                     match wait(&mut self.master, POLLOUT, self.watching.as_ref())? {
                         // A hang-up wins over writable beside it: Linux can
                         // report both and then refuse the write, and a loop
                         // that believed the first half would spin.
                         Waited::Polled(events) if events & !POLLOUT != 0 => {
-                            return Err(io::Error::new(
-                                io::ErrorKind::BrokenPipe,
-                                "the program has closed its terminal",
-                            ));
+                            return Err(hung_up());
                         }
                         Waited::Polled(_) | Waited::Blocking => {}
                         Waited::Closed => return Err(closed()),
                     }
+                }
+                #[cfg(target_os = "macos")]
+                Ok(written) => {
+                    let written = bytes.get(..written).unwrap_or(bytes);
+                    self.pacing.wrote(written);
+                    return Ok(written.len());
                 }
                 done => return done,
             }
@@ -230,6 +357,14 @@ impl Write for Writable {
 /// What a write reports once the pty has closed on this side.
 fn closed() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "the terminal was closed")
+}
+
+/// What a write reports once nobody is on the other end of the master.
+fn hung_up() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "the program has closed its terminal",
+    )
 }
 
 /// Waits until `master` is ready for `events` or hangs up, or until `closed`

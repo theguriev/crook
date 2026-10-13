@@ -855,7 +855,13 @@ hand its shells the outer one's. Beside it is the one secret, `CROOK_TOKEN`, whi
 request says which pane it comes from, set empty on the same terms. `CROOK_BIN`, the absolute
 path of the running binary, is set in the same place, read once at the first pane: a hook runs
 in whatever `PATH` its agent was started with, where a Crook.app nobody linked is not, and on
-Linux a binary an upgrade has replaced reads its own path back as `… (deleted)`.
+Linux a binary an upgrade has replaced reads its own path back as `… (deleted)`. A program that
+asks the terminal rather than its environment, with XTVERSION (`CSI > q`), is told the same
+name and version, as `Crook <version>`, which reaches it through ssh and sudo where the
+variables do not. `vte` has no hook for that question, so the emulator's OSC watcher stops on
+it and answers it between the answers `Term` gives to the queries either side. Claude Code asks
+whether synchronized output is supported only once it has been answered, and until then draws
+frames a pane can paint half done when a read ends in the middle of one.
 
 **The pty opens at the pane's size.** A shell prints its whole startup — a `~/.zprofile`
 banner, a greeting sized with `tput cols` — before any resize can reach it, and what it
@@ -928,6 +934,31 @@ its pane does. It does, save for a write that began to wait in a process short o
 out of them, so the pipe could not be made, or on macOS past what `select` can watch. That
 wait is on the master alone, and lasts as long as an orphan such as a `sleep 60 &` holds the
 pty open.
+
+**On macOS the writer never lets unread input wrap the kernel's ring.** XNU keeps a child's
+unread input in a ring of 1024 bytes, and when the child turns canonical mode on, the kernel
+feeds what is unread through the line discipline again by reading the ring into itself:
+whatever had wrapped around its end is overwritten before it is read. A shell running a pasted
+block switches to canonical mode between every two lines, and a writer that kept the ring full
+had it wrapped nearly always — a 730-line block submitted to the system `bash` ran with lines
+mangled and missing every time, and in a third of the runs the rest of the block was thrown
+away past the kernel's line limit. A ring starts again at its first byte once it empties, so
+the writer counts what it has written since `FIONREAD` on the master last said the child had
+read everything. A write that keeps the count within 1022 bytes goes at once — keys typed ahead
+of a busy program, a short paste — and one that does not waits, in a `kqueue`, for the child to
+read it all, and then goes at most 1022 bytes at a time, ending at a line end when it can,
+since the count leaves out a line a program in canonical mode has not finished. The rest of a
+line longer than that waits for the program to read it, a second at most: a shell back in its
+line editor reads it at once, and a program that stays in canonical mode never can, so that
+line is given up on until the next line end. The keys the line discipline acts on and never
+queues — `Ctrl-C`, `Ctrl-\`, `Ctrl-Z`, `Ctrl-S` and `Ctrl-Q`, and `Ctrl-T` in canonical mode,
+or whatever the terminal's modes make them — never wait on the count, since they are how a
+person stops a program that has stopped reading. One pressed behind input the writer is
+already holding still waits for that input, as it waited behind the kernel's full queue
+before. Neither they nor the other keys the line discipline takes in place — `Ctrl-V` and
+`Ctrl-O`, and in canonical mode `Backspace`, `Ctrl-U`, `Ctrl-W` and `Ctrl-R` — add to the
+count, so a line typed ahead of a busy program and corrected as it goes does not fill it. See
+`crates/crook_terminal/src/typeahead.rs`.
 
 The emulator's mutex is never held across a frame, or across a write. The reader takes it to
 parse, and again to build a snapshot, and publishes the `Arc` into a slot of its own before it
@@ -1100,7 +1131,9 @@ copies nothing — half a `node_modules` a `*` caught is worse than none — and
 MB is left out alone. None of that can fail the checkout, which exists by then: it is logged,
 and what did not arrive is said on the worktree menu reopened on the new tab, since the
 creator has closed. A copy that went as asked says nothing, because a menu that came back
-after every checkout would take the keyboard from the tab a person had just asked for.
+after every checkout would take the keyboard from the tab a person had just asked for. A
+checkout `crook tab new --worktree` asks for is made by the same function, and says what did
+not arrive in its answer instead, since that tab never takes the keyboard.
 
 The same creator starts the agent, which is the other half of "one agent, one worktree", and
 it is the creator rather than a dialog or a `Task` object of its own for the reason the session
@@ -1252,15 +1285,27 @@ them — the checks are what `-d` stood in for. Three gestures reach it:
   the tab's group: a worktree opens into the group of the tab it came from, so a group is the
   repository, and closing it would end the main checkout and every task beside this one. It is
   refused, in a sentence naming the pane, while an agent there is running or waiting on an
-  answer or a command is open in its shell. The panes close first — a shell sitting in a
-  directory keeps Windows from deleting it — and since the menu hung off a row that is now
-  gone, it moves to a tab in the main checkout and says what happened under the list.
+  answer or a command is open in its shell — and, in a sentence naming it, over a checkout with
+  a submodule checked out in it, however clean, or still holding the repository of one that was
+  deinitialised or `git rm`ed there, which git removes only when forced. The panes
+  close first — a shell sitting in a directory keeps Windows from deleting it — and since the
+  menu hung off a row that is now gone, it moves to a tab in the main checkout and says what
+  happened under the list.
 - **Discard task** is the one way to delete a branch nobody proved, and it asks twice. The
   second question names the commits only that branch holds — on no other branch, tag or
   remote, since one that is elsewhere is not lost — and the modified or untracked files the
   forced removal throws away, six of each by name and the rest counted, over a button that
   says "for good" and is never Enter's. The branch is deleted only if its tip is still the one
-  those commits were counted from.
+  those commits were counted from. It names the commits only a submodule of the checkout holds
+  too, checked out or only kept, and counts its stashes: its repository lives in the checkout's
+  own git directory, and the forced removal deletes it. A commit counts when nothing says a
+  remote has it: no remote-tracking branch reaches it, it is not a commit a shallow clone's
+  history stops at, and no tag at or under the commit the superproject points at reaches it. A
+  tag anywhere else, on a branch or past that commit, may be one made by hand in the repository
+  the removal deletes, over the very work it marks. The commit the superproject points at is
+  taken for the remote's when a `--depth 1` fetch brought it; one a deeper or full clone
+  fetched by name, on no remote branch, is still counted, since nothing tells it from the
+  commit an agent made there and pointed the superproject at.
 
 What a question says is what its press does, however long it was up. It stays up while an agent
 finishes — that is what lights its button — and an agent's last act is often a file or a
@@ -1837,22 +1882,26 @@ machine under one user could.
 about is its own window's, and no token names a pane of another — beside the caller's tab, in
 its group when `in_my_group` says so (a group of the two is made when there is none), and never
 selected: the person may be typing, and a tab that took the keyboard would take the rest of
-their line with it. With `worktree`, the window makes the checkout the tab menu's creator makes —
-the branch name trimmed and required and otherwise git's to judge, the checkout filed under
-Crook's store by repository, `git worktree add -b` from the caller's `HEAD` — on the pool, and
-the tab opens in it when git is done. The command arrives as words, and the window joins them
-with the quoting the plugin host types an argument with, which is proven to read back word for
-word in `sh`, `bash`, `zsh` and `fish` (#342). A new pane that would run any other shell is
-refused as `unsupported-shell`, and a word holding a control character as `bad-request`, since a
-newline in a command line is a second command. A word arrives as itself: an alias is not
-expanded, `&&` is an argument, and a pipeline is `sh -c '…'`. The line is typed into the new
-pane's field at once, where a person can see it, and sent by the field's own submit at the
-shell's first prompt — the first `A` for a shell with marks, since a line submitted into the
-block open from before it is one the shell never reports a boundary for, and the first thing it
-prints for a shell without. That is an event and not a clock, so a shell whose integration never
-marks a prompt keeps the line in its field for a person to send, and a person who edits the line
-before its prompt owns it, and it is not sent. The reply is the new pane's number, its tab's
-and its directory. The new row's hover card and its "Why this status" say which pane opened it.
+their line with it. With `worktree`, the window makes the checkout the tab menu's creator makes
+— the branch name trimmed and required and otherwise git's to judge, the checkout filed under
+Crook's store by repository, `git worktree add -b` from the caller's `HEAD`, locked and given
+what `.worktreeinclude` names, through the one function the creator makes its checkouts with —
+on the pool, and the tab opens in it when git is done. The command arrives as words, and the
+window joins them with the quoting the plugin host types an argument with, which is proven to
+read back word for word in `sh`, `bash`, `zsh` and `fish` (#342). A new pane that would run any
+other shell is refused as `unsupported-shell`, and a word holding a control character as
+`bad-request`, since a newline in a command line is a second command. A word arrives as itself:
+an alias is not expanded, `&&` is an argument, and a pipeline is `sh -c '…'`. The line is typed
+into the new pane's field at once, where a person can see it, and sent by the field's own submit
+at the shell's first prompt — the first `A` for a shell with marks, since a line submitted into
+the block open from before it is one the shell never reports a boundary for, and the first thing
+it prints for a shell without. That is an event and not a clock, so a shell whose integration
+never marks a prompt keeps the line in its field for a person to send, and a person who edits
+the line before its prompt owns it, and it is not sent. The reply is the new pane's number, its
+tab's and its directory, and a `note` when the worktree was not given everything its
+`.worktreeinclude` names — left out when there is nothing to say, so the reply is the three
+fields it always was. The new row's hover card and its "Why this status" say which pane opened
+it.
 
 **The budget, and refusals.** Eight tabs at once on behalf of one pane a person opened. The
 count is by *root*: a tab opened by a tab that was itself opened counts against the pane the
@@ -1966,8 +2015,9 @@ long as nobody connects — the reason a pty reader is a thread and not a pool w
 connection gets a short-lived thread of its own, eight at once and the ninth refused as `busy`.
 A connection has five seconds all told and a line 64 KiB; a longer line is refused as `too-long`
 and the connection closed, since nothing says where the next line starts. The one exception is a
-tab in a new worktree, which waits on git and its `post-checkout` hook: that reply is given the
-worktree module's own read and write budgets and a margin, and the connection closes after it. A question that needs
+tab in a new worktree, which waits on git, its `post-checkout` hook, the lock and the
+`.worktreeinclude` copy: that reply is given every deadline the making of the checkout runs
+under, an allowance for the copy and a margin, and the connection closes after it. A question that needs
 the window is posted to it and answered on the main thread through the `ctx.spawn` a pty's
 output comes home by, while the connection's thread waits for the answer until a quarter of a
 second before its five are up — the quarter being what it writes `timeout` back in, so a window
@@ -2007,7 +2057,9 @@ there is exactly one, and refuses when there are several, naming them: each wind
 process, and choosing the newest would be a guess that hands a script another window's panes.
 `crook tab new [--worktree B] [--in-my-group] [--title T] [--json] -- CMD…` prints the new
 pane's number, or the window's answer with `--json`; the `--` is required, since a command is
-the part of the line most likely to hold a word that starts with a dash.
+the part of the line most likely to hold a word that starts with a dash. A `note` in the answer
+goes to standard error beside the number, so `id=$(crook tab new …)` still reads a number and
+whoever ran it still sees what the worktree was not given.
 `crook pane wait <ID> --until <STATE> [--timeout <SECS>]` prints where the pane got to and exits
 with a failure, having printed where it is, when it did not get there, so `&&` after it reads
 the way it looks; `crook pane blocks <ID> [--last <N>]` prints each block as its command line,

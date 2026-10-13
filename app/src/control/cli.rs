@@ -74,6 +74,10 @@ pub struct Printed {
     /// Why the command fails after printing it, when it does: a wait that
     /// ran out, or a pane that closed first.
     pub failure: Option<String>,
+    /// What goes to standard error beside it, when the window said something
+    /// a person should read that is not the answer a script reads: the files
+    /// a new worktree was not given.
+    pub note: Option<String>,
 }
 
 impl From<String> for Printed {
@@ -81,6 +85,7 @@ impl From<String> for Printed {
         Self {
             text,
             failure: None,
+            note: None,
         }
     }
 }
@@ -128,7 +133,7 @@ pub fn events(args: impl Iterator<Item = String>) -> Result<()> {
 
 /// Answers `crook tab …`, given everything after `tab`, with the text to
 /// print: the new pane's number, or the window's answer as JSON.
-pub fn tab(args: impl Iterator<Item = String>) -> Result<String> {
+pub fn tab(args: impl Iterator<Item = String>) -> Result<Printed> {
     let (asked, json) = tab_arguments(args)?;
     opened(asked, json)
 }
@@ -320,7 +325,7 @@ fn listed(json: bool) -> Result<String> {
 }
 
 #[cfg(not(unix))]
-fn opened(asked: NewTab, json: bool) -> Result<String> {
+fn opened(asked: NewTab, json: bool) -> Result<Printed> {
     let flag = if json { " --json" } else { "" };
     bail!(
         "`crook tab new{flag} -- {}` is not available on this platform yet: a window answers on \
@@ -374,7 +379,7 @@ fn listed(json: bool) -> Result<String> {
 }
 
 #[cfg(unix)]
-fn opened(asked: NewTab, json: bool) -> Result<String> {
+fn opened(asked: NewTab, json: bool) -> Result<Printed> {
     let socket = unix::socket_here()?;
     unix::open_tab(&socket, unix::token_here().as_deref(), asked, json)
 }
@@ -537,6 +542,7 @@ pub fn waited_text(waited: &Waited, waited_for: std::time::Duration) -> Printed 
     Printed {
         text: state,
         failure,
+        note: None,
     }
 }
 
@@ -759,19 +765,29 @@ pub mod unix {
     /// What `crook tab new` prints, having asked the window at `socket` to
     /// open `asked`: the new pane's number, which is what a script goes on to
     /// find in `crook pane list`, or the whole answer with `--json`.
+    ///
+    /// The answer's `note` goes to standard error rather than after the
+    /// number, so that `id=$(crook tab new …)` still reads a number and
+    /// whoever ran it still sees what the worktree was not given. Made
+    /// printable, since it names the repository's files and a file's name can
+    /// hold an ESC.
     pub fn open_tab(
         socket: &Path,
         token: Option<&str>,
         asked: NewTab,
         json: bool,
-    ) -> Result<String> {
+    ) -> Result<Printed> {
         let result = ask(socket, &Verb::TabNew(asked), token)?;
         if json {
-            return Ok(super::json(&result));
+            return Ok(Printed::from(super::json(&result)));
         }
         let opened: Opened = serde_json::from_value(result)
             .context("the window's answer is not the tab it opened")?;
-        Ok(opened.pane_id.to_string())
+        Ok(Printed {
+            text: opened.pane_id.to_string(),
+            failure: None,
+            note: opened.note.as_deref().map(super::printable),
+        })
     }
 
     /// What `crook pane wait` prints, having asked the window at `socket` to

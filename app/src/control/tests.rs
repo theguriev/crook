@@ -1769,6 +1769,57 @@ mod socket {
     }
 
     #[test]
+    fn the_command_line_prints_a_new_tabs_number_alone_and_the_note_beside_it() {
+        // `id=$(crook tab new …)` is how a lead keeps the number, so a note
+        // the window adds goes beside it, to standard error, and never into
+        // what that reads. It names the repository's files, and a file's name
+        // can hold an escape sequence, so it is printed as text a terminal
+        // shows rather than acts on.
+        let root = TempDir::new();
+        let opened = Opened {
+            pane_id: 7,
+            tab_id: 3,
+            cwd: Some("/store/repo/fix-x".to_owned()),
+            note: Some(
+                "Copied 1 file from .worktreeinclude, but not \u{1b}]0;x\u{7}.env (not ignored \
+                 in the new checkout)."
+                    .to_owned(),
+            ),
+        };
+        let answer = serde_json::to_value(&opened).expect("encodes");
+        let socket = Socket::open_in(&root.sockets(), Arc::new(move |_, _, _| Ok(answer.clone())))
+            .expect("opens");
+
+        let printed = cli::unix::open_tab(socket.path(), Some("token"), new_tab(&["make"]), false)
+            .expect("answered");
+        assert_eq!(printed.text, "7");
+        assert_eq!(printed.failure, None);
+        let note = printed.note.expect("the note is printed");
+        assert!(note.contains(r"but not \u{1b}]0;x\u{7}.env"), "{note}");
+        assert!(!note.chars().any(char::is_control), "{note:?}");
+
+        // With `--json` the answer carries its own note, escaped as JSON.
+        let printed = cli::unix::open_tab(socket.path(), Some("token"), new_tab(&["make"]), true)
+            .expect("answered");
+        assert_eq!(printed.note, None, "the note was printed twice");
+        let read: Opened = serde_json::from_str(&printed.text).expect("the output is JSON");
+        assert_eq!(read, opened);
+
+        // And a window with nothing to say sends the three fields it always
+        // has, which is what a script written before the note reads.
+        let quiet = serde_json::to_value(Opened {
+            note: None,
+            ..opened
+        })
+        .expect("encodes");
+        assert_eq!(
+            quiet.as_object().map(serde_json::Map::len),
+            Some(3),
+            "{quiet}"
+        );
+    }
+
+    #[test]
     fn outside_a_pane_the_command_line_asks_the_only_window_and_will_not_guess_among_several() {
         let root = TempDir::new();
         let directory = root.sockets();
@@ -2035,7 +2086,7 @@ mod socket {
         fn open_tab(&mut self, token: Option<String>, asked: NewTab) -> Result<Opened, String> {
             self.ask(move |socket| {
                 cli::unix::open_tab(&socket, token.as_deref(), asked, true)
-                    .map(|json| serde_json::from_str(&json).expect("the answer is JSON"))
+                    .map(|printed| serde_json::from_str(&printed.text).expect("the answer is JSON"))
                     .map_err(|error| error.to_string())
             })
         }
@@ -2386,6 +2437,18 @@ mod socket {
             let Some(repository) = repository(&root.0.join("repo")) else {
                 return;
             };
+            // A repository that keeps its `.env` out of git and names it in
+            // `.worktreeinclude`, as Claude Code recommends. `local.toml` is
+            // named too, and ignored only by an edit to the main checkout's
+            // `.gitignore` nobody has committed: a new checkout does not
+            // ignore it, so it is left out, and the answer says so.
+            fs::write(repository.join(".gitignore"), ".env\n").expect("written");
+            fs::write(repository.join(".worktreeinclude"), ".env\nlocal.toml\n").expect("written");
+            git(&repository, &["add", ".gitignore", ".worktreeinclude"]);
+            git(&repository, &["commit", "--quiet", "-m", "ignore .env"]);
+            fs::write(repository.join(".gitignore"), ".env\nlocal.toml\n").expect("written");
+            fs::write(repository.join(".env"), "SECRET=main\n").expect("written");
+            fs::write(repository.join("local.toml"), "mine = true\n").expect("written");
             // The caller works in a checkout of its own, a commit ahead of
             // the main one: its HEAD is the base, and the main checkout's is
             // not.
@@ -2447,10 +2510,40 @@ mod socket {
             "the branch starts at the caller's HEAD"
         );
 
+        // The checkout the menu's creator makes, and not only its branch:
+        // given what the main checkout's `.worktreeinclude` names before the
+        // tab's shell starts, and locked while the window works in it.
+        assert_eq!(
+            fs::read_to_string(checkout.join(".env")).ok().as_deref(),
+            Some("SECRET=main\n"),
+            "the .env .worktreeinclude names was not copied in"
+        );
+        assert!(
+            !checkout.join("local.toml").exists(),
+            "a file the new checkout does not ignore was copied in"
+        );
+        let note = opened.note.clone().unwrap_or_default();
+        assert!(
+            note.contains("local.toml"),
+            "the answer does not say what did not arrive: {note:?}"
+        );
+        let lock = || {
+            crate::git::worktree::list(&repository)
+                .expect("the repository lists")
+                .into_iter()
+                .find(|listed| listed.branch.as_deref() == Some("fix-x"))
+                .and_then(|listed| listed.locked)
+        };
+        assert_eq!(
+            lock(),
+            Some(crate::git::worktree::lock_reason("fix-x")),
+            "the checkout was opened without being locked"
+        );
+
         let worker = served.pane(opened.pane_id);
         assert_eq!(
             served.session(worker, |session| session.working_directory.clone()),
-            Some(checkout),
+            Some(checkout.clone()),
             "the tab's shell starts in the checkout"
         );
         served.read(|workspace, _| {
@@ -2487,6 +2580,77 @@ mod socket {
             assert!(refused.contains(said), "{branch:?}: {refused}");
         }
         assert_eq!(served.tab_count(), tabs, "a refused worktree opened a tab");
+
+        // Held from the moment the tab opened rather than left in the stage
+        // of a creation still waiting for one: the worker's closing is the
+        // last pane in the checkout leaving, and the lock goes with it.
+        assert!(
+            lock().is_some(),
+            "the lock went with the worker still in it"
+        );
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::ClosePane(worker), ctx);
+        });
+        served.pump_until("the lock never went with the worker", |_| lock().is_none());
+        assert!(
+            checkout.is_dir(),
+            "closing the worker took the checkout too"
+        );
+    }
+
+    #[test]
+    fn a_worktree_tabs_connection_outwaits_every_deadline_its_checkout_is_made_under() {
+        let root = TempDir::new();
+        let Some(repository) = repository(&root.0.join("repo")) else {
+            eprintln!("skipped: no git here to make a repository with");
+            return;
+        };
+        // A `.env` for `.worktreeinclude` to name, so that the copy asks git
+        // everything it asks before a file goes: where the main checkout is,
+        // what it ignores, what the patterns match there, and what the new
+        // checkout ignores.
+        fs::write(repository.join(".gitignore"), ".env\n").expect("written");
+        fs::write(repository.join(".worktreeinclude"), ".env\n").expect("written");
+        git(&repository, &["add", ".gitignore", ".worktreeinclude"]);
+        git(&repository, &["commit", "--quiet", "-m", "ignore .env"]);
+        fs::write(repository.join(".env"), "SECRET=main\n").expect("written");
+        let checkout = root.0.join("fix-x");
+
+        // What the window does between being asked for the tab and answering,
+        // here on the test's thread, where every deadline its git runs under
+        // is counted: the listing that names the repository, then the
+        // checkout the menu's creator makes.
+        let held = crate::workspace::HeldLocks::default();
+        let before = crate::git::worktree::deadlines_run_under();
+        crate::git::worktree::list(&repository).expect("the repository lists");
+        let included = held
+            .make_checkout(&repository, &checkout, "fix-x", None)
+            .expect("git made the worktree");
+        let ran_under = crate::git::worktree::deadlines_run_under() - before;
+        let locked = !held.checkouts().is_empty();
+        held.release_all(Duration::from_secs(10));
+        assert!(locked, "the checkout was not locked");
+        assert_eq!(
+            (included.copied, included.problem()),
+            (1, None),
+            "the copy stopped short of the .env"
+        );
+
+        // A connection that gave up any sooner could print `timeout` about a
+        // tab that then opened.
+        let patience = Verb::TabNew(NewTab {
+            command: vec!["make".to_owned()],
+            worktree: Some("fix-x".to_owned()),
+            ..NewTab::default()
+        })
+        .patience()
+        .expect("a tab in a new worktree is given time");
+        assert!(
+            patience > ran_under,
+            "the connection gives up after {}s on a checkout git may take {}s to make",
+            patience.as_secs(),
+            ran_under.as_secs()
+        );
     }
 
     #[test]
