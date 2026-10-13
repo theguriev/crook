@@ -294,12 +294,14 @@ Twenty features, and the page that configures them:
   application menu or with a plain `crook`, and the second window opens fresh, with a line
   under its header that says another window keeps your tabs. It does not come back with a copy
   of the first window's tabs, which would offer to resume agents still running there, and
-  nothing it does is written over them, so its own tabs are not there at the next launch. Once
-  the first window closes, the next one you open keeps the tabs. A lock on `session.lock`
-  beside the session file says which window that is, and the system lets go of it when that
-  window's process ends, crash included. **New window**, `cmd-n` (`ctrl-shift-n` off macOS),
-  opens another window, fresh, in the focused pane's directory, as `--working-directory`
-  would.
+  nothing it does is written over them, so its own tabs are not there at the next launch. A
+  window does not see settings changed in another one, so turning **Bring the tabs back** on in
+  the second window does not turn it on in the first: turn it on there. If the first window has
+  closed by then, the second keeps the tabs in its place. Once the first window closes, the next
+  one you open keeps the tabs. A lock on `session.lock` beside the session file says which
+  window that is, and the system lets go of it when that window's process ends, crash included.
+  **New window**, `cmd-n` (`ctrl-shift-n` off macOS), opens another window, fresh, in the
+  focused pane's directory, as `--working-directory` would.
   **Closing asks first when it would end something still working.** The window's close — the
   desktop's close button, `alt-f4`, the palette's Close the window — a row's ×, a group's and
   `cmd-w` (`ctrl-shift-w`) on a pane all end whatever runs in the panes they take, so while an
