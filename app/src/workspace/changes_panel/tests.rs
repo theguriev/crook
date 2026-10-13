@@ -246,6 +246,65 @@ fn another_tab_starts_over_before_its_checkout_is_found() {
     assert_eq!(state.tab(), other);
 }
 
+/// What the column says while it looks for the checkout a pane is in.
+const LOOKING: &str = "Reading the repository…";
+/// What it says for a pane that has not said where it is.
+const NOWHERE: &str = "This tab has not said where it is working yet.";
+
+#[test]
+fn opening_on_a_pane_that_has_said_where_it_is_says_the_column_is_looking() {
+    // The walk up from a mount whose server has gone does not come back,
+    // and what the column says meanwhile is what it says for good.
+    let tab = Some(TabId::next());
+    let here = PathBuf::from("/mnt/gone/work");
+
+    let mut state = ChangesPanelState::default();
+    state.open(tab, Some(here.clone()), None);
+    assert_eq!(state.rows(), [Row::Message(LOOKING.to_owned())]);
+    assert!(state.is_reading());
+
+    // And opened again, after closing forgot where the pane was.
+    state.close();
+    state.open(tab, Some(here), None);
+    assert_eq!(state.rows(), [Row::Message(LOOKING.to_owned())]);
+}
+
+#[test]
+fn a_tab_that_has_not_said_where_it_is_says_so_after_one_that_had() {
+    let mut state = showing(overview(&["a.rs"]));
+
+    assert_eq!(state.follow(Some(TabId::next()), None), None);
+    assert_eq!(
+        state.rows(),
+        [Row::Message(NOWHERE.to_owned())],
+        "the column says it is reading with nothing to read"
+    );
+    assert!(!state.is_reading());
+}
+
+#[test]
+fn a_pane_saying_where_it_is_for_the_first_time_is_looked_for_on_screen() {
+    let tab = Some(TabId::next());
+    let mut state = ChangesPanelState::default();
+    state.open(tab, None, None);
+    assert_eq!(state.rows(), [Row::Message(NOWHERE.to_owned())]);
+
+    let here = PathBuf::from("/work/repo");
+    assert_eq!(state.follow(tab, Some(here.clone())), Some(here.clone()));
+    assert_eq!(
+        state.rows(),
+        [Row::Message(LOOKING.to_owned())],
+        "the column goes on saying the pane has not said where it is"
+    );
+
+    // The same pane saying nothing again, before the answer: it says so,
+    // and the answer about where it was moves nothing.
+    state.follow(tab, None);
+    assert_eq!(state.rows(), [Row::Message(NOWHERE.to_owned())]);
+    assert!(state.found(&here, here.clone()).is_none());
+    assert!(state.target.is_none());
+}
+
 #[test]
 fn an_answer_about_a_directory_the_column_has_left_is_dropped() {
     let mut state = ChangesPanelState::default();

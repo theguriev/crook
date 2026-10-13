@@ -511,6 +511,11 @@ impl ChangesPanelState {
             return None;
         };
         self.directory = Some(directory.clone());
+        if self.target.is_none() {
+            // Nothing is showing, so what the column says is about the
+            // directory: a pane that had said nothing has now.
+            self.relayout();
+        }
         self.look_for(directory)
     }
 
@@ -537,16 +542,17 @@ impl ChangesPanelState {
         directory: Option<PathBuf>,
         target: PathBuf,
     ) -> Option<u64> {
-        let epoch = self.retarget(tab, Some(target));
         self.directory = directory;
-        epoch
+        self.retarget(tab, Some(target))
     }
 
     /// Shows nothing for `tab` until the checkout `directory` is in is
     /// found, and answers what to look for.
     fn start_over(&mut self, tab: Option<TabId>, directory: Option<PathBuf>) -> Option<PathBuf> {
-        self.retarget(tab, None);
+        // Before the rows are built, which say whether the pane has said
+        // where it is.
         self.directory = directory.clone();
+        self.retarget(tab, None);
         self.look_for(directory?)
     }
 

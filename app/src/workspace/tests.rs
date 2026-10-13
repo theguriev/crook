@@ -31062,6 +31062,20 @@ mod changes_column {
             "the column still shows the tab that was left"
         );
 
+        // Closed and opened again on that tab while the walk is stuck: the
+        // column says it is looking, and not that the tab has not said where
+        // it works, for as long as the mount holds the walk.
+        harness.run_command("crook/changes/toggle");
+        harness.run_command("crook/changes/toggle");
+        not_while_drawing("opening the column again");
+        let lines = column_lines(&harness.frame());
+        assert!(
+            lines
+                .iter()
+                .any(|(_, line)| line.contains("Reading the repository")),
+            "the column does not say it is looking: {lines:?}"
+        );
+
         // Away and back while it is stuck. The column follows the first tab
         // at once, and a second visit waits for the walk already on its way
         // rather than starting another: every walk into the dead mount is a
