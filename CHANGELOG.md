@@ -5,6 +5,39 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.22
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.21...v0.1.22)
+
+### Fixes
+
+- **control:** Answer a wait only once the finished block is published ([#472](https://github.com/theguriev/crook/pull/472))
+- **blocks:** Re-anchor an open block at its prompt after a resize wraps it ([#475](https://github.com/theguriev/crook/pull/475))
+- **terminal:** Keep the view inside the history when a scroll region scrolls while scrolled up ([#474](https://github.com/theguriev/crook/pull/474))
+- **terminal:** Write to the pty from a thread of its own, so a child that stops reading cannot freeze the window ([#476](https://github.com/theguriev/crook/pull/476))
+- **terminal:** Pace writes to a macOS pty so a large paste reaches the shell whole ([#484](https://github.com/theguriev/crook/pull/484))
+- **terminal:** Answer XTVERSION, so Claude Code draws its frames whole ([#480](https://github.com/theguriev/crook/pull/480))
+- **control:** Lock a tab.new worktree and give it what .worktreeinclude names, as the menu does ([#478](https://github.com/theguriev/crook/pull/478))
+- **worktrees:** Count the work a checkout's submodules hold, and refuse Finish over them before any tab closes ([#481](https://github.com/theguriev/crook/pull/481))
+- **worktrees:** Leave standing a checkout a pane entered after the sweep or the × asked ([#477](https://github.com/theguriev/crook/pull/477))
+- **agent:** Print hooks that do nothing outside Crook and never fail the agent ([#479](https://github.com/theguriev/crook/pull/479))
+- **agent:** Hear the title's status in pane wait and events, and take its running back when the agent stops ([#483](https://github.com/theguriev/crook/pull/483))
+- **worktrees:** Stop calling a branch reset back onto its base merged ([#482](https://github.com/theguriev/crook/pull/482))
+- **git:** Tell a checkout deleted under a read from a missing git ([#485](https://github.com/theguriev/crook/pull/485))
+
+### Tests
+
+- Fix the three tests main is red on for the wrong reason ([#471](https://github.com/theguriev/crook/pull/471))
+
+### CI
+
+- **release:** Refuse to tag a commit Crook CI has not passed ([#473](https://github.com/theguriev/crook/pull/473))
+- Run Crook CI by itself on pull requests and on pushes to main ([#470](https://github.com/theguriev/crook/pull/470))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.21
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.20...v0.1.21)
