@@ -43,6 +43,22 @@
 //! left here is the consequence: a snapshot measured for the grid the last
 //! frame had is refreshed during layout rather than painted into the new box.
 //!
+//! # Pictures
+//!
+//! A picture a program printed — iTerm2's inline images, see
+//! [`crook_terminal::image`] — is drawn over the rows it took here exactly as
+//! it is on the list, by the same [`paint_images`]. A good share of them land
+//! here rather than there: an `ssh` session with no shell integration is one
+//! open block from its first byte, and so is anything whose output has run past
+//! a screenful, a REPL or a training run printing its plot. The open block's
+//! pictures arrive at viewport rows, numbered the way the snapshot's rows are,
+//! so a grid scrolled back into its history finds them on the rows their text
+//! went to without any arithmetic of its own. Nor does it check them: once the
+//! history is full the emulator can no longer say which rows a picture is
+//! over, and hands over none rather than a row the text has moved on from —
+//! the bottom one, often, where the prompt is. The alternate screen has none
+//! to draw either: the emulator does not place a picture there.
+//!
 //! # Selecting the output
 //!
 //! The grid is the other selectable surface in a pane, and it is selected with
@@ -76,8 +92,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crook_terminal::{
-    BlockId, CellFlags, CellSide, Cursor, CursorShape, MouseEventKind, Rgb, RowCombining, Rows,
-    SelectionKind, Snapshot, SnapshotCell,
+    BlockId, CellFlags, CellSide, Cursor, CursorShape, ImagePlacement, MouseEventKind, Rgb,
+    RowCombining, Rows, SelectionKind, Snapshot, SnapshotCell,
 };
 // Both crates have a `MouseButton` and they are different types: one is what a
 // window reported, the other is what a terminal protocol names. Keeping the
@@ -90,7 +106,7 @@ use crookui_core::element::{Element, SizeConstraint};
 use crookui_core::event::{DispatchedEvent, Event, Modifiers, MouseButton};
 use crookui_core::geometry::{Color, Point, RectF, Vector2F, vec2f};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
-use crookui_core::scene::Scene;
+use crookui_core::scene::{ClipBounds, Scene};
 
 use crate::browser;
 use crate::clipboard::Clipboard;
@@ -989,11 +1005,84 @@ fn paint_grid(
         );
     }
 
+    // Over the rows they took, which the emulator left blank when it moved the
+    // cursor past them. Cut off at the last row drawn rather than at the box,
+    // whose bottom is a fraction of a row nothing is drawn in.
+    paint_images(
+        &snapshot.live_block.images,
+        origin,
+        RectF::new(
+            origin,
+            vec2f(columns as f32 * metrics.width, rows as f32 * metrics.height),
+        ),
+        metrics,
+        scene,
+    );
+
     if let (Some(cursor), Some(shape)) = (snapshot.cursor.as_ref(), shape)
         && cursor.row < rows
         && cursor.column < columns
     {
         paint_cursor(cursor, shape, origin, metrics, scene);
+    }
+}
+
+/// Draws the pictures a program printed over the cells each one covers —
+/// fitted inside them with its shape kept, unless the program asked for it
+/// stretched.
+///
+/// Both surfaces draw them with this: a picture is on the list while its
+/// block is, and on the grid while the open block has run past the top of the
+/// screen. `origin` is where the top-left cell of the placements' numbering
+/// is drawn, and `within` is the rows they may cover: a picture is cut off at
+/// its edge rather than hanging over whatever is drawn beyond it.
+///
+/// A picture with no part inside `within` is passed over before it is
+/// decoded, which is what keeps the pictures of a long session from being
+/// decoded to draw the few on screen — see [`crate::inline_image`].
+pub(super) fn paint_images(
+    images: &[ImagePlacement],
+    origin: Vector2F,
+    within: RectF,
+    metrics: CellMetrics,
+    scene: &mut Scene,
+) {
+    let mut started = false;
+    for placement in images {
+        let cells = RectF::new(
+            vec2f(
+                origin.x() + placement.column as f32 * metrics.width,
+                origin.y() + placement.row as f32 * metrics.height,
+            ),
+            vec2f(
+                placement.columns as f32 * metrics.width,
+                placement.rows as f32 * metrics.height,
+            ),
+        );
+        if cells.intersection(within).is_none() {
+            continue;
+        }
+        let Some(bitmap) = crate::inline_image::bitmap(&placement.image) else {
+            continue;
+        };
+        let drawn = if placement.stretch {
+            cells.size()
+        } else {
+            let (width, height) = bitmap.size();
+            let scale = (cells.width() / width as f32).min(cells.height() / height as f32);
+            vec2f(width as f32 * scale, height as f32 * scale)
+        };
+        // A layer of their own, because a layer draws its pictures under its
+        // glyphs and these go over the rows' — and only once one is drawn, so
+        // a screen with none in view costs no layer.
+        if !started {
+            scene.start_layer(ClipBounds::BoundedByActiveLayerAnd(within));
+            started = true;
+        }
+        scene.draw_image(bitmap, RectF::new(cells.origin(), drawn));
+    }
+    if started {
+        scene.stop_layer();
     }
 }
 

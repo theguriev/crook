@@ -255,6 +255,10 @@ struct OscWatcher {
     /// Whether the chunk erased the scrollback — `CSI 3 J`, the third thing
     /// `clear` prints.
     history_cleared: bool,
+    /// Whether the chunk reset the terminal — `ESC c`, the first thing
+    /// `reset` prints — which empties the shell's history along with
+    /// everything else, from either screen, and leaves the alternate one.
+    reset: bool,
     /// Whether the program asked which terminal this is, with XTVERSION —
     /// `CSI > q`, which is where the watcher stops.
     version_asked: bool,
@@ -269,6 +273,12 @@ struct OscWatcher {
 }
 
 impl Perform for OscWatcher {
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        if intermediates.is_empty() && byte == b'c' {
+            self.reset = true;
+        }
+    }
+
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         let first = params.iter().next();
         match (action, intermediates) {
@@ -600,9 +610,12 @@ impl Emulator {
             // Before the mark, which the piece ends on and so comes after
             // anything else in it. On the alternate screen the erase is the
             // full-screen program's own and touches no history of the shell's.
-            if std::mem::take(&mut self.osc_watcher.history_cleared)
-                && !self.term.mode().contains(TermMode::ALT_SCREEN)
-            {
+            // A reset empties the shell's whichever screen the piece ends on:
+            // under a program started after it, the block is found again once
+            // the shell's screen is back, as it is after a reflow there.
+            let erased = std::mem::take(&mut self.osc_watcher.history_cleared)
+                && !self.term.mode().contains(TermMode::ALT_SCREEN);
+            if std::mem::take(&mut self.osc_watcher.reset) || erased {
                 self.blocks.history_cleared(&self.term);
             }
             // The piece ends on the query, and `Term` has queued the answers
@@ -634,6 +647,10 @@ impl Emulator {
             if let Some(bytes) = self.osc_watcher.long_title.take() {
                 exited = self.cut_grid_title(bytes).or(exited);
             }
+            // After everything in the piece that scrolled, the update a long
+            // title ended included, and before the mark, which may harvest
+            // the pictures at the rows their anchors name.
+            self.settle_pictures();
             if let Some(mark) = self.osc_watcher.mark.take() {
                 // A directory too, and for the same reason: bash and zsh print
                 // `D`, the directory and the next `A` back to back, and the
@@ -729,6 +746,16 @@ impl Emulator {
             moves.extend_from_slice(format!("\x1b[{}G", column + columns + 1).as_bytes());
         }
         self.parser.advance(&mut self.term, &moves);
+        // The rows it took may be the ones that filled the history, and the
+        // picture is then already past where its anchor can follow it.
+        self.settle_pictures();
+    }
+
+    /// Forgets the open block's pictures if the history is full: see
+    /// [`BlockTracker::settle_pictures`].
+    fn settle_pictures(&mut self) {
+        self.blocks
+            .settle_pictures(&self.term, self.scrollback_lines);
     }
 
     /// Feeds one item of a stream that another emulator is also being fed,
@@ -861,6 +888,7 @@ impl Emulator {
     /// [`crate::Terminal::resize`] does both.
     pub fn resize(&mut self, size: TerminalSize) {
         let columns_changed = size.columns != self.size.columns;
+        let shortened = size.rows < self.size.rows;
         let geometry_changed = columns_changed || size.rows != self.size.rows;
         self.size = size;
         if !geometry_changed {
@@ -876,6 +904,13 @@ impl Emulator {
         if columns_changed {
             self.blocks.reflowed(&self.term);
         }
+        // A shorter screen pushes its top rows into the history, and into a
+        // full one without counting them: the shell's as well under a
+        // full-screen program, where its history cannot be read.
+        if shortened {
+            self.blocks.shortened(&self.term);
+        }
+        self.settle_pictures();
         self.dirty = true;
         self.drain();
     }
@@ -1072,6 +1107,7 @@ impl Emulator {
         // any other.
         let view = self.view();
         self.parser.stop_sync(&mut self.term);
+        self.settle_pictures();
         self.keep_view(view);
         self.dirty = true;
         self.drain();

@@ -1359,9 +1359,9 @@ impl BlockList {
         );
     }
 
-    /// Draws the pictures an item's rows hold over those rows, each in the
-    /// cells it covers — fitted inside them with its shape kept, unless the
-    /// program asked for it stretched.
+    /// Draws the pictures an item's rows hold over those rows, by the same
+    /// [`terminal_element::paint_images`] the grid draws the open block's
+    /// with once it has run past the top of the screen.
     ///
     /// `at.last_visible` is how many rows the item has, and a picture is cut
     /// off at the last of them rather than hanging over the next item; `skip`
@@ -1374,9 +1374,6 @@ impl BlockList {
         at: RowBox,
         ctx: &mut PaintContext,
     ) {
-        if images.is_empty() {
-            return;
-        }
         let metrics = self.font.metrics();
         let size = self.size.unwrap_or_default();
         let rows_box = RectF::new(
@@ -1389,42 +1386,18 @@ impl BlockList {
         let view = self.origin.map_or(RectF::default(), |origin| {
             RectF::new(vec2f(origin.x(), origin.y()), size)
         });
-        let mut started = false;
-        for placement in images {
-            let cells = RectF::new(
-                vec2f(
-                    at.left + placement.column as f32 * metrics.width,
-                    at.rows_top + (placement.row - skip) as f32 * metrics.height,
-                ),
-                vec2f(
-                    placement.columns as f32 * metrics.width,
-                    placement.rows as f32 * metrics.height,
-                ),
-            );
-            if cells.intersection(view).is_none() {
-                continue;
-            }
-            let Some(bitmap) = crate::inline_image::bitmap(&placement.image) else {
-                continue;
-            };
-            let drawn = if placement.stretch {
-                cells.size()
-            } else {
-                let (width, height) = bitmap.size();
-                let scale = (cells.width() / width as f32).min(cells.height() / height as f32);
-                vec2f(width as f32 * scale, height as f32 * scale)
-            };
-            if !started {
-                ctx.scene
-                    .start_layer(ClipBounds::BoundedByActiveLayerAnd(rows_box));
-                started = true;
-            }
-            ctx.scene
-                .draw_image(bitmap, RectF::new(cells.origin(), drawn));
-        }
-        if started {
-            ctx.scene.stop_layer();
-        }
+        // The part of the item's rows that is on screen, so that a picture
+        // scrolled out of the list is not decoded only to be clipped away.
+        let Some(within) = rows_box.intersection(view) else {
+            return;
+        };
+        terminal_element::paint_images(
+            images,
+            vec2f(at.left, at.rows_top - skip as f32 * metrics.height),
+            within,
+            metrics,
+            ctx.scene,
+        );
     }
 
     /// What an item's chrome says about it.

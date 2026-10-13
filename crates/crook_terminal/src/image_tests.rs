@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use base64::Engine as _;
 
 use super::*;
@@ -184,6 +186,214 @@ fn clear_and_the_alternate_screen_take_no_pictures() {
     emulator.advance(&osc("", &png(10, 10)));
     emulator.advance(b"\x1b[?1049l");
     assert!(emulator.snapshot().live_block.images.is_empty());
+}
+
+/// Twenty columns by six rows, keeping `scrollback` lines of history, with
+/// `lines` of output, then `ABOVE` and a picture two rows tall — and no shell
+/// integration, so all of it is the one open block.
+fn picture_printed_after(lines: usize, scrollback: usize) -> Emulator {
+    let mut emulator = Emulator::new(
+        TerminalSize::new(20, 6).with_cell_size(10, 20),
+        scrollback,
+        Palette::default(),
+    );
+    for line in 0..lines {
+        emulator.advance(format!("log {line}\r\n").as_bytes());
+    }
+    emulator.advance(b"ABOVE\r\n");
+    emulator.advance(&osc("width=4;height=2;", &png(8, 8)));
+    emulator
+}
+
+/// [`picture_printed_after`], and then `BELOW`.
+fn picture_after(lines: usize, scrollback: usize) -> Emulator {
+    let mut emulator = picture_printed_after(lines, scrollback);
+    emulator.advance(b"\r\nBELOW\r\n");
+    emulator
+}
+
+/// The viewport row whose text starts with `prefix`.
+fn row_saying(emulator: &mut Emulator, prefix: &str) -> i32 {
+    let text = emulator.snapshot().text();
+    let row = text.lines().position(|line| line.starts_with(prefix));
+    row.unwrap_or_else(|| panic!("no row says {prefix:?}:\n{text}")) as i32
+}
+
+#[test]
+fn a_picture_follows_its_rows_while_the_history_has_room() {
+    // What the anchor's arithmetic is exact for, so that the tests after
+    // this one are seen to be about the history being full.
+    let mut emulator = picture_after(10, 100);
+    let row = row_saying(&mut emulator, "ABOVE") + 1;
+    let images = &emulator.snapshot().live_block.images;
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].row, row);
+
+    emulator.advance(b"more\r\n");
+    let row = row_saying(&mut emulator, "ABOVE") + 1;
+    assert_eq!(emulator.snapshot().live_block.images[0].row, row);
+}
+
+#[test]
+fn a_picture_printed_into_a_full_history_is_not_placed() {
+    // Every line scrolled into a full history evicts one and the history
+    // does not grow, so an anchor stays on the screen row it was taken on
+    // while the text moves on — and this one, taken on the bottom row, would
+    // put the picture over the prompt and whatever is typed at it. Its own
+    // second row is the first line to scroll by uncounted.
+    let mut emulator = picture_printed_after(30, 10);
+    let images = &emulator.snapshot().live_block.images;
+    assert!(images.is_empty(), "{images:?}");
+
+    emulator.advance(b"\r\nBELOW\r\n");
+    let images = &emulator.snapshot().live_block.images;
+    assert!(images.is_empty(), "{images:?}");
+}
+
+#[test]
+fn a_picture_whose_history_fills_after_it_is_no_longer_placed() {
+    let mut emulator = picture_after(2, 10);
+    assert_eq!(emulator.snapshot().live_block.images.len(), 1);
+
+    for line in 0..20 {
+        emulator.advance(format!("more {line}\r\n").as_bytes());
+    }
+    let images = &emulator.snapshot().live_block.images;
+    assert!(images.is_empty(), "{images:?}");
+}
+
+#[test]
+fn a_shorter_pane_that_fills_the_history_takes_its_pictures() {
+    // One line of history to start with, of the three it may hold: four rows
+    // fewer push four lines into it, and the two that do not fit evict two
+    // that are not counted.
+    let mut emulator = picture_after(2, 3);
+    assert_eq!(emulator.history_len(), 1);
+    assert_eq!(emulator.snapshot().live_block.images.len(), 1);
+
+    emulator.resize(TerminalSize::new(20, 2).with_cell_size(10, 20));
+    assert_eq!(emulator.history_len(), 3);
+    let images = &emulator.snapshot().live_block.images;
+    assert!(images.is_empty(), "{images:?}");
+}
+
+#[test]
+fn a_shorter_pane_under_a_full_screen_program_takes_its_pictures() {
+    // `Term` resizes the shell's grid under vim too, where nothing here can
+    // read its history: four rows fewer push four lines into it and evict two
+    // uncounted, and four rows more pull four back out, so by the time the
+    // shell's screen is back its history is under its length again and the
+    // anchor is two rows off, on `BELOW`.
+    let mut emulator = picture_after(9, 10);
+    assert_eq!(emulator.history_len(), 8);
+    assert_eq!(emulator.snapshot().live_block.images.len(), 1);
+
+    emulator.advance(b"\x1b[?1049h");
+    emulator.resize(TerminalSize::new(20, 2).with_cell_size(10, 20));
+    emulator.resize(TerminalSize::new(20, 6).with_cell_size(10, 20));
+    emulator.advance(b"\x1b[?1049l");
+    assert_eq!(emulator.history_len(), 6);
+    let images = &emulator.snapshot().live_block.images;
+    assert!(images.is_empty(), "{images:?}");
+}
+
+#[test]
+fn a_taller_pane_under_a_full_screen_program_keeps_its_pictures() {
+    // The lines it pulls back out of the history are counted, full or not.
+    let mut emulator = picture_after(9, 10);
+    emulator.advance(b"\x1b[?1049h");
+    emulator.resize(TerminalSize::new(20, 8).with_cell_size(10, 20));
+    emulator.advance(b"\x1b[?1049l");
+
+    let row = row_saying(&mut emulator, "ABOVE") + 1;
+    let images = &emulator.snapshot().live_block.images;
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].row, row);
+}
+
+/// What `reset` prints, from ncurses 6.6 with `TERM=xterm-256color`: a full
+/// reset (`ESC c`) first, which empties the history along with the screen.
+const RESET: &[u8] = b"\x1bc\x1b]104\x07\x1b[!p\x1b[?3;4l\x1b[4l\x1b>\x1b[?69l\r";
+
+#[test]
+fn a_reset_takes_the_pictures_with_the_history() {
+    // The anchor is measured against a history the reset emptied, so it
+    // names a row far below the screen, and output growing the history
+    // again brings it back up, onto whatever is on that row by then.
+    let mut emulator = picture_after(50, 10_000);
+    for line in 0..50 {
+        emulator.advance(format!("log {line}\r\n").as_bytes());
+    }
+    emulator.advance(RESET);
+    emulator.advance(b"$ ");
+    for line in 0..52 {
+        emulator.advance(format!("new {line}\r\n").as_bytes());
+    }
+    emulator.advance(b"$ ");
+
+    let images = &emulator.snapshot().live_block.images;
+    assert!(images.is_empty(), "{images:?}");
+}
+
+#[test]
+fn a_reset_read_with_a_full_screen_program_starting_takes_the_pictures() {
+    // The shell's history is gone whichever screen the read ends on.
+    let mut emulator = picture_after(50, 10_000);
+    let mut read = RESET.to_vec();
+    read.extend_from_slice(b"\x1b[?1049h");
+    emulator.advance(&read);
+    emulator.advance(b"\x1b[?1049l$ ");
+    for line in 0..52 {
+        emulator.advance(format!("new {line}\r\n").as_bytes());
+    }
+
+    let images = &emulator.snapshot().live_block.images;
+    assert!(images.is_empty(), "{images:?}");
+}
+
+#[test]
+fn a_picture_whose_history_fills_in_an_expired_update_is_no_longer_placed() {
+    // The update's lines reach the grid when it expires, which is a snapshot
+    // with no output after it to settle against.
+    let mut emulator = picture_after(2, 10);
+    assert_eq!(emulator.snapshot().live_block.images.len(), 1);
+
+    let mut update = b"\x1b[?2026h".to_vec();
+    for line in 0..20 {
+        update.extend_from_slice(format!("more {line}\r\n").as_bytes());
+    }
+    emulator.advance(&update);
+    std::thread::sleep(Duration::from_millis(200));
+    let images = &emulator.snapshot().live_block.images;
+    assert!(images.is_empty(), "{images:?}");
+}
+
+#[test]
+fn a_block_longer_than_the_history_keeps_no_picture() {
+    // With shell integration the history is dropped at every block, and
+    // fills only under one command that prints more than all of it. The
+    // picture is placed while the history has room, and the lines that fill
+    // it arrive in the one read with the `D` that harvests the block: only a
+    // look at the history before the mark is applied stands between the two.
+    let mut emulator = Emulator::new(
+        TerminalSize::new(20, 6).with_cell_size(10, 20),
+        10,
+        Palette::default(),
+    );
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07train\r\n\x1b]133;C\x07");
+    emulator.advance(b"log\r\n");
+    emulator.advance(&osc("width=4;height=2;", &png(8, 8)));
+    assert_eq!(emulator.snapshot().live_block.images.len(), 1);
+
+    let mut read = b"\r\n".to_vec();
+    for line in 0..30 {
+        read.extend_from_slice(format!("log {line}\r\n").as_bytes());
+    }
+    read.extend_from_slice(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    emulator.advance(&read);
+
+    let block = &emulator.blocks()[0];
+    assert!(block.images.is_empty(), "{:?}", block.images);
 }
 
 fn emulator_with_cells() -> Emulator {

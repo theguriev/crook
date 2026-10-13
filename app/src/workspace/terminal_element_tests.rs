@@ -4,7 +4,7 @@
 //! id and a cell is half the font size — so an assertion here is about the grid
 //! rather than about which fonts the machine running it happens to have.
 
-use crook_terminal::{BlockId, CellCombining, LiveBlock};
+use crook_terminal::{BlockId, CellCombining, Emulator, LiveBlock, Palette, TerminalSize};
 use crookui_core::scene::{ClipBounds, Fill, Glyph, Rect};
 
 use super::*;
@@ -624,4 +624,182 @@ fn a_folded_url_on_the_grid_is_one_link_from_either_row() {
         element.link_at(at(0, 5), Modifiers::default()).is_none(),
         "without the chord key the pointer is selecting, not following"
     );
+}
+
+/// A session the pane draws as one grid, with a picture in it: no shell
+/// integration, as over `ssh`, and more than a screenful of output before
+/// `imgcat` printed, so the one open block starts above the top of the screen.
+///
+/// Six rows of twenty columns, with cells of 10×20 pixels as far as the
+/// emulator is told, so the picture's `width=4;height=2` is four columns and
+/// two rows. `ABOVE` is the line printed just before it.
+fn grid_with_a_picture(args: &str) -> Emulator {
+    grid_with_a_picture_after(10, 100, args)
+}
+
+/// [`grid_with_a_picture`], after `lines` of output into a history that
+/// keeps `scrollback` of them.
+fn grid_with_a_picture_after(lines: usize, scrollback: usize, args: &str) -> Emulator {
+    use base64::Engine as _;
+
+    let mut emulator = Emulator::new(
+        TerminalSize::new(20, 6).with_cell_size(10, 20),
+        scrollback,
+        Palette::default(),
+    );
+    for line in 0..lines {
+        emulator.advance(format!("log {line}\r\n").as_bytes());
+    }
+    emulator.advance(b"ABOVE\r\n");
+    let png = crate::picture::tests::png_of(8, 8, png::ColorType::Rgba, &[200, 30, 30, 255]);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+    emulator.advance(format!("\x1b]1337;File={args}inline=1:{encoded}\x07").as_bytes());
+    emulator.advance(b"\r\nBELOW");
+    emulator
+}
+
+/// The viewport row whose text starts with `prefix`.
+fn row_saying(snapshot: &Snapshot, prefix: &str) -> usize {
+    snapshot
+        .text()
+        .lines()
+        .position(|line| line.starts_with(prefix))
+        .unwrap_or_else(|| panic!("no row says {prefix:?}:\n{}", snapshot.text()))
+}
+
+/// Every picture a frame draws, with the clip of the layer it is drawn in.
+fn pictures(scene: &Scene) -> Vec<(RectF, Option<RectF>)> {
+    scene
+        .layers()
+        .flat_map(|layer| {
+            layer
+                .images
+                .iter()
+                .map(|image| (image.bounds, layer.clip_bounds))
+        })
+        .collect()
+}
+
+#[test]
+fn a_picture_printed_into_the_grid_is_drawn_over_the_rows_it_took() {
+    // `imgcat loss.png` after a screenful of training logs: the emulator kept
+    // the rows for it, and a grid that drew nothing over them left a blank
+    // hole where the plot should be.
+    let mut emulator = grid_with_a_picture("width=4;height=2;");
+    let snapshot = emulator.snapshot();
+    assert_eq!(
+        pane_surface::of(&snapshot, std::time::Instant::now()).surface,
+        pane_surface::Surface::Grid,
+        "the open block has run past the top of the screen, so the pane is a grid"
+    );
+
+    let metrics = font().metrics();
+    let row = row_saying(&snapshot, "ABOVE") + 1;
+    let drawn = pictures(&painted(&snapshot));
+    assert_eq!(drawn.len(), 1, "the picture is drawn, once: {drawn:?}");
+    let (bounds, clip) = drawn[0];
+    assert_eq!(
+        bounds.origin(),
+        vec2f(0., row as f32 * metrics.height),
+        "on the row under the line printed before it, at its first column"
+    );
+    // A square, fitted inside four columns by two rows with its shape kept.
+    let side = (4. * metrics.width).min(2. * metrics.height);
+    assert_eq!(bounds.size(), vec2f(side, side));
+    assert_eq!(
+        clip,
+        Some(RectF::new(
+            Vector2F::zero(),
+            vec2f(20. * metrics.width, 6. * metrics.height)
+        )),
+        "cut off at the grid's rows, so a picture half off the screen does not hang over the pane"
+    );
+}
+
+#[test]
+fn a_picture_asked_to_be_stretched_fills_its_cells_on_the_grid() {
+    let mut emulator = grid_with_a_picture("width=4;height=2;preserveAspectRatio=0;");
+    let snapshot = emulator.snapshot();
+
+    let metrics = font().metrics();
+    let drawn = pictures(&painted(&snapshot));
+    assert_eq!(drawn.len(), 1, "{drawn:?}");
+    assert_eq!(
+        drawn[0].0.size(),
+        vec2f(4. * metrics.width, 2. * metrics.height)
+    );
+}
+
+#[test]
+fn a_picture_on_the_grid_moves_with_its_rows_when_the_scrollback_is_scrolled() {
+    let mut emulator = grid_with_a_picture("width=4;height=2;");
+    let metrics = font().metrics();
+    let live = row_saying(&emulator.snapshot(), "ABOVE") + 1;
+
+    // Two lines back into the history: everything moves down two rows, and
+    // the picture's second row is now under the bottom of the screen.
+    emulator.scroll_lines(2);
+    let snapshot = emulator.snapshot();
+    let row = row_saying(&snapshot, "ABOVE") + 1;
+    assert_eq!(row, live + 2, "the viewport moved");
+    let drawn = pictures(&painted(&snapshot));
+    assert_eq!(drawn.len(), 1, "{drawn:?}");
+    assert_eq!(
+        drawn[0].0.origin().y(),
+        row as f32 * metrics.height,
+        "the picture stayed under the line printed before it"
+    );
+
+    // Far enough back that it is below the screen altogether.
+    emulator.scroll_lines(10);
+    let snapshot = emulator.snapshot();
+    assert!(!snapshot.text().contains("ABOVE"), "{}", snapshot.text());
+    assert!(
+        pictures(&painted(&snapshot)).is_empty(),
+        "a picture scrolled out of the grid is not drawn"
+    );
+}
+
+#[test]
+fn a_full_screen_program_does_not_show_the_pictures_of_the_screen_under_it() {
+    // The alternate screen is the program's, cell for cell, and the picture
+    // printed on the primary screen before it started is not on it.
+    let mut emulator = grid_with_a_picture("width=4;height=2;");
+    emulator.advance(b"\x1b[?1049h");
+    let snapshot = emulator.snapshot();
+    assert!(snapshot.alt_screen);
+    assert!(pictures(&painted(&snapshot)).is_empty());
+
+    emulator.advance(b"\x1b[?1049l");
+    assert_eq!(
+        pictures(&painted(&emulator.snapshot())).len(),
+        1,
+        "and it is back when the program leaves"
+    );
+}
+
+#[test]
+fn a_picture_past_a_full_scrollback_is_not_drawn_over_the_rows_after_it() {
+    // A session longer than its scrollback — ten thousand lines in a pane,
+    // ten here — has a history that no longer grows, and nothing then says
+    // which rows a picture printed into it is over: told where the cursor
+    // was, the grid would draw it over `BELOW` and, at the bottom of the
+    // screen, over the prompt and what is typed at it. It leaves the blank
+    // rows it took instead.
+    let mut emulator = grid_with_a_picture_after(30, 10, "width=4;height=2;");
+    let snapshot = emulator.snapshot();
+    assert_eq!(
+        pane_surface::of(&snapshot, std::time::Instant::now()).surface,
+        pane_surface::Surface::Grid
+    );
+    let below = row_saying(&snapshot, "BELOW");
+    let drawn = pictures(&painted(&snapshot));
+    let metrics = font().metrics();
+    assert!(
+        drawn
+            .iter()
+            .all(|(bounds, _)| bounds.max_y() <= below as f32 * metrics.height),
+        "nothing over BELOW, on row {below}: {drawn:?}"
+    );
+    assert!(drawn.is_empty(), "{drawn:?}");
 }
