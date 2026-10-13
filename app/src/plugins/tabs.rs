@@ -740,8 +740,10 @@ impl Plugin for Tabs {
                     workspace.handle_action(&WorkspaceAction::ShowSection(None), ctx);
                     workspace.handle_action(&TabMenuAction::Open { tab, pane }.into(), ctx);
                 }
-                // Refused where the panel is not drawing that row, and then
-                // there is nothing to type in.
+                // Refused where the panel is not drawing that row — the
+                // column hidden, the tab folded into its group, the row
+                // filtered out by the search — and then there is nothing to
+                // type in. See `Workspace::panel_draws_row`.
                 let Some(menu) = open_menu(workspace) else {
                     return;
                 };

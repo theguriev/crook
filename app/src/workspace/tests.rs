@@ -6338,6 +6338,88 @@ fn renaming_from_the_palette_brings_up_the_menu_the_name_is_typed_in() {
     assert!(harness.pane_takes_keys());
 }
 
+/// Runs `command` with no menu up, where the panel draws no row for the
+/// active tab, and checks it put nothing up: no menu opened as state that
+/// nothing paints, and no rename typed into a field nobody can see.
+fn assert_starts_nothing_without_a_row(harness: &mut Harness, command: &str) {
+    let tab = harness.active_id();
+    let was = harness.tab_name(tab);
+    harness.run_command(command);
+    harness.frame();
+    assert_eq!(
+        harness.tab_menu_row(),
+        None,
+        "{command} opened the menu on a row nothing draws"
+    );
+    assert!(
+        !harness.a_popup_is_open(),
+        "{command} left a popup up that nothing draws"
+    );
+    assert!(
+        !harness.a_plugin_field_has_keys(),
+        "{command} gave the keyboard to a field nobody can see"
+    );
+    assert_eq!(harness.tab_name(tab), was);
+}
+
+#[test]
+fn a_rename_behind_a_hidden_panel_starts_nothing() {
+    // The column hidden, there is no row for the menu to hang off, so the
+    // menu a rename is typed in cannot be put up — and neither can the menu
+    // itself, or "Why this status" off it, which used to come up as state
+    // nothing paints and leave the shell deaf until an Escape.
+    let mut harness = Harness::seeded();
+    harness.run_command("crook/window/toggle-panel");
+    assert!(!harness.general().show_tabs_panel);
+
+    for command in [
+        "crook/tabs/rename-tab",
+        "crook/tabs/rename-pane",
+        "crook/tabs/open-menu",
+        "crook/tabs/explain-status",
+    ] {
+        assert_starts_nothing_without_a_row(&mut harness, command);
+        assert!(
+            harness.pane_takes_keys(),
+            "{command} took the keyboard from the shell"
+        );
+    }
+}
+
+#[test]
+fn a_rename_of_a_tab_folded_into_its_group_starts_nothing() {
+    // A folded group draws its heading and none of its members, so the
+    // active tab inside one has no row to put a menu on.
+    let (mut harness, group) = Harness::grouped_panel(2);
+    let active = harness.active_id();
+    assert!(
+        harness.members_of(group).contains(&active),
+        "the active tab is not in the group"
+    );
+    harness.dispatch_action(TabAction::ToggleGroup(group));
+    harness.frame();
+
+    assert_starts_nothing_without_a_row(&mut harness, "crook/tabs/rename-tab");
+    assert!(harness.pane_takes_keys());
+}
+
+#[test]
+fn a_rename_of_a_tab_the_search_filtered_out_starts_nothing() {
+    // A row the query does not answer for is not built, so a menu opened on
+    // it would be drawn by nothing — and the box would lose the keyboard to
+    // a field that is not on screen either.
+    let mut harness = Harness::panel(2);
+    harness.press_search_chord();
+    harness.type_text("qxqxq");
+    assert!(harness.panel_search_takes_keys());
+
+    assert_starts_nothing_without_a_row(&mut harness, "crook/tabs/rename-tab");
+    assert!(
+        harness.panel_search_takes_keys(),
+        "the search box lost the keyboard"
+    );
+}
+
 #[test]
 fn a_person_s_name_for_a_pane_beats_the_one_its_agent_chose() {
     // The precedence, through the gesture. An agent that renames its work

@@ -1089,6 +1089,31 @@ fn rows_by_tab(
     grouped
 }
 
+/// Whether the list builds a row for `pane`, asked with the list's own rules
+/// rather than a copy of them: the rows the search left, from
+/// [`rows_by_tab`], less the members of a folded group, which
+/// [`group_block`] draws a heading for and nothing under.
+///
+/// Whether the list is on screen at all is the caller's to ask. See
+/// [`Workspace::panel_draws_row`].
+pub(super) fn builds_row(workspace: &Workspace, app: &AppContext, pane: PaneId) -> bool {
+    let granularity = workspace.options().granularity;
+    let query = workspace.panel_search().query();
+    rows_by_tab(workspace, app, &query, granularity)
+        .into_iter()
+        .any(|(tab, panes)| panes.contains(&pane) && !folded_away(workspace, tab))
+}
+
+/// Whether a tab is a member of a group that is folded.
+fn folded_away(workspace: &Workspace, tab: TabId) -> bool {
+    workspace
+        .tabs()
+        .get(tab)
+        .and_then(Tab::group)
+        .and_then(|group| workspace.tabs().group(group))
+        .is_some_and(crate::tab::TabGroup::is_collapsed)
+}
+
 /// One tab in `Panes` granularity: a container around all of its rows.
 ///
 /// Warp's `uses_outer_group_container == true` branch. No border on any edge:

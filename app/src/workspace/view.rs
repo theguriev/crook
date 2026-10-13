@@ -4298,12 +4298,13 @@ impl Workspace {
         // And never on a row the panel is not drawing. The popup is built by
         // the row it hangs off — `tabs_panel::row` is the one caller of
         // `tab_context_menu::render` — so a menu opened on a tab whose section
-        // is covering the list, or whose group is folded away, is state
-        // nothing paints: a popup that takes the keyboard from every pane
-        // through `a_popup_is_open` and can only be left by an Escape nobody
-        // has a reason to press. A pointer cannot ask for that, because the
-        // press it asks with lands on the row; the palette can, and does.
-        if !self.panel_draws_row(pane) {
+        // is covering the list, whose column is hidden, whose group is folded
+        // away or whose row the search filtered out, is state nothing paints:
+        // a popup that takes the keyboard from every pane through
+        // `a_popup_is_open` and can only be left by an Escape nobody has a
+        // reason to press. A pointer cannot ask for that, because the press it
+        // asks with lands on the row; the palette can, and does.
+        if !self.panel_draws_row(pane, ctx) {
             return;
         }
         if self.tab_context_menu.pane == Some(pane) {
@@ -4316,20 +4317,18 @@ impl Workspace {
     /// Whether the tab panel is drawing a row for this pane right now.
     ///
     /// Two questions in one, because a popup anchored to a row needs both
-    /// answered the same way: the tab list has to be the section on screen,
-    /// and the pane has to be one of the rows that list builds — which a tab
-    /// inside a folded group is not.
+    /// answered the same way: the tab list has to be on screen — the section
+    /// showing, and the column not hidden — and the pane has to be one of the
+    /// rows that list builds, which a tab folded into its group is not, and
+    /// neither is one the search box filtered out.
     ///
-    /// The search box is deliberately not asked. A filtered-out row is still a
-    /// row the list would draw if the query changed, and a menu opened on one
-    /// is the same menu; what matters here is whether the list exists at all.
-    pub(crate) fn panel_draws_row(&self, pane: PaneId) -> bool {
+    /// The search box is asked as well, because a filtered-out row is not
+    /// built: a menu opened on one is drawn by nothing until the query
+    /// changes, and the query cannot change while the menu holds the keyboard.
+    pub(crate) fn panel_draws_row(&self, pane: PaneId, app: &AppContext) -> bool {
         self.section.is_none()
-            && self
-                .tabs
-                .rows(self.options().granularity)
-                .into_iter()
-                .any(|(_, row)| row == pane)
+            && self.tabs_panel_is_showing()
+            && tabs_panel::builds_row(self, app, pane)
     }
 
     /// Puts it up without the toggle.
