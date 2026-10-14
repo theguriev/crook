@@ -306,7 +306,7 @@ pub(crate) fn run_group(workspace: &Workspace) -> Box<dyn Element> {
         // line to divide them at there is nothing to keep the command by.
         entry(
             "Filter output",
-            None,
+            chord_for(workspace, "crook/window/filter-block"),
             menu.output_from
                 .is_some()
                 .then(|| dispatching(BlockAction::FilterOutput)),

@@ -302,6 +302,9 @@ pub enum Binding {
     OpenBlockMenu,
     /// Bookmark the selected block, or take its bookmark off.
     BookmarkBlock,
+    /// Open the find bar filtering the selected block's output to the lines
+    /// that hold its query.
+    FilterBlock,
     /// Select the bookmarked block before the selected one — older — or the
     /// newest one from the prompt.
     PreviousBookmark,

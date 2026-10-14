@@ -5539,7 +5539,16 @@ impl Workspace {
             BlockAction::FilterOutput => {
                 let target = self.block_target();
                 self.close_block_menu(ctx);
+                // Only a block that said where its output starts, which is the
+                // rule the menu's row is disabled by: a filter keeps the
+                // command and the output lines that match, and with no line
+                // between the two there is nothing to keep the command by.
+                // The row never sends this for such a block; `filter-block`
+                // reaches here without asking the row.
                 if let Some((pane, block)) = target
+                    && self
+                        .block_facts(pane, block, ctx)
+                        .is_some_and(|facts| facts.output_from.is_some())
                     && let Some(find) = self.find(pane).cloned()
                 {
                     find.set_filter(Some(block));
@@ -9441,8 +9450,11 @@ impl Workspace {
         // The find bar owns Escape and Enter while it has the keyboard, for
         // the reason the search box owns its two: the field answers Escape by
         // clearing itself and Enter by nothing, and neither of those is a way
-        // to close the bar or step to the next match. Everything else typed
-        // into it is the query and is left to the field.
+        // to close the bar or step to the next match. It owns the two chords
+        // that flip its switches as well, which the field has no use for and
+        // which come before the bindings for the reason Escape does: a person
+        // typing a query is talking to the bar. Everything else typed into it
+        // is the query and is left to the field.
         if self.find_takes_keys()
             && let Some(action) = self.find_action_for(keystroke)
         {
@@ -9489,10 +9501,12 @@ impl Workspace {
 
     /// What a keystroke means to the find bar, if it means anything.
     ///
-    /// Three keys: Escape closes it, Enter steps to the next match and
-    /// Shift-Enter to the previous one. Enter rather than a chord because the
-    /// bar has the keyboard and a person in it expects Enter to move, the way
-    /// it does in every find bar there is.
+    /// Three keys and two chords. Escape closes it, Enter steps to the next
+    /// match and Shift-Enter to the previous one: Enter rather than a chord
+    /// because the bar has the keyboard and a person in it expects Enter to
+    /// move, the way it does in every find bar there is. The chords flip its
+    /// two switches — see [`find_switch_chord`] — because saying how a query
+    /// should match is something done in the middle of typing it.
     fn find_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
         let pane = self.tabs.focused_pane_id()?;
         let modifiers = keystroke.modifiers;
@@ -9502,7 +9516,7 @@ impl Workspace {
             "enter" if modifiers.shift && !modifiers.ctrl && !modifiers.alt && !modifiers.cmd => {
                 FindAction::Step { forward: false }
             }
-            _ => return None,
+            _ => find_switch_for(keystroke, Platform::current())?,
         };
         Some(WorkspaceAction::Find { pane, action })
     }
@@ -9746,7 +9760,7 @@ impl Workspace {
                     bottom: true,
                 }));
             }
-            // The three that act on a block rather than on a pane. They ask
+            // The four that act on a block rather than on a pane. They ask
             // for the target here rather than leaving it to the handler,
             // because a chord pressed at the prompt with nothing selected has
             // to reach the shell.
@@ -9761,6 +9775,10 @@ impl Workspace {
             Binding::BookmarkBlock => {
                 self.block_target()?;
                 return Some(WorkspaceAction::Block(BlockAction::ToggleBookmark));
+            }
+            Binding::FilterBlock => {
+                self.block_target()?;
+                return Some(WorkspaceAction::Block(BlockAction::FilterOutput));
             }
             // Declined where there is nothing to jump to, so the chord a person
             // gave either reaches the shell instead.
@@ -11644,6 +11662,39 @@ fn as_filter(filtered: Option<&(BlockId, Rc<Vec<usize>>, usize, usize)>) -> Opti
         block: *block,
         kept,
     })
+}
+
+/// The chord that flips one of the find bar's two switches while the bar has
+/// the keyboard: the case switch, or — with `regex` — the pattern one.
+///
+/// VS Code's pair, `alt-c` and `alt-r`, and on macOS with the Command VS Code
+/// puts beside the Option there: Option alone *types* on a Mac — `ç`, `®` —
+/// and somebody searching for either would flip a switch instead. Off macOS
+/// the field types nothing under Alt (`typed_intent` refuses it), no shipped
+/// binding is on either chord on either platform, and the match is exact, so
+/// the AltGr that Windows reports as Ctrl-Alt still types its character.
+///
+/// One spelling for the key the bar answers to and for the note its switch
+/// shows under the pointer, so the two cannot come to disagree.
+pub(super) fn find_switch_chord(regex: bool, platform: Platform) -> Keystroke {
+    Keystroke::new(
+        if regex { "r" } else { "c" },
+        crookui_core::event::Modifiers {
+            alt: true,
+            cmd: platform == Platform::Mac,
+            ..Default::default()
+        },
+    )
+}
+
+/// Which of the find bar's switches a keystroke flips on `platform`, if
+/// either.
+pub(super) fn find_switch_for(keystroke: &Keystroke, platform: Platform) -> Option<FindAction> {
+    [FindAction::ToggleCase, FindAction::ToggleRegex]
+        .into_iter()
+        .find(|switch| {
+            *keystroke == find_switch_chord(*switch == FindAction::ToggleRegex, platform)
+        })
 }
 
 /// Whether a keystroke is this platform's "copy" chord: cmd-c on macOS, and
