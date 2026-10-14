@@ -36011,6 +36011,8 @@ mod dropping_files {
 
     use super::shells::{a_shell_these_tests_speak, await_prompt, marked_shell};
     use super::*;
+    use crate::pane_blocks::{PaneBlocks, ScrollPosition};
+    use crate::pane_surface::{PaneSurface, Surface};
 
     /// What a person drops on an agent: a screenshot, named with spaces the
     /// way every desktop names one, and a log with a quote in its name.
@@ -36039,13 +36041,31 @@ mod dropping_files {
             .update(|ctx| workspace.update(ctx, |workspace, ctx| workspace.drop_files(paths, ctx)))
     }
 
-    /// Whether a pane is drawing its composer, by the one rule that decides.
-    fn shows_a_composer(harness: &Harness, pane: PaneId) -> bool {
+    /// What a pane is drawing, by the one rule that decides.
+    fn surface(harness: &Harness, pane: PaneId) -> Option<PaneSurface> {
         harness.workspace.read(&harness.app, |workspace, app| {
-            workspace.terminal(pane, app).is_some_and(|(_, snapshot)| {
-                crate::pane_surface::of(&snapshot, Instant::now()).composer
-            })
+            workspace
+                .terminal(pane, app)
+                .map(|(_, snapshot)| crate::pane_surface::of(&snapshot, Instant::now()))
         })
+    }
+
+    /// Whether a pane is drawing its composer.
+    fn shows_a_composer(harness: &Harness, pane: PaneId) -> bool {
+        surface(harness, pane).is_some_and(|surface| surface.composer)
+    }
+
+    /// Where a pane's block list is scrolled to.
+    fn scrolled_to(harness: &Harness, pane: PaneId) -> Option<ScrollPosition> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.pane_blocks(pane).map(PaneBlocks::position)
+        })
+    }
+
+    /// Text with every space and line break taken out, so that a line the
+    /// pane wrapped, at a space or anywhere else, still reads as the line.
+    fn unwrapped(text: &str) -> String {
+        text.chars().filter(|c| *c != ' ' && *c != '\n').collect()
     }
 
     #[test]
@@ -36126,6 +36146,25 @@ mod dropping_files {
         };
         await_prompt(&mut harness, pane);
 
+        // Something above the program taller than the pane, for the list to
+        // be scrolled up through to read.
+        harness.type_field(pane, "seq 1 200");
+        harness.press("enter", Modifiers::default(), "\r");
+        harness.wait_for("seq never became a block", |harness| {
+            harness
+                .workspace
+                .read(&harness.app, |workspace, app| {
+                    let blocks = workspace.terminal_blocks(pane, app)?;
+                    Some(
+                        blocks
+                            .iter()
+                            .any(|block| block.command.as_deref() == Some("seq 1 200")),
+                    )
+                })
+                .unwrap_or_default()
+        });
+        await_prompt(&mut harness, pane);
+
         // A stand-in for an agent: it turns bracketed paste on, as Claude
         // Code does, and writes every byte it is given to `received` as it
         // comes — with the terminal's line mode off, so that nothing waits
@@ -36144,8 +36183,34 @@ mod dropping_files {
                 && received.exists()
                 && !shows_a_composer(harness, pane)
         });
+        assert_eq!(
+            surface(&harness, pane).map(|surface| surface.surface),
+            Some(Surface::Blocks),
+            "the program is meant to run in a block list, which a drop can be scrolled away from"
+        );
+
+        // Somebody reading the numbers rather than watching the agent.
+        harness.frame();
+        harness.workspace_update(|workspace, ctx| {
+            assert!(
+                workspace.scroll_blocks(pane, -60., ctx),
+                "the list had nothing to scroll"
+            );
+        });
+        harness.frame();
+        assert!(
+            matches!(scrolled_to(&harness, pane), Some(ScrollPosition::Fixed(_))),
+            "the list did not stay where it was scrolled to"
+        );
 
         assert!(drop_on_the_window(&mut harness, &the_files()));
+        // Back at the live block, where the paste went, as the paste chord
+        // and every other key sent to the program bring it.
+        assert_eq!(
+            scrolled_to(&harness, pane),
+            Some(ScrollPosition::FollowBottom),
+            "the drop reached the program out of sight of the person who dropped it"
+        );
         let expected = format!("\u{1b}[200~{}\u{1b}[201~", the_line());
         harness.wait_for("the drop never reached the program", |_| {
             fs::read_to_string(&received).is_ok_and(|got| got.len() >= expected.len())
@@ -36183,5 +36248,96 @@ mod dropping_files {
         assert!(!harness.is_menu_open());
         assert!(drop_on_the_window(&mut harness, &the_files()));
         assert_eq!(harness.field_text(pane), the_line());
+    }
+
+    #[test]
+    fn a_drop_on_a_section_of_the_sidebar_reaches_no_pane_and_one_back_on_the_tabs_does() {
+        // A section is drawn in place of the panes, and the focused pane's
+        // field goes on holding the keyboard behind it: no key reaches a pane
+        // that is not drawn, and a drop must not either, where nobody would
+        // see it land.
+        let mut harness = Harness::new(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        await_prompt(&mut harness, pane);
+
+        harness.open_settings_page();
+        assert!(!drop_on_the_window(&mut harness, &the_files()));
+        harness.show_plugins();
+        assert!(!drop_on_the_window(&mut harness, &the_files()));
+
+        harness.show_tabs();
+        assert_eq!(
+            harness.field_text(pane),
+            "",
+            "a drop on a section was typed into the pane behind it"
+        );
+        // And the same drop on the tabs does land, so it was the section that
+        // kept it out.
+        assert!(drop_on_the_window(&mut harness, &the_files()));
+        assert_eq!(harness.field_text(pane), the_line());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_at_its_prompt_with_no_composer_left_gets_its_own_quoting() {
+        // cmd.exe reports no marks, so its one block outgrows the screen at
+        // its first screenful and the composer goes with it — and from then
+        // on it is still cmd, at its prompt, that reads a drop, and cmd reads
+        // a single quote as a letter. Played here by sh under cmd's name,
+        // which is how the quoting is picked.
+        let scratch = Scratch::new();
+        let cmd = scratch.path().join("cmd");
+        std::os::unix::fs::symlink("/bin/sh", &cmd).expect("a link to sh");
+        let mut harness = Harness::new(1);
+        harness.workspace_update(|workspace, ctx| workspace.set_shell(Some(cmd.clone()), ctx));
+        if !harness.start_terminals() {
+            return;
+        }
+        let pane = harness.focused_pane_id().expect("a pane");
+        // The setting moves on, as it does when somebody picks another shell
+        // for the panes to come; this one goes on running what it was given.
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_shell(Some(PathBuf::from("/bin/sh")), ctx);
+        });
+        harness.type_into(pane, "echo RE''ADY\n");
+        harness.wait_for("the shell never answered", |harness| {
+            harness.terminal_text(pane).contains("READY")
+        });
+
+        let quoted = r#""/tmp/Screen Shot 2026-10-14 at 09.41.07.png" "/tmp/it's.log""#;
+        assert!(shows_a_composer(&harness, pane));
+        assert!(drop_on_the_window(&mut harness, &the_files()));
+        assert_eq!(harness.field_text(pane), quoted, "into the composer");
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .input(pane)
+                .expect("the pane has a field")
+                .edit(|editor| editor.clear());
+        });
+
+        // Its first screenful.
+        harness.type_into(pane, "seq 1 300\n");
+        harness.wait_for("the block never outgrew the screen", |harness| {
+            harness.terminal_text(pane).contains("\n300\n") && !shows_a_composer(harness, pane)
+        });
+
+        assert!(drop_on_the_window(&mut harness, &the_files()));
+        // Until the end of the line has been echoed, however it was quoted.
+        harness.wait_for("the drop never reached the shell", |harness| {
+            let shown = unwrapped(&harness.terminal_text(pane));
+            shown.contains("s.log\"") || shown.contains("s.log'")
+        });
+        let shown = harness.terminal_text(pane);
+        assert!(
+            unwrapped(&shown).contains(&unwrapped(quoted)),
+            "not typed for cmd: {shown:?}"
+        );
+        assert_eq!(
+            harness.field_text(pane),
+            "",
+            "the drop went into the composer the grid had taken the place of"
+        );
     }
 }
