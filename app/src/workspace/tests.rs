@@ -19265,6 +19265,59 @@ mod shells {
         }
 
         #[test]
+        fn a_cleared_pane_draws_no_divider_over_the_prompt_it_kept() {
+            // A clear lets the finished blocks go the way the cap evicts them,
+            // and a rule is drawn over the first block held when blocks were
+            // evicted before it. Nothing is before the prompt a clear kept: a
+            // rule there runs across an empty pane above the prompt.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "echo ALPHA") == 0 {
+                return;
+            }
+            run(&mut harness, pane, "echo BETA");
+            await_prompt(&mut harness, pane);
+            let rules = |harness: &mut Harness| {
+                let scene = harness.frame();
+                let panel = panel_of_the_pane(harness);
+                visible_rects(&scene)
+                    .filter(|(rect, bounds)| {
+                        rect.background == Fill::Solid(theme().overlay_2)
+                            && (bounds.width() - panel.width()).abs() < 0.5
+                            && bounds.height() <= 1.5
+                    })
+                    .map(|(_, bounds)| bounds.min_y())
+                    .collect::<Vec<_>>()
+            };
+            assert!(
+                rules(&mut harness).len() >= 2,
+                "two blocks and an open one drew no dividers to lose"
+            );
+
+            harness.run_command("crook/window/clear-blocks");
+            assert_eq!(0, block_count(&harness, pane), "the clear left a block");
+            await_prompt(&mut harness, pane);
+            assert_eq!(
+                Vec::<f32>::new(),
+                rules(&mut harness),
+                "a cleared pane rules a line over the prompt it kept"
+            );
+
+            // And the first block after the clear has the prompt below it
+            // ruled off from it, as in a pane never cleared.
+            run(&mut harness, pane, "echo GAMMA");
+            await_prompt(&mut harness, pane);
+            assert_eq!(
+                1,
+                rules(&mut harness).len(),
+                "one block and an open one need one divider"
+            );
+        }
+
+        #[test]
         fn the_newest_block_s_output_is_what_the_command_printed_and_nothing_else() {
             // What `--run` reports. It used to print the grid, and for a
             // shell with marks the grid after a command is the next prompt

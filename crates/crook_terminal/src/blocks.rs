@@ -667,6 +667,11 @@ pub(crate) struct BlockTracker {
     open: OpenBlock,
     finished: Vec<Block>,
     evicted: usize,
+    /// What [`Self::evicted`] came to at the last [`Self::clear`]. The blocks
+    /// counted up to there went because somebody asked for an empty pane,
+    /// and leave nothing before the first block held; only the ones counted
+    /// past it were pushed off by the cap.
+    cleared_at: usize,
     last_ignored: Option<IgnoreReason>,
     /// A reflow that happened under a full-screen program, owed to the
     /// shell's screen for when it comes back. See [`Self::reflowed`].
@@ -696,6 +701,7 @@ impl BlockTracker {
             },
             finished: Vec::new(),
             evicted: 0,
+            cleared_at: 0,
             reflow_owed: false,
             image_bytes: 0,
             last_ignored: None,
@@ -711,6 +717,12 @@ impl BlockTracker {
     /// [`MAX_BLOCKS`], or by a [`Self::clear`].
     pub(crate) fn evicted(&self) -> usize {
         self.evicted
+    }
+
+    /// What [`Self::evicted`] came to at the last [`Self::clear`], or 0 for a
+    /// pane never cleared.
+    pub(crate) fn cleared_at(&self) -> usize {
+        self.cleared_at
     }
 
     /// Why the last mark that changed nothing changed nothing.
@@ -1060,7 +1072,10 @@ impl BlockTracker {
     /// The finished blocks go the way an eviction takes them, off the front
     /// and counted in [`Self::evicted`], so that whatever keeps a copy of the
     /// list — cloned a block at a time, and told what went by that count —
-    /// lets them go too.
+    /// lets them go too. [`Self::cleared_at`] marks where that count stood,
+    /// for whoever has to tell blocks a clear let go of from blocks the cap
+    /// pushed off: only the second kind leaves something before the first
+    /// block.
     ///
     /// The history goes as `CSI 3 J` takes it, but the open block is carried
     /// across rather than found again the way [`Self::history_cleared`]
@@ -1086,6 +1101,7 @@ impl BlockTracker {
     pub(crate) fn clear<T: EventListener>(&mut self, term: &mut Term<T>) {
         self.evicted += self.finished.len();
         self.finished.clear();
+        self.cleared_at = self.evicted;
         self.image_bytes = 0;
 
         if term.mode().contains(TermMode::ALT_SCREEN) {

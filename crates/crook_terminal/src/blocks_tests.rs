@@ -1692,6 +1692,7 @@ fn test_clearing_drops_the_finished_blocks_and_the_history_and_keeps_the_prompt(
     );
     let before = emulator.live_block();
     let evicted = emulator.blocks_evicted();
+    assert_eq!(0, emulator.blocks_cleared_at(), "a pane never cleared");
 
     emulator.clear_blocks();
 
@@ -1700,6 +1701,11 @@ fn test_clearing_drops_the_finished_blocks_and_the_history_and_keeps_the_prompt(
         evicted + 2,
         emulator.blocks_evicted(),
         "the blocks went without the front of the list saying so"
+    );
+    assert_eq!(
+        emulator.blocks_evicted(),
+        emulator.blocks_cleared_at(),
+        "the blocks a clear let go of read as ones the cap pushed off"
     );
     assert_eq!(0, emulator.history_len(), "the scrollback survived");
     assert_eq!(

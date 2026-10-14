@@ -384,6 +384,12 @@ impl Terminal {
         self.emulator.blocks_evicted()
     }
 
+    /// What [`Self::blocks_evicted`] came to at the last
+    /// [`Self::clear_blocks`]. See [`Emulator::blocks_cleared_at`].
+    pub fn blocks_cleared_at(&self) -> usize {
+        self.emulator.blocks_cleared_at()
+    }
+
     /// Forgets the finished blocks and the scrollback, and keeps the open
     /// block. The child is not told: it is the pane being cleared, not the
     /// program's screen. See [`Emulator::clear_blocks`].

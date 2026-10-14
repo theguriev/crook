@@ -844,6 +844,15 @@ impl Emulator {
         self.blocks.evicted()
     }
 
+    /// What [`Self::blocks_evicted`] came to at the last
+    /// [`Self::clear_blocks`], or 0 for a pane never cleared. Past it, the
+    /// count is blocks the cap pushed off the front, which leave something
+    /// before the first block still held; up to it, blocks a person cleared
+    /// away, which leave nothing.
+    pub fn blocks_cleared_at(&self) -> usize {
+        self.blocks.cleared_at()
+    }
+
     /// The block everything arriving now belongs to. Also on every
     /// [`Snapshot`].
     pub fn live_block(&self) -> LiveBlock {

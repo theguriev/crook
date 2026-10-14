@@ -1072,8 +1072,10 @@ impl BlockList {
 
         // Over the wash rather than under it, and only above a block that has
         // one before it: a rule along the very top of the pane separates the
-        // pane from nothing.
-        if item.index > 0 || self.blocks.evicted() > 0 {
+        // pane from nothing. Blocks the cap evicted were before the first one
+        // held; blocks a clear let go of were not, as far as anybody looking
+        // at a cleared pane is concerned.
+        if item.index > 0 || self.blocks.evicted_since_clear() > 0 {
             ctx.scene
                 .draw_rect_without_hit_recording(RectF::new(
                     vec2f(origin.x(), top),
