@@ -61,6 +61,9 @@ const TITLE: &str = "port the tab bar";
 /// The message `--message -` makes of [`INPUT`].
 const MESSAGE: &str = "Claude needs your permission to use Bash";
 
+/// The session `--session -` reads out of [`INPUT`].
+const SESSION: &str = "test";
+
 /// How long one hook is given before the test calls it a failure rather than
 /// hanging the suite.
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -228,8 +231,8 @@ fn run_as_a_hook(command: &str, agent: Agent) -> Ran {
 }
 
 /// The report `command`'s `--agent` arguments make of [`INPUT`]: the status
-/// after `--agent`, with the title or the message `-` reads from stdin, and no
-/// pull request, since [`INPUT`] names none.
+/// after `--agent`, with the title, the message or the session `-` reads from
+/// stdin, and no pull request, since [`INPUT`] names none.
 fn expected_report(command: &str) -> String {
     let (_, arguments) = command
         .split_once("--agent ")
@@ -239,7 +242,7 @@ fn expected_report(command: &str) -> String {
         .take_while(|word| *word != "||");
     let status = words.next().expect("`--agent` is followed by a status");
     let status = AgentReport::parse(status).unwrap_or_else(|| panic!("{status} is no status"));
-    let (mut title, mut message) = (None, None);
+    let (mut title, mut message, mut session) = (None, None, None);
     while let Some(flag) = words.next() {
         assert_eq!(
             Some("-"),
@@ -253,10 +256,11 @@ fn expected_report(command: &str) -> String {
             // such call's: the report is the status alone, as it is for
             // every tool that opens no pull request.
             "--pull-request" => {}
+            "--session" => session = Some(SESSION),
             other => panic!("{command}: {other} is not a flag `--agent` takes"),
         }
     }
-    crook_terminal::agent::report(status, title, message)
+    crook_terminal::agent::report(status, title, message, session)
 }
 
 /// Asserts that `command`, run as a hook, told the pane what its arguments

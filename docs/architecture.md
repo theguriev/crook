@@ -1575,8 +1575,9 @@ the snapshot fixture and by nothing else, which made the sidebar a list of shell
 promise painted on it. The promise is now kept by the program the promise is about, and it is
 kept over the one channel that program already has.
 
-**The report is an escape sequence.** `OSC 6340 ; <status> [; <title> [;; <message>]] BEL`, read
-by the same watcher that reads OSC 7 and the completion channel's 6339, in
+**The report is an escape sequence.**
+`OSC 6340 ; <status> [; <title> [;; <message> [;; <session>]]] BEL`, read by the same watcher
+that reads OSC 7 and the completion channel's 6339, in
 `crates/crook_terminal/src/agent.rs`. Four words — `idle`, `running`, `needs-input`, `failed` —
 an optional name for the work, which lands in `derived_title` because that is what
 `derived_title` has always been: what the agent calls what it is doing — and, after that, what
@@ -1668,11 +1669,39 @@ second line is the question rather than the branch or the directory, since "want
 `rm -rf build`" is what decides whether a person comes now, and which branch the pane is on is
 not. The header's count and the window title are unchanged by it.
 
+**A subagent is not the pane.** An agent can hand part of a turn to a subagent in a session of
+its own, and GitHub Copilot CLI runs every hook for that session as for the one the person is
+talking to: the subagent's `userPromptSubmitted` carries the prompt the agent wrote for it, and
+its `agentStop` comes while the parent is still working — 14 ms before the parent's
+`postToolUse` in the capture. Taken as the pane's, that prompt named the tab until the next one,
+and that stop woke a lead's `crook pane wait --until idle` partway through the turn. So a report
+can name its session, after a second empty field — `running;<title>;;;<session>`,
+`needs-input;;<message>;;<session>` — and both texts lose a `;` at either end so that neither
+can forge that cut. `crook --agent <status> --session -` reads it out of the hook's input
+(`sessionId` for Copilot, `session_id` for the agents that spell it so), and every hook
+`--agent-hooks copilot` prints passes it. `agent::Sessions` is the rule, applied in the watcher
+as each report is read, so a report the pane does not take never replaces one earlier in the
+same read that it does: the first session to say `running` while nobody holds the pane holds it
+— a question does not take it, since an agent at rest can still ask for a look and its next turn
+may be another session's; from any other, a title is dropped and a stop — `idle` or `failed` —
+is dropped whole, while a question and the `running` after one are taken, since they wait on a
+person all the same; a report that names no session is taken whoever holds the pane. The holder
+lets go when it stops, because one Copilot process can go on in a new session (`/clear`), and on
+the shell's `D`, because an agent interrupted mid-turn never says it stopped. The writer counts
+the session's two pieces and the cut before the message first, so `vte`'s sixteen never drop it.
+A Crook older than the field reads the session into the message, which the row shows only beside
+`needs-input`. OpenCode's subagents need none of this on the wire: its plugin keeps the ids
+`session.created` gives a `parentID` — the way `opencode run` finds the sessions it waits on —
+and sends nothing for them but their questions and the going on after one. Its event handlers
+are not awaited, and each report is a process, so the plugin also sends its reports through one
+promise, in the order it made them, and leaves a status said again unsaid. Claude Code needs
+neither: its subagents fire `SubagentStop`, which no hook reports.
+
 **The pull request is a second sequence.** `OSC 6342 ; pr ; <url> BEL`, read by the same watcher
 and written by `crook --agent <status> --pull-request <url>` in the same write as the status.
-A sibling number rather than a third field on 6340, because 6340's tail is already cut twice —
-on `vte`'s `;` and on the `;;` before a message — and an older Crook reads that tail as the
-title, where a number it does not know is simply a link that is not there; 6341 is the
+A sibling number rather than a field on 6340, because 6340's tail is already cut — on `vte`'s
+`;` and on the `;;` before a message and before a session — and an older Crook reads that tail
+as the title, where a number it does not know is simply a link that is not there; 6341 is the
 question an agent that stopped to ask is waiting on. An address holds `:` and `/` always and
 `;` almost never, so the pieces after the word are joined back as a title's are, and the one
 thing that cannot be undone — `vte` keeping sixteen pieces and dropping the rest without a

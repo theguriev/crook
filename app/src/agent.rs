@@ -55,6 +55,16 @@
 //! Crook asks no forge for it: the agent just made the pull request, and
 //! knows.
 //!
+//! `--session <id>` says which of the agent's sessions the report is from,
+//! and `--session -` reads the id out of the hook's input. A subagent runs in
+//! a session of its own, and the pane takes a title or a stop only from the
+//! session that holds it — see [`crook_terminal::agent`] — so a subagent's
+//! prompt does not rename the tab and its end does not end the agent's turn.
+//! Copilot CLI's hooks pass it, because Copilot runs every hook for a
+//! subagent as it does for the session the person is talking to. The
+//! OpenCode plugin tells its subagents apart itself, from the parent a
+//! session is made with, and sends nothing for them but their questions.
+//!
 //! `--skill` prints [`SKILL`], the file that teaches an agent the rest of
 //! this: how it tells it is in a pane, what the four words do to the row,
 //! and what else the binary will do for it. A hook makes Claude Code report
@@ -121,11 +131,16 @@ const MESSAGE_CHARS: usize = 200;
 /// [`crook_terminal::agent`]. `Some("-")` looks for one in the hook input:
 /// the address `gh pr create` printed, when the tool that just ran was one,
 /// and nothing otherwise, so the hook after every tool can carry it.
+///
+/// `session` is the id of the agent's session the report is from, and
+/// `Some("-")` reads it from the hook input: Copilot CLI's `sessionId`, or
+/// the `session_id` the other agents hand a hook.
 pub fn report(
     status: &str,
     title: Option<&str>,
     message: Option<&str>,
     pull_request: Option<&str>,
+    session: Option<&str>,
 ) -> Result<()> {
     let status = AgentReport::parse(status).with_context(|| {
         let words: Vec<_> = AgentReport::ALL.iter().map(|word| word.word()).collect();
@@ -138,11 +153,15 @@ pub fn report(
         None | Some("-") => None,
         Some(url) => Some(given_pull_request(url)?),
     };
+    let given_session = match session {
+        None | Some("-") => None,
+        Some(id) => Some(given_session(id)?),
+    };
 
     // Read once, whichever of them asked for it: stdin has one reading in
     // it, and `--title - --message -` would otherwise hand the second an
     // empty string.
-    let input = if [title, message, pull_request].contains(&Some("-")) {
+    let input = if [title, message, pull_request, session].contains(&Some("-")) {
         let mut input = String::new();
         io::stdin()
             .read_to_string(&mut input)
@@ -165,6 +184,10 @@ pub fn report(
         Some("-") => pull_request_from_hook(input.as_deref().unwrap_or_default()),
         _ => given,
     };
+    let session = match session {
+        Some("-") => session_from_hook(input.as_deref().unwrap_or_default()),
+        _ => given_session,
+    };
 
     let mut terminal = terminal().context(
         "`--agent` writes to the terminal this was run in, and there is none: run it from a pane, or from a hook of a program in one",
@@ -176,6 +199,7 @@ pub fn report(
                 title.as_deref(),
                 message.as_deref(),
                 pull_request.as_deref(),
+                session.as_deref(),
             )
             .as_bytes(),
         )
@@ -194,8 +218,9 @@ fn sequence(
     title: Option<&str>,
     message: Option<&str>,
     pull_request: Option<&str>,
+    session: Option<&str>,
 ) -> String {
-    let mut written = crook_terminal::agent::report(status, title, message);
+    let mut written = crook_terminal::agent::report(status, title, message, session);
     if let Some(pull_request) = pull_request.and_then(crook_terminal::agent::pull_request) {
         written.push_str(&pull_request);
     }
@@ -220,6 +245,43 @@ spaces or control characters, not {url:?}",
                 crook_terminal::agent::PULL_REQUEST_BYTES
             )
         })
+}
+
+/// A session id given on the command line, as the wire will take it.
+///
+/// Its ends trimmed, as an address's are, and nothing else done to it: an id
+/// with anything taken out of it is another session's, and the pane would
+/// take the report for a subagent's. One the wire would refuse is refused
+/// here, with the rule it broke.
+fn given_session(id: &str) -> Result<String> {
+    let id = id.trim();
+    crook_terminal::agent::session_id(id)
+        .map(str::to_owned)
+        .with_context(|| {
+            format!(
+                "`--session` takes one word of at most {} bytes, with no `;`, spaces or \
+control characters, not {id:?}",
+                crook_terminal::agent::SESSION_BYTES
+            )
+        })
+}
+
+/// The session a hook's input says the report is from, or `None` when it
+/// names none the wire takes.
+///
+/// GitHub Copilot CLI hands every hook a `sessionId`, and Claude Code, Codex
+/// and Gemini CLI a `session_id`; either is read. Input that is not JSON
+/// names no session, since a line piped in is somebody's message rather
+/// than an id. An id the wire would refuse is no session, and the report
+/// goes without one — as every report went before there were sessions —
+/// rather than failing the hook.
+fn session_from_hook(input: &str) -> Option<String> {
+    let hook: Value = serde_json::from_str(input).ok()?;
+    ["sessionId", "session_id"]
+        .iter()
+        .find_map(|key| hook.get(key)?.as_str())
+        .and_then(crook_terminal::agent::session_id)
+        .map(str::to_owned)
 }
 
 /// The pull request a hook's input says was just opened, or the address a
@@ -658,13 +720,19 @@ const GEMINI_EVENTS: &[(&str, &str)] = &[
 /// `~/.copilot/hooks/`: camel-cased names for the same moments, with
 /// `agentStop` for the end of a turn and `notification` carrying a
 /// `message`.
+///
+/// Every one says which session it is from. Copilot runs a subagent in a
+/// session of its own and runs every hook for it as for the session the
+/// person is talking to: its `userPromptSubmitted` carries the prompt the
+/// agent wrote for it, and its `agentStop` comes while the agent is still
+/// working. Named, the pane takes neither — see [`crook_terminal::agent`].
 const COPILOT_EVENTS: &[(&str, &str)] = &[
-    ("userPromptSubmitted", "running --title -"),
-    ("preToolUse", "running"),
-    ("postToolUse", "running"),
-    ("notification", "needs-input --message -"),
-    ("agentStop", "idle"),
-    ("sessionEnd", "idle"),
+    ("userPromptSubmitted", "running --title - --session -"),
+    ("preToolUse", "running --session -"),
+    ("postToolUse", "running --session -"),
+    ("notification", "needs-input --message - --session -"),
+    ("agentStop", "idle --session -"),
+    ("sessionEnd", "idle --session -"),
 ];
 
 /// The OpenCode plugin: a TypeScript file its plugin directory loads at
@@ -679,6 +747,22 @@ const COPILOT_EVENTS: &[(&str, &str)] = &[
 /// OpenCode was started with and a development build is on nobody's.
 /// `.quiet().nothrow()`: a report that could not be written — no terminal,
 /// a pane that is not Crook's — is nothing a plugin should throw over.
+///
+/// A subagent runs in a session of its own, made with its parent's id as
+/// `parentID`, and the hooks fire for it as for any session: its prompt
+/// named the tab, and its idle came while the agent above it was still
+/// working. The plugin keeps the ids `session.created` gives a parent and
+/// says nothing for them but their questions and the going on after one,
+/// which are the agent's own — the way `opencode run` tells the sessions it
+/// waits on from the rest.
+///
+/// OpenCode does not wait for an event's handler, and a report is a
+/// process of its own, so two started together can reach the pane in
+/// either order: an idle overtaken by the busy before it left the pane
+/// running. So the reports go one after another, through one promise, and
+/// a status said again is not said: a turn is busy several times over, and
+/// each was a process. A title or a question always goes, since a new one
+/// is news.
 const OPENCODE_PLUGIN: &str = r#"// Crook: tell the tab this session runs in what OpenCode is doing.
 // Save as ~/.config/opencode/plugins/crook.ts, or as a project's
 // .opencode/plugins/crook.ts. Reports go to the terminal OpenCode was
@@ -686,13 +770,31 @@ const OPENCODE_PLUGIN: &str = r#"// Crook: tell the tab this session runs in wha
 const crook = BINARY
 
 export const CrookPlugin = async ({ $ }) => {
-  const report = (status, flag, text) =>
-    (text === undefined
-      ? $`${crook} --agent ${status}`
-      : $`${crook} --agent ${status} ${flag} ${text}`
-    ).quiet().nothrow()
+  // A subagent's session is made with its parent's id. Its prompt is not
+  // the tab's name and its idle is not the end of the work, so of a
+  // subagent only its questions, and the going on after one, are reported.
+  const subagents = new Set()
+  // One report at a time, in the order they were made, and a status said
+  // again left unsaid: OpenCode does not wait for an event's handler, and
+  // two processes started together can land in either order.
+  let reports = Promise.resolve()
+  let said
+  const report = (status, flag, text) => {
+    if (text === undefined && status === said) return reports
+    said = status
+    reports = reports
+      .then(() =>
+        (text === undefined
+          ? $`${crook} --agent ${status}`
+          : $`${crook} --agent ${status} ${flag} ${text}`
+        ).quiet().nothrow(),
+      )
+      .catch(() => {})
+    return reports
+  }
   return {
-    "chat.message": async (_input, output) => {
+    "chat.message": async (input, output) => {
+      if (subagents.has(input.sessionID)) return
       const text = output.parts.find((part) => part.type === "text")?.text ?? ""
       const title = (text.split("\n").find((line) => line.trim() !== "") ?? "").trim()
       // A lone `-` is how `--title` is told to read a hook's input from stdin,
@@ -703,22 +805,27 @@ export const CrookPlugin = async ({ $ }) => {
         : report("running", "--title", title))
     },
     event: async ({ event }) => {
+      const properties = event.properties
       switch (event.type) {
+        case "session.created":
+          if (properties.info.parentID) subagents.add(properties.info.id)
+          break
         case "session.status":
-          if (event.properties.status.type === "busy") await report("running")
+          if (properties.status.type === "busy" && !subagents.has(properties.sessionID))
+            await report("running")
           break
         case "permission.asked":
-          await report("needs-input", "--message", `${event.properties.permission}: ${event.properties.patterns.join(", ")}`)
+          await report("needs-input", "--message", `${properties.permission}: ${properties.patterns.join(", ")}`)
           break
         case "question.asked":
-          await report("needs-input", "--message", event.properties.questions[0]?.question ?? "")
+          await report("needs-input", "--message", properties.questions[0]?.question ?? "")
           break
         case "permission.replied":
         case "question.replied":
           await report("running")
           break
         case "session.idle":
-          await report("idle")
+          if (!subagents.has(properties.sessionID)) await report("idle")
           break
       }
     },
@@ -1267,7 +1374,14 @@ mod tests {
             crook_terminal::Palette::default(),
         );
         emulator.advance(
-            sequence(AgentReport::NeedsInput, Some(&title), Some(&message), None).as_bytes(),
+            sequence(
+                AgentReport::NeedsInput,
+                Some(&title),
+                Some(&message),
+                None,
+                None,
+            )
+            .as_bytes(),
         );
         assert_eq!(
             vec![crook_terminal::TerminalEvent::Agent(
@@ -1371,7 +1485,7 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
         let parsed: Value = serde_json::from_str(&copilot.text).unwrap();
         assert_eq!(1, parsed["version"]);
         assert_eq!(
-            hook_command("idle"),
+            hook_command("idle --session -"),
             parsed["hooks"]["agentStop"][0]["bash"].as_str().unwrap()
         );
         assert!(
@@ -1394,6 +1508,7 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
         // would read stdin for it.
         assert!(opencode.text.contains(r#"title === "-""#));
         for event in [
+            "session.created",
             "session.status",
             "permission.asked",
             "question.asked",
@@ -1404,6 +1519,19 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
                 "the plugin misses {event}"
             );
         }
+        // A subagent's session is made with its parent's id, and is known by
+        // it: its prompt names no tab and its idle ends no turn.
+        assert!(opencode.text.contains("properties.info.parentID"));
+        assert!(
+            opencode
+                .text
+                .contains("if (subagents.has(input.sessionID)) return")
+        );
+        assert!(
+            opencode
+                .text
+                .contains("if (!subagents.has(properties.sessionID)) await report(\"idle\")")
+        );
         assert!(
             opencode
                 .note
@@ -1499,6 +1627,108 @@ such guard"
                 "--help no longer says {sentence:?}"
             );
         }
+    }
+
+    /// Loads the OpenCode plugin from `CROOK_PLUGIN` under Node, hands it a
+    /// stand-in for Bun's `$`, fires the events of the capture the rule was
+    /// made from at it without waiting — as OpenCode fires them — and prints
+    /// the commands it ran, in the order they finished.
+    ///
+    /// The stand-in runs a command when it is awaited, as Bun's does, and
+    /// takes longer over each one than over the next, so reports started
+    /// side by side would finish the other way round.
+    const OPENCODE_HARNESS: &str = r#"
+const { CrookPlugin } = await import(
+  "data:text/javascript;base64," + Buffer.from(process.env.CROOK_PLUGIN).toString("base64")
+)
+const ran = []
+let takes = 80
+const $ = (strings, ...values) => {
+  const command = String.raw(strings, ...values)
+  const wait = takes
+  takes = Math.max(0, takes - 10)
+  const shell = {
+    quiet: () => shell,
+    nothrow: () => shell,
+    then: (resolve, reject) =>
+      new Promise((done) => setTimeout(() => done(ran.push(command)), wait)).then(resolve, reject),
+  }
+  return shell
+}
+const hooks = await CrookPlugin({ $ })
+const root = "ses_ed0445216ffeDHYKPcyGysBHGl"
+const child = "ses_ed0444d0fffeOBcKd0pB2EaB4b"
+const prompt = (sessionID, text) =>
+  hooks["chat.message"]({ sessionID }, { parts: [{ type: "text", text }] })
+const event = (type, properties) => hooks.event({ event: { type, properties } })
+const busy = (sessionID) => event("session.status", { sessionID, status: { type: "busy" } })
+const stopped = (sessionID) => event("session.status", { sessionID, status: { type: "idle" } })
+await Promise.all([
+  event("session.created", { sessionID: root, info: { id: root } }),
+  prompt(root, "please delegate the file"),
+  busy(root),
+  busy(root),
+  event("session.created", { sessionID: child, info: { id: child, parentID: root } }),
+  prompt(child, "run the subtask"),
+  busy(child),
+  event("permission.asked", { sessionID: child, permission: "bash", patterns: ["touch made-by-sub.txt"] }),
+  event("permission.replied", { sessionID: child }),
+  busy(child),
+  stopped(child),
+  event("session.idle", { sessionID: child }),
+  busy(root),
+  stopped(root),
+  event("session.idle", { sessionID: root }),
+])
+process.stdout.write(JSON.stringify(ran))
+"#;
+
+    #[test]
+    fn the_opencode_plugin_reports_a_subagents_questions_and_nothing_else_of_it() {
+        // The plugin is JavaScript, and what it does is only proven by
+        // running it: Node rather than Bun, which OpenCode is, because Node
+        // is on every machine the gate runs on and the plugin uses nothing
+        // of Bun's but the `$` the harness stands in for.
+        let plugin = hooks_text("opencode", Path::new("/opt/crook/bin/crook"))
+            .unwrap()
+            .text;
+        let output = match crate::process::command("node")
+            .args(["--input-type=module", "-e", OPENCODE_HARNESS])
+            .env("CROOK_PLUGIN", &plugin)
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                eprintln!("skipped: no node on PATH to run the OpenCode plugin under");
+                return;
+            }
+            Err(error) => panic!("node could not be started: {error}"),
+        };
+        assert!(
+            output.status.success(),
+            "the harness failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let ran: Vec<String> = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "the harness printed {:?}: {error}",
+                String::from_utf8_lossy(&output.stdout)
+            )
+        });
+        // The parent's prompt names the work, and its busy, said again and
+        // again, is said once. Of the subagent, its question and the going
+        // on after it, and not its prompt, its busy or its idle. Then the
+        // parent's idle — last, as it was fired, however long the reports
+        // before it took.
+        assert_eq!(
+            vec![
+                "/opt/crook/bin/crook --agent running --title please delegate the file",
+                "/opt/crook/bin/crook --agent needs-input --message bash: touch made-by-sub.txt",
+                "/opt/crook/bin/crook --agent running",
+                "/opt/crook/bin/crook --agent idle",
+            ],
+            ran
+        );
     }
 
     #[test]
@@ -1606,13 +1836,80 @@ such guard"
     fn the_pull_request_rides_beside_the_status_on_its_own_channel() {
         assert_eq!(
             format!("\x1b]6340;running\x07\x1b]6342;pr;{PR}\x07"),
-            sequence(AgentReport::Running, None, None, Some(PR))
+            sequence(AgentReport::Running, None, None, Some(PR), None)
         );
         // Without one the report is exactly what it was.
         assert_eq!(
             "\x1b]6340;idle\x07",
-            sequence(AgentReport::Idle, None, None, None)
+            sequence(AgentReport::Idle, None, None, None, None)
         );
+    }
+
+    /// Copilot CLI's subagent in the capture the session rule was made from.
+    const SUBAGENT: &str = "f2368c19-368c-461e-8976-2cfa5d93311c";
+
+    #[test]
+    fn a_session_rides_in_the_report_after_a_second_cut() {
+        assert_eq!(
+            format!("\x1b]6340;idle;;;{SUBAGENT}\x07"),
+            sequence(AgentReport::Idle, None, None, None, Some(SUBAGENT))
+        );
+        assert_eq!(
+            format!("\x1b]6340;running;run the subtask;;;{SUBAGENT}\x07"),
+            sequence(
+                AgentReport::Running,
+                Some("run the subtask"),
+                None,
+                None,
+                Some(SUBAGENT)
+            )
+        );
+    }
+
+    #[test]
+    fn the_session_is_read_out_of_either_agents_hook_input() {
+        // Copilot CLI spells it `sessionId`; Claude Code, Codex and Gemini CLI
+        // `session_id`. Both are in the hooks' input as captured.
+        assert_eq!(
+            Some(SUBAGENT.to_owned()),
+            session_from_hook(&format!(
+                r#"{{"sessionId":"{SUBAGENT}","timestamp":1791802242871,"prompt":"run the subtask"}}"#
+            ))
+        );
+        assert_eq!(
+            Some("abc123".to_owned()),
+            session_from_hook(r#"{"session_id": "abc123", "hook_event_name": "Stop"}"#)
+        );
+        // Nothing the wire would not take, and nothing from a line piped in:
+        // the report then goes as reports went before there were sessions.
+        for input in [
+            r#"{"sessionId": "two words"}"#,
+            r#"{"sessionId": 7}"#,
+            r#"{"prompt": "fix it"}"#,
+            "f2368c19",
+            "",
+        ] {
+            assert_eq!(None, session_from_hook(input), "{input}");
+        }
+    }
+
+    #[test]
+    fn every_copilot_hook_says_which_session_it_is_from() {
+        // A subagent's prompt and its stop come through the same hooks as
+        // the parent's, and the session is the one thing that tells them
+        // apart. A hook that left it off would be a report the pane takes
+        // whoever made it.
+        let printed = hooks_text("copilot", Path::new("/opt/crook/bin/crook")).unwrap();
+        let parsed: Value = serde_json::from_str(&printed.text).unwrap();
+        let hooks = parsed["hooks"].as_object().unwrap();
+        assert_eq!(COPILOT_EVENTS.len(), hooks.len());
+        for (event, hook) in hooks {
+            let command = hook[0]["bash"].as_str().unwrap();
+            assert!(
+                command.ends_with(" --session - || exit 0"),
+                "copilot's {event} runs {command}"
+            );
+        }
     }
 
     #[test]
@@ -1626,7 +1923,7 @@ such guard"
             "https://github.com/o/r/pull/1\x07",
             "not a link",
         ] {
-            let error = report("running", None, None, Some(refused))
+            let error = report("running", None, None, Some(refused), None)
                 .expect_err("an address the wire refuses is an error")
                 .to_string();
             assert!(error.contains("--pull-request"), "{error}");
@@ -2192,7 +2489,7 @@ its `hooks` should be\n{}",
 
     #[test]
     fn a_word_that_is_not_a_status_is_refused_with_the_words_that_are() {
-        let error = report("sleeping", None, None, None).unwrap_err();
+        let error = report("sleeping", None, None, None, None).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("sleeping"));
         assert!(message.contains("needs-input"));
