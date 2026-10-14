@@ -546,7 +546,8 @@ bookmarks, a menu up on a block, and the find bar with its filter, closed as Esc
 There is no undo and no question, as in every terminal that has a clear. What does not go is
 that the last command finished: a `pane.wait --until finished` asked of a cleared pane at rest
 is answered with the exit of the newest command the clear let go of, while `pane.blocks` reads
-only what is left.
+only what is left — and with nothing left, refuses as `no-blocks` with a sentence saying the
+clear took it, rather than an empty list that would print as a pane with no command finished.
 
 ## What this does not do
 

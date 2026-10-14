@@ -2063,7 +2063,10 @@ has not finished, whatever the pane draws it as: a build on the primary screen, 
 program on the alternate one, an agent's interactive TUI. With nothing finished such a pane is
 refused as `no-blocks` with a sentence saying which — wait `--until finished` for a command,
 and a screen is never a block — rather than answered with an empty list that reads as "nothing
-ran"; with finished commands from before, it gets those and `running: true`. A worker whose
+ran"; with finished commands from before, it gets those and `running: true`. A pane at rest whose
+commands a clear let go of is refused the same way, with a sentence saying the clear took what
+the last one printed and how it exited, since `pane.wait --until finished` has just said it
+finished; one running something since says nothing has finished since the clear. A worker whose
 answer is meant to be read runs headless.
 
 **`events.follow`** answers `{panes}`, what it follows as of now, then one line per event until

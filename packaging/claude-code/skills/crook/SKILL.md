@@ -227,8 +227,9 @@ there.
 what it printed (the end of it, when it is long), the exit status, how long it ran and where;
 `--json` for a script. A command still running has not finished, and an interactive agent —
 `claude` with no `-p` — is one live screen, not a list of finished commands: `crook pane blocks`
-says so rather than printing nothing. To read a worker's answer, run it headless and wait for it
-to finish:
+says so rather than printing nothing. So does a pane someone cleared after its command finished:
+the wait still answers with the exit, but what the command printed went with the clear. To read
+a worker's answer, run it headless and wait for it to finish:
 
 ```sh
 id=$(crook tab new --in-my-group -- claude -p "list the flaky tests in x")
