@@ -2533,12 +2533,14 @@ cursor's row while no composer is drawn under it: a program reading at the start
 printed on, and that row is where its cursor and the composition are drawn. Once taken, the row
 is kept while it is still the one under the block's own rows (`PaneBlocks::live_reach` carries
 it from one layout to the next): a display that rests there and goes back up with `\e[3A` to
-redraw its last lines would otherwise move every line in the pane a row each time. A
-composition belongs to the keyboard: a commit or the input method giving up ends it, and so
-does focus moving, a menu, a find bar or a box beside the pane taking the keys, a section of
-the sidebar replacing the panes, the composer coming back, and the window going behind
-another. Whether the keyboard is a pane's is one predicate, `Workspace::pane_with_keys`, which
-the composers and the frame both ask.
+redraw its last lines would otherwise move every line in the pane a row each time. A one-line
+field — the tab search box, a find bar, a plugin's field — takes an input method's commit but
+draws no composition and reports no caret, so while one has the keys the window leaves the
+candidate list where it last put it. A composition belongs to the keyboard: a commit or the
+input method giving up ends it, and so does focus moving, a menu, a find bar or a box beside
+the pane taking the keys, a section of the sidebar replacing the panes, the composer coming
+back, and the window going behind another. Whether the keyboard is a pane's is one predicate,
+`Workspace::pane_with_keys`, which the composers and the frame both ask.
 
 **The kitty keyboard protocol is in**, in `crook_terminal::input`. Alacritty's `Term` already
 maintained the mode stack behind a config flag that was off; turning it on and reading the

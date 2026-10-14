@@ -18363,7 +18363,7 @@ mod shells {
     fn a_word_composed_into_the_tab_search_box_is_not_drawn_over_the_program() {
         // The box beside the pane has the keyboard, and the program in the
         // pane keeps drawing its cursor all the same: the word is the box's,
-        // and so is the input method's list.
+        // not the program's.
         let mut harness = Harness::panel(1);
         if reading_on_the_whole_screen(&mut harness).is_none() {
             return;
@@ -18377,10 +18377,14 @@ mod shells {
             !drawn(&harness.frame(), 'に').contains(&cursor),
             "a word composed for the search box was drawn at the program's cursor"
         );
-        assert_ne!(
-            Some(cell_from(cursor)),
+        // Nor does the pane claim the input method's list for the program.
+        // The box reports no caret either — a one-line field takes only the
+        // commit — so the window leaves the list where it last put it, which
+        // here is still beside the program's cursor, from before the chord.
+        assert_eq!(
+            None,
             ime_area(&harness),
-            "the list for the search box went beside the program's cursor"
+            "the program's cursor claimed the list while the box has the keyboard"
         );
     }
 

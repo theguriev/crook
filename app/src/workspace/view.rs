@@ -7617,7 +7617,10 @@ impl Workspace {
     /// [`PaneComposition`].
     ///
     /// `None` when nothing has the keyboard — the settings page is the
-    /// focused pane — and when the caret has been scrolled out of view.
+    /// focused pane — and when the caret has been scrolled out of view. And
+    /// `None` while a one-line field has it — the tab search box, a find bar,
+    /// a plugin's field — which takes an input method's commit and reports no
+    /// caret, so the window leaves the list where it last put it.
     pub fn caret_rect(&self) -> Option<RectF> {
         let pane = self.tabs.focused_pane_id()?;
         if let Some(composition) = self

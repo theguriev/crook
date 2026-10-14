@@ -535,8 +535,9 @@ fn contents(
     // And only where the workspace says the keyboard is this pane's. `keys`
     // above leaves a program every key while the tab search box, the Themes
     // panel or a plugin's field is being typed into, and a word composed for
-    // the box would otherwise be drawn at the program's cursor, with the
-    // input method's list beside it rather than beside the box.
+    // the box would otherwise be drawn at the program's cursor, which would
+    // be reported as where the input method's list goes. The box reports no
+    // caret of its own, so the list stays where the window last put it.
     if let Some(interaction) = workspace.interaction(id) {
         interaction.composition.listen(
             output_keys == Keys::All && !surface.composer && workspace.pane_with_keys() == Some(id),
