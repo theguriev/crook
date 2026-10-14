@@ -5,6 +5,30 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.24
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.23...v0.1.24)
+
+### Performance
+
+- **find:** Keep each block's matches between frames and anchor ^ and $ per line ([#496](https://github.com/theguriev/crook/pull/496))
+
+### Fixes
+
+- **terminal:** Draw inline pictures over the grid as well as in blocks ([#495](https://github.com/theguriev/crook/pull/495))
+- **find:** Filter a block by its lines, not its screen rows ([#493](https://github.com/theguriev/crook/pull/493))
+- **blocks:** Copy only the lines a filtered block shows ([#494](https://github.com/theguriev/crook/pull/494))
+- **tabs:** End a rename when the menu it is typed in closes ([#497](https://github.com/theguriev/crook/pull/497))
+- **find:** Search a grid pane's scrollback instead of refusing to open ([#498](https://github.com/theguriev/crook/pull/498))
+
+### Tests
+
+- **session:** Wait for a closed window's hold on the session to go ([#499](https://github.com/theguriev/crook/pull/499))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.23
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.22...v0.1.23)
