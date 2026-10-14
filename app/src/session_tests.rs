@@ -1286,9 +1286,14 @@ fn an_agent_started_through_a_launcher_is_remembered_with_it_and_nothing_else_of
         ),
         (
             &directory,
-            Some("mise x -C /work/repo node@22 -- codex --model o4"),
+            Some("mise x --quiet -j 8 node@22 -- codex --model o4"),
         ),
         (&directory, Some("env ANTHROPIC_API_KEY=secret claude")),
+        // A sandbox no resume line would keep: no agent, and no path.
+        (
+            &directory,
+            Some("mise x --allow-read /srv/confined -- claude"),
+        ),
     ]);
     Session::of(&strip, None)
         .save_blocking(&path)
@@ -1297,13 +1302,14 @@ fn an_agent_started_through_a_launcher_is_remembered_with_it_and_nothing_else_of
     let session = Session::load(&path);
     assert_eq!(
         written_agents(&session),
-        [Some("gemini"), Some("codex"), Some("claude")]
+        [Some("gemini"), Some("codex"), Some("claude"), None]
     );
     assert_eq!(
         written_launchers(&session),
         [
             Some("npx @google/gemini-cli"),
             Some("mise x node@22 -- codex"),
+            None,
             None
         ]
     );
@@ -1313,7 +1319,9 @@ fn an_agent_started_through_a_launcher_is_remembered_with_it_and_nothing_else_of
         "API_KEY",
         "port the tab bar",
         "npx -y",
-        "/work/repo",
+        "--quiet",
+        "/srv/confined",
+        "--allow-read",
         "--model",
     ] {
         assert!(

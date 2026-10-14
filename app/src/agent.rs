@@ -926,15 +926,17 @@ impl Launch {
 ///
 /// Read past the words that only run the program. Some are dropped: `env`
 /// and its options, `NAME=value` assignments, `command`, `exec`, `time`,
-/// `nohup` and `nice`. None of them changes where the program is found, and
-/// an assignment is where a person puts an API key, which has no place in a
-/// file anybody with the home directory can read. The others are kept as
-/// the [`Launch::launcher`], because without them the program is not found
-/// at all: a package runner — `npx`, `bunx` or `bun x`, `pnpm dlx` or
-/// `pnpx`, `yarn dlx`, `npm exec` — handed the agent's package, and a
-/// version manager's `mise x … --` or `asdf exec`. Somebody who runs Gemini
-/// CLI the way its own quick start does, `npx @google/gemini-cli`, has no
-/// `gemini` on `PATH` to resume with.
+/// `nohup` and `nice`. An assignment is where a person puts an API key,
+/// which has no place in a file anybody with the home directory can read,
+/// so every one is dropped, whatever it sets — a `PATH=` that is how the
+/// program was found as well, which leaves that agent resumed by its name
+/// alone, where the shell may not find it. The others are kept as the
+/// [`Launch::launcher`], because without them the program is not found at
+/// all: a package runner — `npx`, `bunx` or `bun x`, `pnpm dlx` or `pnpx`,
+/// `yarn dlx`, `npm exec` — handed the agent's package, and a version
+/// manager's `mise x … --` or `asdf exec`. Somebody who runs Gemini CLI the
+/// way its own quick start does, `npx @google/gemini-cli`, has no `gemini`
+/// on `PATH` to resume with.
 ///
 /// What is kept is rebuilt rather than copied: each program by its name and
 /// not its path, a runner's package without the runner's options — `-y`, a
@@ -942,8 +944,16 @@ impl Launch {
 /// that mean the same typed into any shell. Nothing after the agent's
 /// program is ever kept.
 ///
+/// A line that ran the agent somewhere other than the pane's directory —
+/// `env -C`, `mise x -C` — or some way no line kept of it could run it
+/// again — `mise x` with a sandbox's `--deny-*` and `--allow-*`, with `-E`,
+/// or with an option this does not know — starts no known agent: every
+/// resume line it could be offered would resume another directory's
+/// conversation, or run the agent some other way (see `mise_tools`).
+///
 /// An alias is not seen through. The shell reports the line as it was
 /// typed, and `cc` is a word only the shell that defined it can expand.
+/// Neither is a `PATH=`, above.
 pub fn launch_of(command: &str) -> Option<Launch> {
     let words = words(command);
     let mut rest = words.as_slice();
@@ -957,7 +967,19 @@ pub fn launch_of(command: &str) -> Option<Launch> {
         let program = program_name(word);
         let second = after.first().map(String::as_str);
         rest = match (program, second) {
-            ("env", _) => past_options(after, &["-u", "--unset", "-C", "--chdir", "-S"]),
+            ("env", _) => {
+                let program = past_options(after, &["-u", "--unset", "-C", "--chdir", "-S"]);
+                let options = &after[..after.len() - program.len()];
+                // The agent ran in a directory the pane is not in, and its
+                // conversation is that directory's.
+                if options
+                    .iter()
+                    .any(|option| option.starts_with("-C") || option.starts_with("--chdir"))
+                {
+                    return None;
+                }
+                program
+            }
             // Says what the name is, and runs nothing.
             ("command", Some("-v" | "-V")) => return None,
             ("command" | "nohup", _) => past_options(after, &[]),
@@ -1068,19 +1090,46 @@ fn package_name(asked: &str) -> &str {
 }
 
 /// The tools `mise x` was given and the command after its `--`, or `None`
-/// for a `mise x` with no `--`, which runs no command of its own.
+/// for a `mise x` with no `--`, which runs no command of its own, and for
+/// one given an option that changes where or how that command runs.
 ///
-/// `mise`'s own options are left out — `-C` names a directory, which is
-/// nothing the file should hold — and only the tools are kept.
+/// Only the tools are kept. The options passed over are the ones that say
+/// how much `mise` prints, whether it asks before an install and how many
+/// it runs at once, and how it prepares one — none of which changes what
+/// the command is or where it runs. Any other is the line of no agent:
+/// `-C` runs it in a directory the pane is not in, whose conversation a
+/// resume line in the pane's would never reach; `-E` loads another
+/// environment's config; a sandbox's `--deny-*` and `--allow-*` confine it,
+/// and a resume line without them would not; `-c` is a command of its own.
+/// So is an option this does not know, since its value would otherwise be
+/// taken for a tool and written into the file.
 fn mise_tools(words: &[String]) -> Option<(Vec<&str>, &[String])> {
+    /// `mise x`'s options that change nothing about the command it runs.
+    const PASSED_OVER: &[&str] = &[
+        "-q",
+        "--quiet",
+        "--silent",
+        "--verbose",
+        "-y",
+        "--yes",
+        "--fresh-env",
+        "--no-deps",
+        "--raw",
+        "--locked",
+    ];
     let end = words.iter().position(|word| word == "--")?;
     let mut tools = Vec::new();
-    let mut options = words[..end].iter();
+    let mut options = words[..end].iter().map(String::as_str);
     while let Some(word) = options.next() {
-        if ["-C", "--cd", "-j", "--jobs"].contains(&word.as_str()) {
-            options.next();
+        if word == "-j" || word == "--jobs" {
+            options.next()?;
         } else if !word.starts_with('-') {
-            tools.push(word.as_str());
+            tools.push(word);
+        } else if !(PASSED_OVER.contains(&word)
+            || word.starts_with("--jobs=")
+            || (word.len() > 1 && word[1..].chars().all(|letter| letter == 'v')))
+        {
+            return None;
         }
     }
     Some((tools, &words[end + 1..]))
@@ -2475,7 +2524,6 @@ its `hooks` should be\n{}",
             "/usr/bin/env claude",
             "env ANTHROPIC_MODEL=opus claude",
             "env -i -u TERM --unset=LANG HOME=/home/me claude",
-            "env -C /tmp claude",
             "env -- claude",
             "ANTHROPIC_MODEL=opus DEBUG= claude --continue",
             "command claude",
@@ -2506,7 +2554,10 @@ its `hooks` should be\n{}",
             ("mise x -- claude", "claude"),
             ("mise x node@22 -- claude --model opus", "claude"),
             ("mise exec node@22 python@3.12 -- codex", "codex"),
-            ("mise x -C /work/repo node@22 -- codex", "codex"),
+            (
+                "mise x -q --yes -j 8 --jobs=2 -vv node@22 -- codex",
+                "codex",
+            ),
             ("mise x node@22 -- npx @google/gemini-cli", "gemini"),
             ("mise x node@22 -- env FOO=1 copilot", "copilot"),
             ("asdf exec claude", "claude"),
@@ -2545,6 +2596,40 @@ its `hooks` should be\n{}",
             "'' claude",
         ] {
             assert_eq!(None, program_of(command), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn an_agent_run_somewhere_else_or_some_other_way_is_no_agent_to_resume() {
+        // Every line a restore could offer for these resumes another
+        // directory's conversation, runs the agent unconfined, or carries a
+        // value of an option as a tool into the file: better no line.
+        for command in [
+            // A directory the pane is not in.
+            "env -C /work/repo claude",
+            "env -C/work/repo claude",
+            "env --chdir /work/repo claude",
+            "env --chdir=/work/repo claude",
+            "mise x -C /work/repo node@22 -- codex",
+            "mise x --cd /work/repo -- claude",
+            "mise x --cd=/work/repo -- claude",
+            // A sandbox a resume line would leave behind.
+            "mise x --allow-read /srv node@22 -- claude",
+            "mise x --deny-all --allow-read /home/me/project --allow-net api.anthropic.com -- claude",
+            "mise x --allow-env ANTHROPIC_API_KEY -- codex",
+            "mise x --allow-write=/tmp -- claude",
+            "mise x --deny-net -- claude",
+            // Another environment's config, and a command of mise's own.
+            "mise x -E staging node@22 -- claude",
+            "mise x --env=staging -- claude",
+            "mise x -c true -- claude",
+            // Options this does not know, with or without a value.
+            "mise x --output json -- claude",
+            "mise x --some-new-flag node@22 -- claude",
+            "mise x -j -- claude",
+            "mise x - -- claude",
+        ] {
+            assert_eq!(None, launch_of(command), "{command:?}");
         }
     }
 
@@ -2631,7 +2716,7 @@ its `hooks` should be\n{}",
             ),
             // A version manager's tools, and none of its options.
             (
-                "mise x -C /work/repo node@22 -- claude --model opus",
+                "mise x -q --yes -j 8 node@22 -- claude --model opus",
                 "mise x node@22 -- claude",
             ),
             ("mise exec -- /usr/local/bin/codex", "mise exec -- codex"),

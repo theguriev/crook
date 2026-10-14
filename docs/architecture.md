@@ -2981,8 +2981,13 @@ the version manager, that found it (`npx @google/gemini-cli`, `mise x node@22 --
 which the resume line is run through, since an `npx` user has no `gemini` on `PATH`. It is
 rebuilt from the line by `agent::launch_of` rather than copied, so a `VAR=value` (an API key's
 usual place), `env`, `nohup` and the runner's own options never reach the file, and a hand edit
-that is not that shape comes back as the agent alone. Aliases are not seen through: the shell
-reports the line as typed, and only that shell could expand it. The
+that is not that shape comes back as the agent alone. Every assignment is dropped, a `PATH=` that
+found the agent too, so that agent is offered its bare line. A line that ran the agent in another
+directory (`env -C`, `mise x -C`) or some other way no kept line could repeat (`mise x` with a
+sandbox's `--deny-*` and `--allow-*`, with `-E`, or with an option `launch_of` does not know)
+names no agent at all, because any line it could be offered would resume another directory's
+conversation or run the agent unconfined. Aliases are not seen through: the shell reports the line as typed, and only
+that shell could expand it. The
 rule above still holds: nothing old is redrawn, and a new process starts only when a person
 presses Enter, or "Resume every agent" for every line nobody has touched.
 

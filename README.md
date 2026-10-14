@@ -311,9 +311,13 @@ Twenty-two features, and the page that configures them:
   `asdf exec` — and its line is offered through the same one, `npx @google/gemini-cli --resume
   latest`, since there may be no `gemini` on your `PATH`; the runner and the package are kept,
   and its options are not. So is one behind `env`, a `VAR=value`, `command`, `exec`, `time`,
-  `nohup` or `nice`, none of which is kept, so an API key set on the line stays off the disk.
-  An alias is not seen through: the shell reports the line the way you typed it. A line of
-  your own goes in `settings.json` under `resume_lines`, keyed by program — `{"claude":
+  `nohup` or `nice`, none of which is kept, so an API key set on the line stays off the disk;
+  nor is a `PATH=`, so an agent only that `PATH` finds is offered its bare line. One run in
+  another directory (`env -C`, `mise x -C`), in a sandbox (`mise x --deny-all`), or with a
+  `mise x` option that changes how it runs (`-E`) or that Crook does not know is offered
+  nothing, since a line without those would resume another directory's conversation or run it
+  some other way. An alias is not seen through: the shell reports the line the way you typed
+  it. A line of your own goes in `settings.json` under `resume_lines`, keyed by program — `{"claude":
   "claude --continue --model opus"}` — and an empty one offers nothing; one that starts with
   the agent's name is run through the same runner. OpenCode and aider have no line until you
   give them one: OpenCode's `--continue` reaches across a repository's worktrees, and aider's
