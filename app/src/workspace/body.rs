@@ -92,6 +92,8 @@ use crookui_core::icons::Lucide;
 use crookui_core::prelude::*;
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 
+use crate::input_keys::Platform;
+use crate::keybindings::format_chord;
 use crate::pane_blocks::PaneBlocks;
 use crate::pane_find;
 use crate::pane_split::{DividerDrag, Drag, PaneExtent};
@@ -108,8 +110,8 @@ use super::block_menu;
 use super::input_element::{CommandInput, Ink};
 use super::pane_output::Keys;
 use super::terminal_element::{TerminalElement, color};
-use super::text_field::TextField;
-use super::view::Workspace;
+use super::text_field::{self, TextField};
+use super::view::{Workspace, find_switch_chord};
 
 /// The gap between a pane's edge and the text inside it, left and right.
 ///
@@ -1840,6 +1842,7 @@ fn find_bar(
     // rather than spilled: in a pane too narrow for everything, the steps and
     // the way out are what the bar must keep.
     let options = find.options();
+    let ui = workspace.fonts().ui;
     row.add_child(
         Shrinkable::new(
             1.,
@@ -1856,6 +1859,11 @@ fn find_bar(
                             action: FindAction::ToggleCase,
                         },
                         options.case_sensitive,
+                        Some(SwitchNote {
+                            label: "Match case",
+                            regex: false,
+                            ui,
+                        }),
                     ))
                     .with_child(find_switch(
                         find.switch_state(true),
@@ -1865,6 +1873,11 @@ fn find_bar(
                             action: FindAction::ToggleRegex,
                         },
                         options.regex,
+                        Some(SwitchNote {
+                            label: "Regular expression",
+                            regex: true,
+                            ui,
+                        }),
                     ))
                     // Only while filtering, and lit: a press goes back to
                     // finding across every block.
@@ -1877,6 +1890,7 @@ fn find_bar(
                                 action: FindAction::StopFiltering,
                             },
                             true,
+                            None,
                         )
                     }))
                     .finish(),
@@ -1926,14 +1940,16 @@ fn find_bar(
         .finish()
 }
 
-/// One of the find bar's two switches — capitals told apart, a regular
-/// expression — which shows whether it is on by a ground that stays lit,
-/// where a button's ground only lights under the pointer.
+/// One of the find bar's switches — capitals told apart, a regular
+/// expression, a filter — which shows whether it is on by a ground that stays
+/// lit, where a button's ground only lights under the pointer, and says what
+/// it is under the pointer when it has a `note`.
 fn find_switch(
     state: MouseStateHandle,
     icon: Lucide,
     action: WorkspaceAction,
     on: bool,
+    note: Option<SwitchNote>,
 ) -> Box<dyn Element> {
     Hoverable::new(state, move |mouse| {
         let ground = if on {
@@ -1948,7 +1964,7 @@ fn find_switch(
         } else {
             theme().text_muted
         };
-        Container::new(
+        let switch = Container::new(
             Icon::new(icon, FIND_BUTTON_ICON)
                 .with_color(colour)
                 .finish(),
@@ -1956,10 +1972,95 @@ fn find_switch(
         .with_uniform_padding(FIND_BUTTON_PADDING)
         .with_background_color(ground)
         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
-        .finish()
+        .finish();
+        match note {
+            Some(note) if mouse.is_hovered() => noted(switch, note),
+            _ => switch,
+        }
     })
     .on_click(move |_, ctx, _| ctx.dispatch_typed_action(action))
     .finish()
+}
+
+/// What one of the find bar's two switches says while the pointer is on it:
+/// what it does, and the chord that flips it.
+///
+/// The chord is the bar's own rather than a keybinding — see
+/// [`find_switch_chord`] — so neither the palette nor the Keyboard Shortcuts
+/// page can list it, and `Aa` and `.*` say what they do only to somebody who
+/// already knows. The switch is the one place left to say both.
+#[derive(Clone, Copy)]
+struct SwitchNote {
+    /// What the switch does.
+    label: &'static str,
+    /// Whether it is the pattern switch rather than the case one, which is
+    /// what says which chord to name.
+    regex: bool,
+    /// The interface face the note is set in.
+    ui: FamilyId,
+}
+
+/// How far under its switch a note hangs: past the rest of the bar, and then
+/// the four pixels a menu keeps from what opened it.
+///
+/// The rest of the bar is the half of the row the switch is centred in that
+/// it does not fill — the field is the row's tallest child — and then the
+/// bar's five pixels of padding and its border.
+const FIND_NOTE_DROP: f32 =
+    (text_field::HEIGHT - FIND_BUTTON_ICON - FIND_BUTTON_PADDING * 2.) / 2. + 5. + 1. + 4.;
+
+/// `switch`, with its note hung under it.
+///
+/// Under rather than above, which is the other way round from the info note
+/// in the tab options menu, for that note's own reason: an overlay covers only
+/// what was painted before it. The bar floats over the top of the pane's
+/// output, painted before the bar, so a note under it covers rows that know
+/// they are covered; over it is the pane's top edge and past that the header
+/// or another pane. Right-aligned with the switch, since the bar is against
+/// the pane's right edge and a note running left stays over the pane. And
+/// clear of the switch, so the slide that keeps it on screen in a short window
+/// never puts it under the pointer that raised it.
+fn noted(switch: Box<dyn Element>, note: SwitchNote) -> Box<dyn Element> {
+    let chord = format_chord(&find_switch_chord(note.regex, Platform::current()));
+    let words = Flex::row()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(10.)
+        .with_child(
+            Text::new(note.label, note.ui, 11.)
+                .with_color(theme().text_primary)
+                .finish(),
+        )
+        .with_child(
+            Text::new(chord, note.ui, 11.)
+                .with_color(theme().text_muted)
+                .finish(),
+        )
+        .finish();
+    let panel = Container::new(words)
+        .with_background_color(theme().surface_raised)
+        .with_border(Border::all(1.).with_border_color(theme().overlay_2))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+        .with_padding(Padding {
+            top: 4.,
+            left: 8.,
+            bottom: 5.,
+            right: 8.,
+        })
+        .finish();
+
+    let mut stack = Stack::new().with_child(switch);
+    stack.add_anchored_overlay_child(
+        panel,
+        AnchorTo {
+            parent: Corner::BottomRight,
+            child: Corner::TopRight,
+            offset: vec2f(0., FIND_NOTE_DROP),
+            keep_on_screen: true,
+            keep_clear_of_parent: true,
+        },
+    );
+    stack.finish()
 }
 
 /// One of the find bar's buttons: an icon that lights under the pointer and

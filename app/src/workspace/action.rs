@@ -225,9 +225,11 @@ pub enum FindAction {
         /// Forwards, rather than back.
         forward: bool,
     },
-    /// Flip whether the search tells capitals apart.
+    /// Flip whether the search tells capitals apart. The `Aa` switch, and
+    /// `alt-c` (`cmd-alt-c` on macOS) while the bar has the keyboard.
     ToggleCase,
-    /// Flip whether the query is read as a regular expression.
+    /// Flip whether the query is read as a regular expression. The `.*`
+    /// switch, and `alt-r` (`cmd-alt-r` on macOS).
     ToggleRegex,
     /// Stop filtering a block and go back to finding across every one.
     StopFiltering,
@@ -541,7 +543,7 @@ pub enum BlockAction {
     /// Bookmark the block, or take its bookmark off.
     ToggleBookmark,
     /// Open the find bar filtering this block's output to the lines that
-    /// hold its query.
+    /// hold its query. The menu's row, and `filter-block`.
     FilterOutput,
     /// Bring a block's first line to the top of its pane's list. What a press
     /// on the sticky header over a block does.

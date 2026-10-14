@@ -58,7 +58,7 @@ pub const WINDOW_OVERLAY: SlotId = SlotId::new("window.overlay");
 ///
 /// The order is the order the shipped keybindings are written in, so a person
 /// reading one and the other is reading the same order twice.
-pub const COMMANDS: [(&str, &str, Binding); 58] = [
+pub const COMMANDS: [(&str, &str, Binding); 59] = [
     ("new-tab", "New agent tab", Binding::NewTab),
     (
         "reopen-closed-tab",
@@ -269,6 +269,11 @@ pub const COMMANDS: [(&str, &str, Binding); 58] = [
         "bookmark-block",
         "Bookmark the block, or take its bookmark off",
         Binding::BookmarkBlock,
+    ),
+    (
+        "filter-block",
+        "Filter the block's output",
+        Binding::FilterBlock,
     ),
     (
         "previous-bookmark",

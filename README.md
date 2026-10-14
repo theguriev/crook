@@ -608,9 +608,11 @@ Twenty-one features, and the page that configures them:
   them and scroll the current one into view, and Escape hands the keyboard back to the shell
   with the query kept for next time. Two switches on the bar change how it matches: `Aa` tells
   capitals apart, and `.*` reads the query as a regular expression — one that does not compile
-  says so on the bar instead of counting no results. It is a search, not a filter: the lines
-  between the hits stay where they are, because the output is a transcript. The filter is a
-  block's own: **Filter output** on its menu opens the same bar filtering that one block, which
+  says so on the bar instead of counting no results. `cmd-alt-c` and `cmd-alt-r` (`alt-c` and
+  `alt-r` off macOS) flip them without leaving the query, and each switch names its chord under
+  the pointer. It is a search, not a filter: the lines between the hits stay where they are,
+  because the output is a transcript. The filter is a block's own: **Filter output** on its
+  menu, or `filter-block` on the selected one, opens the same bar filtering that block, which
   then shows its command and only the lines of its output that match — the bar counts them,
   `2/4 lines`, with the same two switches — until the bar closes or its filter switch goes
   back to finding. A copy of a filtered block takes the lines it shows: a drag over it, its
@@ -929,7 +931,7 @@ Twenty-one features, and the page that configures them:
   page tells you where it is.
 
 - **Everything the window does has a name, and most of it has a key.** The window registers
-  fifty-eight commands of its own and ships chords for forty; the other eighteen are
+  fifty-nine commands of its own and ships chords for forty; the other nineteen are
   reached by name, from the palette or from a chord of your own. That split is deliberate — a
   shipped chord is a key taken away from the shell in every pane, forever, so it is spent on
   what is pressed often and not on what is done once a week.
@@ -956,7 +958,8 @@ Twenty-one features, and the page that configures them:
   Without a chord, by name: `split-left` and `split-up`, `grow-pane`, `shrink-pane` and
   `even-panes`, a block's menu (`open-block-menu`) and every entry of it (`copy-block`,
   `copy-block-command`, `copy-block-output`, `copy-block-directory`, `copy-block-branch`,
-  `rerun-block`, `bookmark-block`, `scroll-to-block-top`, `scroll-to-block-bottom`), the
+  `rerun-block`, `bookmark-block`, `filter-block`, `scroll-to-block-top`,
+  `scroll-to-block-bottom`), the
   bookmarks between blocks (`previous-bookmark`, `next-bookmark`), `resume-agents` (the
   agents a restart ended — see Tabs), every entry of a tab's
   (`crook/tabs/pin-tab`, `close-tab`, `open-menu`, `view-options`,

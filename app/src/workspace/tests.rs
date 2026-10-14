@@ -20048,6 +20048,40 @@ mod shells {
         }
 
         #[test]
+        fn the_filter_row_says_the_chord_it_was_bound_to() {
+            // Every other row of the menu says the chord its command is bound
+            // to, which is how somebody reading the menu learns there is one.
+            // Filtering had no command, so its row had nothing to say.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.bind(r#"[{ "key": "ctrl+alt+l", "command": "crook/window/filter-block" }]"#);
+            harness.frame();
+            if run(&mut harness, pane, "echo ALPHA") == 0 {
+                return;
+            }
+
+            let scene = open_block_menu(&mut harness, pane, 0);
+            let popup = block_menu_box(&scene);
+            let lines = text_lines(&scene, |at| {
+                at.x() >= popup.min_x() && at.x() <= popup.max_x()
+            });
+            let (row, _) = lines
+                .iter()
+                .find(|(_, line)| line.trim() == "Filter output")
+                .expect("the menu has a Filter output row");
+            // The chord is set smaller than the label, so it sits on its own
+            // baseline a pixel off the label's: beside it, not a row away.
+            assert!(
+                lines.iter().any(|(at, line)| {
+                    line.trim() == "ctrl+alt+l" && (at.y() - row.y()).abs() < 4. && at.x() > row.x()
+                }),
+                "the Filter output row does not say its chord: {lines:?}"
+            );
+        }
+
+        #[test]
         fn filtering_a_block_keeps_its_command_and_the_lines_that_match() {
             // Four lines of output; filtering them for `ap` keeps two, the
             // bar counts them, and going back to finding shows all four.
@@ -21625,6 +21659,151 @@ mod shells {
             );
         }
 
+        /// What flips one of the bar's switches from the keyboard, held with
+        /// `c` or `r`: Alt, and Option-Command on macOS, where Option alone
+        /// types a character into the query.
+        fn switch_chord() -> Modifiers {
+            Modifiers {
+                alt: true,
+                cmd: cfg!(target_os = "macos"),
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn the_switches_flip_from_the_keyboard_and_the_search_runs_again() {
+            // `Aa` and `.*` were a press each and nothing else, so saying how
+            // a query should match meant leaving the keyboard in the middle of
+            // typing it. VS Code's chords flip them while the bar has the
+            // keyboard, each a new search counted at once, with nothing typed
+            // into the query on the way.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = searching(&mut harness, "QVX qvx", "qvx") else {
+                return;
+            };
+            let total = |harness: &Harness| {
+                harness.workspace.read(&harness.app, |workspace, app| {
+                    workspace.find_matches(pane, app).len()
+                })
+            };
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("a find bar");
+            // The field takes keys in the tree the last frame built, so a
+            // chord the bar did not claim would reach it rather than vanish.
+            harness.frame();
+            assert_eq!(total(&harness), 4, "folded, every one");
+
+            harness.press("c", switch_chord(), "c");
+            assert!(
+                find.options().case_sensitive,
+                "the case chord flipped nothing"
+            );
+            assert_eq!(total(&harness), 2, "told apart, only the small ones");
+            assert_eq!("qvx", find.query(), "the chord was typed into the query");
+
+            harness.press("r", switch_chord(), "r");
+            assert!(find.options().regex, "the pattern chord flipped nothing");
+            retype(&mut harness, pane, "Q.X");
+            assert_eq!(total(&harness), 2, "a pattern, told apart");
+
+            harness.press("c", switch_chord(), "c");
+            assert_eq!(total(&harness), 4, "a pattern, folded again");
+            harness.press("r", switch_chord(), "r");
+            assert_eq!(total(&harness), 0, "`Q.X` read as text again");
+        }
+
+        #[test]
+        fn a_switch_flipped_from_the_keyboard_searches_a_grid_again() {
+            // A grid is searched off the thread that draws, and only when
+            // something asks; a chord that flipped the switch without asking
+            // would leave the count answering the question before it. `Q7X`
+            // is only ever the output — the command line spells `Q%sX`.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = overflowed(&mut harness, "printf 'Q%sX\\n' 7") else {
+                return;
+            };
+            harness.run_command("crook/window/find");
+            type_query(&mut harness, "q7x");
+            await_grid_matches(&mut harness, pane, 1);
+
+            let answered = |harness: &Harness, total: usize| {
+                !harness.workspace.read(&harness.app, |workspace, app| {
+                    workspace.grid_find_pending(pane, app)
+                }) && matches(harness, pane) == total
+            };
+            harness.press("c", switch_chord(), "c");
+            harness.wait_for(
+                "the grid was not searched with capitals told apart",
+                |harness| answered(harness, 0),
+            );
+            harness.press("c", switch_chord(), "c");
+            harness.wait_for("the grid was not searched folded again", |harness| {
+                answered(harness, 1)
+            });
+        }
+
+        #[test]
+        fn a_switch_under_the_pointer_says_what_it_does_and_its_chord() {
+            // The chords are the bar's own rather than keybindings, so neither
+            // the palette nor the Keyboard Shortcuts page can list them: the
+            // switch is the one place that can say which key it answers to.
+            let mut harness = Harness::panel(1);
+            if searching(&mut harness, "qvx wqz rqv", "wqz").is_none() {
+                return;
+            }
+            let mac = cfg!(target_os = "macos");
+            for (icon, says, chord) in [
+                (
+                    Lucide::CaseSensitive,
+                    "Match case",
+                    if mac { "alt+cmd+c" } else { "alt+c" },
+                ),
+                (
+                    Lucide::Regex,
+                    "Regular expression",
+                    if mac { "alt+cmd+r" } else { "alt+r" },
+                ),
+            ] {
+                harness.move_to(vec2f(0., 0.));
+                let scene = harness.frame();
+                assert!(
+                    !frame_text(&scene).contains(says),
+                    "{says:?} is up with the pointer off the switch"
+                );
+                let switch = icons_in(&scene, find_bar_box(&scene), icon);
+                assert_eq!(switch.len(), 1, "one {says:?} switch on the bar");
+
+                harness.move_to(center(switch[0]));
+                let scene = harness.frame();
+                let shown = frame_text(&scene);
+                assert!(
+                    shown.contains(says) && shown.contains(chord),
+                    "the switch under the pointer does not say {says:?} and {chord:?}: {shown}"
+                );
+
+                // Hung under the bar, over output painted before it, rather
+                // than over the bar or off the pane's side.
+                let notes: Vec<RectF> = scene
+                    .layers()
+                    .flat_map(|layer| layer.rects.iter())
+                    .filter(|rect| {
+                        rect.corner_radius.get_top_left() == Radius::Pixels(4.)
+                            && rect.background == Fill::Solid(theme().surface_raised)
+                    })
+                    .map(|rect| rect.bounds)
+                    .collect();
+                assert_eq!(notes.len(), 1, "one note for {says:?}");
+                let (bar, pane) = (find_bar_box(&scene), panel_boxes(&scene)[0]);
+                assert!(
+                    notes[0].min_y() > bar.max_y() && notes[0].max_x() <= pane.max_x(),
+                    "the note at {:?} is not under the bar at {bar:?} inside the pane at {pane:?}",
+                    notes[0]
+                );
+            }
+        }
+
         #[test]
         fn the_bar_fits_the_pane_it_is_about() {
             // The bar hung off the pane's corner and was laid out against the
@@ -22530,6 +22709,111 @@ mod shells {
                 "the composer holds {:?} rather than {command:?}",
                 harness.field_text(pane)
             );
+        }
+
+        /// Steps the keyboard's selection up from the prompt until it is on
+        /// `block`.
+        fn select(harness: &mut Harness, pane: PaneId, block: BlockId) {
+            while selected(harness, pane) != Some(block) {
+                let before = selected(harness, pane);
+                up(harness);
+                assert_ne!(
+                    before,
+                    selected(harness, pane),
+                    "stepping up never reached {block:?}"
+                );
+            }
+        }
+
+        /// The first block the history holds that `keep` says yes to.
+        fn block_where(
+            harness: &Harness,
+            pane: PaneId,
+            keep: impl Fn(&crook_terminal::Block) -> bool,
+        ) -> Option<BlockId> {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                let blocks = workspace.terminal_blocks(pane, app)?;
+                blocks
+                    .iter()
+                    .find(|block| keep(block))
+                    .map(|block| block.id)
+            })
+        }
+
+        /// What the pane's find bar is filtering, once a command has had its
+        /// say: `None` with the bar shut.
+        fn filtering(harness: &Harness, pane: PaneId) -> Option<BlockId> {
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("a find bar");
+            find.filter().filter(|_| find.is_open())
+        }
+
+        #[test]
+        fn filter_block_filters_the_selected_block_rather_than_the_newest() {
+            // Filtering was the one row of the block's menu with no name, so
+            // it was the one thing done to a block that needed a pointer. The
+            // command acts on the block the keyboard selected, the way every
+            // other block command does — an older one here, so a filter
+            // landing on whichever block was last would not pass for it.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = three_commands(&mut harness) else {
+                return;
+            };
+            let aimed = block_where(&harness, pane, |block| {
+                block.command.as_deref() == Some("echo second")
+            })
+            .expect("the second command is a block");
+            select(&mut harness, pane, aimed);
+
+            harness.run_command("crook/window/filter-block");
+
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("a find bar");
+            assert!(find.is_open(), "the command opened no bar");
+            assert_eq!(
+                Some(aimed),
+                find.filter(),
+                "the bar is not filtering the selected block"
+            );
+        }
+
+        #[test]
+        fn filter_block_leaves_a_block_that_never_said_where_its_output_starts() {
+            // The menu's row is disabled on such a block: a filter keeps the
+            // command and the lines of output that match, and with no line
+            // between the two it has nothing to keep the command by. The
+            // command has to come to the same answer without the row.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = three_commands(&mut harness) else {
+                return;
+            };
+            // Lines typed straight at bash, past the composer, leave a block
+            // between each two commands that ran nothing and so said nothing
+            // about where output starts. A shell that leaves none has nothing
+            // here to aim at.
+            let Some(aimed) = block_where(&harness, pane, |block| block.output_from.is_none())
+            else {
+                eprintln!("skipped: every block here said where its output starts");
+                return;
+            };
+            select(&mut harness, pane, aimed);
+
+            harness.run_command("crook/window/filter-block");
+            assert_eq!(None, filtering(&harness, pane), "the block was filtered");
+
+            // And the same command on a block that did say does filter it.
+            let said = block_where(&harness, pane, |block| block.output_from.is_some())
+                .expect("a command said where its output starts");
+            harness.dispatch_workspace_action(WorkspaceAction::Block(BlockAction::ClearSelection(
+                pane,
+            )));
+            select(&mut harness, pane, said);
+            harness.run_command("crook/window/filter-block");
+            assert_eq!(Some(said), filtering(&harness, pane));
         }
 
         #[test]
@@ -32644,14 +32928,78 @@ mod from_the_keyboard {
             "crook/window/rerun-block",
             "crook/window/open-block-menu",
             "crook/window/scroll-to-block-top",
+            "crook/window/filter-block",
         ] {
             let action = ActionName::parse(command).expect("a literal that parses");
-            let resolved = harness.workspace.read(&harness.app, |workspace, _| {
-                crate::plugins::window::binding_for(&action)
-                    .and_then(|binding| workspace.command(binding))
-            });
+            // A name nothing answers to would decline too, and say nothing.
+            let binding = crate::plugins::window::binding_for(&action)
+                .unwrap_or_else(|| panic!("{command} is not one of the window's commands"));
+            let resolved = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.command(binding));
             assert!(resolved.is_none(), "{command} did not decline");
         }
+    }
+
+    #[test]
+    fn the_find_bar_switch_chords_take_nothing_from_a_binding_or_the_field() {
+        // The bar claims its two chords before the bindings, so a shipped
+        // binding on one would go dead whenever the bar was open, and before
+        // the field, so a chord the field types with would stop typing. Asked
+        // of both platforms' tables from either, since the chords differ.
+        use crate::input_keys::{Platform, intent};
+        use crate::workspace::action::FindAction;
+        use crate::workspace::view::{find_switch_chord, find_switch_for};
+
+        for platform in [Platform::Mac, Platform::Other] {
+            for regex in [false, true] {
+                let chord = find_switch_chord(regex, platform);
+                for rule in crate::keybindings::Keybindings::for_platform(platform).effective() {
+                    assert_ne!(
+                        rule.keys.first(),
+                        Some(&chord),
+                        "{} is a shipped binding and the find bar's on {platform:?}",
+                        rule.chord()
+                    );
+                }
+                assert_eq!(
+                    None,
+                    intent(&chord, &chord.key, platform),
+                    "the field types with the find bar's chord on {platform:?}"
+                );
+            }
+        }
+
+        let held = |key: &str, ctrl: bool, alt: bool, cmd: bool| {
+            Keystroke::new(
+                key,
+                Modifiers {
+                    ctrl,
+                    alt,
+                    cmd,
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(
+            Some(FindAction::ToggleCase),
+            find_switch_for(&held("c", false, true, false), Platform::Other)
+        );
+        assert_eq!(
+            Some(FindAction::ToggleRegex),
+            find_switch_for(&held("r", false, true, true), Platform::Mac)
+        );
+        // Option alone types on a Mac, and what it types is a query.
+        assert_eq!(
+            None,
+            find_switch_for(&held("c", false, true, false), Platform::Mac)
+        );
+        assert!(intent(&held("c", false, true, false), "ç", Platform::Mac).is_some());
+        // Windows reports AltGr as Ctrl-Alt, and AltGr types a character.
+        assert_eq!(
+            None,
+            find_switch_for(&held("c", true, true, false), Platform::Other)
+        );
     }
 
     #[test]
