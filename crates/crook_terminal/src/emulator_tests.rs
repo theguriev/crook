@@ -506,6 +506,28 @@ fn test_the_mouse_modes_are_the_ones_the_child_asked_for() {
 }
 
 #[test]
+fn test_the_snapshot_says_whether_the_child_has_the_mouse() {
+    // What the pointer over the grid is drawn from: the frame paints from the
+    // snapshot, and asking the terminal instead would take the lock the
+    // reader parses under on every frame.
+    let mut emulator = emulator();
+    assert!(!emulator.snapshot().mouse_reporting);
+
+    emulator.advance(b"\x1b[?1000h");
+    assert!(
+        emulator.snapshot().mouse_reporting,
+        "a mode the child asked for with nothing drawn is still a new snapshot"
+    );
+
+    // Any of the three reports is the mouse taken; alternate scroll is not.
+    emulator.advance(b"\x1b[?1000l\x1b[?1003h");
+    assert!(emulator.snapshot().mouse_reporting);
+    emulator.advance(b"\x1b[?1003l");
+    assert!(!emulator.snapshot().mouse_reporting);
+    assert!(emulator.mouse_modes().alternate_scroll);
+}
+
+#[test]
 fn test_focus_reporting_is_the_mode_the_child_asked_for() {
     let mut emulator = emulator();
     assert!(

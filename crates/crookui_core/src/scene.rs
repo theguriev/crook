@@ -17,6 +17,14 @@
 //! A picture is the one thing that cannot be a reference — the renderer has no
 //! way to produce it — so an [`Image`] carries its pixels, shared behind an
 //! `Arc` so that cloning a scene clones none of them.
+//!
+//! A scene is also where the pointer's shape is decided. An element that wants
+//! the I-beam, a hand or a resize arrow over part of itself asks for it while
+//! it paints, with [`Scene::request_pointer`], and the windowing layer asks
+//! [`Scene::pointer_at`] on every move. The answer is resolved by exactly the
+//! rule a press is: the topmost layer with something at the point decides, so
+//! a menu over the output takes the I-beam away for the same reason it takes
+//! the click.
 
 use std::sync::Arc;
 
@@ -74,20 +82,96 @@ pub struct Layer {
     /// it the tint would cover the button and the button would decline every
     /// click that landed on it.
     pub click_through: bool,
+
+    /// The pointer shapes asked for over parts of this layer, in paint order.
+    ///
+    /// Empty in nearly every layer, and a `Vec` allocates nothing until the
+    /// first one: a frame asks for a handful — the output, the composer, a
+    /// divider — and nothing else pays for them.
+    pointers: Vec<PointerRequest>,
+}
+
+/// The shape the pointer takes over part of the window.
+///
+/// Crook's own names rather than the window system's, because this crate
+/// knows nothing about one: the windowing layer turns each into the cursor
+/// its platform draws.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PointerShape {
+    /// The arrow, over anything that asked for nothing else — a button
+    /// included. A control says what it does by looking like one.
+    #[default]
+    Arrow,
+    /// The I-beam, over text that a press selects or puts a caret in.
+    Text,
+    /// The hand, over a link that a click will follow.
+    Hand,
+    /// The arrows that point left and right, over a handle dragged sideways
+    /// to make the things beside it wider and narrower.
+    ColumnResize,
+    /// The arrows that point up and down, over a handle dragged to make the
+    /// things above and below it taller and shorter.
+    RowResize,
+}
+
+/// One [`PointerShape`] asked for over one rectangle.
+#[derive(Clone, Debug)]
+struct PointerRequest {
+    /// Where, already cut to the clip of the layer it was asked in.
+    bounds: RectF,
+    shape: PointerShape,
+    /// How many hit rects the layer held when this was asked for. The ones
+    /// after that were painted over it, and a press there is theirs.
+    hits_before: usize,
 }
 
 impl Layer {
     fn record_hit_rect(&mut self, rect: RectF) {
-        if let Some(visible) = self
-            .clip_bounds
-            .map_or(Some(rect), |c| rect.intersection(c))
-        {
+        if let Some(visible) = self.visible(rect) {
             self.hit_map.push(visible);
         }
     }
 
+    fn record_pointer(&mut self, rect: RectF, shape: PointerShape) {
+        if let Some(bounds) = self.visible(rect) {
+            self.pointers.push(PointerRequest {
+                bounds,
+                shape,
+                hits_before: self.hit_map.len(),
+            });
+        }
+    }
+
+    fn visible(&self, rect: RectF) -> Option<RectF> {
+        self.clip_bounds
+            .map_or(Some(rect), |clip| rect.intersection(clip))
+    }
+
     fn contains_point(&self, point: Vector2F) -> bool {
         self.hit_map.iter().any(|rect| rect.contains_point(point))
+    }
+
+    /// What this layer says the pointer is at `point`, or `None` when nothing
+    /// in it is there and the layer below is asked instead.
+    ///
+    /// Within a layer the last request wins, as the last thing painted is the
+    /// one on top — a link asked for over the grid it was printed in — and a
+    /// hit rect painted after it wins over it with the arrow: a block's
+    /// controls are drawn into the list's own layer, over the I-beam the list
+    /// asked for, and a press on one is the control's.
+    fn pointer_at(&self, point: Vector2F) -> Option<PointerShape> {
+        let request = self
+            .pointers
+            .iter()
+            .rev()
+            .find(|request| request.bounds.contains_point(point));
+        let painted_over = self.hit_map[request.map_or(0, |request| request.hits_before)..]
+            .iter()
+            .any(|rect| rect.contains_point(point));
+        if painted_over {
+            return Some(PointerShape::Arrow);
+        }
+        request.map(|request| request.shape)
     }
 }
 
@@ -703,6 +787,39 @@ impl Scene {
         layer.icons.last_mut().expect("just pushed")
     }
 
+    /// Asks for `shape` while the pointer is over `rect`, as much of it as
+    /// the active layer's clip leaves visible.
+    ///
+    /// Asked of the active layer, and it competes the way a press does: a
+    /// layer above with anything at the point wins over it, and so does a hit
+    /// rect painted after it in the same layer. An element that paints a
+    /// ground of its own asks after drawing it, or its own ground would cover
+    /// the request.
+    pub fn request_pointer(&mut self, rect: RectF, shape: PointerShape) {
+        debug_assert!(
+            rect.origin().is_finite() && rect.size().is_finite(),
+            "a pointer was asked for over a non-finite rect: {rect:?}"
+        );
+        self.active_layer().record_pointer(rect, shape);
+    }
+
+    /// The shape the pointer takes at `position`.
+    ///
+    /// The topmost layer with anything at the point decides — the last
+    /// request there, or the arrow when something with no request was painted
+    /// over it — which is the layer a press there would reach. A click-through
+    /// layer is invisible to the pointer as it is to the press. Where nothing
+    /// asked for anything, it is the arrow.
+    pub fn pointer_at(&self, position: Vector2F) -> PointerShape {
+        self.overlay_layers
+            .iter()
+            .rev()
+            .chain(self.layers.iter().rev())
+            .filter(|layer| !layer.click_through)
+            .find_map(|layer| layer.pointer_at(position))
+            .unwrap_or_default()
+    }
+
     /// Whether anything in a layer above `position`'s own covers it.
     ///
     /// This is the whole of hit testing: an element asks whether the point it
@@ -1007,5 +1124,116 @@ mod tests {
 
         assert_eq!(origins, [vec2f(0., 0.), vec2f(1., 0.)]);
         assert_eq!(scene.layer_count(), 3, "the root, one normal, one overlay");
+    }
+
+    const INSIDE: Vector2F = vec2f(5., 5.);
+
+    fn square() -> RectF {
+        RectF::new(vec2f(0., 0.), vec2f(10., 10.))
+    }
+
+    #[test]
+    fn a_scene_nobody_asked_anything_of_shows_the_arrow() {
+        let mut scene = Scene::new(1.);
+        scene.draw_rect_with_hit_recording(square());
+
+        assert_eq!(scene.pointer_at(INSIDE), PointerShape::Arrow);
+    }
+
+    #[test]
+    fn the_pointer_is_what_was_asked_for_over_the_rect_and_nothing_outside_it() {
+        let mut scene = Scene::new(1.);
+        scene.request_pointer(square(), PointerShape::Text);
+
+        assert_eq!(scene.pointer_at(INSIDE), PointerShape::Text);
+        assert_eq!(scene.pointer_at(vec2f(50., 50.)), PointerShape::Arrow);
+    }
+
+    #[test]
+    fn the_topmost_layer_that_asked_wins_whenever_it_asked() {
+        // The overlay is asked of first and painted last: z order, not the
+        // order the tree was walked in, is what is on top. The same rule a
+        // press is hit-tested by.
+        let mut scene = Scene::new(1.);
+        scene.start_overlay_layer(ClipBounds::None);
+        scene.request_pointer(square(), PointerShape::Hand);
+        scene.stop_layer();
+        scene.start_layer(ClipBounds::None);
+        scene.request_pointer(square(), PointerShape::Text);
+        scene.stop_layer();
+
+        assert_eq!(scene.pointer_at(INSIDE), PointerShape::Hand);
+    }
+
+    #[test]
+    fn within_one_layer_the_last_request_wins() {
+        // A link is asked for over the grid it was printed in, after the grid
+        // asked for the whole of itself.
+        let mut scene = Scene::new(1.);
+        scene.request_pointer(square(), PointerShape::Text);
+        scene.request_pointer(RectF::new(vec2f(4., 4.), vec2f(2., 2.)), PointerShape::Hand);
+
+        assert_eq!(scene.pointer_at(INSIDE), PointerShape::Hand);
+        assert_eq!(scene.pointer_at(vec2f(1., 1.)), PointerShape::Text);
+    }
+
+    #[test]
+    fn something_drawn_over_the_request_in_a_layer_above_takes_the_arrow_back() {
+        // A menu over the output: nothing in it asked for a pointer, and the
+        // output's I-beam must not show through it any more than a press does.
+        let mut scene = Scene::new(1.);
+        scene.request_pointer(square(), PointerShape::Text);
+        scene.start_overlay_layer(ClipBounds::None);
+        scene.draw_rect_with_hit_recording(RectF::new(vec2f(0., 0.), vec2f(6., 6.)));
+        scene.stop_layer();
+
+        assert_eq!(scene.pointer_at(INSIDE), PointerShape::Arrow);
+        assert_eq!(scene.pointer_at(vec2f(8., 8.)), PointerShape::Text);
+    }
+
+    #[test]
+    fn a_control_drawn_over_the_request_in_its_own_layer_takes_the_arrow_back() {
+        // A block's controls are hit-recorded into the list's own layer,
+        // after the list asked for the I-beam over all of it.
+        let mut scene = Scene::new(1.);
+        scene.draw_rect_with_hit_recording(square());
+        scene.request_pointer(square(), PointerShape::Text);
+        scene.draw_rect_with_hit_recording(RectF::new(vec2f(4., 4.), vec2f(2., 2.)));
+
+        assert_eq!(scene.pointer_at(INSIDE), PointerShape::Arrow);
+        assert_eq!(
+            scene.pointer_at(vec2f(1., 1.)),
+            PointerShape::Text,
+            "the ground drawn before the request is under it, not over it"
+        );
+    }
+
+    #[test]
+    fn a_click_through_layer_neither_asks_for_a_pointer_nor_covers_one() {
+        let mut scene = Scene::new(1.);
+        scene.request_pointer(square(), PointerShape::Text);
+        scene.start_overlay_layer(ClipBounds::None);
+        scene.set_active_layer_click_through();
+        scene.draw_rect_with_hit_recording(square());
+        scene.request_pointer(square(), PointerShape::Hand);
+        scene.stop_layer();
+
+        assert_eq!(scene.pointer_at(INSIDE), PointerShape::Text);
+    }
+
+    #[test]
+    fn a_request_is_cut_to_the_clip_of_the_layer_it_was_made_in() {
+        // A list scrolled half out of its pane asks for the whole of itself,
+        // and the half outside the pane is somebody else's.
+        let mut scene = Scene::new(1.);
+        scene.start_layer(ClipBounds::BoundedBy(RectF::new(
+            vec2f(0., 0.),
+            vec2f(6., 10.),
+        )));
+        scene.request_pointer(square(), PointerShape::Text);
+        scene.stop_layer();
+
+        assert_eq!(scene.pointer_at(vec2f(3., 5.)), PointerShape::Text);
+        assert_eq!(scene.pointer_at(vec2f(8., 5.)), PointerShape::Arrow);
     }
 }

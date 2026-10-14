@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use crookui_core::event::SystemTheme;
 use crookui_core::geometry::{Vector2F, vec2f};
 use crookui_core::platform::FontDb;
-use crookui_core::scene::Scene;
+use crookui_core::scene::{PointerShape, Scene};
 use wgpu::wgt::WgpuHasDisplayHandle;
 use winit::event_loop::ActiveEventLoop;
 
@@ -187,6 +187,15 @@ impl Window {
     /// Whether a frame is already built and waiting to be drawn.
     pub(super) fn has_scene(&self) -> bool {
         self.scene.is_some()
+    }
+
+    /// The pointer the frame on screen asks for at `position`, or `None`
+    /// between a change and the frame that draws it.
+    ///
+    /// `None` rather than an answer from the frame that is going: the next
+    /// one is about to be built, and the pointer is asked again then.
+    pub(super) fn pointer_at(&self, position: Vector2F) -> Option<PointerShape> {
+        self.scene.as_ref().map(|scene| scene.pointer_at(position))
     }
 
     /// Rebuilds the frame from the application's current state and draws it.

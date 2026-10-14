@@ -219,6 +219,16 @@ The frame, end to end: an entity notifies → the window's invalidation set gain
 the presenter re-renders those views into fresh element trees → layout → paint into a `Scene`
 → the renderer uploads one instance buffer and issues per-layer draws.
 
+The pointer's shape comes out of the same walk. An element that wants the I-beam, a hand or
+a resize arrow over part of itself asks the scene for it as it paints
+(`Scene::request_pointer`), and the windowing layer asks `Scene::pointer_at` where the pointer
+is on every move and after every new frame, keeping the shape a drag started with until the
+button comes up. The answer follows the rule a press does — the topmost layer with anything at
+the point decides, and a hit rect painted after a request in its own layer covers it — so the
+pointer says what a press there would do: a menu over the output takes the I-beam away for
+the same reason it takes the click. Only a frameless window's resize border overrides it,
+because the border takes the press before the element tree sees it.
+
 ---
 
 ## 3. One UI backend
@@ -2548,6 +2558,13 @@ into arrow keys for a pager that never asked for the mouse, which is why `less` 
 scroll out of the box. **Shift suspends all of it** — that is the only way to select text out
 of a program that has taken the pointer, and copying what `htop` is showing is a thing people
 do constantly.
+
+The pointer says which of the two a press will be: the grid asks for the I-beam while a press
+selects and the arrow while a program has the mouse, read from the snapshot's
+`mouse_reporting` so that a frame never takes the lock the reader parses under. That is what
+kitty and Alacritty show over `vim` with the mouse on. Alacritty brings the I-beam back while
+Shift is held; Crook does not, because nothing is drawn for Shift alone. A link the chord key
+has lit, below, gets the hand, on either surface, for as long as its underline is drawn.
 
 The gesture is classified once, when the button goes down, and remembered in `PaneSelection`
 as `Selecting` or `Reporting`. Asking the terminal again on each move would be asking a

@@ -502,6 +502,15 @@ pub struct Snapshot {
     pub live_block: LiveBlock,
     /// The title the child process last asked for, if any.
     pub title: Option<String>,
+    /// Whether the child has asked for the mouse — `?1000`, `?1002` or
+    /// `?1003` — so that a press goes to it rather than to a selection.
+    ///
+    /// Nothing is drawn from it, but the pointer's shape is: the I-beam over a
+    /// grid a press selects in, the arrow over one a program reads the mouse
+    /// from. A frame decides that as it paints, and it paints from a snapshot
+    /// rather than from the terminal, whose lock is the one the reader parses
+    /// under. The same three modes as [`crate::MouseModes::is_reporting`].
+    pub mouse_reporting: bool,
 }
 
 impl Snapshot {
@@ -550,8 +559,8 @@ impl Snapshot {
         }
     }
 
-    /// Whether the two snapshots would be drawn identically — everything except
-    /// the revision they carry.
+    /// Whether the two snapshots would be drawn identically, with the same
+    /// pointer over them — everything except the revision they carry.
     pub fn same_content(&self, other: &Self) -> bool {
         self.columns == other.columns
             && self.rows == other.rows
@@ -563,6 +572,7 @@ impl Snapshot {
             && self.alt_screen == other.alt_screen
             && self.live_block == other.live_block
             && self.title == other.title
+            && self.mouse_reporting == other.mouse_reporting
             && self.cells == other.cells
             && self.combining == other.combining
     }
@@ -752,6 +762,7 @@ pub(crate) fn build<T>(
         alt_screen: term.mode().contains(TermMode::ALT_SCREEN),
         live_block,
         title: title.map(str::to_owned),
+        mouse_reporting: term.mode().intersects(TermMode::MOUSE_MODE),
     }
 }
 

@@ -67,7 +67,7 @@ use crookui_core::event::{DispatchedEvent, Event, Modifiers, MouseButton};
 use crookui_core::geometry::{Point, RectF, Vector2F, vec2f};
 use crookui_core::icons::{IconKey, Lucide};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
-use crookui_core::scene::{ClipBounds, CornerRadius, Radius, Scene};
+use crookui_core::scene::{ClipBounds, CornerRadius, PointerShape, Radius, Scene};
 
 use crate::browser;
 use crate::clipboard::Clipboard;
@@ -1686,6 +1686,12 @@ impl Element for BlockList {
         ctx.scene
             .draw_rect_without_hit_recording(RectF::new(origin, size))
             .with_background(color(self.snapshot.background));
+
+        // All of it, gaps and gutter included, because a press anywhere in
+        // the list starts a selection. A block's controls are hit-recorded
+        // over it below, and that is what gives them the arrow back.
+        ctx.scene
+            .request_pointer(RectF::new(origin, size), PointerShape::Text);
 
         // Resolved once for the frame rather than once per row: a double
         // click asks the text under it where the word ends, and asking that

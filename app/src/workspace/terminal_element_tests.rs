@@ -5,7 +5,7 @@
 //! rather than about which fonts the machine running it happens to have.
 
 use crook_terminal::{BlockId, CellCombining, Emulator, LiveBlock, Palette, TerminalSize};
-use crookui_core::scene::{ClipBounds, Fill, Glyph, Rect};
+use crookui_core::scene::{ClipBounds, Fill, Glyph, PointerShape, Rect};
 
 use super::*;
 use crate::selection::Place;
@@ -51,6 +51,7 @@ fn snapshot(lines: &[&str], columns: usize) -> Snapshot {
         alt_screen: false,
         live_block: LiveBlock::default(),
         title: None,
+        mouse_reporting: false,
     }
 }
 
@@ -292,6 +293,68 @@ fn an_underline_is_drawn_under_a_cell_that_asked_for_one() {
         "an underline above the baseline is a strikeout"
     );
     assert_eq!(rule.bounds.width(), metrics.width);
+}
+
+/// The middle of one cell of a grid painted at the origin.
+fn middle_of(row: usize, column: usize) -> Vector2F {
+    let metrics = font().metrics();
+    vec2f(
+        (column as f32 + 0.5) * metrics.width,
+        (row as f32 + 0.5) * metrics.height,
+    )
+}
+
+#[test]
+fn the_pointer_over_a_grid_is_the_i_beam_a_selection_is_made_with() {
+    let scene = painted(&snapshot(&["ls", ""], 10));
+
+    assert_eq!(scene.pointer_at(middle_of(0, 1)), PointerShape::Text);
+    assert_eq!(
+        scene.pointer_at(middle_of(1, 8)),
+        PointerShape::Text,
+        "a blank cell is selected from like any other"
+    );
+    assert_eq!(scene.pointer_at(vec2f(-1., -1.)), PointerShape::Arrow);
+}
+
+#[test]
+fn the_pointer_over_a_program_that_has_the_mouse_is_the_arrow() {
+    // A press here goes down the pty to `vim`, not into a selection, and the
+    // I-beam would be promising the selection.
+    let mut grid = snapshot(&["~", "~"], 10);
+    grid.mouse_reporting = true;
+
+    let scene = painted(&grid);
+
+    assert_eq!(scene.pointer_at(middle_of(0, 0)), PointerShape::Arrow);
+}
+
+#[test]
+fn a_link_s_rule_comes_with_the_hand_over_its_cells_and_only_its_cells() {
+    // The rule is drawn only while the chord key is held and the pointer is
+    // on the link, and so is the hand: both say a click follows it.
+    let grid = snapshot(&["see https://a.test now"], 24);
+    let font = font();
+    let metrics = font.metrics();
+    // Into the layer the grid painted, as the element paints it.
+    let mut scene = Scene::new(1.);
+    scene.start_layer(ClipBounds::None);
+    paint_grid(
+        &grid,
+        &font,
+        Vector2F::zero(),
+        vec2f(24. * metrics.width, metrics.height),
+        true,
+        &Washes::default(),
+        &mut scene,
+    );
+    paint_link_rule(Vector2F::zero(), 4, 14, metrics, Color::WHITE, &mut scene);
+    scene.stop_layer();
+
+    assert_eq!(scene.pointer_at(middle_of(0, 4)), PointerShape::Hand);
+    assert_eq!(scene.pointer_at(middle_of(0, 17)), PointerShape::Hand);
+    assert_eq!(scene.pointer_at(middle_of(0, 18)), PointerShape::Text);
+    assert_eq!(scene.pointer_at(middle_of(0, 1)), PointerShape::Text);
 }
 
 #[test]

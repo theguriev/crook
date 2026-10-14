@@ -91,6 +91,7 @@ use crookui_core::geometry::{Point, Vector2F, vec2f};
 use crookui_core::icons::Lucide;
 use crookui_core::prelude::*;
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
+use crookui_core::scene::{ClipBounds, PointerShape};
 
 use crate::input_keys::Platform;
 use crate::keybindings::format_chord;
@@ -233,6 +234,7 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
         layout.add_child(Expanded::new(pane.flex(), measured.finish()).finish());
         previous = Some(pane.id());
     }
+    let layout = GrabPointers::new(panes.axis(), grabs, layout.finish());
 
     // The box the panes share, written down for the panes no layout will
     // see before their shells open: the ones in the tabs behind this one,
@@ -1208,14 +1210,14 @@ fn bounded(max: f32, min: f32) -> f32 {
     if max.is_finite() { max } else { min }
 }
 
-/// A hairline between two panes.
+/// A hairline between two panes: what [`SplitDivider`] draws.
 ///
-/// A line and nothing else: this one is not draggable, so the panes always
-/// share the tab equally. When it is made draggable it has to move out of the
-/// flex and into a [`Stack`] above the panes, which is where Warp keeps its
-/// dividers and for the reason its comment gives
-/// (`app/src/pane_group/tree.rs:1097`) — pane content painted after a divider
-/// otherwise steals the hit box a person is aiming at.
+/// A line and nothing else. Dragging it goes by a band wider than the line,
+/// and the divider stays in the flex between the panes rather than moving into
+/// a [`Stack`] above them, which is where Warp keeps its dividers
+/// (`app/src/pane_group/tree.rs:1097`) so that pane content painted after one
+/// cannot steal the band a person is aiming at. Here [`Grabs`] keeps that
+/// band's press from the panes, and [`GrabPointers`] its pointer.
 fn divider(axis: SplitAxis) -> Box<dyn Element> {
     let line = Container::new(Empty::new().finish())
         .with_background_color(theme().border)
@@ -1276,8 +1278,8 @@ impl Measured {
 /// started a selection, and focus, in the pane under it, extending on every
 /// drag; a program reporting the mouse got the press too. Each divider writes
 /// its area here when it paints, and each pane's wrapper declines a press in
-/// one. Built fresh with the frame's tree, so a divider that is gone takes
-/// its area with it.
+/// one. Emptied by [`GrabPointers`] each time the split is painted, so a
+/// divider that is gone, or has moved, takes its area with it.
 #[derive(Clone, Default)]
 struct Grabs(Rc<RefCell<Vec<RectF>>>);
 
@@ -1288,6 +1290,92 @@ impl Grabs {
             .borrow()
             .iter()
             .any(|area| area.contains_point(position))
+    }
+}
+
+/// Shows the resize arrows over every divider's grab, over the panes the grab
+/// reaches into.
+///
+/// Asked for here rather than by each divider because a divider is painted
+/// between its two panes and loses to both of them: the pane after it paints
+/// its output's I-beam later in the same layer, and a pane's list paints into
+/// a layer of its own, above the divider's, on either side. So once the whole
+/// split has painted, every grab is asked for in a layer over all of it — no
+/// layer at all when the tab is not split — and the pointer says resize
+/// exactly where [`Grabs`] already makes a press resize.
+///
+/// It is also what empties [`Grabs`] for the frame: the grabs are written as
+/// the dividers paint, and a tree painted again without being rebuilt — a
+/// resized window lays out the same tree at the new size — would otherwise add
+/// this frame's grabs to the last one's, and keep a press and a resize pointer
+/// at a place the divider has left.
+struct GrabPointers {
+    axis: SplitAxis,
+    grabs: Grabs,
+    child: Box<dyn Element>,
+    size: Option<Vector2F>,
+    origin: Option<Point>,
+}
+
+impl GrabPointers {
+    fn new(axis: SplitAxis, grabs: Grabs, child: Box<dyn Element>) -> Self {
+        Self {
+            axis,
+            grabs,
+            child,
+            size: None,
+            origin: None,
+        }
+    }
+}
+
+impl Element for GrabPointers {
+    fn layout(
+        &mut self,
+        constraint: SizeConstraint,
+        ctx: &mut LayoutContext,
+        app: &AppContext,
+    ) -> Vector2F {
+        let size = self.child.layout(constraint, ctx, app);
+        self.size = Some(size);
+        size
+    }
+
+    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
+        self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
+        self.grabs.0.borrow_mut().clear();
+        self.child.paint(origin, ctx, app);
+
+        let grabs = self.grabs.0.borrow();
+        if grabs.is_empty() {
+            return;
+        }
+        let shape = match self.axis {
+            SplitAxis::Horizontal => PointerShape::ColumnResize,
+            SplitAxis::Vertical => PointerShape::RowResize,
+        };
+        ctx.scene.start_layer(ClipBounds::ActiveLayer);
+        for area in grabs.iter() {
+            ctx.scene.request_pointer(*area, shape);
+        }
+        ctx.scene.stop_layer();
+    }
+
+    fn dispatch_event(
+        &mut self,
+        event: &DispatchedEvent,
+        ctx: &mut EventContext,
+        app: &AppContext,
+    ) -> bool {
+        self.child.dispatch_event(event, ctx, app)
+    }
+
+    fn size(&self) -> Option<Vector2F> {
+        self.size
+    }
+
+    fn origin(&self) -> Option<Point> {
+        self.origin
     }
 }
 

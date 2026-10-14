@@ -86,7 +86,7 @@ use crookui_core::element::{Element, SizeConstraint};
 use crookui_core::event::{DispatchedEvent, Event, Ime, Keystroke, MouseButton};
 use crookui_core::geometry::{Color, Point, RectF, Vector2F, vec2f};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
-use crookui_core::scene::{ClipBounds, CornerRadius, Radius, Scene};
+use crookui_core::scene::{ClipBounds, CornerRadius, PointerShape, Radius, Scene};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -687,6 +687,12 @@ impl Element for CommandInput {
             self.ink,
             ctx.scene,
         );
+        // Its own box: the prompt row above it, which the first row may
+        // continue, already has the list's I-beam.
+        if let Some(size) = self.size {
+            ctx.scene
+                .request_pointer(RectF::new(origin, size), PointerShape::Text);
+        }
         if layered {
             ctx.scene.stop_layer();
         }

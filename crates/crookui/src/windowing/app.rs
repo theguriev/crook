@@ -35,7 +35,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 
 use crate::rendering::init_wgpu_instance;
 
-use super::chrome::{RESIZE_GRAB, WindowChrome, WindowControls, edge_at};
+use super::chrome::{RESIZE_GRAB, ResizeEdge, WindowChrome, WindowControls, edge_at};
 use super::dock;
 use super::event::InputState;
 use super::window::Window;
@@ -563,8 +563,13 @@ impl ApplicationHandler<CrookEvent> for App {
                 return;
             }
 
+            // A new frame may have moved the world out from under a pointer
+            // that never moved — a menu opened under it, a link lit up when
+            // the chord key went down — so the pointer is asked again.
             WindowEvent::RedrawRequested => {
-                self.redraw(event_loop);
+                if self.redraw(event_loop) {
+                    self.update_pointer();
+                }
                 return;
             }
 
@@ -600,6 +605,9 @@ impl ApplicationHandler<CrookEvent> for App {
         // except in the corner the application draws the window's own controls
         // in, which `handle_resize_border` leaves alone.
         let grabbed = self.handle_resize_border(&event);
+        // A release asks too, not only a move: the drag it ends kept the
+        // pointer it started with, and may have carried it somewhere else.
+        let pointer_moved = matches!(event, Event::MouseMoved { .. } | Event::MouseUp { .. });
         let redraw = !grabbed && self.delegate.handle_event(event);
 
         // After both of them, which is the whole point. The border starts a
@@ -609,6 +617,12 @@ impl ApplicationHandler<CrookEvent> for App {
         // after the drag to be converted as a drag with no button behind it.
         if self.controls.take_gesture_started() {
             self.input.release_buttons();
+        }
+
+        // Before the redraw is asked for, which throws the frame on screen
+        // away: it is the one this move was made over.
+        if pointer_moved {
+            self.update_pointer();
         }
 
         if redraw {
@@ -653,44 +667,71 @@ impl App {
     /// happens on macOS, where a client-decorated window still has a frame and
     /// the system is still resizing it.
     fn handle_resize_border(&mut self, event: &Event) -> bool {
-        if !self.options.chrome.is_frameless() {
+        let Event::MouseDown {
+            button: MouseButton::Left,
+            position,
+            ..
+        } = event
+        else {
             return false;
-        }
-
-        // A maximised window has no outside to drag towards, and a fullscreen
-        // one is not a window with edges at all.
-        let resizable = !self.controls.is_maximized() && !self.controls.is_fullscreen();
-        let size = self.with_window(|window| window.logical_size());
-        let edge = |position| {
-            resizable
-                .then(|| edge_at(position, size, RESIZE_GRAB))
-                .flatten()
         };
 
-        match event {
-            // Set on every move, including the one that leaves the border: a
-            // pointer that kept the resize arrow over the middle of a terminal
-            // would be worse than one that never showed it at all.
-            Event::MouseMoved { position, .. } => {
-                self.controls.set_resize_cursor(edge(*position));
-                false
+        match self.resize_edge(*position) {
+            Some(edge) => {
+                self.controls.start_resize(edge);
+                true
             }
-            Event::MouseDown {
-                button: MouseButton::Left,
-                position,
-                ..
-            } => match edge(*position) {
-                Some(edge) => {
-                    self.controls.start_resize(edge);
-                    true
-                }
-                None => false,
-            },
-            _ => false,
+            None => false,
         }
     }
 
-    fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+    /// The edge of a frameless window `position` is on, if it is on one and
+    /// the window has edges to drag.
+    fn resize_edge(&mut self, position: Vector2F) -> Option<ResizeEdge> {
+        // A maximised window has no outside to drag towards, and a fullscreen
+        // one is not a window with edges at all.
+        if !self.options.chrome.is_frameless()
+            || self.controls.is_maximized()
+            || self.controls.is_fullscreen()
+        {
+            return None;
+        }
+        let size = self.with_window(|window| window.logical_size());
+        edge_at(position, size, RESIZE_GRAB)
+    }
+
+    /// Shows the pointer for wherever it is now: the border's arrows on a
+    /// frameless window's edge, and what the frame on screen asks for
+    /// everywhere else.
+    ///
+    /// Set every time, including when the pointer leaves the border: a pointer
+    /// that kept the resize arrow over the middle of a terminal would be worse
+    /// than one that never showed it at all.
+    ///
+    /// Except while a button is held. A drag keeps the pointer it started
+    /// with — the resize arrows across a divider drag that the split follows a
+    /// frame behind, the I-beam across a selection dragged over the tabs
+    /// panel — which is what keeps it from flickering between shapes under a
+    /// pointer moving faster than the layout, and what a person dragging a
+    /// split or a selection in any other application sees.
+    fn update_pointer(&mut self) {
+        if self.input.is_dragging() {
+            return;
+        }
+        let position = self.input.pointer();
+        let edge = self.resize_edge(position);
+        let asked = self.with_window(|window| window.pointer_at(position));
+        // Between a change and its frame there is nothing to ask but the
+        // border, and the frame asks again when it lands.
+        if edge.is_none() && asked.is_none() {
+            return;
+        }
+        self.controls.show_pointer(edge, asked.unwrap_or_default());
+    }
+
+    /// Draws a frame, reporting whether a new one was built and reached the
+    /// screen.
+    fn redraw(&mut self, event_loop: &ActiveEventLoop) -> bool {
         let App {
             window,
             delegate,
@@ -705,7 +746,7 @@ impl App {
         // own only if the *previous* frame's replay asked for it.
         let after_replay = std::mem::take(replay_requested_redraw);
         let Some(window) = window.as_mut() else {
-            return;
+            return false;
         };
 
         let mut rebuilt = false;
@@ -740,7 +781,7 @@ impl App {
                 *replay_requested_redraw = true;
                 window.request_redraw();
             }
-            return;
+            return rebuilt;
         };
 
         // Nothing else is going to ask for this frame again: the delegate was
@@ -756,6 +797,7 @@ impl App {
             window.drop_renderer(Box::new(event_loop.owned_display_handle()));
             window.recreate_renderer();
         }
+        false
     }
 }
 

@@ -14,12 +14,19 @@
 //! is still moved, resized and closed by the window manager; a frameless one
 //! has to do all three itself, which is what [`WindowControls`] and
 //! [`ResizeEdge`] are for.
+//!
+//! Either kind of window shows the pointer the application asks for — the
+//! I-beam over text, the resize arrows over a divider, see [`PointerShape`] —
+//! except on a frameless window's own border, where it is the border's arrows
+//! whatever is drawn underneath, for the reason a press there is the
+//! border's.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use crookui_core::geometry::Vector2F;
+use crookui_core::scene::PointerShape;
 use winit::window::{CursorIcon, ResizeDirection, UserAttentionType, Window, WindowAttributes};
 
 /// Who draws the window's title bar and the controls in it.
@@ -185,6 +192,26 @@ impl ResizeEdge {
     }
 }
 
+/// The pointer to show: the border's arrows on a frameless window's edge, and
+/// what the application asked for everywhere else.
+///
+/// The edge wins because the press does. Five pixels into a frameless window
+/// a press resizes the window whatever the application drew there, so a
+/// pointer that showed the I-beam of the output reaching the border would be
+/// promising a selection the press will not make.
+pub(super) fn pointer_icon(edge: Option<ResizeEdge>, asked: PointerShape) -> CursorIcon {
+    if let Some(edge) = edge {
+        return edge.cursor();
+    }
+    match asked {
+        PointerShape::Arrow => CursorIcon::Default,
+        PointerShape::Text => CursorIcon::Text,
+        PointerShape::Hand => CursorIcon::Pointer,
+        PointerShape::ColumnResize => CursorIcon::ColResize,
+        PointerShape::RowResize => CursorIcon::RowResize,
+    }
+}
+
 /// Which resize zone `position` is in, for a window of `size`.
 ///
 /// Corners win over edges, which is what makes a corner grabbable at all: the
@@ -242,10 +269,10 @@ struct State {
     /// input state goes on believing the button is held and turns every later
     /// move into a drag. See [`WindowControls::take_gesture_started`].
     gesture_started: bool,
-    /// The resize cursor currently set, so the pointer is only changed when it
-    /// actually changes — a mouse move is a common event and setting a cursor
-    /// is a call into the window system.
-    cursor: Option<ResizeEdge>,
+    /// The pointer currently shown, so it is only changed when it actually
+    /// changes — a mouse move is a common event and setting a cursor is a
+    /// call into the window system.
+    cursor: CursorIcon,
     /// Whether [`WindowControls::bring_forward`] has asked for attention that
     /// nobody has given yet.
     ///
@@ -365,15 +392,17 @@ impl WindowControls {
         );
     }
 
-    /// Shows the pointer for `edge`, or the ordinary one for `None`.
-    pub(super) fn set_resize_cursor(&self, edge: Option<ResizeEdge>) {
+    /// Shows the pointer for `edge`, or the one the application `asked` for
+    /// when the pointer is on no edge. See [`pointer_icon`].
+    pub(super) fn show_pointer(&self, edge: Option<ResizeEdge>, asked: PointerShape) {
+        let icon = pointer_icon(edge, asked);
         let mut state = self.0.borrow_mut();
-        if state.cursor == edge {
+        if state.cursor == icon {
             return;
         }
-        state.cursor = edge;
+        state.cursor = icon;
         if let Some(window) = state.window.as_ref() {
-            window.set_cursor(edge.map_or(CursorIcon::Default, ResizeEdge::cursor));
+            window.set_cursor(icon);
         }
     }
 
@@ -485,6 +514,34 @@ mod tests {
     }
 
     #[test]
+    fn the_border_s_arrows_win_over_whatever_the_application_asked_for() {
+        // The output reaches the window's edge, and asks for the I-beam all
+        // the way to it; five pixels in, a press resizes the window instead.
+        assert_eq!(
+            pointer_icon(Some(ResizeEdge::West), PointerShape::Text),
+            CursorIcon::WResize
+        );
+        assert_eq!(
+            pointer_icon(Some(ResizeEdge::SouthEast), PointerShape::ColumnResize),
+            CursorIcon::SeResize
+        );
+    }
+
+    #[test]
+    fn off_the_border_the_pointer_is_the_one_the_application_asked_for() {
+        let cases = [
+            (PointerShape::Arrow, CursorIcon::Default),
+            (PointerShape::Text, CursorIcon::Text),
+            (PointerShape::Hand, CursorIcon::Pointer),
+            (PointerShape::ColumnResize, CursorIcon::ColResize),
+            (PointerShape::RowResize, CursorIcon::RowResize),
+        ];
+        for (asked, shown) in cases {
+            assert_eq!(pointer_icon(None, asked), shown, "{asked:?}");
+        }
+    }
+
+    #[test]
     fn a_window_with_a_native_frame_is_never_frameless_and_macos_never_is() {
         assert!(!WindowChrome::Native.is_frameless());
         assert_eq!(
@@ -504,7 +561,7 @@ mod tests {
         controls.toggle_maximized();
         controls.minimize();
         controls.start_resize(ResizeEdge::SouthEast);
-        controls.set_resize_cursor(Some(ResizeEdge::North));
+        controls.show_pointer(Some(ResizeEdge::North), PointerShape::Text);
 
         assert!(!controls.is_maximized());
         assert!(!controls.is_fullscreen());

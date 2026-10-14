@@ -229,6 +229,16 @@ impl InputState {
         self.buttons_down.clear();
     }
 
+    /// Where the pointer was last seen, in logical pixels.
+    pub(super) fn pointer(&self) -> Vector2F {
+        self.cursor
+    }
+
+    /// Whether a button is held, which makes every move a drag.
+    pub(super) fn is_dragging(&self) -> bool {
+        !self.buttons_down.is_empty()
+    }
+
     /// Replays the last pointer position as a synthetic move.
     ///
     /// A frame that changed layout leaves hover state stale — close a tab and
