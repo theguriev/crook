@@ -76,6 +76,7 @@ pub(super) fn render(
         PLACEHOLDER,
     )
     .with_icon(Lucide::Search)
+    .with_window_focused(workspace.is_window_focused())
     .with_focus(WorkspaceAction::Settings(SettingsAction::FocusField(Some(
         index,
     ))))

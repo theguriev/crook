@@ -171,7 +171,8 @@ impl Plugin for Fixture {
                         placement,
                         &chrome,
                         workspace.clipboard(),
-                    ),
+                    )
+                    .with_window_focused(workspace.is_window_focused()),
                     // A fixture's buttons are inert, and they draw as buttons
                     // anyway: a control that answers to nothing is drawn dead
                     // rather than left out, which is a rule this borrows from

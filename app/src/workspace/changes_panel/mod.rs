@@ -1984,6 +1984,7 @@ fn draft_row(workspace: &Workspace) -> Box<dyn Element> {
             state.control(Control::Draft),
             "Comment for the agent · Enter adds it",
         )
+        .with_window_focused(workspace.is_window_focused())
         .with_focus(WorkspaceAction::Changes(ChangesAction::FocusComment))
         .finish(),
     )

@@ -2189,6 +2189,7 @@ fn a_menu_opened_after_a_picker_closed_gives_the_keyboard_back() {
         Some(an_action()),
         fonts,
         &Clipboard::new(),
+        true,
     );
     assert!(
         picker::open().is_some(),

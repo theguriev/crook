@@ -126,6 +126,14 @@ pub struct Output {
     /// [`crate::terminal_keys`] for the other half of the same line.
     keys: Keys,
 
+    /// Whether the window this output is in has the desktop's keyboard.
+    ///
+    /// The cursor's business and not the routing's: a window behind another
+    /// application is sent no keys to route, and the one that comes back to
+    /// the front types where it left off with `keys` exactly as they were.
+    /// See [`Self::draws_focus`].
+    window_focused: bool,
+
     /// The line being composed under this output, when there is a composer.
     ///
     /// **`None` is a fact about the keyboard, not only about Ctrl-D.** A pane
@@ -170,6 +178,9 @@ impl Output {
         Self {
             handle: None,
             keys: Keys::None,
+            // In front until told otherwise, as the workspace's own bit is: a
+            // window that never hears about its focus draws as it always did.
+            window_focused: true,
             input: None,
             mouse: None,
             clipboard: None,
@@ -190,6 +201,13 @@ impl Output {
     /// setting and not the output's to decide.
     pub fn with_option_as_meta(mut self, option_as_meta: OptionAsMeta) -> Self {
         self.option_as_meta = option_as_meta;
+        self
+    }
+
+    /// Says whether the window has the desktop's keyboard. See
+    /// [`Self::draws_focus`].
+    pub fn with_window_focused(mut self, focused: bool) -> Self {
+        self.window_focused = focused;
         self
     }
 
@@ -276,6 +294,18 @@ impl Output {
     /// How much of the keyboard this output takes.
     pub fn keys(&self) -> Keys {
         self.keys
+    }
+
+    /// Whether the program's cursor here is drawn as the one typing goes to —
+    /// in the shape the program asked for — rather than as the outline of a
+    /// terminal without the keyboard.
+    ///
+    /// Every key, and a window in front. A pane with the keyboard in a window
+    /// behind another application is one nothing typed reaches either, and
+    /// its cursor drawn filled made every Crook window on a desktop look as
+    /// though it were the one being typed into.
+    pub fn draws_focus(&self) -> bool {
+        self.keys == Keys::All && self.window_focused
     }
 
     /// The typed keystroke, if this pane is the one that should have it and

@@ -106,6 +106,9 @@ pub struct TextField {
     /// The selection in the output this field floats over, for the one field
     /// that does: the find bar's. See [`Self::over_output`].
     output: Option<PaneSelection>,
+    /// Whether the window this field is in has the desktop's keyboard. See
+    /// [`Self::with_window_focused`].
+    window_focused: bool,
     /// The shaped text, kept from layout for paint and for hit testing.
     line: Option<Line>,
     /// Whether `line` is the placeholder rather than what was typed.
@@ -133,6 +136,8 @@ impl TextField {
             focus: None,
             edited: None,
             output: None,
+            // In front until told otherwise, as the workspace's own bit is.
+            window_focused: true,
             line: None,
             showing_placeholder: false,
             size: None,
@@ -177,6 +182,20 @@ impl TextField {
     /// is aiming at any more.
     pub fn over_output(mut self, selection: PaneSelection) -> Self {
         self.output = Some(selection);
+        self
+    }
+
+    /// Says whether the window has the desktop's keyboard, which the field is
+    /// drawn as listening — the accent ring and the caret — only while it does.
+    ///
+    /// The drawing's business and not the keyboard's, as it is for a pane's
+    /// composer: a find bar or a search box with the keys in a window behind
+    /// another application is one nothing typed reaches, and drawn listening
+    /// it made every Crook window on a desktop look like the one being typed
+    /// into. A keystroke still asks [`TextInput::has_keys`], so the window
+    /// that comes back types into the field it left.
+    pub fn with_window_focused(mut self, focused: bool) -> Self {
+        self.window_focused = focused;
         self
     }
 
@@ -380,7 +399,7 @@ impl Element for TextField {
             .expect("the field was painted before it was laid out");
         self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
 
-        let listening = self.input.has_keys();
+        let listening = self.input.has_keys() && self.window_focused;
         let hovered = self.hover.lock().is_hovered();
         let border = if listening {
             theme().accent

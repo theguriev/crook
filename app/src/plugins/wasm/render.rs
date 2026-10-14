@@ -267,6 +267,10 @@ pub(super) struct Chrome<'a> {
     held: &'a Rc<Held>,
     /// What a field pastes from.
     clipboard: &'a Clipboard,
+    /// Whether the window has the desktop's keyboard, which a picker's field
+    /// is drawn as listening only while it does. See
+    /// [`TextField::with_window_focused`](crate::workspace::TextField::with_window_focused).
+    window_focused: bool,
     /// How many nodes the one being built is inside. See [`DEEPEST`].
     ///
     /// Carried here rather than as a parameter of its own because this is
@@ -290,7 +294,17 @@ impl<'a> Chrome<'a> {
             placement,
             held,
             clipboard,
+            // In front until told otherwise, as the workspace's own bit is.
+            window_focused: true,
             depth: 0,
+        }
+    }
+
+    /// Says whether the window has the desktop's keyboard.
+    pub(super) fn with_window_focused(self, window_focused: bool) -> Self {
+        Self {
+            window_focused,
+            ..self
         }
     }
 }
@@ -484,6 +498,7 @@ fn element_in(
             action(choose),
             chrome.fonts,
             chrome.clipboard,
+            chrome.window_focused,
         ),
         Node::Picker { .. } => unbounded_share(),
         Node::Menu { content, items } => picker::menued(

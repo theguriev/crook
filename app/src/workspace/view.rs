@@ -770,7 +770,10 @@ pub struct Workspace {
     ///
     /// Focused until told otherwise, which is what every window was before
     /// this was recorded: a desktop that never says leaves the strip exactly
-    /// as it always behaved.
+    /// as it always behaved. It is also what the caret and a program's cursor
+    /// are drawn against, so the same default is what opens a window with its
+    /// caret — on Wayland, which sends no word of focus until the keyboard
+    /// arrives, a window that assumed the opposite would open without one.
     window_focused: bool,
     /// The pane that had the keyboard when the window last went behind
     /// something else, until the window comes back.
@@ -7524,8 +7527,16 @@ impl Workspace {
         .detach();
     }
 
-    /// Whether any field on screen is drawing a caret.
-    fn shows_a_caret(&self, app: &AppContext) -> bool {
+    /// Whether any field on screen is drawing a caret that blinks.
+    pub(super) fn shows_a_caret(&self, app: &AppContext) -> bool {
+        // Nothing blinks in a window behind another. Nothing in it draws a
+        // caret at all — not a pane's composer, see `body::contents`, nor a
+        // field with the keys, see `TextField::with_window_focused` — and
+        // repainting twice a second for a caret nobody draws is the idle tick
+        // the window does not keep.
+        if !self.window_focused {
+            return false;
+        }
         if self.a_popup_is_open() {
             // Except a plugin's own field inside the menu that is up, which is
             // the one caret a popup can carry. Asked of the host rather than

@@ -428,6 +428,7 @@ pub(crate) fn field_entry(
             workspace.tab_context_menu().control(key),
             placeholder,
         )
+        .with_window_focused(workspace.is_window_focused())
         .finish(),
     )
     .with_horizontal_padding(ROW_INSET)
