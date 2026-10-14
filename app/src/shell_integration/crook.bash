@@ -37,6 +37,11 @@ if [ -n "${CROOK_SHELL_INTEGRATION-}" ]; then
 fi
 CROOK_SHELL_INTEGRATION=1
 
+# bash exports these to whatever a `bind -x` widget runs, so a shell started
+# from inside one inherits them, and __crook_command_started would take every
+# command it runs for a widget. Outside a widget they mean nothing.
+unset READLINE_LINE READLINE_POINT READLINE_MARK
+
 __crook_mark() { builtin printf '\e]133;%s\a' "$1"; }
 
 # Where the shell is, reported the way every terminal reads it: OSC 7. See the
@@ -214,6 +219,14 @@ __crook_prior_debug=''
 
 __crook_command_started() {
 	[ -n "$__crook_running" ] && return 0
+	# A `bind -x` widget — fzf's ctrl-t and ctrl-r, atuin — runs while the line
+	# is still being edited, and bash runs the DEBUG trap for it (and
+	# bash-preexec its preexec) all the same. It is no command anybody ran:
+	# reporting it as one put a C in the middle of the prompt and left the flag
+	# up, so the line the widget put there ran with no C, no start time and no
+	# notification when it finished. bash sets READLINE_POINT for the length of
+	# a widget and nowhere else, which is why it is unset below.
+	[ -n "${READLINE_POINT+set}" ] && return 0
 	__crook_running=1
 	__crook_ran=1
 	__crook_mark C

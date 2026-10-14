@@ -2392,6 +2392,63 @@ fn test_a_real_bash_keeps_its_marks_when_the_users_own_files_trap_debug() {
 }
 
 #[test]
+fn test_a_real_bash_reports_the_line_a_widget_put_on_its_prompt_and_not_the_widget() {
+    // fzf's `ctrl-t` and `ctrl-r`, and atuin, are `bind -x` widgets: a shell
+    // function run while the line is still being edited, which puts a line on
+    // the prompt for Enter to run. bash runs the DEBUG trap for the widget as
+    // for any command, and the snippet used to report it as one — a C in the
+    // middle of the prompt — and then had its flag up when the line the
+    // widget left ran, which got no C at all: no start time, no running
+    // block, no notification when a long one finished.
+    let widget = "__test_pick_a_line() {\n\
+                  \tREADLINE_LINE=\"printf 'CROOK_PICKED[%s]\\\\n' ok\"\n\
+                  \tREADLINE_POINT=${#READLINE_LINE}\n\
+                  }\n\
+                  bind -x '\"\\C-t\": __test_pick_a_line'\n";
+    // bash 3.2, the one macOS ships, has `bind -x` but no READLINE_LINE for a
+    // widget to put a line in.
+    let major = crate::process::command("bash")
+        .args(["-c", "echo ${BASH_VERSINFO[0]}"])
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|text| text.trim().parse::<u32>().ok());
+    if major.is_none_or(|major| major < 4) {
+        return;
+    }
+    let home_files = [(".bashrc", widget)];
+    let Some(ran) = (RealShell {
+        name: "bash",
+        login: false,
+        home_files: &home_files,
+        // `ctrl-t`, and the Enter `run` types after every command.
+        command: "\x14",
+        ..RealShell::default()
+    })
+    .run() else {
+        return;
+    };
+    let seen = &ran.seen;
+    let output = seen
+        .find("CROOK_PICKED[ok]")
+        .unwrap_or_else(|| panic!("the widget's line never ran: {seen:?}"));
+    // The line the widget put there, drawn on the prompt before Enter.
+    let drawn = seen
+        .find("CROOK_PICKED[%s]")
+        .expect("bash draws the widget's line on its prompt");
+    let starts: Vec<usize> = seen.match_indices("\x1b]133;C").map(|(at, _)| at).collect();
+    assert_eq!(
+        starts.len(),
+        1,
+        "one command ran, and it said so once: {seen:?}"
+    );
+    assert!(
+        drawn < starts[0] && starts[0] < output,
+        "the C was the widget's rather than the line's: {seen:?}"
+    );
+}
+
+#[test]
 fn test_a_real_fish_emits_the_four_marks() {
     // fish 4.0 marks prompts itself, and the snippet stands down when it does,
     // so the only way to see Crook's own hooks work is to turn fish's off.
