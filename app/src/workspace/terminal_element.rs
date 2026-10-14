@@ -1568,7 +1568,7 @@ fn paint_cell(
 /// beam or an underline hides next to nothing of the first drawing, and a
 /// second one over it would blend a shade or a rounded corner's smoothed edge
 /// in twice: `░` under an unfocused pane's cursor would come out nearly `▒`.
-pub(super) fn paint_over_cursor(
+fn paint_over_cursor(
     cell: &SnapshotCell,
     shape: CursorShape,
     at: Vector2F,
@@ -1594,7 +1594,7 @@ pub(super) fn paint_over_cursor(
 /// asked for: the shape says what the *program* wants, and this says whether
 /// the shape means anything right now. It does not while an input field below
 /// holds the keyboard, which on the normal screen is always.
-pub(super) fn shape_of(cursor: &Cursor, owns_caret: bool) -> CursorShape {
+fn shape_of(cursor: &Cursor, owns_caret: bool) -> CursorShape {
     if owns_caret {
         cursor.shape
     } else {
@@ -1773,21 +1773,32 @@ fn paint_cursor(
     );
 }
 
-/// Draws the cursor at a cell somebody else placed.
+/// Draws the cursor at a cell somebody else placed, and the line or block
+/// character under it again where the cursor would hide it.
 ///
 /// What the block list needs: the open block's rows are drawn where the *list*
 /// puts them, which is not where the viewport would, so the caller has already
 /// done the arithmetic. `owns_caret` is whether typing would go here — a
 /// surface that is not listening draws an outline where a listening one draws
-/// the filled block the program asked for.
+/// the filled block the program asked for. `cell` is what the cursor is on.
+///
+/// The shape is decided once, here, for both drawings, so the character is
+/// drawn again under the very cursor that was drawn and no other: see
+/// [`paint_over_cursor`]. It is drawn in the cell's own colour, because the
+/// list's rows invert nothing under a cursor.
 pub(super) fn paint_cursor_at(
     cursor: &Cursor,
+    cell: Option<&SnapshotCell>,
     owns_caret: bool,
     at: Vector2F,
     metrics: CellMetrics,
     scene: &mut Scene,
 ) {
-    paint_cursor_in(cursor, shape_of(cursor, owns_caret), at, metrics, scene);
+    let shape = shape_of(cursor, owns_caret);
+    paint_cursor_in(cursor, shape, at, metrics, scene);
+    if let Some(cell) = cell {
+        paint_over_cursor(cell, shape, at, cell.foreground, metrics, scene);
+    }
 }
 
 /// Draws the cursor in `shape`, in the cell whose top-left corner is `at`.

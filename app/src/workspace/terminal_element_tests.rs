@@ -691,10 +691,14 @@ fn a_shade_under_an_outline_beam_or_underline_cursor_is_drawn_once() {
 }
 
 #[test]
-fn only_a_filled_cursor_has_its_character_drawn_again_over_it() {
-    // What the block list asks for its open block's cursor, which no grid
-    // test reaches.
-    let cell = snapshot(&["░"], 1).cells[0];
+fn a_cursor_somebody_else_placed_has_its_character_drawn_again_only_when_filled() {
+    // `paint_cursor_at` is all the block list draws at its open block's
+    // cursor, which no grid test reaches: the cursor, then the line or block
+    // under it again. An unfocused pane's outline asks for no second drawing,
+    // even where the program asked for a filled block, and nor does a beam or
+    // an underline. Counted by opacity, as in the grid's test above.
+    let half = |fill: &Fill| matches!(fill, Fill::Solid(color) if color.a == 127);
+    let cell = snapshot(&["▒"], 1).cells[0];
     let metrics = font().metrics();
     for (shape, owns_caret, drawn) in [
         (CursorShape::Block, true, true),
@@ -710,20 +714,30 @@ fn only_a_filled_cursor_has_its_character_drawn_again_over_it() {
         };
         let mut scene = Scene::new(1.);
         scene.start_layer(ClipBounds::None);
-        paint_over_cursor(
-            &cell,
-            shape_of(&cursor, owns_caret),
+        paint_cursor_at(
+            &cursor,
+            Some(&cell),
+            owns_caret,
             Vector2F::zero(),
-            INK,
             metrics,
             &mut scene,
         );
         scene.stop_layer();
+
+        let painted = rects(&scene);
+        let shades = painted.iter().filter(|rect| half(&rect.background)).count();
         assert_eq!(
-            !rects(&scene).is_empty(),
-            drawn,
-            "{shape:?}, focused: {owns_caret}"
+            shades,
+            usize::from(drawn),
+            "{shape:?}, focused: {owns_caret}: the shade drawn again {shades} times"
         );
+        if drawn {
+            assert_eq!(
+                painted.last().map(|rect| rect.background),
+                Some(Fill::Solid(color(INK).with_alpha(127))),
+                "over the cursor, in the cell's own colour"
+            );
+        }
     }
 }
 

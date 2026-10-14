@@ -1424,21 +1424,14 @@ impl BlockList {
             .as_ref()
             .and_then(|cursor| Some((cursor, drawn(cursor.row, cursor.column)?)))
         {
-            let at = row + vec2f(cursor.column as f32 * metrics.width, 0.);
-            let owns_caret = self.output.draws_focus();
-            terminal_element::paint_cursor_at(cursor, owns_caret, at, metrics, ctx.scene);
-            // In its own colour, because the list's rows invert nothing under
-            // a cursor. See `paint_over_cursor` for why it is drawn again.
-            if let Some(cell) = self.snapshot.cell(cursor.row, cursor.column) {
-                terminal_element::paint_over_cursor(
-                    cell,
-                    terminal_element::shape_of(cursor, owns_caret),
-                    at,
-                    cell.foreground,
-                    metrics,
-                    ctx.scene,
-                );
-            }
+            terminal_element::paint_cursor_at(
+                cursor,
+                self.snapshot.cell(cursor.row, cursor.column),
+                self.output.draws_focus(),
+                row + vec2f(cursor.column as f32 * metrics.width, 0.),
+                metrics,
+                ctx.scene,
+            );
         }
 
         // And what an input method is composing for the program, over it.
