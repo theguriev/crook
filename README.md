@@ -467,13 +467,17 @@ Twenty-two features, and the page that configures them:
   instead, and `aider`, which has no hooks, gets a sentence saying what to do instead. A
   subagent works in a session of its own, and Copilot CLI runs its hooks for one as for the
   session you are talking to, so its hooks pass `--session -`: the pane takes a title or a stop
-  only from the session whose turn it is, until that one stops or its command ends. A
+  only from the session whose turn it is, until that one stops, another starts or its command
+  ends. Its `sessionStart` hook, which no subagent runs, passes `--session-start -`, so a turn
+  interrupted with Esc and followed by `/new` or `/resume` hands the pane to the new session. A
   subagent's prompt no longer renames the tab, and its end no longer wakes a `crook pane wait
   --until idle` partway through the turn; its questions still light the row. The OpenCode plugin
-  leaves its subagents out itself, but for their questions, and sends its reports one after
-  another, each only when it says something new. Copilot CLI refuses the tool call a hook
-  failed over, so no hook ever fails: outside Crook, with no terminal to report to, or with
-  the binary gone, each one exits 0. Outside Crook means where
+  leaves its subagents out itself, but for their questions — asking OpenCode about a session it
+  did not see made, such as a subagent's that `task` resumes by its id — takes no title from
+  text OpenCode wrote itself, and sends its reports one after another, each only when it says
+  something new. Copilot CLI refuses the tool call a hook failed over, so no hook ever fails:
+  outside Crook, with no terminal to report to, or with the binary gone, each one exits 0.
+  Outside Crook means where
   neither `TERM_PROGRAM=Crook` nor `CROOK_PANE_ID` reaches, and `ssh` and `docker exec` carry
   neither, so an agent on the far side of either reports nothing through these command hooks,
   the Claude Code plugin's included, until two things hold there. `TERM_PROGRAM` is passed

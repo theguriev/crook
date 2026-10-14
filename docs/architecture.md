@@ -1576,8 +1576,8 @@ promise painted on it. The promise is now kept by the program the promise is abo
 kept over the one channel that program already has.
 
 **The report is an escape sequence.**
-`OSC 6340 ; <status> [; <title> [;; <message> [;; <session>]]] BEL`, read by the same watcher
-that reads OSC 7 and the completion channel's 6339, in
+`OSC 6340 ; <status> [; <title> [;; <message> [;; <session> [;; start]]]] BEL`, read by the same
+watcher that reads OSC 7 and the completion channel's 6339, in
 `crates/crook_terminal/src/agent.rs`. Four words — `idle`, `running`, `needs-input`, `failed` —
 an optional name for the work, which lands in `derived_title` because that is what
 `derived_title` has always been: what the agent calls what it is doing — and, after that, what
@@ -1687,15 +1687,29 @@ may be another session's; from any other, a title is dropped and a stop — `idl
 is dropped whole, while a question and the `running` after one are taken, since they wait on a
 person all the same; a report that names no session is taken whoever holds the pane. The holder
 lets go when it stops, because one Copilot process can go on in a new session (`/clear`), and on
-the shell's `D`, because an agent interrupted mid-turn never says it stopped. The writer counts
-the session's two pieces and the cut before the message first, so `vte`'s sixteen never drop it.
-A Crook older than the field reads the session into the message, which the row shows only beside
-`needs-input`. OpenCode's subagents need none of this on the wire: its plugin keeps the ids
-`session.created` gives a `parentID` — the way `opencode run` finds the sessions it waits on —
-and sends nothing for them but their questions and the going on after one. Its event handlers
-are not awaited, and each report is a process, so the plugin also sends its reports through one
-promise, in the order it made them, and leaves a status said again unsaid. Claude Code needs
-neither: its subagents fire `SubagentStop`, which no hook reports.
+the shell's `D`, because an agent interrupted mid-turn never says it stopped. And a session that
+says it starts — a third empty field and `start` after the session,
+`crook --agent <status> --session-start <id>` — takes the pane whoever holds it: Copilot says no
+`agentStop` for a turn interrupted with Esc, and `/new` or `/resume` go on in a new session in
+the same process with the old one's `sessionEnd` still to come, so without it every turn after
+was taken for a subagent's until Copilot exited. Its `sessionStart` hook is the one it runs for
+no subagent — once a session, on its first prompt, 13 ms after that prompt's
+`userPromptSubmitted` in the 1.0.89 capture, with the prompt as `initialPrompt` — so the printed
+hook reports `running --title - --session-start -`, and the title the prompt's own report lost
+comes back with it. The writer counts the session's pieces, its start's and the cut before the
+message first, so `vte`'s sixteen never drop them. A Crook older than the field reads the
+session into the message, which the row shows only beside `needs-input`. OpenCode's subagents
+need none of this on the wire: its plugin keeps the ids `session.created` gives a `parentID` —
+the way `opencode run` finds the sessions it waits on — and asks OpenCode's server, through the
+`client` a plugin is handed, about a session it did not see made, once each: the `task` tool
+goes on in an earlier subagent's session when handed its `task_id`, which makes no new session,
+and after OpenCode is started again the plugin has seen none of them made. It sends nothing for
+a subagent but its questions and the going on after one, and takes a prompt's title only from
+text that is not `synthetic`, since a background task's result comes back to its session as a
+prompt OpenCode wrote, `<task id=…>`. Its event handlers are not awaited, and each report is a
+process, so the plugin also sends its reports through one promise, in the order it made them,
+and leaves a status said again unsaid. Claude Code needs neither: its subagents fire
+`SubagentStop`, which no hook reports.
 
 **The pull request is a second sequence.** `OSC 6342 ; pr ; <url> BEL`, read by the same watcher
 and written by `crook --agent <status> --pull-request <url>` in the same write as the status.

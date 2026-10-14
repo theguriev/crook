@@ -1602,6 +1602,15 @@ fn said_by(session: &str, status: &str, title: &str, message: &str) -> Vec<u8> {
     format!("\x1b]{}\x07", pieces.join(";")).into_bytes()
 }
 
+/// [`said_by`] from a session that says it starts with this report: the
+/// same, with another empty piece and `start` after the session.
+fn started_by(session: &str, status: &str, title: &str) -> Vec<u8> {
+    let mut bytes = said_by(session, status, title, "");
+    bytes.pop();
+    bytes.extend(b";;start\x07");
+    bytes
+}
+
 /// A report the row hears, with neither a title nor a message.
 fn bare(status: AgentReport) -> TerminalEvent {
     TerminalEvent::Agent(Reported {
@@ -1775,7 +1784,12 @@ fn test_a_report_too_long_for_the_parser_keeps_its_session() {
         .collect::<Vec<_>>()
         .join(";");
     let said = |status, session| {
-        crate::agent::report(status, Some(&commands), Some(&commands), Some(session))
+        crate::agent::report(
+            status,
+            Some(&commands),
+            Some(&commands),
+            Some(crate::agent::Session::Of(session)),
+        )
     };
     let mut emulator = emulator();
     emulator.advance(said(AgentReport::Running, PARENT).as_bytes());
@@ -1786,6 +1800,72 @@ fn test_a_report_too_long_for_the_parser_keeps_its_session() {
     assert_eq!(AgentReport::Running, emulator.agent());
     emulator.advance(said(AgentReport::Idle, PARENT).as_bytes());
     assert_eq!(AgentReport::Idle, emulator.agent());
+}
+
+#[test]
+fn test_a_session_that_starts_takes_the_pane_from_one_interrupted_mid_turn() {
+    // Copilot CLI says no `agentStop` for a turn interrupted with Esc, and
+    // `/new` goes on in a new session in the same process; the old one's
+    // `sessionEnd` comes only when the process ends. Captured with Copilot
+    // 1.0.89: the new session's prompt, then its `sessionStart` 13 ms later
+    // with the same prompt, and its turn. Without the start, the new
+    // session's title was dropped and its end never heard.
+    const NEW: &str = "2d22d2e4-3653-46a8-a109-0a468850805d";
+    let mut emulator = emulator();
+    emulator.advance(&said_by(PARENT, "running", "first prompt", ""));
+    emulator.take_events();
+
+    emulator.advance(&said_by(NEW, "running", "second prompt", ""));
+    assert!(emulator.take_events().is_empty());
+    emulator.advance(&started_by(NEW, "running", "second prompt"));
+    assert_eq!(
+        vec![TerminalEvent::Agent(Reported {
+            status: AgentReport::Running,
+            title: Some("second prompt".to_owned()),
+            message: None,
+        })],
+        emulator.take_events()
+    );
+
+    // And now the new session is the pane's: a subagent of it is still not.
+    emulator.advance(&said_by(SUBAGENT, "running", "run the subtask", ""));
+    emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
+    assert!(emulator.take_events().is_empty());
+    emulator.advance(&said_by(NEW, "idle", "", ""));
+    assert_eq!(vec![bare(AgentReport::Idle)], emulator.take_events());
+
+    // The interrupted session's own end, when Copilot exits, is an idle on
+    // a pane already idle.
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    assert!(emulator.take_events().is_empty());
+    assert_eq!(AgentReport::Idle, emulator.agent());
+}
+
+#[test]
+fn test_a_start_too_long_for_the_parser_is_still_a_start() {
+    // Counted with the session, before the title and the message: a start
+    // the parser dropped would leave the pane to the session before it.
+    let commands = (1..=40)
+        .map(|at| format!("step {at}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    let mut emulator = emulator();
+    emulator.advance(&said_by(PARENT, "running", "first prompt", ""));
+    emulator.advance(
+        crate::agent::report(
+            AgentReport::Running,
+            Some(&commands),
+            Some(&commands),
+            Some(crate::agent::Session::Starts(SUBAGENT)),
+        )
+        .as_bytes(),
+    );
+    emulator.take_events();
+
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    assert!(emulator.take_events().is_empty());
+    emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
+    assert_eq!(vec![bare(AgentReport::Idle)], emulator.take_events());
 }
 
 #[test]

@@ -32,6 +32,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crook_terminal::agent::Session;
 use crook_terminal::{AgentReport, Program, Pty, PtyLink as _, TerminalSize};
 use serde_json::Value;
 
@@ -61,7 +62,7 @@ const TITLE: &str = "port the tab bar";
 /// The message `--message -` makes of [`INPUT`].
 const MESSAGE: &str = "Claude needs your permission to use Bash";
 
-/// The session `--session -` reads out of [`INPUT`].
+/// The session `--session -` and `--session-start -` read out of [`INPUT`].
 const SESSION: &str = "test";
 
 /// How long one hook is given before the test calls it a failure rather than
@@ -256,7 +257,8 @@ fn expected_report(command: &str) -> String {
             // such call's: the report is the status alone, as it is for
             // every tool that opens no pull request.
             "--pull-request" => {}
-            "--session" => session = Some(SESSION),
+            "--session" => session = Some(Session::Of(SESSION)),
+            "--session-start" => session = Some(Session::Starts(SESSION)),
             other => panic!("{command}: {other} is not a flag `--agent` takes"),
         }
     }

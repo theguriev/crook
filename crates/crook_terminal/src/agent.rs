@@ -5,7 +5,7 @@
 //! finished yet. Whether that agent is working, waiting for an answer or has
 //! given up is something only the agent knows, and this is the sequence it
 //! says it with —
-//! `OSC 6340 ; <status> [; <title> [;; <message> [;; <session>]]] BEL`,
+//! `OSC 6340 ; <status> [; <title> [;; <message> [;; <session> [;; start]]]] BEL`,
 //! written to its own terminal.
 //!
 //! The terminal rather than a socket, because the terminal is the one thing
@@ -55,6 +55,12 @@
 //! the row shows only beside `needs-input`: wrong on the row there, and
 //! nothing worse, as the message once was.
 //!
+//! A third empty field and the word `start` after the session say that the
+//! session starts with this report —
+//! `running;port the tab bar;;;f2368c19;;start` — which is what hands the
+//! pane to it; see below. Anything else after the session is not a start,
+//! and the session is still read.
+//!
 //! On 6340 rather than on a number of its own, as the pull request is,
 //! because it is a fact about the report rather than about the work: a
 //! sequence of its own would have to be paired with the report after it,
@@ -73,8 +79,9 @@
 //!
 //! So a report can say which session it is from, and the pane takes a title
 //! and a stop — idle or failed — only from the session it holds: the first
-//! to say `running` while nobody held it, until that session stops or the
-//! command the agent was ends. Another session's question is still taken,
+//! to say `running` while nobody held it, or the last to say it starts,
+//! until that session stops, another starts or the command the agent was
+//! ends. Another session's question is still taken,
 //! without its title, since it waits on a person all the same; so is its
 //! `running`, which is how it says the question was answered. A report that
 //! names no session is taken whoever holds the pane, because nothing says it
@@ -88,6 +95,19 @@
 //! notifications come whether or not a turn is under way — and a question
 //! that took the pane would hold it against the next session's turn.
 //!
+//! And handed over, whoever holds it, to a session that says it starts. An
+//! agent can stop without saying so — Copilot says no `agentStop` for a turn
+//! interrupted with Esc — and go on in a new session in the same process:
+//! `/new` and `/resume` close nothing, so the old session's `sessionEnd`
+//! waits for the process to end. With the interrupted session still held,
+//! every turn of the new one was taken for a subagent's, its prompt naming
+//! nothing and its end ending nothing until the agent exited. Copilot says
+//! a session starts, with the prompt that started it, on the first prompt
+//! of every session a person begins or resumes — a few milliseconds after
+//! that prompt's own report — and never for a subagent's, so that report is
+//! the one the pane goes over on, and it brings back the title the prompt's
+//! own report lost.
+//!
 //! # How long the fields may be
 //!
 //! The reader keeps at most [`TITLE_BYTES`] of a title and [`MESSAGE_BYTES`]
@@ -100,9 +120,11 @@
 //! a hook says is cut on the way in.
 //!
 //! A session goes first when the writer counts what `vte` will keep — it
-//! and the cut before it, and the cut before the message, which it needs
-//! even when there is none — so that it is never what the parser drops: a
-//! session lost is a subagent's report taken as the parent's.
+//! and the cut before it, its start and the cut before that, and the cut
+//! before the message, which it needs even when there is none — so that it
+//! is never what the parser drops: a session lost is a subagent's report
+//! taken as the parent's, and a start lost is a pane kept for a session
+//! that has gone.
 //!
 //! # The pull request, on a channel of its own
 //!
@@ -185,13 +207,13 @@ impl AgentReport {
 /// cut between them — see the module docs. A message with no title is the
 /// cut straight after the status, `;;message`: the empty piece the reader
 /// looks for is the first one, and there is no title in front of it. A
-/// session that is not a [`session_id`] is left off, and the report goes
-/// without it as it would have gone before there were sessions.
+/// session that is not a [`session_id`] is left off, start and all, and the
+/// report goes without it as it would have gone before there were sessions.
 pub fn report(
     status: AgentReport,
     title: Option<&str>,
     message: Option<&str>,
-    session: Option<&str>,
+    session: Option<Session<&str>>,
 ) -> String {
     // And each text loses a `;` at either end, or is left off when that
     // leaves nothing: beside the cut in front of it or the one behind it, an
@@ -203,16 +225,22 @@ pub fn report(
             .filter(|text| !text.is_empty())
     };
     let (title, message) = (text(title), text(message));
-    let session = session.and_then(session_id);
+    let session = session.and_then(|said| session_id(said.id()).map(|id| said.map(|_| id)));
 
     // What `vte` will keep of it. The number and the status are two pieces.
-    // A session is two more with the cut in front of it, and it needs the
-    // cut before a message whether or not there is one, which is one more;
-    // a message needs at least one of its own. Everything past the limit is
-    // dropped by the parser without a word, so it is cut here instead, where
-    // the cut can say so — and never out of the session, counted first.
+    // A session is two more with the cut in front of it, and its start two
+    // more again; it needs the cut before a message whether or not there is
+    // one, which is one more, and a message needs at least one of its own.
+    // Everything past the limit is dropped by the parser without a word, so
+    // it is cut here instead, where the cut can say so — and never out of
+    // the session, counted first.
     let cut = message.is_some() || session.is_some();
-    let mut budget = MAX_PIECES - 2 - 2 * usize::from(session.is_some()) - usize::from(cut);
+    let said = match session {
+        None => 0,
+        Some(Session::Of(_)) => 2,
+        Some(Session::Starts(_)) => 4,
+    };
+    let mut budget = MAX_PIECES - 2 - said - usize::from(cut);
     let mut fields = vec![OSC.to_owned(), status.word().to_owned()];
     if let Some(title) = title {
         let title = within(&title, budget - usize::from(message.is_some()));
@@ -227,10 +255,62 @@ pub fn report(
     }
     if let Some(session) = session {
         fields.push(String::new());
-        fields.push(session.to_owned());
+        fields.push((*session.id()).to_owned());
+        if session.starts() {
+            fields.push(String::new());
+            fields.push(STARTS.to_owned());
+        }
     }
     format!("\x1b]{}\x07", fields.join(";"))
 }
+
+/// Which of an agent's sessions a report is from, and whether that session
+/// starts with it — see "Whose report it is" in the module docs.
+///
+/// Over the id, so that the writer can hand one it borrows and the reader
+/// one it owns.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Session<Id> {
+    /// Said by the session with this id, which may be a subagent's.
+    Of(Id),
+    /// Said by the session with this id as it starts: one a person began or
+    /// resumed, never a subagent's, and the pane's from this report on,
+    /// whichever session held it.
+    Starts(Id),
+}
+
+impl<Id> Session<Id> {
+    /// The session's id.
+    pub fn id(&self) -> &Id {
+        match self {
+            Self::Of(id) | Self::Starts(id) => id,
+        }
+    }
+
+    /// Whether the session starts with the report.
+    pub fn starts(&self) -> bool {
+        matches!(self, Self::Starts(_))
+    }
+
+    /// The same session, starting or not, with its id borrowed.
+    pub fn as_ref(&self) -> Session<&Id> {
+        match self {
+            Self::Of(id) => Session::Of(id),
+            Self::Starts(id) => Session::Starts(id),
+        }
+    }
+
+    /// The same session, starting or not, with its id made into another.
+    pub fn map<To>(self, id: impl FnOnce(Id) -> To) -> Session<To> {
+        match self {
+            Self::Of(of) => Session::Of(id(of)),
+            Self::Starts(of) => Session::Starts(id(of)),
+        }
+    }
+}
+
+/// The word after a session that says it starts with the report.
+const STARTS: &str = "start";
 
 /// The longest session id either end takes, in bytes.
 ///
@@ -349,8 +429,9 @@ pub struct Reported {
 /// arrives in pieces and is put back together here: the sequence has exactly
 /// two fields before the title, and everything after them is the title up to
 /// the first empty piece, which is the `;;` that starts the message, and the
-/// message up to the second, after which is the session.
-pub(crate) fn parse(parameters: &[&[u8]]) -> Option<(Reported, Option<String>)> {
+/// message up to the second, after which is the session, and after a third
+/// whether it starts.
+pub(crate) fn parse(parameters: &[&[u8]]) -> Option<(Reported, Option<Session<String>>)> {
     let [number, word, rest @ ..] = parameters else {
         return None;
     };
@@ -359,13 +440,22 @@ pub(crate) fn parse(parameters: &[&[u8]]) -> Option<(Reported, Option<String>)> 
     }
     let status = AgentReport::parse(str::from_utf8(word).ok()?)?;
     let (title, rest) = cut(rest);
-    let (message, session) = cut(rest);
+    let (message, rest) = cut(rest);
+    let (session, rest) = cut(rest);
+    let starts = matches!(rest, [word] if *word == STARTS.as_bytes());
     let reported = Reported {
         status,
         title: joined(title, TITLE_BYTES),
         message: joined(message, MESSAGE_BYTES),
     };
-    Some((reported, session_of(session)))
+    let session = session_of(session).map(|id| {
+        if starts {
+            Session::Starts(id)
+        } else {
+            Session::Of(id)
+        }
+    });
+    Some((reported, session))
 }
 
 /// `pieces` up to the first empty one, and what comes after it.
@@ -390,7 +480,8 @@ fn session_of(pieces: &[&[u8]]) -> Option<String> {
 #[derive(Debug, Default)]
 pub(crate) struct Sessions {
     /// The session the pane holds: the first to say it is running while
-    /// nobody held it, until it stops or the command the agent was ends.
+    /// nobody held it, or the last to say it starts, until it stops, another
+    /// starts or the command the agent was ends.
     held: Option<String>,
 }
 
@@ -401,14 +492,20 @@ impl Sessions {
     /// Another session's title is the prompt an agent wrote to its
     /// subagent, and its stop is the subagent's, with the agent still at
     /// work; its question and its going on after one are the agent's own.
+    /// A session that starts is no subagent's, and holds the pane from here.
     pub(crate) fn admit(
         &mut self,
         mut reported: Reported,
-        session: Option<String>,
+        session: Option<Session<String>>,
     ) -> Option<Reported> {
-        let Some(session) = session else {
+        let Some(said) = session else {
             return Some(reported);
         };
+        let starts = said.starts();
+        let (Session::Of(session) | Session::Starts(session)) = said;
+        if starts {
+            self.held = Some(session.clone());
+        }
         let stopped = matches!(reported.status, AgentReport::Idle | AgentReport::Failed);
         match &self.held {
             Some(held) if *held != session => {
@@ -553,7 +650,7 @@ mod tests {
     }
 
     /// [`parsed`], with the session the report names.
-    fn parsed_with_session(sequence: &str) -> Option<(Reported, Option<String>)> {
+    fn parsed_with_session(sequence: &str) -> Option<(Reported, Option<Session<String>>)> {
         let pieces = split(sequence);
         let parameters: Vec<&[u8]> = pieces.iter().map(Vec::as_slice).collect();
         parse(&parameters)
@@ -720,7 +817,7 @@ mod tests {
             ),
         ] {
             let status = AgentReport::parse(wire.split(';').next().unwrap()).unwrap();
-            let sequence = report(status, title, message, Some(SESSION));
+            let sequence = report(status, title, message, Some(Session::Of(SESSION)));
             assert_eq!(format!("\x1b]{OSC};{wire}\x07"), sequence);
             assert_eq!(
                 Some((
@@ -729,7 +826,7 @@ mod tests {
                         title: title.map(str::to_owned),
                         message: message.map(str::to_owned),
                     },
-                    Some(SESSION.to_owned())
+                    Some(Session::Of(SESSION.to_owned()))
                 )),
                 parsed_with_session(&sequence),
                 "{wire}"
@@ -755,13 +852,13 @@ mod tests {
                         title: None,
                         message: Some("approve".to_owned()),
                     },
-                    Some(SESSION.to_owned())
+                    Some(Session::Of(SESSION.to_owned()))
                 )),
                 parsed_with_session(&report(
                     AgentReport::NeedsInput,
                     None,
                     Some(message),
-                    Some(SESSION)
+                    Some(Session::Of(SESSION))
                 )),
                 "{message:?}"
             );
@@ -783,11 +880,16 @@ mod tests {
             format!("{longest}s"),
         ] {
             assert_eq!(None, session_id(&refused), "{refused:?} was taken");
-            assert_eq!(
-                report(AgentReport::Running, Some("port"), None, None),
-                report(AgentReport::Running, Some("port"), None, Some(&refused)),
-                "{refused:?} was written"
-            );
+            for said in [
+                Session::Of(refused.as_str()),
+                Session::Starts(refused.as_str()),
+            ] {
+                assert_eq!(
+                    report(AgentReport::Running, Some("port"), None, None),
+                    report(AgentReport::Running, Some("port"), None, Some(said)),
+                    "{said:?} was written"
+                );
+            }
         }
         // Read the same way: more than one piece after the cut, or a piece
         // that is not one word, is no session, and the report is still read.
@@ -811,9 +913,12 @@ mod tests {
         }
     }
 
-    /// The reports the pane takes of `said`, each a status, a title and the
+    /// A report as [`admitted`] is handed it: a status, a title and the
     /// session that said it.
-    fn admitted(said: &[(AgentReport, Option<&str>, Option<&str>)]) -> Vec<Reported> {
+    type Said<'a> = (AgentReport, Option<&'a str>, Option<Session<&'a str>>);
+
+    /// The reports the pane takes of `said`.
+    fn admitted(said: &[Said<'_>]) -> Vec<Reported> {
         let mut sessions = Sessions::default();
         said.iter()
             .filter_map(|(status, title, session)| {
@@ -822,8 +927,16 @@ mod tests {
                     title: title.map(str::to_owned),
                     message: None,
                 };
-                sessions.admit(reported, session.map(str::to_owned))
+                sessions.admit(reported, session.map(|said| said.map(str::to_owned)))
             })
+            .collect()
+    }
+
+    /// Each report the pane takes, as its status and its title.
+    fn heard(taken: &[Reported]) -> Vec<(AgentReport, Option<&str>)> {
+        taken
+            .iter()
+            .map(|reported| (reported.status, reported.title.as_deref()))
             .collect()
     }
 
@@ -832,16 +945,13 @@ mod tests {
         // A subagent that failed is a tool call that failed: the agent above
         // it reads the failure and goes on.
         use AgentReport::{Failed, Running};
+        use Session::Of;
         let taken = admitted(&[
-            (Running, Some("port"), Some("parent")),
-            (Failed, None, Some("child")),
-            (Failed, None, Some("parent")),
-            (Running, Some("next"), Some("child")),
+            (Running, Some("port"), Some(Of("parent"))),
+            (Failed, None, Some(Of("child"))),
+            (Failed, None, Some(Of("parent"))),
+            (Running, Some("next"), Some(Of("child"))),
         ]);
-        let statuses: Vec<_> = taken
-            .iter()
-            .map(|reported| (reported.status, reported.title.as_deref()))
-            .collect();
         // The parent's failure lets the pane go, as its idle would.
         assert_eq!(
             vec![
@@ -849,7 +959,85 @@ mod tests {
                 (Failed, None),
                 (Running, Some("next"))
             ],
-            statuses
+            heard(&taken)
+        );
+    }
+
+    #[test]
+    fn a_start_travels_after_the_session_behind_a_third_cut() {
+        // Behind one more cut after the session, as the session is behind
+        // one after the message, so that every field before it is read as
+        // it was.
+        for (title, message, wire) in [
+            (None, None, format!("running;;;{SESSION};;start")),
+            (
+                Some("port the tab bar"),
+                None,
+                format!("running;port the tab bar;;;{SESSION};;start"),
+            ),
+            (
+                Some("fix a"),
+                Some("approve?"),
+                format!("needs-input;fix a;;approve?;;{SESSION};;start"),
+            ),
+        ] {
+            let status = AgentReport::parse(wire.split(';').next().unwrap()).unwrap();
+            let sequence = report(status, title, message, Some(Session::Starts(SESSION)));
+            assert_eq!(format!("\x1b]{OSC};{wire}\x07"), sequence);
+            assert_eq!(
+                Some((
+                    Reported {
+                        status,
+                        title: title.map(str::to_owned),
+                        message: message.map(str::to_owned),
+                    },
+                    Some(Session::Starts(SESSION.to_owned()))
+                )),
+                parsed_with_session(&sequence),
+                "{wire}"
+            );
+        }
+        // Any other word there, or more than the one, is no start, and the
+        // session is still the report's.
+        for wire in [
+            format!("\x1b]{OSC};idle;;;{SESSION};;started\x07"),
+            format!("\x1b]{OSC};idle;;;{SESSION};;start;more\x07"),
+            format!("\x1b]{OSC};idle;;;{SESSION};;\x07"),
+        ] {
+            assert_eq!(
+                Some(Some(Session::Of(SESSION.to_owned()))),
+                parsed_with_session(&wire).map(|(_, session)| session),
+                "{wire:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_that_starts_takes_the_pane_from_one_that_never_stopped() {
+        // Copilot CLI says no `agentStop` for a turn interrupted with Esc,
+        // and `/new` goes on in a new session in the same process: the new
+        // session's prompt comes first and loses its title to the held one,
+        // and its start, a moment later, hands the pane over and names it.
+        use AgentReport::{Idle, Running};
+        use Session::{Of, Starts};
+        let taken = admitted(&[
+            (Running, Some("first"), Some(Of("interrupted"))),
+            (Running, Some("second"), Some(Of("new"))),
+            (Running, Some("second"), Some(Starts("new"))),
+            (Running, Some("run the subtask"), Some(Of("subagent"))),
+            (Idle, None, Some(Of("subagent"))),
+            (Idle, None, Some(Of("interrupted"))),
+            (Idle, None, Some(Of("new"))),
+        ]);
+        assert_eq!(
+            vec![
+                (Running, Some("first")),
+                (Running, None),
+                (Running, Some("second")),
+                (Running, None),
+                (Idle, None),
+            ],
+            heard(&taken)
         );
     }
     /// What a pull request sequence reads as, through the same split `vte`

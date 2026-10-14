@@ -847,8 +847,9 @@ struct AgentArguments {
     message: Option<String>,
     /// `--pull-request`, when given.
     pull_request: Option<String>,
-    /// `--session`, when given.
-    session: Option<String>,
+    /// `--session`, or `--session-start` for a session that starts, when
+    /// given.
+    session: Option<crook_terminal::agent::Session<String>>,
 }
 
 /// What follows `--agent`: the status, and a title, a message, a pull
@@ -866,6 +867,7 @@ fn agent_arguments(
     let mut message = None;
     let mut pull_request = None;
     let mut session = None;
+    let mut session_start = None;
     // In any order, each at most once: a hook that names the
     // work and says what it is waiting for spells both.
     while let Some(flag) = args.peek().map(String::as_str) {
@@ -885,6 +887,11 @@ fn agent_arguments(
                 "`--session` needs the session's id, or `-` to read it from a hook's input \
                  on stdin",
             ),
+            "--session-start" => (
+                &mut session_start,
+                "`--session-start` needs the id of the session that starts, or `-` to read it \
+                 from a hook's input on stdin",
+            ),
             _ => break,
         };
         if field.is_some() {
@@ -903,9 +910,17 @@ fn agent_arguments(
     if let Some(extra) = args.peek().filter(|word| word.starts_with("--")) {
         bail!(
             "unrecognised argument {extra}; `--agent <status>` takes only \
-             --title, --message, --pull-request and --session"
+             --title, --message, --pull-request, --session and --session-start"
         );
     }
+    let session = match (session, session_start) {
+        (Some(_), Some(_)) => bail!(
+            "`--session` and `--session-start` both name the session the report is from; \
+             give one"
+        ),
+        (session, None) => session.map(crook_terminal::agent::Session::Of),
+        (None, start) => start.map(crook_terminal::agent::Session::Starts),
+    };
     Ok(AgentArguments {
         status,
         title,
@@ -1020,7 +1035,10 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                     arguments.title.as_deref(),
                     arguments.message.as_deref(),
                     arguments.pull_request.as_deref(),
-                    arguments.session.as_deref(),
+                    arguments
+                        .session
+                        .as_ref()
+                        .map(|said| said.as_ref().map(String::as_str)),
                 )?;
                 return Ok(Startup::Answered);
             }
@@ -1049,6 +1067,7 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
             }
             "--pull-request" => bail!("`--pull-request` goes after `--agent <status>`"),
             "--session" => bail!("`--session` goes after `--agent <status>`"),
+            "--session-start" => bail!("`--session-start` goes after `--agent <status>`"),
             // Stdout is the fragment and stderr the lead and the note, so
             // `> hooks.json` takes exactly the fragment; an agent with no
             // hooks gets a sentence on stdout and no note, since the sentence
@@ -1749,7 +1768,7 @@ OPTIONS:
                        to paste into that shell\'s own configuration on a machine
                        Crook cannot start the shell on — over ssh, in a container
     --agent <STATUS> [--title <TEXT>] [--message <TEXT>] [--pull-request <URL>]
-                       [--session <ID>]
+                       [--session <ID> | --session-start <ID>]
                        Tell the pane this is run in what the program in it is
                        doing: `idle`, `running`, `needs-input` or `failed`,
                        what it calls its work, with `needs-input` what it is
@@ -1763,7 +1782,10 @@ OPTIONS:
                        session the report is from, and `-` reads the hook\'s:
                        the pane takes a title or a stop only from the session
                        that holds it, so a subagent\'s prompt does not rename
-                       the tab and its end does not end the agent\'s turn
+                       the tab and its end does not end the agent\'s turn.
+                       `--session-start` names one that starts with the
+                       report, never a subagent\'s, and hands it the pane
+                       whichever session held it
     --agent-hooks <AGENT>
                        Print the hooks that make an agent say all of that by
                        itself, to merge into its settings: `claude` (Claude
@@ -5317,12 +5339,42 @@ mod tests {
                 title: Some("port".to_owned()),
                 message: None,
                 pull_request: None,
-                session: Some("-".to_owned()),
+                session: Some(crook_terminal::agent::Session::Of("-".to_owned())),
+            }
+        );
+        let mut given = ["running", "--title", "-", "--session-start", "-"]
+            .map(str::to_owned)
+            .into_iter()
+            .peekable();
+        assert_eq!(
+            agent_arguments(&mut given).expect("valid"),
+            AgentArguments {
+                status: "running".to_owned(),
+                title: Some("-".to_owned()),
+                message: None,
+                pull_request: None,
+                session: Some(crook_terminal::agent::Session::Starts("-".to_owned())),
             }
         );
 
         for (args, complaint) in [
             (&["--agent", "idle", "--session"][..], "`--session` needs"),
+            (
+                &["--agent", "idle", "--session-start"][..],
+                "`--session-start` needs",
+            ),
+            (
+                &["--agent", "idle", "--session", "a", "--session-start", "a"][..],
+                "give one",
+            ),
+            (
+                &["--session-start", "f2368c19"][..],
+                "goes after `--agent <status>`",
+            ),
+            (
+                &["--agent", "running", "--session-start", "two words"][..],
+                "`--session-start` takes one word",
+            ),
             (
                 &["--agent", "idle", "--session", "a", "--session", "b"][..],
                 "was given twice",
