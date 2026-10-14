@@ -581,6 +581,32 @@ impl PaneBlocks {
         true
     }
 
+    /// Forgets every finished block, for a pane that has just been cleared of
+    /// them: back to following the bottom, with nothing selected, bookmarked,
+    /// hovered, pressed or pinned over the top.
+    ///
+    /// Each of those names a block, and an eviction leaves them to step over
+    /// a block that is gone. A clear is a person asking for an empty pane,
+    /// and a bookmark that outlived it would come back to mark nothing, or a
+    /// sticky header would go on naming a command no longer on screen until
+    /// the next layout. The position goes for a plainer reason: a number of
+    /// lines into a list that is no longer there.
+    ///
+    /// Not a new state. The measurements and the pointer are the pane's
+    /// rather than its blocks', and the prefix sums rebuild themselves at the
+    /// next layout, the list they were built from having changed.
+    pub fn clear(&self) {
+        let mut state = self.0.borrow_mut();
+        state.position = ScrollPosition::FollowBottom;
+        state.selected = None;
+        state.bookmarks.clear();
+        state.hovered = None;
+        state.on_control = None;
+        state.pressed = None;
+        state.menu_at = None;
+        state.sticky = None;
+    }
+
     /// Brings the prefix sums up to date with this frame's blocks and answers
     /// the list's height.
     ///

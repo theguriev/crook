@@ -155,6 +155,15 @@ pub enum Intent {
     /// either way, which is where Warp moves its completions menu when Tab
     /// is given to the suggestion.
     AskCompletions,
+    /// Clear the pane: Ctrl-L, readline's clear-screen.
+    ///
+    /// Not an edit, and not the shell's to do either. The shell holds no
+    /// line to draw again — the field does — and wiping its screen would
+    /// leave every finished block above it, since a block is a copy taken
+    /// off the screen when its command ended. So the key does what
+    /// `crook/window/clear-blocks` does to the pane under the field, and
+    /// the line being written stays where it is, as it does in readline.
+    ClearBlocks,
 }
 
 /// Where a keystroke goes.
@@ -294,6 +303,9 @@ pub enum Binding {
     /// Jump back to the newest, which is where a pane that is not scrolled
     /// back already is.
     ScrollToBottom,
+    /// Drop the focused pane's finished blocks and its scrollback, keeping
+    /// the block that is open.
+    ClearBlocks,
     /// Put one of the selected block's facts on the clipboard.
     CopyBlock(BlockPart),
     /// Put the selected block's command line back in the composer, unsent.
@@ -500,6 +512,7 @@ fn signal(keystroke: &Keystroke) -> Option<Signal> {
 /// [`Intent::Submit`], [`Intent::Newline`], [`Intent::HistoryUp`] and
 /// [`Intent::HistoryDown`] all mean "a line, and a place to send it"; a field
 /// that has neither has to decide what those keys mean before it gets here.
+/// [`Intent::ClearBlocks`] means a pane under the field, to clear.
 pub fn intent(keystroke: &Keystroke, chars: &str, platform: Platform) -> Option<Intent> {
     let modifiers = keystroke.modifiers;
     if let Some(intent) = named_intent(&keystroke.key, modifiers, platform) {
@@ -646,11 +659,18 @@ fn chord_intent(key: &str, modifiers: Modifiers, platform: Platform) -> Option<I
 /// Ctrl-W is here rather than in a table of its own because it is the reason
 /// the werase character exists: it is what a terminal person presses to take
 /// back the last word, and off macOS it used to close the pane instead.
+///
+/// So is Ctrl-L, which is not an edit but is in the same fingers: a shell
+/// person presses it at a prompt to start from a clean screen, and it costs
+/// the shell nothing, since a key the field has no meaning for never reached
+/// it anyway. A program holding the screen still gets it — rule 2 of
+/// [`route`] — which is where vim and `less` redraw on it.
 fn emacs_intent(key: &str) -> Option<Intent> {
     match key {
         "a" => Some(Intent::Move(Motion::LineStart)),
         "e" => Some(Intent::Move(Motion::LineEnd)),
         "k" => Some(Intent::DeleteToLineEnd),
+        "l" => Some(Intent::ClearBlocks),
         "u" => Some(Intent::DeleteToLineStart),
         "w" => Some(Intent::DeleteWordLeft),
         _ => None,
@@ -1406,6 +1426,37 @@ mod tests {
                 edit("w", ctrl(), platform),
                 Some(Intent::DeleteWordLeft),
                 "the werase character, which off macOS used to close the pane"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_l_at_the_prompt_clears_the_pane_and_still_reaches_a_program() {
+        // Readline's clear-screen, which used to fall through rule 4 and do
+        // nothing at all: the field had no meaning for it and kept it from
+        // the shell anyway.
+        let vim = Pane {
+            composer: false,
+            line_is_empty: true,
+            grid_has_selection: false,
+        };
+        for platform in [Platform::Mac, Platform::Other] {
+            for pane in [composing(), empty(), selected(composing())] {
+                assert_eq!(
+                    route(&keystroke("l", ctrl()), "", pane, platform),
+                    Route::Edit(Intent::ClearBlocks),
+                    "{pane:?} on {platform:?}"
+                );
+            }
+            assert_eq!(
+                route(&keystroke("l", ctrl()), "", vim, platform),
+                Route::Raw,
+                "a program holding the screen redraws on it, and has it"
+            );
+            assert_eq!(
+                route(&keystroke("l", ctrl_shift()), "", composing(), platform),
+                Route::Ignored,
+                "with a Shift it is the window's chord off macOS, never the field's"
             );
         }
     }

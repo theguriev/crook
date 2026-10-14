@@ -571,7 +571,12 @@ Twenty-one features, and the page that configures them:
   tab and the split back on the next press, tmux's zoom, and a shell that exits closes its
   pane, its tab, and with the last tab the window. With shell integration the scrollback
   moves into the blocks: each finished command owns its rows, so ten thousand *commands*
-  survive a `clear`, a resize, and the emulator's own history evicting anything.
+  survive a `clear`, a resize, and the emulator's own history evicting anything. What empties
+  a pane is **Clear blocks** — `ctrl-l` at the prompt, or `shift-cmd-k` (`ctrl-shift-l` off
+  macOS) from anywhere — which drops the finished commands and the scrollback and keeps the
+  prompt, or the command still running, along with the line being typed. Its bookmarks, its
+  selection and its find bar go with them. Nothing asks first and nothing brings them back;
+  `cmd-k` stays the tab search.
 - **Output as a list of commands.** A pane is not a grid with decorations drawn over it: each
   command is a block holding its prompt, the line that was run and everything it printed, with
   a hairline between one and the next, a red wash on one that failed and an accent stripe on
@@ -931,7 +936,7 @@ Twenty-one features, and the page that configures them:
   page tells you where it is.
 
 - **Everything the window does has a name, and most of it has a key.** The window registers
-  fifty-nine commands of its own and ships chords for forty; the other nineteen are
+  sixty commands of its own and ships chords for forty-one; the other nineteen are
   reached by name, from the palette or from a chord of your own. That split is deliberate — a
   shipped chord is a key taken away from the shell in every pane, forever, so it is spent on
   what is pressed often and not on what is done once a week.
@@ -944,6 +949,7 @@ Twenty-one features, and the page that configures them:
   | The next pane, the previous one | `cmd-]`, `cmd-[` | `ctrl-shift-]`, `ctrl-shift-[` |
   | Page the output | `shift-PageUp`, `shift-PageDown` | the same |
   | The ends of the scrollback | `shift-cmd-PageUp`, `shift-cmd-PageDown` | `alt-Home`, `alt-End` |
+  | Clear blocks | `shift-cmd-k` | `ctrl-shift-l` |
 
   Paging works over both surfaces, which is the split the wheel already makes: a pane drawing
   a list of commands moves its own offset, and one a full-screen program has taken moves the

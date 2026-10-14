@@ -532,6 +532,12 @@ pub(crate) const PANE_KEYS: &[PaneKey] = &[
         other: "ctrl+c / ctrl+z / ctrl+d",
     },
     PaneKey {
+        label: "Clear the pane, from the prompt",
+        keywords: &["clear", "clear-screen", "ctrl-l", "blocks", "scrollback"],
+        mac: "ctrl+l",
+        other: "ctrl+l",
+    },
+    PaneKey {
         label: "Select a run of the output",
         keywords: &["mouse", "drag", "highlight", "word", "line", "column"],
         mac: "drag / double / triple click / alt+drag",

@@ -819,8 +819,27 @@ impl Emulator {
             .map(|at| &self.blocks.finished()[at])
     }
 
+    /// Forgets every finished block and the scrollback, and keeps the block
+    /// that is open where it is: what clearing a pane does — Warp's "Clear
+    /// blocks", and the `cmd-k` of the terminals before it.
+    ///
+    /// The scrollback goes with the blocks because it is the rest of what a
+    /// pane has to scroll back to: what the open block has pushed off the
+    /// screen, and for a shell that reports no boundaries, everything above
+    /// the screen. The screen itself stays — the prompt, or whatever a
+    /// running command is printing — and so does the block on it, down to
+    /// where its prompt ends; `BlockTracker::clear` says how.
+    ///
+    /// Not part of any stream, so an emulator fed the same items as a mirror
+    /// keeps everything this one forgot.
+    pub fn clear_blocks(&mut self) {
+        self.blocks.clear(&mut self.term);
+        self.dirty = true;
+    }
+
     /// How many blocks have been dropped off the front of the list to keep a
-    /// stream of forged marks from growing it without bound.
+    /// stream of forged marks from growing it without bound, or by
+    /// [`Self::clear_blocks`].
     pub fn blocks_evicted(&self) -> usize {
         self.blocks.evicted()
     }

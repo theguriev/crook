@@ -708,7 +708,7 @@ impl BlockTracker {
     }
 
     /// How many blocks have been dropped off the front to stay under
-    /// [`MAX_BLOCKS`].
+    /// [`MAX_BLOCKS`], or by a [`Self::clear`].
     pub(crate) fn evicted(&self) -> usize {
         self.evicted
     }
@@ -1052,6 +1052,69 @@ impl BlockTracker {
     /// growing the history again brings back up onto other text.
     pub(crate) fn history_cleared<T>(&mut self, term: &Term<T>) {
         self.reflowed(term);
+    }
+
+    /// Drops every finished block and the grid's history, and keeps the open
+    /// block on the rows it is on: what clearing a pane by hand does.
+    ///
+    /// The finished blocks go the way an eviction takes them, off the front
+    /// and counted in [`Self::evicted`], so that whatever keeps a copy of the
+    /// list — cloned a block at a time, and told what went by that count —
+    /// lets them go too.
+    ///
+    /// The history goes as `CSI 3 J` takes it, but the open block is carried
+    /// across rather than found again the way [`Self::history_cleared`]
+    /// finds it. That one reads a stream which may have erased the screen in
+    /// the same breath — `clear` does both — so the rows its anchors named
+    /// may be anywhere by then. Here nothing on the screen moves: the rows
+    /// below the history keep their lines, and an anchor, which follows its
+    /// row by how much the history changed, only has to be told that the
+    /// history is empty now. So each one is read before the drop and written
+    /// again after it, at the line it named. Found again instead, the block
+    /// would forget where its prompt ends, and the composer that continues
+    /// the prompt's row would drop to a row of its own until the next prompt.
+    ///
+    /// An anchor in the history names a row that is gone. The block's top and
+    /// the start of its output come to the top of the screen, where what is
+    /// left of the block now starts — all of it output, when the start of the
+    /// output was up there too. A prompt's end and a picture up there go, as
+    /// a reflow loses them.
+    ///
+    /// The history stays while a full-screen program is up. The one `Term`
+    /// hands out then is the program's, and empty; the shell's is underneath,
+    /// out of reach, with the anchors measured against it.
+    pub(crate) fn clear<T: EventListener>(&mut self, term: &mut Term<T>) {
+        self.evicted += self.finished.len();
+        self.finished.clear();
+        self.image_bytes = 0;
+
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        // `Top` is the oldest line whatever the history holds, so it needs no
+        // carrying: it is the top of the screen once the history is gone.
+        let top = matches!(self.open.top, Anchor::At { .. }).then(|| self.open.top.line(term));
+        let command_start = self.open.command_start.map(|anchor| anchor.cell(term));
+        let output_start = self.open.output_start.map(|anchor| anchor.line(term));
+        let images: Vec<_> = std::mem::take(&mut self.open.images)
+            .into_iter()
+            .map(|(anchor, placement)| (anchor.cell(term), placement))
+            .collect();
+
+        term.clear_screen(ClearMode::Saved);
+
+        if let Some(line) = top {
+            self.open.top = Anchor::at(line.max(0), 0, term);
+        }
+        self.open.command_start = command_start
+            .filter(|(line, _)| *line >= 0)
+            .map(|(line, column)| Anchor::at(line, column, term));
+        self.open.output_start = output_start.map(|line| Anchor::at(line.max(0), 0, term));
+        self.open.images = images
+            .into_iter()
+            .filter(|((line, _), _)| *line >= 0)
+            .map(|((line, column), placement)| (Anchor::at(line, column, term), placement))
+            .collect();
     }
 
     /// Runs the reflow a full-screen program was up for, if one is owed and

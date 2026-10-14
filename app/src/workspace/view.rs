@@ -5571,7 +5571,36 @@ impl Workspace {
             BlockAction::ScrollToEnd { pane, bottom } => {
                 self.scroll_output_to_end(pane, bottom, ctx);
             }
+            BlockAction::Clear(pane) => self.clear_blocks(pane, ctx),
         }
+    }
+
+    /// Clears a pane: its finished commands and its scrollback go, and the
+    /// block that is open stays — the prompt, or a command still running.
+    ///
+    /// What the pane kept about its blocks goes with them, since each piece
+    /// of it names a block that is gone or a place in a list that is: where
+    /// the list was scrolled to, the keyboard's selection and a dragged one,
+    /// the bookmarks, a menu up on one of them, and the find bar with its
+    /// filter — closed the way Escape closes it, the query kept for next
+    /// time. Nothing asks first and nothing undoes it, as in every terminal
+    /// that has a clear.
+    fn clear_blocks(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        let Some((handle, _)) = self.terminal(pane, ctx) else {
+            return;
+        };
+        handle.clear_blocks();
+        if let Some(interaction) = self.interactions.get(&pane) {
+            interaction.blocks.clear();
+            interaction.selection.clear();
+        }
+        if self.block_menu.on.is_some_and(|(on, _)| on == pane) {
+            self.close_block_menu(ctx);
+        }
+        if self.find(pane).is_some_and(PaneFind::is_open) {
+            self.apply_find(pane, FindAction::Close, ctx);
+        }
+        ctx.notify();
     }
 
     /// Whether a pane is drawing its output as a list of blocks.
@@ -9759,6 +9788,14 @@ impl Workspace {
                     pane: self.tabs.focused_pane_id()?,
                     bottom: true,
                 }));
+            }
+            // Declined only with no pane to clear. A pane with nothing in it
+            // cleared is still the empty pane that was asked for, the way a
+            // scroll to the end a list is already at is not declined either.
+            Binding::ClearBlocks => {
+                return Some(WorkspaceAction::Block(BlockAction::Clear(
+                    self.tabs.focused_pane_id()?,
+                )));
             }
             // The four that act on a block rather than on a pane. They ask
             // for the target here rather than leaving it to the handler,

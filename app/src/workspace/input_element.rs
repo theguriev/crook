@@ -104,7 +104,7 @@ use crate::text_input::Preedit;
 use crate::text_input::TextInput;
 use crate::theme::theme;
 
-use super::action::WorkspaceAction;
+use super::action::{BlockAction, WorkspaceAction};
 use super::terminal_element::color;
 
 /// The tallest the composer ever grows, in rows.
@@ -378,6 +378,17 @@ impl CommandInput {
             Route::Edit(Intent::CompleteBackwards) => {
                 if self.input.cycle_completion(false) {
                     ctx.notify();
+                }
+                true
+            }
+            // Not an edit: the pane under the field is cleared and the line
+            // stays. Dispatched, and the same action the window's own
+            // `clear-blocks` sends, because most of what a clear lets go of
+            // — a find bar, a menu up on a block — is the workspace's, which
+            // this element cannot reach.
+            Route::Edit(Intent::ClearBlocks) => {
+                if let Some(id) = self.pane {
+                    ctx.dispatch_typed_action(WorkspaceAction::Block(BlockAction::Clear(id)));
                 }
                 true
             }

@@ -384,6 +384,13 @@ impl Terminal {
         self.emulator.blocks_evicted()
     }
 
+    /// Forgets the finished blocks and the scrollback, and keeps the open
+    /// block. The child is not told: it is the pane being cleared, not the
+    /// program's screen. See [`Emulator::clear_blocks`].
+    pub fn clear_blocks(&mut self) {
+        self.emulator.clear_blocks();
+    }
+
     /// The block everything arriving now belongs to. Also on every
     /// [`Snapshot`], which is where a renderer should read it.
     pub fn live_block(&self) -> LiveBlock {

@@ -1855,6 +1855,17 @@ impl TerminalHandle {
         });
     }
 
+    /// Forgets the pane's finished commands and its scrollback, keeping the
+    /// block that is open.
+    ///
+    /// Through `drive`, which publishes the cleared list and the
+    /// picture of the open block together, and now: the reader that usually
+    /// publishes may not run again for hours, and until something did, the
+    /// pane would go on drawing every command the clear let go of.
+    pub fn clear_blocks(&self) {
+        self.drive(Terminal::clear_blocks);
+    }
+
     /// Copies rows out of the grid into the store a finished block's rows live
     /// in, numbered from the oldest line of the scrollback.
     ///

@@ -1667,3 +1667,131 @@ fn the_first_block_of_a_session_still_knows_where_its_command_ran() {
         "the directory the command was typed in"
     );
 }
+
+/// Two commands run and a two-row prompt waiting at the foot of the screen:
+/// a pane somebody wants to clear, with a blank row its prompt pushed into
+/// the history.
+fn two_commands_and_a_prompt() -> Emulator {
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}$ {B}true\r\n{C}\x1b]133;D;0\x07").as_bytes());
+    emulator.advance(format!("{A}$ {B}seq\r\n{C}").as_bytes());
+    for line in 0..10 {
+        emulator.advance(format!("{line}\r\n").as_bytes());
+    }
+    emulator.advance(format!("\x1b]133;D;0\x07{A}~/dir\r\n$ {B}").as_bytes());
+    emulator
+}
+
+#[test]
+fn test_clearing_drops_the_finished_blocks_and_the_history_and_keeps_the_prompt() {
+    let mut emulator = two_commands_and_a_prompt();
+    assert_eq!(2, emulator.blocks().len(), "the control ran two commands");
+    assert!(
+        emulator.history_len() > 0,
+        "the prompt pushed nothing into the history, so this clears nothing"
+    );
+    let before = emulator.live_block();
+    let evicted = emulator.blocks_evicted();
+
+    emulator.clear_blocks();
+
+    assert!(emulator.blocks().is_empty(), "a finished block survived");
+    assert_eq!(
+        evicted + 2,
+        emulator.blocks_evicted(),
+        "the blocks went without the front of the list saying so"
+    );
+    assert_eq!(0, emulator.history_len(), "the scrollback survived");
+    assert_eq!(
+        before,
+        emulator.live_block(),
+        "the open block moved, or lost where its prompt ends"
+    );
+    assert_eq!("~/dir\n$", live_text(&mut emulator));
+}
+
+#[test]
+fn test_the_prompt_a_clear_kept_is_still_the_next_blocks_first_rows() {
+    // The anchors were measured against a history the clear dropped, and an
+    // anchor follows its row by how much the history changed: one left as it
+    // was would name a row further down once the history had shrunk under it.
+    let mut emulator = two_commands_and_a_prompt();
+    emulator.clear_blocks();
+
+    emulator.advance(format!("echo hi\r\n{C}hi\r\n\x1b]133;D;0\x07").as_bytes());
+
+    let [block] = emulator.blocks() else {
+        panic!("one finished block, got {}", emulator.blocks().len());
+    };
+    assert_eq!(Some("echo hi".to_owned()), block.command);
+    assert_eq!("~/dir\n$ echo hi\nhi", block.rows.to_text());
+    assert_eq!(Some("hi".to_owned()), output_text(block));
+}
+
+#[test]
+fn test_clearing_under_a_running_command_keeps_the_screen_it_has_printed() {
+    // The rows the command scrolled away go with the history, and with them
+    // its prompt and its command line: what is left is all output, from the
+    // top of the screen down.
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}$ {B}seq\r\n{C}").as_bytes());
+    for line in 0..12 {
+        emulator.advance(format!("{line}\r\n").as_bytes());
+    }
+    let running = emulator.live_block();
+
+    emulator.clear_blocks();
+
+    let live = emulator.live_block();
+    assert_eq!((running.id, running.state), (live.id, live.state));
+    assert_eq!(0, live.top_row, "the block still starts in the history");
+    assert_eq!("7\n8\n9\n10\n11", live_text(&mut emulator));
+
+    emulator.advance(b"12\r\n\x1b]133;D;0\x07");
+    let [block] = emulator.blocks() else {
+        panic!("one finished block, got {}", emulator.blocks().len());
+    };
+    assert_eq!("7\n8\n9\n10\n11\n12", block.rows.to_text());
+    assert_eq!(Some(0), block.output_from, "every row it kept is output");
+}
+
+#[test]
+fn test_clearing_a_shell_with_no_marks_keeps_its_screen() {
+    // The one open block is the whole session: what scrolled away goes, and
+    // what is on screen stays, still the block's.
+    let mut emulator = emulator();
+    emulator.advance(b"$ seq\r\n");
+    for line in 0..12 {
+        emulator.advance(format!("{line}\r\n").as_bytes());
+    }
+    emulator.advance(b"$ ");
+
+    emulator.clear_blocks();
+
+    assert_eq!(0, emulator.history_len());
+    assert_eq!(BlockState::Unknown, emulator.live_block().state);
+    assert_eq!("7\n8\n9\n10\n11\n$", live_text(&mut emulator));
+}
+
+#[test]
+fn test_clearing_under_a_full_screen_program_leaves_its_screen_and_the_block_alone() {
+    // The history `Term` hands out under vim is vim's, which has none; the
+    // shell's is underneath and the block is anchored against it.
+    let run = |clear: bool| {
+        let mut emulator = emulator();
+        emulator.advance(format!("{A}$ {B}true\r\n{C}\x1b]133;D;0\x07").as_bytes());
+        emulator.advance(format!("{A}$ {B}vim\r\n{C}").as_bytes());
+        emulator.advance(b"\x1b[?1049h\x1b[H~\r\n~");
+        if clear {
+            emulator.clear_blocks();
+            assert!(emulator.blocks().is_empty(), "the finished block survived");
+        }
+        let screen = emulator.snapshot().text();
+        emulator.advance(b"\x1b[?1049l");
+        emulator.advance(format!("\x1b]133;D;0\x07{A}$ {B}").as_bytes());
+        let block = emulator.blocks().last().expect("vim's block").clone();
+        (screen, block.rows.to_text(), block.output_from)
+    };
+
+    assert_eq!(run(false), run(true));
+}

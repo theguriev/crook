@@ -279,6 +279,7 @@ const MUST_HAVE_A_CHORD: &[&str] = &[
     "page-down",
     "scroll-to-top",
     "scroll-to-bottom",
+    "clear-blocks",
     "open-settings",
     "zoom-in",
     "zoom-out",
@@ -297,6 +298,28 @@ fn the_commands_a_person_arrives_expecting_are_bound_on_both_platforms() {
             );
         }
     }
+}
+
+#[test]
+fn clearing_a_pane_has_a_chord_of_its_own_and_cmd_k_stays_the_tab_search() {
+    // Terminal, iTerm2, Ghostty and Warp clear on cmd-k, and here it is the
+    // tab search, which crook.id tells people to press. The clear takes the
+    // Shift beside it on macOS; off it, ctrl-shift-l, the Ctrl-L a shell
+    // person reaches for with the Shift every chord of Crook's there carries.
+    let mac = Keybindings::for_platform(Platform::Mac);
+    let other = Keybindings::for_platform(Platform::Other);
+    let clear = Resolution::Command(command("crook/window/clear-blocks"));
+    let search = Resolution::Command(command("crook/window/search-tabs"));
+
+    assert_eq!(meaning(&mac, "shift+cmd+k"), clear);
+    assert_eq!(meaning(&mac, "cmd+k"), search);
+    assert_eq!(meaning(&other, "ctrl+shift+l"), clear);
+    assert_eq!(meaning(&other, "ctrl+shift+k"), search);
+    assert_eq!(
+        meaning(&other, "ctrl+l"),
+        Resolution::Nothing,
+        "bare ctrl-l is the composer's, and a program's"
+    );
 }
 
 #[test]

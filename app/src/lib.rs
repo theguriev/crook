@@ -1795,6 +1795,7 @@ KEYS (macOS):
     alt+cmd+up / alt+cmd+down  Select the block above / below, and copy it with cmd+c
     shift+pageup/pagedown      Page the output
     shift+cmd+pageup/pagedown  Scroll it to its top / bottom
+    shift+cmd+k                Clear blocks, keeping the prompt (ctrl+l at the prompt)
     cmd+plus / cmd+minus       Make the terminal's text bigger / smaller
     cmd+0                      Put the text back to its default size
 
@@ -1820,6 +1821,7 @@ KEYS (Linux and Windows):
     ctrl+alt+up / ctrl+alt+down  Select the block above / below, and copy it with ctrl+shift+c
     shift+pageup/pagedown      Page the output
     alt+home / alt+end         Scroll it to its top / bottom
+    ctrl+shift+l               Clear blocks, keeping the prompt (ctrl+l at the prompt)
     ctrl+plus / ctrl+minus     Make the terminal's text bigger / smaller
     ctrl+0                     Put the text back to its default size
 
