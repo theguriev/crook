@@ -57,6 +57,7 @@ use crate::shell_integration::Standing;
 use crate::tab::{
     AgentSession, AgentStatus, Attention, Direction, GroupId, Pane, PaneId, PullRequest,
     PullRequestCheck, StatusSource, Tab, TabAction, TabEffect, TabGroup, TabId, TabStrip,
+    TitleSays,
 };
 use crate::terminal_font::CellFont;
 use crate::terminal_model::{
@@ -8275,10 +8276,18 @@ impl Workspace {
     /// often before its first turn. So it is kept, as
     /// [`StatusSource::TitleAtStart`]: the status stays the idle the pane
     /// had, and nothing that waits for idle takes it for one.
-    fn title_reported(&mut self, pane: PaneId, status: AgentStatus, ctx: &mut ViewContext<Self>) {
+    ///
+    /// A question ends otherwise than a running does. The person answers it
+    /// and the agent, as often as not, works on, so an idle the title says
+    /// only by no longer asking — codex's folder, which codex shows at work
+    /// too when its animations are off — is the question's end and not the
+    /// turn's: see [`Self::title_stopped_asking`]. An idle said outright,
+    /// Gemini CLI's `◇`, is the turn's end, approved or not.
+    fn title_reported(&mut self, pane: PaneId, said: TitleSays<'_>, ctx: &mut ViewContext<Self>) {
         let Some(open) = self.tabs.pane(pane) else {
             return;
         };
+        let status = said.status;
         let session = open.session();
         let titled_turn = matches!(session.source, StatusSource::Title(_))
             && matches!(
@@ -8290,6 +8299,10 @@ impl Workspace {
             (_, StatusSource::Agent(_)) => return,
             _ if titled_turn && session.status == status => return,
             (AgentStatus::Running | AgentStatus::NeedsInput, _) => StatusSource::Title(now),
+            _ if titled_turn && session.status == AgentStatus::NeedsInput && !said.outright => {
+                self.title_stopped_asking(pane, ctx);
+                return;
+            }
             _ if titled_turn => StatusSource::Title(now),
             (_, StatusSource::NoReport | StatusSource::CommandEnded(_)) => {
                 StatusSource::TitleAtStart(now)
@@ -8300,19 +8313,26 @@ impl Workspace {
     }
 
     /// Ends a question the title asked, now that a title has come that
-    /// does not ask it and says nothing else Crook can read.
+    /// does not ask it and does not say what the agent does next.
     ///
     /// Gemini CLI and codex keep a question in their titles for exactly as
     /// long as it is open — codex blinking it — and put something else
-    /// there once it is answered. Where that says a status, as Gemini's
-    /// glyphs do and codex's titles do in a pane running codex,
-    /// [`Self::title_reported`] has taken it. This is codex where the pane
-    /// runs it through `npx`, an alias or `ssh`: its spinner is any build
-    /// tool's there, and its folder any title at all. The question is over
-    /// all the same, and an amber row nothing would take back keeps the
-    /// waiting count and the next-waiting chord on an agent that has moved
-    /// on. So idle, which is what the row said of that agent before it
-    /// asked.
+    /// there once it is answered. Where that says a status outright, as
+    /// Gemini's glyphs do and codex's spinner does in a pane running codex,
+    /// [`Self::title_reported`] has taken it. Here it does not: codex's
+    /// folder with its animations off, which it shows at work and at rest
+    /// alike, or codex where the pane runs it through `npx`, an alias or
+    /// `ssh`, whose spinner is any build tool's there and whose folder is
+    /// any title at all.
+    ///
+    /// The question is over all the same, and an amber row nothing would
+    /// take back keeps the waiting count and the next-waiting chord on an
+    /// agent that has moved on. So idle, which is what the row said of that
+    /// agent before it asked — but as
+    /// [`StatusSource::TitleStoppedAsking`], which is no report of idle: an
+    /// approval is answered and the agent works on, and nothing here can
+    /// tell that from a turn that ended, so `crook pane wait --until idle`
+    /// and `crook events --follow` are not told the turn is over.
     fn title_stopped_asking(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
         let asked = self.tabs.pane(pane).is_some_and(|open| {
             matches!(open.session().source, StatusSource::Title(_))
@@ -8326,7 +8346,7 @@ impl Workspace {
             AgentStatus::Idle,
             None,
             None,
-            StatusSource::Title(Instant::now()),
+            StatusSource::TitleStoppedAsking(Instant::now()),
             ctx,
         );
     }
@@ -8588,12 +8608,12 @@ impl Workspace {
                 let said = title
                     .as_deref()
                     .and_then(|title| AgentStatus::from_title(title, agent));
-                let titled = match said {
+                let titled = match said.map(|said| said.name) {
                     // A status and nothing more: the name stands, and nothing
                     // on the row moves unless the status does — codex writes
                     // a frame of its spinner ten times a second.
-                    Some((_, None)) => self.tabs.pane(*pane).is_some(),
-                    Some((_, Some(name))) => {
+                    Some(None) => self.tabs.pane(*pane).is_some(),
+                    Some(Some(name)) => {
                         let name = Some(name.to_owned()).filter(|name| !name.is_empty());
                         self.update_session(*pane, ctx, |session| session.derived_title = name)
                     }
@@ -8603,7 +8623,7 @@ impl Workspace {
                     }
                 };
                 match said {
-                    Some((status, _)) => self.title_reported(*pane, status, ctx),
+                    Some(said) => self.title_reported(*pane, said, ctx),
                     None if title.is_none() => self.take_back_a_running_title(*pane, ctx),
                     None => self.title_stopped_asking(*pane, ctx),
                 }
@@ -11477,9 +11497,10 @@ pub(super) fn a_shell_is_listening(
 /// status, but it is the agent saying it is there.
 fn agent_report(pane: &Pane) -> Option<Instant> {
     match pane.session().source {
-        StatusSource::Agent(at) | StatusSource::Title(at) | StatusSource::TitleAtStart(at) => {
-            Some(at)
-        }
+        StatusSource::Agent(at)
+        | StatusSource::Title(at)
+        | StatusSource::TitleAtStart(at)
+        | StatusSource::TitleStoppedAsking(at) => Some(at),
         StatusSource::NoReport | StatusSource::CommandEnded(_) => None,
     }
 }

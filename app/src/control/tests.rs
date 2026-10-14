@@ -3243,6 +3243,67 @@ mod socket {
         assert_eq!((printed.text.as_str(), printed.failure), ("idle", None));
     }
 
+    /// A title that stops asking and says no more ends the question and not
+    /// the turn: codex in a pipeline works on after an approval, and its
+    /// spinner is any build tool's there. A wait for idle goes on, and the
+    /// stream is told the question and not an idle.
+    #[test]
+    fn a_title_that_stops_asking_tells_no_wait_or_stream_the_turn_is_over() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let words = ["sh", "-c", "codex 'fix x' | tee codex.log"];
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&words))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+        let owned = words.map(str::to_owned);
+        let line = spawn::command_line(&owned, Path::new("zsh")).expect("a proven shell");
+        served.update(|workspace, ctx| {
+            workspace.apply_terminal_update(&TerminalUpdate::Running(worker, Some(line)), ctx);
+        });
+
+        let following = served.start(follow(Some(&token), Some(worker)));
+        served.pump_until("the stream never started", |served| served.following() == 1);
+        let waiting = served.start(wait(&token, worker, Until::Idle, 120, false));
+        served.pump_until("the wait was never registered", |served| {
+            served.waiting() == 1
+        });
+        served.titled(worker, "[ ! ] Action Required | proj");
+        served.titled(worker, "\u{280b} proj");
+        served.titled(worker, "\u{2819} proj");
+        assert_eq!(
+            served.session(worker, |session| session.status),
+            AgentStatus::Idle,
+            "the question was never ended"
+        );
+        assert_eq!(
+            served.waiting(),
+            1,
+            "answered when the title stopped asking"
+        );
+
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::ClosePane(worker), ctx);
+        });
+        let printed = served.finish(waiting).expect("answered");
+        assert_ne!(printed.text, "idle");
+        assert!(printed.failure.is_some(), "{}", printed.text);
+        let events = served.finish(following).expect("followed until it closed");
+        let pane_id = opened.pane_id;
+        assert_eq!(
+            events,
+            vec![
+                PaneEvent::Status {
+                    pane_id,
+                    status: "needs-input".to_owned(),
+                    message: None,
+                },
+                PaneEvent::Closed { pane_id },
+            ]
+        );
+    }
+
     /// The question a title asks is on the stream with the rest of what it
     /// says, and so is the idle the end of its command takes it back to
     /// when the agent is killed asking it.

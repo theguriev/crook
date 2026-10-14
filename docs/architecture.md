@@ -1499,8 +1499,9 @@ paste behind a check that the program asked for bracketed paste, made under the 
 write. Without the markers `crook_terminal::input::paste` turns every newline into the Enter key,
 so a program that has not asked is refused rather than handed a review a line at a time. The
 pane is the one in the tab whose agent has reported (`StatusSource::Agent`, or for one with no
-hooks its title: `Title`, and `TitleAtStart` for what it wears before its first turn: Claude
-Code's `✳`, Gemini CLI's `◇`, codex's bare folder), whose shell is not listening, and which
+hooks its title: `Title`, `TitleAtStart` for what it wears before its first turn: Claude
+Code's `✳`, Gemini CLI's `◇`, codex's bare folder, and `TitleStoppedAsking` after a question its
+title asked), whose shell is not listening, and which
 works in the reviewed repository, else the focused one; a pane
 whose shell is listening is refused, because a review's quoted lines are commands there (bash
 5.3 turns bracketed paste on at its prompt, so the whole review would sit in its line editor one
@@ -1986,8 +1987,11 @@ pane starts in, before anything has reported, is not it, so a worker whose agent
 started is not taken for one that has finished, and nor is the `✳` Claude Code's title wears
 from the moment it starts (Gemini CLI's `◇`, codex's folder with no spinner before it), which is
 a report only once the title has said running (until then it is `StatusSource::TitleAtStart`,
-which says an agent is there and nothing more) — `needs-input`, which a Gemini CLI or codex title
-says as well, `finished` or `exited`.
+which says an agent is there and nothing more), and nor is the idle a title's question ends in
+when what replaces it says nothing outright — codex's folder with its animations off, its spinner
+where the pane runs it through `npx` or `sh -c` — since the agent works on after an approval
+(`StatusSource::TitleStoppedAsking`) — `needs-input`, which a Gemini CLI or codex title says as
+well, `finished` or `exited`.
 `finished` is a state and not an event: nothing is running, no line is waiting for the shell's
 first prompt (a tab `tab.new` just opened has not run its command yet), and a command has been
 closed by the shell's own `D`, whose exit status the answer carries — a command's, not an empty
@@ -2024,7 +2028,8 @@ answer is meant to be read runs headless.
 
 **`events.follow`** answers `{panes}`, what it follows as of now, then one line per event until
 the client hangs up: `status` (only when the status or the message changed — an agent reports
-`running` around every tool it calls), `started`, `finished` with the command line, exit and
+`running` around every tool it calls — and never an idle `pane.wait` would not take, so a
+question a title stopped asking is not told as a turn that ended), `started`, `finished` with the command line, exit and
 duration, `opened` for a tab the caller opens later, `closed`, and `lagged`. `started` is read
 off a frame the pane's terminal published, since there is no event for a command running: one
 that starts and ends between two frames — `true`, `git status` — is never seen running, and its

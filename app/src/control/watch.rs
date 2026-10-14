@@ -379,7 +379,13 @@ impl Watches {
             !reached
         });
 
-        if self.followers.is_empty() {
+        // An idle `--until idle` would not take is not told as one either: a
+        // stream that said `idle` when a title stopped asking would tell a
+        // lead the turn was over while the agent worked on the approval.
+        let unreported_idle = matches!(heard, Heard::Status)
+            && session.status == AgentStatus::Idle
+            && !is_idle(session);
+        if self.followers.is_empty() || unreported_idle {
             return;
         }
         let event = match heard {
@@ -698,11 +704,16 @@ pub fn wait(
 /// or the command it was ended. Not the idle a pane starts in before anything
 /// has reported, and not the `✳` Claude Code's title wears from the moment it
 /// starts: a worker whose agent has not had a turn is not one that finished.
+/// Nor the idle a title leaves when it stops asking and says no more, which
+/// is as often an approval the agent works on after as a turn that ended:
+/// see [`StatusSource::TitleStoppedAsking`].
 fn is_idle(session: &AgentSession) -> bool {
     session.status == AgentStatus::Idle
         && !matches!(
             session.source,
-            StatusSource::NoReport | StatusSource::TitleAtStart(_)
+            StatusSource::NoReport
+                | StatusSource::TitleAtStart(_)
+                | StatusSource::TitleStoppedAsking(_)
         )
 }
 

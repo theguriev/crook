@@ -24919,6 +24919,33 @@ mod the_agent {
     }
 
     #[test]
+    fn why_this_status_says_when_the_title_stopped_asking_and_said_no_more() {
+        // Codex through `npx`, with no hooks: its question, then a spinner
+        // that is any build tool's in a pane that does not run codex. The
+        // idle that ends the question is no report that the turn is over,
+        // and the panel does not pass it off as one.
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        for title in ["[ ! ] Action Required | proj", "\u{2819} proj"] {
+            harness.workspace_update(|workspace, ctx| {
+                workspace.apply_terminal_update(
+                    &TerminalUpdate::Title(away, Some(title.to_owned())),
+                    ctx,
+                );
+            });
+        }
+
+        let text = explanation_of(&mut harness, tabs[0], away);
+        assert!(text.contains("title stopped asking just now"), "{text}");
+        assert!(
+            text.contains("has not said since whether it is at work"),
+            "{text}"
+        );
+        assert!(!text.contains("title said so"), "{text}");
+    }
+
+    #[test]
     fn opening_the_worktree_list_takes_the_explanation_down() {
         // The two hang off the same corner, so opening one is closing the
         // other — and opening the menu afresh starts with neither.
@@ -34599,7 +34626,8 @@ mod agent_titles {
     /// be read for nothing else: codex through `npx`, an alias or `ssh`,
     /// whose spinner is not taken for work. Idle, then, which is what the
     /// row said of that agent before it asked, rather than an amber row the
-    /// title would never take back.
+    /// title would never take back — but no report of idle, since the agent
+    /// may be at work on what was approved.
     #[test]
     fn a_title_that_stops_asking_ends_the_question() {
         let mut harness = Harness::panel(1);
@@ -34609,6 +34637,62 @@ mod agent_titles {
         assert_eq!(status_and_source(&harness, pane).0, AgentStatus::NeedsInput);
         titled(&mut harness, pane, "\u{2819} proj");
 
+        let (status, source) = status_and_source(&harness, pane);
+        assert_eq!(status, AgentStatus::Idle);
+        assert!(
+            matches!(source, StatusSource::TitleStoppedAsking(_)),
+            "{source:?}"
+        );
+        // Nor does the next frame make anything of it.
+        titled(&mut harness, pane, "\u{2839} proj");
+        assert_eq!(status_and_source(&harness, pane), (status, source));
+    }
+
+    /// With its animations off codex draws no spinner, and its folder is
+    /// all its title says at work and at rest: only the question stands
+    /// out. The folder after it ends the question and not the turn — the
+    /// person may have approved what codex goes on to do. The folder after a
+    /// spinner, where there is one, is still the end of a turn, and so is
+    /// Gemini CLI's `◇` after its `✋`, which says ready in so many words.
+    #[test]
+    fn a_folder_after_codexs_question_is_not_the_end_of_its_turn() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+
+        report(
+            &mut harness,
+            TerminalUpdate::Running(pane, Some("codex 'fix the flaky test'".to_owned())),
+        );
+        titled(&mut harness, pane, "proj");
+        titled(&mut harness, pane, "[ ! ] Action Required | proj");
+        assert_eq!(status_and_source(&harness, pane).0, AgentStatus::NeedsInput);
+        titled(&mut harness, pane, "proj");
+        let (status, source) = status_and_source(&harness, pane);
+        assert_eq!(status, AgentStatus::Idle);
+        assert!(
+            matches!(source, StatusSource::TitleStoppedAsking(_)),
+            "{source:?}"
+        );
+
+        // Animations on: the spinner is the turn, and its end is one.
+        titled(&mut harness, pane, "\u{280b} proj");
+        assert_eq!(status_and_source(&harness, pane).0, AgentStatus::Running);
+        titled(&mut harness, pane, "proj");
+        let (status, source) = status_and_source(&harness, pane);
+        assert_eq!(status, AgentStatus::Idle);
+        assert!(matches!(source, StatusSource::Title(_)), "{source:?}");
+        report(&mut harness, TerminalUpdate::Running(pane, None));
+
+        report(
+            &mut harness,
+            TerminalUpdate::Running(pane, Some("gemini".to_owned())),
+        );
+        titled(
+            &mut harness,
+            pane,
+            &gemini("\u{270b}  Action Required (proj)"),
+        );
+        titled(&mut harness, pane, &gemini("\u{25c7}  Ready (proj)"));
         let (status, source) = status_and_source(&harness, pane);
         assert_eq!(status, AgentStatus::Idle);
         assert!(matches!(source, StatusSource::Title(_)), "{source:?}");
