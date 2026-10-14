@@ -72,6 +72,7 @@ use crookui_core::scene::{ClipBounds, CornerRadius, Radius, Scene};
 use crate::browser;
 use crate::clipboard::Clipboard;
 use crate::pane_blocks::{Control, PaneBlocks, ScrollCause};
+use crate::pane_composition::PaneComposition;
 use crate::pane_find::Matches;
 use crate::pane_link::{self, LinkRow, LinkSpan, PaneLink};
 use crate::pane_selection::PaneSelection;
@@ -85,7 +86,7 @@ use crate::theme::theme;
 
 use super::action::{BlockAction, WorkspaceAction};
 use super::pane_output::{Keys, Output, Typed, selection_kind};
-use super::terminal_element::{self, Ink, RowMarks, color};
+use super::terminal_element::{self, CursorRow, Ink, RowMarks, color};
 
 /// The gap between a pane's edge and the text inside it.
 ///
@@ -697,6 +698,14 @@ impl BlockList {
     /// the workspace keeps for it.
     pub fn with_links(mut self, links: PaneLink) -> Self {
         self.links = Some(links);
+        self
+    }
+
+    /// Attaches the pane's input method composition, which is drawn at the
+    /// running program's cursor while the list has the keyboard and no
+    /// composer. See [`Output::composition`].
+    pub fn with_composition(mut self, composition: PaneComposition) -> Self {
+        self.output = self.output.with_composition(composition);
         self
     }
 
@@ -1345,28 +1354,51 @@ impl BlockList {
         if self.surface().composer {
             return;
         }
-        let Some(cursor) = self
+        // Where a viewport cell of the open block is drawn, when it is on one
+        // of the rows on screen.
+        let drawn = |viewport_row: usize, column: usize| {
+            let row = viewport_row
+                .checked_sub(first)
+                .filter(|_| viewport_row <= last)?;
+            (row >= first_visible && row < last_visible && column < columns)
+                .then(|| vec2f(left, rows_top + row as f32 * metrics.height))
+        };
+        if let Some((cursor, row)) = self
             .snapshot
             .cursor
             .as_ref()
-            .filter(|cursor| cursor.row >= first && cursor.row <= last)
-        else {
-            return;
-        };
-        let row = cursor.row - first;
-        if row < first_visible || row >= last_visible || cursor.column >= columns {
-            return;
+            .and_then(|cursor| Some((cursor, drawn(cursor.row, cursor.column)?)))
+        {
+            terminal_element::paint_cursor_at(
+                cursor,
+                self.output.draws_focus(),
+                row + vec2f(cursor.column as f32 * metrics.width, 0.),
+                metrics,
+                ctx.scene,
+            );
         }
-        terminal_element::paint_cursor_at(
-            cursor,
-            self.output.draws_focus(),
-            vec2f(
-                left + cursor.column as f32 * metrics.width,
-                rows_top + row as f32 * metrics.height,
-            ),
-            metrics,
-            ctx.scene,
-        );
+
+        // And what an input method is composing for the program, over it.
+        // This is where Claude Code is drawn while it runs, so it is where a
+        // word composed into its prompt has to appear. See
+        // `terminal_element::paint_composition`.
+        if let Some(composition) = self.output.composition() {
+            let caret = self.snapshot.cursor_cell.and_then(|(row, column)| {
+                let origin = drawn(row, column)?;
+                Some(terminal_element::paint_composition(
+                    composition.preedit().as_ref(),
+                    CursorRow {
+                        origin,
+                        columns: columns.min(self.snapshot.columns),
+                        column,
+                    },
+                    (self.snapshot.foreground, ground),
+                    &self.font,
+                    ctx.scene,
+                ))
+            });
+            composition.set_caret_rect(caret);
+        }
     }
 
     /// Draws the pictures an item's rows hold over those rows, by the same
@@ -1693,6 +1725,12 @@ impl Element for BlockList {
             .selection()
             .and_then(|selection| selection.region(&self.addressed()));
 
+        // Until the open block says where the program's cursor is: a list
+        // scrolled away from it has no cell for an input method to sit
+        // beside, and the one it had was somewhere else on screen.
+        if let Some(composition) = self.output.composition() {
+            composition.set_caret_rect(None);
+        }
         for item in std::mem::take(&mut self.window) {
             self.paint_item(origin, item, region, ctx);
             self.window.push(item);

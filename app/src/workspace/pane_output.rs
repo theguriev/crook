@@ -12,7 +12,9 @@
 //! **Nothing here is state that outlives a frame.** The gesture is a
 //! [`PaneSelection`], which the workspace keeps; the selection itself is the
 //! emulator's, because that is the only place it stays anchored to its text
-//! while the shell prints underneath it. What this owns is the routing.
+//! while the shell prints underneath it. A word an input method is composing
+//! for the program is a [`PaneComposition`], which the workspace keeps too.
+//! What this owns is the routing.
 
 use std::rc::Rc;
 
@@ -24,6 +26,7 @@ use crookui_core::presenter::EventContext;
 
 use crate::clipboard::Clipboard;
 use crate::input_keys::{self, Platform, Route};
+use crate::pane_composition::PaneComposition;
 use crate::pane_selection::PaneSelection;
 use crate::selection::{Anchor, Blocks, Cells, Filter, Selection};
 use crate::settings::OptionAsMeta;
@@ -148,6 +151,10 @@ pub struct Output {
     /// end of input on an empty line, and a delete over a written one.
     input: Option<TextInput>,
 
+    /// What an input method is composing into the program, which the output
+    /// draws at the program's cursor. See [`Self::composition`].
+    composition: Option<PaneComposition>,
+
     /// The pointer gesture that selects text out of this output.
     mouse: Option<Mouse>,
 
@@ -182,6 +189,7 @@ impl Output {
             // window that never hears about its focus draws as it always did.
             window_focused: true,
             input: None,
+            composition: None,
             mouse: None,
             clipboard: None,
             option_as_meta: OptionAsMeta::default(),
@@ -234,6 +242,28 @@ impl Output {
     pub fn with_input(mut self, input: TextInput) -> Self {
         self.input = Some(input);
         self
+    }
+
+    /// Attaches the pane's input method composition, which the output keeps
+    /// and draws while the program has the keyboard.
+    pub fn with_composition(mut self, composition: PaneComposition) -> Self {
+        self.composition = Some(composition);
+        self
+    }
+
+    /// The pane's composition, when this output is where an input method
+    /// composes: it has every key and no composer is drawn under it.
+    ///
+    /// Asked of the composition as well as of the frame, because the element
+    /// an input method's event reaches was built before whatever last moved
+    /// the keyboard. See [`PaneComposition::is_listening`].
+    pub fn composition(&self) -> Option<&PaneComposition> {
+        if self.keys != Keys::All || self.input.is_some() {
+            return None;
+        }
+        self.composition
+            .as_ref()
+            .filter(|composition| composition.is_listening())
     }
 
     /// Makes the output selectable: `gesture` is this pane's selection, which
@@ -330,7 +360,7 @@ impl Output {
         } = event
         else {
             return match event {
-                Event::Ime(Ime::Commit(text)) => self.commit(text),
+                Event::Ime(ime) => self.compose(ime),
                 _ => Typed::Ignored,
             };
         };
@@ -426,6 +456,42 @@ impl Output {
         };
         if handle.send_key(key, modifiers) {
             Typed::SentToPty
+        } else {
+            Typed::Ignored
+        }
+    }
+
+    /// Keeps what an input method is composing for the program that owns the
+    /// keyboard, or sends it what it committed.
+    ///
+    /// A preedit is held and drawn, never written: it is not text yet, and a
+    /// program handed every guess on the way to a word would have typed all of
+    /// them. Handled rather than sent, so the frame is redrawn with it and
+    /// nothing that follows typing — the list returning to its end — happens
+    /// for a word that has not been typed.
+    fn compose(&self, ime: &Ime) -> Typed {
+        let composition = self.composition();
+        let changed = match ime {
+            Ime::Commit(text) => {
+                // The composition is over whether or not its text reaches
+                // anyone: what was drawn belonged to the word that has just
+                // been committed, and left up it would be drawn twice once the
+                // program echoes it.
+                let cleared = composition.is_some_and(PaneComposition::clear);
+                return match self.commit(text) {
+                    Typed::Ignored if cleared => Typed::Handled,
+                    typed => typed,
+                };
+            }
+            // A composition starting means anything left over from the last
+            // one is stale, whatever ended it.
+            Ime::Enabled | Ime::Disabled => composition.is_some_and(PaneComposition::clear),
+            Ime::Preedit { text, cursor } => {
+                composition.is_some_and(|composition| composition.set(text, *cursor))
+            }
+        };
+        if changed {
+            Typed::Handled
         } else {
             Typed::Ignored
         }

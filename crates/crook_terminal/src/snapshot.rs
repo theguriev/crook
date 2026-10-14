@@ -476,6 +476,16 @@ pub struct Snapshot {
     pub combining: Vec<CellCombining>,
     /// The cursor, or `None` when it is hidden or scrolled out of view.
     pub cursor: Option<Cursor>,
+    /// The cell the cursor is in, `(row, column)` within the viewport, whether
+    /// or not the child has it shown. `None` only when it is scrolled out of
+    /// view.
+    ///
+    /// Not something to draw — [`Self::cursor`] is that — but where the child
+    /// is *typing*, which is what an input method composes at. A program that
+    /// draws its own caret hides the real one and parks it on the field it is
+    /// reading: Claude Code does exactly that, and a composition that waited
+    /// for a cursor it could see would never be drawn there at all.
+    pub cursor_cell: Option<(usize, usize)>,
     /// The resolved default text colour, for anything the renderer draws around
     /// the grid.
     pub foreground: Rgb,
@@ -556,6 +566,7 @@ impl Snapshot {
         self.columns == other.columns
             && self.rows == other.rows
             && self.cursor == other.cursor
+            && self.cursor_cell == other.cursor_cell
             && self.foreground == other.foreground
             && self.background == other.background
             && self.display_offset == other.display_offset
@@ -681,6 +692,17 @@ fn cursor_of<T>(
         return None;
     }
 
+    let (row, column) = cursor_cell_of(term, rows, display_offset)?;
+    Some(Cursor {
+        row,
+        column,
+        shape,
+        color: palette.named(NamedColor::Cursor, term.colors()),
+    })
+}
+
+/// The cell the cursor is in, in viewport coordinates, shown or hidden.
+fn cursor_cell_of<T>(term: &Term<T>, rows: usize, display_offset: usize) -> Option<(usize, usize)> {
     let grid = term.grid();
     let mut point = grid.cursor.point;
     // A cursor sitting on the tail of a double-width character belongs to the
@@ -695,12 +717,7 @@ fn cursor_of<T>(
     // Scrolling back far enough puts the cursor above the viewport, where there
     // is nothing to draw.
     let row = usize::try_from(point.line.0 + display_offset as i32).ok()?;
-    (row < rows).then(|| Cursor {
-        row,
-        column: point.column.0,
-        shape,
-        color: palette.named(NamedColor::Cursor, term.colors()),
-    })
+    (row < rows).then_some((row, point.column.0))
 }
 
 /// Builds the snapshot the renderer draws from the emulator's current state.
@@ -745,6 +762,7 @@ pub(crate) fn build<T>(
         cells,
         combining,
         cursor: cursor_of(term, palette, rows, display_offset),
+        cursor_cell: cursor_cell_of(term, rows, display_offset),
         foreground: palette.named(NamedColor::Foreground, overrides),
         background: palette.named(NamedColor::Background, overrides),
         display_offset,

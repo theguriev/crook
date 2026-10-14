@@ -59,6 +59,19 @@
 //! the bottom one, often, where the prompt is. The alternate screen has none
 //! to draw either: the emulator does not place a picture there.
 //!
+//! # What an input method is composing
+//!
+//! A program that has the keyboard has no composer under it, so a word being
+//! composed in Japanese, Chinese or Korean — or a dead key's accent — is drawn
+//! here instead, over the cells from the program's cursor, underlined, the way
+//! every terminal draws one: see [`paint_composition`], which the list's open
+//! block draws with too. It is drawn and never sent, and it is drawn where the
+//! cursor *is* rather than where it is shown, because a program that draws its
+//! own caret hides the real one on the field it is reading. Where the input
+//! method's caret ends up is written back to the pane's
+//! [`PaneComposition`] for the window, which puts the candidate list beside
+//! it.
+//!
 //! # Selecting the output
 //!
 //! The grid is the other selectable surface in a pane, and it is selected with
@@ -111,6 +124,7 @@ use crookui_core::scene::{ClipBounds, Scene};
 use crate::browser;
 use crate::clipboard::Clipboard;
 use crate::input_keys::Platform;
+use crate::pane_composition::{PaneComposition, Preedit};
 use crate::pane_link::{self, LinkRow, LinkSpan, PaneLink};
 use crate::pane_selection::PaneSelection;
 use crate::pane_surface;
@@ -295,6 +309,14 @@ impl TerminalElement {
     /// workspace keeps for this pane.
     pub fn with_links(mut self, links: PaneLink) -> Self {
         self.links = Some(links);
+        self
+    }
+
+    /// Attaches the pane's input method composition, which is drawn at the
+    /// program's cursor while the grid has the keyboard. See
+    /// [`Output::composition`].
+    pub fn with_composition(mut self, composition: PaneComposition) -> Self {
+        self.output = self.output.with_composition(composition);
         self
     }
 
@@ -805,6 +827,33 @@ impl Element for TerminalElement {
             ctx.scene,
         );
 
+        // Over everything the program drew, in a layer of its own. Where the
+        // input method's caret is recorded whether or not anything is being
+        // composed: it is the program's cursor until something is, and that
+        // is where a composition starts.
+        if let Some(composition) = self.output.composition() {
+            let metrics = self.font.metrics();
+            let (columns, rows) = drawn_grid(&self.snapshot, metrics, size);
+            let caret = self
+                .snapshot
+                .cursor_cell
+                .filter(|&(row, column)| row < rows && column < columns)
+                .map(|(row, column)| {
+                    paint_composition(
+                        composition.preedit().as_ref(),
+                        CursorRow {
+                            origin: origin + vec2f(0., row as f32 * metrics.height),
+                            columns,
+                            column,
+                        },
+                        (self.snapshot.foreground, self.snapshot.background),
+                        &self.font,
+                        ctx.scene,
+                    )
+                });
+            composition.set_caret_rect(caret);
+        }
+
         // Over the grid, because it is an affordance rather than something the
         // shell printed: it appears when the chord key goes down and goes away
         // when it comes up, and the cells under it are unchanged.
@@ -985,9 +1034,7 @@ fn paint_grid(
     scene: &mut Scene,
 ) {
     let metrics = font.metrics();
-    let (fitting_columns, fitting_rows) = metrics.grid_for(size.x(), size.y());
-    let columns = usize::from(fitting_columns).min(snapshot.columns);
-    let rows = usize::from(fitting_rows).min(snapshot.rows);
+    let (columns, rows) = drawn_grid(snapshot, metrics, size);
 
     // The ground the emulator resolved, painted once. Every cell that agrees
     // with it — which on an idle screen is all of them — then costs nothing.
@@ -1094,6 +1141,110 @@ fn paint_grid(
     {
         paint_cursor(cursor, shape, origin, metrics, scene);
     }
+}
+
+/// How many columns and rows of `snapshot` a box of `size` draws: as many as
+/// fit, and no more than the snapshot has.
+fn drawn_grid(snapshot: &Snapshot, metrics: CellMetrics, size: Vector2F) -> (usize, usize) {
+    let (fitting_columns, fitting_rows) = metrics.grid_for(size.x(), size.y());
+    (
+        usize::from(fitting_columns).min(snapshot.columns),
+        usize::from(fitting_rows).min(snapshot.rows),
+    )
+}
+
+/// The row a program's cursor is on, as a surface draws it.
+#[derive(Copy, Clone, Debug)]
+pub(super) struct CursorRow {
+    /// Where the row's first cell is drawn.
+    pub(super) origin: Vector2F,
+    /// How many of its cells are drawn.
+    pub(super) columns: usize,
+    /// Which of them the cursor is in.
+    pub(super) column: usize,
+}
+
+/// Draws what an input method is composing at the program's cursor, and
+/// answers the cell the input method's caret is in — the cursor's own cell
+/// while nothing is being composed.
+///
+/// Both surfaces draw it with this: the grid, and the list's open block, which
+/// is where a program on the primary screen — Claude Code — is drawn once it
+/// has taken the composer away. `ink` is the foreground and the ground the
+/// composition is drawn in, which are the program's defaults: it is text the
+/// person is writing, not text the program coloured.
+///
+/// The composition covers the cells it takes, with the ground under it, so
+/// what the program drew there does not show through a word that is not
+/// there yet; it is underlined, which is what says it is not text; and the
+/// input method's caret is a beam where it asked for one. It stays on the
+/// row — see [`Preedit::lay_out`] — and is clipped to it.
+pub(super) fn paint_composition(
+    preedit: Option<&Preedit>,
+    at: CursorRow,
+    ink: (Rgb, Rgb),
+    font: &CellFont,
+    scene: &mut Scene,
+) -> RectF {
+    let metrics = font.metrics();
+    let cell = |column: usize| {
+        let column = column.min(at.columns.saturating_sub(1));
+        RectF::new(
+            at.origin + vec2f(column as f32 * metrics.width, 0.),
+            vec2f(metrics.width, metrics.height),
+        )
+    };
+    let Some(preedit) = preedit else {
+        return cell(at.column);
+    };
+    let laid = preedit.lay_out(at.column, at.columns);
+    if laid.span.is_empty() {
+        return cell(at.column);
+    }
+
+    let (foreground, ground) = (color(ink.0), color(ink.1));
+    let row = RectF::new(
+        at.origin,
+        vec2f(at.columns as f32 * metrics.width, metrics.height),
+    );
+    let span = RectF::new(
+        at.origin + vec2f(laid.span.start as f32 * metrics.width, 0.),
+        vec2f(laid.span.len() as f32 * metrics.width, metrics.height),
+    );
+    // A layer of its own, because a layer draws every glyph over every rect:
+    // in the grid's, the ground below would be painted under the program's
+    // characters rather than over them.
+    scene.start_layer(ClipBounds::BoundedByActiveLayerAnd(row));
+    scene
+        .draw_rect_without_hit_recording(span)
+        .with_background(ground);
+    let face = font.regular();
+    for &(column, character) in &laid.glyphs {
+        let pen = at.origin + vec2f(column as f32 * metrics.width, metrics.baseline);
+        paint_cell(character, pen, face, foreground, font, metrics, scene);
+    }
+    let thickness = (metrics.font_size * RULE_THICKNESS_RATIO).max(1.);
+    let below = (metrics.height - metrics.baseline) * UNDERLINE_OFFSET_RATIO;
+    scene
+        .draw_rect_without_hit_recording(RectF::new(
+            vec2f(span.min_x(), at.origin.y() + metrics.baseline + below),
+            vec2f(span.width(), thickness),
+        ))
+        .with_background(foreground);
+    if preedit.cursor().is_some() {
+        // Kept inside the row: a caret past the last character of a
+        // composition that ends at the row's edge would be clipped away.
+        let x =
+            (at.origin.x() + laid.caret as f32 * metrics.width).min(row.max_x() - CURSOR_STROKE);
+        scene
+            .draw_rect_without_hit_recording(RectF::new(
+                vec2f(x, at.origin.y()),
+                vec2f(CURSOR_STROKE, metrics.height),
+            ))
+            .with_background(foreground);
+    }
+    scene.stop_layer();
+    cell(laid.caret)
 }
 
 /// Draws the pictures a program printed over the cells each one covers —

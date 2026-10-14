@@ -2518,6 +2518,19 @@ rectangle travels back out to the window through `Proxy::set_ime_area`, so the c
 stands beside the text being composed; it has to come from the paint path, because where the
 caret is is the result of wrapping the line at the width the field was given.
 
+A pane with no composer — vim, `less`, Claude Code — composes into its program instead. The
+preedit is kept per pane in `PaneComposition`, while that pane's output has the whole keyboard,
+and drawn by `terminal_element::paint_composition` over the cells from the program's cursor,
+underlined, on the grid and on the list's open block alike; it is never written to the pty, and
+only the commit is. It is drawn where the cursor *is* rather than where it is shown: the
+snapshot carries `cursor_cell` beside `cursor`, because a program that draws its own caret hides
+the real one and parks it on the field it reads — Claude Code does — and a composition that
+waited for a visible cursor would never appear there. Where the input method's caret lands is
+written back the way the composer's is, and `Workspace::caret_rect` reads it whenever the
+output, not a composer, is listening. A composition belongs to the keyboard: a commit or the
+input method giving up ends it, and so does focus moving, a menu or a find bar taking the keys,
+the composer coming back, and the window going behind another.
+
 **The kitty keyboard protocol is in**, in `crook_terminal::input`. Alacritty's `Term` already
 maintained the mode stack behind a config flag that was off; turning it on and reading the
 five `TermMode` bits is the whole of the plumbing. What the encoder does with them is narrow
