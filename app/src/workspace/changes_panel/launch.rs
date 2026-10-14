@@ -1,5 +1,7 @@
 //! Opening a changed file in the editor a person has named, at the line that
-//! changed when the editor is one known to take a line.
+//! changed when the editor is one known to take a line — and a path a program
+//! printed in a pane's output, at the line it named, which is the same
+//! question asked from somewhere else (see [`crate::pane_link`]).
 //!
 //! `$VISUAL`, then `$EDITOR` — the order git and every Unix tool read them in —
 //! split into a program and its arguments the way a shell splits the value,
@@ -164,6 +166,17 @@ impl Editor {
     /// closes — see [`crate::process::reap`].
     pub(crate) fn open(&self, path: &Path, line: u32) -> std::io::Result<()> {
         let (program, arguments) = self.command_line(path, line);
+        #[cfg(test)]
+        if STARTED
+            .with_borrow_mut(|started| {
+                started
+                    .as_mut()
+                    .map(|started| started.push((program.clone(), arguments.clone())))
+            })
+            .is_some()
+        {
+            return Ok(());
+        }
         let mut missing = None;
         for spelling in spellings(&program, cfg!(windows)) {
             let started = crate::process::command(&spelling)
@@ -186,6 +199,39 @@ impl Editor {
         }
         Err(missing.unwrap_or_else(|| std::io::ErrorKind::NotFound.into()))
     }
+}
+
+/// An editor started: the program, and every argument it was given.
+#[cfg(test)]
+pub(crate) type Started = (String, Vec<OsString>);
+
+#[cfg(test)]
+thread_local! {
+    /// The editors this thread has started, once [`record_starts`] asked for
+    /// them to be written down rather than started.
+    static STARTED: std::cell::RefCell<Option<Vec<Started>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// From now on, writes down the editors this thread starts instead of
+/// starting them.
+///
+/// For a test that presses something an editor opens from: what it checks
+/// is the command line the press got to, and what it must not do is open
+/// whatever editor the person running the suite has named. A thread's worth,
+/// for the reason `browser::record_opens` is one: a press in the window's
+/// test harness is dispatched on the test's own thread, and the suite runs
+/// its tests in parallel.
+#[cfg(test)]
+pub(crate) fn record_starts() {
+    STARTED.with_borrow_mut(|started| *started = Some(Vec::new()));
+}
+
+/// What this thread has started since [`record_starts`]: each editor's
+/// program and its arguments.
+#[cfg(test)]
+pub(crate) fn started() -> Vec<Started> {
+    STARTED.with_borrow(|started| started.clone().unwrap_or_default())
 }
 
 /// A command line split into words the way a POSIX shell splits one, with

@@ -90,7 +90,10 @@ pub const SCHEMES: [&str; 8] = [
 /// either — each is two cells wide, and the second cell, which the caller
 /// fills with a stand-in, is what the row ends in — so `https://example.com。`
 /// underlined the stop and opened an address that ended in it.
-fn terminates(character: char) -> bool {
+///
+/// [`crate::path`] starts from the same list, so that a path printed in a
+/// sentence of either language ends where a URL would.
+pub(crate) fn terminates(character: char) -> bool {
     character.is_whitespace()
         || character.is_control()
         || matches!(character, '"' | '\'' | '<' | '>' | '`' | '|' | '\\' | '^')

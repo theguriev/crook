@@ -74,6 +74,8 @@ mod review;
 mod tests;
 
 pub(crate) use launch::Editor;
+#[cfg(test)]
+pub(crate) use launch::{record_starts, started};
 pub(crate) use review::Comment;
 
 use std::cell::RefCell;

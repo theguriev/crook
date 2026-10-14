@@ -97,6 +97,19 @@ pub enum WorkspaceAction {
     /// no way to wait off the thread that draws. The workspace does. See
     /// [`crate::clipboard`].
     PastePrimary(PaneId),
+    /// Look for the file a path under the pointer in a pane's output names,
+    /// so that it underlines if there is one.
+    ///
+    /// An action rather than a call, for the reason `Complete` is one: the
+    /// element that found the path holds no executor, and the look is a
+    /// `stat`, which must not run on the thread that draws. The path itself
+    /// is waiting in the pane's link state, because this enum is `Copy`. See
+    /// [`crate::pane_link`].
+    LookForPath(PaneId),
+    /// Open the file a chord-click on a path in a pane's output landed on,
+    /// which is waiting in the pane's link state: in the editor at its line,
+    /// or with the platform's handler. See `Workspace::open_path`.
+    OpenPath(PaneId),
     /// Something happened to the search box above the tabs.
     Search(SearchAction),
     /// Something happened to the find bar over a pane's output.

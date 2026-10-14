@@ -13,7 +13,7 @@ use crook_terminal::{Block, Emulator, Palette, TerminalSize};
 use crookui_core::event::Modifiers;
 
 use super::*;
-use crate::pane_link::LinkCells;
+use crate::pane_link::{LinkCells, LinkTarget};
 
 /// A grid wide enough for the marks below and short enough to reason about.
 const GRID: TerminalSize = TerminalSize::new(20, 6);
@@ -465,7 +465,11 @@ fn links_on_a_command_less_block_land_on_their_own_rows() {
         let span = list
             .link_at(at, follow)
             .unwrap_or_else(|| panic!("row {row} has no link under the pointer"));
-        assert_eq!(span.uri, uri, "row {row} opened the wrong URL");
+        assert_eq!(
+            span.target,
+            LinkTarget::Url(uri.to_owned()),
+            "row {row} opened the wrong URL"
+        );
         assert!(
             matches!(
                 span.cells.as_slice(),
@@ -554,12 +558,88 @@ fn a_folded_url_in_a_finished_block_is_one_link_on_both_of_its_rows() {
         let span = list
             .link_at(at, follow)
             .unwrap_or_else(|| panic!("row {row} has no link under the pointer"));
-        assert_eq!(span.uri, url, "row {row} found a cut-off URL");
+        assert_eq!(
+            span.target,
+            LinkTarget::Url(url.to_owned()),
+            "row {row} found a cut-off URL"
+        );
         assert_eq!(
             span.cells, whole,
             "row {row} did not map the link onto both rows"
         );
     }
+}
+
+/// A path a finished command printed is read against the directory that
+/// command ran in, which the block was filed under — not the one the shell has
+/// `cd`ed to since. That one is what a path the command still running prints
+/// is read against.
+#[test]
+fn a_path_in_a_finished_block_is_read_against_the_directory_it_ran_in() {
+    use crate::pane_link::{FileLink, PaneLink};
+    use crookui_core::geometry::{Point, ZIndex, vec2f};
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]7;file://host/project\x07");
+    cycle(&mut emulator, "cargo b", "src/main.rs:42:5", 0);
+    // A `cd`, and a command still running that prints a path of its own.
+    emulator.advance(b"\x1b]7;file://host/elsewhere\x07");
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07tail log\r\n\x1b]133;C\x07src/lib.rs:7\r\n");
+    assert_eq!(
+        finished(&emulator).working_directory.as_deref(),
+        Some(Path::new("/project"))
+    );
+
+    let history = Arc::new(BlockHistory::new(
+        emulator.blocks().iter().cloned().map(Arc::new).collect(),
+        0,
+    ));
+    let font = crate::terminal_font::CellFont::headless(12.);
+    let metrics = font.metrics();
+    let mut list = BlockList::new(history, emulator.snapshot(), font, PaneBlocks::new())
+        .with_links(PaneLink::new(), Some(PathBuf::from("/elsewhere")));
+    let size = vec2f(400., 300.);
+    list.size = Some(size);
+    list.origin = Some(Point::from_vec2f(vec2f(0., 0.), ZIndex::Normal(0)));
+    list.measure(size);
+    let origin = list.bounds().expect("the list has bounds").origin();
+    let follow = follow();
+
+    // Row 0 of each is the prompt line, and the path is row 1.
+    let path_in = |index: usize| {
+        let item = *list
+            .window
+            .iter()
+            .find(|item| item.index == index)
+            .unwrap_or_else(|| panic!("item {index} is not on screen"));
+        let rows_top = item.top + list.padding_top(index) * metrics.height;
+        let at = origin
+            + vec2f(
+                GUTTER + 3.5 * metrics.width,
+                rows_top + 1.5 * metrics.height,
+            );
+        list.link_at(at, follow).map(|span| span.target)
+    };
+    assert_eq!(
+        path_in(0),
+        Some(LinkTarget::File(FileLink {
+            path: Path::new("/project").join("src/main.rs"),
+            line: Some(42),
+            column: Some(5),
+        })),
+        "the finished block's path"
+    );
+    assert_eq!(
+        path_in(1),
+        Some(LinkTarget::File(FileLink {
+            path: Path::new("/elsewhere").join("src/lib.rs"),
+            line: Some(7),
+            column: None,
+        })),
+        "the running command's path"
+    );
 }
 
 /// Past `MAX_BLOCKS` the emulator drops a batch off the front of the list. A

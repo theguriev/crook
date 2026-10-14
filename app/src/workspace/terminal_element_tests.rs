@@ -887,7 +887,7 @@ fn a_row_of_no_columns_answers_zero_rather_than_underflowing() {
 /// emulator sets it for is pinned in `crook_terminal::rows`.
 #[test]
 fn a_folded_url_on_the_grid_is_one_link_from_either_row() {
-    use crate::pane_link::{LinkCells, LinkRow};
+    use crate::pane_link::{LinkCells, LinkRow, LinkTarget};
     use crookui_core::event::Modifiers;
     use crookui_core::geometry::{Point, ZIndex};
 
@@ -938,7 +938,11 @@ fn a_folded_url_on_the_grid_is_one_link_from_either_row() {
         let link = element
             .link_at(at(row, column), follow)
             .unwrap_or_else(|| panic!("row {row} has no link under the pointer"));
-        assert_eq!(link.uri, url, "row {row} found a cut-off URL");
+        assert_eq!(
+            link.target,
+            LinkTarget::Url(url.to_owned()),
+            "row {row} found a cut-off URL"
+        );
         assert_eq!(
             link.cells, whole,
             "row {row} did not map the link onto both rows"
@@ -949,7 +953,7 @@ fn a_folded_url_on_the_grid_is_one_link_from_either_row() {
     let below = element
         .link_at(at(2, 3), follow)
         .expect("the hard-wrapped row's link");
-    assert_eq!(below.uri, "https://b.test");
+    assert_eq!(below.target, LinkTarget::Url("https://b.test".to_owned()));
     assert_eq!(
         below.cells,
         vec![LinkCells {
@@ -962,6 +966,57 @@ fn a_folded_url_on_the_grid_is_one_link_from_either_row() {
     assert!(
         element.link_at(at(0, 5), Modifiers::default()).is_none(),
         "without the chord key the pointer is selecting, not following"
+    );
+}
+
+/// A path on the grid is read against where the pane's shell last said it
+/// was, which is where the full-screen program or the command still running
+/// on it was started — and is no link at all when the shell never said.
+#[test]
+fn a_path_on_the_grid_is_read_against_where_the_shell_said_it_was() {
+    use crate::pane_link::{FileLink, LinkTarget, PaneLink};
+    use crookui_core::event::Modifiers;
+    use crookui_core::geometry::{Point, ZIndex};
+    use std::path::{Path, PathBuf};
+
+    let grid = Arc::new(snapshot(&["error: src/main.rs:3"], 20));
+    let font = font();
+    let metrics = font.metrics();
+    let follow = if cfg!(target_os = "macos") {
+        Modifiers {
+            cmd: true,
+            ..Default::default()
+        }
+    } else {
+        Modifiers {
+            ctrl: true,
+            ..Default::default()
+        }
+    };
+    let on_the_path = vec2f(10.5 * metrics.width, 0.5 * metrics.height);
+    let element = |directory: Option<PathBuf>| {
+        let mut element =
+            TerminalElement::new(grid.clone(), font.clone()).with_links(PaneLink::new(), directory);
+        element.size = Some(vec2f(20. * metrics.width, metrics.height));
+        element.origin = Some(Point::from_vec2f(Vector2F::zero(), ZIndex::Normal(0)));
+        element
+    };
+
+    let link = element(Some(PathBuf::from("/project")))
+        .link_at(on_the_path, follow)
+        .expect("the path is a link");
+    assert_eq!(
+        link.target,
+        LinkTarget::File(FileLink {
+            path: Path::new("/project").join("src/main.rs"),
+            line: Some(3),
+            column: None,
+        })
+    );
+    assert_eq!(
+        element(None).link_at(on_the_path, follow),
+        None,
+        "a relative path was read against nothing"
     );
 }
 

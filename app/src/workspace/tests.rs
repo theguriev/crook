@@ -17549,6 +17549,146 @@ mod shells {
     }
 
     #[test]
+    fn a_chord_click_on_a_path_the_shell_printed_opens_it_in_the_editor_at_its_line() {
+        // **The whole of a path link.** A real shell prints a path, the chord
+        // key held over it has it looked for off the thread that draws and
+        // underlined when the file is there, and a click with the key held
+        // opens it in the editor at the line it named — and selects nothing.
+        crate::workspace::changes_panel::record_starts();
+        crate::browser::record_opens();
+        let scratch = Scratch::new();
+        let notes = scratch.path().join("notes.md");
+        fs::write(&notes, "# notes\n").expect("writable");
+
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        let looks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = looks.clone();
+        harness.workspace_update(move |workspace, _| {
+            workspace.open_paths_with(|| {
+                crate::workspace::changes_panel::Editor::from_variables(Some("code"), None)
+            });
+            workspace.look_for_files_with(move |path| {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                crate::pane_link::Found::at(path)
+            });
+        });
+        let looks = move || looks.load(std::sync::atomic::Ordering::SeqCst);
+        // Where the pane's shell says it is. Into the scratch for real, so
+        // that a shell reporting its own directory says the same thing.
+        let directory = scratch.path().to_path_buf();
+        harness.type_into(pane, &format!("cd '{}'\n", directory.display()));
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(directory.clone());
+        });
+        harness.frame();
+
+        // In upper case in the command and folded down by `tr`, so the line
+        // the shell wrote is the only one on screen that names the file.
+        let row = run_and_find(&mut harness, "echo 'NOTES.MD:3' | tr A-Z a-z", "notes.md:3");
+        let column = harness
+            .terminal_text(pane)
+            .lines()
+            .nth(row)
+            .and_then(|line| line.find("notes.md:3"))
+            .expect("the path is on that row");
+        let at = grid_cell(&mut harness, row, column + 2, 0.5);
+        let follow = if cfg!(target_os = "macos") {
+            Modifiers {
+                cmd: true,
+                ..Default::default()
+            }
+        } else {
+            Modifiers {
+                ctrl: true,
+                ..Default::default()
+            }
+        };
+
+        harness.dispatch(Event::MouseMoved {
+            position: at,
+            modifiers: follow,
+            is_synthetic: false,
+        });
+        let links = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .interaction(pane)
+                .expect("the pane is open")
+                .links
+                .clone()
+        });
+        harness.wait_for("the path never underlined", |_| links.is_some());
+        harness.frame();
+
+        harness.dispatch(Event::MouseDown {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: follow,
+            click_count: 1,
+        });
+        harness.dispatch(Event::MouseUp {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: follow,
+        });
+
+        let mut at_the_line = notes.into_os_string();
+        at_the_line.push(":3");
+        assert_eq!(
+            crate::workspace::changes_panel::started(),
+            [(
+                "code".to_owned(),
+                vec![std::ffi::OsString::from("--goto"), at_the_line]
+            )]
+        );
+        assert_eq!(crate::browser::opened(), Vec::<String>::new());
+        assert_eq!(
+            harness.terminal_selection(pane),
+            None,
+            "the click that opened the path selected as well"
+        );
+
+        // Letting go of the chord key — under a pointer that never moved, or
+        // by moving without it — lets go of what was found as well as the
+        // underline: the next time the key goes down over the path, its file
+        // is looked for again, in case a command has removed it since.
+        for (how, let_go) in [
+            (
+                "the chord key came up",
+                Event::ModifiersChanged {
+                    position: at,
+                    modifiers: Modifiers::default(),
+                },
+            ),
+            (
+                "the pointer moved without it",
+                Event::MouseMoved {
+                    position: at,
+                    modifiers: Modifiers::default(),
+                    is_synthetic: false,
+                },
+            ),
+        ] {
+            let before = looks();
+            harness.dispatch(let_go);
+            assert_eq!(links.get(), None, "{how}: the underline stayed");
+            harness.dispatch(Event::MouseMoved {
+                position: at,
+                modifiers: follow,
+                is_synthetic: false,
+            });
+            harness.wait_for("the path never underlined again", |_| links.is_some());
+            assert_eq!(
+                looks(),
+                before + 1,
+                "{how}: what was found outlived the chord"
+            );
+        }
+    }
+
+    #[test]
     fn typing_and_clicking_into_the_field_let_go_of_the_output_selection() {
         // Two of the four clearing rules, and the reason for both: a highlight
         // nobody is aiming at any more is the next copy taking the wrong
@@ -36612,6 +36752,314 @@ mod changes_column {
         });
         assert_eq!(query.as_deref(), Some("qq"));
         assert_eq!(comment_typed(&harness).as_deref(), Some("abc"));
+    }
+}
+
+/// A path in a pane's output, looked for and opened by the window: what the
+/// workspace does with the two actions the output elements dispatch. The
+/// elements' half, against a real shell, is in `shells`.
+mod path_links {
+    use std::ffi::OsString;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::pane_link::{
+        FileLink, Found, LinkCells, LinkRow, LinkSpan, LinkTarget, PaneLink, file_url,
+    };
+    use crate::workspace::changes_panel::{Editor, record_starts, started};
+
+    /// The link state the elements drawing `pane`'s output hold.
+    fn links_of(harness: &Harness, pane: PaneId) -> PaneLink {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .interaction(pane)
+                .expect("the pane is open")
+                .links
+                .clone()
+        })
+    }
+
+    /// The file a path under the pointer names.
+    fn file(path: &Path, line: Option<u32>) -> FileLink {
+        FileLink {
+            path: path.to_path_buf(),
+            line,
+            column: None,
+        }
+    }
+
+    /// Puts a path under the pointer, and asks for its file to be looked for
+    /// when that is wanted — what the element that found it does.
+    fn hover(harness: &mut Harness, pane: PaneId, path: &Path, line: Option<u32>) {
+        let links = links_of(harness, pane);
+        links.set(Some(LinkSpan {
+            cells: vec![LinkCells {
+                row: LinkRow::Viewport(0),
+                start: 0,
+                len: 4,
+            }],
+            target: LinkTarget::File(file(path, line)),
+        }));
+        if links.wants_a_look() {
+            harness.dispatch_workspace_action(WorkspaceAction::LookForPath(pane));
+        }
+    }
+
+    /// A chord-click on a path — what the element that was pressed does —
+    /// reporting whether the press was a link's rather than the selection's.
+    fn press(harness: &mut Harness, pane: PaneId, path: &Path, line: Option<u32>) -> bool {
+        if !links_of(harness, pane).press(file(path, line)) {
+            return false;
+        }
+        harness.dispatch_workspace_action(WorkspaceAction::OpenPath(pane));
+        true
+    }
+
+    /// An editor that opens a window and takes a line: VS Code's `--goto`.
+    fn code() -> Option<Editor> {
+        Editor::from_variables(Some("code"), None)
+    }
+
+    /// A file of the scratch's own, with something in it.
+    fn written(scratch: &Scratch, name: &str) -> PathBuf {
+        let path = scratch.path().join(name);
+        fs::write(&path, "# notes\n").expect("writable");
+        path
+    }
+
+    #[test]
+    fn a_path_underlines_once_its_file_is_found_and_never_when_nothing_is_there() {
+        let scratch = Scratch::new();
+        let notes = written(&scratch, "notes.md");
+        let nothing = scratch.path().join("and").join("or");
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.workspace_update(|workspace, _| workspace.open_paths_with(|| None));
+        let links = links_of(&harness, pane);
+
+        hover(&mut harness, pane, &nothing, None);
+        assert_eq!(links.get(), None, "underlined before anybody looked");
+        // On to a file that is there while that look is out: it is looked for
+        // when the first one comes home.
+        hover(&mut harness, pane, &notes, Some(3));
+        harness.wait_for("the file that is there never underlined", |_| {
+            links.is_some()
+        });
+        assert_eq!(
+            links.target(),
+            Some(LinkTarget::File(file(&notes, Some(3))))
+        );
+
+        // And back: what names nothing is no link, and is not looked for again
+        // while the chord key is held.
+        hover(&mut harness, pane, &nothing, None);
+        assert_eq!(links.get(), None);
+        assert!(!links.wants_a_look());
+        assert!(
+            !press(&mut harness, pane, &nothing, None),
+            "a press on what names nothing was taken for a link"
+        );
+    }
+
+    #[test]
+    fn a_path_is_looked_for_off_the_thread_that_draws_and_into_a_dead_mount_once() {
+        // A path into a mount whose server has gone: its `stat` blocks for as
+        // long as the mount does, which on a hard NFS mount is for good. The
+        // stand-in counts every look asked of the thread that draws, and holds
+        // the one into the mount until the test lets it go.
+        let scratch = Scratch::new();
+        let dead = scratch.path().join("mount").join("a.rs");
+        let there = written(&scratch, "b.rs");
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+
+        let drawing = std::thread::current().id();
+        let asked_while_drawing = Arc::new(AtomicUsize::new(0));
+        let asked_about_the_mount = Arc::new(AtomicUsize::new(0));
+        let (unblock, blocked) = std::sync::mpsc::channel::<()>();
+        let blocked = Mutex::new(blocked);
+        {
+            let asked_while_drawing = asked_while_drawing.clone();
+            let asked_about_the_mount = asked_about_the_mount.clone();
+            let dead = dead.clone();
+            harness.workspace_update(move |workspace, _| {
+                workspace.open_paths_with(|| None);
+                workspace.look_for_files_with(move |path| {
+                    if std::thread::current().id() == drawing {
+                        // Counted and never held: held here, the test would
+                        // hang where it ought to fail.
+                        asked_while_drawing.fetch_add(1, Ordering::SeqCst);
+                    } else if path == dead {
+                        asked_about_the_mount.fetch_add(1, Ordering::SeqCst);
+                        // Until the sender goes. The timeout is for a test
+                        // that failed before it let go.
+                        let _ = blocked
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .recv_timeout(SHELL_TIMEOUT);
+                    }
+                    Found::at(path)
+                });
+            });
+        }
+        let links = links_of(&harness, pane);
+        let not_while_drawing = || {
+            assert_eq!(
+                asked_while_drawing.load(Ordering::SeqCst),
+                0,
+                "a path was looked for on the thread that draws"
+            );
+        };
+
+        hover(&mut harness, pane, &dead, Some(1));
+        harness.wait_for("the mount was never looked into", |_| {
+            asked_about_the_mount.load(Ordering::SeqCst) == 1
+                || asked_while_drawing.load(Ordering::SeqCst) > 0
+        });
+        not_while_drawing();
+        // The window draws while the look is stuck, and the pointer going to
+        // and fro, and the chord key coming up and going down again, start no
+        // second look into the mount — and no look at all while it is out:
+        // every one would be a worker of the pool that does not come back.
+        harness.frame();
+        hover(&mut harness, pane, &there, None);
+        hover(&mut harness, pane, &dead, Some(1));
+        links.let_go();
+        hover(&mut harness, pane, &dead, Some(1));
+        hover(&mut harness, pane, &there, None);
+        harness.queue.run_until_parked();
+        assert_eq!(links.get(), None);
+
+        drop(unblock);
+        harness.wait_for(
+            "the file that is there never underlined after the mount answered",
+            |_| links.is_some(),
+        );
+        not_while_drawing();
+        assert_eq!(
+            asked_about_the_mount.load(Ordering::SeqCst),
+            1,
+            "the dead mount was looked into again while the first look was stuck"
+        );
+    }
+
+    #[test]
+    fn a_chord_click_on_a_path_opens_it_in_the_editor_at_its_line() {
+        record_starts();
+        crate::browser::record_opens();
+        let scratch = Scratch::new();
+        let main = written(&scratch, "main.rs");
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.workspace_update(|workspace, _| workspace.open_paths_with(code));
+        let links = links_of(&harness, pane);
+
+        assert!(
+            !press(&mut harness, pane, &main, Some(42)),
+            "a press before the file was found was taken for a link"
+        );
+        hover(&mut harness, pane, &main, Some(42));
+        harness.wait_for("the path never underlined", |_| links.is_some());
+        assert!(press(&mut harness, pane, &main, Some(42)));
+
+        let mut at_the_line = main.clone().into_os_string();
+        at_the_line.push(":42");
+        assert_eq!(
+            started(),
+            [(
+                "code".to_owned(),
+                vec![OsString::from("--goto"), at_the_line]
+            )]
+        );
+        assert_eq!(crate::browser::opened(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn with_no_editor_named_a_path_goes_to_the_platform_as_a_file_url() {
+        record_starts();
+        crate::browser::record_opens();
+        let scratch = Scratch::new();
+        let notes = written(&scratch, "notes.md");
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.workspace_update(|workspace, _| workspace.open_paths_with(|| None));
+        let links = links_of(&harness, pane);
+
+        hover(&mut harness, pane, &notes, Some(3));
+        harness.wait_for("the path never underlined", |_| links.is_some());
+        assert!(press(&mut harness, pane, &notes, Some(3)));
+
+        assert_eq!(crate::browser::opened(), [file_url(&notes)]);
+        assert!(file_url(&notes).starts_with("file://"));
+        assert_eq!(started(), []);
+    }
+
+    #[test]
+    fn a_folder_goes_to_the_file_manager_whatever_editor_is_named() {
+        record_starts();
+        crate::browser::record_opens();
+        let scratch = Scratch::new();
+        let folder = scratch.path().to_path_buf();
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.workspace_update(|workspace, _| workspace.open_paths_with(code));
+        let links = links_of(&harness, pane);
+
+        hover(&mut harness, pane, &folder, None);
+        harness.wait_for("the folder never underlined", |_| links.is_some());
+        assert!(press(&mut harness, pane, &folder, None));
+
+        assert_eq!(crate::browser::opened(), [file_url(&folder)]);
+        assert_eq!(started(), []);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_program_opens_in_the_editor_and_with_none_named_is_no_link() {
+        // The platform's handler runs a program: `open` on macOS starts an
+        // executable in Terminal. A chord-click on a path a program printed
+        // must not be a way to start what is at it.
+        use std::os::unix::fs::PermissionsExt as _;
+
+        record_starts();
+        crate::browser::record_opens();
+        let scratch = Scratch::new();
+        let script = written(&scratch, "release");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let notes = written(&scratch, "notes.md");
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.workspace_update(|workspace, _| workspace.open_paths_with(|| None));
+        let links = links_of(&harness, pane);
+
+        // The program, then a file that is there: once that one underlines,
+        // the program's look has come home, because a pane has one out at a
+        // time.
+        hover(&mut harness, pane, &script, None);
+        hover(&mut harness, pane, &notes, None);
+        harness.wait_for("the file never underlined", |_| links.is_some());
+        hover(&mut harness, pane, &script, None);
+        assert_eq!(links.get(), None, "a program underlined with no editor");
+        assert!(!press(&mut harness, pane, &script, None));
+        assert_eq!(crate::browser::opened(), Vec::<String>::new());
+
+        // With an editor named, it is a file like any other — once the chord
+        // key has come up and the disk is asked again.
+        links.let_go();
+        harness.workspace_update(|workspace, _| workspace.open_paths_with(code));
+        hover(&mut harness, pane, &script, None);
+        harness.wait_for("the program never underlined", |_| links.is_some());
+        assert!(press(&mut harness, pane, &script, None));
+        let mut at_the_top = script.clone().into_os_string();
+        at_the_top.push(":1");
+        assert_eq!(
+            started(),
+            [(
+                "code".to_owned(),
+                vec![OsString::from("--goto"), at_the_top]
+            )]
+        );
+        assert_eq!(crate::browser::opened(), Vec::<String>::new());
     }
 }
 
