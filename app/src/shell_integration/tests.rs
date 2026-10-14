@@ -1758,7 +1758,10 @@ fn run_a_real_shell(name: &str, extra: &[(&str, &str)]) -> Option<String> {
 /// produced it: the echo carries the `%s` and the output carries the value, so
 /// the format string is what tells them apart. The raw stream is read rather
 /// than the grid, so a value longer than the terminal is whole rather than
-/// wrapped.
+/// wrapped. The echo is not: a line editor that reaches the edge of the
+/// terminal writes its own bytes into it, and bash 3.2's readline put ` \r`
+/// between the `%` and the `s` of a command that crossed column 80 there. So
+/// a value starting with the `%` is the echo too; no value a test prints does.
 fn printed(seen: &str, label: &str) -> Option<String> {
     let opening = format!("{label}[");
     seen.match_indices(&opening)
@@ -1766,7 +1769,7 @@ fn printed(seen: &str, label: &str) -> Option<String> {
             let rest = &seen[at + opening.len()..];
             rest.find(']').map(|end| rest[..end].to_owned())
         })
-        .find(|value| !value.contains("%s"))
+        .find(|value| !value.contains("%s") && !value.starts_with('%'))
 }
 
 /// What the same shell, started by hand as a login shell, comes out with.
@@ -2101,10 +2104,19 @@ fn test_a_real_shell_whose_own_files_exec_another_program_still_hands_it_crook()
             "{name} wrote {:?}",
             ran.seen
         );
-        assert_eq!(
-            printed(&ran.seen, PATH_LABEL),
-            Some(path_of(&[nothing.path(), directory])),
-            "{name}"
+        // After what the pane inherited, and not necessarily last: the
+        // shell's own system files may add to PATH before the person's run —
+        // Ubuntu's snapd puts /snap/bin at the end from fish's vendor_conf.d.
+        let path = printed(&ran.seen, PATH_LABEL)
+            .unwrap_or_else(|| panic!("{name} should have printed its PATH"));
+        let entries: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        let at = |wanted: &Path| entries.iter().position(|entry| entry == wanted);
+        assert!(
+            at(nothing.path())
+                .zip(at(directory))
+                .is_some_and(|(first, then)| first < then),
+            "{name}: {path} should hold {} after what the pane inherited",
+            directory.display()
         );
     }
 }
