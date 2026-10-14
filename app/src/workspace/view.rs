@@ -43,7 +43,7 @@ use crate::notify::{Cooldown, LONG_COMMAND, Notice, Notifier, Occasion, Silent};
 use crate::pane_blocks::{PAGE_OVERLAP, PaneBlocks, ScrollCause};
 use crate::pane_composition::PaneComposition;
 use crate::pane_find::{Matches, PaneFind};
-use crate::pane_link::PaneLink;
+use crate::pane_link::{self, Found, Opens, PaneLink};
 use crate::pane_selection::PaneSelection;
 use crate::pane_split::{DividerDrag, PaneExtent};
 use crate::pane_surface::{self, Surface};
@@ -941,6 +941,18 @@ pub struct Workspace {
     /// here that says which thread it was asked on, or that holds its answer
     /// the way a mount whose server has gone holds a `stat`.
     find_checkout: Arc<dyn Fn(PathBuf) -> PathBuf + Send + Sync>,
+    /// How the file a path in a pane's output names is looked for, on the
+    /// background pool: [`Found::at`], everywhere but a test.
+    ///
+    /// A field for the reason [`Self::find_checkout`] is one: a test puts a
+    /// stand-in here that says which thread it was asked on, or that holds
+    /// its answer the way a mount whose server has gone holds a `stat`.
+    look_for_file: Arc<dyn Fn(&Path) -> Found + Send + Sync>,
+    /// The editor a path in a pane's output opens in:
+    /// [`Editor::from_environment`], everywhere but a test, which cannot set
+    /// `$VISUAL` for one window without setting it for every test running
+    /// beside it.
+    path_editor: fn() -> Option<Editor>,
     /// Every theme that can be chosen, as of the last time a surface that
     /// lists them was opened.
     ///
@@ -1243,6 +1255,8 @@ impl Workspace {
             panel: ThemePanelState::default(),
             changes: ChangesPanelState::default(),
             find_checkout: Arc::new(checkout_of),
+            look_for_file: Arc::new(Found::at),
+            path_editor: Editor::from_environment,
             themes: crate::theme::available(),
             unreadable_themes: Vec::new(),
             theme_before_draft: None,
@@ -8332,6 +8346,104 @@ impl Workspace {
         .detach();
     }
 
+    /// Looks for the file a path under the pointer in `pane`'s output names,
+    /// on the background pool, and underlines the path if it is still under
+    /// the pointer and there is something there to open.
+    ///
+    /// The look is a `stat`, and on a network mount whose server has gone a
+    /// `stat` blocks for as long as the mount does — so it is never done on
+    /// this thread, and a pane has one look out at a time: see
+    /// [`crate::pane_link`]. The next path the pointer found while one was
+    /// out is looked for when that one comes home.
+    ///
+    /// Whether an editor is named is read here rather than on the pool, and
+    /// decides with what was found whether the path is a link at all: a
+    /// program goes to the editor or nowhere.
+    fn look_for_path(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        let Some(path) = self
+            .interactions
+            .get(&pane)
+            .and_then(|interaction| interaction.links.take_look())
+        else {
+            return;
+        };
+        let editor = (self.path_editor)().is_some();
+        let look = self.look_for_file.clone();
+        let looking = ctx.background().spawn(async move {
+            let opens = Opens::of(look(&path), editor);
+            (path, opens)
+        });
+        ctx.spawn(looking, move |workspace, (path, opens), ctx| {
+            // A pane closed while its look was out has nothing to underline.
+            let Some(links) = workspace
+                .interactions
+                .get(&pane)
+                .map(|interaction| interaction.links.clone())
+            else {
+                return;
+            };
+            if links.found(&path, opens) {
+                ctx.notify();
+            }
+            workspace.look_for_path(pane, ctx);
+        })
+        .detach();
+    }
+
+    /// Opens the file a chord-click on a path in `pane`'s output landed on:
+    /// in the editor at the line it names, or with the platform's handler as
+    /// a `file://` URL — whichever its look decided.
+    ///
+    /// Started from here and not waited for, as the Changes column starts its
+    /// editor. A failure is logged and nothing else: the press has nowhere to
+    /// say so, and an editor that would not start is the person's own.
+    fn open_path(&mut self, pane: PaneId) {
+        let Some((file, opens)) = self
+            .interactions
+            .get(&pane)
+            .and_then(|interaction| interaction.links.take_pressed())
+        else {
+            return;
+        };
+        match opens {
+            Opens::InEditor => {
+                // Named when the file was looked for; a test that changed its
+                // mind since is the only way to be without one now.
+                let Some(editor) = (self.path_editor)() else {
+                    return;
+                };
+                if let Err(error) = editor.open(&file.path, file.line.unwrap_or(1)) {
+                    log::warn!(
+                        "could not start {} on {}: {error}",
+                        editor.name(),
+                        file.path.display()
+                    );
+                }
+            }
+            Opens::ByPlatform => {
+                crate::browser::open(&pane_link::file_url(&file.path));
+            }
+        }
+    }
+
+    /// Looks for the file a path names with `look` rather than
+    /// [`Found::at`], for a test that has to see which thread asks, or has to
+    /// hold the answer back.
+    #[cfg(test)]
+    pub(super) fn look_for_files_with(
+        &mut self,
+        look: impl Fn(&Path) -> Found + Send + Sync + 'static,
+    ) {
+        self.look_for_file = Arc::new(look);
+    }
+
+    /// Opens a path in `editor`'s answer rather than the one `$VISUAL` or
+    /// `$EDITOR` names.
+    #[cfg(test)]
+    pub(super) fn open_paths_with(&mut self, editor: fn() -> Option<Editor>) {
+        self.path_editor = editor;
+    }
+
     /// Finds the checkout a directory is in with `find` rather than
     /// [`checkout_of`], for a test that has to see where the Changes column
     /// asks, or has to hold the answer back.
@@ -12101,6 +12213,8 @@ impl TypedActionView for Workspace {
             WorkspaceAction::OpenPullRequest(pane) => self.open_pull_request(pane),
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),
             WorkspaceAction::PastePrimary(pane) => self.paste_primary(pane, ctx),
+            WorkspaceAction::LookForPath(pane) => self.look_for_path(pane, ctx),
+            WorkspaceAction::OpenPath(pane) => self.open_path(pane),
             WorkspaceAction::Complete(pane) => self.request_completions(pane, ctx),
             WorkspaceAction::CrashNote(action) => self.apply_crash_note(action, ctx),
             WorkspaceAction::DismissSessionNote => {

@@ -2633,6 +2633,29 @@ maps the span back onto every row it crosses, so the underline and the click bot
 whole URL. A newline the program printed carries no flag, and two URLs on adjacent rows stay two
 links.
 
+**So are paths**, which is what an agent or a compiler prints most: `src/main.rs:42:5`,
+`Update(app/src/view.rs)`, `src/app.ts(42,5)`, `./README.md`. Where there is no URL under the
+cell, `crook_terminal::path` scans the same joined line for a run with a separator in it or an
+extension on it, and the location after it, and `pane_link::find` reads it against the
+directory its command ran in — the one a finished block was filed under, or the one the pane's
+shell last reported for the open block and the grid. Nothing in the scan touches the disk, and
+a path is not underlined when it is found: `PaneLink` keeps it waiting, the element dispatches
+`WorkspaceAction::LookForPath`, and the workspace `stat`s it on the background pool and
+underlines it when there is something there to open. Never on the thread that draws, for the
+reason #489 moved the Changes column's walk for `.git` off it: on a network mount whose server
+has gone, a `stat` blocks for as long as the mount does. And one look per pane at a time, since
+each look into such a mount is a worker of the pool that does not come back. What was found is
+kept while the chord key is held and forgotten when it comes up; a look still out is kept, so
+a dead mount is looked into once. A chord-click on a path that was found dispatches
+`WorkspaceAction::OpenPath`, and the workspace starts `$VISUAL` or `$EDITOR` at the line through
+the Changes column's launcher, or — with no editor that opens a window named, or for a folder —
+hands `app::browser` a `file://` URL, through the same list of schemes. A program, which the
+platform's handler would run rather than show, is opened only in an editor: the exec bit on
+unix, Windows' programs on every platform (`pane_link::WINDOWS_PROGRAMS`, since Wine's desktop
+entry runs an `.exe` that `xdg-open` is handed), and a per-platform list of extensions (`RUNS`,
+and the macOS bundles in `BUNDLES`), checked against both the printed path and what it
+canonicalizes to, since the handler follows a link.
+
 **OSC 8 is not read**, and that is a decision rather than an omission. Carrying a per-cell
 hyperlink to the renderer means either putting it on `SnapshotCell` — twelve bytes and `Copy`
 precisely so a full screen is one flat allocation — or threading a side table through the

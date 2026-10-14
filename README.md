@@ -233,7 +233,7 @@ reporter — `coredumpctl`, Console.app, the Event Viewer — has the rest.
 
 ## v1 scope
 
-Twenty-one features, and the page that configures them:
+Twenty-two features, and the page that configures them:
 
 - **Tabs.** Open, close, switch, reorder. One agent session per tab, and the tab is named
   the way a person would answer "what is that one?": what you called it, else what the agent
@@ -608,6 +608,19 @@ Twenty-one features, and the page that configures them:
   as well as its screen. What no selection survives is the picture under it changing: resizing
   the pane re-wraps the rows, and crossing between the list and the grid renumbers them, so the
   selection is let go of rather than re-read against text nobody selected.
+- **The URLs and paths a program prints are links.** Hold `cmd` (`ctrl` off macOS) over one and
+  it underlines; click with it held and it opens. A URL goes to your browser. A path — what
+  compilers and agents print most: `--> src/main.rs:42:5`, `Update(app/src/view.rs)`,
+  `src/app.ts(42,5)`, `./README.md`, `/etc/hosts`, `~/notes.md` — is read against the directory
+  its command ran in (a finished block keeps its own; a running one is where the shell last
+  said it was), and opens in your `$VISUAL` or `$EDITOR` at the line it names, the same editors
+  the Changes column's **Open** knows; with no editor that opens a window named, the system's
+  own handler opens the file, at the top. A folder opens in the file manager. A path is a link
+  only once its file has been found — looked for off the thread that draws, a beat after the
+  key goes down — so `and/or` in a sentence never underlines. A program (a file marked
+  executable, an `.exe`, an `.app`, a `.jar`, a script Windows runs by its name such as `.sh` or
+  `.py`, or a link to any of them) is opened only in the editor, never by the system's handler,
+  which would run it.
 - **Find across every command in the output.** `cmd-f` (`ctrl-shift-f` off macOS) opens a bar
   over the top-right of a pane and searches the blocks, not the screenful — every finished
   command and the open one at once. Each match is highlighted where it is, the current one in

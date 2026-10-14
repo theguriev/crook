@@ -102,6 +102,7 @@
 //! [`Line`]: crookui_core::text_layout::Line
 
 use std::ops::Range;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crook_terminal::{
@@ -125,7 +126,7 @@ use crate::browser;
 use crate::clipboard::Clipboard;
 use crate::input_keys::Platform;
 use crate::pane_composition::{PaneComposition, Preedit};
-use crate::pane_link::{self, LinkRow, LinkSpan, PaneLink};
+use crate::pane_link::{self, LinkRow, LinkSpan, LinkTarget, PaneLink};
 use crate::pane_selection::PaneSelection;
 use crate::pane_surface;
 use crate::selection::{Anchor, Blocks, Cells, Item, Region, Selection, grid_first_row};
@@ -135,6 +136,7 @@ use crate::terminal_model::TerminalHandle;
 use crate::text_input::TextInput;
 use crate::theme::theme;
 
+use super::action::WorkspaceAction;
 use super::block_list::{FIND_CURRENT_ALPHA, FIND_MATCH_ALPHA, paint_wash};
 use super::pane_output::{Keys, Output, Typed, selection_kind};
 
@@ -177,6 +179,58 @@ pub(super) fn opens_links(modifiers: Modifiers) -> bool {
         // taken out of a program that has the pointer. Two meanings for one
         // combination is one too many.
         Platform::Other => modifiers.ctrl && !modifiers.cmd && !modifiers.shift,
+    }
+}
+
+/// Puts the link a pointer found under it while the chord key is held — and
+/// lets go of what was found when it is not — and asks the workspace to look
+/// for the file a path names when that has not been done.
+///
+/// Its own function because both surfaces follow links, and both have to ask
+/// the same way: the element holds no executor, and the look is a `stat` that
+/// must not run on the thread that draws. See [`crate::pane_link`]. Reports
+/// whether the frame changed.
+pub(super) fn follow_link(
+    links: &PaneLink,
+    modifiers: Modifiers,
+    pane: Option<PaneId>,
+    ctx: &mut EventContext,
+    find: impl FnOnce() -> Option<LinkSpan>,
+) -> bool {
+    let changed = links.track(opens_links(modifiers), find);
+    if let Some(pane) = pane
+        && links.wants_a_look()
+    {
+        ctx.dispatch_typed_action(WorkspaceAction::LookForPath(pane));
+    }
+    changed
+}
+
+/// Opens the link a chord-click landed on, reporting whether there was one to
+/// open.
+///
+/// A URL goes to the platform's handler from here, as it always has. A path
+/// is opened by the workspace, which knows the editor — and only one whose
+/// file has been found: what is not underlined does not open, and a press on
+/// it selects.
+pub(super) fn open_link(
+    links: Option<&PaneLink>,
+    link: LinkSpan,
+    pane: Option<PaneId>,
+    ctx: &mut EventContext,
+) -> bool {
+    match link.target {
+        LinkTarget::Url(uri) => browser::open(&uri),
+        LinkTarget::File(file) => {
+            let (Some(links), Some(pane)) = (links, pane) else {
+                return false;
+            };
+            if !links.press(file) {
+                return false;
+            }
+            ctx.dispatch_typed_action(WorkspaceAction::OpenPath(pane));
+            true
+        }
     }
 }
 
@@ -250,6 +304,9 @@ pub struct TerminalElement {
     /// the move that finds one and the frame that underlines it are different
     /// frames. `None` for a grid nothing can be clicked in.
     links: Option<PaneLink>,
+    /// Where the pane's shell last said it was, which a relative path the
+    /// grid shows is read against. See [`Self::with_links`].
+    directory: Option<PathBuf>,
 
     /// The find matches on screen, and the current one wherever it is. See
     /// [`Self::with_find`].
@@ -268,6 +325,7 @@ impl TerminalElement {
             font,
             output: Output::detached(),
             links: None,
+            directory: None,
             finds: Vec::new(),
             find_current: None,
             size: None,
@@ -318,10 +376,15 @@ impl TerminalElement {
         self
     }
 
-    /// Makes the URLs the shell printed clickable, through the link state the
-    /// workspace keeps for this pane.
-    pub fn with_links(mut self, links: PaneLink) -> Self {
+    /// Makes the URLs and the paths the shell printed clickable, through the
+    /// link state the workspace keeps for this pane.
+    ///
+    /// `directory` is where the pane's shell last said it was. The grid is a
+    /// full-screen program or a command still running, both started there, so
+    /// it is what a relative path on it is read against.
+    pub fn with_links(mut self, links: PaneLink, directory: Option<PathBuf>) -> Self {
         self.links = Some(links);
+        self.directory = directory;
         self
     }
 
@@ -352,15 +415,16 @@ impl TerminalElement {
     /// spoken for by the selection, and a click that opened a browser instead
     /// of placing a selection would be a terminal you cannot copy a URL out
     /// of. Reports whether the frame changed.
-    fn track_link(&self, position: Vector2F, modifiers: Modifiers) -> bool {
+    fn track_link(&self, position: Vector2F, modifiers: Modifiers, ctx: &mut EventContext) -> bool {
         let Some(links) = self.links.as_ref() else {
             return false;
         };
-
-        links.set(self.link_at(position, modifiers))
+        follow_link(links, modifiers, self.output.pane(), ctx, || {
+            self.link_at(position, modifiers)
+        })
     }
 
-    /// The URL under a window position, on the viewport rows it covers.
+    /// The link under a window position, on the viewport rows it covers.
     ///
     /// `None` unless the link modifier is held, which is what keeps this scan
     /// off every ordinary pointer move.
@@ -384,15 +448,21 @@ impl TerminalElement {
             top: 0,
             count: self.snapshot.rows,
         };
-        pane_link::find(&rows, row, column, LinkRow::Viewport)
+        pane_link::find(
+            &rows,
+            row,
+            column,
+            self.directory.as_deref(),
+            LinkRow::Viewport,
+        )
     }
 
     /// Opens the link under the pointer, reporting whether there was one.
-    fn open_link(&self, position: Vector2F, modifiers: Modifiers) -> bool {
+    fn open_link(&self, position: Vector2F, modifiers: Modifiers, ctx: &mut EventContext) -> bool {
         let Some(link) = self.link_at(position, modifiers) else {
             return false;
         };
-        browser::open(&link.uri)
+        open_link(self.links.as_ref(), link, self.output.pane(), ctx)
     }
 
     /// The grid as the one block a selection addresses.
@@ -947,7 +1017,7 @@ impl Element for TerminalElement {
                 position,
                 modifiers,
                 ..
-            } if self.open_link(*position, *modifiers) => {
+            } if self.open_link(*position, *modifiers, ctx) => {
                 // Before the press below, and instead of it. A chord-click on a
                 // link is not a selection gesture, and starting one would leave
                 // a highlight behind the browser that just opened.
@@ -978,7 +1048,7 @@ impl Element for TerminalElement {
                 modifiers,
                 is_synthetic,
             } => {
-                let mut changed = self.track_link(*position, *modifiers);
+                let mut changed = self.track_link(*position, *modifiers, ctx);
                 if changed {
                     ctx.notify();
                 }
@@ -994,7 +1064,7 @@ impl Element for TerminalElement {
                 position,
                 modifiers,
             } => {
-                let changed = self.track_link(*position, *modifiers);
+                let changed = self.track_link(*position, *modifiers, ctx);
                 if changed {
                     ctx.notify();
                 }

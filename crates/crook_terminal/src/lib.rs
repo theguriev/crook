@@ -92,6 +92,7 @@ pub mod mouse;
 #[cfg(unix)]
 mod nonblocking;
 pub mod notify;
+pub mod path;
 mod pty;
 mod rows;
 pub mod selection;

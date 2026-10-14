@@ -78,6 +78,7 @@
 //! "no shell" is a much worse answer than "the login shell is not executable".
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -718,7 +719,7 @@ fn blocks(
                 interaction.selection.clone(),
                 workspace.clipboard().clone(),
             )
-            .with_links(interaction.links.clone())
+            .with_links(interaction.links.clone(), pane_directory(workspace, pane))
             .with_composition(interaction.composition.clone());
     }
     let list = list.finish();
@@ -773,6 +774,15 @@ fn blocks(
         block_menu::anchor(view.menu_at()),
     );
     stack.finish()
+}
+
+/// Where a pane's shell last said it was, which a path its output prints is
+/// read against. Off the session, never off the disk.
+fn pane_directory(workspace: &Workspace, pane: PaneId) -> Option<PathBuf> {
+    workspace
+        .tabs()
+        .pane(pane)
+        .and_then(|pane| pane.session().working_directory.clone())
 }
 
 /// Floats a find bar over the top-right of a pane's output.
@@ -838,7 +848,7 @@ fn grid(
                 interaction.selection.clone(),
                 workspace.clipboard().clone(),
             )
-            .with_links(interaction.links.clone())
+            .with_links(interaction.links.clone(), pane_directory(workspace, pane))
             .with_composition(interaction.composition.clone());
     }
     if let Some((showing, current)) = on_screen {

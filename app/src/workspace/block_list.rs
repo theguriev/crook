@@ -54,6 +54,7 @@
 //! jump-to-bottom button; see `docs/blocks.md`.
 
 use std::ops::Range;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -69,7 +70,6 @@ use crookui_core::icons::{IconKey, Lucide};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 use crookui_core::scene::{ClipBounds, CornerRadius, PointerShape, Radius, Scene};
 
-use crate::browser;
 use crate::clipboard::Clipboard;
 use crate::pane_blocks::{Control, PaneBlocks, ScrollCause};
 use crate::pane_composition::PaneComposition;
@@ -206,6 +206,10 @@ pub struct BlockList {
     /// the move that finds one and the frame that underlines it are different
     /// frames. `None` for a list nothing can be clicked in.
     links: Option<PaneLink>,
+    /// Where the pane's shell last said it was, which a relative path in the
+    /// open block is read against. A finished block keeps its own. See
+    /// [`Self::with_links`].
+    directory: Option<PathBuf>,
     /// The find matches to highlight.
     ///
     /// Each one already the cells it covers, so there is nothing to resolve,
@@ -277,6 +281,7 @@ impl BlockList {
             finds: Matches::default(),
             find_current: None,
             links: None,
+            directory: None,
             menu: None,
             menu_available: false,
             size: None,
@@ -709,10 +714,17 @@ impl BlockList {
             .is_some()
     }
 
-    /// Makes the URLs in this pane's output clickable, through the link state
-    /// the workspace keeps for it.
-    pub fn with_links(mut self, links: PaneLink) -> Self {
+    /// Makes the URLs and the paths in this pane's output clickable, through
+    /// the link state the workspace keeps for it.
+    ///
+    /// `directory` is where the pane's shell last said it was, which is where
+    /// the command still running in the open block was started. A finished
+    /// block was filed under the directory it ran in when it opened, and a
+    /// path it printed is read against that one — the shell has often `cd`ed
+    /// somewhere else since.
+    pub fn with_links(mut self, links: PaneLink, directory: Option<PathBuf>) -> Self {
         self.links = Some(links);
+        self.directory = directory;
         self
     }
 
@@ -780,7 +792,11 @@ impl BlockList {
         }
         let (column, _) = terminal_element::column_at(local.x() - GUTTER, metrics.width, columns);
 
-        pane_link::find(&self.rows_of(item.index), row, column, |row| {
+        let directory = match self.block(item.index) {
+            Some(block) => block.working_directory.as_deref(),
+            None => self.directory.as_deref(),
+        };
+        pane_link::find(&self.rows_of(item.index), row, column, directory, |row| {
             LinkRow::Block {
                 index: item.index,
                 row,
@@ -788,20 +804,23 @@ impl BlockList {
         })
     }
 
-    /// Finds the link under the pointer, reporting whether the frame changed.
-    fn track_link(&self, position: Vector2F, modifiers: Modifiers) -> bool {
+    /// Finds the link under the pointer, or lets go of the one that was there,
+    /// reporting whether the frame changed.
+    fn track_link(&self, position: Vector2F, modifiers: Modifiers, ctx: &mut EventContext) -> bool {
         let Some(links) = self.links.as_ref() else {
             return false;
         };
-        links.set(self.link_at(position, modifiers))
+        terminal_element::follow_link(links, modifiers, self.output.pane(), ctx, || {
+            self.link_at(position, modifiers)
+        })
     }
 
     /// Opens the link under the pointer, reporting whether there was one.
-    fn open_link(&self, position: Vector2F, modifiers: Modifiers) -> bool {
+    fn open_link(&self, position: Vector2F, modifiers: Modifiers, ctx: &mut EventContext) -> bool {
         let Some(link) = self.link_at(position, modifiers) else {
             return false;
         };
-        browser::open(&link.uri)
+        terminal_element::open_link(self.links.as_ref(), link, self.output.pane(), ctx)
     }
 
     /// Underlines the link under the pointer, when it is on this row.
@@ -1851,7 +1870,7 @@ impl Element for BlockList {
                 modifiers,
                 ..
             } => {
-                let mut changed = self.track_link(*position, *modifiers);
+                let mut changed = self.track_link(*position, *modifiers, ctx);
                 if changed {
                     ctx.notify();
                 }
@@ -1866,7 +1885,7 @@ impl Element for BlockList {
                 position,
                 modifiers,
             } => {
-                let changed = self.track_link(*position, *modifiers);
+                let changed = self.track_link(*position, *modifiers, ctx);
                 if changed {
                     ctx.notify();
                 }
@@ -1880,7 +1899,7 @@ impl Element for BlockList {
                 position,
                 modifiers,
                 ..
-            } if self.open_link(*position, *modifiers) => true,
+            } if self.open_link(*position, *modifiers, ctx) => true,
             Event::MouseDown {
                 button: MouseButton::Middle,
                 position,
