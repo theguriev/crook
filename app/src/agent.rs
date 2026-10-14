@@ -540,6 +540,9 @@ enum Fragment {
         events: &'static [(&'static str, &'static str)],
         /// What the events cannot say, for the note.
         missing: &'static str,
+        /// What the agent can be set to say with none of these hooks, for a
+        /// line of its own at the end of the note; empty when nothing.
+        without: &'static str,
     },
     /// GitHub Copilot CLI's shape: a `version`, and `bash` for the command,
     /// with a `powershell` beside it that this fragment leaves out.
@@ -585,6 +588,22 @@ const CLAUDE_EVENTS: &[(&str, &str)] = &[
     ("Stop", "idle"),
     ("SessionEnd", "idle"),
 ];
+
+/// What Claude Code can say with neither the plugin nor the hooks: a
+/// notification in one of the three forms Crook reads, once it is told which.
+///
+/// Its notification channel is `auto` until a person sets it, and `auto`
+/// picks a form by `TERM_PROGRAM` — iTerm2's, kitty's or Ghostty's — and
+/// nothing at all for a terminal it does not know, Crook included. The
+/// setting is Claude Code's `preferredNotifChannel`, read from its
+/// `settings.json` and offered in its `/config`. Whichever of the three the
+/// person's other terminal is, because the setting holds in every terminal
+/// and `auto` would have picked that one there; Crook reads all three.
+const CLAUDE_WITHOUT_HOOKS: &str = "\n# With neither the plugin nor these hooks, Claude \
+Code can still ask for a look when it stops: set \"preferredNotifChannel\" in \
+~/.claude/settings.json, or in its /config, to \"ghostty\", \"kitty\" or \"iterm2\" — \
+whichever your other terminal is, since it then holds everywhere. Crook reads all three; \
+the \"auto\" it starts with picks by terminal name and picks nothing in Crook.";
 
 /// The commands that install Crook's Claude Code plugin: this repository as
 /// a marketplace, then the one plugin in it.
@@ -734,6 +753,7 @@ const AGENTS: &[Agent] = &[
             file: "~/.claude/settings.json, or a project's .claude/settings.json",
             events: CLAUDE_EVENTS,
             missing: "",
+            without: CLAUDE_WITHOUT_HOOKS,
         },
         prompt_flag: None,
         plugin: CLAUDE_PLUGIN,
@@ -748,6 +768,7 @@ const AGENTS: &[Agent] = &[
             events: CODEX_EVENTS,
             missing: " Codex has no notification hook: the row says needs-input for a \
 permission, and a question the model asks ends its turn as idle.",
+            without: "",
         },
         prompt_flag: None,
         plugin: &[],
@@ -762,6 +783,7 @@ permission, and a question the model asks ends its turn as idle.",
             events: GEMINI_EVENTS,
             missing: " Gemini CLI notifies for a tool permission only: a question the \
 model asks ends its turn as idle.",
+            without: "",
         },
         prompt_flag: Some("-i"),
         plugin: &[],
@@ -1020,13 +1042,14 @@ pub fn hooks_text(agent: &str, binary: &Path) -> Result<Hooks> {
             file,
             events,
             missing,
+            without,
         } => {
             let hooks = hooks_object(events);
             let text = serde_json::to_string_pretty(&json!({ "hooks": hooks }))
                 .context("could not write the hooks as JSON")?;
             let note = format!(
                 "# Merge the `hooks` above into {file}. {} then tells the tab it runs in what it \
-is doing.{missing}",
+is doing.{missing}{without}",
                 known.program
             );
             (text, Some(note))
@@ -2034,6 +2057,39 @@ its `hooks` should be\n{}",
         for agent in AGENTS.iter().filter(|agent| agent.name != "claude") {
             let printed = hooks_text(agent.name, Path::new("/usr/bin/crook")).unwrap();
             assert_eq!(None, printed.lead, "{}", agent.name);
+        }
+    }
+
+    #[test]
+    fn the_claude_note_names_the_notification_channels_crook_reads_for_a_claude_without_hooks() {
+        // Claude Code's `auto` notification channel picks nothing in Crook,
+        // so with neither the plugin nor the hooks a stop to ask lights no
+        // row — until its setting names one of the three forms the pane's
+        // emulator reads (crook_terminal's notify module).
+        let note = hooks_text("claude", Path::new("/usr/bin/crook"))
+            .unwrap()
+            .note
+            .unwrap();
+        let line = note.lines().last().unwrap();
+        assert!(
+            line.starts_with("# "),
+            "a comment line of its own, so pasting the note runs nothing: {note}"
+        );
+        assert!(line.contains("\"preferredNotifChannel\""), "{line}");
+        for channel in ["ghostty", "kitty", "iterm2"] {
+            assert!(
+                line.contains(&format!("\"{channel}\"")),
+                "{channel}: {line}"
+            );
+        }
+
+        // The setting is Claude Code's, and no other agent's note names it.
+        for agent in AGENTS.iter().filter(|agent| agent.name != "claude") {
+            let note = hooks_text(agent.name, Path::new("/usr/bin/crook"))
+                .unwrap()
+                .note
+                .unwrap_or_default();
+            assert!(!note.contains("preferredNotifChannel"), "{}", agent.name);
         }
     }
 

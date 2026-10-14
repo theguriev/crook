@@ -55,6 +55,8 @@ fn host(home: &str) -> HostEnv {
         home: Some(PathBuf::from(home)),
         zdotdir: None,
         xdg_data_dirs: None,
+        path: None,
+        binary: None,
     }
 }
 
@@ -160,6 +162,8 @@ fn test_zsh_points_user_zdotdir_at_a_zdotdir_the_user_already_had() {
             home: Some(PathBuf::from("/home/person")),
             zdotdir: Some(PathBuf::from("/home/person/.config/zsh")),
             xdg_data_dirs: None,
+            path: None,
+            binary: None,
         },
     );
 
@@ -431,6 +435,8 @@ fn test_fish_keeps_the_data_dirs_the_user_already_had() {
             home: Some(PathBuf::from("/home/person")),
             zdotdir: None,
             xdg_data_dirs: Some("/opt/share:/usr/share".to_owned()),
+            path: None,
+            binary: None,
         },
     );
 
@@ -762,6 +768,280 @@ fn test_every_shell_is_told_where_the_crook_binary_is() {
             "{name} should name the binary that is running, not {named}"
         );
     }
+}
+
+#[test]
+fn test_every_shell_tells_claude_code_that_crook_draws_strikethrough() {
+    // Claude Code prints ~~deleted~~ text with its tildes unless the terminal
+    // is on a list of names it keeps, which Crook is not, and this variable
+    // is its own way past the list. Spelled out rather than read from the
+    // constant: the name is Claude Code's, and a typo in the constant is
+    // exactly the bug this is here to catch.
+    let home = TempDir::new("home");
+    for (name, enabled, program) in [
+        ("marked zsh", true, "/nowhere/zsh"),
+        ("bash with the marks off", false, "/nowhere/bash"),
+        ("a shell with no integration", true, "/nowhere/nu"),
+    ] {
+        let session = Session::with_host(
+            PaneId::next(),
+            &Options {
+                enabled,
+                login: true,
+                shell: Some(PathBuf::from(program)),
+                control_socket: None,
+                control_token: None,
+            },
+            host_at(&home),
+        );
+        assert_eq!(
+            session_variable(session.environment(), "CLAUDE_CODE_FORCE_STRIKETHROUGH"),
+            Some("1"),
+            "{name} should tell Claude Code that Crook draws SGR 9"
+        );
+    }
+}
+
+/// An executable file named `name` in `directory`, standing in for a binary
+/// a `PATH` lookup should or should not find.
+fn executable(directory: &Path, name: &str) -> PathBuf {
+    let path = directory.join(name);
+    fs::write(&path, "#!/bin/sh\n").expect("a file in a temporary directory should be writable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .expect("a file the test made should take a mode");
+    }
+    path
+}
+
+/// `directories` as one `PATH`.
+#[cfg(unix)]
+fn path_of(directories: &[&Path]) -> String {
+    std::env::join_paths(directories)
+        .expect("a test's directories hold no separator")
+        .into_string()
+        .expect("a test's directories are text")
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_pane_finds_the_crook_it_belongs_to_at_the_end_of_its_path() {
+    // A Crook.app dragged out of the disk image is on nobody's PATH, so every
+    // `crook pane list` the README gives answered "command not found" in
+    // Crook's own panes. Temporary directories stand in for the system's, so
+    // a machine with a crook in /usr/bin answers the same.
+    let app = TempDir::new("app");
+    let binary = executable(app.path(), "crook");
+    let elsewhere = TempDir::new("bin");
+    let system = TempDir::new("system");
+    let inherited = path_of(&[elsewhere.path(), system.path()]);
+
+    assert_eq!(
+        super::scratch::path_reaching(inherited.as_ref(), &binary, None),
+        Some(path_of(&[elsewhere.path(), system.path(), app.path()])),
+        "the binary's directory goes after everything the pane inherits, \
+         which stays exactly as it was"
+    );
+    assert_eq!(
+        super::scratch::path_reaching("".as_ref(), &binary, None),
+        None,
+        "an empty PATH is the shell's own default search path, and one holding \
+         only Crook's directory would replace it"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_path_that_already_finds_this_crook_is_left_alone() {
+    let app = TempDir::new("app");
+    let binary = executable(app.path(), "crook");
+
+    let with_its_directory = path_of(&[Path::new("/usr/bin"), app.path()]);
+    assert_eq!(
+        super::scratch::path_reaching(with_its_directory.as_ref(), &binary, None),
+        None,
+        "its own directory is on PATH already"
+    );
+
+    // What the README tells a person to do outside Crook: a link on PATH
+    // that leads to the app's binary is that binary.
+    let linked = TempDir::new("linked");
+    std::os::unix::fs::symlink(&binary, linked.path().join("crook"))
+        .expect("a link in a temporary directory should be makeable");
+    let with_a_link = path_of(&[linked.path(), Path::new("/usr/bin")]);
+    assert_eq!(
+        super::scratch::path_reaching(with_a_link.as_ref(), &binary, None),
+        None,
+        "`crook` there already runs this binary, through the link"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_crook_of_the_users_own_is_never_shadowed() {
+    // Nothing goes in front of a crook the person put on PATH — a build they
+    // are working on, another version — and nothing behind it either: an
+    // entry at the end could never get in front of theirs, so it would
+    // change nothing `crook` runs. `$CROOK_BIN` is this one either way.
+    let app = TempDir::new("app");
+    let binary = executable(app.path(), "crook");
+    let theirs = TempDir::new("theirs");
+    executable(theirs.path(), "crook");
+    let system = TempDir::new("system");
+    let inherited = path_of(&[theirs.path(), system.path()]);
+
+    assert_eq!(
+        super::scratch::path_reaching(inherited.as_ref(), &binary, None),
+        None,
+        "`crook` already answers on {inherited}, with the person's own"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_bin_directory_in_the_home_is_left_to_the_persons_own_files() {
+    // ~/.local/bin is where script/install puts crook, and uv's
+    // ~/.local/bin/env, like rustup's ~/.cargo/env, adds its directory only
+    // when PATH lacks it. Handed a PATH with it already at the end, such a
+    // file leaves it there: behind /usr/bin, for python3 as much as for
+    // crook.
+    let home = TempDir::new("home");
+    let system = TempDir::new("system");
+    let inherited = path_of(&[system.path()]);
+    for bin in [".local/bin", "bin", ".cargo/bin"] {
+        let directory = home.path().join(bin);
+        fs::create_dir_all(&directory)
+            .expect("a directory in a temporary home should be creatable");
+        let binary = executable(&directory, "crook");
+        assert_eq!(
+            super::scratch::path_reaching(inherited.as_ref(), &binary, Some(home.path())),
+            None,
+            "~/{bin} is the person's startup files' to place"
+        );
+        assert_eq!(
+            super::scratch::path_reaching(inherited.as_ref(), &binary, None),
+            Some(path_of(&[system.path(), &directory])),
+            "and only because it is in the home"
+        );
+    }
+
+    // An app in the home is in nobody's startup files.
+    let bundle = home.path().join("Applications/Crook.app/Contents/MacOS");
+    fs::create_dir_all(&bundle).expect("a directory in a temporary home should be creatable");
+    let binary = executable(&bundle, "crook");
+    assert_eq!(
+        super::scratch::path_reaching(inherited.as_ref(), &binary, Some(home.path())),
+        Some(path_of(&[system.path(), &bundle])),
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_every_shell_is_handed_crook_in_its_environment_but_a_bin_in_the_home() {
+    // In the environment, and not only from a snippet that runs after the
+    // person's own files: a .bashrc that execs fish, a .zshrc that starts
+    // tmux, replace the shell before any snippet runs, and what they hand on
+    // is the environment. An app in the home is in nobody's startup files.
+    let home = TempDir::new("home");
+    let bundle = home.path().join("Applications/Crook.app/Contents/MacOS");
+    fs::create_dir_all(&bundle).expect("a directory in a temporary home should be creatable");
+    let binary = executable(&bundle, "crook");
+    let elsewhere = TempDir::new("bin");
+    let system = TempDir::new("system");
+    let inherited = path_of(&[elsewhere.path(), system.path()]);
+    let host = |binary: &Path, path: &str| HostEnv {
+        path: Some(path.into()),
+        binary: Some(binary.to_path_buf()),
+        ..host_at(&home)
+    };
+    let options = |enabled, program: &str| Options {
+        enabled,
+        login: true,
+        shell: Some(PathBuf::from(program)),
+        control_socket: None,
+        control_token: None,
+    };
+    let shells = [
+        ("marked zsh", true, "/nowhere/zsh"),
+        ("marked bash", true, "/nowhere/bash"),
+        ("bash with the marks off", false, "/nowhere/bash"),
+        ("a shell with no integration", true, "/nowhere/nu"),
+    ];
+
+    for (name, enabled, program) in shells {
+        let session = Session::with_host(
+            PaneId::next(),
+            &options(enabled, program),
+            host(&binary, &inherited),
+        );
+        assert_eq!(
+            session_variable(session.environment(), "PATH"),
+            Some(path_of(&[elsewhere.path(), system.path(), &bundle]).as_str()),
+            "{name} should find the binary it belongs to as `crook`"
+        );
+        assert_eq!(
+            session_variable(session.environment(), BIN_VARIABLE),
+            binary.to_str(),
+            "{name} is told about the same binary"
+        );
+    }
+
+    // ~/.local/bin, where script/install puts crook, is the person's own
+    // files' to place: uv's ~/.local/bin/env adds it only when PATH lacks it,
+    // and would find it here, at the end, and leave it there. Marked or not,
+    // the shell starts with the PATH it inherited.
+    let local = home.path().join(".local/bin");
+    fs::create_dir_all(&local).expect("a directory in a temporary home should be creatable");
+    let installed = executable(&local, "crook");
+    for (name, enabled, program) in shells {
+        let session = Session::with_host(
+            PaneId::next(),
+            &options(enabled, program),
+            host(&installed, &inherited),
+        );
+        assert_eq!(
+            session_variable(session.environment(), "PATH"),
+            None,
+            "{name} should inherit PATH untouched when crook is in ~/.local/bin"
+        );
+    }
+
+    // A link by that name, the one the README suggests for other
+    // terminals, is a PATH that already reaches it.
+    let linked = TempDir::new("linked");
+    std::os::unix::fs::symlink(&binary, linked.path().join("crook"))
+        .expect("a link in a temporary directory should be makeable");
+    let session = Session::with_host(
+        PaneId::next(),
+        &options(true, "/nowhere/zsh"),
+        host(&binary, &path_of(&[linked.path(), system.path()])),
+    );
+    assert_eq!(
+        session_variable(session.environment(), "PATH"),
+        None,
+        "a PATH that already runs this binary as `crook` is inherited untouched"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn test_a_windows_pane_keeps_the_path_its_registry_gives() {
+    // The pty assembles a Windows child's PATH from the registry rather than
+    // from this process's, so a PATH written from the process's own would
+    // throw that away.
+    let home = TempDir::new("home");
+    let session = Session::with_host(
+        PaneId::next(),
+        &Options::default(),
+        HostEnv {
+            path: Some(r"C:\nowhere".into()),
+            ..host_at(&home)
+        },
+    );
+    assert_eq!(session_variable(session.environment(), "PATH"), None);
 }
 
 #[test]
@@ -1255,6 +1535,12 @@ fn host_at(home: &TempDir) -> HostEnv {
         home: Some(home.path().to_path_buf()),
         zdotdir: None,
         xdg_data_dirs: std::env::var("XDG_DATA_DIRS").ok(),
+        // None, so a real shell's PATH is the one it inherits and nothing
+        // else: the tests that hold it to a shell started by hand compare the
+        // two, and the directory a pane may be given for `crook` is asked
+        // about by tests of its own.
+        path: None,
+        binary: running_binary().map(PathBuf::from),
     }
 }
 
@@ -1299,19 +1585,29 @@ struct RealShell<'a> {
     home_files: &'a [(&'a str, &'a str)],
     /// Environment variables on top of the launcher's.
     extra: &'a [(&'a str, &'a str)],
+    /// The `PATH` the launcher inherits, when not this process's own: what
+    /// the session is planned against and what the shell starts with, under
+    /// whatever the session sets.
+    inherited_path: Option<&'a str>,
+    /// Where the binary the pane belongs to is, inside the temporary home:
+    /// an executable is made there and the session is planned against it,
+    /// `CROOK_BIN` included. The test binary when `None`.
+    binary: Option<&'a str>,
     /// The line typed at the first prompt.
     command: &'a str,
 }
 
 impl Default for RealShell<'_> {
     /// Every caller names its own shell; the name here is only so that the
-    /// other four fields can be defaulted past.
+    /// other fields can be defaulted past.
     fn default() -> Self {
         Self {
             name: "zsh",
             login: true,
             home_files: &[],
             extra: &[],
+            inherited_path: None,
+            binary: None,
             command: "printf 'crook-ok\\n'",
         }
     }
@@ -1346,6 +1642,18 @@ impl RealShell<'_> {
             }
             fs::write(path, contents).expect("a file in a temporary home should be writable");
         }
+        let binary = match self.binary {
+            Some(relative) => {
+                let path = home.path().join(relative);
+                let (Some(directory), Some(name)) = (path.parent(), path.file_name()) else {
+                    panic!("{relative} names no file in a directory");
+                };
+                fs::create_dir_all(directory)
+                    .expect("a directory in a temporary home should be creatable");
+                Some(executable(directory, &name.to_string_lossy()))
+            }
+            None => running_binary().map(PathBuf::from),
+        };
 
         let session = Session::with_host(
             PaneId::next(),
@@ -1356,12 +1664,21 @@ impl RealShell<'_> {
                 control_socket: None,
                 control_token: None,
             },
-            host_at(&home),
+            HostEnv {
+                path: self.inherited_path.map(Into::into),
+                binary,
+                ..host_at(&home)
+            },
         );
         assert!(session.marks(), "{} should get the integration", self.name);
 
         let mut options = TerminalOptions {
             size: TerminalSize::new(80, 24),
+            // First, so that anything the session sets wins over it.
+            environment: self
+                .inherited_path
+                .map(|path| vec![("PATH".to_owned(), path.to_owned())])
+                .unwrap_or_default(),
             ..TerminalOptions::default()
         };
         session.apply(&mut options);
@@ -1441,7 +1758,10 @@ fn run_a_real_shell(name: &str, extra: &[(&str, &str)]) -> Option<String> {
 /// produced it: the echo carries the `%s` and the output carries the value, so
 /// the format string is what tells them apart. The raw stream is read rather
 /// than the grid, so a value longer than the terminal is whole rather than
-/// wrapped.
+/// wrapped. The echo is not: a line editor that reaches the edge of the
+/// terminal writes its own bytes into it, and bash 3.2's readline put ` \r`
+/// between the `%` and the `s` of a command that crossed column 80 there. So
+/// a value starting with the `%` is the echo too; no value a test prints does.
 fn printed(seen: &str, label: &str) -> Option<String> {
     let opening = format!("{label}[");
     seen.match_indices(&opening)
@@ -1449,7 +1769,7 @@ fn printed(seen: &str, label: &str) -> Option<String> {
             let rest = &seen[at + opening.len()..];
             rest.find(']').map(|end| rest[..end].to_owned())
         })
-        .find(|value| !value.contains("%s"))
+        .find(|value| !value.contains("%s") && !value.starts_with('%'))
 }
 
 /// What the same shell, started by hand as a login shell, comes out with.
@@ -1491,6 +1811,11 @@ fn test_a_zsh_started_by_crook_has_the_path_a_zsh_started_by_hand_has() {
     let Some(ran) = (RealShell {
         name: "zsh",
         home_files,
+        // No binary for the snippet to put back on PATH when no `crook`
+        // answers. That entry, at the end, is the one difference from a
+        // shell started by hand that a pane has on purpose, and the tests
+        // of it are below; this one is about the user's own files.
+        extra: &[(BIN_VARIABLE, "")],
         command: PRINT_PATH,
         ..RealShell::default()
     })
@@ -1539,6 +1864,11 @@ fn test_a_bash_started_by_crook_has_the_path_a_bash_started_by_hand_has() {
     let Some(ran) = (RealShell {
         name: "bash",
         home_files,
+        // No binary for the snippet to put back on PATH when no `crook`
+        // answers. That entry, at the end, is the one difference from a
+        // shell started by hand that a pane has on purpose, and the tests
+        // of it are below; this one is about the user's own files.
+        extra: &[(BIN_VARIABLE, "")],
         command: PRINT_PATH,
         ..RealShell::default()
     })
@@ -1570,6 +1900,312 @@ fn test_a_bash_started_by_crook_has_the_path_a_bash_started_by_hand_has() {
         inside, outside,
         "the emulated login sequence has to land on the same PATH as a real \
          one, or Crook's bash is a bash nobody else has"
+    );
+}
+
+/// The line that prints which `crook` a POSIX-ish shell would run, and the
+/// label [`printed`] finds it by.
+#[cfg(unix)]
+const PRINT_CROOK: &str = "printf 'CROOK_FOUND[%s]\\n' \"$(command -v crook)\"";
+
+/// See [`PRINT_CROOK`].
+#[cfg(unix)]
+const CROOK_LABEL: &str = "CROOK_FOUND";
+
+/// What a real shell says at its first prompt — the `crook` it runs, and its
+/// `PATH` — when its own startup file sets `PATH` to `directory` and then
+/// does `then`, with `CROOK_BIN` naming `binary`; `None` when the shell is
+/// not installed here.
+///
+/// Outright, not added to: the assignment drops everything the pane
+/// inherited, which is what Debian's system-wide profile does to a login bash
+/// and what any rc file that spells out a whole `PATH` does. The snippet runs
+/// after the person's files, and is the one place that can put `crook` back.
+/// A directory of the test's own rather than `/usr/bin`, which may hold a
+/// `crook` of a package's.
+#[cfg(unix)]
+fn after_path_is_set_outright(
+    name: &str,
+    directory: &Path,
+    binary: &Path,
+    then: &str,
+) -> Option<(String, String)> {
+    let directory = directory.display();
+    let (file, contents, command) = match name {
+        // The labels are arguments rather than part of the format, so fish's
+        // echo of the line, redrawn as it is typed, never spells them.
+        "fish" => (
+            "config/fish/config.fish",
+            format!("set --global --export PATH '{directory}'\n{then}"),
+            // Two lines, since a `crook` that is not found is no argument at
+            // all, and one format would then pair each label with the next.
+            format!(
+                "printf '%s[%s]\\n' {CROOK_LABEL} (command --search crook); \
+                 printf '%s[%s]\\n' {PATH_LABEL} \"$PATH\""
+            ),
+        ),
+        "zsh" => (
+            ".zshrc",
+            format!("PATH='{directory}'\n{then}"),
+            format!("{PRINT_CROOK}; {PRINT_PATH}"),
+        ),
+        _ => (
+            ".bashrc",
+            format!("PATH='{directory}'\n{then}"),
+            format!("{PRINT_CROOK}; {PRINT_PATH}"),
+        ),
+    };
+    let binary = binary.display().to_string();
+    let ran = RealShell {
+        name,
+        home_files: &[(file, &contents)],
+        extra: &[("CROOK_BIN", &binary)],
+        command: &command,
+        ..RealShell::default()
+    }
+    .run()?;
+    let said = |label| {
+        printed(&ran.seen, label)
+            .unwrap_or_else(|| panic!("{name} should have printed {label}, wrote {:?}", ran.seen))
+    };
+    Some((said(CROOK_LABEL), said(PATH_LABEL)))
+}
+
+/// [`after_path_is_set_outright`] for a binary that can be put on `PATH`,
+/// held to finding it there, at the end.
+#[cfg(unix)]
+fn assert_a_real_shell_finds_crook_after_its_own_files_set_path_outright(name: &str) {
+    let app = TempDir::new("app");
+    let binary = executable(app.path(), "crook");
+    let nothing = TempDir::new("nothing");
+    let Some((found, path)) = after_path_is_set_outright(name, nothing.path(), &binary, "") else {
+        return;
+    };
+    assert_eq!(found, binary.display().to_string(), "{name}");
+    assert_eq!(path, path_of(&[nothing.path(), app.path()]), "{name}");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_real_zsh_finds_crook_after_its_own_files_set_path_outright() {
+    assert_a_real_shell_finds_crook_after_its_own_files_set_path_outright("zsh");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_real_bash_finds_crook_after_its_own_files_set_path_outright() {
+    assert_a_real_shell_finds_crook_after_its_own_files_set_path_outright("bash");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_real_fish_finds_crook_after_its_own_config_sets_path_outright() {
+    // fish reads vendor_conf.d before config.fish, so a snippet that looked
+    // when it was sourced would look before the assignment and see a `crook`
+    // that is gone by the first prompt.
+    assert_a_real_shell_finds_crook_after_its_own_files_set_path_outright("fish");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_real_shell_adds_no_directory_a_path_cannot_hold() {
+    // A `:` in a directory's name — a Finder folder called "Tools/Apps" is
+    // stored as Tools:Apps — splits it into two entries, the second of them
+    // relative and looked up from wherever the shell stands.
+    let app = TempDir::new("app");
+    let directory = app.path().join("Tools:Apps");
+    fs::create_dir_all(&directory)
+        .expect("a directory in a temporary directory should be creatable");
+    let binary = executable(&directory, "crook");
+    let nothing = TempDir::new("nothing");
+    for name in ["zsh", "bash", "fish"] {
+        let Some((found, path)) = after_path_is_set_outright(name, nothing.path(), &binary, "")
+        else {
+            continue;
+        };
+        assert_eq!(found, "", "{name} found a crook it was not given");
+        assert_eq!(
+            path,
+            nothing.path().display().to_string(),
+            "{name} should have added nothing"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_real_shell_finds_crook_past_an_older_copy_of_its_snippet() {
+    // The snippet's header tells a person to paste it at the end of their
+    // own rc file for ssh and containers, and synced dotfiles bring that copy
+    // home. A copy from before the snippet put `crook` on PATH sets the guard
+    // and adds nothing, and Crook's own copy, sourced after it, returns at
+    // that guard. One whose `CROOK_BIN` is spelled otherwise is such a copy:
+    // the guard, the hooks, and nothing for PATH. fish reads Crook's copy
+    // first, from vendor_conf.d, and is here to hold it to that.
+    let app = TempDir::new("app");
+    let binary = executable(app.path(), "crook");
+    let nothing = TempDir::new("nothing");
+    for (name, snippet) in [
+        ("bash", BASH_SNIPPET),
+        ("zsh", ZSH_SNIPPET),
+        ("fish", FISH_SNIPPET),
+    ] {
+        let older = snippet.replace(BIN_VARIABLE, "CROOK_BIN_UNSET");
+        assert_ne!(
+            older, snippet,
+            "the {name} snippet should read {BIN_VARIABLE}"
+        );
+        let Some((found, path)) = after_path_is_set_outright(name, nothing.path(), &binary, &older)
+        else {
+            continue;
+        };
+        assert_eq!(found, binary.display().to_string(), "{name}");
+        assert_eq!(path, path_of(&[nothing.path(), app.path()]), "{name}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_real_shell_whose_own_files_exec_another_program_still_hands_it_crook() {
+    // `exec fish` in a .bashrc, a .zshrc that starts tmux: the shell is
+    // replaced before any snippet would run, and what the program it became
+    // inherits is the environment the pane started with. An app in the home
+    // is in nobody's startup files, so it is in that environment.
+    let nothing = TempDir::new("nothing");
+    let inherited = nothing.path().display().to_string();
+    let bundle = "Applications/Crook.app/Contents/MacOS/crook";
+    let exec = format!(
+        "exec /bin/sh -c 'printf \"{CROOK_LABEL}[%s]\\n\" \"$(command -v crook)\"; \
+         printf \"{PATH_LABEL}[%s]\\n\" \"$PATH\"'\n"
+    );
+    for (name, file) in [
+        ("bash", ".bashrc"),
+        ("zsh", ".zshrc"),
+        ("fish", "config/fish/config.fish"),
+    ] {
+        // Not a login shell: a system profile would add to PATH on its way
+        // to the person's file, and this is about what reaches the exec.
+        let Some(ran) = (RealShell {
+            name,
+            login: false,
+            home_files: &[(file, &exec)],
+            inherited_path: Some(&inherited),
+            binary: Some(bundle),
+            ..RealShell::default()
+        })
+        .run() else {
+            continue;
+        };
+        let binary = ran.home.path().join(bundle);
+        let directory = binary.parent().expect("a binary is in a directory");
+        assert_eq!(
+            printed(&ran.seen, CROOK_LABEL),
+            Some(binary.display().to_string()),
+            "{name} wrote {:?}",
+            ran.seen
+        );
+        // After what the pane inherited, and not necessarily last: the
+        // shell's own system files may add to PATH before the person's run —
+        // Ubuntu's snapd puts /snap/bin at the end from fish's vendor_conf.d.
+        let path = printed(&ran.seen, PATH_LABEL)
+            .unwrap_or_else(|| panic!("{name} should have printed its PATH"));
+        let entries: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        let at = |wanted: &Path| entries.iter().position(|entry| entry == wanted);
+        assert!(
+            at(nothing.path())
+                .zip(at(directory))
+                .is_some_and(|(first, then)| first < then),
+            "{name}: {path} should hold {} after what the pane inherited",
+            directory.display()
+        );
+    }
+}
+
+/// A real shell's `PATH` and the `crook` it finds when the binary is in
+/// `~/.local/bin`, where `script/install` puts it, and the shell's own rc
+/// file adds that directory the way uv's `~/.local/bin/env` does: only when
+/// `PATH` lacks it.
+///
+/// Had the directory been in the `PATH` the person's files start from, at
+/// the end, the guard would have found it there and left it there — behind
+/// `/usr/bin`, for every command in it. So the pane is not handed it, and
+/// the snippet, which runs after the guard, finds `crook` answering already.
+#[cfg(unix)]
+fn assert_a_guard_in_a_real_shell_still_puts_its_directory_first(name: &str) {
+    let system = TempDir::new("system");
+    let inherited = system.path().display().to_string();
+    let rc = "case \":$PATH:\" in\n*:\"$HOME/.local/bin\":*) ;;\n\
+              *) PATH=\"$HOME/.local/bin:$PATH\" ;;\nesac\n";
+    let file = if name == "zsh" { ".zshrc" } else { ".bashrc" };
+    let Some(ran) = (RealShell {
+        name,
+        // Not a login shell, whose system profile would add to PATH too.
+        login: false,
+        home_files: &[(file, rc)],
+        inherited_path: Some(&inherited),
+        binary: Some(".local/bin/crook"),
+        command: &format!("{PRINT_CROOK}; {PRINT_PATH}"),
+        ..RealShell::default()
+    })
+    .run() else {
+        return;
+    };
+
+    let local = ran.home.path().join(".local/bin");
+    assert_eq!(
+        printed(&ran.seen, PATH_LABEL),
+        Some(path_of(&[&local, system.path()])),
+        "{name}: the guard should have found its directory missing, and put it first"
+    );
+    assert_eq!(
+        printed(&ran.seen, CROOK_LABEL),
+        Some(local.join("crook").display().to_string()),
+        "{name}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_guard_in_a_real_bash_still_puts_its_directory_first() {
+    assert_a_guard_in_a_real_shell_still_puts_its_directory_first("bash");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_guard_in_a_real_zsh_still_puts_its_directory_first() {
+    assert_a_guard_in_a_real_shell_still_puts_its_directory_first("zsh");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_real_bash_adds_nothing_when_a_crook_of_the_users_own_answers() {
+    let app = TempDir::new("app");
+    let binary = executable(app.path(), "crook");
+    let theirs = TempDir::new("theirs");
+    let their_crook = executable(theirs.path(), "crook");
+    let path = format!("{}:/usr/bin:/bin", theirs.path().display());
+    let rc = format!("PATH={path}\n");
+    let binary_text = binary.display().to_string();
+    let Some(ran) = (RealShell {
+        name: "bash",
+        home_files: &[(".bashrc", &rc)],
+        extra: &[("CROOK_BIN", &binary_text)],
+        command: &format!("{PRINT_CROOK}; {PRINT_PATH}"),
+        ..RealShell::default()
+    })
+    .run() else {
+        return;
+    };
+
+    assert_eq!(
+        printed(&ran.seen, CROOK_LABEL),
+        Some(their_crook.display().to_string()),
+        "the crook the person put on PATH is the one `crook` runs"
+    );
+    assert_eq!(
+        printed(&ran.seen, PATH_LABEL),
+        Some(path),
+        "and nothing was added behind it, since `crook` already answered"
     );
 }
 

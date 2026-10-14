@@ -156,6 +156,15 @@ the whole of the way past it: the old right-click-and-Open shortcut was removed.
 The `.tar.gz` archives hold the bare binary and are what `script/install` fetches. Nothing `curl`
 downloads is quarantined, which is why that path never needed the dialog in the first place.
 
+**`crook` on the command line.** Nothing in an app bundle is on `PATH`, so in its own panes Crook
+puts itself there: when no `crook` answers in a pane, its `PATH` ends with
+`Crook.app/Contents/MacOS`, so the `crook …` lines below work in a pane as written. It goes last,
+so it never stands in front of a `crook` of your own. A startup file that sets `PATH` outright and
+then starts another shell or tmux in its own place can still drop it, and `"$CROOK_BIN"` is the
+same command there. For other terminals, link it once into a directory on your `PATH`:
+`ln -s /Applications/Crook.app/Contents/MacOS/crook /usr/local/bin/crook`, with `sudo` if that
+directory is not yours.
+
 To build it yourself instead, see [Prerequisites](#prerequisites) and [Build and run](#build-and-run).
 
 ### Updating
@@ -504,7 +513,11 @@ Twenty features, and the page that configures them:
   Crook also reads the notifications other terminals show — OSC 9, 777 and 99 — as the pane
   asking for a look, with the notification's text on the row and the status left as it was, so
   an agent on a remote box with its notification channel set to `iterm2`, `ghostty` or `kitty`
-  lights its row with no Crook binary there.
+  lights its row with no Crook binary there. Claude Code's channel starts as `auto`, which picks
+  one of those by the terminal's name and sends nothing in Crook: without the plugin, set
+  `"preferredNotifChannel"` in `~/.claude/settings.json`, or in its `/config`, to `ghostty`,
+  `kitty` or `iterm2` — whichever your other terminal is, since the setting holds in every
+  terminal — and a stop to ask lights the row. `crook --agent-hooks claude` says so too.
   A status the agent never took back goes when the shell's own marks say the command ended,
   and a failure stays on the row until the next command starts. Looking at a tab clears the
   *attention* it asked for and nothing else: an agent waiting for an approval is still waiting
@@ -666,7 +679,16 @@ Twenty features, and the page that configures them:
   `crook tab new`, `crook pane wait`, `crook pane blocks` and `crook events` send to say which
   pane is asking. `CROOK_BIN` is beside them: the absolute path of the `crook` binary the pane
   belongs to, so a hook can call it from a `PATH` it is not on — a Crook.app nobody linked, a
-  build under `target/`.
+  build under `target/`. And `crook` itself is on the pane's `PATH`: when no `crook` answers
+  there, that binary's directory goes at the end — never the front, so it shadows nothing. Every
+  shell is handed it in the environment it starts with, which a startup file that execs fish or
+  starts tmux passes on, unless the directory is a `bin` in your home: your own files place that
+  one, and one that adds `~/.local/bin` only when it is missing has to find it missing to put it
+  first. The zsh, bash and fish integration adds it again after your startup files have run, so
+  one that sets `PATH` outright cannot drop it, and neither can an older copy of the snippet
+  pasted into them. Windows panes keep the `PATH` the registry gives them. Every pane also has
+  `CLAUDE_CODE_FORCE_STRIKETHROUGH=1`: Claude Code strikes `~~deleted~~` text through only in
+  terminals it knows by name and prints the tildes everywhere else, and Crook draws it.
 
   It also **answers**, which is what makes Tab work. Command marks are an announcement and
   completion is a question, so there is a second channel beside them: Crook writes the line

@@ -51,7 +51,9 @@ use std::time::{Duration, SystemTime};
 use crook_terminal::{Program, TerminalOptions, default_shell};
 
 use super::launch::{HostEnv, Launch, ScratchFile, plain, plan};
-use super::{BIN_VARIABLE, Options, PANE_ID_VARIABLE, Shell, opted_out};
+use super::{
+    BIN_VARIABLE, CLAUDE_STRIKETHROUGH_VARIABLE, Options, PANE_ID_VARIABLE, Shell, opted_out,
+};
 use crate::control::{SOCKET_VARIABLE, TOKEN_VARIABLE};
 use crate::tab::PaneId;
 
@@ -156,13 +158,13 @@ impl Session {
         let shell = Shell::of(&program);
 
         if !options.enabled || opted_out() {
-            return Self::unmarked(pane, shell, &program, options);
+            return Self::unmarked(pane, shell, &program, options, &host);
         }
 
         let scratch = scratch_directory(root);
         let launch = plan(shell, &program, &scratch, options.login, &host);
         if !launch.marks() {
-            return Self::unmarked(pane, shell, &program, options);
+            return Self::unmarked(pane, shell, &program, options, &host);
         }
 
         // Nothing is made, written or removed inside the root before it has
@@ -175,7 +177,7 @@ impl Session {
                      the shell will run without command marks",
                     root.display()
                 );
-                return Self::unmarked(pane, shell, &program, options);
+                return Self::unmarked(pane, shell, &program, options, &host);
             }
         };
         SWEPT.call_once(|| sweep(&root, &mine(), STALE_AFTER));
@@ -187,10 +189,10 @@ impl Session {
                 scratch.display()
             );
             remove(&scratch);
-            return Self::unmarked(pane, shell, &program, options);
+            return Self::unmarked(pane, shell, &program, options, &host);
         }
 
-        Self::from_launch(pane, shell, launch, Some(scratch), options)
+        Self::from_launch(pane, shell, launch, Some(scratch), options, &host)
     }
 
     /// The shell this launch is for.
@@ -232,8 +234,21 @@ impl Session {
 
     /// The launch with no integration in it. Still a login shell, when that is
     /// what the setting says and the shell has a switch for it.
-    fn unmarked(pane: PaneId, shell: Shell, program: &Path, options: &Options) -> Self {
-        Self::from_launch(pane, shell, plain(program, options.login), None, options)
+    fn unmarked(
+        pane: PaneId,
+        shell: Shell,
+        program: &Path,
+        options: &Options,
+        host: &HostEnv,
+    ) -> Self {
+        Self::from_launch(
+            pane,
+            shell,
+            plain(program, options.login),
+            None,
+            options,
+            host,
+        )
     }
 
     /// Puts a completion request — [`crate::completion::request_text`] —
@@ -271,6 +286,7 @@ impl Session {
         launch: Launch,
         scratch: Option<PathBuf>,
         options: &Options,
+        host: &HostEnv,
     ) -> Self {
         let mut environment = launch.environment;
         // Here rather than in the launch, because the launch is what a shell
@@ -281,9 +297,34 @@ impl Session {
         // The binary beside it for the second half of that reason: it reaches
         // every session from here, and the planners stay functions of what
         // they are handed rather than of the process they run in.
-        if let Some(binary) = running_binary() {
+        if let Some(binary) = host.binary.as_deref().and_then(Path::to_str) {
             environment.push((BIN_VARIABLE.to_owned(), binary.to_owned()));
         }
+        // And reachable as `crook`, which is what a person types: in the
+        // environment every shell starts with, marked or not, since that is
+        // what a startup file that execs something else — `exec fish` in a
+        // .bashrc, a .zshrc that starts tmux — hands on, and a snippet
+        // sourced after that file never runs. The snippets add it again
+        // after the person's files, for one that assigns `PATH` outright,
+        // and `path_reaching` keeps a `bin` in the home out of here, where a
+        // guard in those files would find it and leave it last. From the
+        // `PATH` and binary the host was read with, so a test can say what a
+        // pane inherits.
+        #[cfg(unix)]
+        if let Some(path) = host
+            .path
+            .as_deref()
+            .zip(host.binary.as_deref())
+            .and_then(|(inherited, binary)| path_reaching(inherited, binary, host.home.as_deref()))
+        {
+            environment.push(("PATH".to_owned(), path));
+        }
+        // Claude Code draws ~~deleted~~ text struck through only in the
+        // terminals on a list of names it keeps, and prints the tildes
+        // everywhere else. Crook draws SGR 9 and is not on the list, and this
+        // is Claude Code's own way past it — set in every pane, since an
+        // agent can be started in any of them.
+        environment.push((CLAUDE_STRIKETHROUGH_VARIABLE.to_owned(), "1".to_owned()));
         // Set when there is no socket too, and set empty: the variable is
         // otherwise inherited, and a Crook started in another Crook's pane
         // would hand its shells a window they are not in. A path that is not
@@ -346,6 +387,102 @@ pub(crate) fn running_binary() -> Option<&'static str> {
         path.into_os_string().into_string().ok()
     });
     BINARY.as_deref()
+}
+
+/// The `PATH` a shell is started with so that `crook` there runs `binary`,
+/// or `None` when the one it inherits needs nothing added — or should not
+/// be added to.
+///
+/// A Crook.app dragged out of the disk image is on nobody's `PATH`: macOS
+/// never puts an app bundle's `Contents/MacOS` there, and the same is true
+/// of a tarball unpacked anywhere `script/install` did not put it and of a
+/// build under `target/`. Without this, every `crook pane list` and `crook
+/// tab new` a person was told to type in a pane answered "command not
+/// found" in Crook's own panes. A shell with the integration has its
+/// snippet add the same again after its startup files — see [`Session`]'s
+/// constructor — by the same rule less the `bin`-in-the-home exception
+/// below, which only a `PATH` those files start from needs.
+///
+/// The rule: nothing is added when the binary's own directory is on `PATH`
+/// already, or when any `crook` answers there at all — this binary by
+/// another path (the `/usr/local/bin/crook` link the README suggests, a
+/// package manager's link), or a `crook` of the person's own, which an entry
+/// at the end could never get in front of anyway. Otherwise the directory
+/// goes **last**, after everything inherited, which stays exactly as it was.
+/// Last is also what survives macOS's `path_helper`, which a login shell
+/// runs from `/etc/zprofile` and `/etc/profile`: it rebuilds `PATH` out of
+/// `/etc/paths` and keeps every entry it was handed after those. A startup
+/// file that assigns `PATH` outright drops it, and only a shell with the
+/// integration has something to put it back.
+///
+/// Nor is a `bin` directory inside `home` added — `~/.local/bin`, where
+/// `script/install` puts Crook by default, `~/bin`, `~/.cargo/bin`. Those are
+/// the person's startup files' to place, and often behind a guard that adds
+/// one only when it is missing (uv's `~/.local/bin/env`, rustup's
+/// `~/.cargo/env`): found at the end of the `PATH` they start from, it would
+/// stay there, behind `/usr/bin`, for every command in it and not only
+/// `crook`.
+///
+/// An empty `PATH` is the shell's own default search path, and one holding
+/// only this directory would replace it, so that gets nothing; and a
+/// directory a `PATH` cannot hold — one with a `:` in it — is not added, nor
+/// one that is not absolute, which a shell would look up from wherever it
+/// stood.
+///
+/// Unix only: on Windows the pty assembles a child's `PATH` out of the
+/// registry rather than this process's, and a `PATH` built here from the
+/// process's own would throw what it read away.
+#[cfg(unix)]
+pub(super) fn path_reaching(
+    inherited: &OsStr,
+    binary: &Path,
+    home: Option<&Path>,
+) -> Option<String> {
+    if inherited.is_empty() {
+        return None;
+    }
+    let directory = binary
+        .parent()
+        .filter(|directory| directory.is_absolute())?;
+    if home.is_some_and(|home| {
+        directory.starts_with(home) && directory.file_name() == Some(OsStr::new("bin"))
+    }) {
+        return None;
+    }
+    let directories: Vec<PathBuf> = std::env::split_paths(inherited).collect();
+    if directories.iter().any(|entry| entry == directory) {
+        return None;
+    }
+    // Only absolute entries: a relative one is looked up from the shell's
+    // own working directory, which is not this process's.
+    if directories
+        .iter()
+        .filter(|entry| entry.is_absolute())
+        .any(|entry| runnable(&entry.join(COMMAND)))
+    {
+        return None;
+    }
+    let joined = std::env::join_paths(
+        directories
+            .iter()
+            .map(PathBuf::as_path)
+            .chain(std::iter::once(directory)),
+    )
+    .ok()?;
+    joined.into_string().ok()
+}
+
+/// The name a person types for Crook, and what [`path_reaching`] looks for.
+#[cfg(unix)]
+const COMMAND: &str = "crook";
+
+/// Whether a shell would run `candidate`: a file, with an execute bit.
+#[cfg(unix)]
+fn runnable(candidate: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fs::metadata(candidate)
+        .is_ok_and(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
 }
 
 /// The directory every session's scratch directory sits in: this user's own.

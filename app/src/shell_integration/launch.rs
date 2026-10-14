@@ -49,6 +49,15 @@ pub struct HostEnv {
     pub zdotdir: Option<PathBuf>,
     /// `$XDG_DATA_DIRS`, verbatim.
     pub xdg_data_dirs: Option<String>,
+    /// `$PATH`, verbatim: what a pane inherits, and what decides whether
+    /// `crook` there needs the running binary's directory after it — see
+    /// [`Session`](super::Session).
+    pub path: Option<OsString>,
+    /// The binary this process is, as `running_binary` reads it, which every
+    /// pane is told about as `CROOK_BIN` and may be handed on `PATH` as
+    /// `crook`. Held here rather than read where it is used, so a test can
+    /// put it where a person's would be: in `~/.local/bin`, in an app bundle.
+    pub binary: Option<PathBuf>,
 }
 
 impl HostEnv {
@@ -62,6 +71,8 @@ impl HostEnv {
             xdg_data_dirs: std::env::var("XDG_DATA_DIRS")
                 .ok()
                 .filter(|value| !value.is_empty()),
+            path: std::env::var_os("PATH").filter(|value| !value.is_empty()),
+            binary: super::running_binary().map(PathBuf::from),
         }
     }
 
