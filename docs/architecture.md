@@ -1218,7 +1218,9 @@ name the system gave when the shell started, and which is the far side of an `ss
 not this machine's — takes the session's directory away rather than moving it: the path is a
 directory over there, and everything that reads a session's directory, the worktree menu
 included, reads this machine's disk. The row prints the host and the path instead; see
-`app/src/tab/remote.rs`.
+`app/src/tab/remote.rs`. A block keeps the host it was filed under beside its directory, since
+one pane's blocks can come from both ends of an `ssh`, and a block from the far end is read for
+no branch and no links.
 The agent's line keeps the same rule: it is put in the new tab's *composer*, unsent, where a
 person reads a line before pressing Enter on it, and it reaches the shell only because somebody
 pressed — Enter there, or the creator's Start, which is a press for exactly that. Enter in the

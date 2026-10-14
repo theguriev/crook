@@ -2312,3 +2312,28 @@ fn a_block_says_only_what_a_plugin_was_allowed_to_be_told() {
         "reading a block told the plugin where it ran"
     );
 }
+
+#[test]
+fn a_block_that_ran_on_another_machine_tells_a_plugin_nowhere() {
+    // `make` typed on the far side of an `ssh`, into a server laid out like
+    // this machine. The path is a directory over there, and a plugin told it
+    // would read this machine's checkout at the same path as the place the
+    // command ran — as `Where` would for the pane, which says nowhere.
+    let mut menu = BlockMenuState::default();
+    menu.command = Some(String::from("make"));
+    menu.directory = Some(PathBuf::from("/home/eugen/Work/crook"));
+    menu.elsewhere = true;
+    let who = PluginId::parse("eugen/probe").expect("a literal");
+
+    let told = Sees {
+        block: true,
+        place: true,
+        ..Sees::default()
+    }
+    .block(&menu, &who);
+    assert!(told.ran.is_some(), "what ran is still what ran");
+    assert_eq!(
+        told.place, None,
+        "a plugin was told a directory on another machine as a place here"
+    );
+}

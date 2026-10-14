@@ -42,7 +42,7 @@ use alacritty_terminal::vte::{Params, Parser, Perform};
 use parking_lot::Mutex;
 
 use crate::agent::{self, AgentReport, Reported};
-use crate::blocks::{Block, BlockId, BlockTracker, IgnoreReason, LiveBlock};
+use crate::blocks::{Block, BlockId, BlockTracker, IgnoreReason, LiveBlock, Whereabouts};
 use crate::harvest::{self, BlockRows};
 use crate::image::{self, ImagePlacement};
 use crate::input::{InputModes, KeyboardModes};
@@ -713,7 +713,10 @@ impl Emulator {
                     mark,
                     &mut self.term,
                     &self.palette,
-                    self.working_directory.as_deref(),
+                    Whereabouts::of(
+                        self.working_directory.as_deref(),
+                        self.working_host.as_deref(),
+                    ),
                 );
                 if let Some(finished) = finished {
                     self.events.push(TerminalEvent::CommandFinished {
@@ -841,7 +844,10 @@ impl Emulator {
             command,
             &mut self.term,
             &self.palette,
-            self.working_directory.as_deref(),
+            Whereabouts::of(
+                self.working_directory.as_deref(),
+                self.working_host.as_deref(),
+            ),
         );
         self.dirty = true;
     }
@@ -1075,7 +1081,10 @@ impl Emulator {
         self.blocks.exited(
             &mut self.term,
             &self.palette,
-            self.working_directory.as_deref(),
+            Whereabouts::of(
+                self.working_directory.as_deref(),
+                self.working_host.as_deref(),
+            ),
         );
         self.dirty = true;
     }

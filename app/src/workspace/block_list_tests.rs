@@ -582,10 +582,10 @@ fn a_path_in_a_finished_block_is_read_against_the_directory_it_ran_in() {
     use std::sync::Arc;
 
     let mut emulator = emulator();
-    emulator.advance(b"\x1b]7;file://host/project\x07");
+    emulator.advance(b"\x1b]7;file:///project\x07");
     cycle(&mut emulator, "cargo b", "src/main.rs:42:5", 0);
     // A `cd`, and a command still running that prints a path of its own.
-    emulator.advance(b"\x1b]7;file://host/elsewhere\x07");
+    emulator.advance(b"\x1b]7;file:///elsewhere\x07");
     emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07tail log\r\n\x1b]133;C\x07src/lib.rs:7\r\n");
     assert_eq!(
         finished(&emulator).working_directory.as_deref(),
@@ -639,6 +639,74 @@ fn a_path_in_a_finished_block_is_read_against_the_directory_it_ran_in() {
             column: None,
         })),
         "the running command's path"
+    );
+}
+
+/// A path a command printed on the far side of an `ssh` is a path there. A
+/// relative one read against this machine's copy of the directory it ran in
+/// opens this machine's file, or none, so it is read the way the live block
+/// of a pane over there is: against no directory, which makes it no link.
+#[test]
+fn a_relative_path_in_a_block_that_ran_on_another_machine_is_no_link() {
+    use crate::pane_link::{FileLink, PaneLink};
+    use crookui_core::geometry::{Point, ZIndex, vec2f};
+    use std::path::Path;
+    use std::sync::Arc;
+
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]7;file:///project\x07");
+    cycle(&mut emulator, "cargo b", "src/main.rs:42:5", 0);
+    // `ssh buildbox`, into the same layout, and the same command there.
+    emulator.advance(b"\x1b]7;file://buildbox.invalid/project\x07");
+    cycle(&mut emulator, "cargo b", "src/main.rs:42:5", 0);
+    assert_eq!(
+        emulator.blocks()[1].working_directory.as_deref(),
+        Some(Path::new("/project")),
+        "the far side's block was not filed under the path it reported"
+    );
+
+    let history = Arc::new(BlockHistory::new(
+        emulator.blocks().iter().cloned().map(Arc::new).collect(),
+        0,
+    ));
+    let font = crate::terminal_font::CellFont::headless(12.);
+    let metrics = font.metrics();
+    let mut list = BlockList::new(history, emulator.snapshot(), font, PaneBlocks::new())
+        .with_links(PaneLink::new(), None);
+    let size = vec2f(400., 300.);
+    list.size = Some(size);
+    list.origin = Some(Point::from_vec2f(vec2f(0., 0.), ZIndex::Normal(0)));
+    list.measure(size);
+    let origin = list.bounds().expect("the list has bounds").origin();
+    let follow = follow();
+
+    let path_in = |index: usize| {
+        let item = *list
+            .window
+            .iter()
+            .find(|item| item.index == index)
+            .unwrap_or_else(|| panic!("item {index} is not on screen"));
+        let rows_top = item.top + list.padding_top(index) * metrics.height;
+        let at = origin
+            + vec2f(
+                GUTTER + 3.5 * metrics.width,
+                rows_top + 1.5 * metrics.height,
+            );
+        list.link_at(at, follow).map(|span| span.target)
+    };
+    assert_eq!(
+        path_in(0),
+        Some(LinkTarget::File(FileLink {
+            path: Path::new("/project").join("src/main.rs"),
+            line: Some(42),
+            column: Some(5),
+        })),
+        "the block that ran here lost its link"
+    );
+    assert_eq!(
+        path_in(1),
+        None,
+        "a path printed on another machine opens this machine's file"
     );
 }
 

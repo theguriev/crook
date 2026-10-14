@@ -792,8 +792,15 @@ impl BlockList {
         }
         let (column, _) = terminal_element::column_at(local.x() - GUTTER, metrics.width, columns);
 
+        // A block that ran on another machine printed paths there, and
+        // read against this machine's copy of its directory, a relative one
+        // would open some other file or none: it is read as the live block
+        // of a pane over there is, against no directory at all.
         let directory = match self.block(item.index) {
-            Some(block) => block.working_directory.as_deref(),
+            Some(block) => block
+                .working_directory
+                .as_deref()
+                .filter(|_| crate::tab::on_this_machine(block.working_host.as_deref())),
             None => self.directory.as_deref(),
         };
         pane_link::find(&self.rows_of(item.index), row, column, directory, |row| {

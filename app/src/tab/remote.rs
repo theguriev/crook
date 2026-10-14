@@ -23,7 +23,8 @@
 //! before the move goes on saying the old one. A host nothing matches costs
 //! that one extra call each time it is asked about: once per change of place
 //! on the far side — a `cd`, or an `ssh` in or out, since a prompt that
-//! repeats the same place is dropped before it gets here.
+//! repeats the same place is dropped before it gets here — and once each time
+//! a block that ran there is read for its branch or for the paths it printed.
 //!
 //! **The system's name is not the only one.** `localhost`, and a loopback or
 //! unspecified address — `127.0.0.1`, `::1`, `0.0.0.0` — are this machine to
@@ -60,8 +61,7 @@ pub struct Remote {
 
 impl Remote {
     /// What a shell's report of `directory` on `host` is: `None` when the
-    /// host is this machine — no host at all, `localhost`, a loopback
-    /// address, or a name this machine answers to — and the other machine
+    /// host is this machine — see [`on_this_machine`] — and the other machine
     /// otherwise.
     pub fn reported(host: Option<&str>, directory: PathBuf) -> Option<Self> {
         let host = host?;
@@ -94,6 +94,18 @@ pub(super) fn short_host(host: &str) -> &str {
         Some(label) => &host[..host.len() - name.len() + label.len()],
         None => host,
     }
+}
+
+/// Whether a directory a shell reported under `host` is a directory on this
+/// machine: no host at all, `localhost`, a loopback address, or a name this
+/// machine answers to.
+///
+/// What a reader of a finished block's directory asks before reading
+/// anything at it — the branch in its menu, the paths its output printed: a
+/// pane's blocks can come from both ends of an `ssh`, and each was filed
+/// under the host its shell named.
+pub fn on_this_machine(host: Option<&str>) -> bool {
+    host.is_none_or(is_this_machine)
 }
 
 /// Every name this machine has answered to since Crook started.

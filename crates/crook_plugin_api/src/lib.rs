@@ -452,7 +452,8 @@ pub struct BlockFacts {
     /// [`Capability::ReadBlock`].
     pub ran: Option<Ran>,
     /// Where it ran, or `None` without [`Capability::ReadWorkingDirectory`] —
-    /// and `None` as well for a shell that never said.
+    /// and `None` as well for a shell that never said, and for a command
+    /// that ran on another machine, as [`Answer::Where`] says of a pane.
     pub place: Option<Place>,
 }
 

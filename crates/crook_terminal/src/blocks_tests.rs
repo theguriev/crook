@@ -472,6 +472,7 @@ fn everything(emulator: &mut Emulator) -> impl PartialEq + std::fmt::Debug + use
                 block.command.clone(),
                 block.exit,
                 block.working_directory.clone(),
+                block.working_host.clone(),
                 block.rows.clone(),
                 block.output_from,
                 block.started_at.is_some(),
@@ -657,6 +658,77 @@ fn test_a_block_is_filed_under_the_directory_reported_before_it_however_the_read
             "cut at byte {split}"
         );
     }
+}
+
+#[test]
+fn test_a_block_is_filed_under_the_host_its_directory_was_reported_on() {
+    // `ssh buildbox` from `/work` on the laptop, into a server laid out the
+    // same way: the `ssh` ran here, and what was typed after it ran there, in
+    // a directory with the same path. The path alone cannot tell the two
+    // blocks apart, and whatever reads a block's directory on this machine —
+    // its branch, the paths its output printed — has to be able to.
+    let here = format!("\x1b]7;file://laptop/work\x07{A}$ {B}");
+    let ssh = format!("ssh buildbox\r\n{C}\x1b]7;file://buildbox/work\x07{A}$ {B}");
+    let make = format!("make\r\n{C}ok\r\n\x1b]133;D;0\x07{A}$ {B}");
+    let stream = [
+        Fed::Output(here.as_bytes()),
+        Fed::Submitted("ssh buildbox"),
+        Fed::Output(ssh.as_bytes()),
+        Fed::Submitted("make"),
+        Fed::Output(make.as_bytes()),
+    ];
+
+    let mut direct = lived(&stream);
+    let filed = direct
+        .blocks()
+        .iter()
+        .map(|block| {
+            (
+                block.command.clone(),
+                block.working_host.clone(),
+                block.working_directory.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec![
+            (
+                Some("ssh buildbox".to_owned()),
+                Some("laptop".to_owned()),
+                Some(PathBuf::from("/work"))
+            ),
+            (
+                Some("make".to_owned()),
+                Some("buildbox".to_owned()),
+                Some(PathBuf::from("/work"))
+            ),
+        ],
+        filed
+    );
+    let expected = everything(&mut direct);
+    assert_eq!(expected, everything(&mut mirrored(&stream)));
+}
+
+#[test]
+fn test_the_first_block_takes_the_host_with_the_directory_it_learns_at_the_submit() {
+    // The first block of a session opens before a byte has arrived, and is
+    // filed under the directory the shell reported by the time a line was
+    // submitted: the host comes with it, or the one block that learned its
+    // place late would be the one that forgot which machine it was on.
+    let prompt = format!("{A}$ {B}\x1b]7;file://buildbox/srv\x07");
+    let rest = format!("make\r\n{C}ok\r\n\x1b]133;D;0\x07{A}$ {B}");
+    let stream = [
+        Fed::Output(prompt.as_bytes()),
+        Fed::Submitted("make"),
+        Fed::Output(rest.as_bytes()),
+    ];
+
+    let direct = lived(&stream);
+    let [block] = direct.blocks() else {
+        panic!("one finished block, got {}", direct.blocks().len());
+    };
+    assert_eq!(block.working_directory.as_deref(), Some(Path::new("/srv")));
+    assert_eq!(block.working_host.as_deref(), Some("buildbox"));
 }
 
 #[test]

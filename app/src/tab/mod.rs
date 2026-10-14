@@ -44,7 +44,7 @@ mod tests;
 
 pub use group::{GroupId, TabGroup};
 pub use pane::{Direction, Pane, PaneEffect, PaneGroup, PaneId, SplitAxis};
-pub use remote::Remote;
+pub use remote::{Remote, on_this_machine};
 
 /// A tab's identity, stable for as long as the tab exists.
 ///

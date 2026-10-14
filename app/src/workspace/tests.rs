@@ -21109,6 +21109,111 @@ mod shells {
         }
 
         #[test]
+        fn a_block_that_ran_on_another_machine_offers_no_branch_from_this_one() {
+            // `ssh buildbox` from a checkout, into a server laid out the same
+            // way, and a command run there. The block is filed under the path
+            // the far side reported, which is this machine's checkout too, and
+            // its menu read this machine's branch there and offered to copy
+            // it as the branch the command ran on.
+            use crate::shell_integration::{Marks, Shell, Standing};
+            if matches!(Standing::current().marks, Marks::Installed(Shell::Fish)) {
+                // The line below that moves the shell is not fish's.
+                return;
+            }
+            let scratch = Scratch::new();
+            let checkout = scratch.path().join("checkout");
+            fs::create_dir_all(checkout.join(".git")).unwrap();
+            fs::write(
+                checkout.join(".git").join("HEAD"),
+                "ref: refs/heads/laptop-branch\n",
+            )
+            .unwrap();
+
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            run(&mut harness, pane, &format!("cd '{}'", checkout.display()));
+            let index_of = |harness: &Harness, command: &str| {
+                harness
+                    .workspace
+                    .read(&harness.app, |workspace, app| {
+                        workspace
+                            .terminal_blocks(pane, app)?
+                            .iter()
+                            .position(|block| block.command.as_deref() == Some(command))
+                    })
+                    .unwrap_or_else(|| panic!("no block ran {command:?}"))
+            };
+            let menu_facts = |harness: &Harness| {
+                harness.workspace.read(&harness.app, |workspace, _| {
+                    let menu = workspace.block_menu();
+                    (menu.branch.clone(), menu.directory.clone(), menu.elsewhere)
+                })
+            };
+
+            // Here first, so a menu that offers no branch below is one that
+            // declined to read it rather than one that could not.
+            run(&mut harness, pane, "echo HERE");
+            let index = index_of(&harness, "echo HERE");
+            open_block_menu(&mut harness, pane, index);
+            let (branch, directory, elsewhere) = menu_facts(&harness);
+            assert_eq!(branch.as_deref(), Some("laptop-branch"));
+            assert!(
+                !elsewhere,
+                "a block that ran here was taken for one elsewhere"
+            );
+            let here = directory.expect("the block was filed under the checkout");
+            harness.press("escape", Modifiers::default(), "\x1b");
+
+            // The shell says from here on that it is on another machine, the
+            // way the snippet does on the far side of an `ssh`, in the same
+            // directory.
+            run(&mut harness, pane, "__crook_host=buildbox.invalid");
+            run(&mut harness, pane, "echo THERE");
+            let index = index_of(&harness, "echo THERE");
+            let scene = open_block_menu(&mut harness, pane, index);
+            let (branch, directory, elsewhere) = menu_facts(&harness);
+            assert!(
+                elsewhere,
+                "the block that ran on buildbox was taken for one here"
+            );
+            assert_eq!(
+                branch, None,
+                "the menu offers this machine's branch for a command that ran on another"
+            );
+            assert_eq!(
+                directory,
+                Some(here),
+                "the directory to copy is still the one the shell said"
+            );
+            assert!(
+                frame_text(&scene).contains("Copy git branch"),
+                "the row is gone rather than inert"
+            );
+            harness.press("escape", Modifiers::default(), "\x1b");
+
+            // And the chord, with no menu up, which reads the branch itself.
+            let Some((clipboard, _system)) = working_clipboard(&harness) else {
+                return;
+            };
+            clipboard.write("nothing yet");
+            harness.run_command("crook/window/select-block-up");
+            harness.run_command("crook/window/copy-block-branch");
+            assert_eq!(
+                clipboard.read().as_deref(),
+                Some("nothing yet"),
+                "the chord copied this machine's branch for a command that ran on another"
+            );
+            // The block above it is the line that moved the shell, which ran
+            // here, and the same chord copies the branch for it.
+            harness.run_command("crook/window/select-block-up");
+            harness.run_command("crook/window/copy-block-branch");
+            assert_eq!(clipboard.read().as_deref(), Some("laptop-branch"));
+        }
+
+        #[test]
         fn escape_takes_the_block_menu_down() {
             // Every modal popup in the window answers Escape, and the workspace
             // claims the key before the pane under it can type one.

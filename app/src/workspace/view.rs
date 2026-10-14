@@ -300,6 +300,11 @@ pub struct BlockMenuState {
     pub(super) output_from: Option<usize>,
     /// Where the shell was when the block opened.
     pub(crate) directory: Option<PathBuf>,
+    /// Whether that directory is on another machine: the block ran on the
+    /// far side of an `ssh`, and its shell said so. The path is still copied
+    /// as the shell said it, and nothing on this machine is read by it — not
+    /// the branch, and not a plugin's place.
+    pub(crate) elsewhere: bool,
     /// The command line the block ran, when it has one.
     pub(crate) command: Option<String>,
     /// The status the shell reported for it, when it reported one.
@@ -392,6 +397,9 @@ struct BlockFacts {
     command: Option<String>,
     /// Where the shell was when the block opened, when it said.
     directory: Option<std::path::PathBuf>,
+    /// Whether that is a directory on another machine, as
+    /// [`BlockMenuState::elsewhere`] is.
+    elsewhere: bool,
     /// Which of the block's rows the command's own output starts on.
     output_from: Option<usize>,
 }
@@ -5893,6 +5901,7 @@ impl Workspace {
             return;
         };
         let directory = found.working_directory.clone();
+        let elsewhere = !crate::tab::on_this_machine(found.working_host.as_deref());
         let command = found.command.clone();
         let exit = found.exit;
         let output_from = found.output_from;
@@ -5907,8 +5916,13 @@ impl Workspace {
         // Cheap enough to do here — it walks up for `.git` and reads one small
         // file, and spawns nothing — which is why it is not a background task
         // whose answer would arrive after the menu was drawn.
+        //
+        // None for a block that ran on another machine: the path is a
+        // directory there, and this machine's checkout at the same path is
+        // not the one the command ran against.
         self.block_menu.branch = directory
             .as_deref()
+            .filter(|_| !elsewhere)
             .and_then(crate::git::current_branch)
             .map(|head| head.label().to_owned());
         self.block_menu.on = Some((pane, block));
@@ -5936,6 +5950,7 @@ impl Workspace {
             view.set_menu_at(None);
         }
         self.block_menu.directory = directory;
+        self.block_menu.elsewhere = elsewhere;
         self.block_menu.command = command;
         self.block_menu.exit = exit;
         self.block_menu.output_from = output_from;
@@ -5953,6 +5968,7 @@ impl Workspace {
         self.block_menu.on = None;
         self.block_menu.branch = None;
         self.block_menu.directory = None;
+        self.block_menu.elsewhere = false;
         self.block_menu.command = None;
         self.block_menu.exit = None;
         self.block_menu.output_from = None;
@@ -5986,6 +6002,7 @@ impl Workspace {
         Some(BlockFacts {
             command: found.command.clone(),
             directory: found.working_directory.clone(),
+            elsewhere: !crate::tab::on_this_machine(found.working_host.as_deref()),
             output_from: found.output_from,
         })
     }
@@ -6027,10 +6044,12 @@ impl Workspace {
             // The branch of the directory the *block* ran in. Taken from the
             // menu while one is up, because it read it when it opened and a
             // second walk could answer differently; worked out here otherwise,
-            // which is the same walk `open_block_menu` does.
+            // which is the same walk `open_block_menu` does — and, as there,
+            // none for a block that ran on another machine.
             BlockPart::Branch => match self.block_menu.on {
                 Some(_) => self.block_menu.branch.clone(),
                 None => facts
+                    .filter(|facts| !facts.elsewhere)
                     .and_then(|facts| facts.directory)
                     .as_deref()
                     .and_then(crate::git::current_branch)
