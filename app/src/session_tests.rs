@@ -858,6 +858,64 @@ fn a_tab_dropped_ahead_of_the_selected_one_does_not_move_the_selection() {
     );
 }
 
+/// The order a strip's tabs were used in, as their places in the bar.
+fn order_of_use(strip: &TabStrip) -> Vec<usize> {
+    strip
+        .mru()
+        .iter()
+        .map(|id| strip.index_of(*id).expect("the order names only open tabs"))
+        .collect()
+}
+
+#[test]
+fn the_order_the_tabs_were_used_in_comes_back() {
+    // Used the fifth, the first, the third, then the second, so the tab used
+    // before the second is the third — not the end of the bar, which is
+    // where a restore that adds the tabs in bar order put it.
+    let mut strip = TabStrip::new();
+    for _ in 1..5 {
+        strip.apply(TabAction::New);
+    }
+    let ids: Vec<TabId> = strip.iter().map(Tab::id).collect();
+    for position in [4, 0, 2, 1] {
+        strip.apply(TabAction::Select(ids[position]));
+    }
+    assert_eq!(order_of_use(&strip), [1, 2, 0, 4, 3]);
+
+    let restored = Session::of(&strip, None).restore().expect("five tabs");
+
+    assert_eq!(order_of_use(&restored), [1, 2, 0, 4, 3]);
+    assert_eq!(
+        restored.used_before().and_then(|id| restored.index_of(id)),
+        Some(2),
+        "back went to a tab nobody had come from"
+    );
+}
+
+#[test]
+fn a_file_without_the_order_of_use_still_puts_its_active_tab_first() {
+    // Written before the order was kept, or edited by hand: a tab with no
+    // place goes after every tab with one, and the active tab leads whatever
+    // its number says, since the head of the order is the tab on screen.
+    let session: Session = serde_json::from_str(
+        r#"{
+            "tabs": [
+                {"name": "a", "panes": [{"title": "a", "flex": 1.0}]},
+                {"name": "b", "panes": [{"title": "b", "flex": 1.0}], "recency": 0},
+                {"name": "c", "panes": [{"title": "c", "flex": 1.0}]},
+                {"name": "d", "panes": [{"title": "d", "flex": 1.0}], "recency": 1}
+            ],
+            "active": 2
+        }"#,
+    )
+    .expect("reads whole");
+
+    let restored = session.restore().expect("four tabs");
+
+    assert_eq!(restored.active().expect("a tab").name(), "c");
+    assert_eq!(order_of_use(&restored), [2, 1, 3, 0]);
+}
+
 #[test]
 fn a_tab_opened_after_a_restore_is_named_past_every_pane_that_came_back() {
     // One tab split in two is `agent 1` and `agent 2`; the counter was moved

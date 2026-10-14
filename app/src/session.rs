@@ -191,6 +191,19 @@ pub struct TabSnapshot {
     /// position out of range is read as `None` rather than refused: a tab in
     /// no group is a better answer than no window.
     pub group: Option<usize>,
+    /// How recently it was used: `0` for the tab that was active, `1` for the
+    /// one used before it, and so on.
+    ///
+    /// Closing the active tab and going back to the tab used before it both
+    /// go by this order, and a window that came back without it sent both to
+    /// a tab nobody had come from — restoring adds the tabs in bar order, and
+    /// left the order of use the reverse of the bar. On the tab rather than as
+    /// a list of positions for the reason `group` is. `None` for a file that
+    /// predates this key and for a closed tab's snapshot, since a place in a
+    /// whole window's order is [`Session::of`]'s to fill in. Two tabs with one
+    /// number keep their bar order between them, and a tab with none goes
+    /// after every tab with one.
+    pub recency: Option<usize>,
 }
 
 /// One pane: where its shell was, and how much of the split it took.
@@ -266,6 +279,7 @@ impl Session {
             })
             .collect();
 
+        let mut written = Vec::with_capacity(strip.len());
         for tab in strip.iter() {
             let Some(mut snapshot) = TabSnapshot::of(tab) else {
                 continue;
@@ -277,6 +291,19 @@ impl Session {
                 .group()
                 .and_then(|id| groups.iter().position(|held| *held == id));
             tabs.push(snapshot);
+            written.push(tab.id());
+        }
+
+        // Counted among the tabs written, so a tab left out — the settings
+        // pane's — leaves no gap in the numbers.
+        let used: Vec<TabId> = strip
+            .mru()
+            .iter()
+            .copied()
+            .filter(|id| written.contains(id))
+            .collect();
+        for (snapshot, id) in tabs.iter_mut().zip(&written) {
+            snapshot.recency = used.iter().position(|used| used == id);
         }
 
         Self {
@@ -304,6 +331,9 @@ impl Session {
         // selection onto its neighbour.
         let mut active = None;
         let mut last = None;
+        // The tabs that came back with a place in the order of use, and that
+        // place.
+        let mut used: Vec<(usize, TabId)> = Vec::new();
 
         for (position, snapshot) in self.tabs.iter().take(MAX_TABS).enumerate() {
             let Some(tab) = snapshot.restore() else {
@@ -316,6 +346,9 @@ impl Session {
                 active = Some(id);
             }
             last = Some(id);
+            if let Some(recency) = snapshot.recency {
+                used.push((recency, id));
+            }
 
             if let Some(group) = snapshot.group
                 && let Some(members) = members.get_mut(group)
@@ -334,11 +367,16 @@ impl Session {
             strip.adopt_group(group.name.clone(), group.collapsed, &members);
         }
 
+        // Stable, so two tabs a hand edit gave one number keep their bar
+        // order between them.
+        used.sort_by_key(|(recency, _)| *recency);
+        let used: Vec<TabId> = used.into_iter().map(|(_, id)| id).collect();
+
         // Clamped rather than refused: an index past the end names the tab
         // that would have been selected, and the last one is a better answer
         // than no window.
         if let Some(active) = active.or(last) {
-            strip.finish_restore(active);
+            strip.finish_restore(active, &used);
         }
         Some(strip)
     }
@@ -460,9 +498,10 @@ impl Session {
 }
 
 impl TabSnapshot {
-    /// Records one tab, with no group — a group is a position in a whole
-    /// session's list, which [`Session::of`] fills in — or `None` when it
-    /// holds nothing worth recording.
+    /// Records one tab, with no group and no recency — a group is a position
+    /// in a whole session's list and a recency a place in a whole window's
+    /// order of use, which [`Session::of`] fills in — or `None` when it holds
+    /// nothing worth recording.
     pub(crate) fn of(tab: &Tab) -> Option<Self> {
         let panes: Vec<_> = tab.panes().iter().map(PaneSnapshot::of).collect();
         if panes.is_empty() {
@@ -482,6 +521,7 @@ impl TabSnapshot {
             pinned: tab.is_pinned(),
             color: tab.color().map(|color| color.name().to_owned()),
             group: None,
+            recency: None,
         })
     }
 
