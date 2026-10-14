@@ -903,9 +903,9 @@ Twenty-one features, and the page that configures them:
   person's own and taken out again when switched off), whether a bell plays the system's alert
   sound (off, as in Warp; a pane you are not looking at is marked either way, and a burst is
   one sound), which stops post a notification, whether a close asks before ending agents that
-  are still working, the Shell page's login shell, Tab key and Option as Meta, whether the tabs
-  panel shows and how wide it is, and — set in the file rather than on the page — its font
-  family and the line each agent is resumed with.
+  are still working, the Shell page's login shell, Tab key, Option as Meta and — on Linux —
+  middle-click paste, whether the tabs panel shows and how wide it is, and — set in the file
+  rather than on the page — its font family and the line each agent is resumed with.
   Beside them, **Default terminal** makes Crook the terminal the system opens — Launch
   Services' shell handler on macOS, what Finder runs a script with, and the first line of
   `xdg-terminals.list` on Linux — and says so once it is; it is the system's, so it is asked
@@ -1028,6 +1028,12 @@ themselves. A program can write the clipboard too, with OSC 52 — what `tmux`, 
 copy over `ssh` use — and it is the same clipboard `cmd-c` writes; an empty write is dropped rather than
 clearing what somebody had copied. What a program cannot do is *read* it: that direction is
 refused, since answering it would hand the clipboard to anything that can print to the pane.
+On Linux a selection is also **PRIMARY**, as in every Linux terminal: the end of a drag — over
+the output, the composer or any text field — is what a middle click in another program pastes,
+and a middle click in a pane pastes what was selected elsewhere, at the composer's caret (beside
+what is selected there, not over it) or, under a program, as a bracketed paste (Shift past one
+that reads the mouse). The clipboard is left alone. Settings → Shell → *Middle-click pastes the selection* (`middle_click_paste`) turns
+both off. On a Wayland desktop it goes through XWayland.
 **Files dropped on the window** have their paths typed, each quoted as one word and a space
 between two, into the focused pane — not the one under the pointer, since a drop arrives with no
 position: into its composer at the caret, or with no composer to the pty as a paste, bracketed

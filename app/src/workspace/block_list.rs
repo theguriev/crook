@@ -899,6 +899,22 @@ impl BlockList {
         self.view.hover(block, over.and_then(|(_, on)| on))
     }
 
+    /// Pastes PRIMARY into the pane, for a middle press on the list.
+    ///
+    /// Every middle press here is one, because the list never gives a press
+    /// to a program — save on the composer's half of the prompt's row, which
+    /// the composer answers itself, exactly as it does a left press there.
+    fn middle_press(&self, position: Vector2F, ctx: &mut EventContext) -> bool {
+        if !self
+            .bounds()
+            .is_some_and(|bounds| bounds.contains_point(position))
+            || self.press_is_the_composer_s(position)
+        {
+            return false;
+        }
+        self.output.paste_primary(ctx)
+    }
+
     /// Presses one of a block's controls, or a selection into the open block.
     fn press(&self, event: &Event, ctx: &mut EventContext) -> bool {
         let Event::MouseDown {
@@ -1865,6 +1881,11 @@ impl Element for BlockList {
                 modifiers,
                 ..
             } if self.open_link(*position, *modifiers) => true,
+            Event::MouseDown {
+                button: MouseButton::Middle,
+                position,
+                ..
+            } => self.middle_press(*position, ctx),
             Event::MouseDown { .. } => self.press(event, ctx),
             _ => false,
         }

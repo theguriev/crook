@@ -909,6 +909,35 @@ fn text_left_with_nothing_printable_in_it_inserts_nothing() {
 }
 
 #[test]
+fn a_paste_at_the_caret_adds_to_the_line_and_keeps_what_was_selected() {
+    // A middle click's paste: `foo` double-clicked and then pasted again is
+    // two of it, not one written over itself, and a word selected earlier is
+    // not quietly replaced by whatever PRIMARY holds now.
+    let mut editor = at("ls foo", 0);
+    editor.select_word_at(4);
+    editor.paste_at_caret("foo");
+    assert_eq!((editor.text(), editor.caret()), ("ls foofoo", 9));
+    assert!(editor.selection().is_empty());
+
+    // At the caret, which is the end the selection was made towards.
+    let mut editor = at("git checkout main", 0);
+    editor.set_selection(Selection::new(17, 13));
+    editor.paste_at_caret("feature-x ");
+    assert_eq!(editor.text(), "git checkout feature-x main");
+
+    // One step back gives back the line and the selection both.
+    assert!(editor.undo());
+    assert_eq!(editor.text(), "git checkout main");
+    assert_eq!(editor.selection(), Selection::new(17, 13));
+
+    // Through the same filter as every paste, and nothing is nothing.
+    let mut editor = at("abc", 3);
+    editor.paste_at_caret("\u{1b}\u{7}");
+    assert_eq!(editor.text(), "abc");
+    assert!(!editor.undo());
+}
+
+#[test]
 fn an_edit_that_joins_two_characters_leaves_the_caret_after_the_one_they_make() {
     // Typed in front of a combining accent, an `e` becomes `é` with it, and
     // the caret belongs after the `é` — not between the letter and its accent,

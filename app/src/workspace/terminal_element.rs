@@ -424,8 +424,9 @@ impl TerminalElement {
         self.output.type_key(event, ctx) != Typed::Ignored
     }
 
-    /// Starts a selection where a press landed, or hands the press to a
-    /// program that is reading the mouse.
+    /// Starts a selection where a press landed, hands the press to a program
+    /// that is reading the mouse, or pastes PRIMARY for a middle one that it
+    /// is not.
     fn press(
         &self,
         button: MouseButton,
@@ -443,9 +444,17 @@ impl TerminalElement {
             return true;
         }
 
-        // Only the primary button selects. A right or middle click a program
-        // did not want has nothing to do with a selection, and taking one
-        // would throw away the highlight somebody was about to copy.
+        // A middle press the program did not take pastes PRIMARY, which is
+        // what one means in every terminal on X11 and Wayland. Shift reaches
+        // here past a program reading the mouse, as it does for a drag.
+        if button == MouseButton::Middle {
+            return self.output.paste_primary(ctx);
+        }
+
+        // Only the primary button selects. A right click a program did not
+        // want, or a middle one with PRIMARY switched off, has nothing to do
+        // with a selection, and taking one would throw away the highlight
+        // somebody was about to copy.
         if button != MouseButton::Left {
             return false;
         }

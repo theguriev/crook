@@ -532,7 +532,7 @@ impl Element for TextField {
             Event::MouseUp {
                 button: MouseButton::Left,
                 ..
-            } => self.input.release(),
+            } => self.input.release(&self.clipboard),
             _ => false,
         }
     }

@@ -24,7 +24,7 @@ use crook_terminal::{
 use crookui_core::event::{Event, Ime, Keystroke};
 use crookui_core::presenter::EventContext;
 
-use crate::clipboard::Clipboard;
+use crate::clipboard::{self, Clipboard};
 use crate::input_keys::{self, Platform, Route};
 use crate::pane_composition::PaneComposition;
 use crate::pane_selection::PaneSelection;
@@ -730,11 +730,50 @@ impl Output {
             .is_some_and(|mouse| mouse.gesture.is_dragging())
     }
 
-    /// Ends the gesture, reporting whether this pane had one.
+    /// Ends the gesture, reporting whether this pane had one, and offers what
+    /// it selected as PRIMARY where the desktop keeps one.
+    ///
+    /// Only a gesture that ends holding a selection offers anything: a plain
+    /// click lets go of the highlight and leaves PRIMARY with whichever
+    /// program holds it, the way every X11 terminal does. See
+    /// [`crate::clipboard`].
     pub fn release(&self) -> bool {
-        self.mouse
+        if !self
+            .mouse
             .as_ref()
             .is_some_and(|mouse| mouse.gesture.release())
+        {
+            return false;
+        }
+        // Asked before the text is, because the text is not free: on the grid
+        // it is read back out of the emulator's history, and with PRIMARY off
+        // or absent nothing would be done with it.
+        if clipboard::primary_in_use()
+            && let (Some(clipboard), Some(selected)) =
+                (self.clipboard.as_ref(), self.selected_text())
+        {
+            clipboard.write_primary(&selected);
+        }
+        true
+    }
+
+    /// Asks for PRIMARY to be pasted into this pane, for a middle press the
+    /// program here did not take, reporting whether the press was answered.
+    ///
+    /// Dispatched rather than read here, because a read waits on whichever
+    /// program holds PRIMARY and this runs on the thread that draws; see
+    /// [`WorkspaceAction::PastePrimary`]. `false` where there is no PRIMARY to
+    /// paste, or the person switched it off, which leaves the press doing what
+    /// it did before there was any: nothing.
+    pub fn paste_primary(&self, ctx: &mut EventContext) -> bool {
+        let Some(pane) = self.pane() else {
+            return false;
+        };
+        if !clipboard::primary_in_use() {
+            return false;
+        }
+        ctx.dispatch_typed_action(WorkspaceAction::PastePrimary(pane));
+        true
     }
 
     /// Which mouse reports the program in this pane has asked for.

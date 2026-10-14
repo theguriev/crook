@@ -475,6 +475,26 @@ impl CommandInput {
         true
     }
 
+    /// Asks for PRIMARY to be pasted into the field, for a middle press on it.
+    ///
+    /// At the caret rather than where the press landed, the way a terminal
+    /// pastes at its cursor: a middle click aimed loosely at the line is a
+    /// paste into the line, not a request to move the caret first. The paste
+    /// itself is the workspace's, once PRIMARY's owner has answered — see
+    /// [`WorkspaceAction::PastePrimary`].
+    fn paste_primary(&self, position: Vector2F, ctx: &mut EventContext) -> bool {
+        let (Some(bounds), Some(pane)) = (self.bounds(), self.pane) else {
+            return false;
+        };
+        if !self.takes_press(position - bounds.origin(), bounds.width())
+            || !crate::clipboard::primary_in_use()
+        {
+            return false;
+        }
+        ctx.dispatch_typed_action(WorkspaceAction::PastePrimary(pane));
+        true
+    }
+
     /// Drags the selection out to the pointer.
     fn drag(&self, position: Vector2F, ctx: &mut EventContext) -> bool {
         let Some(bounds) = self.bounds() else {
@@ -723,7 +743,7 @@ impl Element for CommandInput {
             Event::MouseUp {
                 button: MouseButton::Left,
                 ..
-            } => return self.input.release(),
+            } => return self.input.release(&self.clipboard),
             _ => {}
         }
 
@@ -744,6 +764,11 @@ impl Element for CommandInput {
                 click_count,
                 ..
             } => self.press(*position, *click_count, ctx),
+            Event::MouseDown {
+                button: MouseButton::Middle,
+                position,
+                ..
+            } => self.paste_primary(*position, ctx),
             _ => false,
         }
     }

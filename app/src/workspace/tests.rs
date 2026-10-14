@@ -1437,6 +1437,49 @@ impl Harness {
         })
     }
 
+    /// What is on PRIMARY, which a test build keeps in memory rather than on
+    /// the desktop of whoever runs the suite. See [`crate::clipboard`].
+    fn primary(&self) -> Option<String> {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.clipboard().primary())
+    }
+
+    /// Puts `text` on PRIMARY the way another program selecting it would.
+    fn select_elsewhere(&self, text: &str) {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.clipboard().select_elsewhere(text);
+        });
+    }
+
+    /// The same, from a program that then stops answering until the owner
+    /// handed back answers or is dropped. See
+    /// [`crate::clipboard::Clipboard::select_and_hang`].
+    fn select_and_hang(&self, text: &str) -> crate::clipboard::HungOwner {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.clipboard().select_and_hang(text)
+        })
+    }
+
+    /// Presses the middle button at a point and lets it go, holding Shift or
+    /// not.
+    fn middle_click(&mut self, position: Vector2F, shift: bool) {
+        let modifiers = Modifiers {
+            shift,
+            ..Modifiers::default()
+        };
+        self.dispatch(Event::MouseDown {
+            button: MouseButton::Middle,
+            position,
+            modifiers,
+            click_count: 1,
+        });
+        self.dispatch(Event::MouseUp {
+            button: MouseButton::Middle,
+            position,
+            modifiers,
+        });
+    }
+
     /// Selects the first occurrence of `text` in a pane's output, the way
     /// `--select-output` does.
     fn select_in_output(&mut self, pane: PaneId, text: &str) -> bool {
@@ -15838,7 +15881,9 @@ fn a_query_that_empties_the_page_shows_the_first_page_that_has_something() {
     let mut harness = Harness::new(1);
     harness.open_settings_page();
     harness.frame();
-    harness.type_text("clipboard");
+    // A word only the Keyboard Shortcuts page answers to. Not "clipboard",
+    // which the Shell page's middle-click row answers to on Linux, ahead of it.
+    harness.type_text("yank");
 
     let text = frame_text(&harness.frame());
     assert!(
@@ -16218,6 +16263,68 @@ fn which_option_is_meta_is_kept_with_the_general_options() {
     assert_eq!(
         harness.general().option_as_meta,
         crate::settings::OptionAsMeta::Left
+    );
+}
+
+#[test]
+fn the_shell_page_offers_middle_click_paste_where_the_desktop_keeps_primary() {
+    // macOS and Windows have one clipboard and nothing a middle click pastes,
+    // so a switch for it there would be a switch connected to nothing. A
+    // window tall enough for the whole page, since the row is its last.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.select_settings_section("Shell");
+    let scene = harness.frame_sized(vec2f(WINDOW.x(), 2400.));
+    let text = text_where(&scene, |position| {
+        settings_pane_box(&scene).contains_point(position)
+    });
+
+    assert_eq!(
+        text.contains("Middle-click pastes the selection"),
+        crate::clipboard::HAS_PRIMARY,
+        "{text:?}"
+    );
+}
+
+#[test]
+fn a_selection_in_a_text_field_is_offered_as_primary_until_that_is_switched_off() {
+    // The settings page's search box, which is every field that is not a
+    // composer: the end of a drag across it is PRIMARY on Linux, as the end of
+    // one across any GTK entry is — and with the switch off it takes nothing
+    // from the program that holds PRIMARY now.
+    let mut harness = Harness::new(1);
+    assert!(harness.general().middle_click_paste, "on, out of the box");
+    harness.open_settings_page();
+    harness.click_section_field();
+    harness.type_text("zqvx");
+    assert_eq!(harness.search_text(), "zqvx");
+
+    let field = settings_field_boxes(&harness.frame())[0];
+    let across = |harness: &mut Harness| {
+        let (from, to) = (
+            vec2f(field.min_x() + 1., center(field).y()),
+            vec2f(field.max_x() - 1., center(field).y()),
+        );
+        harness.hold(from, 1);
+        harness.drag_to(to);
+        harness.let_go(to);
+    };
+
+    across(&mut harness);
+    assert_eq!(
+        harness.primary().as_deref(),
+        crate::clipboard::HAS_PRIMARY.then_some("zqvx")
+    );
+
+    harness.dispatch_workspace_action(SettingsAction::ToggleMiddleClickPaste.into());
+    assert!(!harness.general().middle_click_paste);
+    harness.select_elsewhere("held by another program");
+    harness.frame();
+    across(&mut harness);
+    assert_eq!(
+        harness.primary().as_deref(),
+        Some("held by another program"),
+        "the switch was off and the drag took PRIMARY all the same"
     );
 }
 
@@ -17907,6 +18014,377 @@ mod shells {
             Some("copy"),
             "the field overwrote the clipboard the output had just been copied to"
         );
+    }
+
+    #[test]
+    fn the_end_of_a_drag_in_a_pane_is_primary_and_the_clipboard_keeps_what_was_copied() {
+        // X11's other selection, from both halves of a pane: what a drag took
+        // out of the output, and then what one took out of the line being
+        // composed, is what a middle click anywhere pastes. The clipboard
+        // keeps what was last copied, because selecting is not copying.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        let row = run_and_find(&mut harness, "echo 'COPY ME' | tr A-Z a-z", "copy me");
+
+        // Taken as late as it can be: the machine's clipboard is every
+        // process's, and a suite running beside this one copies to it.
+        let clipboard = working_clipboard(&harness);
+        drag_across(&mut harness, (row, 0), (row, 3));
+        assert_eq!(harness.terminal_selection(pane).as_deref(), Some("copy"));
+        assert_eq!(
+            harness.primary().as_deref(),
+            crate::clipboard::HAS_PRIMARY.then_some("copy"),
+            "the drag across the output was not offered as PRIMARY"
+        );
+        if let Some((clipboard, _held)) = clipboard.as_ref() {
+            assert_eq!(
+                clipboard.read().as_deref(),
+                Some("crook: nothing was copied over this"),
+                "a selection was copied to the clipboard"
+            );
+        }
+
+        if draws_blocks(&harness) {
+            type_line(&mut harness, "abcd");
+            let cell = CellFont::headless(CELL_FONT_SIZE).metrics().width;
+            let first = composer_text(&mut harness) - vec2f(cell * 0.4, 0.);
+            let last = first + vec2f(cell * 3.8, 0.);
+            harness.hold(first, 1);
+            harness.drag_to(last);
+            harness.let_go(last);
+            assert_eq!(harness.field_selection(pane), "abcd");
+            assert_eq!(
+                harness.primary().as_deref(),
+                crate::clipboard::HAS_PRIMARY.then_some("abcd"),
+                "the drag across the composer was not offered as PRIMARY"
+            );
+        }
+
+        // Switched off, a drag takes nothing from the program that holds
+        // PRIMARY now.
+        harness.dispatch_workspace_action(SettingsAction::ToggleMiddleClickPaste.into());
+        harness.select_elsewhere("held by another program");
+        harness.frame();
+        drag_across(&mut harness, (row, 0), (row, 6));
+        assert_eq!(harness.terminal_selection(pane).as_deref(), Some("copy me"));
+        assert_eq!(
+            harness.primary().as_deref(),
+            Some("held by another program"),
+            "the switch was off and the drag took PRIMARY all the same"
+        );
+    }
+
+    #[test]
+    fn a_middle_press_pastes_primary_into_the_composer_at_its_caret() {
+        // The paste chord's path with PRIMARY in the clipboard's place: from a
+        // press on the output above the composer, and from one on the
+        // composer itself, the text goes into the line being written rather
+        // than to the shell — and nothing is sent until Enter.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        let row = run_and_find(&mut harness, "echo 'PASTE ME' | tr A-Z a-z", "paste me");
+        if !draws_blocks(&harness) {
+            eprintln!("skipped: the pane fell back to the grid, which has no composer");
+            return;
+        }
+        harness.select_elsewhere("zq7xv");
+
+        // Switched off first: the press does what it always did, which is
+        // nothing.
+        harness.dispatch_workspace_action(SettingsAction::ToggleMiddleClickPaste.into());
+        harness.frame();
+        let on_output = grid_cell(&mut harness, row, 0, 0.5);
+        harness.middle_click(on_output, false);
+        harness.settle(NO_LEAK_PATIENCE);
+        assert_eq!(harness.field_text(pane), "", "the switch was off");
+        harness.dispatch_workspace_action(SettingsAction::ToggleMiddleClickPaste.into());
+        harness.frame();
+
+        harness.middle_click(on_output, false);
+        if !crate::clipboard::HAS_PRIMARY {
+            harness.settle(NO_LEAK_PATIENCE);
+            assert_eq!(harness.field_text(pane), "", "there is no PRIMARY here");
+            return;
+        }
+        harness.wait_for("a middle press on the output pasted nothing", |harness| {
+            harness.field_text(pane) == "zq7xv"
+        });
+
+        let on_composer = composer_text(&mut harness);
+        harness.middle_click(on_composer, false);
+        harness.wait_for("a middle press on the composer pasted nothing", |harness| {
+            harness.field_text(pane) == "zq7xvzq7xv"
+        });
+        assert!(
+            !harness.terminal_text(pane).contains("zq7xv"),
+            "the paste reached the shell rather than the line being written"
+        );
+    }
+
+    #[test]
+    fn a_middle_press_on_a_program_that_is_not_reading_it_pastes_primary_bracketed() {
+        // A full-screen program that asked for bracketed paste and for the
+        // mouse: a plain middle press is the program's, and Shift takes it
+        // back, the way it takes a drag back — and then PRIMARY arrives inside
+        // the markers, as the paste chord's clipboard does. `read` echoes what
+        // it is given, so the markers are on screen.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        await_prompt(&mut harness, pane);
+        harness.type_into(
+            pane,
+            "printf '\\033[?1049h\\033[?1000h\\033[?2004h'; printf 'zq%sxv\\n' 7; read line; \
+             printf '\\033[?2004l\\033[?1000l\\033[?1049l'\n",
+        );
+        harness.wait_for("the program never drew its screen", |harness| {
+            harness.alt_screen(pane) && harness.terminal_text(pane).contains("zq7xv")
+        });
+        harness.select_elsewhere("PQ3WK");
+        let on_program = center(panel_of_the_pane(&mut harness));
+
+        harness.dispatch_workspace_action(SettingsAction::ToggleMiddleClickPaste.into());
+        harness.frame();
+        harness.middle_click(on_program, true);
+        harness.settle(NO_LEAK_PATIENCE);
+        assert!(
+            !harness.terminal_text(pane).contains("PQ3WK"),
+            "the switch was off"
+        );
+        harness.dispatch_workspace_action(SettingsAction::ToggleMiddleClickPaste.into());
+        harness.frame();
+
+        harness.middle_click(on_program, false);
+        harness.settle(NO_LEAK_PATIENCE);
+        assert!(
+            !harness.terminal_text(pane).contains("PQ3WK"),
+            "a press the program asked for was pasted over"
+        );
+
+        harness.middle_click(on_program, true);
+        if !crate::clipboard::HAS_PRIMARY {
+            harness.settle(NO_LEAK_PATIENCE);
+            assert!(!harness.terminal_text(pane).contains("PQ3WK"));
+            return;
+        }
+        harness.wait_for("Shift and a middle press pasted nothing", |harness| {
+            harness.terminal_text(pane).contains("PQ3WK")
+        });
+        let screen = harness.terminal_text(pane);
+        assert!(
+            screen.contains("[200~PQ3WK"),
+            "the paste was not bracketed: {screen:?}"
+        );
+    }
+
+    #[test]
+    fn a_middle_press_on_a_grid_scrolled_back_draws_the_live_output_it_pasted_into() {
+        // The paste scrolls the grid back down to the live output, as typing
+        // does, and that is a frame nobody has drawn. A program that echoes
+        // asks for it by printing; one that does not — a password prompt,
+        // here `read` under `stty -echo` — prints nothing, so the paste has to
+        // ask for the frame itself, or the window keeps showing the history as
+        // though the press did nothing.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        harness.type_into(
+            pane,
+            "for i in $(seq 1 200); do echo line-$i; done; stty -echo; printf 'REA%sY\\n' D; \
+             read -r line; stty echo; printf 'go%s-%s\\n' t \"$line\"\n",
+        );
+        harness.wait_for("the program never got to its prompt", |harness| {
+            harness.terminal_text(pane).contains("READY")
+        });
+        assert!(
+            !draws_blocks(&harness),
+            "two hundred lines did not take the pane to the grid"
+        );
+
+        let over_the_grid = grid_cell(&mut harness, 1, 1, 0.5);
+        harness.dispatch(Event::ScrollWheel {
+            position: over_the_grid,
+            delta: ScrollDelta::Lines(vec2f(0., 20.)),
+            modifiers: Modifiers::default(),
+        });
+        assert!(
+            !harness.terminal_text(pane).contains("READY"),
+            "the wheel did not reach the scrollback"
+        );
+        harness.select_elsewhere("PQ3WK");
+        harness.middle_click(over_the_grid, false);
+        if !crate::clipboard::HAS_PRIMARY {
+            harness.settle(NO_LEAK_PATIENCE);
+            assert!(!harness.terminal_text(pane).contains("READY"));
+            return;
+        }
+        // Everything the press itself asked for, drawn: what is left to ask
+        // for is the paste's, which arrives on the queue.
+        harness.frame();
+        assert!(!harness.needs_a_frame());
+        harness.wait_for("the middle press pasted nothing", |harness| {
+            harness.terminal_text(pane).contains("READY")
+        });
+        assert!(
+            harness.needs_a_frame(),
+            "the paste moved the grid to the live output and asked for no frame"
+        );
+
+        // And it was the program the text went to.
+        harness.type_into(pane, "\n");
+        harness.wait_for("the paste never reached the program", |harness| {
+            harness.terminal_text(pane).contains("got-PQ3WK")
+        });
+    }
+
+    #[test]
+    fn a_middle_press_while_primary_is_being_read_joins_that_read() {
+        // A read of PRIMARY holds a worker of the pool until its owner
+        // answers, which for one that has hung is about half a minute. So a
+        // press made while a read is out starts no second one: it is one
+        // paste, however many presses came before the answer — and the next
+        // press after it reads again.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        let row = run_and_find(&mut harness, "echo 'PASTE ME' | tr A-Z a-z", "paste me");
+        if !draws_blocks(&harness) {
+            eprintln!("skipped: the pane fell back to the grid, which has no composer");
+            return;
+        }
+        if !crate::clipboard::HAS_PRIMARY {
+            return;
+        }
+        harness.select_elsewhere("zq7xv");
+        let on_output = grid_cell(&mut harness, row, 0, 0.5);
+
+        // Three presses before the queue is pumped, which is where the answer
+        // of the first comes home.
+        for _ in 0..3 {
+            harness.middle_click(on_output, false);
+        }
+        harness.wait_for("the middle presses pasted nothing", |harness| {
+            !harness.field_text(pane).is_empty()
+        });
+        harness.settle(NO_LEAK_PATIENCE);
+        assert_eq!(
+            harness.field_text(pane),
+            "zq7xv",
+            "every press read PRIMARY for itself"
+        );
+
+        harness.middle_click(on_output, false);
+        harness.wait_for("a press after the answer pasted nothing", |harness| {
+            harness.field_text(pane) == "zq7xvzq7xv"
+        });
+    }
+
+    #[test]
+    fn a_middle_press_after_a_selection_here_reads_again_rather_than_wait_on_a_hung_owner() {
+        // A read is put to whoever held PRIMARY when it began. While nothing
+        // here has taken PRIMARY since, a press joins it, however long the
+        // owner takes — that is what stops a few clicks on a program that
+        // has hung from tying up the pool. But once a selection here has
+        // taken it, the read out is asking a program that no longer holds
+        // it, so a press reads again, which Crook answers at once; and the
+        // old read's answer, when the hung program is resumed and gives it,
+        // is not pasted.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        let row = run_and_find(&mut harness, "echo 'PASTE ME' | tr A-Z a-z", "paste me");
+        if !draws_blocks(&harness) {
+            eprintln!("skipped: the pane fell back to the grid, which has no composer");
+            return;
+        }
+        if !crate::clipboard::HAS_PRIMARY {
+            return;
+        }
+        let on_output = grid_cell(&mut harness, row, 0, 0.5);
+
+        // Two presses on a program that has stopped answering, with time
+        // between them: one read, and one paste when it answers.
+        let hung = harness.select_and_hang("first");
+        harness.middle_click(on_output, false);
+        harness.settle(NO_LEAK_PATIENCE);
+        harness.middle_click(on_output, false);
+        harness.settle(NO_LEAK_PATIENCE);
+        assert_eq!(harness.field_text(pane), "", "a hung owner answered");
+        hung.answer();
+        harness.wait_for("the hung owner's answer was not pasted", |harness| {
+            !harness.field_text(pane).is_empty()
+        });
+        harness.settle(NO_LEAK_PATIENCE);
+        assert_eq!(
+            harness.field_text(pane),
+            "first",
+            "the second press read PRIMARY again while the first read was out"
+        );
+
+        // Hung again, and then a drag here takes PRIMARY: the next press is
+        // not left waiting on the program that held it before.
+        let stale = harness.select_and_hang("stale");
+        harness.middle_click(on_output, false);
+        harness.settle(NO_LEAK_PATIENCE);
+        drag_across(&mut harness, (row, 0), (row, 4));
+        assert_eq!(harness.primary().as_deref(), Some("paste"));
+        harness.middle_click(on_output, false);
+        harness.wait_for(
+            "a press after a selection here waited on the program that held PRIMARY before",
+            |harness| harness.field_text(pane) == "firstpaste",
+        );
+
+        // The old read answers while a newer one is out, to a program that
+        // took PRIMARY after Crook and has hung as well: the old answer is
+        // dropped, and the newer read is still the one waited on.
+        let newer = harness.select_and_hang("newer");
+        harness.middle_click(on_output, false);
+        harness.settle(NO_LEAK_PATIENCE);
+        stale.answer();
+        harness.settle(NO_LEAK_PATIENCE);
+        assert_eq!(
+            harness.field_text(pane),
+            "firstpaste",
+            "the answer of a read overtaken by a selection here was pasted"
+        );
+        newer.answer();
+        harness.wait_for(
+            "the newer read's answer was lost to the old one's",
+            |harness| harness.field_text(pane) == "firstpastenewer",
+        );
+
+        // And one that nothing newer overtook, but a selection here did:
+        // what was selected before is not what a press would paste now.
+        let old = harness.select_and_hang("old");
+        harness.middle_click(on_output, false);
+        harness.settle(NO_LEAK_PATIENCE);
+        drag_across(&mut harness, (row, 0), (row, 4));
+        old.answer();
+        harness.settle(NO_LEAK_PATIENCE);
+        assert_eq!(
+            harness.field_text(pane),
+            "firstpastenewer",
+            "a read's answer was pasted after a selection here took PRIMARY"
+        );
+
+        // Nothing is left waiting: the next press reads, and pastes.
+        harness.middle_click(on_output, false);
+        harness.wait_for("a press after the old answers pasted nothing", |harness| {
+            harness.field_text(pane) == "firstpastenewerpaste"
+        });
     }
 
     #[test]
