@@ -504,6 +504,22 @@ impl Editor {
         self.edit(self.selection.range(), &pasted);
     }
 
+    /// Inserts pasted text at the caret and leaves the selected text where it
+    /// is, as a terminal pastes PRIMARY on a middle click: xterm and VTE put it
+    /// where the cursor is and leave the selection alone. Not every X11 field
+    /// does — a GtkEntry pastes where it was clicked, and over the selection
+    /// when clicked inside it — but over the selection is the wrong place in a
+    /// terminal's line, since the selection is, as often as not, where PRIMARY
+    /// came from. The selection goes, as it does after any edit.
+    ///
+    /// Through [`text::printable`], as [`Self::paste`] is, and for the same
+    /// reason. One undo step, which gives the selection back with the text.
+    pub fn paste_at_caret(&mut self, pasted: &str) {
+        let pasted = text::printable(pasted);
+        let caret = self.selection.head;
+        self.edit(caret..caret, &pasted);
+    }
+
     // --- Undo ----------------------------------------------------------------
 
     /// Steps back one edit, returning whether there was one.

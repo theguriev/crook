@@ -2339,6 +2339,22 @@ that every unrelated drag afterwards, from any other press or from none, rewrote
 selection. What keeps a neighbour's drag out is `PaneSelection`, not the layer: only the pane
 the press landed on has a gesture to continue.
 
+**On Linux the end of a drag is PRIMARY, and a middle press pastes it.** X11 keeps a second
+selection beside the clipboard, and every Linux terminal both sets it from a selection and
+pastes it on a middle click; `app/src/clipboard.rs` holds the argument. The release that ends a
+gesture — `Output::release` for the output, `TextInput::release` for the composer and every
+text field — offers what it selected, and nothing else writes it: selecting is not copying, so
+the clipboard proper is untouched. A middle press that the program did not take (mouse
+reporting off, or Shift held, the rule a drag already follows) dispatches
+`WorkspaceAction::PastePrimary`, because the read is a question to whichever program holds
+PRIMARY and can wait half a minute for an answer; the workspace asks on the pool, one read at a
+time — a press while one is out joins it, unless a selection in Crook has taken PRIMARY since,
+when it reads again and the old read's answer is dropped — and pastes when it comes home: into
+the composer at its caret if one is drawn by then (added to the line, never over what is
+selected in it), into the pty through the bracketed-paste path if not. A test build keeps
+PRIMARY in memory, so a test run never overwrites the selection of whoever is running it; the
+one test that reaches the desktop's own is ignored unless run by hand.
+
 **Two elements route each keystroke, so nothing may change the answer between them.** A pane's
 output and the field under it are siblings in a `Flex`, which hands the same `KeyDown` to both
 — the output first. Both ask the same `PaneSelection` whether anything is selected, and both

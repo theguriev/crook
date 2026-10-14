@@ -88,6 +88,15 @@ pub enum WorkspaceAction {
     /// of them. **Nothing may change what is selected in the output while a
     /// keystroke is being dispatched.**
     ReleaseSelection(PaneId),
+    /// Paste PRIMARY into a pane, for a middle press on it that the program
+    /// in it did not take.
+    ///
+    /// An action because the press cannot do it where it lands: reading
+    /// PRIMARY is a question to whichever program holds it, answered whenever
+    /// that program gets round to it, and the element that saw the press has
+    /// no way to wait off the thread that draws. The workspace does. See
+    /// [`crate::clipboard`].
+    PastePrimary(PaneId),
     /// Something happened to the search box above the tabs.
     Search(SearchAction),
     /// Something happened to the find bar over a pane's output.
@@ -795,6 +804,9 @@ pub enum SettingsAction {
     ToggleLoginShell,
     /// "Audible bell": whether a bell plays the system's alert sound.
     ToggleAudibleBell,
+    /// "Middle-click pastes the selection": whether a selection becomes
+    /// PRIMARY and a middle click in a pane pastes it. Linux's only.
+    ToggleMiddleClickPaste,
     /// "Tab key": whether Tab completes the word or takes the suggestion.
     SetTabKey(crate::settings::TabKey),
     /// "Option as Meta": which Option key a program on a Mac reads as Meta.

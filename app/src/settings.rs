@@ -496,6 +496,14 @@ pub struct GeneralOptions {
     /// pane nobody is looking at is marked whichever way this is set; see
     /// [`crate::bell`] for the sound.
     pub audible_bell: bool,
+    /// Whether text selected in Crook becomes PRIMARY, the selection a middle
+    /// click pastes, and whether a middle click in a pane pastes it.
+    ///
+    /// On, because it is what every Linux terminal does and what a Linux hand
+    /// does without looking. Read only where the desktop keeps PRIMARY at all,
+    /// and offered only there: on macOS and Windows there is nothing for it to
+    /// switch. See [`crate::clipboard`].
+    pub middle_click_paste: bool,
 }
 
 /// How wide the tabs panel is until its edge is dragged: Warp's
@@ -522,6 +530,7 @@ impl Default for GeneralOptions {
             notify_on_long_command: false,
             open_at_login: false,
             audible_bell: false,
+            middle_click_paste: true,
         }
     }
 }
@@ -1951,6 +1960,10 @@ mod tests {
                 // Crook's own, and the one key here that changes what the
                 // shell itself is rather than what the window looks like.
                 "login_shell",
+                // Crook's own, and Linux's: whether a selection is PRIMARY
+                // and a middle click pastes it. Written everywhere, read only
+                // where a desktop keeps one.
+                "middle_click_paste",
                 // Crook's own: which of a pane's stops post a desktop
                 // notification while the window is behind another.
                 "notify_on_failed",
@@ -2166,11 +2179,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Nine tab options, fourteen general ones and three theme names, and
+        // Nine tab options, fifteen general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(26, written.len());
+        assert_eq!(27, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),

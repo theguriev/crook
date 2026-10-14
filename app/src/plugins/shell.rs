@@ -8,7 +8,8 @@
 //!
 //! On a Mac it also says what Option is to a program, because that is a
 //! question about what the shell and what runs in it are sent, and there is no
-//! keyboard page but the shortcuts.
+//! keyboard page but the shortcuts. On Linux it says whether a middle click
+//! pastes the selection, for the same reason: it decides what a pane is sent.
 
 use crookui_core::prelude::*;
 
@@ -232,7 +233,51 @@ fn shell(workspace: &Workspace, app: &AppContext) -> Vec<Category> {
             vec![option_as_meta(workspace)],
         ));
     }
+    // Linux's only, and last for the same reason: macOS and Windows keep one
+    // clipboard and nothing a middle click pastes, so a switch for it there
+    // would be connected to nothing.
+    if crate::clipboard::HAS_PRIMARY {
+        categories.push(widgets::category(
+            "Mouse",
+            vec![middle_click_paste(workspace)],
+        ));
+    }
     categories
+}
+
+/// The row that says whether a selection is PRIMARY and a middle click pastes
+/// it. See [`crate::clipboard`].
+fn middle_click_paste(workspace: &Workspace) -> Entry {
+    let ui = workspace.fonts().ui;
+    let state = workspace.settings_page();
+    widgets::row(
+        Words::new("Middle-click pastes the selection")
+            .with_description(
+                "Text you select in Crook is what a middle click pastes in other programs, and a \
+                 middle click in a pane pastes what you selected in them, as in every Linux \
+                 terminal. The clipboard is left alone either way. Hold Shift to paste into a \
+                 program that reads the mouse.",
+            )
+            .with_keywords(&[
+                "middle",
+                "click",
+                "paste",
+                "selection",
+                "select",
+                "primary",
+                "mouse",
+                "x11",
+                "wayland",
+                "copy",
+            ]),
+        true,
+        widgets::switch(
+            workspace.general().middle_click_paste,
+            Some(SettingsAction::ToggleMiddleClickPaste.into()),
+            state.control(named("middle-click-paste")),
+        ),
+        ui,
+    )
 }
 
 /// The row that says what Option is to a program: Meta, or the key a layout

@@ -534,6 +534,17 @@ impl SaveOrder {
     }
 }
 
+/// The read of PRIMARY on its way for a middle press, and where its answer
+/// goes. See [`Workspace::paste_primary`].
+struct PrimaryPaste {
+    /// The pane the answer is pasted into: the one pressed last, which the
+    /// press focused.
+    pane: PaneId,
+    /// [`crate::clipboard::primary_taken`] when the read began: which taking
+    /// of PRIMARY by this window it was asked after.
+    taken: u64,
+}
+
 /// What one window is opened with, as one argument.
 ///
 /// Values that arrive together, are read once each, and travel from whoever
@@ -677,6 +688,9 @@ pub struct Workspace {
     /// The system clipboard every field copies to and pastes from. One for the
     /// window: see [`Clipboard`].
     clipboard: Clipboard,
+    /// The read of PRIMARY in flight that a middle press waits on, while one
+    /// is. See [`Self::paste_primary`].
+    primary_paste: Option<PrimaryPaste>,
 
     /// The divider drag in progress, shared by every divider in the window so
     /// that only one can be dragged at a time. See
@@ -1104,6 +1118,8 @@ impl Workspace {
         // first pane of every session for a person who turned this off.
         let login_shell = settings.general().login_shell;
         terminals.update(ctx, |model, _| model.set_shell_login(login_shell));
+        // Before the first selection can end, which is a frame away.
+        crate::clipboard::use_primary(settings.general().middle_click_paste);
 
         // Last, and before anything is placed on the workspace: every plugin
         // builds here, and one that owns a model or a view makes it with this
@@ -1176,6 +1192,7 @@ impl Workspace {
             closed: Closed::default(),
             filter_cache: RefCell::new(None),
             clipboard: Clipboard::new(),
+            primary_paste: None,
             divider_drag: DividerDrag::new(),
             panel_resize: PanelResize::new(),
             session_saves: Arc::default(),
@@ -7216,6 +7233,7 @@ impl Workspace {
         // decides the next one opened.
         self.terminals
             .update(ctx, |model, _| model.set_shell_login(general.login_shell));
+        crate::clipboard::use_primary(general.middle_click_paste);
         self.save_settings(ctx);
         ctx.notify();
     }
@@ -7991,6 +8009,107 @@ impl Workspace {
         if interaction.selection.clear() {
             ctx.notify();
         }
+    }
+
+    /// Pastes PRIMARY into a pane, for a middle press on it that its program
+    /// did not take.
+    ///
+    /// Read on the pool, and pasted when the answer comes home: PRIMARY
+    /// belongs to whichever program last selected something, and reading it
+    /// waits on that program — for seconds, for one that never answers. See
+    /// [`crate::clipboard`].
+    ///
+    /// The pane is focused first, as a click on it focuses it. The text is
+    /// about to land there, and the Enter that runs it has to as well — not
+    /// in the pane the keyboard happened to be in.
+    ///
+    /// **One read at a time.** A read holds a worker of the pool for as long
+    /// as PRIMARY's owner takes, and one that has stopped answering takes
+    /// about half a minute; the pool is a handful of workers shared with the
+    /// terminals' timers and the plugins, so a read per press would let a few
+    /// impatient clicks stall all of them. A press that arrives while a read
+    /// is out joins it instead: the answer goes to the pane pressed last,
+    /// which is the one now focused.
+    ///
+    /// **Unless a selection here has taken PRIMARY since.** A read is put to
+    /// whoever held PRIMARY when it began, so the one out then is asking a
+    /// program that holds it no more — one that may never answer — about a
+    /// selection that is not the latest. The press reads again instead, and
+    /// Crook answers that read at once from what it holds. The old read's
+    /// answer, whenever it comes, is dropped: whoever pressed for it has
+    /// selected something newer since. See [`crate::clipboard::primary_taken`].
+    fn paste_primary(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        self.handle_action(&WorkspaceAction::Tab(TabAction::FocusPane(pane)), ctx);
+        let taken = crate::clipboard::primary_taken();
+        if let Some(paste) = self
+            .primary_paste
+            .as_mut()
+            .filter(|paste| paste.taken == taken)
+        {
+            paste.pane = pane;
+            return;
+        }
+        let Some(read) = self.clipboard.read_primary() else {
+            return;
+        };
+        self.primary_paste = Some(PrimaryPaste { pane, taken });
+        let reading = ctx.background().spawn(async move { read() });
+        ctx.spawn(reading, move |workspace, text, ctx| {
+            // Its own place only, if it still has one: a read begun since,
+            // after a selection here, holds it now and is the one waited on.
+            let Some(paste) = workspace
+                .primary_paste
+                .take_if(|paste| paste.taken == taken)
+            else {
+                return;
+            };
+            // And nothing, even so, once a selection here has taken PRIMARY:
+            // the answer is what was selected before, which a press now would
+            // not paste.
+            if taken != crate::clipboard::primary_taken() {
+                return;
+            }
+            if let Some(text) = text.filter(|text| !text.is_empty()) {
+                workspace.paste_into(paste.pane, &text, ctx);
+            }
+        })
+        .detach();
+    }
+
+    /// Puts pasted text where typing in `pane` would go, as of now.
+    ///
+    /// Asked when the text arrives rather than when the press did, because a
+    /// read of PRIMARY takes as long as its owner takes and the pane does not
+    /// wait: a command that started in between has taken the composer away,
+    /// and the text belongs to the program. The composer gets it at its caret,
+    /// added to the line rather than put over what is selected in it — see
+    /// [`TextInput::paste_primary`]; the pty gets it through
+    /// [`TerminalHandle::paste`], bracketed when the program asked.
+    fn paste_into(&mut self, pane: PaneId, text: &str, ctx: &mut ViewContext<Self>) {
+        let Some((handle, snapshot)) = self.terminal(pane, ctx) else {
+            return;
+        };
+        if pane_surface::of(&snapshot, Instant::now()).composer {
+            if let Some(input) = self.inputs.get(&pane) {
+                input.paste_primary(text);
+                ctx.notify();
+            }
+            return;
+        }
+        if !handle.paste(text) {
+            log::debug!("nothing was pasted into the shell");
+            return;
+        }
+        // What typing does to a list scrolled back through: the text went to
+        // the live block, and that is where the person is now looking.
+        if let Some(view) = self.pane_blocks(pane) {
+            view.apply(ScrollCause::KeyToPty);
+        }
+        // And a frame whatever the surface: the paste scrolled the grid to the
+        // live output, which no frame has drawn yet, and a program that does
+        // not echo — a password prompt — prints nothing that would ask for
+        // one. The keyboard's paste asks for the same frame, on `SentToPty`.
+        ctx.notify();
     }
 
     /// Whether a pane showing `snapshot` draws one grid rather than a list of
@@ -10834,6 +10953,11 @@ impl Workspace {
                     self.sound_the_bell();
                 }
             }
+            SettingsAction::ToggleMiddleClickPaste => {
+                let mut general = self.general();
+                general.middle_click_paste = !general.middle_click_paste;
+                self.set_general(general, ctx);
+            }
             SettingsAction::ToggleTabsPanel => {
                 let shown = !self.general().show_tabs_panel;
                 self.set_tabs_panel_shown(shown, ctx);
@@ -11976,6 +12100,7 @@ impl TypedActionView for Workspace {
             }
             WorkspaceAction::OpenPullRequest(pane) => self.open_pull_request(pane),
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),
+            WorkspaceAction::PastePrimary(pane) => self.paste_primary(pane, ctx),
             WorkspaceAction::Complete(pane) => self.request_completions(pane, ctx),
             WorkspaceAction::CrashNote(action) => self.apply_crash_note(action, ctx),
             WorkspaceAction::DismissSessionNote => {

@@ -544,6 +544,21 @@ impl TextInput {
         submitted
     }
 
+    /// Inserts PRIMARY at the caret, for a middle press: it arrives when its
+    /// owner answers rather than with a keystroke.
+    ///
+    /// Added to the line, unlike the paste chord's clipboard, and never put
+    /// over what is selected in it, as a terminal's middle click — xterm's,
+    /// VTE's — pastes at the cursor and leaves the selection be. A GtkEntry
+    /// would paste over a selection clicked inside it, and the composer does
+    /// not follow it there: the selection is very often where PRIMARY came
+    /// from, since selecting in the field is what offers it, and a paste over
+    /// it would write the word over itself and look like nothing happened.
+    /// See [`Editor::paste_at_caret`].
+    pub fn paste_primary(&self, text: &str) {
+        self.edit(|editor| editor.paste_at_caret(text));
+    }
+
     /// Throws the half-written line away: what Ctrl-C means, on the field's
     /// side of the same keystroke the shell is interrupted by.
     pub fn abandon(&self) {
@@ -595,9 +610,22 @@ impl TextInput {
         true
     }
 
-    /// Ends the gesture, reporting whether there was one.
-    pub fn release(&self) -> bool {
-        self.0.drag.replace(None).is_some()
+    /// Ends the gesture, reporting whether there was one, and offers what it
+    /// selected as PRIMARY where the desktop keeps one.
+    ///
+    /// At the end rather than at every step of the drag: PRIMARY is what a
+    /// middle click in another program pastes, and a selection is not chosen
+    /// until the button comes up. A press that selected nothing offers nothing
+    /// — clicking to place the caret is not taking PRIMARY away from whoever
+    /// holds it. See [`crate::clipboard`].
+    pub fn release(&self, clipboard: &Clipboard) -> bool {
+        if self.0.drag.replace(None).is_none() {
+            return false;
+        }
+        if let Some(selected) = self.editor().copy() {
+            clipboard.write_primary(&selected);
+        }
+        true
     }
 }
 
@@ -913,11 +941,71 @@ mod tests {
         assert!(input.drag_to(0));
         assert_eq!(input.editor().selected_text(), "echo");
 
-        assert!(input.release());
+        assert!(input.release(&Clipboard::new()));
         assert!(
             !input.drag_to(2),
             "a drag with no press behind it selects nothing"
         );
+    }
+
+    #[test]
+    fn the_end_of_a_drag_offers_what_it_selected_as_primary_on_linux() {
+        // Offered once the button comes up rather than on every step of the
+        // drag: PRIMARY is what a middle click elsewhere pastes, and the
+        // selection is not finished being chosen until then.
+        let clipboard = Clipboard::new();
+        let input = holding("echo hello");
+        input.press(5, 1);
+        input.drag_to(10);
+        assert_eq!(clipboard.primary(), None, "offered before the drag ended");
+
+        assert!(input.release(&clipboard));
+        assert_eq!(
+            clipboard.primary().as_deref(),
+            crate::clipboard::HAS_PRIMARY.then_some("hello")
+        );
+    }
+
+    #[test]
+    fn a_click_that_selects_nothing_leaves_primary_to_whoever_holds_it() {
+        let clipboard = Clipboard::new();
+        clipboard.select_elsewhere("held by another program");
+        let input = holding("echo hello");
+        input.press(5, 1);
+        assert!(input.release(&clipboard));
+        assert_eq!(
+            clipboard.primary().as_deref(),
+            Some("held by another program")
+        );
+    }
+
+    #[test]
+    fn a_double_click_offers_the_word_it_took() {
+        let clipboard = Clipboard::new();
+        let input = holding("one two three");
+        input.press(5, 2);
+        assert!(input.release(&clipboard));
+        assert_eq!(
+            clipboard.primary().as_deref(),
+            crate::clipboard::HAS_PRIMARY.then_some("two")
+        );
+    }
+
+    #[test]
+    fn a_middle_click_after_a_double_click_pastes_the_word_a_second_time() {
+        // The word is selected and it is PRIMARY, so pasting PRIMARY over the
+        // selection wrote it over itself and nothing visibly happened. The
+        // composer follows the terminal — xterm and VTE paste at the cursor
+        // and leave the selection — rather than GtkEntry, which replaces a
+        // selection clicked inside.
+        let input = holding("ls foo");
+        input.press(4, 2);
+        assert!(input.release(&Clipboard::new()));
+        assert_eq!(input.editor().selected_text(), "foo");
+
+        input.paste_primary("foo");
+        assert_eq!(input.editor().text(), "ls foofoo");
+        assert!(input.editor().selection().is_empty());
     }
 
     #[test]
