@@ -129,8 +129,10 @@ impl AgentStatus {
     ///   approval. Then the folder, in brackets, and spaces to 80 columns.
     /// - Codex blinks `[ ! ] Action Required` and `[ . ] Action Required`
     ///   in front of the folder while it waits for an approval, turns a
-    ///   braille spinner there while it works, and leaves the folder alone
-    ///   at rest — and while it works too, when its animations are off
+    ///   braille spinner there while it works — or wherever its
+    ///   `tui.terminal_title` puts the spinner, a word of its own between
+    ///   spaces — and leaves the folder alone at rest, and while it works
+    ///   too when its animations are off
     ///   (`[tui] animations = false`), which takes the spinner away and
     ///   leaves the question standing still.
     ///
@@ -179,10 +181,20 @@ impl AgentStatus {
         let (status, outright) = match gemini {
             Some(status) => (status, true),
             None if codex_asks => (Self::NeedsInput, true),
-            None if agent == Some("codex") => match glyph {
-                '\u{2800}'..='\u{28ff}' => (Self::Running, true),
-                _ => (Self::Idle, false),
-            },
+            None if agent == Some("codex") => {
+                let frame = |word: &str| {
+                    let mut characters = word.chars();
+                    matches!(
+                        (characters.next(), characters.next()),
+                        (Some('\u{2800}'..='\u{28ff}'), None)
+                    )
+                };
+                if title.split_whitespace().any(frame) {
+                    (Self::Running, true)
+                } else {
+                    (Self::Idle, false)
+                }
+            }
             None => return None,
         };
         Some(TitleSays {

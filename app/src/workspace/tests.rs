@@ -34562,6 +34562,40 @@ mod agent_titles {
         }
     }
 
+    /// Codex's spinner is a word of its own in its title, which a person
+    /// may order after the folder with `tui.terminal_title`: it says codex
+    /// is at work wherever it stands. A braille character inside a word is
+    /// no frame of it.
+    #[test]
+    fn codexs_spinner_is_at_work_wherever_its_title_puts_it() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+
+        report(
+            &mut harness,
+            TerminalUpdate::Running(pane, Some("codex".to_owned())),
+        );
+        titled(&mut harness, pane, "proj | main");
+        for (title, said) in [
+            ("proj | main \u{280b}", AgentStatus::Running),
+            ("proj \u{2819} main", AgentStatus::Running),
+            ("proj | main", AgentStatus::Idle),
+        ] {
+            titled(&mut harness, pane, title);
+            let (status, source) = status_and_source(&harness, pane);
+            assert_eq!(status, said, "{title}");
+            assert!(
+                matches!(source, StatusSource::Title(_)),
+                "{title}: {source:?}"
+            );
+        }
+
+        titled(&mut harness, pane, "proj\u{280b} | main");
+        let (status, source) = status_and_source(&harness, pane);
+        assert_eq!(status, AgentStatus::Idle);
+        assert!(matches!(source, StatusSource::Title(_)), "{source:?}");
+    }
+
     /// What follows a Gemini CLI or codex status is the folder, which the
     /// row shows already, or Gemini's passing thought: no name for the work.
     /// The pane keeps the one it has — the prompt a hook named it after, or
