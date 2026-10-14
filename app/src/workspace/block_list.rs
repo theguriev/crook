@@ -1355,7 +1355,10 @@ impl BlockList {
             return;
         }
         // Where a viewport cell of the open block is drawn, when it is on one
-        // of the rows on screen.
+        // of the rows on screen: the cursor's own row included, which the
+        // block is laid out to reach before anything is printed on it. See
+        // `drawn_live_rows`.
+        let last = drawn_live_rows(&self.snapshot, false).map_or(last, |(_, last)| last);
         let drawn = |viewport_row: usize, column: usize| {
             let row = viewport_row
                 .checked_sub(first)
@@ -1909,7 +1912,7 @@ pub(super) fn padding_top(block: Option<&Block>) -> f32 {
 /// Zero when it has printed nothing, so a prompt that has not arrived yet
 /// leaves no gap above the composer.
 fn live_height(snapshot: &Snapshot, composer: bool) -> f32 {
-    let Some((first, last)) = snapshot.live_rows() else {
+    let Some((first, last)) = drawn_live_rows(snapshot, composer) else {
         return 0.;
     };
     // With a composer under it, no bottom padding at all: what follows the
@@ -1923,6 +1926,30 @@ fn live_height(snapshot: &Snapshot, composer: bool) -> f32 {
     // padding is only what keeps its last row off the window's edge.
     let bottom = if composer { 0. } else { RUNNING_PADDING_BOTTOM };
     PADDING_TOP + (last - first + 1) as f32 + bottom
+}
+
+/// The rows of the snapshot the open block is laid out over: its own, and,
+/// with no composer under it, the row the program's cursor is in as well.
+///
+/// The block's own rows end at the last one anything was printed on, so a
+/// program that printed a line and is reading at the start of the next one —
+/// `cat`, `bc`, `read`, a Python `input()` — has its cursor one row past the
+/// block. That row is where the next character goes, so it is where the
+/// program's cursor is drawn, and where a word an input method is composing
+/// for the program is drawn and its list of candidates goes; a block that
+/// stopped short of it had nowhere to draw either. With a composer the
+/// composer's caret is where typing goes, and a blank row between the prompt
+/// and it is the seam [`live_height`] exists to remove.
+///
+/// Only the layout and the cursor reach the extra row: it is blank, so there
+/// is nothing in it to draw, select or find.
+fn drawn_live_rows(snapshot: &Snapshot, composer: bool) -> Option<(usize, usize)> {
+    let (first, last) = snapshot.live_rows()?;
+    let cursor = snapshot
+        .cursor_cell
+        .map(|(row, _)| row)
+        .filter(|_| !composer);
+    Some((first, cursor.map_or(last, |row| last.max(row))))
 }
 
 /// The cell column the composer's first row starts at when it continues the

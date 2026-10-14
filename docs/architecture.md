@@ -2527,9 +2527,13 @@ snapshot carries `cursor_cell` beside `cursor`, because a program that draws its
 the real one and parks it on the field it reads — Claude Code does — and a composition that
 waited for a visible cursor would never appear there. Where the input method's caret lands is
 written back the way the composer's is, and `Workspace::caret_rect` reads it whenever the
-output, not a composer, is listening. A composition belongs to the keyboard: a commit or the
-input method giving up ends it, and so does focus moving, a menu or a find bar taking the keys,
-the composer coming back, and the window going behind another.
+output, not a composer, is listening. On the list the open block is laid out down to the
+cursor's row while no composer is drawn under it: a program reading at the start of a line —
+`cat`, `read`, a Python `input()` after a print — has its cursor one row past the last row it
+printed on, and that row is where its cursor and the composition are drawn. A composition
+belongs to the keyboard: a commit or the input method giving up ends it, and so does focus
+moving, a menu or a find bar taking the keys, the composer coming back, and the window going
+behind another.
 
 **The kitty keyboard protocol is in**, in `crook_terminal::input`. Alacritty's `Term` already
 maintained the mode stack behind a config flag that was off; turning it on and reading the

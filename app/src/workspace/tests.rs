@@ -18348,6 +18348,58 @@ mod shells {
     }
 
     #[test]
+    fn a_word_composed_where_a_command_reads_at_the_start_of_a_line_is_drawn_there() {
+        // `cat`, `bc`, `read`, a Python `input()` after a print: the command
+        // printed a whole line and reads at the start of the next one, a row
+        // the open block has printed nothing on yet. The word goes on that
+        // row all the same, and the input method's list beside it.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        await_prompt(&mut harness, pane);
+        harness.type_into(pane, "printf 'zq%sxv\\n' 7; read line\n");
+        harness.wait_for("the command never took the composer away", |harness| {
+            harness.terminal_text(pane).contains("zq7xv")
+                && composer_boxes(&harness.frame()).is_empty()
+        });
+        if !draws_blocks(&harness) {
+            return;
+        }
+        let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+        let scene = harness.frame();
+        // The start of the row under the printed line: the line's own start,
+        // which is the `z` drawn on the same row as the end of it, one row
+        // down.
+        let printed = drawn_after(&scene, "zq7xv").expect("the command drew its line");
+        let start = drawn(&scene, 'z')
+            .into_iter()
+            .find(|z| (z.y() - printed.y()).abs() < 0.01)
+            .expect("the line starts with a z");
+        let cursor = start + vec2f(0., cell.height);
+        let near = |a: Vector2F, b: Vector2F| (a - b).length() < 0.01;
+
+        harness.dispatch(composing("にほん", 0));
+        let composed = drawn(&harness.frame(), 'に');
+        assert!(
+            composed.len() == 1 && near(composed[0], cursor),
+            "the composition is not drawn at the start of the cursor's row: \
+             {composed:?}, not [{cursor:?}]"
+        );
+        let area = ime_area(&harness).expect("the list has nowhere to go");
+        let expected = cell_from(cursor);
+        assert!(
+            near(area.origin(), expected.origin()) && near(area.size(), expected.size()),
+            "the list is beside {area:?}, not the cursor's cell {expected:?}"
+        );
+        harness.settle(NO_LEAK_PATIENCE);
+        assert!(
+            !harness.terminal_text(pane).contains('に'),
+            "a word that was not committed reached the command"
+        );
+    }
+
+    #[test]
     fn a_release_over_the_tabs_panel_still_ends_a_drag_in_the_field() {
         // The field's half of the grid's rule: the button can come up over a
         // layer painted after it, and the drag has to end there all the same.
