@@ -36062,12 +36062,6 @@ mod dropping_files {
         })
     }
 
-    /// Text with every space and line break taken out, so that a line the
-    /// pane wrapped, at a space or anywhere else, still reads as the line.
-    fn unwrapped(text: &str) -> String {
-        text.chars().filter(|c| *c != ' ' && *c != '\n').collect()
-    }
-
     #[test]
     fn a_drop_goes_into_the_focused_pane_s_composer_at_the_caret_quoted() {
         let mut harness = Harness::new(1);
@@ -36287,6 +36281,14 @@ mod dropping_files {
         // on it is still cmd, at its prompt, that reads a drop, and cmd reads
         // a single quote as a letter. Played here by sh under cmd's name,
         // which is how the quoting is picked.
+
+        /// Text with every space and line break taken out, so that a line
+        /// the pane wrapped, at a space or anywhere else, still reads as the
+        /// line.
+        fn unwrapped(text: &str) -> String {
+            text.chars().filter(|c| *c != ' ' && *c != '\n').collect()
+        }
+
         let scratch = Scratch::new();
         let cmd = scratch.path().join("cmd");
         std::os::unix::fs::symlink("/bin/sh", &cmd).expect("a link to sh");
