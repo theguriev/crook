@@ -1257,18 +1257,17 @@ fn paint_grid(
     {
         paint_cursor(cursor, shape, origin, metrics, scene);
         if let Some(cell) = snapshot.cell(cursor.row, cursor.column) {
+            // In the ground colour, the one `paint_glyphs` inverted the cell
+            // to under the only cursor this draws anything over.
             paint_over_cursor(
                 cell,
+                shape,
                 origin
                     + vec2f(
                         cursor.column as f32 * metrics.width,
                         cursor.row as f32 * metrics.height,
                     ),
-                if inverted.is_some() {
-                    snapshot.background
-                } else {
-                    cell.foreground
-                },
+                snapshot.background,
                 metrics,
                 scene,
             );
@@ -1555,23 +1554,29 @@ fn paint_cell(
     scene.draw_glyph(pen, glyph, drawn_with, metrics.font_size, ink);
 }
 
-/// Draws a line or block character again, over the cursor just drawn on its
-/// cell, in `ink`: the colour [`paint_glyphs`] gave it, which a surface that
-/// inverts the character under a filled cursor passes inverted.
+/// Draws a line or block character again, over the filled cursor just drawn
+/// on its cell, in `ink`: the colour [`paint_glyphs`] gave it, which a surface
+/// that inverts the character under a filled cursor passes inverted.
 ///
 /// A glyph is drawn after every rectangle in its layer, so whatever character
 /// is under the cursor shows over it. A line or a block is rectangles, painted
 /// with its row and so under a cursor painted after the rows, where it would
 /// vanish into a filled one. Anything else under the cursor is a glyph
 /// already, and nothing is drawn for it here.
+///
+/// Nor is anything drawn under a cursor of any other `shape`. An outline, a
+/// beam or an underline hides next to nothing of the first drawing, and a
+/// second one over it would blend a shade or a rounded corner's smoothed edge
+/// in twice: `░` under an unfocused pane's cursor would come out nearly `▒`.
 pub(super) fn paint_over_cursor(
     cell: &SnapshotCell,
+    shape: CursorShape,
     at: Vector2F,
     ink: Rgb,
     metrics: CellMetrics,
     scene: &mut Scene,
 ) {
-    if cell.flags.contains(CellFlags::WIDE_SPACER) {
+    if shape != CursorShape::Block || cell.flags.contains(CellFlags::WIDE_SPACER) {
         return;
     }
     box_drawing::paint(
@@ -1589,7 +1594,7 @@ pub(super) fn paint_over_cursor(
 /// asked for: the shape says what the *program* wants, and this says whether
 /// the shape means anything right now. It does not while an input field below
 /// holds the keyboard, which on the normal screen is always.
-fn shape_of(cursor: &Cursor, owns_caret: bool) -> CursorShape {
+pub(super) fn shape_of(cursor: &Cursor, owns_caret: bool) -> CursorShape {
     if owns_caret {
         cursor.shape
     } else {

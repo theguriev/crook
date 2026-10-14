@@ -657,6 +657,77 @@ fn a_line_under_a_block_cursor_is_drawn_over_it_in_the_ground_colour() {
 }
 
 #[test]
+fn a_shade_under_an_outline_beam_or_underline_cursor_is_drawn_once() {
+    // Those hide next to nothing of the cell, so a second drawing of a
+    // translucent shade would land on the first and darken that one cell:
+    // `▒` under an unfocused pane's cursor would come out nearly `▓`. Counted
+    // by their opacity, in whatever colour: a second drawing in another one
+    // would darken the cell all the same.
+    let half = |fill: &Fill| matches!(fill, Fill::Solid(color) if color.a == 127);
+    for (shape, owns_caret) in [
+        (CursorShape::Block, false),
+        (CursorShape::Beam, true),
+        (CursorShape::Underline, true),
+    ] {
+        let mut grid = snapshot(&["▒▒"], 2);
+        grid.cursor = Some(Cursor {
+            row: 0,
+            column: 0,
+            shape,
+            color: HIGHLIGHT,
+        });
+
+        let shades: Vec<_> = rects(&paint(&grid, None, owns_caret))
+            .into_iter()
+            .filter(|rect| half(&rect.background))
+            .map(|rect| rect.bounds.min_x())
+            .collect();
+        assert!(
+            shades.len() == 2 && shades[0] == 0. && shades[1] > 0.,
+            "{shape:?}, focused: {owns_caret}: each cell's shade drawn once, \
+             at {shades:?}"
+        );
+    }
+}
+
+#[test]
+fn only_a_filled_cursor_has_its_character_drawn_again_over_it() {
+    // What the block list asks for its open block's cursor, which no grid
+    // test reaches.
+    let cell = snapshot(&["░"], 1).cells[0];
+    let metrics = font().metrics();
+    for (shape, owns_caret, drawn) in [
+        (CursorShape::Block, true, true),
+        (CursorShape::Block, false, false),
+        (CursorShape::Beam, true, false),
+        (CursorShape::Underline, true, false),
+    ] {
+        let cursor = Cursor {
+            row: 0,
+            column: 0,
+            shape,
+            color: HIGHLIGHT,
+        };
+        let mut scene = Scene::new(1.);
+        scene.start_layer(ClipBounds::None);
+        paint_over_cursor(
+            &cell,
+            shape_of(&cursor, owns_caret),
+            Vector2F::zero(),
+            INK,
+            metrics,
+            &mut scene,
+        );
+        scene.stop_layer();
+        assert_eq!(
+            !rects(&scene).is_empty(),
+            drawn,
+            "{shape:?}, focused: {owns_caret}"
+        );
+    }
+}
+
+#[test]
 fn a_finished_block_s_row_draws_its_lines_the_way_the_grid_does() {
     // The list hands a harvested row to the same `paint_glyphs`, so the box
     // a program left on screen when it exited stays unbroken too.
