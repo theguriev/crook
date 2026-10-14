@@ -640,6 +640,9 @@ fn apply(intent: Intent, clipboard: &Clipboard, editor: &mut Editor) -> Option<S
         // being the only thing holding the terminal to ask — and stepping
         // through what came back is the field's, above.
         Complete | CompleteBackwards | AskCompletions => {}
+        // Nor this: the element that saw it clears the pane, and the line
+        // stays as it was, which is readline's own Ctrl-L.
+        ClearBlocks => {}
         Newline => editor.insert_newline(),
         Submit => return Some(editor.submit()),
         Backspace => editor.backspace(),

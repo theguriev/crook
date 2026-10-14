@@ -523,6 +523,32 @@ macOS) copies the selected block whole, through the very region its own copy con
 only while the pointer has selected no text of its own, where that copy belongs to the drag.
 Escape lets the selection go, back to composing at the prompt.
 
+## Clearing a pane
+
+A typed `clear` empties the screen and leaves every block where it was: a block is a copy taken
+off the screen when its command ended, and erasing the screen does not reach it. What empties a
+pane is `crook/window/clear-blocks` — "Clear blocks", Warp's name for it — on `shift-cmd-k`
+(`ctrl-shift-l` off macOS), and `ctrl-l` in the composer, which readline spends on the same
+wish and which the field had no other use for. `cmd-k`, the clear of the terminals before Crook,
+is the tab search here.
+
+It drops the finished blocks and the emulator's scrollback, and keeps the open block: the prompt,
+with the composer still on its row and the line being typed still in it, or a command still
+running, from the top of the screen down. `Emulator::clear_blocks` does both halves, and carries
+the open block's anchors across the history it drops rather than finding the block again the way
+`CSI 3 J` makes it: nothing on the screen moved, so the block does not either, and its prompt end
+survives. The finished blocks leave as an eviction takes them, counted off the front, so the
+app's copy of the list lets them go the same way. Where that count stood at the clear is kept
+beside it: the divider over the first block held is for blocks the cap pushed off since, and
+not for the ones a clear let go of, which leave nothing above the prompt. Everything the pane
+kept about them goes too — the scroll position, the keyboard's selection and a dragged one, the
+bookmarks, a menu up on a block, and the find bar with its filter, closed as Escape closes it.
+There is no undo and no question, as in every terminal that has a clear. What does not go is
+that the last command finished: a `pane.wait --until finished` asked of a cleared pane at rest
+is answered with the exit of the newest command the clear let go of, while `pane.blocks` reads
+only what is left — and with nothing left, refuses as `no-blocks` with a sentence saying the
+clear took it, rather than an empty list that would print as a pane with no command finished.
+
 ## What this does not do
 
 Stage 1 of the port. These are absent on purpose, not overlooked:

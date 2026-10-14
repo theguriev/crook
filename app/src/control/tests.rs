@@ -4144,6 +4144,25 @@ mod socket {
         })
     }
 
+    /// Clears a pane's blocks, as shift-cmd-k does, and checks the clear
+    /// left none in its history.
+    fn clear(served: &mut Served, pane: PaneId) {
+        served.update(|workspace, ctx| {
+            workspace.handle_action(
+                &crate::workspace::WorkspaceAction::Block(crate::workspace::BlockAction::Clear(
+                    pane,
+                )),
+                ctx,
+            );
+        });
+        let held = served.read(|workspace, app| {
+            workspace
+                .terminal_blocks(pane, app)
+                .map_or(0, |history| history.len())
+        });
+        assert_eq!(held, 0, "the clear left a block in the history");
+    }
+
     /// Linux only: that is where a half-close is told from a hang-up. See
     /// `server::until_closed`.
     #[cfg(target_os = "linux")]
@@ -4547,6 +4566,141 @@ mod socket {
             .expect("answered");
         assert_eq!(printed.text, "finished: exit 0");
         assert_eq!(printed.failure, None);
+    }
+
+    #[test]
+    fn a_command_cleared_away_after_it_finished_still_answers_a_wait_for_it() {
+        // A person clears a worker's pane between the end of its command and
+        // the lead's wait: the history holds no command any more, and the
+        // command finished all the same. The wait is answered at once with
+        // its status, as it was before the clear, rather than left for a
+        // command nobody is going to run.
+        let Some(mut served) = marked_bash() else {
+            return;
+        };
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        served.shell.open();
+        served.run(lead, "false");
+        served.pump_until("the shell never came back to a prompt", |served| {
+            served.at_prompt(lead)
+        });
+        let finished = |served: &mut Served| {
+            let printed = served
+                .ask(wait(&token, lead, Until::Finished, 0, false))
+                .expect("answered");
+            (printed.text, printed.failure)
+        };
+
+        clear(&mut served, lead);
+        assert_eq!(finished(&mut served), ("finished: exit 1".to_owned(), None));
+        // Twice, with nothing run in between: the second lets go of nothing
+        // that ran, and forgets nothing the first kept.
+        clear(&mut served, lead);
+        assert_eq!(finished(&mut served), ("finished: exit 1".to_owned(), None));
+
+        // A command run since is newer than any a clear let go of.
+        served.run(lead, "true");
+        served.pump_until("the shell never came back to a prompt", |served| {
+            served.at_prompt(lead)
+        });
+        assert_eq!(finished(&mut served), ("finished: exit 0".to_owned(), None));
+    }
+
+    #[test]
+    fn blocks_of_a_pane_cleared_after_its_command_finished_say_the_clear_took_it() {
+        // The lead's recipe from the skill — wait for the worker's command to
+        // finish, then read its block — with a person clearing the worker's
+        // pane in between. The wait says the command finished; the read that
+        // follows must not then say that none has, which is what an empty
+        // list prints as.
+        let Some(mut served) = marked_bash() else {
+            return;
+        };
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        served.shell.open();
+        served.run(lead, "printf 'the %s\\n' answer; (exit 4)");
+        served.pump_until("the shell never came back to a prompt", |served| {
+            served.at_prompt(lead)
+        });
+        clear(&mut served, lead);
+
+        let waited = served
+            .ask(wait(&token, lead, Until::Finished, 0, false))
+            .expect("answered");
+        assert_eq!(
+            (waited.text.as_str(), waited.failure),
+            ("finished: exit 4", None)
+        );
+        let asked = ReadBlocks {
+            pane: lead.as_u64(),
+            last: Some(1),
+        };
+        let printed = served.ask({
+            let token = token.clone();
+            move |socket| {
+                cli::unix::read_blocks(&socket, Some(&token), asked, false, None)
+                    .map_err(|error| error.to_string())
+            }
+        });
+        let refused = printed.expect_err("what it printed went with the clear");
+        assert!(refused.contains("no-blocks"), "{refused}");
+        assert!(
+            refused.contains("was cleared after its last command finished (exit 4)"),
+            "it says the clear took it, and how the command ended: {refused}"
+        );
+        assert!(
+            !refused.contains("not finished"),
+            "a command did finish: {refused}"
+        );
+
+        // Running a command since the clear, none has finished since it.
+        served.update(|workspace, ctx| workspace.type_into(lead, "sleep 600\r", ctx));
+        served.pump_until("the command never started", |served| {
+            executing(served, lead)
+        });
+        let refused = served
+            .ask(read_blocks(&token, lead, None))
+            .expect_err("nothing has finished since the clear");
+        assert!(
+            refused.contains("has a command running and none finished since it was cleared"),
+            "{refused}"
+        );
+        // And once it has, it is what is read.
+        served.update(|workspace, ctx| workspace.type_into(lead, "\u{3}", ctx));
+        served.pump_until("the interrupted command never became a block", |served| {
+            served.at_prompt(lead)
+        });
+        let read = served
+            .ask(read_blocks(&token, lead, None))
+            .expect("a command finished since the clear");
+        let [block] = &read.blocks[..] else {
+            panic!("the one run since the clear: {read:#?}");
+        };
+        assert_eq!(block.command.as_deref(), Some("sleep 600"));
+
+        // A full-screen program taking the pane after a clear has not
+        // finished either, and nor has anything since the clear.
+        clear(&mut served, lead);
+        served.update(|workspace, ctx| {
+            workspace.type_into(lead, "printf '\\033[?1049h'; sleep 600\r", ctx);
+        });
+        served.pump_until("the pane never took the alternate screen", |served| {
+            served.read(|workspace, app| {
+                workspace
+                    .terminal(lead, app)
+                    .is_some_and(|(_, snapshot)| snapshot.alt_screen)
+            })
+        });
+        let refused = served
+            .ask(read_blocks(&token, lead, None))
+            .expect_err("a screen is not a finished block");
+        assert!(refused.contains("live grid"), "{refused}");
+        assert!(
+            refused.contains("no command has finished in it since it was cleared"),
+            "{refused}"
+        );
     }
 
     #[test]

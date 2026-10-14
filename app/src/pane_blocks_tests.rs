@@ -276,3 +276,37 @@ fn a_rebuild_after_an_eviction_says_how_many_lines_went_off_the_top() {
         0.
     );
 }
+
+#[test]
+fn clearing_forgets_every_block_and_goes_back_to_following_the_bottom() {
+    // A cleared pane has one block left, the open one, and whatever named a
+    // finished block names nothing now: the keyboard's selection, the
+    // bookmarks, the controls under the pointer, the command pinned over the
+    // top. A scrolled position would be lines into a list that is no longer
+    // there.
+    let list = measured(100., 24.);
+    let block = a_block();
+    list.apply(ScrollCause::Wheel(-30.));
+    list.select(Some(block));
+    list.toggle_bookmark(block);
+    list.hover(Some(block), Some(Control::Menu));
+    list.press_control(block, Control::Menu);
+    list.set_menu_at(Some(Vector2F::new(300., 40.)));
+    list.set_sticky(Some((block, "seq 100".to_owned())));
+    list.point(Some(Vector2F::new(120., 80.)));
+
+    list.clear();
+
+    assert_eq!(list.position(), ScrollPosition::FollowBottom);
+    assert_eq!(list.selected(), None);
+    assert!(!list.has_bookmarks() && !list.is_bookmarked(block));
+    assert_eq!((list.hovered(), list.on_control()), (None, None));
+    assert_eq!(list.release_control(), None, "a press survived to click");
+    assert_eq!(list.menu_at(), None);
+    assert_eq!(list.sticky(), None);
+    assert_eq!(
+        list.pointer(),
+        Some(Vector2F::new(120., 80.)),
+        "the pointer is over the pane, which is still there"
+    );
+}

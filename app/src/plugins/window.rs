@@ -58,7 +58,7 @@ pub const WINDOW_OVERLAY: SlotId = SlotId::new("window.overlay");
 ///
 /// The order is the order the shipped keybindings are written in, so a person
 /// reading one and the other is reading the same order twice.
-pub const COMMANDS: [(&str, &str, Binding); 59] = [
+pub const COMMANDS: [(&str, &str, Binding); 60] = [
     ("new-tab", "New agent tab", Binding::NewTab),
     (
         "reopen-closed-tab",
@@ -227,6 +227,11 @@ pub const COMMANDS: [(&str, &str, Binding); 59] = [
         "Scroll to the newest output",
         Binding::ScrollToBottom,
     ),
+    // Warp's name, and what cmd-k does in the terminals before it: the
+    // finished commands and the scrollback gone, the prompt — or the command
+    // still running — kept. Nothing asks first and nothing undoes it, as in
+    // every one of them.
+    ("clear-blocks", "Clear blocks", Binding::ClearBlocks),
     // Everything the menu on a block offers, as a name each. They act on the
     // block the menu is up on, or — with no menu — on the one the keyboard has
     // selected, so each of these is a chord as well as a row.

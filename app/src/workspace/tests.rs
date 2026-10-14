@@ -19265,6 +19265,59 @@ mod shells {
         }
 
         #[test]
+        fn a_cleared_pane_draws_no_divider_over_the_prompt_it_kept() {
+            // A clear lets the finished blocks go the way the cap evicts them,
+            // and a rule is drawn over the first block held when blocks were
+            // evicted before it. Nothing is before the prompt a clear kept: a
+            // rule there runs across an empty pane above the prompt.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "echo ALPHA") == 0 {
+                return;
+            }
+            run(&mut harness, pane, "echo BETA");
+            await_prompt(&mut harness, pane);
+            let rules = |harness: &mut Harness| {
+                let scene = harness.frame();
+                let panel = panel_of_the_pane(harness);
+                visible_rects(&scene)
+                    .filter(|(rect, bounds)| {
+                        rect.background == Fill::Solid(theme().overlay_2)
+                            && (bounds.width() - panel.width()).abs() < 0.5
+                            && bounds.height() <= 1.5
+                    })
+                    .map(|(_, bounds)| bounds.min_y())
+                    .collect::<Vec<_>>()
+            };
+            assert!(
+                rules(&mut harness).len() >= 2,
+                "two blocks and an open one drew no dividers to lose"
+            );
+
+            harness.run_command("crook/window/clear-blocks");
+            assert_eq!(0, block_count(&harness, pane), "the clear left a block");
+            await_prompt(&mut harness, pane);
+            assert_eq!(
+                Vec::<f32>::new(),
+                rules(&mut harness),
+                "a cleared pane rules a line over the prompt it kept"
+            );
+
+            // And the first block after the clear has the prompt below it
+            // ruled off from it, as in a pane never cleared.
+            run(&mut harness, pane, "echo GAMMA");
+            await_prompt(&mut harness, pane);
+            assert_eq!(
+                1,
+                rules(&mut harness).len(),
+                "one block and an open one need one divider"
+            );
+        }
+
+        #[test]
         fn the_newest_block_s_output_is_what_the_command_printed_and_nothing_else() {
             // What `--run` reports. It used to print the grid, and for a
             // shell with marks the grid after a command is the next prompt
@@ -22869,6 +22922,141 @@ mod shells {
             assert!(
                 is_following(&harness, pane),
                 "scroll-to-bottom left the list off its own end"
+            );
+        }
+
+        /// What is left of a pane's output: how many finished blocks, what
+        /// the open one is doing, and how many lines of scrollback sit above
+        /// the screen.
+        fn left(harness: &Harness, pane: PaneId) -> (usize, BlockState, usize) {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                let finished = workspace
+                    .terminal_blocks(pane, app)
+                    .map_or(0, |blocks| blocks.len());
+                let (_, snapshot) = workspace.terminal(pane, app).expect("a shell");
+                (finished, snapshot.live_block.state, snapshot.history_len)
+            })
+        }
+
+        fn has_bookmarks(harness: &Harness, pane: PaneId) -> bool {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .pane_blocks(pane)
+                    .is_some_and(|view| view.has_bookmarks())
+            })
+        }
+
+        #[test]
+        fn clearing_leaves_the_open_block_and_lets_go_of_everything_that_named_the_rest() {
+            let mut harness = Harness::panel(1);
+            let Some(pane) = three_commands(&mut harness) else {
+                return;
+            };
+            await_prompt(&mut harness, pane);
+            // Short enough to scroll, so there is a position to lose.
+            harness.frame_sized(vec2f(1024., 220.));
+            let aimed = block_where(&harness, pane, |block| {
+                block.command.as_deref() == Some("echo second")
+            })
+            .expect("the second command is a block");
+            select(&mut harness, pane, aimed);
+            harness.run_command("crook/window/bookmark-block");
+            harness.run_command("crook/window/filter-block");
+            assert_eq!(
+                Some(aimed),
+                filtering(&harness, pane),
+                "nothing was filtered"
+            );
+            assert!(
+                harness.select_in_output(pane, "first"),
+                "nothing to drag over"
+            );
+            harness.run_command("crook/window/scroll-to-top");
+            let scrolled = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.pane_blocks(pane).map(|view| view.position())
+            });
+
+            harness.run_command("crook/window/clear-blocks");
+
+            let (finished, state, history) = left(&harness, pane);
+            assert_eq!(0, finished, "a finished block survived the clear");
+            assert_eq!(BlockState::AtPrompt, state, "the prompt went with them");
+            assert_eq!(0, history, "the scrollback survived the clear");
+            assert_eq!(
+                None,
+                selected(&harness, pane),
+                "the keyboard is still on a block"
+            );
+            assert!(
+                !has_bookmarks(&harness, pane),
+                "a bookmark outlived its block"
+            );
+            assert_eq!(
+                None,
+                harness.terminal_selection(pane),
+                "a drag outlived its text"
+            );
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("a find bar");
+            assert!(
+                !find.is_open(),
+                "the find bar is still up over a cleared pane"
+            );
+            assert_eq!(
+                None,
+                find.filter(),
+                "and still filtering a block that is gone"
+            );
+            if scrolled != Some(crate::pane_blocks::ScrollPosition::FollowBottom) {
+                assert!(
+                    is_following(&harness, pane),
+                    "the list is still scrolled up"
+                );
+            }
+
+            // And the pane goes on: the next command is a block like any other.
+            harness.type_into(pane, "echo after\n");
+            harness.wait_for(
+                "the command after the clear never became a block",
+                |harness| ids(harness, pane).len() == 1,
+            );
+        }
+
+        #[test]
+        fn ctrl_l_at_the_prompt_clears_the_pane_and_keeps_the_line_being_written() {
+            // Readline's clear-screen, which the composer used to swallow
+            // without doing anything.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = three_commands(&mut harness) else {
+                return;
+            };
+            await_prompt(&mut harness, pane);
+            up(&mut harness);
+            harness.run_command("crook/window/bookmark-block");
+            down(&mut harness);
+            harness.frame();
+            type_line(&mut harness, "echo kept");
+            assert_eq!(harness.field_text(pane), "echo kept");
+
+            let ctrl = Modifiers {
+                ctrl: true,
+                ..Default::default()
+            };
+            harness.press("l", ctrl, "\u{c}");
+
+            let (finished, state, _) = left(&harness, pane);
+            assert_eq!(0, finished, "ctrl-l left the finished blocks");
+            assert_eq!(BlockState::AtPrompt, state);
+            assert!(
+                !has_bookmarks(&harness, pane),
+                "a bookmark outlived its block"
+            );
+            assert_eq!(
+                harness.field_text(pane),
+                "echo kept",
+                "the line being written went with the clear"
             );
         }
     }

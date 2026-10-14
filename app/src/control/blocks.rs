@@ -19,7 +19,10 @@
 //! than answered with an empty list that reads as "nothing ran"; one with
 //! finished commands from before is answered with those and `running` set. A
 //! shell that reports no command marks is refused too, since its output is
-//! one block that never closes. A worker whose answer is meant to be read runs
+//! one block that never closes. So is a pane at rest whose commands a clear
+//! let go of: one did finish there, and `pane.wait --until finished` says so
+//! with its exit, so the refusal says the clear took what it printed rather
+//! than that nothing ran. A worker whose answer is meant to be read runs
 //! headless — `claude -p` — and its answer is then its block's output.
 //!
 //! # Caps
@@ -95,13 +98,23 @@ pub fn read(
         .take(last)
         .collect();
     if newest.is_empty() {
+        // A clear can be what emptied the history, and then a command did
+        // finish here: `pane.wait --until finished` answers with its exit
+        // (see `Workspace::cleared_exit`), and a sentence saying none has
+        // would contradict the answer a lead read just before this one.
+        let cleared = workspace.cleared_exit(pane);
+        let since = if cleared.is_some() {
+            "since it was cleared"
+        } else {
+            "yet"
+        };
         if snapshot.alt_screen {
-            return Err(no_blocks(
+            return Err(no_blocks(&format!(
                 "is drawn as one live grid — a full-screen program or an agent's TUI is \
-                 running there — and no command has finished in it: what it shows is a screen, \
-                 not a finished block; run a worker whose answer you want to read headless, \
-                 like `claude -p`, and read its block when it has finished",
-            ));
+                 running there — and no command has finished in it {since}: what it shows is a \
+                 screen, not a finished block; run a worker whose answer you want to read \
+                 headless, like `claude -p`, and read its block when it has finished"
+            )));
         }
         if workspace.shell_marks(pane, app) == Some(false) {
             return Err(no_blocks(
@@ -111,10 +124,20 @@ pub fn read(
         }
         if running {
             return Err(no_blocks(&format!(
-                "has a command running and none finished yet: what it prints is read once it \
-                 has finished, which `crook pane wait {number} --until finished` answers; an \
+                "has a command running and none finished {since}: what it prints is read once \
+                 it has finished, which `crook pane wait {number} --until finished` answers; an \
                  interactive agent's answer is on its screen and never in a finished block, so \
                  run a worker whose answer you want to read headless, like `claude -p`"
+            )));
+        }
+        // At rest, with nothing to read because a clear let it go: an empty
+        // list would print as a pane that has not finished a command.
+        if let Some(exit) = cleared {
+            let exit = exit.map_or(String::new(), |exit| format!(" (exit {exit})"));
+            return Err(no_blocks(&format!(
+                "was cleared after its last command finished{exit}, and what that command \
+                 printed went with the clear: a command run there from now on is read once it \
+                 has finished"
             )));
         }
     }

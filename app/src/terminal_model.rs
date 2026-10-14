@@ -449,13 +449,27 @@ pub struct BlockHistory {
     /// started. A list caching geometry per index compares this against what
     /// it saw last to learn that the front moved rather than the back grew.
     evicted: usize,
+    /// What `evicted` came to when the pane was last cleared. See
+    /// [`Self::evicted_since_clear`].
+    cleared_at: usize,
 }
 
 impl BlockHistory {
     /// A history holding `blocks`, oldest first, `evicted` of which have
     /// already been dropped off the front.
     pub fn new(blocks: Vec<Arc<Block>>, evicted: usize) -> Self {
-        Self { blocks, evicted }
+        Self {
+            blocks,
+            evicted,
+            cleared_at: 0,
+        }
+    }
+
+    /// The same history, of a pane last cleared when `evicted` came to
+    /// `cleared_at`.
+    #[must_use]
+    pub fn cleared_at(self, cleared_at: usize) -> Self {
+        Self { cleared_at, ..self }
     }
 
     /// The blocks, oldest first.
@@ -490,6 +504,14 @@ impl BlockHistory {
     /// How many blocks have been dropped off the front.
     pub fn evicted(&self) -> usize {
         self.evicted
+    }
+
+    /// How many of [`Self::evicted`] went since the pane was last cleared:
+    /// pushed off the front by the cap, so that the first block held still
+    /// had blocks before it. The ones a clear let go of are not counted, a
+    /// pane somebody cleared having nothing above what is left in it.
+    pub fn evicted_since_clear(&self) -> usize {
+        self.evicted.saturating_sub(self.cleared_at)
     }
 }
 
@@ -1855,6 +1877,20 @@ impl TerminalHandle {
         });
     }
 
+    /// Forgets the pane's finished commands and its scrollback, keeping the
+    /// block that is open, and answers the blocks it let go of.
+    ///
+    /// Through `drive`, which publishes the cleared list and the
+    /// picture of the open block together, and now: the reader that usually
+    /// publishes may not run again for hours, and until something did, the
+    /// pane would go on drawing every command the clear let go of. The blocks
+    /// come back from under the same lock, so a command that finishes while
+    /// the clear waits for it is among them rather than lost between a look
+    /// at the history and the clear.
+    pub fn clear_blocks(&self) -> Vec<Block> {
+        self.drive(Terminal::clear_blocks)
+    }
+
     /// Copies rows out of the grid into the store a finished block's rows live
     /// in, numbered from the oldest line of the scrollback.
     ///
@@ -2260,8 +2296,10 @@ impl Shared {
     fn sync_blocks(&self, terminal: &Terminal) {
         let mut held = self.blocks.lock().unwrap_or_else(PoisonError::into_inner);
         let evicted = terminal.blocks_evicted();
+        let cleared_at = terminal.blocks_cleared_at();
         let finished = terminal.blocks();
-        if held.evicted == evicted && held.len() == finished.len() {
+        if held.evicted == evicted && held.cleared_at == cleared_at && held.len() == finished.len()
+        {
             return;
         }
 
@@ -2278,7 +2316,7 @@ impl Shared {
                 .map(|block| Arc::new(block.clone())),
         );
 
-        *held = Arc::new(BlockHistory::new(blocks, evicted));
+        *held = Arc::new(BlockHistory::new(blocks, evicted).cleared_at(cleared_at));
     }
 
     fn take_events(&self) -> Vec<TerminalEvent> {

@@ -592,6 +592,10 @@ pub enum BlockAction {
         /// The newest output, rather than the oldest.
         bottom: bool,
     },
+    /// Drop every finished block of a pane, and its scrollback, keeping the
+    /// open one. What `clear-blocks` sends for the focused pane, and what a
+    /// composer's Ctrl-L sends for the pane it is under.
+    Clear(PaneId),
 }
 
 /// Which of a block's facts an entry copies.

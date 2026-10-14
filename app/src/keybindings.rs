@@ -1163,6 +1163,11 @@ pub const DEFAULTS_MAC: &[(&str, &str)] = &[
     ("shift+pagedown", "crook/window/page-down"),
     ("shift+cmd+pageup", "crook/window/scroll-to-top"),
     ("shift+cmd+pagedown", "crook/window/scroll-to-bottom"),
+    // Warp's "Clear blocks" is cmd-k, and so is the clear of Terminal, iTerm2
+    // and Ghostty — but cmd-k is the tab search here, the chord crook.id
+    // tells people to press. So the clear takes the Shift beside it, free of
+    // the field: the cmd branch of `chord_intent` takes a Shift only on z.
+    ("shift+cmd+k", "crook/window/clear-blocks"),
 ];
 
 /// The chords Linux and Windows open with.
@@ -1279,6 +1284,11 @@ pub const DEFAULTS_OTHER: &[(&str, &str)] = &[
     ("shift+pagedown", "crook/window/page-down"),
     ("alt+home", "crook/window/scroll-to-top"),
     ("alt+end", "crook/window/scroll-to-bottom"),
+    // Not the Mac table's letter: ctrl+shift+k is the tab search here. The
+    // Ctrl-L every shell person clears with instead, with the Shift every
+    // chord here carries — bare ctrl-l is the composer's own clear, and the
+    // program's whenever one holds the screen.
+    ("ctrl+shift+l", "crook/window/clear-blocks"),
 ];
 
 /// Whether `later`, written after `rule`, leaves `rule`'s chord unpressable.

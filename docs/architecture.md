@@ -2035,7 +2035,10 @@ closed by the shell's own `D`, whose exit status the answer carries — a comman
 line's, which a shell ends with a `D` too. That is what keeps a
 command that ended before the wait was asked from being missed, and a tab that has not started
 from being taken for one that has finished; it is refused as `no-blocks` for a shell with no
-marks, where nothing ever says a command ended. `exited` is the pane closing by whichever road.
+marks, where nothing ever says a command ended. A pane cleared by hand (Clear blocks) between
+the command's end and the wait still answers: with no command left in its history, the newest
+one the clear let go of is the one that finished, exit and all. `exited` is the pane closing by
+whichever road.
 A state already reached answers at once, and a pane that closes first answers at once with
 `reached: false`. A pane that closed before the wait was asked answers at once too: the window
 remembers who opened the last 256 tabs `tab.new` opened that have closed, whether anybody was
@@ -2060,7 +2063,10 @@ has not finished, whatever the pane draws it as: a build on the primary screen, 
 program on the alternate one, an agent's interactive TUI. With nothing finished such a pane is
 refused as `no-blocks` with a sentence saying which — wait `--until finished` for a command,
 and a screen is never a block — rather than answered with an empty list that reads as "nothing
-ran"; with finished commands from before, it gets those and `running: true`. A worker whose
+ran"; with finished commands from before, it gets those and `running: true`. A pane at rest whose
+commands a clear let go of is refused the same way, with a sentence saying the clear took what
+the last one printed and how it exited, since `pane.wait --until finished` has just said it
+finished; one running something since says nothing has finished since the clear. A worker whose
 answer is meant to be read runs headless.
 
 **`events.follow`** answers `{panes}`, what it follows as of now, then one line per event until

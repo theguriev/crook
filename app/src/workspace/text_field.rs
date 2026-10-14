@@ -263,6 +263,10 @@ impl TextField {
             Intent::HistoryUp => Intent::Move(Motion::LineStart),
             Intent::HistoryDown => Intent::Move(Motion::LineEnd),
             Intent::Copy if self.input.editor().selection().is_empty() => return false,
+            // A composer's Ctrl-L clears the pane it is under, and this field
+            // is under none. Declined, which is all it did before it meant
+            // anything: a find bar over a pane passes it on to nobody.
+            Intent::ClearBlocks => return false,
             other => other,
         };
 

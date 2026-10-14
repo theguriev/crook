@@ -819,10 +819,43 @@ impl Emulator {
             .map(|at| &self.blocks.finished()[at])
     }
 
+    /// Forgets every finished block and the scrollback, and keeps the block
+    /// that is open where it is: what clearing a pane does — Warp's "Clear
+    /// blocks", and the `cmd-k` of the terminals before it.
+    ///
+    /// The scrollback goes with the blocks because it is the rest of what a
+    /// pane has to scroll back to: what the open block has pushed off the
+    /// screen, and for a shell that reports no boundaries, everything above
+    /// the screen. The screen itself stays — the prompt, or whatever a
+    /// running command is printing — and so does the block on it, down to
+    /// where its prompt ends; `BlockTracker::clear` says how.
+    ///
+    /// Not part of any stream, so an emulator fed the same items as a mirror
+    /// keeps everything this one forgot.
+    ///
+    /// Answers the finished blocks it let go of, oldest first, for a caller
+    /// with something to keep of them: what the last command exited with
+    /// still answers whether the pane's command has finished.
+    pub fn clear_blocks(&mut self) -> Vec<Block> {
+        let dropped = self.blocks.clear(&mut self.term);
+        self.dirty = true;
+        dropped
+    }
+
     /// How many blocks have been dropped off the front of the list to keep a
-    /// stream of forged marks from growing it without bound.
+    /// stream of forged marks from growing it without bound, or by
+    /// [`Self::clear_blocks`].
     pub fn blocks_evicted(&self) -> usize {
         self.blocks.evicted()
+    }
+
+    /// What [`Self::blocks_evicted`] came to at the last
+    /// [`Self::clear_blocks`], or 0 for a pane never cleared. Past it, the
+    /// count is blocks the cap pushed off the front, which leave something
+    /// before the first block still held; up to it, blocks a person cleared
+    /// away, which leave nothing.
+    pub fn blocks_cleared_at(&self) -> usize {
+        self.blocks.cleared_at()
     }
 
     /// The block everything arriving now belongs to. Also on every
