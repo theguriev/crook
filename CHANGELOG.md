@@ -5,6 +5,27 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.26
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.25...v0.1.26)
+
+### Features
+
+- **blocks:** Clear a pane with shift-cmd-k, ctrl-shift-l or ctrl-l at the prompt ([#510](https://github.com/theguriev/crook/pull/510))
+- **input:** Type the paths of files dropped on the window into the focused pane ([#508](https://github.com/theguriev/crook/pull/508))
+- **window:** Change the pointer's shape over text, split handles and links ([#513](https://github.com/theguriev/crook/pull/513))
+- **clipboard:** Make a selection PRIMARY on Linux and paste it on a middle click ([#511](https://github.com/theguriev/crook/pull/511))
+- **links:** Open a path a program printed in the editor at its line ([#512](https://github.com/theguriev/crook/pull/512))
+
+### Fixes
+
+- **tabs:** Reopen a closed group or pane, and put a reopened tab back in its group ([#514](https://github.com/theguriev/crook/pull/514))
+- **input:** Draw what an input method composes at a program's cursor ([#509](https://github.com/theguriev/crook/pull/509))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.25
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.24...v0.1.25)
