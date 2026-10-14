@@ -36002,3 +36002,186 @@ fn the_menu_offers_every_close_and_below_takes_nothing_from_the_bottom_tab() {
         "the bottom tab had nothing below it"
     );
 }
+
+mod dropping_files {
+    //! Files dropped on the window, from the moment the window hands the
+    //! workspace their paths: which pane they go to, and what reaches it.
+
+    use std::time::{Duration, Instant};
+
+    use super::shells::{a_shell_these_tests_speak, await_prompt, marked_shell};
+    use super::*;
+
+    /// What a person drops on an agent: a screenshot, named with spaces the
+    /// way every desktop names one, and a log with a quote in its name.
+    fn the_files() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/tmp/Screen Shot 2026-10-14 at 09.41.07.png"),
+            PathBuf::from("/tmp/it's.log"),
+        ]
+    }
+
+    /// [`the_files`] as the line a drop of them types, spelled out rather
+    /// than built with the quoting under test.
+    fn the_line() -> &'static str {
+        match cfg!(windows) {
+            true => "'/tmp/Screen Shot 2026-10-14 at 09.41.07.png' '/tmp/it''s.log'",
+            false => "'/tmp/Screen Shot 2026-10-14 at 09.41.07.png' '/tmp/it'\\''s.log'",
+        }
+    }
+
+    /// Drops files on the window the way the window delegate hands them on,
+    /// and says whether they went anywhere.
+    fn drop_on_the_window(harness: &mut Harness, paths: &[PathBuf]) -> bool {
+        let workspace = &harness.workspace;
+        harness
+            .app
+            .update(|ctx| workspace.update(ctx, |workspace, ctx| workspace.drop_files(paths, ctx)))
+    }
+
+    /// Whether a pane is drawing its composer, by the one rule that decides.
+    fn shows_a_composer(harness: &Harness, pane: PaneId) -> bool {
+        harness.workspace.read(&harness.app, |workspace, app| {
+            workspace.terminal(pane, app).is_some_and(|(_, snapshot)| {
+                crate::pane_surface::of(&snapshot, Instant::now()).composer
+            })
+        })
+    }
+
+    #[test]
+    fn a_drop_goes_into_the_focused_pane_s_composer_at_the_caret_quoted() {
+        let mut harness = Harness::new(1);
+        if !a_shell_these_tests_speak() {
+            return;
+        }
+        harness.dispatch_action(TabAction::Split(Direction::Right));
+        let [left, right] = harness.active_pane_ids()[..] else {
+            panic!("a split tab has two panes");
+        };
+        if !harness.start_terminals_with_marks() {
+            return;
+        }
+        await_prompt(&mut harness, left);
+        await_prompt(&mut harness, right);
+        harness.dispatch_action(TabAction::FocusPane(left));
+
+        // Half a command, with the caret where its argument goes.
+        harness.type_field(left, "ls -l  | head");
+        let caret = "ls -l ".len();
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .input(left)
+                .expect("the pane has a field")
+                .edit(|editor| editor.set_caret(caret));
+        });
+
+        assert!(drop_on_the_window(&mut harness, &the_files()));
+        assert_eq!(
+            harness.field_text(left),
+            format!("ls -l {} | head", the_line())
+        );
+        assert_eq!(
+            harness.field_caret(left),
+            caret + the_line().len(),
+            "the caret was not left after what the drop typed"
+        );
+        assert_eq!(
+            harness.field_text(right),
+            "",
+            "the pane beside the focused one was typed into"
+        );
+
+        // And with the keyboard moved to the other pane, it is the other
+        // pane: the focus is what aims a drop, not which pane came first or
+        // which was made last.
+        harness.dispatch_action(TabAction::FocusPane(right));
+        assert!(drop_on_the_window(&mut harness, &the_files()));
+        assert_eq!(harness.field_text(right), the_line());
+        assert_eq!(
+            harness.field_text(left),
+            format!("ls -l {} | head", the_line()),
+            "the pane the keyboard left was typed into again"
+        );
+
+        // Typed into the fields and not handed to the shells as well, where
+        // it would be a command line of its own the moment anybody pressed
+        // Enter.
+        harness.settle(Duration::from_millis(200));
+        for pane in [left, right] {
+            assert!(
+                !harness.terminal_text(pane).contains("Screen Shot"),
+                "the drop reached the shell under the field: {:?}",
+                harness.terminal_text(pane)
+            );
+        }
+    }
+
+    #[test]
+    fn a_drop_reaches_a_program_holding_the_keyboard_as_one_bracketed_paste() {
+        let scratch = Scratch::new();
+        let received = scratch.path().join("received");
+        let mut harness = Harness::new(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        await_prompt(&mut harness, pane);
+
+        // A stand-in for an agent: it turns bracketed paste on, as Claude
+        // Code does, and writes every byte it is given to `received` as it
+        // comes — with the terminal's line mode off, so that nothing waits
+        // for the Enter a drop must never press. The word it prints is
+        // spelled in two halves so that the echo of the command line is not
+        // it.
+        harness.type_into(
+            pane,
+            &format!(
+                "stty -icanon min 1 time 0 -echo; printf '\\033[?2004hRE%s\\n' ADY; cat > '{}'\n",
+                received.display()
+            ),
+        );
+        harness.wait_for("the stand-in never took the keyboard", |harness| {
+            harness.terminal_text(pane).contains("READY")
+                && received.exists()
+                && !shows_a_composer(harness, pane)
+        });
+
+        assert!(drop_on_the_window(&mut harness, &the_files()));
+        let expected = format!("\u{1b}[200~{}\u{1b}[201~", the_line());
+        harness.wait_for("the drop never reached the program", |_| {
+            fs::read_to_string(&received).is_ok_and(|got| got.len() >= expected.len())
+        });
+        assert_eq!(
+            fs::read_to_string(&received).expect("the stand-in made its file"),
+            expected,
+            "not the paths, quoted and between the two markers, and nothing else"
+        );
+        assert_eq!(
+            harness.field_text(pane),
+            "",
+            "the drop went into the composer the program had taken the place of"
+        );
+    }
+
+    #[test]
+    fn a_drop_under_an_open_menu_reaches_no_pane_and_one_after_it_closes_does() {
+        // The menu has the keyboard, and a drop goes where a paste would:
+        // into nothing hidden under it.
+        let mut harness = Harness::new(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        await_prompt(&mut harness, pane);
+
+        harness.dispatch_option(OptionsAction::TogglePopup);
+        assert!(harness.is_menu_open());
+        assert!(!drop_on_the_window(&mut harness, &the_files()));
+        assert_eq!(harness.field_text(pane), "", "the field under the menu");
+
+        // And the same drop with the menu gone does land, so it was the menu
+        // that kept it out.
+        harness.dispatch_option(OptionsAction::TogglePopup);
+        assert!(!harness.is_menu_open());
+        assert!(drop_on_the_window(&mut harness, &the_files()));
+        assert_eq!(harness.field_text(pane), the_line());
+    }
+}

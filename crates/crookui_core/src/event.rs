@@ -6,6 +6,8 @@
 //! event is therefore indistinguishable from a real one, which is what makes
 //! the element tree testable without a window.
 
+use std::path::PathBuf;
+
 use crate::geometry::{Point, Vector2F, ZIndex};
 use crate::presenter::EventContext;
 
@@ -228,6 +230,26 @@ pub enum Event {
     /// otherwise, which is what every window was before this was sent, so a
     /// desktop that never says leaves an application exactly as it was.
     WindowFocused(bool),
+
+    /// Files were dragged from somewhere else — a file manager, a
+    /// screenshot's thumbnail, a browser's downloads — and let go over the
+    /// window.
+    ///
+    /// One event for the whole drop, however many files it carried: a
+    /// platform that reports them a file at a time has them gathered before
+    /// they cross the line, so an application never sees half a drop.
+    ///
+    /// It says nothing about *where* in the window they were let go, so it is
+    /// not hit-tested and goes wherever the application decides. That is not
+    /// an omission here. The platform layer reads its drops through a
+    /// windowing library that reports no position with one, and while an
+    /// operating system's drag is in progress the window is sent no pointer
+    /// moves either, so the last position it was told of is wherever the
+    /// pointer left it before the drag began. Wayland reports no drop at all.
+    FilesDropped {
+        /// The files, in the order the desktop listed them.
+        paths: Vec<PathBuf>,
+    },
 }
 
 /// Whether the desktop is set to light or to dark.
@@ -296,7 +318,8 @@ impl Event {
             | Self::KeyUp { .. }
             | Self::Ime(_)
             | Self::SystemTheme(_)
-            | Self::WindowFocused(_) => None,
+            | Self::WindowFocused(_)
+            | Self::FilesDropped { .. } => None,
         }
     }
 
@@ -324,7 +347,10 @@ impl Event {
             // An input method reports what it composed, never what was held to
             // compose it: the modifiers went into the composition and came out
             // the other side as text.
-            Self::Ime(_) | Self::SystemTheme(_) | Self::WindowFocused(_) => Modifiers::default(),
+            Self::Ime(_)
+            | Self::SystemTheme(_)
+            | Self::WindowFocused(_)
+            | Self::FilesDropped { .. } => Modifiers::default(),
         }
     }
 
@@ -378,6 +404,7 @@ impl DispatchedEvent {
             | Event::Ime(_)
             | Event::SystemTheme(_)
             | Event::WindowFocused(_)
+            | Event::FilesDropped { .. }
             | Event::MouseMoved { .. }
             | Event::ModifiersChanged { .. } => Some(&self.event),
         }

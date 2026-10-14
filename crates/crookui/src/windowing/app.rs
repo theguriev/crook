@@ -435,6 +435,10 @@ impl ApplicationHandler<CrookEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // A drop whose last file was the last event of the batch: nothing
+        // else may come for minutes, and the drop is over now.
+        self.deliver_drop(None);
+
         // Every batch of events ends here, and a Quit that comes before the
         // next one is answered with what is written down now.
         #[cfg(target_os = "macos")]
@@ -533,6 +537,12 @@ impl ApplicationHandler<CrookEvent> for App {
             return;
         }
 
+        // Before this event, whatever it is: a drop is told a file at a time,
+        // every file of it before anything else, so the first event that is
+        // not one of its files is the end of it — and the application hears
+        // the drop before the thing that came after it.
+        self.deliver_drop(Some(&event));
+
         match event {
             // The application's to answer rather than this loop's: a window
             // with work in it asks before that work is ended, and the answer
@@ -616,6 +626,23 @@ impl App {
                 .as_mut()
                 .expect("the window was matched by id a moment ago"),
         )
+    }
+
+    /// Hands the application the drop that `next` ends, if one is arriving
+    /// and `next` is not another of its files; `None` is the end of the
+    /// batch of events, which ends any drop.
+    ///
+    /// Straight to the application, past the resize border: a drop is not a
+    /// press, and carries no position for the border to claim it by.
+    fn deliver_drop(&mut self, next: Option<&WindowEvent>) {
+        let Some(dropped) = self.input.finish_drop(next) else {
+            return;
+        };
+        if self.delegate.handle_event(dropped)
+            && let Some(window) = self.window.as_mut()
+        {
+            window.request_redraw();
+        }
     }
 
     /// Resizes the window from its own edges, on a window that has none of the
