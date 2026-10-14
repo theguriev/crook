@@ -197,9 +197,10 @@ when its turn ends — so a question it stops to ask reads as `idle` too, and `n
 comes: a worker you will wait on for a question needs the hooks. Codex and Gemini CLI workers
 without them say in their titles when they stop for an approval, so theirs does come, without the
 words of the question. The end of the question is not `idle`, since the agent works on after an
-approval: only its title saying the turn is over is. A codex without hooks that draws no spinner
-(`[tui] animations = false`), or that you start through `sh -c`, `npx` or `ssh`, never says that
-in its title, so wait for `finished` there.
+approval: only its title saying the turn is over is, or its command ending. A codex without hooks
+that draws no spinner (`[tui] animations = false`), or that you start through `sh -c`, `npx` or
+`ssh`, never says that in its title, so its `idle` comes only when it exits: wait for `finished`
+there.
 
 `crook pane blocks <id> [--last N]` prints the pane's newest finished commands: the command line,
 what it printed (the end of it, when it is long), the exit status, how long it ran and where;
@@ -215,7 +216,9 @@ crook pane wait "$id" --until finished --timeout 110 && crook pane blocks "$id" 
 
 `crook events --follow` prints one line of JSON for every change of status, every command
 finished — with its command line and exit status — and every tab opened or closed, in your pane
-and the tabs it opened (`--pane <id>` for one), until you stop it. A command is also sent as
+and the tabs it opened (`--pane <id>` for one), until you stop it. It sends `idle` only when
+`--until idle` would take it, so the end of a question a title asked comes as `idle` once the
+title says the turn is over or the command ends, and not before. A command is also sent as
 `started` when it runs long enough to be seen running; a quick one comes only as `finished`. A
 reader that falls behind is sent a `lagged` line saying how many events it missed.
 

@@ -265,8 +265,9 @@ pub enum StatusSource {
     /// The command the agent was ended and took its last report back, at
     /// this instant. See `Emulator::settle_agent` in `crook_terminal` for a
     /// hook's report, and `Workspace::take_back_a_running_title` for a
-    /// running or a question the title said — which a cleared title takes
-    /// back too, since that is how Claude Code and Gemini CLI leave.
+    /// running or a question the title said, or the idle its question left
+    /// ([`Self::TitleStoppedAsking`]) — which a cleared title takes back
+    /// too, since that is how Claude Code and Gemini CLI leave.
     CommandEnded(Instant),
     /// The program's terminal title said so, at this instant. See
     /// [`AgentStatus::from_title`].
@@ -289,7 +290,9 @@ pub enum StatusSource {
     /// off, its spinner where the pane runs it through `npx`, an alias or
     /// `ssh` — cannot tell that from a turn that ended. So `crook pane wait
     /// --until idle` is not answered by it, and `crook events --follow` is
-    /// not told it. See `Workspace::title_stopped_asking`.
+    /// not told it, until the end of the agent's command turns it into a
+    /// [`Self::CommandEnded`], which both take. See
+    /// `Workspace::title_stopped_asking`.
     TitleStoppedAsking(Instant),
 }
 

@@ -34760,6 +34760,46 @@ mod agent_titles {
         assert_taken_back(&harness, pane);
     }
 
+    /// The idle a question ends in when its title says no more is no report
+    /// that the turn is over while the agent may be at work on what was
+    /// approved — and it is one once the agent has gone. Every word the
+    /// pane has of that takes it back as it takes back a running: the end
+    /// of the command, the pane going back to a prompt, the first prompt,
+    /// and the title cleared on the way out.
+    #[test]
+    fn the_agent_going_takes_back_the_idle_a_question_left() {
+        type Gone = fn(PaneId) -> TerminalUpdate;
+        let ways: [(&str, Gone); 4] = [
+            ("the end of the command", |pane| {
+                TerminalUpdate::CommandFinished {
+                    pane,
+                    command: Some("npx @openai/codex".to_owned()),
+                    exit: Some(0),
+                    took: None,
+                    ran: true,
+                }
+            }),
+            ("a prompt again", |pane| TerminalUpdate::Running(pane, None)),
+            ("the first prompt", TerminalUpdate::Prompted),
+            ("a cleared title", |pane| TerminalUpdate::Title(pane, None)),
+        ];
+        for (way, gone) in ways {
+            let mut harness = Harness::panel(1);
+            let pane = harness.active_pane_ids()[0];
+            titled(&mut harness, pane, "[ ! ] Action Required | proj");
+            titled(&mut harness, pane, "\u{2819} proj");
+            let (status, source) = status_and_source(&harness, pane);
+            assert_eq!(status, AgentStatus::Idle, "{way}");
+            assert!(
+                matches!(source, StatusSource::TitleStoppedAsking(_)),
+                "{way}: {source:?}"
+            );
+
+            report(&mut harness, gone(pane));
+            assert_taken_back(&harness, pane);
+        }
+    }
+
     /// A stand-in for Claude Code mid-turn: its running title, then whatever
     /// `then` does. `sh -c` so that the line means the same in every shell
     /// these tests speak, fish included.

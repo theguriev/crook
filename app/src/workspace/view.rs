@@ -8215,18 +8215,23 @@ impl Workspace {
         reported
     }
 
-    /// What a pane's agent has said so far — its status and its question —
-    /// when something on the control socket is watching, for
+    /// What a pane's agent has said so far — its status, its question, and
+    /// whether that is the idle `crook pane wait --until idle` takes — when
+    /// something on the control socket is watching, for
     /// [`Self::tell_watches_the_status`] to tell a change from a repeat.
     ///
     /// `None` when nothing is: an agent reports running around every tool it
     /// calls, and copying its question each time for nobody is waste.
-    fn said(&self, pane: PaneId) -> Option<(AgentStatus, Option<String>)> {
+    fn said(&self, pane: PaneId) -> Option<(AgentStatus, Option<String>, bool)> {
         if self.watches.is_empty() {
             return None;
         }
         let session = self.tabs.pane(pane)?.session();
-        Some((session.status, session.message.clone()))
+        Some((
+            session.status,
+            session.message.clone(),
+            watch::is_idle(session),
+        ))
     }
 
     /// Tells what the control socket is watching that a pane's status
@@ -8234,19 +8239,25 @@ impl Workspace {
     /// [`Self::said`] read before it did.
     ///
     /// Only a change: a stream of the same word is noise, and a wait that
-    /// was not answered by a status is not answered by it again.
+    /// was not answered by a status is not answered by it again. An idle
+    /// that becomes the idle a wait takes is a change, though the word is
+    /// the same: the idle a title's question ends in is no report that the
+    /// turn is over, and the end of its command, which is, finds the status
+    /// idle already. Without it a lead's `--until idle` would wait for the
+    /// pane to close, and its stream would still say the agent was asking.
     fn tell_watches_the_status(
         &mut self,
         pane: PaneId,
-        before: Option<(AgentStatus, Option<String>)>,
+        before: Option<(AgentStatus, Option<String>, bool)>,
     ) {
-        let Some((status, message)) = before else {
+        let Some((status, message, idle)) = before else {
             return;
         };
         let Some(session) = self.tabs.pane(pane).map(Pane::session) else {
             return;
         };
-        if session.status == status && session.message == message {
+        let became_idle = !idle && watch::is_idle(session);
+        if session.status == status && session.message == message && !became_idle {
             return;
         }
         self.watches.heard(pane, session, watch::Heard::Status);
@@ -8332,7 +8343,8 @@ impl Workspace {
     /// [`StatusSource::TitleStoppedAsking`], which is no report of idle: an
     /// approval is answered and the agent works on, and nothing here can
     /// tell that from a turn that ended, so `crook pane wait --until idle`
-    /// and `crook events --follow` are not told the turn is over.
+    /// and `crook events --follow` are not told the turn is over. The end
+    /// of its command is, by [`Self::take_back_a_running_title`].
     fn title_stopped_asking(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
         let asked = self.tabs.pane(pane).is_some_and(|open| {
             matches!(open.session().source, StatusSource::Title(_))
@@ -8368,14 +8380,22 @@ impl Workspace {
     /// hook's report, and is said to have come from there.
     ///
     /// Only a running or a question, and only the title's: a hook's report
-    /// has the emulator's own settle, and an idle has nothing to take back.
+    /// has the emulator's own settle, and an idle has nothing to take back —
+    /// but for the one a question left when its title stopped asking
+    /// ([`StatusSource::TitleStoppedAsking`]), which says the agent may still
+    /// be at work. Once the agent has gone it is not, and the idle is the
+    /// command's end like any other, which a wait for idle takes.
     fn take_back_a_running_title(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
         let titled_turn = self.tabs.pane(pane).is_some_and(|open| {
-            matches!(open.session().source, StatusSource::Title(_))
-                && matches!(
-                    open.session().status,
+            let session = open.session();
+            match session.source {
+                StatusSource::Title(_) => matches!(
+                    session.status,
                     AgentStatus::Running | AgentStatus::NeedsInput
-                )
+                ),
+                StatusSource::TitleStoppedAsking(_) => true,
+                _ => false,
+            }
         });
         if !titled_turn {
             return;

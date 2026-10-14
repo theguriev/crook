@@ -2263,7 +2263,7 @@ mod socket {
 
     use super::super::protocol::{BlocksRead, Follow, PaneEvent, ReadBlocks, Until, Wait, Waited};
     use super::super::watch::{self, Feed};
-    use crate::tab::{Lineage, PaneId};
+    use crate::tab::{Lineage, PaneId, StatusSource};
     use crate::terminal_model::TerminalUpdate;
 
     /// `crook pane wait`, as the command line asks it from inside a pane.
@@ -3302,6 +3302,126 @@ mod socket {
                 PaneEvent::Closed { pane_id },
             ]
         );
+    }
+
+    /// The end of its command ends the turn a title stopped asking in,
+    /// though the title could not say so: the agent that might have been at
+    /// work on the approval has gone. A wait for idle is answered then, and
+    /// the stream is told `idle` before `finished`, as it is for an agent
+    /// killed while it asks. Codex that `tab new` opened, whose folder comes
+    /// back when the person declines, and codex through `npx`, whose spinner
+    /// is any build tool's.
+    #[test]
+    fn the_end_of_its_command_ends_the_turn_a_title_stopped_asking_in() {
+        // What the worker runs, the titles it shows, and what the stream
+        // says of them before the end of the command.
+        let codex: (&[&str], &[&str], &[&str]) = (
+            &["codex", "fix x"],
+            &[
+                "proj",
+                "\u{280b} proj",
+                "[ ! ] Action Required | proj",
+                "proj",
+            ],
+            &["running", "needs-input"],
+        );
+        let npx: (&[&str], &[&str], &[&str]) = (
+            &["sh", "-c", "npx @openai/codex 'fix x'"],
+            &[
+                "[ ! ] Action Required | proj",
+                "\u{280b} proj",
+                "\u{2819} proj",
+            ],
+            &["needs-input"],
+        );
+        for (words, titles, said) in [codex, npx] {
+            let mut served = Served::new(|_, _, _| {});
+            let lead = first_pane(&served);
+            let token = served.token(lead);
+            let opened = served
+                .open_tab(Some(token.clone()), new_tab(words))
+                .expect("the lead opens a worker");
+            let worker = served.pane(opened.pane_id);
+            let owned: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
+            let line = spawn::command_line(&owned, Path::new("zsh")).expect("a proven shell");
+            served.update(|workspace, ctx| {
+                workspace.apply_terminal_update(
+                    &TerminalUpdate::Running(worker, Some(line.clone())),
+                    ctx,
+                );
+            });
+
+            let following = served.start(follow(Some(&token), Some(worker)));
+            served.pump_until("the stream never started", |served| served.following() == 1);
+            let waiting = served.start(wait(&token, worker, Until::Idle, 120, false));
+            served.pump_until("the wait was never registered", |served| {
+                served.waiting() == 1
+            });
+            for title in titles {
+                served.titled(worker, title);
+            }
+            assert!(
+                served.session(worker, |session| {
+                    matches!(session.source, StatusSource::TitleStoppedAsking(_))
+                }),
+                "{words:?}: the title never stopped asking"
+            );
+            assert_eq!(
+                served.waiting(),
+                1,
+                "{words:?}: answered when the title stopped asking"
+            );
+
+            // The person quits the agent, in the order the model hands it
+            // over: what the pane runs, read off the snapshot, then the end.
+            served.update(|workspace, ctx| {
+                workspace.apply_terminal_update(&TerminalUpdate::Running(worker, None), ctx);
+                workspace.apply_terminal_update(
+                    &TerminalUpdate::CommandFinished {
+                        pane: worker,
+                        command: Some(line.clone()),
+                        exit: Some(0),
+                        took: None,
+                        ran: true,
+                    },
+                    ctx,
+                );
+            });
+            assert_eq!(
+                served.waiting(),
+                0,
+                "{words:?}: not answered when the command ended"
+            );
+            let printed = served.finish(waiting).expect("answered");
+            assert_eq!(
+                (printed.text.as_str(), printed.failure),
+                ("idle", None),
+                "{words:?}"
+            );
+
+            served.update(|workspace, ctx| {
+                workspace.apply(TabAction::ClosePane(worker), ctx);
+            });
+            let events = served.finish(following).expect("followed until it closed");
+            let pane_id = opened.pane_id;
+            let status = |status: &str| PaneEvent::Status {
+                pane_id,
+                status: status.to_owned(),
+                message: None,
+            };
+            let mut expected: Vec<PaneEvent> = said.iter().map(|said| status(said)).collect();
+            expected.extend([
+                status("idle"),
+                PaneEvent::Finished {
+                    pane_id,
+                    command: Some(line),
+                    exit: Some(0),
+                    duration_ms: None,
+                },
+                PaneEvent::Closed { pane_id },
+            ]);
+            assert_eq!(events, expected, "{words:?}");
+        }
     }
 
     /// The question a title asks is on the stream with the rest of what it
