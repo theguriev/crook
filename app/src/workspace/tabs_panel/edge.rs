@@ -6,15 +6,22 @@
 //! press, so a handle beside the panel would share its press with whatever
 //! row was under it — and a row pressed and dragged is a tab being moved.
 //! Wrapping the panel is what lets the handle keep the press from the rows.
+//!
+//! And everything the panel paints counts as under the handle, the rows
+//! included, though they scroll in a layer above the handle's own: hit-tested
+//! at its own layer, the handle lost every press at the height of a tab to
+//! the layer the tab was in. The resize arrows are asked for on the same
+//! terms, over the whole strip, so they show exactly where a press resizes.
 
 use std::cell::Cell;
 use std::rc::Rc;
 
 use crookui_core::element::SizeConstraint;
 use crookui_core::event::{DispatchedEvent, Event, MouseButton};
-use crookui_core::geometry::{Point, Vector2F};
+use crookui_core::geometry::{Point, Vector2F, ZIndex};
 use crookui_core::prelude::*;
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
+use crookui_core::scene::{ClipBounds, PointerShape};
 
 use super::PANEL_WIDTH;
 use crate::workspace::action::WorkspaceAction;
@@ -57,6 +64,9 @@ pub(super) struct PanelEdge {
     width: f32,
     size: Option<Vector2F>,
     origin: Option<Point>,
+    /// The topmost layer the panel reached, which is what a press on the
+    /// handle is hit-tested against. See the module comment.
+    child_max_z_index: Option<ZIndex>,
 }
 
 impl PanelEdge {
@@ -68,14 +78,24 @@ impl PanelEdge {
             width,
             size: None,
             origin: None,
+            child_max_z_index: None,
         }
+    }
+
+    /// The strip along the right edge a press takes the handle in.
+    fn handle(&self) -> Option<RectF> {
+        let bounds = self.bounds()?;
+        let grab = GRAB.min(bounds.width());
+        Some(RectF::new(
+            bounds.origin() + vec2f(bounds.width() - grab, 0.),
+            vec2f(grab, bounds.height()),
+        ))
     }
 
     /// Whether a press at `position` is on the handle.
     fn on_handle(&self, position: Vector2F) -> bool {
-        self.bounds().is_some_and(|bounds| {
-            bounds.contains_point(position) && position.x() >= bounds.max_x() - GRAB
-        })
+        self.handle()
+            .is_some_and(|handle| handle.contains_point(position))
     }
 
     fn ask(width: f32, save: bool, ctx: &mut EventContext) {
@@ -98,6 +118,16 @@ impl Element for PanelEdge {
     fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
         self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
         self.child.paint(origin, ctx, app);
+        self.child_max_z_index = Some(ctx.scene.max_active_z_index());
+
+        // In a layer over everything the panel painted, as a press on the
+        // strip is taken over all of it.
+        if let Some(handle) = self.handle() {
+            ctx.scene.start_layer(ClipBounds::ActiveLayer);
+            ctx.scene
+                .request_pointer(handle, PointerShape::ColumnResize);
+            ctx.scene.stop_layer();
+        }
     }
 
     fn dispatch_event(
@@ -133,7 +163,7 @@ impl Element for PanelEdge {
             }
         }
 
-        if let Some(z_index) = self.z_index()
+        if let Some(z_index) = self.child_max_z_index
             && let Some(Event::MouseDown {
                 button: MouseButton::Left,
                 position,

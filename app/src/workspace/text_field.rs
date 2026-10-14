@@ -43,6 +43,7 @@ use crookui_core::geometry::Point;
 use crookui_core::icons::IconKey;
 use crookui_core::prelude::*;
 use crookui_core::presenter::{LayoutContext, PaintContext};
+use crookui_core::scene::PointerShape;
 use crookui_core::text_layout::Line;
 
 use crate::clipboard::Clipboard;
@@ -410,12 +411,15 @@ impl Element for TextField {
         };
 
         // Hit-recorded: a press on the box is a press on the field, and the
-        // rail row under it must not get it.
+        // rail row under it must not get it. The I-beam is asked for after
+        // it, or the box would cover its own request.
         ctx.scene
             .draw_rect_with_hit_recording(RectF::new(origin, size))
             .with_background(theme().overlay_1)
             .with_border(Border::all(1.).with_border_color(border))
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)));
+        ctx.scene
+            .request_pointer(RectF::new(origin, size), PointerShape::Text);
 
         if let Some(icon) = self.icon {
             ctx.scene.draw_icon(

@@ -106,7 +106,7 @@ use crookui_core::element::{Element, SizeConstraint};
 use crookui_core::event::{DispatchedEvent, Event, Modifiers, MouseButton};
 use crookui_core::geometry::{Color, Point, RectF, Vector2F, vec2f};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
-use crookui_core::scene::{ClipBounds, Scene};
+use crookui_core::scene::{ClipBounds, PointerShape, Scene};
 
 use crate::browser;
 use crate::clipboard::Clipboard;
@@ -166,11 +166,16 @@ pub(super) fn opens_links(modifiers: Modifiers) -> bool {
     }
 }
 
-/// Underlines the cells a link occupies.
+/// Underlines the cells a link occupies, and asks for the hand over them.
 ///
 /// Its own function because both surfaces draw it: a URL printed by a running
 /// command is on the grid, and the same URL a moment later is a row of a
 /// finished block.
+///
+/// The hand comes with the rule because both mean the same thing — a click
+/// here follows the link — and both are true only while the chord key is
+/// held: a link is under the pointer only then, so without it there is no
+/// rule and the I-beam the surface asked for is what shows.
 pub(super) fn paint_link_rule(
     row_origin: Vector2F,
     start: usize,
@@ -179,6 +184,14 @@ pub(super) fn paint_link_rule(
     color: Color,
     scene: &mut Scene,
 ) {
+    scene.request_pointer(
+        RectF::new(
+            row_origin + vec2f(start as f32 * metrics.width, 0.),
+            vec2f(len as f32 * metrics.width, metrics.height),
+        ),
+        PointerShape::Hand,
+    );
+
     let thickness = (metrics.height * RULE_THICKNESS_RATIO).max(1.);
     scene
         .draw_rect_without_hit_recording(RectF::new(
@@ -994,6 +1007,22 @@ fn paint_grid(
     scene
         .draw_rect_without_hit_recording(RectF::new(origin, size))
         .with_background(color(snapshot.background));
+
+    // The I-beam says a press here selects, and over a program that has asked
+    // for the mouse it does not: the press is the program's. So a grid whose
+    // program has the mouse gets the arrow, which is what kitty and Alacritty
+    // show over `vim` with the mouse on. Alacritty brings the I-beam back
+    // while Shift is held, since Shift selects through the program; this does
+    // not, because nothing is drawn for Shift going down, and the arrow is
+    // what is true of the press a person makes without it.
+    scene.request_pointer(
+        RectF::new(origin, size),
+        if snapshot.mouse_reporting {
+            PointerShape::Arrow
+        } else {
+            PointerShape::Text
+        },
+    );
 
     let shape = snapshot
         .cursor

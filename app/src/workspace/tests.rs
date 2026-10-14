@@ -21,7 +21,7 @@ use crookui_core::geometry::{RectF, Vector2F, vec2f};
 use crookui_core::icons::Mark;
 use crookui_core::platform::TextLayoutSystem;
 use crookui_core::prelude::*;
-use crookui_core::scene::{CornerRadius, Radius, Rect, Scene};
+use crookui_core::scene::{CornerRadius, PointerShape, Radius, Rect, Scene};
 use crookui_core::text_layout::{Glyph, Line, Run};
 use crookui_core::{App, Presenter, WindowId};
 
@@ -2634,6 +2634,78 @@ fn a_press_beside_a_divider_drags_the_split_and_leaves_the_pane_under_it_alone()
         "the split did not move: {} then {}",
         before[0].width(),
         after[0].width()
+    );
+}
+
+#[test]
+fn the_pointer_shows_the_resize_arrows_across_a_divider_s_whole_grab() {
+    // The line is one pixel and the grab nine, most of it over the panes on
+    // either side: the arrows have to cover the band a press resizes in, not
+    // the line a person can barely see.
+    let mut harness = Harness::new(1);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let scene = harness.frame();
+    let panes = panel_boxes(&scene);
+    assert_eq!(panes.len(), 2, "two panes side by side");
+    let line = (panes[0].max_x() + panes[1].min_x()) / 2.;
+    let y = center(panes[0]).y();
+
+    for x in [line - 3.5, line, line + 3.5] {
+        assert_eq!(
+            scene.pointer_at(vec2f(x, y)),
+            PointerShape::ColumnResize,
+            "{x} is on the grab, {line} is the line"
+        );
+    }
+    assert_ne!(
+        scene.pointer_at(vec2f(line - 20., y)),
+        PointerShape::ColumnResize,
+        "a pane well clear of the line is not the divider's"
+    );
+}
+
+#[test]
+fn a_divider_between_panes_above_and_below_shows_the_up_and_down_arrows() {
+    let mut harness = Harness::new(1);
+    harness.dispatch_action(TabAction::Split(Direction::Down));
+    let scene = harness.frame();
+    let panes = panel_boxes(&scene);
+    assert_eq!(panes.len(), 2, "two panes, one over the other");
+    let line = (panes[0].max_y() + panes[1].min_y()) / 2.;
+    let x = center(panes[0]).x();
+
+    for y in [line - 3.5, line + 3.5] {
+        assert_eq!(scene.pointer_at(vec2f(x, y)), PointerShape::RowResize);
+    }
+}
+
+#[test]
+fn a_divider_s_grab_goes_with_it_when_the_window_is_resized() {
+    // A resize lays the same tree out again without rendering it, and the
+    // grab each divider writes down as it paints used to be added to the one
+    // from the frame before. Where the divider had been, a press was still
+    // the divider's — so it reached no pane — and the pointer still said so.
+    let mut harness = Harness::new(1);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let panes = harness.active_pane_ids();
+    let narrow = panel_boxes(&harness.frame_sized(vec2f(800., 640.)));
+    let was = vec2f(narrow[0].max_x(), center(narrow[0]).y());
+
+    let scene = harness.frame_sized(vec2f(1400., 640.));
+    let wide = panel_boxes(&scene);
+    assert!(
+        wide[0].contains_point(was) && was.x() < wide[0].max_x() - 20.,
+        "the line moved well into the first pane: {was:?} in {:?}",
+        wide[0]
+    );
+    assert_ne!(scene.pointer_at(was), PointerShape::ColumnResize);
+
+    assert_eq!(harness.focused_pane_id(), Some(panes[1]));
+    harness.click(was, MouseButton::Left);
+    assert_eq!(
+        harness.focused_pane_id(),
+        Some(panes[0]),
+        "a press where the divider used to be did not reach the pane there"
     );
 }
 
@@ -12024,6 +12096,27 @@ fn a_window_behind_another_draws_its_search_box_as_one_without_the_keys() {
 }
 
 #[test]
+fn the_pointer_over_the_search_box_is_the_i_beam_and_beside_it_the_arrow() {
+    // A text field is where a press puts a caret, and every one of them is
+    // this element: the palette's, the find bar's, the settings page's.
+    let mut harness = Harness::panel(2);
+    let scene = harness.frame();
+    let field = panel_search_box(&scene);
+
+    assert_eq!(scene.pointer_at(center(field)), PointerShape::Text);
+    assert_eq!(
+        scene.pointer_at(vec2f(field.min_x() + 1., field.min_y() + 1.)),
+        PointerShape::Text,
+        "the whole box takes the press, padding and icon included"
+    );
+    assert_eq!(
+        scene.pointer_at(center(panel_rows(&scene)[0])),
+        PointerShape::Arrow,
+        "a tab's row is a control"
+    );
+}
+
+#[test]
 fn typing_in_the_box_filters_the_list_and_leaves_the_strip_alone() {
     // The whole feature, and the one line of it that is easy to get wrong: a
     // filter is a thing the *list* does. The tab that is active stays active
@@ -17105,6 +17198,106 @@ mod shells {
     /// The pane every test here works in, once it is open.
     fn harness_pane(harness: &Harness) -> PaneId {
         harness.focused_pane_id().expect("the window has a pane")
+    }
+
+    #[test]
+    fn the_pointer_is_an_i_beam_over_the_output_and_a_hand_on_a_link_while_the_chord_key_is_held() {
+        // **The whole feature, end to end**, on a real shell's output: the
+        // surface asks for the I-beam, the chord key going down finds the
+        // link under a pointer that never moved, and the frame that underlines
+        // it asks for the hand over it — and only over it.
+        let mut harness = Harness::panel(1);
+        if one_shell(&mut harness).is_none() {
+            return;
+        }
+        harness.frame();
+        let row = run_and_find(
+            &mut harness,
+            "printf 'HTTPS://EXAMPLE.COM/POINTER\\n' | tr A-Z a-z",
+            "https://example.com/pointer",
+        );
+        let on_link = grid_cell(&mut harness, row, 4, 0.5);
+        let past_it = grid_cell(&mut harness, row, 32, 0.5);
+        let follow = if cfg!(target_os = "macos") {
+            Modifiers {
+                cmd: true,
+                ..Default::default()
+            }
+        } else {
+            Modifiers {
+                ctrl: true,
+                ..Default::default()
+            }
+        };
+
+        assert_eq!(harness.frame().pointer_at(on_link), PointerShape::Text);
+
+        harness.dispatch(Event::ModifiersChanged {
+            position: on_link,
+            modifiers: follow,
+        });
+        let scene = harness.frame();
+        assert_eq!(scene.pointer_at(on_link), PointerShape::Hand);
+        assert_eq!(
+            scene.pointer_at(past_it),
+            PointerShape::Text,
+            "the cells after the link are not part of it"
+        );
+
+        harness.dispatch(Event::ModifiersChanged {
+            position: on_link,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(
+            harness.frame().pointer_at(on_link),
+            PointerShape::Text,
+            "letting go of the chord key puts the pointer back to selecting"
+        );
+
+        let composer = composer_text(&mut harness);
+        assert_eq!(harness.frame().pointer_at(composer), PointerShape::Text);
+    }
+
+    #[test]
+    fn a_divider_s_grab_shows_the_resize_arrows_over_the_output_on_either_side() {
+        // The band reaches four pixels into each pane, and both panes ask for
+        // the I-beam over their output: the one after the divider later in
+        // the same layer, and both from a list in a layer above the
+        // divider's. The press there is the divider's, so the pointer is too.
+        let mut harness = Harness::panel(1);
+        if one_shell(&mut harness).is_none() {
+            return;
+        }
+        harness.dispatch_action(TabAction::Split(Direction::Right));
+        let panes = harness.active_pane_ids();
+        for pane in &panes {
+            harness.wait_for("the split's shell never opened", |harness| {
+                harness.workspace.read(&harness.app, |workspace, app| {
+                    workspace.terminal(*pane, app).is_some()
+                })
+            });
+        }
+
+        let scene = harness.frame();
+        let boxes = panel_boxes(&scene);
+        assert_eq!(boxes.len(), 2, "two panes side by side");
+        let line = (boxes[0].max_x() + boxes[1].min_x()) / 2.;
+        let y = center(boxes[0]).y();
+
+        for pane in &boxes {
+            assert_eq!(
+                scene.pointer_at(center(*pane)),
+                PointerShape::Text,
+                "the output of the pane at {pane:?}"
+            );
+        }
+        for x in [line - 3.5, line + 3.5] {
+            assert_eq!(
+                scene.pointer_at(vec2f(x, y)),
+                PointerShape::ColumnResize,
+                "{x}, beside the line at {line}"
+            );
+        }
     }
 
     #[test]
@@ -34465,6 +34658,7 @@ mod changes_column {
             alt_screen,
             live_block,
             title: None,
+            mouse_reporting: false,
         };
         // A shell handed `(claude)` by the composer, as its emulator has it:
         // one that has drawn a marked prompt, or one that has printed a
@@ -35916,6 +36110,49 @@ mod panel_edge {
         harness.let_go(grab);
 
         assert_eq!(width(&harness), tabs_panel::PANEL_WIDTH);
+    }
+
+    /// Beside a row as well as below the last one. The rows scroll in a layer
+    /// of their own, above the edge's, and they used to cover it: a press at
+    /// the height of a tab went to the tab, so the edge could be dragged only
+    /// in the empty space under the list.
+    #[test]
+    fn the_edge_beside_a_row_is_the_edge_and_not_the_row() {
+        let mut harness = Harness::panel(2);
+        let scene = harness.frame();
+        let row = panel_rows(&scene)[0];
+        let grab = vec2f(width(&harness) - 2., center(row).y());
+
+        harness.hold(grab, 1);
+        harness.drag_to(grab + vec2f(100., 0.));
+        harness.let_go(grab + vec2f(100., 0.));
+
+        assert_eq!(
+            width(&harness),
+            tabs_panel::PANEL_WIDTH + 100.,
+            "the press went to the row beside the edge"
+        );
+    }
+
+    #[test]
+    fn the_pointer_shows_the_resize_arrows_along_the_whole_edge_and_nowhere_inside() {
+        let mut harness = Harness::panel(2);
+        let scene = harness.frame();
+        let row = panel_rows(&scene)[0];
+        let edge = width(&harness) - 2.;
+
+        for y in [center(row).y(), WINDOW.y() / 2.] {
+            assert_eq!(
+                scene.pointer_at(vec2f(edge, y)),
+                PointerShape::ColumnResize,
+                "at {y}"
+            );
+        }
+        assert_ne!(
+            scene.pointer_at(on_edge(&harness, 40.)),
+            PointerShape::ColumnResize,
+            "further in than the handle reaches is the panel's"
+        );
     }
 
     /// Further in than the handle reaches is a row, and a row dragged is a
