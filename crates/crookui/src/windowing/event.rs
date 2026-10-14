@@ -10,6 +10,7 @@
 //! in logical ones, because that is the space a [`Scene`](crookui_core::Scene)
 //! is laid out in.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crookui_core::event::{
@@ -43,6 +44,9 @@ pub(super) struct InputState {
     cursor: Vector2F,
     buttons_down: Vec<MouseButton>,
     last_click: Option<Click>,
+    /// The files of a drop that is still arriving, one `DroppedFile` at a
+    /// time. See [`Self::finish_drop`].
+    dropped: Vec<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -57,6 +61,10 @@ impl InputState {
     /// Converts one winit window event, or `None` when it is not input or one
     /// of the two things the desktop says about the window — its theme and
     /// whether it has the focus.
+    ///
+    /// A dropped file is input, and is `None` here all the same: it is one
+    /// file of a drop that may have more, and what crosses the line is the
+    /// whole drop, from [`Self::finish_drop`].
     ///
     /// `scale_factor` converts winit's physical coordinates to the logical ones
     /// the scene was laid out in, so it must be the window's *current* scale
@@ -177,8 +185,38 @@ impl InputState {
                 }
             }
 
+            // One file of a drop, which winit tells a file at a time. Kept
+            // until the drop has been told in full, which only the next event
+            // can say: see `finish_drop`.
+            WindowEvent::DroppedFile(path) => {
+                self.dropped.push(path.clone());
+                None
+            }
+
             _ => None,
         }
+    }
+
+    /// The files dropped since the last drop went on, as one
+    /// [`Event::FilesDropped`], once `next` says the drop is over: an event
+    /// that is not another file of it, or `None` for the end of the batch of
+    /// events it arrived in.
+    ///
+    /// Asked before every event is converted, and at the end of every batch.
+    /// Every desktop winit reads a drop from tells all its files in one go,
+    /// one after another with nothing between them — AppKit's
+    /// `performDragOperation:`, OLE's `Drop`, X11's `XdndDrop` each loop over
+    /// the list — so the first thing that is not one of them is after the
+    /// drop rather than in the middle of it. The end of the batch is asked
+    /// too, because a drop is usually the last thing that happens for a
+    /// while: a person lets go of the files and reaches for the keyboard.
+    pub(super) fn finish_drop(&mut self, next: Option<&WindowEvent>) -> Option<Event> {
+        if self.dropped.is_empty() || matches!(next, Some(WindowEvent::DroppedFile(_))) {
+            return None;
+        }
+        Some(Event::FilesDropped {
+            paths: std::mem::take(&mut self.dropped),
+        })
     }
 
     /// Forgets every button it believes is held.
@@ -551,6 +589,55 @@ mod tests {
             input.convert(&WindowEvent::Focused(true), 1.),
             Some(Event::WindowFocused(true))
         ));
+    }
+
+    #[test]
+    fn the_files_of_one_drop_arrive_together_once_something_else_happens() {
+        let mut input = InputState::default();
+        let files = [
+            PathBuf::from("/home/me/Screen Shot.png"),
+            PathBuf::from("/home/me/it's.log"),
+        ];
+
+        // Winit tells a drop a file at a time, each file its own event, and
+        // nothing of it goes on until the drop has been told in full.
+        for file in &files {
+            let dropped = WindowEvent::DroppedFile(file.clone());
+            assert!(
+                input.finish_drop(Some(&dropped)).is_none(),
+                "another file of the same drop ended it"
+            );
+            assert!(
+                input.convert(&dropped, 1.).is_none(),
+                "a file went on before the rest of its drop"
+            );
+        }
+
+        // The first thing that is not one of its files is the end of it, and
+        // the drop goes on as one event, its files in the order they came.
+        let moved = cursor_moved(10., 10.);
+        match input.finish_drop(Some(&moved)) {
+            Some(Event::FilesDropped { paths }) => assert_eq!(paths, files),
+            other => panic!("expected the drop, got {other:?}"),
+        }
+
+        // Once.
+        assert!(input.finish_drop(Some(&moved)).is_none());
+        assert!(input.finish_drop(None).is_none());
+    }
+
+    #[test]
+    fn a_drop_that_is_the_last_thing_in_its_batch_of_events_ends_with_the_batch() {
+        // Nothing may follow a drop for minutes, and the drop cannot wait for
+        // the pointer to move: the end of the batch it came in ends it.
+        let mut input = InputState::default();
+        let file = PathBuf::from("/tmp/a.png");
+        input.convert(&WindowEvent::DroppedFile(file.clone()), 1.);
+
+        match input.finish_drop(None) {
+            Some(Event::FilesDropped { paths }) => assert_eq!(paths, [file]),
+            other => panic!("expected the drop, got {other:?}"),
+        }
     }
 
     #[test]

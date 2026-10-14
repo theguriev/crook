@@ -34,6 +34,7 @@ use crookui_core::prelude::*;
 use crate::clipboard::Clipboard;
 use crate::control::watch::{self, Watches};
 use crate::editor::Selection;
+use crate::file_drop;
 use crate::git::GitFacts;
 use crate::git_model::GitModel;
 use crate::input_keys::{Binding, Intent, Platform};
@@ -7739,6 +7740,93 @@ impl Workspace {
         };
         input.edit(|editor| editor.insert(text));
         ctx.notify();
+    }
+
+    /// Types the paths of files dropped on the window into the focused pane,
+    /// and says whether they went anywhere.
+    ///
+    /// Into its composer at the caret when it is showing one, quoted for the
+    /// shell that will run the line, as a paste into the field would be.
+    /// Otherwise to the pty instead, the way the paste chord sends the
+    /// clipboard there: bracketed when the program reading it asked for
+    /// that, which is how an agent tells a pasted path from a typed one, and
+    /// with the block list brought back to the live block, as any key sent
+    /// there brings it. Quoting and what is left out are
+    /// [`file_drop::line`]'s.
+    ///
+    /// **Quoted for whoever reads it**, which is not always a program when
+    /// there is no composer. With no command running and no full-screen
+    /// program up, the reader is the pane's shell at its prompt: a shell
+    /// with no marks, say, whose one open block has outgrown the screen and
+    /// taken the composer with it — cmd.exe's and PowerShell's after their
+    /// first screenful. Only a command the shell said is running, or the
+    /// alternate screen, is a program.
+    ///
+    /// Which leaves a program under a shell with no marks reading what was
+    /// spelled for the shell, in the composer or out of it: such a shell
+    /// never says a command is running, so on the main screen nothing tells
+    /// it apart from what it started — `wsl`, `ssh`, a nested shell, an
+    /// agent. Off cmd.exe and PowerShell the two spellings are one and the
+    /// same. For those two, [`file_drop::line`] leaves out a name that a
+    /// shell started from them could run part of, and a program under
+    /// PowerShell may not undo the quotes its spelling doubles.
+    ///
+    /// **The focused pane, not the one under the pointer.** A drop says
+    /// nothing about where it landed — see [`Event::FilesDropped`] — and the
+    /// pointer's last position is from before the drag began, wherever it
+    /// left the window. So it goes where a paste would, and on the same
+    /// terms: only while that pane has the keyboard and is on screen. A
+    /// menu, a question, a find bar or another field holding the keyboard
+    /// keeps the drop out of the pane beneath, as it keeps the paste chord
+    /// out, and so does a section of the sidebar showing in place of the
+    /// panes: the pane's field still holds the keyboard then, but nothing
+    /// typed reaches a pane that is not drawn.
+    ///
+    /// [`Event::FilesDropped`]: crookui_core::event::Event::FilesDropped
+    pub fn drop_files(&mut self, paths: &[PathBuf], ctx: &mut ViewContext<Self>) -> bool {
+        let Some(pane) = self.tabs.focused_pane_id() else {
+            return false;
+        };
+        if !self.pane_takes_keys(pane) || !self.pane_is_on_screen(pane) {
+            return false;
+        }
+        let Some((handle, snapshot)) = self.terminal(pane, ctx) else {
+            return false;
+        };
+        let shell = self
+            .terminals
+            .as_ref(ctx)
+            .shell_of(pane)
+            .map(Path::to_path_buf);
+        let surface = pane_surface::of(&snapshot, Instant::now());
+
+        if surface.composer {
+            let (Some(line), Some(input)) = (
+                file_drop::line(paths, shell.as_deref()),
+                self.inputs.get(&pane),
+            ) else {
+                return false;
+            };
+            input.edit(|editor| editor.paste(&line));
+            ctx.notify();
+            return true;
+        }
+
+        let a_program_reads = snapshot.alt_screen || snapshot.live_block.state.is_running();
+        let reader = shell.as_deref().filter(|_| !a_program_reads);
+        let Some(line) = file_drop::line(paths, reader) else {
+            return false;
+        };
+        if !handle.paste(&line) {
+            return false;
+        }
+        if surface.surface == Surface::Blocks
+            && let Some(view) = self.pane_blocks(pane)
+        {
+            view.apply(ScrollCause::KeyToPty);
+        }
+        ctx.notify();
+        true
     }
 
     /// Selects the first occurrence of `text` in a pane's field, reporting

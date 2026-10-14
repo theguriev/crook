@@ -144,7 +144,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
@@ -634,6 +634,9 @@ struct Session {
     marks: bool,
     /// Whether [`TerminalUpdate::Prompted`] has been sent for this shell.
     prompted: bool,
+    /// The shell this pane was started with, which the setting may have
+    /// moved on from since: see [`TerminalModel::shell_of`].
+    shell: PathBuf,
 }
 
 impl Entity for TerminalModel {
@@ -826,6 +829,17 @@ impl TerminalModel {
     /// whole session: nothing in it ever finishes.
     pub fn marks(&self, pane: PaneId) -> Option<bool> {
         self.sessions.get(&pane).map(|session| session.marks)
+    }
+
+    /// The shell a pane is running, or `None` when it has none.
+    ///
+    /// The one it was started with, not [`Self::shell`]: that is the next
+    /// pane's, and changes with the setting while this one goes on running
+    /// what it was given.
+    pub fn shell_of(&self, pane: PaneId) -> Option<&Path> {
+        self.sessions
+            .get(&pane)
+            .map(|session| session.shell.as_path())
     }
 
     /// The running terminal in a pane, for the element that draws it.
@@ -1036,6 +1050,7 @@ impl TerminalModel {
                 token,
                 marks,
                 prompted: false,
+                shell: self.shell(),
             },
         );
         self.watch(pane, ctx);

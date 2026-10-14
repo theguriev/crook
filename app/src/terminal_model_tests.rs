@@ -605,6 +605,7 @@ impl Batches {
                         token: None,
                         marks,
                         prompted: false,
+                        shell: model.shell(),
                     },
                 );
                 model.watch(pane, ctx);

@@ -64,6 +64,7 @@ pub mod default_terminal;
 pub mod diagnostics;
 pub mod duo;
 pub mod editor;
+pub mod file_drop;
 pub mod filename;
 pub mod forge;
 pub mod git;
@@ -4355,6 +4356,19 @@ impl WindowDelegate for Shell {
                 workspace.update(ctx, |workspace, ctx| {
                     workspace.set_window_focused(focused, ctx);
                 });
+            });
+            return self
+                .app
+                .read(|ctx| ctx.has_window_invalidations(self.window_id));
+        }
+
+        // And for a drop, which says nothing about where in the window it
+        // landed, so there is nothing to hit-test: which pane the files go to
+        // is the workspace's to decide.
+        if let Event::FilesDropped { paths } = &event {
+            let workspace = &self.workspace;
+            self.app.update(|ctx| {
+                workspace.update(ctx, |workspace, ctx| workspace.drop_files(paths, ctx));
             });
             return self
                 .app
