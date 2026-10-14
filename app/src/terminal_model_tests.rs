@@ -127,9 +127,11 @@ fn the_grid_is_drawn_on_the_panel_it_sits_in() {
     let palette = crook_palette();
     assert_eq!(palette.background, rgb(theme().surface));
     assert_eq!(palette.foreground, rgb(theme().text_primary));
+    // The theme's red rather than the emulator's: Crook Dark's is lighter than
+    // xterm's, so that it reads as text on this panel.
     assert_eq!(
         palette.ansi[1],
-        Palette::default().ansi[1],
+        rgb(theme().terminal.normal[1]),
         "a program that asked for red must still get red"
     );
     // Dim text resolves through this slot, so a palette that left it at the

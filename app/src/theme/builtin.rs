@@ -67,10 +67,10 @@ pub const BUILTIN: [Builtin; 3 + OMARCHY.len()] = {
 
 /// The sixteen colours a program asks for by number.
 ///
-/// The xterm values every terminal agrees on, which is also what
-/// `crook_terminal`'s own default palette holds. A theme that wants its own
-/// sixteen says so; a theme that does not gets the ones every program was
-/// written against.
+/// The xterm values, which are also what `crook_terminal`'s own default
+/// palette holds, and what the [theme creator](super::creator) gives a
+/// generated theme whose grid they read best on. Crook's own dark themes keep
+/// the bright half and replace this one with [`DARK_NORMAL`].
 pub(super) const ANSI_NORMAL: [Color; 8] = [
     Color::hex(0x000000),
     Color::hex(0xcd0000),
@@ -92,6 +92,31 @@ pub(super) const ANSI_BRIGHT: [Color; 8] = [
     Color::hex(0xff00ff),
     Color::hex(0x00ffff),
     Color::hex(0xffffff),
+];
+
+/// The normal eight that Crook Dark and Midnight print in.
+///
+/// xterm's hues, lifted until each one reads as text on a dark grid. xterm's
+/// own blue is 1.79:1 on Crook Dark's pane and its red 2.89:1, and `ls` draws
+/// directories in that blue, so the first thing a new window showed was a
+/// listing whose directories could barely be seen. Red to white are each at
+/// least 4.5:1, WCAG's bar for text, on Crook Dark's grid. Midnight's grid is
+/// black, darker than that, so the same eight read better there still and the
+/// two themes share them.
+///
+/// Black stays black. On a dark grid it is the colour a program fills behind
+/// light text, or inks dark text with on a coloured fill, and both need it
+/// dark. The bright half is not touched: it is still [`ANSI_BRIGHT`], which is
+/// what the tab colour swatches are drawn from.
+const DARK_NORMAL: [Color; 8] = [
+    Color::hex(0x000000),
+    Color::hex(0xf05f5a),
+    Color::hex(0x66c860),
+    Color::hex(0xdec943),
+    Color::hex(0x6a9cfb),
+    Color::hex(0xd574d3),
+    Color::hex(0x35cbd2),
+    Color::hex(0xe5e5e5),
 ];
 
 /// What Crook has always looked like, and what it opens in.
@@ -129,7 +154,7 @@ pub const DARK: Theme = Theme {
         foreground: Color::hex(0xe8ebf0),
         background: Color::hex(0x1a1d24),
         cursor: Color::hex(0x8b5cf6),
-        normal: ANSI_NORMAL,
+        normal: DARK_NORMAL,
         bright: ANSI_BRIGHT,
     },
     is_light: false,
@@ -179,7 +204,7 @@ pub const MIDNIGHT: Theme = Theme::derived(
         foreground: Color::hex(0xd8dee9),
         background: Color::hex(0x000000),
         cursor: Color::hex(0x7c9cff),
-        normal: ANSI_NORMAL,
+        normal: DARK_NORMAL,
         bright: ANSI_BRIGHT,
     },
 );
