@@ -5,6 +5,31 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.25
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.24...v0.1.25)
+
+### Features
+
+- **tabs:** Go back to the tab you were on, and again to return ([#502](https://github.com/theguriev/crook/pull/502))
+- **find:** Flip the find bar's switches and filter a block from the keyboard ([#501](https://github.com/theguriev/crook/pull/501))
+
+### Fixes
+
+- **tabs:** Open a split and a new group's tab where the pane is working ([#500](https://github.com/theguriev/crook/pull/500))
+- **agent:** Read Gemini CLI's and codex's status from their titles ([#505](https://github.com/theguriev/crook/pull/505))
+- **shell:** Put crook on every pane's PATH and tell Claude Code what Crook draws ([#507](https://github.com/theguriev/crook/pull/507))
+- **control:** Exit cleanly when a reader stops early, and say how to wait and pass a long prompt ([#503](https://github.com/theguriev/crook/pull/503))
+- **window:** Draw no caret or focus ring while the window is behind another ([#504](https://github.com/theguriev/crook/pull/504))
+
+### Documentation
+
+- **readme:** Bring the tab menu, settings, checks and scripts up to v0.1.24 ([#506](https://github.com/theguriev/crook/pull/506))
+
+### ❤️ Contributors
+
+- Eugen Guriev <gurievcreative@gmail.com>
+
 ## v0.1.24
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.23...v0.1.24)
