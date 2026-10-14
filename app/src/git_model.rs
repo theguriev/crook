@@ -166,6 +166,16 @@ impl GitModel {
         }
     }
 
+    /// The directories the next gather reads, which is every one a pane
+    /// is working in and nothing else.
+    #[cfg(test)]
+    pub(crate) fn tracked(&self) -> Vec<PathBuf> {
+        self.tracked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// Says whether the expensive half is worth running.
     ///
     /// Turning it on wakes the sleeping cycle, so switching "Diff stats" on

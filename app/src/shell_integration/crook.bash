@@ -40,11 +40,12 @@ CROOK_SHELL_INTEGRATION=1
 __crook_mark() { builtin printf '\e]133;%s\a' "$1"; }
 
 # Where the shell is, reported the way every terminal reads it: OSC 7. See the
-# zsh integration for why nothing else tells Crook, and why the authority is
-# left empty and both `%` and `;` are escaped. Bash cannot nest the two
-# substitutions the way zsh does, so `%` is escaped into a local first (before
-# `;`, so the `%` in `%3B` is left alone) and `;` in the result.
-__crook_cwd() { local d="${PWD//\%/%25}"; builtin printf '\e]7;file://%s\a' "${d//;/%3B}"; }
+# zsh integration for why nothing else tells Crook, why the authority is the
+# machine's name — `$HOSTNAME`, bash's own copy of it — and why both `%` and
+# `;` are escaped in the path. Bash cannot nest the two substitutions the way
+# zsh does, so `%` is escaped into a local first (before `;`, so the `%` in
+# `%3B` is left alone) and `;` in the result.
+__crook_cwd() { local d="${PWD//\%/%25}"; builtin printf '\e]7;file://%s%s\a' "${HOSTNAME-}" "${d//;/%3B}"; }
 
 # Completion, which is the one thing the marks cannot do: they are an
 # announcement, and this is a question with an answer.

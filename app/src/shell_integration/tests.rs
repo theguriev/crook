@@ -2422,6 +2422,105 @@ fn test_a_real_fish_that_marks_its_own_prompt_is_left_alone() {
     );
 }
 
+/// The host and the path of the last OSC 7 a shell wrote, out of everything
+/// it wrote.
+fn reported_place(seen: &str) -> Option<(String, String)> {
+    const OPENING: &str = "\x1b]7;file://";
+    let rest = &seen[seen.rfind(OPENING)? + OPENING.len()..];
+    let url = &rest[..rest.find(['\x07', '\x1b'])?];
+    let (host, path) = url.split_at(url.find('/')?);
+    Some((host.to_owned(), path.to_owned()))
+}
+
+/// The line that prints what a shell calls this machine, in the variable
+/// `variable`, and the label [`printed`] finds it by.
+fn print_host(variable: &str) -> String {
+    format!("printf 'CROOK_HOST[%s]\\n' \"${variable}\"")
+}
+
+/// Asserts a shell reported its directory under the name it has for this
+/// machine, and that Crook takes that name for this machine: a pane whose
+/// shell is here must never read as one on the far side of an ssh, which
+/// would cost it every git fact on its row.
+fn assert_reports_this_machine(name: &str, seen: &str) {
+    let host = printed(seen, "CROOK_HOST")
+        .unwrap_or_else(|| panic!("{name} never said what it calls this machine: {seen:?}"));
+    let (reported, _) = reported_place(seen)
+        .unwrap_or_else(|| panic!("{name} never reported its directory: {seen:?}"));
+    assert!(!host.is_empty(), "{name} has no name for this machine");
+    assert_eq!(
+        reported, host,
+        "{name} reported its directory on {reported:?}, and calls this machine {host:?}"
+    );
+    assert_eq!(
+        crate::tab::Remote::reported(Some(&reported), PathBuf::from("/")),
+        None,
+        "{name}'s own name for this machine, {reported:?}, was taken for another machine's"
+    );
+}
+
+#[test]
+fn test_a_real_zsh_reports_which_machine_its_directory_is_on() {
+    let Some(ran) = (RealShell {
+        name: "zsh",
+        command: &print_host("HOST"),
+        ..RealShell::default()
+    })
+    .run() else {
+        return;
+    };
+    assert_reports_this_machine("zsh", &ran.seen);
+}
+
+#[test]
+fn test_a_real_bash_reports_which_machine_its_directory_is_on() {
+    let Some(ran) = (RealShell {
+        name: "bash",
+        command: &print_host("HOSTNAME"),
+        ..RealShell::default()
+    })
+    .run() else {
+        return;
+    };
+    assert_reports_this_machine("bash", &ran.seen);
+}
+
+#[test]
+fn test_a_real_fish_reports_which_machine_its_directory_is_on() {
+    // With fish's own marks off, so that what reports the directory is the
+    // snippet; the test below is about the fish that does it itself.
+    let Some(ran) = (RealShell {
+        name: "fish",
+        extra: &[("fish_features", "no-mark-prompt")],
+        command: &print_host("hostname"),
+        ..RealShell::default()
+    })
+    .run() else {
+        return;
+    };
+    assert_reports_this_machine("fish", &ran.seen);
+}
+
+#[test]
+fn test_a_real_fish_that_reports_its_own_directory_names_this_machine() {
+    // fish 4 writes its own OSC 7, with the host in it, and always has: the
+    // snippet stands down for it. Crook ignored the host, and now reads it,
+    // so a fish here naming this machine in a way Crook did not recognise
+    // would lose every git fact on its row.
+    if fish_marks_its_own_prompt() != Some(true) {
+        return;
+    }
+    let Some(ran) = (RealShell {
+        name: "fish",
+        command: &print_host("hostname"),
+        ..RealShell::default()
+    })
+    .run() else {
+        return;
+    };
+    assert_reports_this_machine("fish", &ran.seen);
+}
+
 /// Whether the fish on `PATH` writes its own prompt marks, or `None` when
 /// there is no fish to ask.
 fn fish_marks_its_own_prompt() -> Option<bool> {

@@ -60,6 +60,13 @@ etagere = "0.3"
 # support devices, and this one is `select` there.
 filedescriptor = "0.8"
 futures-lite = "2.6"
+# This machine's name, which is what tells a shell on it from one on the far
+# side of an `ssh`: OSC 7 names the host a directory is on. The standard
+# library has no call for it. 1.1 is what `x11rb` already resolves on Linux,
+# and its own dependencies — `rustix` on Unix, `windows-link` on Windows — are
+# in the graph on every platform, so it adds one small crate and no build
+# script.
+gethostname = "1.1"
 # The operating system's random source, for the secret each pane is handed
 # for the control socket. 0.2 is what `ring` (under `ureq`) and `dirs` already
 # resolve on every platform, so it costs the graph nothing.

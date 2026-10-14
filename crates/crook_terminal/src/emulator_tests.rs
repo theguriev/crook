@@ -407,7 +407,7 @@ fn test_a_working_directory_longer_than_any_path_is_refused_rather_than_cut() {
 
     let longest = format!("/{}", "d".repeat(DIRECTORY_BYTES - 1));
     assert_eq!(
-        Some(PathBuf::from(&longest)),
+        Some((None, PathBuf::from(&longest))),
         parse_working_directory(longest.as_bytes())
     );
     let over = format!("{longest}d");
@@ -415,7 +415,7 @@ fn test_a_working_directory_longer_than_any_path_is_refused_rather_than_cut() {
     // Measured as the path it decodes to, not the escapes it arrived in.
     let escaped = format!("/{}", "%64".repeat(DIRECTORY_BYTES - 1));
     assert_eq!(
-        Some(PathBuf::from(&longest)),
+        Some((None, PathBuf::from(&longest))),
         parse_working_directory(escaped.as_bytes())
     );
 }
@@ -476,11 +476,46 @@ fn test_osc_seven_reports_the_working_directory() {
         emulator.working_directory()
     );
     assert_eq!(
-        vec![TerminalEvent::WorkingDirectory(PathBuf::from(
-            "/tmp/some dir"
-        ))],
+        vec![TerminalEvent::WorkingDirectory {
+            host: Some("localhost".to_owned()),
+            path: PathBuf::from("/tmp/some dir"),
+        }],
         emulator.take_events()
     );
+}
+
+#[test]
+fn test_the_same_directory_on_another_machine_is_reported_again() {
+    // `ssh` from ~/work/app into a server with the same layout, and back: the
+    // path never changes, and the machine it is on does twice. A report that
+    // only looked at the path would say nothing either time, and the pane
+    // would go on reading this machine's repository for the server's shell —
+    // or, once back, the server's for this one.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]7;file://laptop/home/eugen/work/app\x07");
+    emulator.take_events();
+
+    emulator.advance(b"\x1b]7;file://buildbox/home/eugen/work/app\x07");
+    assert_eq!(
+        vec![TerminalEvent::WorkingDirectory {
+            host: Some("buildbox".to_owned()),
+            path: PathBuf::from("/home/eugen/work/app"),
+        }],
+        emulator.take_events()
+    );
+
+    emulator.advance(b"\x1b]7;file://laptop/home/eugen/work/app\x07");
+    assert_eq!(
+        vec![TerminalEvent::WorkingDirectory {
+            host: Some("laptop".to_owned()),
+            path: PathBuf::from("/home/eugen/work/app"),
+        }],
+        emulator.take_events()
+    );
+
+    // And the same place twice is still said once.
+    emulator.advance(b"\x1b]7;file://laptop/home/eugen/work/app\x07");
+    assert!(emulator.take_events().is_empty());
 }
 
 #[test]
@@ -1031,18 +1066,25 @@ fn test_bracketed_paste_and_cursor_modes_are_reported() {
 
 #[test]
 fn test_working_directory_urls_are_parsed() {
+    // The host is the machine the path is on, and it comes back with it: a
+    // shell on the far side of an ssh reports a directory there, and whether
+    // that is this machine is the application's to say.
     assert_eq!(
-        Some(PathBuf::from("/home/eugen/work")),
+        Some((Some("laptop".to_owned()), PathBuf::from("/home/eugen/work"))),
         parse_working_directory(b"file://laptop/home/eugen/work")
     );
-    // Some shells report a bare path.
     assert_eq!(
-        Some(PathBuf::from("/srv")),
+        Some((Some("localhost".to_owned()), PathBuf::from("/tmp"))),
+        parse_working_directory(b"file://localhost/tmp")
+    );
+    // Some shells report a bare path, which names no host at all.
+    assert_eq!(
+        Some((None, PathBuf::from("/srv"))),
         parse_working_directory(b"/srv")
     );
     // Percent escapes come back as themselves.
     assert_eq!(
-        Some(PathBuf::from("/a b/c#d")),
+        Some((None, PathBuf::from("/a b/c#d"))),
         parse_working_directory(b"/a%20b/c%23d")
     );
     // A URL with no path at all says nothing useful.
@@ -1050,27 +1092,38 @@ fn test_working_directory_urls_are_parsed() {
     assert_eq!(None, parse_working_directory(b""));
 
     // The exact bytes Crook's own shell integration writes, captured from a
-    // real bash: an empty authority, and `%` in a directory name escaped so it
-    // is not read as the start of an escape. Both halves of the round trip are
-    // in this repository, and this is the seam between them.
+    // real bash: the host the shell is on, and `%` in a directory name
+    // escaped so it is not read as the start of an escape. Both halves of the
+    // round trip are in this repository, and this is the seam between them.
     assert_eq!(
-        Some(PathBuf::from("/tmp")),
-        parse_working_directory(b"file:///tmp")
+        Some((Some("omarchy".to_owned()), PathBuf::from("/tmp"))),
+        parse_working_directory(b"file://omarchy/tmp")
     );
     assert_eq!(
-        Some(PathBuf::from("/Users/eugen/work/connectly-frontend")),
-        parse_working_directory(b"file:///Users/eugen/work/connectly-frontend")
+        Some((
+            Some("Eugens-MacBook-Pro.local".to_owned()),
+            PathBuf::from("/Users/eugen/work/connectly-frontend")
+        )),
+        parse_working_directory(
+            b"file://Eugens-MacBook-Pro.local/Users/eugen/work/connectly-frontend"
+        )
     );
     assert_eq!(
-        Some(PathBuf::from("/tmp/weird%dir")),
-        parse_working_directory(b"file:///tmp/weird%25dir")
+        Some((Some("omarchy".to_owned()), PathBuf::from("/tmp/weird%dir"))),
+        parse_working_directory(b"file://omarchy/tmp/weird%25dir")
     );
     // `;` is escaped to `%3B` by the snippet, because a raw `;` is where the
     // terminal splits the OSC into fields — `params[1]` would have stopped at
     // it — and it decodes back here. See the semicolon snippet test below.
     assert_eq!(
-        Some(PathBuf::from("/tmp/a;b")),
-        parse_working_directory(b"file:///tmp/a%3Bb")
+        Some((Some("omarchy".to_owned()), PathBuf::from("/tmp/a;b"))),
+        parse_working_directory(b"file://omarchy/tmp/a%3Bb")
+    );
+    // What a snippet older than the host wrote, and what a shell whose
+    // hostname is empty still writes: no host, which is this machine.
+    assert_eq!(
+        Some((None, PathBuf::from("/tmp"))),
+        parse_working_directory(b"file:///tmp")
     );
 }
 
@@ -1092,6 +1145,19 @@ fn a_hostile_working_directory_url_is_refused_rather_than_believed() {
     assert_eq!(None, parse_working_directory(b"kitty-shell-cwd://host/tmp"));
     assert_eq!(None, parse_working_directory(b"foo"));
 
+    // The host is printed on the pane's row, so it is held to what a
+    // machine's name can be: no control character — an ESC there would be
+    // drawn as one — no space, and no longer than any name a resolver takes.
+    assert_eq!(None, parse_working_directory(b"file://evil\x1b[2Jbox/tmp"));
+    assert_eq!(None, parse_working_directory(b"file://two words/tmp"));
+    let long = format!("file://{}/tmp", "h".repeat(HOST_BYTES + 1));
+    assert_eq!(None, parse_working_directory(long.as_bytes()));
+    let longest = format!("file://{}/tmp", "h".repeat(HOST_BYTES));
+    assert_eq!(
+        Some((Some("h".repeat(HOST_BYTES)), PathBuf::from("/tmp"))),
+        parse_working_directory(longest.as_bytes())
+    );
+
     // Escapes that decode to bytes that are not UTF-8 are refused the same way
     // — a lone continuation byte is no path.
     assert_eq!(None, parse_working_directory(b"/%ff"));
@@ -1099,9 +1165,12 @@ fn a_hostile_working_directory_url_is_refused_rather_than_believed() {
 
     // An escape with too few digits to be one is left as itself rather than
     // eaten: a trailing `%` or `%2` is a literal, not the start of a byte.
-    assert_eq!(Some(PathBuf::from("/a%")), parse_working_directory(b"/a%"));
     assert_eq!(
-        Some(PathBuf::from("/a%2")),
+        Some((None, PathBuf::from("/a%"))),
+        parse_working_directory(b"/a%")
+    );
+    assert_eq!(
+        Some((None, PathBuf::from("/a%2"))),
         parse_working_directory(b"/a%2")
     );
 }
@@ -1131,6 +1200,45 @@ fn test_every_shell_integration_reports_its_working_directory() {
             snippet.contains("\\e]7;file://"),
             "the {shell} integration sends no OSC 7, so nothing will ever \
              correct a tab's directory after a cd"
+        );
+    }
+}
+
+/// Every integration says which machine its directory is on, by the shell's
+/// own copy of the machine's name.
+///
+/// The bug this pins: with the authority left empty, a shell on the far side
+/// of an ssh — where the README says to paste these — reported a path that
+/// Crook read as one on this machine, and the pane showed this machine's
+/// checkout at that path. Each shell keeps the name in a variable it read
+/// once at startup, so naming it costs a prompt nothing.
+#[test]
+fn test_every_shell_integration_names_the_machine_its_directory_is_on() {
+    for (shell, snippet, host) in [
+        (
+            "zsh",
+            include_str!("../../../app/src/shell_integration/crook.zsh"),
+            "\"${HOST-}\"",
+        ),
+        (
+            "bash",
+            include_str!("../../../app/src/shell_integration/crook.bash"),
+            "\"${HOSTNAME-}\"",
+        ),
+        (
+            "fish",
+            include_str!("../../../app/src/shell_integration/crook.fish"),
+            "\"$hostname\"",
+        ),
+    ] {
+        let line = snippet
+            .lines()
+            .find(|line| line.contains("\\e]7;file://"))
+            .unwrap_or_else(|| panic!("the {shell} integration sends no OSC 7"));
+        assert!(
+            line.contains("\\e]7;file://%s%s") && line.contains(host),
+            "the {shell} integration does not put {host} in its OSC 7's \
+             authority, so a shell on another machine reads as one on this: {line}"
         );
     }
 }

@@ -2867,6 +2867,7 @@ impl Workspace {
         // so to anything outside it. Read once per opening rather than on the
         // render path, where the button would read it every frame.
         let editor = Editor::from_environment();
+        self.changes.set_elsewhere(self.changes_elsewhere());
         if let Some(directory) =
             self.changes
                 .open(self.changes_tab(), self.changes_directory(), editor)
@@ -2897,6 +2898,16 @@ impl Workspace {
             .and_then(|pane| pane.session().working_directory.clone())
     }
 
+    /// The machine the focused pane is on, when that is not this one: where
+    /// the Changes column has no directory to read, and says so.
+    fn changes_elsewhere(&self) -> Option<String> {
+        self.tabs
+            .focused_pane_id()
+            .and_then(|pane| self.tabs.pane(pane))
+            .and_then(|pane| pane.session().remote.as_ref())
+            .map(|remote| remote.host.clone())
+    }
+
     /// The tab the Changes column is about: the one in front, whose focused
     /// pane it follows.
     fn changes_tab(&self) -> Option<TabId> {
@@ -2925,9 +2936,14 @@ impl Workspace {
         }
         let directory = self.changes_directory();
         let tab = self.changes_tab();
-        if directory == self.changes.directory && tab == self.changes.tab() {
+        let elsewhere = self.changes_elsewhere();
+        if directory == self.changes.directory
+            && tab == self.changes.tab()
+            && elsewhere == self.changes.elsewhere
+        {
             return;
         }
+        self.changes.set_elsewhere(elsewhere);
         if let Some(directory) = self.changes.follow(tab, directory) {
             self.look_for_checkout(directory, ctx);
         }
@@ -9062,7 +9078,7 @@ impl Workspace {
             TerminalUpdate::WorkingDirectory(pane, directory) => {
                 let directory = directory.clone();
                 let reported = self.update_session(*pane, ctx, |session| {
-                    session.working_directory = Some(directory);
+                    session.set_local_directory(directory);
                 });
                 // Where the shells are is what the next window opens in, and
                 // a `cd` moves no tab: without this the file said where each
@@ -9073,6 +9089,25 @@ impl Workspace {
                     // Into a directory another pane already shows, the git
                     // model has nothing new to read and says nothing; the
                     // branch a pull request goes with is asked here instead.
+                    self.forget_moved_pull_requests();
+                }
+                reported
+            }
+            // Through the same `update_session`, which is what takes the pane
+            // off this machine: the git model stops tracking a directory no
+            // pane has here, the Changes column lets go of it, and a lock this
+            // window took on a checkout it was in comes off as a `cd` out of
+            // it would take it.
+            TerminalUpdate::RemoteDirectory(pane, remote) => {
+                let remote = remote.clone();
+                let reported = self.update_session(*pane, ctx, |session| {
+                    session.set_remote(remote);
+                });
+                // Saved, so the file says the directory is another machine's
+                // and a restore does not start a shell in this one's: see
+                // `PaneSnapshot::remote_host`.
+                if reported {
+                    self.save_session(ctx);
                     self.forget_moved_pull_requests();
                 }
                 reported

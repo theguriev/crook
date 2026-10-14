@@ -592,7 +592,9 @@ pub struct PaneEntry {
     /// What the agent said it is waiting for, while it waits.
     #[serde(default)]
     pub message: Option<String>,
-    /// Where the pane is working, as its shell last reported it.
+    /// Where the pane is working, as its shell last reported it — on this
+    /// machine: `None` for a pane whose shell said it is on another one,
+    /// since the path there names some other directory here, or none.
     #[serde(default)]
     pub cwd: Option<String>,
     /// The branch there, or the short sha of a detached head, once git has

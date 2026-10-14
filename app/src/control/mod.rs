@@ -91,7 +91,6 @@ use crook_terminal::AgentReport;
 use crookui_core::prelude::*;
 use serde_json::Value;
 
-use crate::git;
 use crate::tab::{AgentSession, AgentStatus};
 use crate::workspace::Workspace;
 
@@ -452,12 +451,7 @@ pub fn title(session: &AgentSession, home: Option<&Path>) -> String {
     session
         .name()
         .map(str::to_owned)
-        .or_else(|| {
-            session
-                .working_directory
-                .as_deref()
-                .and_then(|directory| git::directory_label(directory, home))
-        })
+        .or_else(|| session.directory_label(home))
         .unwrap_or_else(|| session.display_title().to_owned())
 }
 

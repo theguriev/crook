@@ -105,7 +105,18 @@ pub enum TerminalEvent {
     /// [`agent::TITLE_BYTES`] of what the child wrote.
     Title(Option<String>),
     /// The child reported its working directory with OSC 7.
-    WorkingDirectory(PathBuf),
+    ///
+    /// With the host the URL named, which is the machine the path is on:
+    /// a shell on the far side of an `ssh` reports a directory there. `None`
+    /// for a URL with an empty host — `file:///tmp` — and for a bare path.
+    /// Which host is this machine is not this crate's to say: see the
+    /// application's `tab::Remote`.
+    WorkingDirectory {
+        /// The host the URL named, as it named it.
+        host: Option<String>,
+        /// The directory, on that host.
+        path: PathBuf,
+    },
     /// The bell rang.
     Bell,
     /// A command finished, because the shell said so with OSC 133 `D`.
@@ -239,7 +250,8 @@ impl EventListener for EventProxy {
 /// slot for the report cannot say which side of the notification it was on.
 #[derive(Default)]
 struct OscWatcher {
-    working_directory: Option<PathBuf>,
+    /// The last OSC 7 in the chunk: the host it named and the directory.
+    working_directory: Option<(Option<String>, PathBuf)>,
     mark: Option<ShellMark>,
     completions: Option<u64>,
     agent: Option<Reported>,
@@ -299,8 +311,8 @@ impl Perform for OscWatcher {
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         match params.first() {
             Some(&b"7") if params.len() >= 2 => {
-                if let Some(path) = parse_working_directory(params[1]) {
-                    self.working_directory = Some(path);
+                if let Some(reported) = parse_working_directory(params[1]) {
+                    self.working_directory = Some(reported);
                 }
             }
             Some(&b"133") => self.mark = ShellMark::parse(params),
@@ -394,6 +406,13 @@ const COMPLETIONS_OSC: &[u8] = b"6339";
 /// next pane's start and the session file would all be told that one.
 const DIRECTORY_BYTES: usize = 4096;
 
+/// The longest host OSC 7 is believed for, in bytes.
+///
+/// 253 is the longest name DNS resolves, and a little over it leaves room for
+/// the `user@` a URL may put in front. Bounded for the reason
+/// [`DIRECTORY_BYTES`] is: the row prints it, and shapes it on every frame.
+const HOST_BYTES: usize = 255;
+
 /// The longest title, in bytes, that a synchronized update is left to carry
 /// to the grid whole, rather than ended at it: see
 /// [`Emulator::cut_grid_title`].
@@ -404,20 +423,37 @@ const DIRECTORY_BYTES: usize = 4096;
 /// can cost; ending it costs a frame drawn half done.
 const UPDATE_TITLE_BYTES: usize = 4096;
 
-/// Reads the payload of OSC 7, which is a `file://` URL or a bare path.
+/// Reads the payload of OSC 7, which is a `file://` URL or a bare path, into
+/// the host the URL named and the path.
 ///
-/// The host in the URL is ignored: a shell on the far end of an ssh session
-/// reports a path that means nothing locally, but showing it still beats
-/// showing nothing, and the caller can decide. A path longer than
-/// [`DIRECTORY_BYTES`] once decoded is no answer at all.
-fn parse_working_directory(value: &[u8]) -> Option<PathBuf> {
+/// The host comes back with the path because the path means a directory on
+/// that host and nowhere else: a shell on the far end of an ssh session
+/// reports one that, read on this machine, is somebody else's checkout or
+/// nothing at all. An empty host — `file:///tmp` — and a bare path name no
+/// host, and come back as `None`. Whether a named one is this machine is the
+/// caller's to decide, which needs the machine's own name.
+///
+/// A path longer than [`DIRECTORY_BYTES`] once decoded is no answer at all,
+/// and neither is a host longer than [`HOST_BYTES`] or one holding a control
+/// character or a space, since no machine is called that and the row would
+/// print it.
+fn parse_working_directory(value: &[u8]) -> Option<(Option<String>, PathBuf)> {
     let value = str::from_utf8(value).ok()?;
-    let path = match value.strip_prefix("file://") {
-        Some(authority_and_path) => authority_and_path
-            .find('/')
-            .map(|at| &authority_and_path[at..])?,
-        None => value,
+    let (host, path) = match value.strip_prefix("file://") {
+        Some(authority_and_path) => {
+            let (host, path) = authority_and_path.split_at(authority_and_path.find('/')?);
+            (Some(host).filter(|host| !host.is_empty()), path)
+        }
+        None => (None, value),
     };
+    if let Some(host) = host
+        && (host.len() > HOST_BYTES
+            || host
+                .chars()
+                .any(|character| character.is_control() || character.is_whitespace()))
+    {
+        return None;
+    }
 
     let decoded = percent_decode(path)?;
     // A Windows path arrives as `/C:/Users/...`; the leading slash is part of
@@ -433,7 +469,8 @@ fn parse_working_directory(value: &[u8]) -> Option<PathBuf> {
     // integrations write — or a stray word came through as a *relative* path,
     // and everything that uses the directory resolved it against Crook's own.
     let rooted = decoded.starts_with(['/', '\\']) || Path::new(&decoded).is_absolute();
-    (rooted && decoded.len() <= DIRECTORY_BYTES).then(|| PathBuf::from(decoded))
+    (rooted && decoded.len() <= DIRECTORY_BYTES)
+        .then(|| (host.map(str::to_owned), PathBuf::from(decoded)))
 }
 
 /// Whether a URL path is a Windows path with its leading slash still attached.
@@ -498,6 +535,9 @@ pub struct Emulator {
     scrollback_lines: usize,
     title: Option<String>,
     working_directory: Option<PathBuf>,
+    /// The host the last OSC 7 named, beside [`Self::working_directory`]:
+    /// the same path on another machine is another place.
+    working_host: Option<String>,
     /// What the program in the pane last said it was doing.
     agent: AgentReport,
     events: Vec<TerminalEvent>,
@@ -553,6 +593,7 @@ impl Emulator {
             scrollback_lines,
             title: None,
             working_directory: None,
+            working_host: None,
             agent: AgentReport::default(),
             events: Vec::new(),
             replies: Vec::new(),
@@ -999,6 +1040,9 @@ impl Emulator {
 
     /// The working directory the child last reported with OSC 7. `None` until a
     /// shell reports one, which most do only once they are configured to.
+    ///
+    /// On whichever machine the report named, which may not be this one: see
+    /// [`TerminalEvent::WorkingDirectory`].
     pub fn working_directory(&self) -> Option<&Path> {
         self.working_directory.as_deref()
     }
@@ -1329,12 +1373,21 @@ impl Emulator {
     /// and the block the mark opens has to be filed under that directory.
     /// Idempotent the same way — it takes the pending directory, so the call
     /// from [`Self::drain`] after one from [`Self::advance`] finds nothing.
+    ///
+    /// A change of host is a change too, with the path the same: `ssh` into
+    /// a machine laid out like this one, and back out, moves the shell twice
+    /// and leaves the path where it was both times.
     fn apply_working_directory(&mut self) {
-        if let Some(directory) = self.osc_watcher.working_directory.take()
-            && self.working_directory.as_deref() != Some(directory.as_path())
+        if let Some((host, directory)) = self.osc_watcher.working_directory.take()
+            && (self.working_directory.as_deref() != Some(directory.as_path())
+                || self.working_host != host)
         {
             self.working_directory = Some(directory.clone());
-            self.events.push(TerminalEvent::WorkingDirectory(directory));
+            self.working_host = host.clone();
+            self.events.push(TerminalEvent::WorkingDirectory {
+                host,
+                path: directory,
+            });
         }
     }
 

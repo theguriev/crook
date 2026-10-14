@@ -115,14 +115,16 @@ and begin
         end
 
         # Where the shell is, reported the way every terminal reads it: OSC 7. See
-        # the zsh integration for why nothing else tells Crook, and why the
-        # authority is left empty and both `%` and `;` are escaped — `%` first, so
-        # the `%` in `%3B` is not escaped a second time.
+        # the zsh integration for why nothing else tells Crook, why the authority
+        # is the machine's name — `$hostname`, fish's own copy of it, which is
+        # also what fish 4's own OSC 7 says — and why both `%` and `;` are
+        # escaped in the path, `%` first, so the `%` in `%3B` is not escaped a
+        # second time.
         #
         # Fired on the variable rather than on the prompt, which is fish's own way
         # of saying it and costs nothing on a prompt where nothing moved.
         function __crook_cwd --on-variable PWD --on-event fish_prompt
-            printf '\e]7;file://%s\a' (string replace --all '%' '%25' -- $PWD | string replace --all ';' '%3B')
+            printf '\e]7;file://%s%s\a' "$hostname" (string replace --all '%' '%25' -- $PWD | string replace --all ';' '%3B')
         end
 
         function __crook_preexec --on-event fish_preexec

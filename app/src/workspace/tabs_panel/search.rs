@@ -54,7 +54,7 @@
 use crookui_core::elements::{MouseStateHandle, Padding};
 use crookui_core::prelude::*;
 
-use crate::git::{self, Head};
+use crate::git::Head;
 use crate::input_keys::Platform;
 use crate::settings::Granularity;
 use crate::tab::{AgentSession, AgentStatus, Pane, PaneId, Tab, TabId};
@@ -272,8 +272,8 @@ fn matches(workspace: &Workspace, app: &AppContext, query: &Query, tab: &Tab, pa
     let session = pane.session();
     let mut words = Words::new(session.display_title());
 
-    if let Some(directory) = session.working_directory.as_deref() {
-        words = words.with_description(git::user_friendly_path(directory, workspace.home()));
+    if let Some(path) = session.shown_path(workspace.home()) {
+        words = words.with_description(path);
     }
     // A keyword rather than a line of its own, because it is not a line of its
     // own: a row prints the branch only under one "Pane title as", and a row
@@ -290,6 +290,9 @@ fn matches(workspace: &Workspace, app: &AppContext, query: &Query, tab: &Tab, pa
 
     let mut keywords: Vec<&str> = status_words(session, active);
     keywords.extend(branch);
+    // The machine, whole, where the row prints its first part: a person
+    // looking for the pane on the build server types its name.
+    keywords.extend(session.remote.as_ref().map(|remote| remote.host.as_str()));
     words = words.with_keywords(&keywords);
 
     query.matches(&words, &[tab.name()])

@@ -67,7 +67,6 @@ use crookui_core::prelude::AppContext;
 
 use crook_plugin::{ActionName, PluginId};
 
-use crate::git;
 use crate::keybindings::Rule;
 use crate::plugin::{ActionId, Host};
 use crate::plugins::shortcuts::{self, NOT_BOUND, PANE_KEYS, PaneKey};
@@ -722,15 +721,16 @@ fn called(tab: &Tab) -> String {
         )
 }
 
-/// Where a tab's focused pane is working, as its row in the panel prints it.
+/// Where a tab's focused pane is working, as its row in the panel prints it
+/// — on another machine, after that machine's name, the way `scp` spells a
+/// path there.
 fn where_it_is(workspace: &Workspace, tab: &Tab) -> Option<String> {
-    let directory = tab
-        .panes()
-        .focused()?
-        .session()
-        .working_directory
-        .as_deref();
-    Some(git::user_friendly_path(directory?, workspace.home()))
+    let session = tab.panes().focused()?.session();
+    let path = session.shown_path(workspace.home())?;
+    Some(match &session.remote {
+        Some(remote) => format!("{}:{path}", remote.short_host()),
+        None => path,
+    })
 }
 
 /// Every settings row a query is looking for, in the order the rail holds

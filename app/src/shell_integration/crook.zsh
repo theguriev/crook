@@ -44,17 +44,21 @@ __crook_mark() { builtin printf '\e]133;%s\a' "$1" }
 # opened from the Dock, where macOS hands a GUI process `/` as its working
 # directory and the tab would say so while the shell sat somewhere else.
 #
-# The authority is left empty — `file:///path`, not `file://host/path` —
-# because the host is ignored at the other end and asking for it would mean a
-# `hostname` call on every prompt.
+# The authority is the machine's name — `file://host/path` — because the path
+# means a directory on this machine and nowhere else: pasted on the far side of
+# an ssh, this is what tells Crook the shell is there, and that the laptop's
+# checkout at the same path is not the one it is in. `$HOST` is zsh's own copy
+# of the name, read once when the shell started, so no prompt pays for a
+# `hostname` call. It is printed as it is: a machine's name holds neither of
+# the two bytes below.
 #
-# `%` and `;` are escaped, and nothing else. `%` is the byte the reader would
-# take for the start of a percent-escape; `;` is the one the terminal splits
-# the OSC into fields on, so a path holding one would arrive cut off at it. Both
-# leave as their `%XX` code and the reader turns them back — `%` first, so the
-# `%` in `%3B` is not escaped a second time. Everything else survives the round
-# trip as itself, spaces included.
-__crook_cwd() { builtin printf '\e]7;file://%s\a' "${${PWD//\%/%25}//;/%3B}" }
+# `%` and `;` are escaped in the path, and nothing else. `%` is the byte the
+# reader would take for the start of a percent-escape; `;` is the one the
+# terminal splits the OSC into fields on, so a path holding one would arrive
+# cut off at it. Both leave as their `%XX` code and the reader turns them back
+# — `%` first, so the `%` in `%3B` is not escaped a second time. Everything
+# else survives the round trip as itself, spaces included.
+__crook_cwd() { builtin printf '\e]7;file://%s%s\a' "${HOST-}" "${${PWD//\%/%25}//;/%3B}" }
 
 # Completion, which is the one thing the marks cannot do: they are an
 # announcement, and this is a question with an answer.
