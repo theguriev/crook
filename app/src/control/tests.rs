@@ -386,7 +386,10 @@ fn a_prompt_with_lines_is_refused_with_the_way_round_it() {
     // prompt a lead most often hands a worker. A refusal that said only why
     // left it to flatten the brief or to ask again blind, every try counting
     // toward the stop, so it says what to do instead: name a file that holds
-    // the brief, by a path the worker can open from its own worktree.
+    // the brief, by a path the worker can open from its own worktree. And
+    // let it open it: Claude Code in a `--worktree` tab asks before reading
+    // the lead's directory, and `claude -p` there is refused the read, so an
+    // example without `--add-dir` was a worker that never saw its brief.
     let refusal = spawn::command_line(
         &[
             "claude".to_owned(),
@@ -396,7 +399,13 @@ fn a_prompt_with_lines_is_refused_with_the_way_round_it() {
     )
     .expect_err("a newline is a second command");
     assert_eq!(refusal.code, code::BAD_REQUEST);
-    for said in ["newline", "one line", "file", "$PWD/task.md"] {
+    for said in [
+        "newline",
+        "one line",
+        "file",
+        "$PWD/task.md",
+        "--add-dir \"$PWD\" --",
+    ] {
         assert!(
             refusal.message.contains(said),
             "the refusal does not say {said:?}: {}",

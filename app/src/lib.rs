@@ -1588,8 +1588,9 @@ COMMANDS:
                        its CROOK_TOKEN, and eight tabs may be open on behalf of
                        one pane a person opened. No word may hold a newline or
                        another control character: put a prompt with lines in
-                       a file, and name the file in the command by its full
-                       path. sh, bash, zsh and fish only; not on Windows yet
+                       a file, name the file by its full path, and let the
+                       agent read there, as Claude Code's --add-dir \"$PWD\"
+                       does. sh, bash, zsh and fish only; not on Windows yet
     events --follow [--pane <ID>]
                        Print a line of JSON for every change of status, every
                        command finished (with its command line), every command

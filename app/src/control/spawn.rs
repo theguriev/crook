@@ -525,7 +525,10 @@ fn finish(
 /// that is a second quoting with rules of its own in each shell, and `sh` has
 /// none to offer; the one here is the quoting proven in all four (#342). A
 /// prompt with lines goes in a file the command names, and the refusal says
-/// so, since the brief a lead hands a worker is the prompt that has them.
+/// so, since the brief a lead hands a worker is the prompt that has them. Its
+/// example lets the worker read there: a `--worktree` tab starts in another
+/// directory, and Claude Code asks before it reads outside its own, which a
+/// `claude -p` worker is refused and an interactive one stops at.
 pub fn command_line(words: &[String], shell: &Path) -> Result<String, Refusal> {
     if words.is_empty() {
         return Err(Refusal::new(
@@ -538,8 +541,8 @@ pub fn command_line(words: &[String], shell: &Path) -> Result<String, Refusal> {
             code::BAD_REQUEST,
             "a word of the command holds a control character, and a newline in a command line \
              is a second command; keep the prompt on one line, or write it to a file and pass \
-             one line that names the file by its full path: `claude \"do the task in \
-             $PWD/task.md\"`",
+             one line that names the file by its full path, letting the worker read there: \
+             `claude --add-dir \"$PWD\" -- \"do the task in $PWD/task.md\"`",
         ));
     }
     if !quoting_is_proven(shell) {

@@ -160,9 +160,12 @@ list`; `--json` prints `pane_id`, `tab_id` and `cwd`, and a `note` when there is
 - No word may hold a newline, a tab or another control character: a newline ends a command
   line, and the rest would be a second command, so the request is refused as `bad-request`.
   Keep the prompt on one line, or write a brief that needs its lines to a file and name the
-  file in a one-line prompt, by its full path, since a `--worktree` tab starts somewhere else:
-  `claude "do the task in $PWD/task.md"`. `"$(cat task.md)"` is no way round it: your own
-  shell expands it, newlines and all, before Crook sees it.
+  file in a one-line prompt, by its full path, since a `--worktree` tab starts somewhere else.
+  Claude Code asks before it reads a file outside its own directory, and `claude -p` is refused
+  one, so let the worker read yours: `claude --add-dir "$PWD" -- "do the task in $PWD/task.md"`,
+  with the second `--` because `--add-dir` takes every word after it as a directory.
+  `"$(cat task.md)"` is no way round it: your own shell expands it, newlines and all, before
+  Crook sees it.
 
 The tab opens without taking the person's keyboard, as a row of its own with a dot, and its card
 says your pane opened it. Only a pane can open one: the request carries your pane's
