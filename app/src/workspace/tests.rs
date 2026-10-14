@@ -27889,17 +27889,23 @@ impl Harness {
 
 #[test]
 fn a_closed_group_comes_back_whole_in_one_press_folded_and_where_it_was() {
-    // A group of two between two loose tabs, folded away and then closed from
-    // its heading. One press brings back the whole of it — not one of its
-    // tabs, and not nothing — under the same heading, still folded, between
-    // the same two tabs.
+    // A group of three between two loose tabs, its middle tab in use, folded
+    // away and then closed from its heading. One press brings back the whole
+    // of it — not one of its tabs, and not nothing — under the same heading,
+    // still folded, between the same two tabs, on the tab that was in use.
+    // The middle one, because the last is where adopting them leaves the
+    // selection and the first is where a bare index of 0 puts it.
     let mut harness = Harness::new(3);
     let loose = harness.tab_ids();
+    harness.dispatch_action(TabAction::NewInGroupOf(loose[1]));
     harness.dispatch_action(TabAction::NewInGroupOf(loose[1]));
     let group = harness
         .group_of(loose[1])
         .expect("the tab was not put in a group");
+    let members = harness.members_of(group);
+    assert_eq!(members.len(), 3);
     harness.name_tabs_by_place();
+    harness.dispatch_action(TabAction::Select(members[1]));
     harness.dispatch_action(TabAction::ToggleGroup(group));
     let (heading, _) = harness.heading_of(group).expect("the group is open");
 
@@ -27910,14 +27916,14 @@ fn a_closed_group_comes_back_whole_in_one_press_folded_and_where_it_was() {
 
     assert_eq!(
         harness.tab_names(),
-        ["tab 0", "tab 1", "tab 2", "tab 3"],
+        ["tab 0", "tab 1", "tab 2", "tab 3", "tab 4"],
         "the group did not come back whole, in its place"
     );
     let after = harness.tab_ids();
     let back = harness
         .group_of(after[1])
         .expect("its tabs came back in no group");
-    assert_eq!(harness.members_of(back), [after[1], after[2]]);
+    assert_eq!(harness.members_of(back), after[1..4]);
     assert_eq!(
         harness.heading_of(back),
         Some((heading, true)),
