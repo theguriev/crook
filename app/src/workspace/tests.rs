@@ -32216,19 +32216,22 @@ mod from_the_keyboard {
 
     #[test]
     fn going_back_after_a_close_goes_to_the_tab_used_before_that() {
-        // The second, the fourth, then the first: back from the first is the
-        // fourth until the fourth is closed, and then it is the second —
-        // not the first's neighbour, and not the end of the strip.
-        let mut harness = Harness::panel(4);
+        // The third, the fifth, then the first: back from the first is the
+        // fifth until the fifth is closed, and then it is the third. Of the
+        // four left, the first's neighbours are the second and (wrapping) the
+        // fourth, and the fourth is the end of the strip too — so a step by
+        // position, or one remembered tab with next-tab behind it, lands
+        // anywhere but here.
+        let mut harness = Harness::panel(5);
         let tabs = tabs_in_order(&harness);
-        harness.run_command("crook/window/select-tab-2");
-        harness.run_command("crook/window/select-tab-4");
+        harness.run_command("crook/window/select-tab-3");
+        harness.run_command("crook/window/select-tab-5");
         harness.run_command("crook/window/select-tab-1");
 
-        harness.dispatch_action(TabAction::Close(tabs[3]));
+        harness.dispatch_action(TabAction::Close(tabs[4]));
         harness.run_command("crook/window/back-to-recent-tab");
 
-        assert_eq!(active_tab(&harness), tabs[1]);
+        assert_eq!(active_tab(&harness), tabs[2]);
     }
 
     #[test]
