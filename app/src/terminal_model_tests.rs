@@ -741,8 +741,8 @@ fn a_directory_on_another_machine_is_heard_as_that_machine_s_and_one_here_as_thi
     // this machine has too, and back: the path is the same all three times,
     // and where it is is not. A report naming no host, `localhost` or this
     // machine's own name is this machine's, which is what every shell Crook
-    // starts says — fish 4 by itself, the snippets by `$HOST`, `$HOSTNAME`
-    // and `$hostname`.
+    // starts says — fish 4 by itself, and the snippets by the name the
+    // system gave when the shell started.
     let Some(mut batches) = Batches::new(true) else {
         eprintln!("skipped: no pty could be opened here");
         return;

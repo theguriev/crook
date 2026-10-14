@@ -12,24 +12,35 @@
 //! directory, as a [`Remote`], and nothing reads a disk by it.
 //!
 //! **Which names are this machine's is asked of the system, not guessed.**
-//! The shells say the name their own `gethostname` gave them — zsh's `$HOST`,
-//! bash's `$HOSTNAME`, fish's `$hostname`, and fish 4's own OSC 7 — so the
-//! same call here gives the same answer. It is asked once, and asked again
-//! only when a shell names a host that matches nothing known: a Mac takes a
-//! new name from the network it joins, and a shell started after the move
-//! says the new one while Crook still knows the old. Every name the machine
-//! has answered to is kept, because a shell started before the move goes on
-//! saying the old one. A host nothing matches costs that one extra call,
-//! once per report, which is once per prompt on the far side.
+//! The snippets say the name the system gave when the shell started, read
+//! once — not `$HOST` or `$HOSTNAME`, which the environment or a startup file
+//! can set to anything — and fish says its read-only `$hostname`, in its own
+//! OSC 7 as well. So the same call here gives the same answer. It is asked
+//! once, and asked again only when a shell names a host that matches nothing
+//! known: a Mac takes a new name from the network it joins, and a shell
+//! started after the move says the new one while Crook still knows the old.
+//! Every name the machine has answered to is kept, because a shell started
+//! before the move goes on saying the old one. A host nothing matches costs
+//! that one extra call each time it is asked about: once per change of place
+//! on the far side — a `cd`, or an `ssh` in or out, since a prompt that
+//! repeats the same place is dropped before it gets here.
+//!
+//! **The system's name is not the only one.** `localhost`, and a loopback or
+//! unspecified address — `127.0.0.1`, `::1`, `0.0.0.0` — are this machine to
+//! anything that says them. So are `$HOST` and `$HOSTNAME` as Crook itself
+//! was started with them, which every shell it starts inherits: a shell
+//! integration other than Crook's that writes one of those into its URL is a
+//! shell here, whatever the variable was set to.
 //!
 //! **A name is this machine's by its first label as well as whole.** The two
 //! mistakes do not cost the same: a shell here taken for one elsewhere loses
 //! its branch, its diff and its Changes column, every prompt, for as long as
 //! it runs; one elsewhere taken for here shows what every pane showed before
-//! there was a rule. A startup file that sets `HOST=$(hostname -s)`, or a Mac
-//! that says `eugens-mbp` in one place and `eugens-mbp.local` in another, is
-//! still this machine; a server that shares this laptop's first label is the
-//! price. An address has no labels, so `10.0.0.5` is not `10.0.0.7`.
+//! there was a rule. An integration that writes `$HOST` after a startup file
+//! set `HOST=$(hostname -s)`, or a Mac that says `eugens-mbp` in one place and
+//! `eugens-mbp.local` in another, is still this machine; a server that shares
+//! this laptop's first label is the price. An address has no labels, so
+//! `10.0.0.5` is not `10.0.0.7`.
 
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -49,8 +60,9 @@ pub struct Remote {
 
 impl Remote {
     /// What a shell's report of `directory` on `host` is: `None` when the
-    /// host is this machine — no host at all, `localhost`, or a name this
-    /// machine answers to — and the other machine otherwise.
+    /// host is this machine — no host at all, `localhost`, a loopback
+    /// address, or a name this machine answers to — and the other machine
+    /// otherwise.
     pub fn reported(host: Option<&str>, directory: PathBuf) -> Option<Self> {
         let host = host?;
         if is_this_machine(host) {
@@ -104,7 +116,7 @@ pub(super) fn names_this_machine(
     ask: impl FnOnce() -> Vec<String>,
 ) -> bool {
     let same = |name: &String| same_machine(name, host);
-    if host.eq_ignore_ascii_case("localhost") || known.iter().any(same) {
+    if host.eq_ignore_ascii_case("localhost") || is_loopback(host) || known.iter().any(same) {
         return true;
     }
     for name in ask() {
@@ -124,6 +136,19 @@ fn same_machine(one: &str, other: &str) -> bool {
             .is_some_and(|(one, other)| one.eq_ignore_ascii_case(other))
 }
 
+/// Whether `host` is an address that means this machine to whoever says it:
+/// a loopback one, or the unspecified one a server is told to listen on —
+/// `HOST=0.0.0.0` is a common line in a startup file for a dev server.
+fn is_loopback(host: &str) -> bool {
+    let address = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host);
+    address
+        .parse::<IpAddr>()
+        .is_ok_and(|address| address.is_loopback() || address.is_unspecified())
+}
+
 /// A name up to its first dot, or `None` for an address, which a dot does
 /// not divide into a name and a domain.
 fn first_label(name: &str) -> Option<&str> {
@@ -139,13 +164,30 @@ fn first_label(name: &str) -> Option<&str> {
 /// that is the DNS name, and the shells there — Git Bash's `$HOSTNAME` above
 /// all — may say the NetBIOS one instead, which is `COMPUTERNAME`: shorter,
 /// upper case, and the same machine.
+///
+/// And `$HOST` and `$HOSTNAME` as Crook was started with them. Every shell
+/// Crook starts inherits both, and an integration that writes one into its
+/// URL writes whatever they hold: the name the machine had at login, before
+/// the network renamed it, or a compiler's target triple that a conda
+/// environment exported as `HOST`. Neither is another machine.
 fn this_machines_names() -> Vec<String> {
-    let mut names = vec![gethostname::gethostname().to_string_lossy().into_owned()];
-    if cfg!(windows)
-        && let Ok(name) = std::env::var("COMPUTERNAME")
-    {
-        names.push(name);
-    }
+    names_of(
+        gethostname::gethostname().to_string_lossy().into_owned(),
+        |variable| std::env::var(variable).ok(),
+    )
+}
+
+/// [`this_machines_names`] from the system's name and the way to read
+/// Crook's environment, handed in so it can be tested without setting
+/// either.
+pub(super) fn names_of(system: String, inherited: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    let variables: &[&str] = if cfg!(windows) {
+        &["COMPUTERNAME", "HOST", "HOSTNAME"]
+    } else {
+        &["HOST", "HOSTNAME"]
+    };
+    let mut names = vec![system];
+    names.extend(variables.iter().filter_map(|variable| inherited(variable)));
     names.retain(|name| !name.is_empty());
     names
 }

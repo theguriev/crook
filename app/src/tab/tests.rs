@@ -176,7 +176,7 @@ fn a_shell_on_another_machine_leaves_its_pane_no_directory_here_until_it_comes_b
 }
 
 mod remote_hosts {
-    use super::super::remote::{names_this_machine, short_host};
+    use super::super::remote::{names_of, names_this_machine, short_host};
     use super::*;
 
     #[test]
@@ -252,6 +252,58 @@ mod remote_hosts {
         assert!(names_this_machine("10.0.0.5", &mut known, nothing_new));
         assert!(!names_this_machine("10.0.0.7", &mut known, nothing_new));
         assert!(!names_this_machine("10", &mut known, nothing_new));
+    }
+
+    #[test]
+    fn an_address_that_means_this_machine_to_whoever_says_it_is_this_machine() {
+        // `HOST=0.0.0.0` for a dev server, and Debian's `127.0.1.1` for the
+        // machine's own name: whatever shell wrote one, it is a shell here.
+        let unasked = || -> Vec<String> { panic!("asked about an address that means here") };
+        for host in [
+            "127.0.0.1",
+            "127.0.1.1",
+            "::1",
+            "[::1]",
+            "0.0.0.0",
+            "::",
+            "[::]",
+        ] {
+            assert!(
+                names_this_machine(host, &mut Vec::new(), unasked),
+                "{host} was taken for another machine"
+            );
+        }
+        let elsewhere = || vec!["laptop".to_owned()];
+        for host in ["10.0.0.7", "[fe80::1]", "128.0.0.1"] {
+            assert!(
+                !names_this_machine(host, &mut Vec::new(), elsewhere),
+                "{host} was taken for this machine"
+            );
+        }
+    }
+
+    #[test]
+    fn the_names_crook_was_started_with_are_this_machine_s() {
+        // Every shell Crook starts inherits `$HOST` and `$HOSTNAME`, and an
+        // integration that writes one into its URL writes whatever it holds:
+        // a conda environment's target triple, or the name the machine had
+        // at login. Neither is another machine.
+        let inherited = |variable: &str| match variable {
+            "HOST" => Some("x86_64-apple-darwin13.4.0".to_owned()),
+            "HOSTNAME" => Some(String::new()),
+            _ => None,
+        };
+        let names = names_of("laptop".to_owned(), inherited);
+        assert_eq!(names, ["laptop", "x86_64-apple-darwin13.4.0"]);
+
+        let mut known = Vec::new();
+        let ask = || names_of("laptop".to_owned(), inherited);
+        assert!(names_this_machine(
+            "x86_64-apple-darwin13.4.0",
+            &mut known,
+            ask
+        ));
+        assert!(!names_this_machine("buildbox", &mut known, ask));
     }
 
     #[test]

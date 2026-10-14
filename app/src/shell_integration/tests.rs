@@ -2432,25 +2432,19 @@ fn reported_place(seen: &str) -> Option<(String, String)> {
     Some((host.to_owned(), path.to_owned()))
 }
 
-/// The line that prints what a shell calls this machine, in the variable
-/// `variable`, and the label [`printed`] finds it by.
-fn print_host(variable: &str) -> String {
-    format!("printf 'CROOK_HOST[%s]\\n' \"${variable}\"")
-}
-
-/// Asserts a shell reported its directory under the name it has for this
-/// machine, and that Crook takes that name for this machine: a pane whose
-/// shell is here must never read as one on the far side of an ssh, which
-/// would cost it every git fact on its row.
+/// Asserts a shell reported its directory under this machine's own name —
+/// the one the system gives, which is the one Crook compares with — and that
+/// Crook takes that name for this machine: a pane whose shell is here must
+/// never read as one on the far side of an ssh, which would cost it every git
+/// fact on its row.
 fn assert_reports_this_machine(name: &str, seen: &str) {
-    let host = printed(seen, "CROOK_HOST")
-        .unwrap_or_else(|| panic!("{name} never said what it calls this machine: {seen:?}"));
     let (reported, _) = reported_place(seen)
         .unwrap_or_else(|| panic!("{name} never reported its directory: {seen:?}"));
-    assert!(!host.is_empty(), "{name} has no name for this machine");
+    let here = gethostname::gethostname().to_string_lossy().into_owned();
+    assert!(!here.is_empty(), "this machine has no name to report");
     assert_eq!(
-        reported, host,
-        "{name} reported its directory on {reported:?}, and calls this machine {host:?}"
+        reported, here,
+        "{name} reported its directory on {reported:?}, and this machine is {here:?}"
     );
     assert_eq!(
         crate::tab::Remote::reported(Some(&reported), PathBuf::from("/")),
@@ -2463,7 +2457,25 @@ fn assert_reports_this_machine(name: &str, seen: &str) {
 fn test_a_real_zsh_reports_which_machine_its_directory_is_on() {
     let Some(ran) = (RealShell {
         name: "zsh",
-        command: &print_host("HOST"),
+        ..RealShell::default()
+    })
+    .run() else {
+        return;
+    };
+    assert_reports_this_machine("zsh", &ran.seen);
+}
+
+#[test]
+fn test_a_real_zsh_whose_startup_file_set_host_still_names_this_machine() {
+    // zsh's `$HOST` is whatever the environment or a startup file last said.
+    // conda's compiler packages export a target triple as `HOST` from the
+    // `conda init` block in ~/.zshrc, and the snippet runs after it: a
+    // snippet that wrote `$HOST` said every local pane was on a machine
+    // called `x86_64-apple-darwin13.4.0`, and took its branch and its diff
+    // off its row.
+    let Some(ran) = (RealShell {
+        name: "zsh",
+        home_files: &[(".zshrc", "export HOST=x86_64-apple-darwin13.4.0\n")],
         ..RealShell::default()
     })
     .run() else {
@@ -2476,7 +2488,24 @@ fn test_a_real_zsh_reports_which_machine_its_directory_is_on() {
 fn test_a_real_bash_reports_which_machine_its_directory_is_on() {
     let Some(ran) = (RealShell {
         name: "bash",
-        command: &print_host("HOSTNAME"),
+        ..RealShell::default()
+    })
+    .run() else {
+        return;
+    };
+    assert_reports_this_machine("bash", &ran.seen);
+}
+
+#[test]
+fn test_a_real_bash_that_inherited_a_stale_hostname_still_names_this_machine() {
+    // bash's `$HOSTNAME` is the environment's when the environment has one:
+    // /etc/profile on Fedora exports it at login, and a network that renames
+    // the machine afterwards leaves every shell started since saying the old
+    // name. A snippet that wrote `$HOSTNAME` said those were on another
+    // machine.
+    let Some(ran) = (RealShell {
+        name: "bash",
+        extra: &[("HOSTNAME", "fedora-old.invalid")],
         ..RealShell::default()
     })
     .run() else {
@@ -2492,7 +2521,6 @@ fn test_a_real_fish_reports_which_machine_its_directory_is_on() {
     let Some(ran) = (RealShell {
         name: "fish",
         extra: &[("fish_features", "no-mark-prompt")],
-        command: &print_host("hostname"),
         ..RealShell::default()
     })
     .run() else {
@@ -2512,7 +2540,6 @@ fn test_a_real_fish_that_reports_its_own_directory_names_this_machine() {
     }
     let Some(ran) = (RealShell {
         name: "fish",
-        command: &print_host("hostname"),
         ..RealShell::default()
     })
     .run() else {

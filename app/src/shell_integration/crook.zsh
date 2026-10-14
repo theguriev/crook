@@ -47,10 +47,8 @@ __crook_mark() { builtin printf '\e]133;%s\a' "$1" }
 # The authority is the machine's name — `file://host/path` — because the path
 # means a directory on this machine and nowhere else: pasted on the far side of
 # an ssh, this is what tells Crook the shell is there, and that the laptop's
-# checkout at the same path is not the one it is in. `$HOST` is zsh's own copy
-# of the name, read once when the shell started, so no prompt pays for a
-# `hostname` call. It is printed as it is: a machine's name holds neither of
-# the two bytes below.
+# checkout at the same path is not the one it is in. It is printed as it is: a
+# machine's name holds neither of the two bytes below.
 #
 # `%` and `;` are escaped in the path, and nothing else. `%` is the byte the
 # reader would take for the start of a percent-escape; `;` is the one the
@@ -58,7 +56,21 @@ __crook_mark() { builtin printf '\e]133;%s\a' "$1" }
 # cut off at it. Both leave as their `%XX` code and the reader turns them back
 # — `%` first, so the `%` in `%3B` is not escaped a second time. Everything
 # else survives the round trip as itself, spaces included.
-__crook_cwd() { builtin printf '\e]7;file://%s%s\a' "${HOST-}" "${${PWD//\%/%25}//;/%3B}" }
+__crook_cwd() { builtin printf '\e]7;file://%s%s\a' "${__crook_host-}" "${${PWD//\%/%25}//;/%3B}" }
+
+# The name is the system's, read once here, and not `$HOST`. zsh takes `$HOST`
+# from the environment when it is there, and a startup file can set it to
+# anything: conda's compiler packages export a target triple as `HOST`, and a
+# dev server is started with `HOST=0.0.0.0`. Either would make a shell on this
+# machine look like one somewhere else, and cost its row every git fact. On
+# Linux the name is a file the shell reads itself; elsewhere it is one `uname`
+# as the shell starts, and no prompt pays for it.
+__crook_host=''
+if [[ -r /proc/sys/kernel/hostname ]]; then
+	builtin read -r __crook_host </proc/sys/kernel/hostname
+fi
+[[ -n $__crook_host ]] || __crook_host=$(command uname -n 2>/dev/null)
+[[ -n $__crook_host ]] || __crook_host=${HOST-}
 
 # Completion, which is the one thing the marks cannot do: they are an
 # announcement, and this is a question with an answer.

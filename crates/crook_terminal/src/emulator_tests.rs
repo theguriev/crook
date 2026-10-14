@@ -1204,26 +1204,29 @@ fn test_every_shell_integration_reports_its_working_directory() {
     }
 }
 
-/// Every integration says which machine its directory is on, by the shell's
-/// own copy of the machine's name.
+/// Every integration says which machine its directory is on, by the name the
+/// system gave when the shell started.
 ///
 /// The bug this pins: with the authority left empty, a shell on the far side
 /// of an ssh — where the README says to paste these — reported a path that
 /// Crook read as one on this machine, and the pane showed this machine's
-/// checkout at that path. Each shell keeps the name in a variable it read
-/// once at startup, so naming it costs a prompt nothing.
+/// checkout at that path. The name is read once at startup, so naming it
+/// costs a prompt nothing — into a variable of the snippet's own in zsh and
+/// bash, whose `$HOST` and `$HOSTNAME` the environment can set to anything
+/// (see the real-shell tests in the application's `shell_integration`), and
+/// fish's read-only `$hostname`.
 #[test]
 fn test_every_shell_integration_names_the_machine_its_directory_is_on() {
     for (shell, snippet, host) in [
         (
             "zsh",
             include_str!("../../../app/src/shell_integration/crook.zsh"),
-            "\"${HOST-}\"",
+            "\"${__crook_host-}\"",
         ),
         (
             "bash",
             include_str!("../../../app/src/shell_integration/crook.bash"),
-            "\"${HOSTNAME-}\"",
+            "\"${__crook_host-}\"",
         ),
         (
             "fish",
