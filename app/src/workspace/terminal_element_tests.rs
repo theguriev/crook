@@ -495,6 +495,207 @@ fn a_combining_mark_is_drawn_over_the_character_it_belongs_to() {
     assert_eq!(painted[2].glyph_key.glyph_id, u32::from('!'));
 }
 
+/// The rectangles in the scene filled with `ink`, in paint order.
+fn inked(scene: &Scene, ink: Rgb) -> Vec<RectF> {
+    rects(scene)
+        .into_iter()
+        .filter(|rect| rect.background == Fill::Solid(color(ink)))
+        .map(|rect| rect.bounds)
+        .collect()
+}
+
+#[test]
+fn a_column_of_vertical_lines_is_one_unbroken_line_down_the_grid() {
+    // The sides of Claude Code's input box, Gemini's trust box and Copilot's
+    // scrollbar. A font's `│` stops short of a row this tall, so drawn from
+    // the font a column of them is a dashed line with a gap at every row.
+    let scene = painted(&snapshot(&["│", "│", "│"], 1));
+    let height = font().metrics().height;
+
+    assert!(glyphs(&scene).is_empty(), "a line is not a glyph");
+    let mut strokes = inked(&scene, INK);
+    assert!(!strokes.is_empty(), "the line is drawn");
+    strokes.sort_by(|above, below| above.min_y().total_cmp(&below.min_y()));
+    let mut reached = 0.;
+    for stroke in &strokes {
+        assert!(
+            stroke.min_y() <= reached,
+            "a gap from {reached} down to {stroke:?}"
+        );
+        reached = stroke.max_y().max(reached);
+        assert_eq!(
+            (stroke.min_x(), stroke.width()),
+            (strokes[0].min_x(), strokes[0].width()),
+            "in one place and at one weight all the way down"
+        );
+    }
+    assert_eq!(reached, 3. * height, "from the top row to the bottom one");
+}
+
+#[test]
+fn full_blocks_fill_their_cells_to_every_edge_and_each_other() {
+    // Claude Code's mascot and every progress bar. Their areas adding up to
+    // the box around them is what says there is no gap between two of them,
+    // and no overlap either.
+    let scene = painted(&snapshot(&["██", "██"], 2));
+    let metrics = font().metrics();
+
+    assert!(glyphs(&scene).is_empty(), "a block is not a glyph");
+    let blocks = inked(&scene, INK);
+    assert_eq!(blocks.len(), 4, "one rectangle a cell");
+    let right = blocks.iter().map(|block| block.max_x()).fold(0., f32::max);
+    let bottom = blocks.iter().map(|block| block.max_y()).fold(0., f32::max);
+    assert!(
+        blocks
+            .iter()
+            .all(|block| block.origin().x() >= 0. && block.origin().y() >= 0.)
+    );
+    assert!(
+        (right - 2. * metrics.width).abs() < 1.,
+        "to the right edge of the grid, rounded to a device pixel"
+    );
+    assert_eq!(bottom, 2. * metrics.height, "and to its bottom edge");
+    let area: f32 = blocks
+        .iter()
+        .map(|block| block.width() * block.height())
+        .sum();
+    assert_eq!(area, right * bottom);
+}
+
+#[test]
+fn a_corner_is_two_half_lines_that_meet_in_the_middle_of_the_cell() {
+    let scene = painted(&snapshot(&["┌"], 1));
+    let metrics = font().metrics();
+
+    assert!(glyphs(&scene).is_empty(), "a corner is not a glyph");
+    let strokes = inked(&scene, INK);
+    assert_eq!(strokes.len(), 2, "an arm right and an arm down");
+    let right = strokes
+        .iter()
+        .find(|stroke| stroke.width() > stroke.height())
+        .expect("a horizontal arm");
+    let down = strokes
+        .iter()
+        .find(|stroke| stroke.height() > stroke.width())
+        .expect("a vertical arm");
+
+    assert!(
+        (right.max_x() - metrics.width).abs() < 1.,
+        "out to the right edge"
+    );
+    assert_eq!(down.max_y(), metrics.height, "and down to the bottom one");
+    assert!(
+        right.min_x() > 0. && down.min_y() > 0.,
+        "and to neither of the others"
+    );
+    assert_eq!(
+        (right.min_x(), right.min_y()),
+        (down.min_x(), down.min_y()),
+        "from the one corner, so the outside of the turn is square"
+    );
+    assert!(
+        ((down.min_x() + down.max_x()) / 2. - metrics.width / 2.).abs() < 1.
+            && ((right.min_y() + right.max_y()) / 2. - metrics.height / 2.).abs() < 1.,
+        "which is the middle of the cell"
+    );
+}
+
+#[test]
+fn text_beside_a_line_is_still_drawn_from_the_font() {
+    let font = font();
+    let metrics = font.metrics();
+    let painted = glyphs(&painted(&snapshot(&["a│b"], 3)));
+
+    let ids: Vec<_> = painted
+        .iter()
+        .map(|glyph| glyph.glyph_key.glyph_id)
+        .collect();
+    assert_eq!(ids, [u32::from('a'), u32::from('b')]);
+    assert_eq!(
+        painted[1].position,
+        vec2f(2. * metrics.width, metrics.baseline),
+        "at its own column, past the line"
+    );
+}
+
+#[test]
+fn a_line_under_a_block_cursor_is_drawn_over_it_in_the_ground_colour() {
+    // A glyph under a filled cursor is drawn over it inverted, because glyphs
+    // are drawn after every rectangle. A line is rectangles, and drawn only
+    // with its row it would vanish into the cursor painted after the rows.
+    let mut grid = snapshot(&["─"], 1);
+    grid.cursor = Some(Cursor {
+        row: 0,
+        column: 0,
+        shape: CursorShape::Block,
+        color: HIGHLIGHT,
+    });
+
+    let painted = rects(&painted(&grid));
+    let cursor = painted
+        .iter()
+        .position(|rect| rect.background == Fill::Solid(color(HIGHLIGHT)))
+        .expect("the cursor is drawn");
+    let over = &painted[cursor + 1..];
+    assert!(!over.is_empty(), "the line is drawn again over the cursor");
+    assert!(
+        over.iter()
+            .all(|rect| rect.background == Fill::Solid(color(GROUND))),
+        "in the ground colour, as an inverted glyph would be"
+    );
+    let metrics = font().metrics();
+    let (left, right) = over.iter().fold((f32::MAX, 0_f32), |(left, right), rect| {
+        (
+            left.min(rect.bounds.min_x()),
+            right.max(rect.bounds.max_x()),
+        )
+    });
+    assert!(
+        left == 0. && (right - metrics.width).abs() < 1.,
+        "across the whole cell"
+    );
+}
+
+#[test]
+fn a_finished_block_s_row_draws_its_lines_the_way_the_grid_does() {
+    // The list hands a harvested row to the same `paint_glyphs`, so the box
+    // a program left on screen when it exited stays unbroken too.
+    let font = font();
+    let cells = snapshot(&["╭─╮"], 3).cells;
+    let mut scene = Scene::new(1.);
+    paint_glyphs(
+        &cells,
+        &RowMarks::Block(&[]),
+        0.,
+        0.,
+        &font,
+        Ink {
+            ground: GROUND,
+            inverted: None,
+        },
+        &mut scene,
+    );
+
+    assert!(glyphs(&scene).is_empty(), "nothing in the row is a glyph");
+    let corners: Vec<_> = rects(&scene)
+        .into_iter()
+        .filter(|rect| rect.background == Fill::None)
+        .map(|rect| rect.bounds)
+        .collect();
+    assert_eq!(corners.len(), 2, "two rounded corners");
+    let line = inked(&scene, INK);
+    let left = line
+        .iter()
+        .map(|stroke| stroke.min_x())
+        .fold(f32::MAX, f32::min);
+    let right = line.iter().map(|stroke| stroke.max_x()).fold(0., f32::max);
+    assert_eq!(
+        (left, right),
+        (corners[0].max_x(), corners[1].min_x()),
+        "the line between them runs from the one corner to the other"
+    );
+}
+
 /// The rectangles the highlight put in the scene, left to right and top to
 /// bottom, as (origin, size) pairs.
 fn selection_rects(scene: &Scene) -> Vec<(Vector2F, Vector2F)> {

@@ -21,11 +21,17 @@
 //!   content changed, so a frame spent on an unchanged grid never happens.
 //!
 //! What the grid does *not* assume is that the monospace family covers what the
-//! shell printed. A character it lacks — a spinner's braille, a powerline
-//! separator, a CJK filename — is drawn from a face that has it, resolved once
-//! per distinct character by [`CellFont::glyph`]. A blank column would be worse
+//! shell printed. A character it lacks — a powerline separator, a CJK
+//! filename, an emoji — is drawn from a face that has it, resolved once per
+//! distinct character by [`CellFont::glyph`]. A blank column would be worse
 //! than wrong: the row would be silently short, and copying the screen would
 //! disagree with looking at it.
+//!
+//! Nor does it take lines and blocks from a font at all. `│`, `╭`, `█`, `▌`
+//! and braille are rectangles drawn from the cell's own edges by
+//! [`box_drawing`], because every box an agent draws its interface in is made
+//! of them and a font's stop short of a row this tall: the box would be a
+//! dashed outline with a gap at every row.
 //!
 //! # When a pane draws this rather than a list of blocks
 //!
@@ -138,13 +144,15 @@ use crate::theme::theme;
 
 use super::action::WorkspaceAction;
 use super::block_list::{FIND_CURRENT_ALPHA, FIND_MATCH_ALPHA, paint_wash};
+use super::box_drawing;
 use super::pane_output::{Keys, Output, Typed, selection_kind};
 
 /// How thick the rules a cell can carry are, as a fraction of the font size.
 ///
 /// The same ratio a shaped line underlines itself with, so a link underlined by
-/// a shell and a label underlined by the UI are the same weight.
-const RULE_THICKNESS_RATIO: f32 = 0.06;
+/// a shell and a label underlined by the UI are the same weight — and a light
+/// box-drawing line is drawn at it too, see [`box_drawing`].
+pub(super) const RULE_THICKNESS_RATIO: f32 = 0.06;
 
 /// How far below the baseline an underline sits, as a fraction of the space
 /// between the baseline and the bottom of the cell.
@@ -1248,6 +1256,23 @@ fn paint_grid(
         && cursor.column < columns
     {
         paint_cursor(cursor, shape, origin, metrics, scene);
+        if let Some(cell) = snapshot.cell(cursor.row, cursor.column) {
+            paint_over_cursor(
+                cell,
+                origin
+                    + vec2f(
+                        cursor.column as f32 * metrics.width,
+                        cursor.row as f32 * metrics.height,
+                    ),
+                if inverted.is_some() {
+                    snapshot.background
+                } else {
+                    cell.foreground
+                },
+                metrics,
+                scene,
+            );
+        }
     }
 }
 
@@ -1328,8 +1353,8 @@ pub(super) fn paint_composition(
         .with_background(ground);
     let face = font.regular();
     for &(column, character) in &laid.glyphs {
-        let pen = at.origin + vec2f(column as f32 * metrics.width, metrics.baseline);
-        paint_cell(character, pen, face, foreground, font, metrics, scene);
+        let corner = at.origin + vec2f(column as f32 * metrics.width, 0.);
+        paint_cell(character, corner, face, foreground, font, scene);
     }
     let thickness = (metrics.font_size * RULE_THICKNESS_RATIO).max(1.);
     let below = (metrics.height - metrics.baseline) * UNDERLINE_OFFSET_RATIO;
@@ -1481,44 +1506,81 @@ pub(super) fn paint_glyphs(
             continue;
         }
 
-        let pen = vec2f(left + column as f32 * metrics.width, top + metrics.baseline);
+        let at = vec2f(left + column as f32 * metrics.width, top);
         let foreground = color(if ink.inverted == Some(column) {
             ink.ground
         } else {
             cell.foreground
         });
         let face = font.face(cell.flags);
-        paint_cell(cell.c, pen, face, foreground, font, metrics, scene);
+        paint_cell(cell.c, at, face, foreground, font, scene);
 
         // Combining marks are drawn from the same pen position the character
         // was: a mark glyph carries its own offset from the character it sits
         // on, and no column of its own to sit in.
         for mark in marks.at(column) {
-            paint_cell(*mark, pen, face, foreground, font, metrics, scene);
+            paint_cell(*mark, at, face, foreground, font, scene);
         }
     }
 }
 
-/// Draws one character at a pen position, in whichever face can draw it.
+/// Draws one character into the cell whose top-left corner is `at`, in
+/// whichever face can draw it — or in none, for a line or a block.
 ///
-/// The face that comes back is not always the one that went in: the monospace
-/// family covers Latin and not a spinner's braille, a powerline separator or a
-/// CJK filename, and [`CellFont::glyph`] finds a face that does. A character no
+/// A line or a block character is drawn by [`box_drawing`] from the cell's own
+/// edges, because a font's stops short of them and a column of `│` or `█`
+/// would have a gap at every row. Everything else is a glyph on the cell's
+/// baseline, and the face it comes from is not always the one that went in:
+/// the monospace family covers Latin and not a CJK filename or a powerline
+/// separator, and [`CellFont::glyph`] finds a face that does. A character no
 /// installed font can draw is the only one that leaves the cell empty.
 fn paint_cell(
     character: char,
-    pen: Vector2F,
+    at: Vector2F,
     face: crookui_core::fonts::FontId,
     ink: Color,
     font: &CellFont,
-    metrics: CellMetrics,
     scene: &mut Scene,
 ) {
+    let metrics = font.metrics();
+    let cell = RectF::new(at, vec2f(metrics.width, metrics.height));
+    if box_drawing::paint(character, cell, metrics.font_size, ink, scene) {
+        return;
+    }
     let Some((drawn_with, glyph)) = font.glyph(face, character) else {
         log::trace!("no installed font can draw {character:?}");
         return;
     };
+    let pen = at + vec2f(0., metrics.baseline);
     scene.draw_glyph(pen, glyph, drawn_with, metrics.font_size, ink);
+}
+
+/// Draws a line or block character again, over the cursor just drawn on its
+/// cell, in `ink`: the colour [`paint_glyphs`] gave it, which a surface that
+/// inverts the character under a filled cursor passes inverted.
+///
+/// A glyph is drawn after every rectangle in its layer, so whatever character
+/// is under the cursor shows over it. A line or a block is rectangles, painted
+/// with its row and so under a cursor painted after the rows, where it would
+/// vanish into a filled one. Anything else under the cursor is a glyph
+/// already, and nothing is drawn for it here.
+pub(super) fn paint_over_cursor(
+    cell: &SnapshotCell,
+    at: Vector2F,
+    ink: Rgb,
+    metrics: CellMetrics,
+    scene: &mut Scene,
+) {
+    if cell.flags.contains(CellFlags::WIDE_SPACER) {
+        return;
+    }
+    box_drawing::paint(
+        cell.c,
+        RectF::new(at, vec2f(metrics.width, metrics.height)),
+        metrics.font_size,
+        color(ink),
+        scene,
+    );
 }
 
 /// What a cursor is drawn as, given whether the grid is where typing goes.
