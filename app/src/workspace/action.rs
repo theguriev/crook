@@ -133,8 +133,8 @@ pub enum WorkspaceAction {
     /// line while they reach for the second half. See
     /// [`crate::keybindings`].
     Chord,
-    /// Bring back the tab closed most recently. See
-    /// `Workspace::reopen_closed_tab`.
+    /// Bring back what was closed most recently: a tab, a group or a pane.
+    /// See `Workspace::reopen_closed_tab`.
     ReopenClosedTab,
     /// Ask this pane's shell what the word before the caret could become.
     ///

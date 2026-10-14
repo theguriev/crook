@@ -27827,6 +27827,337 @@ fn a_closed_tab_comes_back_where_it_was_with_its_name_and_its_split() {
     );
 }
 
+/// What "Reopen the closed tab" is asked about in the tests below it.
+impl Harness {
+    /// Whether the command would decline, with nothing left to bring back.
+    fn nothing_to_reopen(&self) -> bool {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .command(crate::input_keys::Binding::ReopenClosedTab)
+                .is_none()
+        })
+    }
+
+    /// Names every tab after its place in the strip, `tab 0` and on, so a
+    /// test can say what order they came back in by what they are called.
+    fn name_tabs_by_place(&mut self) {
+        for (index, tab) in self.tab_ids().into_iter().enumerate() {
+            self.workspace_update(|workspace, ctx| {
+                workspace.rename_tab(tab, Some(format!("tab {index}")), ctx);
+            });
+        }
+    }
+
+    /// What every tab is called, in strip order.
+    fn tab_names(&self) -> Vec<String> {
+        self.tab_ids()
+            .into_iter()
+            .map(|tab| self.tab_name(tab))
+            .collect()
+    }
+
+    /// The panel's blocks as the groups they are drawn under, in strip order:
+    /// a group whose members are not side by side is in here twice.
+    fn block_groups(&self) -> Vec<Option<GroupId>> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .tabs()
+                .blocks()
+                .into_iter()
+                .map(|block| block.group)
+                .collect()
+        })
+    }
+
+    /// A group's heading and whether it is folded away.
+    fn heading_of(&self, group: GroupId) -> Option<(String, bool)> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .tabs()
+                .group(group)
+                .map(|group| (group.name().to_owned(), group.is_collapsed()))
+        })
+    }
+
+    /// The share of its split a pane takes.
+    fn flex_of(&self, pane: PaneId) -> Option<f32> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.tabs().pane(pane).map(Pane::flex)
+        })
+    }
+}
+
+#[test]
+fn a_closed_group_comes_back_whole_in_one_press_folded_and_where_it_was() {
+    // A group of two between two loose tabs, folded away and then closed from
+    // its heading. One press brings back the whole of it — not one of its
+    // tabs, and not nothing — under the same heading, still folded, between
+    // the same two tabs.
+    let mut harness = Harness::new(3);
+    let loose = harness.tab_ids();
+    harness.dispatch_action(TabAction::NewInGroupOf(loose[1]));
+    let group = harness
+        .group_of(loose[1])
+        .expect("the tab was not put in a group");
+    harness.name_tabs_by_place();
+    harness.dispatch_action(TabAction::ToggleGroup(group));
+    let (heading, _) = harness.heading_of(group).expect("the group is open");
+
+    harness.dispatch_action(TabAction::CloseGroup(group));
+    assert_eq!(harness.tab_ids(), [loose[0], loose[2]]);
+
+    harness.run_command("crook/window/reopen-closed-tab");
+
+    assert_eq!(
+        harness.tab_names(),
+        ["tab 0", "tab 1", "tab 2", "tab 3"],
+        "the group did not come back whole, in its place"
+    );
+    let after = harness.tab_ids();
+    let back = harness
+        .group_of(after[1])
+        .expect("its tabs came back in no group");
+    assert_eq!(harness.members_of(back), [after[1], after[2]]);
+    assert_eq!(
+        harness.heading_of(back),
+        Some((heading, true)),
+        "the heading came back changed, or unfolded"
+    );
+    assert_eq!(
+        harness.active_id(),
+        after[2],
+        "the tab selected is not the one of them used last"
+    );
+    assert!(
+        harness.nothing_to_reopen(),
+        "the group was written down as more than one close"
+    );
+}
+
+#[test]
+fn a_tab_closed_out_of_a_group_goes_back_into_it() {
+    // The middle one of three. Put back at its own index with no group, it sat
+    // between two members of a group it was not in, and the panel drew that
+    // group under two headings.
+    let mut harness = Harness::new(2);
+    let anchor = harness.tab_ids()[1];
+    harness.dispatch_action(TabAction::NewInGroupOf(anchor));
+    harness.dispatch_action(TabAction::NewInGroupOf(anchor));
+    let group = harness
+        .group_of(anchor)
+        .expect("the tab was not put in a group");
+    let members = harness.members_of(group);
+    assert_eq!(members.len(), 3);
+    harness.workspace_update(|workspace, ctx| {
+        workspace.rename_tab(members[1], Some("the middle one".to_owned()), ctx);
+    });
+
+    harness.dispatch_action(TabAction::Close(members[1]));
+    harness.run_command("crook/window/reopen-closed-tab");
+
+    let after = harness.tab_ids();
+    assert_eq!(after.len(), 4, "the tab did not come back");
+    assert_eq!(harness.tab_name(after[2]), "the middle one");
+    assert_eq!(
+        harness.members_of(group),
+        after[1..],
+        "it came back out of its group"
+    );
+    assert_eq!(harness.block_groups(), [None, Some(group)]);
+}
+
+#[test]
+fn a_pane_closed_out_of_a_split_goes_back_into_its_tab() {
+    // A tab closed first, so that a reopen which never saw the pane go has
+    // something else to bring back — and brought back that tab, leaving the
+    // pane gone.
+    let mut harness = Harness::new(3);
+    let tabs = harness.tab_ids();
+    harness.dispatch_action(TabAction::Close(tabs[0]));
+
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let panes = harness.panes_of(tabs[2]);
+    assert_eq!(panes.len(), 3);
+    harness.dispatch_action(TabAction::ResizePanes {
+        before: panes[1],
+        after: panes[2],
+        leading: 0.7,
+    });
+    let title = harness.pane_title(panes[1]);
+    let share = harness.flex_of(panes[1]);
+    assert_ne!(share, Some(1.), "the divider did not move");
+
+    harness.dispatch_action(TabAction::ClosePane(panes[1]));
+    assert_eq!(harness.panes_of(tabs[2]), [panes[0], panes[2]]);
+
+    harness.run_command("crook/window/reopen-closed-tab");
+
+    assert_eq!(
+        harness.tab_ids(),
+        [tabs[1], tabs[2]],
+        "a tab came back rather than the pane"
+    );
+    let after = harness.panes_of(tabs[2]);
+    assert_eq!(after.len(), 3, "the pane did not come back");
+    assert_eq!([after[0], after[2]], [panes[0], panes[2]]);
+    assert_eq!(harness.pane_title(after[1]), title);
+    assert_eq!(harness.flex_of(after[1]), share, "its share did not");
+    assert_eq!(harness.focused_pane_id(), Some(after[1]));
+
+    // And the tab closed before it is the next thing back.
+    harness.run_command("crook/window/reopen-closed-tab");
+    assert_eq!(harness.tab_ids().len(), 3);
+    assert!(harness.nothing_to_reopen());
+}
+
+#[test]
+fn a_pane_closed_before_its_tab_goes_back_into_that_tab_once_it_is_back() {
+    // The pane names the tab it went out of, and the tab that comes back is a
+    // new one. Brought back as a tab of its own, the pane would leave the
+    // reopened tab one pane short and the strip one tab long.
+    let mut harness = Harness::new(2);
+    let tab = harness.active_id();
+    harness.dispatch_action(TabAction::Split(Direction::Down));
+    let panes = harness.panes_of(tab);
+    let titles: Vec<String> = panes.iter().map(|pane| harness.pane_title(*pane)).collect();
+
+    harness.dispatch_action(TabAction::ClosePane(panes[1]));
+    harness.dispatch_action(TabAction::Close(tab));
+    assert_eq!(harness.tab_ids().len(), 1);
+
+    harness.run_command("crook/window/reopen-closed-tab");
+    harness.run_command("crook/window/reopen-closed-tab");
+
+    assert_eq!(
+        harness.tab_ids().len(),
+        2,
+        "the pane came back as a tab of its own"
+    );
+    let back = harness.active_pane_ids();
+    let back: Vec<String> = back.iter().map(|pane| harness.pane_title(*pane)).collect();
+    assert_eq!(back, titles, "the pane did not go back into its tab");
+}
+
+#[test]
+fn a_tab_reopened_beside_a_group_it_was_not_in_does_not_split_it() {
+    // The tab closed from the middle, and a group made since over the place
+    // it had: one member above that place and one in it. Its old index is
+    // between the two of them.
+    let mut harness = Harness::new(3);
+    let tabs = harness.tab_ids();
+    harness.dispatch_action(TabAction::Close(tabs[1]));
+    harness.dispatch_action(TabAction::NewInGroupOf(tabs[0]));
+    let group = harness
+        .group_of(tabs[0])
+        .expect("the tab was not put in a group");
+    let members = harness.members_of(group);
+    assert_eq!(harness.tab_ids()[..2], members);
+
+    harness.run_command("crook/window/reopen-closed-tab");
+
+    assert_eq!(harness.tab_ids().len(), 4, "the tab did not come back");
+    assert_eq!(
+        harness.members_of(group),
+        members,
+        "it joined a group it was never in"
+    );
+    let blocks = harness.block_groups();
+    assert_eq!(
+        blocks.iter().filter(|block| **block == Some(group)).count(),
+        1,
+        "the group was split in two: {blocks:?}"
+    );
+}
+
+#[test]
+fn a_group_reopened_over_a_group_made_since_does_not_split_it() {
+    // The same, a block at a time: a group closed from between two loose
+    // tabs, and another made since over its place. Set down at its old index
+    // it would land between that one's two members.
+    let mut harness = Harness::new(3);
+    let loose = harness.tab_ids();
+    harness.dispatch_action(TabAction::NewInGroupOf(loose[1]));
+    let closed = harness
+        .group_of(loose[1])
+        .expect("the tab was not put in a group");
+    harness.dispatch_action(TabAction::CloseGroup(closed));
+    harness.dispatch_action(TabAction::NewInGroupOf(loose[0]));
+    let group = harness
+        .group_of(loose[0])
+        .expect("the tab was not put in a group");
+    let members = harness.members_of(group);
+
+    harness.run_command("crook/window/reopen-closed-tab");
+
+    assert_eq!(harness.tab_ids().len(), 5, "the group did not come back");
+    assert_eq!(harness.members_of(group), members);
+    let blocks = harness.block_groups();
+    assert_eq!(
+        blocks.iter().filter(|block| block.is_some()).count(),
+        2,
+        "a group was split in two: {blocks:?}"
+    );
+}
+
+#[test]
+fn closing_the_others_brings_a_whole_group_back_as_one_group() {
+    // Everything but the last tab: one loose tab, and a group every member of
+    // which went. Two closes are written down rather than three, and they
+    // come back top first, the group as a group.
+    let mut harness = Harness::new(3);
+    let loose = harness.tab_ids();
+    harness.dispatch_action(TabAction::NewInGroupOf(loose[1]));
+    harness.name_tabs_by_place();
+
+    harness.dispatch_action(TabAction::CloseOthers(loose[2]));
+    assert_eq!(harness.tab_ids(), [loose[2]]);
+
+    harness.run_command("crook/window/reopen-closed-tab");
+    assert_eq!(harness.tab_names(), ["tab 0", "tab 3"]);
+    harness.run_command("crook/window/reopen-closed-tab");
+    assert_eq!(harness.tab_names(), ["tab 0", "tab 1", "tab 2", "tab 3"]);
+
+    let after = harness.tab_ids();
+    let group = harness
+        .group_of(after[1])
+        .expect("the group came back as loose tabs");
+    assert_eq!(harness.members_of(group), after[1..3]);
+    assert!(harness.nothing_to_reopen());
+}
+
+#[test]
+fn a_tab_closed_out_of_a_group_rejoins_it_once_the_group_is_back() {
+    // One member closed, then the group with the other: the group comes back
+    // first, made anew, and the tab closed before it goes back into that one
+    // rather than into a group that no longer exists.
+    let mut harness = Harness::new(2);
+    let anchor = harness.tab_ids()[1];
+    harness.dispatch_action(TabAction::NewInGroupOf(anchor));
+    let group = harness
+        .group_of(anchor)
+        .expect("the tab was not put in a group");
+    harness.name_tabs_by_place();
+
+    harness.dispatch_action(TabAction::Close(anchor));
+    harness.dispatch_action(TabAction::CloseGroup(group));
+    assert_eq!(harness.tab_names(), ["tab 0"]);
+
+    harness.run_command("crook/window/reopen-closed-tab");
+    harness.run_command("crook/window/reopen-closed-tab");
+
+    assert_eq!(harness.tab_names(), ["tab 0", "tab 1", "tab 2"]);
+    let after = harness.tab_ids();
+    let back = harness
+        .group_of(after[2])
+        .expect("the group did not come back");
+    assert_eq!(
+        harness.members_of(back),
+        after[1..],
+        "the tab closed first did not rejoin it"
+    );
+}
+
 #[test]
 fn open_at_login_is_a_setting_the_page_switches() {
     // Switched from the settings page's row, and kept in the file; the login

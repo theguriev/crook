@@ -576,7 +576,7 @@ impl TabSnapshot {
 
 impl PaneSnapshot {
     /// Records one pane.
-    fn of(pane: &Pane) -> Self {
+    pub(crate) fn of(pane: &Pane) -> Self {
         let session = pane.session();
         Self {
             title: session.title.clone(),
@@ -587,46 +587,55 @@ impl PaneSnapshot {
         }
     }
 
+    /// Builds the pane this describes on its own, for a tab still open to
+    /// take it back: a pane closed out of a split and reopened.
+    pub(crate) fn restore(&self) -> Pane {
+        let mut pane = Pane::new(self.title.clone());
+        self.apply(&mut pane);
+        pane
+    }
+
     /// Writes this snapshot's facts onto a group's only pane.
     fn apply_to_first(&self, group: &mut PaneGroup) {
         let Some(id) = group.iter().next().map(Pane::id) else {
             return;
         };
-        self.apply(group, id);
+        if let Some(pane) = group.get_mut(id) {
+            self.apply(pane);
+        }
     }
 
     /// The same, onto whichever pane a split has just focused.
     fn apply_to_focused(&self, group: &mut PaneGroup) {
         let id = group.focused_id();
-        self.apply(group, id);
+        if let Some(pane) = group.get_mut(id) {
+            self.apply(pane);
+        }
     }
 
-    fn apply(&self, group: &mut PaneGroup, id: crate::tab::PaneId) {
-        if let Some(pane) = group.get_mut(id) {
-            pane.set_flex(self.flex);
-            pane.session_mut().custom_title = self.custom_title.clone();
-            // Only a directory that still exists. A repository moved or
-            // deleted between two launches would otherwise start a shell in a
-            // directory that is not there, which most shells answer by
-            // starting in `/` — a worse answer than the one Crook was started
-            // from.
-            if self
-                .working_directory
-                .as_ref()
-                .is_some_and(|path| path.is_dir())
-            {
-                pane.session_mut().working_directory = self.working_directory.clone();
-                // Only here, beside the directory: the conversation is kept
-                // by the directory it was had in, and offered anywhere else
-                // it would resume another directory's work, or none. By the
-                // table's name for it, so a hand-edited name that no agent
-                // answers to comes back as nothing.
-                pane.session_mut().restored_agent = self
-                    .agent
-                    .as_deref()
-                    .and_then(crate::agent::program_of)
-                    .map(str::to_owned);
-            }
+    fn apply(&self, pane: &mut Pane) {
+        pane.set_flex(self.flex);
+        pane.session_mut().custom_title = self.custom_title.clone();
+        // Only a directory that still exists. A repository moved or deleted
+        // between two launches would otherwise start a shell in a directory
+        // that is not there, which most shells answer by starting in `/` — a
+        // worse answer than the one Crook was started from.
+        if self
+            .working_directory
+            .as_ref()
+            .is_some_and(|path| path.is_dir())
+        {
+            pane.session_mut().working_directory = self.working_directory.clone();
+            // Only here, beside the directory: the conversation is kept by
+            // the directory it was had in, and offered anywhere else it would
+            // resume another directory's work, or none. By the table's name
+            // for it, so a hand-edited name that no agent answers to comes
+            // back as nothing.
+            pane.session_mut().restored_agent = self
+                .agent
+                .as_deref()
+                .and_then(crate::agent::program_of)
+                .map(str::to_owned);
         }
     }
 }

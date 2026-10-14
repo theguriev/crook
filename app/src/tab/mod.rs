@@ -1325,22 +1325,6 @@ impl TabStrip {
     /// back does not see. `agent 1` and `agent 3` back, with the second
     /// closed, went on to open another `agent 3`; one tab split in two came
     /// back as `agent 1` and `agent 2`, and the next tab was `agent 2`.
-    /// Puts a tab back at `index` — clamped to the end — and selects it.
-    ///
-    /// What reopening a closed tab is: it goes back where it was, as near as
-    /// the strip that is left allows, and it is the tab a person is looking at,
-    /// since bringing it back is asking to look at it.
-    pub(crate) fn reopen(&mut self, tab: Tab, index: usize) -> TabEffect {
-        let id = tab.id();
-        self.adopt(tab);
-        if let Some(from) = self.index_of(id) {
-            let tab = self.tabs.remove(from);
-            self.tabs.insert(index.min(self.tabs.len()), tab);
-        }
-        self.repair(Some(id));
-        TabEffect::Changed
-    }
-
     pub(crate) fn adopt(&mut self, tab: Tab) {
         let id = tab.id();
         let highest = std::iter::once(tab.born_as.as_str())
@@ -1352,6 +1336,89 @@ impl TabStrip {
         self.tabs.push(tab);
         self.active = id;
         self.mru.insert(0, id);
+    }
+
+    /// Puts a closed tab back at `index`, into `group` when that group is
+    /// still here, and selects it.
+    ///
+    /// What reopening a closed tab is: it goes back where it was, as near as
+    /// the strip that is left allows, and it is the tab a person is looking at,
+    /// since bringing it back is asking to look at it. As near as, because the
+    /// strip has moved since, and put back at its raw index a tab closed out
+    /// of the middle of a group sat between two of its members in none, while
+    /// one closed beside a group made over its place since split that group in
+    /// two. So it goes through [`Self::slot_for`] as a drop does: inside its
+    /// group's run when the group is here, and between runs when it is not.
+    pub(crate) fn reopen(&mut self, tab: Tab, index: usize, group: Option<GroupId>) -> TabEffect {
+        let id = tab.id();
+        self.adopt(tab);
+        // Adopted onto the end, and lifted straight back off: the clamp
+        // measures the strip it is going into, which is the strip without it.
+        if let Some(mut tab) = self.tabs.pop() {
+            tab.group = group.filter(|group| self.group(*group).is_some());
+            let before = self.tabs.get(index).map(Tab::id);
+            let at = self.slot_for(tab.group, before, tab.pinned);
+            self.tabs.insert(at, tab);
+        }
+        self.repair(Some(id));
+        TabEffect::Changed
+    }
+
+    /// Puts a closed group back over `tabs`, in their order, from `index`,
+    /// and selects the one at `selected`. Answers the group, or `None` when
+    /// there are no tabs to make one of.
+    ///
+    /// A new group, called `name` and folded or not as the closed one was: that
+    /// one went with its last member, and a group's id is never reused — see
+    /// [`GroupId`]. It lands between runs, as a moved group does, since one set
+    /// down inside another group's run is the arrangement the panel cannot
+    /// draw.
+    pub(crate) fn reopen_group(
+        &mut self,
+        name: String,
+        collapsed: bool,
+        tabs: Vec<Tab>,
+        index: usize,
+        selected: usize,
+    ) -> Option<GroupId> {
+        let ids: Vec<TabId> = tabs.iter().map(Tab::id).collect();
+        let first = *ids.first()?;
+        let mut group = TabGroup::new(name);
+        group.set_collapsed(collapsed);
+        let id = group.id();
+        self.groups.push(group);
+
+        for tab in tabs {
+            self.adopt(tab);
+        }
+        let moving = self.tabs.split_off(self.tabs.len() - ids.len());
+        let at = self.slot_in_block(None, index.min(self.tabs.len()));
+        for (offset, mut tab) in moving.into_iter().enumerate() {
+            tab.group = Some(id);
+            self.tabs.insert(at + offset, tab);
+        }
+        self.repair(Some(ids.get(selected).copied().unwrap_or(first)));
+        Some(id)
+    }
+
+    /// Puts a closed pane back into `tab` at `index` in its split, focused,
+    /// and selects the tab. `Unchanged` for a tab that is not here.
+    ///
+    /// `axis` is the way the split went when the pane was closed — see
+    /// [`PaneGroup::reopen`].
+    pub(crate) fn reopen_pane(
+        &mut self,
+        tab: TabId,
+        pane: Pane,
+        index: usize,
+        axis: SplitAxis,
+    ) -> TabEffect {
+        let Some(holder) = self.get_mut(tab) else {
+            return TabEffect::Unchanged;
+        };
+        holder.panes_mut().reopen(pane, index, axis);
+        self.repair(Some(tab));
+        TabEffect::Changed
     }
 
     /// Settles a strip [`Self::adopt`] and [`Self::adopt_group`] built, with

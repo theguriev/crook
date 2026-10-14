@@ -28,6 +28,7 @@ mod block_list;
 pub(crate) mod block_menu;
 mod body;
 mod changes_panel;
+mod closed;
 mod closing;
 mod controls;
 mod crash_note;

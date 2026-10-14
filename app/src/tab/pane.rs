@@ -391,6 +391,25 @@ impl PaneGroup {
         PaneEffect::Changed
     }
 
+    /// Puts a closed pane back at `at` — clamped to the end — and focuses it.
+    ///
+    /// Where it was in the row, between the panes that were its neighbours.
+    /// A group left with one pane since takes `axis` back, the way the split
+    /// went when the pane was closed, because one pane says nothing about
+    /// which way that was; a group still split keeps its own, for the reason
+    /// [`Self::split`] gives.
+    pub(crate) fn reopen(&mut self, pane: Pane, at: usize, axis: SplitAxis) {
+        if !self.is_split() {
+            self.axis = axis;
+        }
+        let id = pane.id();
+        self.panes.insert(at.min(self.panes.len()), pane);
+        // As a split does: the zoom was of the arrangement before this one,
+        // and the pane coming back has to be seen to be used.
+        self.zoomed = false;
+        self.repair(Some(id));
+    }
+
     /// Removes a pane, and reports [`PaneEffect::GroupEmptied`] rather than
     /// removing the last one.
     ///
