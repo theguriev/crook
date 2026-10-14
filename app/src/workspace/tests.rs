@@ -6043,6 +6043,47 @@ fn the_menu_is_about_the_row_it_was_opened_on_rather_than_the_focused_one() {
 }
 
 #[test]
+fn new_group_with_tab_opens_where_the_row_it_was_opened_on_is_working() {
+    // The one entry on the menu that starts a shell, and it starts it where
+    // the pressed row says it is working — the directory "Copy working
+    // directory" copies — rather than where the tab's focused pane is. Under
+    // `Panes` a split tab is a row per pane, and a split leaves the focus on
+    // the second.
+    let mut harness = Harness::new(1);
+    harness.set_granularity(Granularity::Panes);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let tab = harness.active_id();
+    let focused = harness.focused_pane_id().expect("a split tab has a focus");
+    let panes = harness.panes_of(tab);
+    let pressed = *panes
+        .iter()
+        .find(|pane| **pane != focused)
+        .expect("a split tab has a second pane");
+    let there = PathBuf::from("/where/the/pressed/row/works");
+    harness.update_session(pressed, |session| {
+        session.working_directory = Some(there.clone());
+    });
+    harness.update_session(focused, |session| {
+        session.working_directory = Some(PathBuf::from("/where/the/focused/pane/works"));
+    });
+    harness.frame();
+
+    harness.open_tab_menu_on(tab, pressed);
+    assert_eq!(harness.tab_menu_row(), Some(pressed));
+    harness.run_command("crook/tabs/new-group-with-tab");
+
+    let opened = harness.focused_pane_id().expect("the new tab has a pane");
+    assert!(!panes.contains(&opened), "no tab opened");
+    let directory = harness.workspace.read(&harness.app, |workspace, _| {
+        workspace
+            .tabs()
+            .pane(opened)
+            .and_then(|pane| pane.session().working_directory.clone())
+    });
+    assert_eq!(directory, Some(there));
+}
+
+#[test]
 fn close_tab_closes_the_tab_its_menu_is_on() {
     // The entry is a named action, so it is reachable from the palette and
     // from a chord as well as from the row — and all three have to mean the

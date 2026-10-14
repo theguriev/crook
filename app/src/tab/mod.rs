@@ -939,6 +939,25 @@ impl Tab {
     pub fn status(&self) -> Option<AgentStatus> {
         self.panes.focused().map(Pane::status)
     }
+
+    /// Points the focused pane at `directory`, for a pane whose shell has not
+    /// started yet.
+    ///
+    /// Only then, because a shell's directory is decided once, when it is
+    /// started, from what its session says: Crook records where a shell goes
+    /// and never drives it, so a directory written afterwards would relabel
+    /// the row while the shell stayed where it was. `None` — the pane it was
+    /// opened from had no readable directory — leaves the one a new session
+    /// starts in.
+    fn start_focused_pane_in(&mut self, directory: Option<PathBuf>) {
+        let Some(directory) = directory else {
+            return;
+        };
+        let pane = self.panes.focused_id();
+        if let Some(pane) = self.panes.get_mut(pane) {
+            pane.session_mut().working_directory = Some(directory);
+        }
+    }
 }
 
 /// Everything that can happen to the strip, from a click, a key or a menu.
@@ -958,7 +977,17 @@ pub enum TabAction {
     /// repository, one branch over. Splitting the tab said that by putting two
     /// agents in one rectangle, which is a different claim — that they are two
     /// halves of one screen — and it is the wrong one.
+    ///
+    /// Its shell starts where `tab`'s focused pane is working.
     NewInGroupOf(TabId),
+    /// [`NewInGroupOf`](Self::NewInGroupOf) the tab `pane` is in, with the
+    /// shell starting where `pane` is working rather than where that tab's
+    /// focused pane is.
+    ///
+    /// The tab menu's "New group with tab", which is about the row that was
+    /// pressed — and under `Panes` granularity that row need not be the pane
+    /// its tab has focused.
+    NewInGroupFrom(PaneId),
     /// Open a tab beside `tab` — at the end of its group, making a group of
     /// the two when `grouped` and it has none, and after its block otherwise —
     /// and leave the active tab as it is.
@@ -1359,10 +1388,18 @@ impl TabStrip {
 
     /// Where the focused pane's shell last said it was, for what opens from it.
     pub(crate) fn focused_directory(&self) -> Option<PathBuf> {
-        self.pane(self.focused_pane_id()?)?
-            .session()
-            .working_directory
-            .clone()
+        self.directory_of(self.active)
+    }
+
+    /// Where a tab's focused pane's shell last said it was, for what opens
+    /// from that tab.
+    fn directory_of(&self, tab: TabId) -> Option<PathBuf> {
+        self.pane_directory(self.get(tab)?.panes().focused_id())
+    }
+
+    /// Where a pane's shell last said it was, for what opens from it.
+    fn pane_directory(&self, pane: PaneId) -> Option<PathBuf> {
+        self.pane(pane)?.session().working_directory.clone()
     }
 
     /// Every row the bar should draw at this granularity, as the tab it
@@ -1791,8 +1828,14 @@ impl TabStrip {
     }
 
     /// Opens a tab at the end of `anchor`'s group, making one of the two when
-    /// it has none, and selects it when `select` says to.
-    fn new_in_group_of(&mut self, anchor: TabId, select: bool) -> TabEffect {
+    /// it has none, with its shell starting in `directory`, and selects it
+    /// when `select` says to.
+    fn new_in_group_of(
+        &mut self,
+        anchor: TabId,
+        directory: Option<PathBuf>,
+        select: bool,
+    ) -> TabEffect {
         let Some(index) = self.index_of(anchor) else {
             return TabEffect::Unchanged;
         };
@@ -1823,6 +1866,13 @@ impl TabStrip {
         self.opened += 1;
         let mut tab = Tab::new(format!("agent {}", self.opened));
         tab.group = Some(group);
+        // Where it was opened from is working, for the reason `New` gives:
+        // the anchor's focused pane, or the row the tab menu's "New group
+        // with tab" was right-clicked on — and neither need be in the tab
+        // with the keyboard. A worktree writes its own checkout over this,
+        // and `crook tab new` the directory of the pane that asked when it
+        // has one.
+        tab.start_focused_pane_in(directory);
         let id = tab.id();
         // After the group's last member. A worktree is the newest thing in the
         // group, and the alternative — beside the tab it was asked from — puts
@@ -1894,12 +1944,7 @@ impl TabStrip {
                 // new tab that always opened in `~` sent them `cd`-ing back to
                 // the directory they had just been in. A directory gone since
                 // is the pty's to fall back from, as it is for a restored one.
-                if let Some(directory) = self.focused_directory() {
-                    let pane = tab.panes().focused_id();
-                    if let Some(pane) = tab.panes_mut().get_mut(pane) {
-                        pane.session_mut().working_directory = Some(directory);
-                    }
-                }
+                tab.start_focused_pane_in(self.focused_directory());
                 // After the active tab, which is where a person who just
                 // branched off what they were doing expects to find it.
                 let at = self.slot_after(self.index_of(self.active));
@@ -1908,9 +1953,20 @@ impl TabStrip {
                 TabEffect::Changed
             }
 
-            TabAction::NewInGroupOf(anchor) => self.new_in_group_of(anchor, true),
+            TabAction::NewInGroupOf(anchor) => {
+                self.new_in_group_of(anchor, self.directory_of(anchor), true)
+            }
 
-            TabAction::NewBeside { tab, grouped: true } => self.new_in_group_of(tab, false),
+            TabAction::NewInGroupFrom(pane) => {
+                let Some(anchor) = self.tab_of(pane) else {
+                    return TabEffect::Unchanged;
+                };
+                self.new_in_group_of(anchor, self.pane_directory(pane), true)
+            }
+
+            TabAction::NewBeside { tab, grouped: true } => {
+                self.new_in_group_of(tab, self.directory_of(tab), false)
+            }
 
             TabAction::NewBeside {
                 tab: anchor,
@@ -1920,7 +1976,11 @@ impl TabStrip {
                     return TabEffect::Unchanged;
                 };
                 self.opened += 1;
-                let tab = Tab::new(format!("agent {}", self.opened));
+                let mut tab = Tab::new(format!("agent {}", self.opened));
+                // Where the tab it opens beside is working, as it would be in
+                // that tab's group. `crook tab new`, the one caller, writes the
+                // asking pane's own directory over this when it has one.
+                tab.start_focused_pane_in(self.directory_of(anchor));
                 let id = tab.id();
                 let at = self.slot_after(Some(index));
                 self.tabs.insert(at, tab);
@@ -1979,6 +2039,11 @@ impl TabStrip {
                 // same counter a new tab is, and the counter only advances
                 // once there is a pane wearing the name.
                 let title = format!("agent {}", self.opened + 1);
+                // Where the pane being split is working, for the reason `New`
+                // gives: a split is the other way to open a shell beside the
+                // one a person is in. Read first, since the split moves the
+                // focus onto the pane it makes.
+                let directory = self.focused_directory();
                 let active = self.active;
                 let Some(tab) = self.get_mut(active) else {
                     // Unreachable: `repair` keeps the active id resident.
@@ -1986,6 +2051,7 @@ impl TabStrip {
                 };
 
                 tab.panes_mut().split(direction, title);
+                tab.start_focused_pane_in(directory);
                 self.opened += 1;
                 TabEffect::Changed
             }

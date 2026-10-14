@@ -81,6 +81,131 @@ fn a_new_tab_opens_where_the_focused_pane_is_working() {
     assert_eq!(session.working_directory, Some(here));
 }
 
+/// Says the shell in a tab's focused pane has gone to `directory`, and
+/// answers it.
+fn focused_pane_went_to(strip: &mut TabStrip, tab: TabId, directory: &str) -> PathBuf {
+    let directory = PathBuf::from(directory);
+    let pane = focused_pane(strip, tab);
+    strip
+        .pane_mut(pane)
+        .expect("the pane is open")
+        .session_mut()
+        .working_directory = Some(directory.clone());
+    directory
+}
+
+/// Where a pane is working, as its row and its pty will read it.
+fn directory_of(strip: &TabStrip, pane: PaneId) -> Option<PathBuf> {
+    strip
+        .pane(pane)
+        .expect("the pane is open")
+        .session()
+        .working_directory
+        .clone()
+}
+
+#[test]
+fn a_split_opens_where_the_focused_pane_is_working() {
+    let mut strip = TabStrip::new();
+    let tab = strip.active_id();
+    let pane = focused_pane(&strip, tab);
+    let here = focused_pane_went_to(&mut strip, tab, "/somewhere/the/shell/went");
+
+    strip.apply(TabAction::Split(Direction::Right));
+
+    let opened = focused_pane(&strip, tab);
+    assert_ne!(opened, pane);
+    assert_eq!(directory_of(&strip, opened), Some(here));
+}
+
+#[test]
+fn a_new_group_with_a_tab_that_is_not_active_opens_where_that_tab_is_working() {
+    // A tab opened into the group of one the keyboard is not in belongs with
+    // that tab, and so does its directory. A worktree writes its checkout
+    // over this; the tab menu says which pane, below.
+    let (mut strip, ids) = strip(2);
+    assert!(strip.is_active(ids[1]));
+    let there = focused_pane_went_to(&mut strip, ids[0], "/where/the/clicked/tab/works");
+    focused_pane_went_to(&mut strip, ids[1], "/where/the/active/tab/works");
+
+    strip.apply(TabAction::NewInGroupOf(ids[0]));
+
+    let opened = strip.active_id();
+    assert!(!ids.contains(&opened));
+    assert_eq!(
+        directory_of(&strip, focused_pane(&strip, opened)),
+        Some(there)
+    );
+}
+
+#[test]
+fn a_new_group_from_a_pane_its_tab_has_not_focused_opens_where_that_pane_is_working() {
+    // The tab menu's "New group with tab" on a pane's own row, which under
+    // `Panes` is every pane of a split tab: the row pressed, not the pane its
+    // tab has focused, and not the active tab either.
+    let (mut strip, ids) = strip(2);
+    strip.apply(TabAction::Select(ids[0]));
+    strip.apply(TabAction::Split(Direction::Right));
+    let focused = focused_pane(&strip, ids[0]);
+    let pressed = panes_of(&strip, ids[0])
+        .into_iter()
+        .find(|pane| *pane != focused)
+        .expect("a split tab has a second pane");
+    let there = PathBuf::from("/where/the/pressed/row/works");
+    strip
+        .pane_mut(pressed)
+        .expect("the pane is open")
+        .session_mut()
+        .working_directory = Some(there.clone());
+    focused_pane_went_to(&mut strip, ids[0], "/where/the/tab/has/focus");
+    strip.apply(TabAction::Select(ids[1]));
+    focused_pane_went_to(&mut strip, ids[1], "/where/the/active/tab/works");
+
+    strip.apply(TabAction::NewInGroupFrom(pressed));
+
+    let opened = strip.active_id();
+    assert!(!ids.contains(&opened));
+    let group = |tab| strip.get(tab).and_then(Tab::group);
+    assert!(group(opened).is_some());
+    assert_eq!(
+        group(opened),
+        group(ids[0]),
+        "it joined the pressed row's tab"
+    );
+    assert_eq!(
+        directory_of(&strip, focused_pane(&strip, opened)),
+        Some(there)
+    );
+}
+
+#[test]
+fn a_tab_opened_beside_one_that_is_not_active_opens_where_that_tab_is_working() {
+    // Both ways `crook tab new` opens one, so that whether it joins the
+    // group is not also a choice of where its shell starts. What a caller
+    // with no directory of its own gets: `open_worker_tab` writes the
+    // asking pane's own over this when it has one.
+    for grouped in [false, true] {
+        let (mut strip, ids) = strip(2);
+        let there = focused_pane_went_to(&mut strip, ids[0], "/where/the/asking/tab/works");
+        focused_pane_went_to(&mut strip, ids[1], "/where/the/active/tab/works");
+
+        strip.apply(TabAction::NewBeside {
+            tab: ids[0],
+            grouped,
+        });
+
+        let opened = order(&strip)
+            .into_iter()
+            .find(|tab| !ids.contains(tab))
+            .expect("a tab opened");
+        assert_eq!(
+            directory_of(&strip, focused_pane(&strip, opened)),
+            Some(there),
+            "a tab opened beside another with grouped: {grouped}"
+        );
+    }
+}
+
 #[test]
 fn selecting_moves_the_tab_to_the_front_of_the_mru_list() {
     let (mut strip, ids) = strip(3);

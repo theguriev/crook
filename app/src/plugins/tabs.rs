@@ -499,11 +499,16 @@ impl Plugin for Tabs {
             action("new-group-with-tab"),
             "New group with tab",
             |workspace, ctx| {
-                let Some((tab, _)) = workspace.menu_target() else {
+                // From the pane whose row was pressed, so the new tab starts
+                // where that row says it is working — the directory "Copy
+                // working directory" copies — and not wherever its tab has
+                // the focus. From the palette it is the focused pane.
+                let Some((_, pane)) = workspace.menu_target() else {
                     return;
                 };
                 workspace.close_tab_context_menu(ctx);
-                workspace.handle_action(&WorkspaceAction::Tab(TabAction::NewInGroupOf(tab)), ctx);
+                workspace
+                    .handle_action(&WorkspaceAction::Tab(TabAction::NewInGroupFrom(pane)), ctx);
             },
         );
 
