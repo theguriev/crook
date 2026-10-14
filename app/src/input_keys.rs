@@ -220,6 +220,13 @@ pub enum Binding {
     PreviousTab,
     /// Select the tab after the active one.
     NextTab,
+    /// Select the tab that was active before this one, wherever it is.
+    ///
+    /// By use rather than by position, which is the one thing it has over
+    /// [`Self::PreviousTab`] and [`Self::SelectLastTab`]: the way back from a
+    /// waiting agent to the tab a person was working in, and pressed again,
+    /// the way back to the agent.
+    BackToRecentTab,
     /// Move the active tab one place towards the start.
     MoveTabLeft,
     /// Move the active tab one place towards the end.

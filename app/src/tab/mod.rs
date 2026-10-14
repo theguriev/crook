@@ -1355,12 +1355,28 @@ impl TabStrip {
     }
 
     /// Settles a strip [`Self::adopt`] and [`Self::adopt_group`] built, with
-    /// `active` selected.
+    /// `active` selected and the tabs in `used` in that order of use, most
+    /// recent first.
     ///
     /// By identity rather than by position, like every other caller: gathering
     /// a group a hand-edited file scattered moves tabs, and a position counted
     /// before that names a different tab after it.
-    pub(crate) fn finish_restore(&mut self, active: TabId) {
+    ///
+    /// Adopting leaves the order of use the reverse of the strip, which is no
+    /// order anybody used the tabs in, and both closing the active tab and
+    /// going back to the tab used before it read that order. So the file's
+    /// order replaces it. A tab `used` does not name — one from a file written
+    /// before the order was kept — goes after every tab it does, as adopted;
+    /// and `active` goes first whatever `used` says, since the head of the
+    /// order is the tab on screen.
+    pub(crate) fn finish_restore(&mut self, active: TabId, used: &[TabId]) {
+        let mut order = Vec::with_capacity(self.mru.len());
+        for id in used.iter().chain(&self.mru) {
+            if self.mru.contains(id) && !order.contains(id) {
+                order.push(*id);
+            }
+        }
+        self.mru = order;
         self.repair(Some(active));
     }
 
@@ -1451,6 +1467,18 @@ impl TabStrip {
     /// Tabs in most-recently-used order, active first.
     pub fn mru(&self) -> &[TabId] {
         &self.mru
+    }
+
+    /// The tab that was active before the active one, or `None` when there
+    /// is no other tab.
+    ///
+    /// What "back to the tab I was on" goes to, and why pressing it twice
+    /// comes home: selecting it puts it at the front of the list, and the tab
+    /// it was asked from second. Found rather than read off the second slot,
+    /// so the answer leans on nothing but the active tab's identity — the
+    /// same reason the strip stores that rather than a position.
+    pub fn used_before(&self) -> Option<TabId> {
+        self.mru.iter().copied().find(|id| *id != self.active)
     }
 
     /// Every pane in the window, in bar order, with the tab holding it.

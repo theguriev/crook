@@ -279,9 +279,10 @@ Twenty features, and the page that configures them:
   a tab is still `cmd-d` (`ctrl-shift-d` off macOS), asked for on purpose.
 
   **The window comes back the way it was closed**: the tabs with their names, pins, colours
-  and groups, the splits, the directory each shell was in — and, for a pane that was running a
-  coding agent, that agent's name. Every Crook update is a restart and a restart ends every
-  process in the window, so a pane that had Claude Code in it comes back as a shell in the same
+  and groups and the order you last used them in, the splits, the directory each shell was
+  in — and, for a pane that was running a coding agent, that agent's name. Every Crook update
+  is a restart and a restart ends every process in the window, so a pane that had Claude Code
+  in it comes back as a shell in the same
   directory with `claude --continue` waiting in its command line, **unsent**: nothing runs
   until you press Enter. Codex is offered `codex resume --last` and Gemini CLI `gemini --resume
   latest`, each the most recent conversation in that directory, and Copilot its `copilot
@@ -903,7 +904,7 @@ Twenty features, and the page that configures them:
   page tells you where it is.
 
 - **Everything the window does has a name, and most of it has a key.** The window registers
-  fifty-seven commands of its own and ships chords for thirty-nine; the other eighteen are
+  fifty-eight commands of its own and ships chords for forty; the other eighteen are
   reached by name, from the palette or from a chord of your own. That split is deliberate — a
   shipped chord is a key taken away from the shell in every pane, forever, so it is spent on
   what is pressed often and not on what is done once a week.
@@ -911,6 +912,7 @@ Twenty features, and the page that configures them:
   | | macOS | Linux and Windows |
   |---|---|---|
   | Tab by position, and the last one | `cmd-1`…`cmd-8`, `cmd-9` | `alt-1`…`alt-8`, `alt-9` |
+  | Back to the tab you were on, and again to return | `shift-cmd-j` | `ctrl-shift-alt-j` |
   | Move between the panes of a split | `ctrl-shift-←↑↓→` | `alt-←↑↓→` |
   | The next pane, the previous one | `cmd-]`, `cmd-[` | `ctrl-shift-]`, `ctrl-shift-[` |
   | Page the output | `shift-PageUp`, `shift-PageDown` | the same |

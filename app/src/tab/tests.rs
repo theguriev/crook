@@ -291,6 +291,31 @@ fn the_mru_list_never_names_a_closed_tab() {
 }
 
 #[test]
+fn the_tab_used_before_is_the_one_left_last_and_there_is_none_when_alone() {
+    let (mut strip, ids) = strip(3);
+    strip.apply(TabAction::Select(ids[0]));
+    strip.apply(TabAction::Select(ids[2]));
+    assert_eq!(strip.used_before(), Some(ids[0]));
+
+    strip.apply(TabAction::Select(ids[0]));
+    assert_eq!(
+        strip.used_before(),
+        Some(ids[2]),
+        "going back swaps the two"
+    );
+
+    strip.apply(TabAction::Close(ids[2]));
+    assert_eq!(
+        strip.used_before(),
+        Some(ids[1]),
+        "and a close falls through"
+    );
+
+    strip.apply(TabAction::Close(ids[1]));
+    assert_eq!(strip.used_before(), None);
+}
+
+#[test]
 fn moving_right_swaps_with_the_next_tab_and_keeps_the_selection() {
     let (mut strip, ids) = strip(3);
     strip.apply(TabAction::Select(ids[0]));
