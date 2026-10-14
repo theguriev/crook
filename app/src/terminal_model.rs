@@ -1878,14 +1878,17 @@ impl TerminalHandle {
     }
 
     /// Forgets the pane's finished commands and its scrollback, keeping the
-    /// block that is open.
+    /// block that is open, and answers the blocks it let go of.
     ///
     /// Through `drive`, which publishes the cleared list and the
     /// picture of the open block together, and now: the reader that usually
     /// publishes may not run again for hours, and until something did, the
-    /// pane would go on drawing every command the clear let go of.
-    pub fn clear_blocks(&self) {
-        self.drive(Terminal::clear_blocks);
+    /// pane would go on drawing every command the clear let go of. The blocks
+    /// come back from under the same lock, so a command that finishes while
+    /// the clear waits for it is among them rather than lost between a look
+    /// at the history and the clear.
+    pub fn clear_blocks(&self) -> Vec<Block> {
+        self.drive(Terminal::clear_blocks)
     }
 
     /// Copies rows out of the grid into the store a finished block's rows live

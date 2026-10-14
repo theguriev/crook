@@ -538,13 +538,15 @@ running, from the top of the screen down. `Emulator::clear_blocks` does both hal
 the open block's anchors across the history it drops rather than finding the block again the way
 `CSI 3 J` makes it: nothing on the screen moved, so the block does not either, and its prompt end
 survives. The finished blocks leave as an eviction takes them, counted off the front, so the
-app's copy of the list lets them go the same way; where that count stood at the clear is kept
-beside it, so the list still tells blocks the cap pushed off, which leave the first block one
-before it to be ruled off from, from blocks a clear let go of, which leave nothing above the
-prompt. Everything the pane kept about them goes too —
-the scroll position, the keyboard's selection and a dragged one, the bookmarks, a menu up on a
-block, and the find bar with its filter, closed as Escape closes it. There is no undo and no
-question, as in every terminal that has a clear.
+app's copy of the list lets them go the same way. Where that count stood at the clear is kept
+beside it: the divider over the first block held is for blocks the cap pushed off since, and
+not for the ones a clear let go of, which leave nothing above the prompt. Everything the pane
+kept about them goes too — the scroll position, the keyboard's selection and a dragged one, the
+bookmarks, a menu up on a block, and the find bar with its filter, closed as Escape closes it.
+There is no undo and no question, as in every terminal that has a clear. What does not go is
+that the last command finished: a `pane.wait --until finished` asked of a cleared pane at rest
+is answered with the exit of the newest command the clear let go of, while `pane.blocks` reads
+only what is left.
 
 ## What this does not do
 

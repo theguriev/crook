@@ -1692,11 +1692,17 @@ fn test_clearing_drops_the_finished_blocks_and_the_history_and_keeps_the_prompt(
     );
     let before = emulator.live_block();
     let evicted = emulator.blocks_evicted();
+    let held: Vec<_> = emulator.blocks().iter().map(|block| block.id).collect();
     assert_eq!(0, emulator.blocks_cleared_at(), "a pane never cleared");
 
-    emulator.clear_blocks();
+    let dropped = emulator.clear_blocks();
 
     assert!(emulator.blocks().is_empty(), "a finished block survived");
+    assert_eq!(
+        held,
+        dropped.iter().map(|block| block.id).collect::<Vec<_>>(),
+        "the clear did not hand back the blocks it let go of"
+    );
     assert_eq!(
         evicted + 2,
         emulator.blocks_evicted(),

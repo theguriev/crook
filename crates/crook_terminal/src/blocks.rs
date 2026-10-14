@@ -1075,7 +1075,8 @@ impl BlockTracker {
     /// lets them go too. [`Self::cleared_at`] marks where that count stood,
     /// for whoever has to tell blocks a clear let go of from blocks the cap
     /// pushed off: only the second kind leaves something before the first
-    /// block.
+    /// block. And they are handed back, to a caller with something to keep
+    /// of them.
     ///
     /// The history goes as `CSI 3 J` takes it, but the open block is carried
     /// across rather than found again the way [`Self::history_cleared`]
@@ -1098,14 +1099,14 @@ impl BlockTracker {
     /// The history stays while a full-screen program is up. The one `Term`
     /// hands out then is the program's, and empty; the shell's is underneath,
     /// out of reach, with the anchors measured against it.
-    pub(crate) fn clear<T: EventListener>(&mut self, term: &mut Term<T>) {
-        self.evicted += self.finished.len();
-        self.finished.clear();
+    pub(crate) fn clear<T: EventListener>(&mut self, term: &mut Term<T>) -> Vec<Block> {
+        let dropped = std::mem::take(&mut self.finished);
+        self.evicted += dropped.len();
         self.cleared_at = self.evicted;
         self.image_bytes = 0;
 
         if term.mode().contains(TermMode::ALT_SCREEN) {
-            return;
+            return dropped;
         }
         // `Top` is the oldest line whatever the history holds, so it needs no
         // carrying: it is the top of the screen once the history is gone.
@@ -1131,6 +1132,7 @@ impl BlockTracker {
             .filter(|((line, _), _)| *line >= 0)
             .map(|((line, column), placement)| (Anchor::at(line, column, term), placement))
             .collect();
+        dropped
     }
 
     /// Runs the reflow a full-screen program was up for, if one is owed and

@@ -4550,6 +4550,61 @@ mod socket {
     }
 
     #[test]
+    fn a_command_cleared_away_after_it_finished_still_answers_a_wait_for_it() {
+        // A person clears a worker's pane between the end of its command and
+        // the lead's wait: the history holds no command any more, and the
+        // command finished all the same. The wait is answered at once with
+        // its status, as it was before the clear, rather than left for a
+        // command nobody is going to run.
+        let Some(mut served) = marked_bash() else {
+            return;
+        };
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        served.shell.open();
+        served.run(lead, "false");
+        served.pump_until("the shell never came back to a prompt", |served| {
+            served.at_prompt(lead)
+        });
+        let clear = |served: &mut Served| {
+            served.update(|workspace, ctx| {
+                workspace.handle_action(
+                    &crate::workspace::WorkspaceAction::Block(
+                        crate::workspace::BlockAction::Clear(lead),
+                    ),
+                    ctx,
+                );
+            });
+            let held = served.read(|workspace, app| {
+                workspace
+                    .terminal_blocks(lead, app)
+                    .map_or(0, |history| history.len())
+            });
+            assert_eq!(held, 0, "the clear left a block in the history");
+        };
+        let finished = |served: &mut Served| {
+            let printed = served
+                .ask(wait(&token, lead, Until::Finished, 0, false))
+                .expect("answered");
+            (printed.text, printed.failure)
+        };
+
+        clear(&mut served);
+        assert_eq!(finished(&mut served), ("finished: exit 1".to_owned(), None));
+        // Twice, with nothing run in between: the second lets go of nothing
+        // that ran, and forgets nothing the first kept.
+        clear(&mut served);
+        assert_eq!(finished(&mut served), ("finished: exit 1".to_owned(), None));
+
+        // A command run since is newer than any a clear let go of.
+        served.run(lead, "true");
+        served.pump_until("the shell never came back to a prompt", |served| {
+            served.at_prompt(lead)
+        });
+        assert_eq!(finished(&mut served), ("finished: exit 0".to_owned(), None));
+    }
+
+    #[test]
     fn a_wait_for_a_command_to_finish_is_not_answered_by_an_empty_line() {
         // Marked, so that `finished` is a thing to wait for; the shells stay
         // at their gate, and what they would say is said for them.

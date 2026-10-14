@@ -2035,7 +2035,10 @@ closed by the shell's own `D`, whose exit status the answer carries — a comman
 line's, which a shell ends with a `D` too. That is what keeps a
 command that ended before the wait was asked from being missed, and a tab that has not started
 from being taken for one that has finished; it is refused as `no-blocks` for a shell with no
-marks, where nothing ever says a command ended. `exited` is the pane closing by whichever road.
+marks, where nothing ever says a command ended. A pane cleared by hand (Clear blocks) between
+the command's end and the wait still answers: with no command left in its history, the newest
+one the clear let go of is the one that finished, exit and all. `exited` is the pane closing by
+whichever road.
 A state already reached answers at once, and a pane that closes first answers at once with
 `reached: false`. A pane that closed before the wait was asked answers at once too: the window
 remembers who opened the last 256 tabs `tab.new` opened that have closed, whether anybody was

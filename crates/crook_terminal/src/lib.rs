@@ -390,11 +390,12 @@ impl Terminal {
         self.emulator.blocks_cleared_at()
     }
 
-    /// Forgets the finished blocks and the scrollback, and keeps the open
-    /// block. The child is not told: it is the pane being cleared, not the
-    /// program's screen. See [`Emulator::clear_blocks`].
-    pub fn clear_blocks(&mut self) {
-        self.emulator.clear_blocks();
+    /// Forgets the finished blocks and the scrollback, keeps the open block,
+    /// and answers the blocks it let go of. The child is not told: it is the
+    /// pane being cleared, not the program's screen. See
+    /// [`Emulator::clear_blocks`].
+    pub fn clear_blocks(&mut self) -> Vec<Block> {
+        self.emulator.clear_blocks()
     }
 
     /// The block everything arriving now belongs to. Also on every

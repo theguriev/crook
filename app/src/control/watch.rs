@@ -773,7 +773,8 @@ fn where_it_is(
 /// At rest — at a prompt, or between a command's end and the next prompt —
 /// with no line waiting to be sent at its first prompt, and a command
 /// finished there: a command's block, not what the shell printed on its own
-/// (see [`blocks::is_command`]). The line waiting is what keeps a wait asked
+/// (see [`blocks::is_command`]), or one a clear has let go of since (see
+/// [`Workspace::cleared_exit`]). The line waiting is what keeps a wait asked
 /// the moment a tab opened from being answered by the tab's empty shell,
 /// before the command it was opened for has started.
 fn finished(workspace: &Workspace, pane: PaneId, app: &AppContext) -> (bool, Option<i32>) {
@@ -788,14 +789,19 @@ fn finished(workspace: &Workspace, pane: PaneId, app: &AppContext) -> (bool, Opt
     });
     // The newest command's, past whatever the shell printed on its own: a
     // tab's startup lines before its first prompt are not a command that
-    // finished.
-    let last = workspace.terminal_blocks(pane, app).and_then(|history| {
-        (0..history.len())
-            .rev()
-            .filter_map(|index| history.get(index))
-            .find(|block| blocks::is_command(block))
-            .map(|block| block.exit)
-    });
+    // finished. With none in the history, the newest a clear let go of: a
+    // person clearing the pane after the command ended does not make it
+    // not have finished.
+    let last = workspace
+        .terminal_blocks(pane, app)
+        .and_then(|history| {
+            (0..history.len())
+                .rev()
+                .filter_map(|index| history.get(index))
+                .find(|block| blocks::is_command(block))
+                .map(|block| block.exit)
+        })
+        .or_else(|| workspace.cleared_exit(pane));
     match (resting, last) {
         (true, Some(exit)) => (true, exit),
         _ => (false, None),

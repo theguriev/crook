@@ -633,6 +633,14 @@ pub struct Workspace {
     /// kept here to know it is still the line the field holds. See
     /// [`Self::run_at_first_prompt`].
     first_lines: HashMap<PaneId, String>,
+    /// What the newest command a clear let go of exited with, for each pane
+    /// cleared with a command among its blocks.
+    ///
+    /// Clearing a pane at rest leaves no command in its history, and a
+    /// `pane.wait --until finished` asked after it would otherwise wait for
+    /// a command nobody is going to run: the command did finish, and a person
+    /// tidying the pane does not undo that. See [`Self::cleared_exit`].
+    cleared_exits: HashMap<PaneId, Option<i32>>,
     /// What the control socket's `pane.wait` and `events.follow` are
     /// watching, told here what happens to a pane as it is applied — see
     /// [`Self::apply_terminal_update`] and [`Self::settle`]. Empty while
@@ -1162,6 +1170,7 @@ impl Workspace {
             terminals,
             inputs: HashMap::new(),
             first_lines: HashMap::new(),
+            cleared_exits: HashMap::new(),
             watches: Watches::default(),
             resume_offers: HashMap::new(),
             closed_tabs: Vec::new(),
@@ -5589,7 +5598,17 @@ impl Workspace {
         let Some((handle, _)) = self.terminal(pane, ctx) else {
             return;
         };
-        handle.clear_blocks();
+        let dropped = handle.clear_blocks();
+        // Only when a command was among them: a second clear, with nothing
+        // run since the first, lets go of nothing that ran, and the command
+        // the first one let go of is still the newest to have finished.
+        if let Some(last) = dropped
+            .iter()
+            .rev()
+            .find(|block| crate::control::blocks::is_command(block))
+        {
+            self.cleared_exits.insert(pane, last.exit);
+        }
         if let Some(interaction) = self.interactions.get(&pane) {
             interaction.blocks.clear();
             interaction.selection.clear();
@@ -9245,6 +9264,16 @@ impl Workspace {
         self.first_lines.contains_key(&pane)
     }
 
+    /// What the newest command a clear let go of in `pane` exited with, or
+    /// `None` when no clear there has let go of a command.
+    ///
+    /// For an answer about the newest command to finish in a pane, when its
+    /// history holds none: a command a clear let go of finished all the same,
+    /// and one in the history is newer than any a clear let go of.
+    pub(crate) fn cleared_exit(&self, pane: PaneId) -> Option<Option<i32>> {
+        self.cleared_exits.get(&pane).copied()
+    }
+
     /// Whether a pane's shell reports command marks, or `None` when the pane
     /// has no shell running.
     pub(crate) fn shell_marks(&self, pane: PaneId, app: &AppContext) -> Option<bool> {
@@ -10240,6 +10269,7 @@ impl Workspace {
         // A line waiting for a prompt in a pane that closed first waits for
         // nothing.
         self.first_lines.retain(|id, _| open.contains(id));
+        self.cleared_exits.retain(|id, _| open.contains(id));
         self.resume_offers.retain(|id, _| open.contains(id));
         // A closed pane's half-written command line goes with it. Keeping it
         // would mean a later pane inheriting somebody else's history the first

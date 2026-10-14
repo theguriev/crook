@@ -832,9 +832,14 @@ impl Emulator {
     ///
     /// Not part of any stream, so an emulator fed the same items as a mirror
     /// keeps everything this one forgot.
-    pub fn clear_blocks(&mut self) {
-        self.blocks.clear(&mut self.term);
+    ///
+    /// Answers the finished blocks it let go of, oldest first, for a caller
+    /// with something to keep of them: what the last command exited with
+    /// still answers whether the pane's command has finished.
+    pub fn clear_blocks(&mut self) -> Vec<Block> {
+        let dropped = self.blocks.clear(&mut self.term);
         self.dirty = true;
+        dropped
     }
 
     /// How many blocks have been dropped off the front of the list to keep a
