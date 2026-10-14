@@ -15,9 +15,12 @@
 //! not anti-alias a rectangle's straight edges: one whose edge falls between
 //! two pixels covers whichever pixel centres it happens to, so a light line
 //! would be one pixel wide in one column and two in the next. Every edge here
-//! is rounded to a device pixel, and the cell's own edges are rounded the same
+//! is snapped to a device pixel, and the cell's own edges are snapped the same
 //! way from the same numbers, so the bottom of one row's `│` is exactly the
-//! top of the next one's and nothing is left between them.
+//! top of the next one's and nothing is left between them. The cell's edges
+//! go to the pixel the renderer would start an unsnapped rectangle at there,
+//! so a line also agrees with the cell backgrounds, washes and cursor beside
+//! it, which are not snapped.
 //!
 //! What is drawn here:
 //!
@@ -345,6 +348,21 @@ fn part(extent: i32, numerator: i32, denominator: i32) -> i32 {
     (2 * extent * numerator + denominator).div_euclid(2 * denominator)
 }
 
+/// The device pixel an edge at `device` device pixels lands on: the first one
+/// whose centre is at or past it.
+///
+/// Which is where the renderer starts an unsnapped rectangle whose top or left
+/// edge is there, and stops one whose bottom or right edge is: a pixel is
+/// covered when its centre is inside, and a centre exactly on the edge counts
+/// for the top and left edges and not for the bottom and right ones. A cell
+/// background, a wash or a cursor is painted unsnapped, so snapping to this
+/// makes a line cover the very pixels its cell's background does. Rounding
+/// would not: an edge exactly on a half pixel rounds up, past a pixel the next
+/// row's background then paints over, and that is a gap in the line.
+fn snap_edge(device: f32) -> f32 {
+    (device - 0.5).ceil()
+}
+
 /// One cell on the device-pixel grid, and the scene its rectangles go into.
 struct Canvas<'a> {
     scene: &'a mut Scene,
@@ -366,10 +384,10 @@ impl<'a> Canvas<'a> {
     /// The cell `cell` covers on `scene`'s device pixels.
     fn new(cell: RectF, font_size: f32, ink: Color, scene: &'a mut Scene) -> Self {
         let scale = scene.scale_factor();
-        // Each edge rounded on its own, rather than the corner rounded and the
+        // Each edge snapped on its own, rather than the corner snapped and the
         // size added to it: the edge this cell shares with the next one is
         // then the same number from both sides, which is the whole point.
-        let snap = |logical: f32| (logical * scale).round();
+        let snap = |logical: f32| snap_edge(logical * scale);
         let (left, top) = (snap(cell.min_x()), snap(cell.min_y()));
         Self {
             width: (snap(cell.max_x()) - left) as i32,

@@ -727,6 +727,136 @@ fn only_a_filled_cursor_has_its_character_drawn_again_over_it() {
     }
 }
 
+/// What colour each device pixel of a `width` by `height` box ends up, filled
+/// the way the renderer fills a rectangle: a pixel takes the colour of the
+/// last solid rectangle in the scene that holds its centre, a centre on a top
+/// or left edge counting as inside and one on a bottom or right edge as
+/// outside. `None` is a pixel nothing covers.
+fn rasterized(scene: &Scene, width: usize, height: usize) -> Vec<Vec<Option<Color>>> {
+    let scale = scene.scale_factor();
+    let mut pixels = vec![vec![None; width]; height];
+    for rect in rects(scene) {
+        let Fill::Solid(fill) = rect.background else {
+            continue;
+        };
+        // As the renderer has it: the origin and the size scaled, and the far
+        // edges where the one ends up past the other.
+        let (left, top) = (rect.bounds.min_x() * scale, rect.bounds.min_y() * scale);
+        let right = left + rect.bounds.width() * scale;
+        let bottom = top + rect.bounds.height() * scale;
+        for (y, row) in pixels.iter_mut().enumerate() {
+            let centre = y as f32 + 0.5;
+            if centre < top || centre >= bottom {
+                continue;
+            }
+            for (x, pixel) in row.iter_mut().enumerate() {
+                let centre = x as f32 + 0.5;
+                if centre >= left && centre < right {
+                    *pixel = Some(fill);
+                }
+            }
+        }
+    }
+    pixels
+}
+
+/// Paints `snapshot` at its natural size in `font`, at `scale`.
+fn painted_at(snapshot: &Snapshot, font: &CellFont, scale: f32) -> Scene {
+    let metrics = font.metrics();
+    let mut scene = Scene::new(scale);
+    scene.start_layer(ClipBounds::None);
+    paint_grid(
+        snapshot,
+        font,
+        Vector2F::zero(),
+        vec2f(
+            snapshot.columns as f32 * metrics.width,
+            snapshot.rows as f32 * metrics.height,
+        ),
+        true,
+        &Washes::default(),
+        &mut scene,
+    );
+    scene.stop_layer();
+    scene
+}
+
+#[test]
+fn a_line_on_coloured_cells_has_no_gap_where_a_row_ends_on_a_half_pixel() {
+    // At 150% with the font zoomed to 13.5, a row is seventeen pixels, which
+    // is twenty-five and a half device pixels: every other row boundary is a
+    // pixel centre. The renderer gives that pixel to the row below, whose
+    // background is painted after the row above's line, so a line that gave
+    // it to the row above would have a gap there in the background's colour.
+    let font = CellFont::headless(13.5);
+    let metrics = font.metrics();
+    let scale = 1.5;
+    assert_eq!(metrics.height * scale, 25.5, "a row ends on a half pixel");
+    let mut grid = snapshot(&["│", "│", "│"], 1);
+    for cell in &mut grid.cells {
+        cell.background = HIGHLIGHT;
+    }
+
+    let scene = painted_at(&grid, &font, scale);
+    let (width, height) = (
+        (metrics.width * scale).ceil() as usize,
+        (3. * metrics.height * scale).ceil() as usize,
+    );
+    let line = inked(&scene, INK)[0];
+    let column = (line.min_x() * scale).round() as usize;
+    let down: Vec<_> = rasterized(&scene, width, height)
+        .into_iter()
+        .map(|row| row[column])
+        .collect();
+
+    let grid_rows = down.iter().take_while(|pixel| pixel.is_some()).count();
+    assert_eq!(
+        grid_rows, 76,
+        "the line stops where the grid does, at 76.5: {down:?}"
+    );
+    let gaps: Vec<usize> = (0..grid_rows)
+        .filter(|&y| down[y] != Some(color(INK)))
+        .collect();
+    assert!(
+        gaps.is_empty(),
+        "the line is broken at device rows {gaps:?}"
+    );
+}
+
+#[test]
+fn a_half_block_capping_a_coloured_run_leaves_no_pixel_between_them() {
+    // A run of coloured cells capped with `▌` in the same colour: a pill, a
+    // tab, a meter. At 15 a cell is seven and a half pixels wide, so the run
+    // ends on a pixel centre, which the renderer leaves out of the run. The
+    // cap has to start on that pixel or a hairline is left between them.
+    let font = CellFont::headless(15.);
+    let metrics = font.metrics();
+    assert_eq!(3. * metrics.width, 22.5, "the run ends on a half pixel");
+    let mut grid = snapshot(&["   ▌"], 4);
+    for cell in &mut grid.cells[..3] {
+        cell.background = HIGHLIGHT;
+    }
+    grid.cells[3].foreground = HIGHLIGHT;
+
+    let scene = painted_at(&grid, &font, 1.);
+    let pixels = rasterized(
+        &scene,
+        (4. * metrics.width) as usize,
+        metrics.height as usize,
+    );
+    let across = &pixels[pixels.len() / 2];
+    let pill: Vec<usize> = (0..across.len())
+        .filter(|&x| across[x] == Some(color(HIGHLIGHT)))
+        .collect();
+    assert_eq!(pill.first(), Some(&0));
+    assert_eq!(
+        pill.len(),
+        pill.last().map_or(0, |last| last + 1),
+        "one unbroken run of the colour, cap and all: {pill:?}"
+    );
+    assert!(pill.len() > 23, "the cap is part of it: {pill:?}");
+}
+
 #[test]
 fn a_finished_block_s_row_draws_its_lines_the_way_the_grid_does() {
     // The list hands a harvested row to the same `paint_glyphs`, so the box
