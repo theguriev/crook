@@ -1936,9 +1936,11 @@ read back word for word in `sh`, `bash`, `zsh` and `fish` (#342). A new pane tha
 other shell is refused as `unsupported-shell`, and a word holding a control character as
 `bad-request`, since a newline in a command line is a second command; the refusal says to put a
 prompt with lines in a file the command names, rather than escape it in a second quoting with
-rules of its own in each shell, and its example gives the worker leave to read there —
-`claude --add-dir "$PWD" -- "do the task in $PWD/task.md"` — since a `--worktree` tab starts in
-another directory and Claude Code asks before reading outside its own. A word arrives as itself:
+rules of its own in each shell, and its example gives the worker leave to read that file and no
+other — `claude --allowedTools "Read(/$PWD/task.md)" -- "do the task in $PWD/task.md"` — since a
+`--worktree` tab starts in another directory and Claude Code asks before reading outside its
+own. It is not `--add-dir "$PWD"`, which lets the worker write in the lead's checkout too, and
+under `acceptEdits` without asking, undoing what `--worktree` is for. A word arrives as itself:
 an alias is not expanded, `&&` is an argument, and a pipeline is `sh -c '…'`. The line is typed
 into the new pane's field at once, where a person can see it, and sent by the field's own submit
 at the shell's first prompt — the first `A` for a shell with marks, since a line submitted into

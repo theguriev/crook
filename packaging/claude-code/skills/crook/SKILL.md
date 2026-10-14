@@ -162,8 +162,11 @@ list`; `--json` prints `pane_id`, `tab_id` and `cwd`, and a `note` when there is
   Keep the prompt on one line, or write a brief that needs its lines to a file and name the
   file in a one-line prompt, by its full path, since a `--worktree` tab starts somewhere else.
   Claude Code asks before it reads a file outside its own directory, and `claude -p` is refused
-  one, so let the worker read yours: `claude --add-dir "$PWD" -- "do the task in $PWD/task.md"`,
-  with the second `--` because `--add-dir` takes every word after it as a directory.
+  one, so let the worker read that one file:
+  `claude --allowedTools "Read(/$PWD/task.md)" -- "do the task in $PWD/task.md"`. The `/` before
+  `$PWD` makes the `//` Claude Code reads as an absolute path, and the second `--` is there
+  because `--allowedTools` takes every word after it as a rule. Not `--add-dir "$PWD"`: that
+  lets the worker write in your checkout as well, and without asking under `acceptEdits`.
   `"$(cat task.md)"` is no way round it: your own shell expands it, newlines and all, before
   Crook sees it.
 

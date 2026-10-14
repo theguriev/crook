@@ -526,9 +526,14 @@ fn finish(
 /// none to offer; the one here is the quoting proven in all four (#342). A
 /// prompt with lines goes in a file the command names, and the refusal says
 /// so, since the brief a lead hands a worker is the prompt that has them. Its
-/// example lets the worker read there: a `--worktree` tab starts in another
-/// directory, and Claude Code asks before it reads outside its own, which a
-/// `claude -p` worker is refused and an interactive one stops at.
+/// example lets the worker read that file: a `--worktree` tab starts in
+/// another directory, and Claude Code asks before it reads outside its own,
+/// which a `claude -p` worker is refused and an interactive one stops at. The
+/// rule names the brief and nothing else — the `/` before an absolute `$PWD`
+/// makes the `//` that marks a rule's path as absolute — since
+/// `--add-dir "$PWD"` would make the lead's checkout a directory the worker
+/// may write in too, and under acceptEdits without asking, which is what
+/// `--worktree` keeps it from.
 pub fn command_line(words: &[String], shell: &Path) -> Result<String, Refusal> {
     if words.is_empty() {
         return Err(Refusal::new(
@@ -541,8 +546,8 @@ pub fn command_line(words: &[String], shell: &Path) -> Result<String, Refusal> {
             code::BAD_REQUEST,
             "a word of the command holds a control character, and a newline in a command line \
              is a second command; keep the prompt on one line, or write it to a file and pass \
-             one line that names the file by its full path, letting the worker read there: \
-             `claude --add-dir \"$PWD\" -- \"do the task in $PWD/task.md\"`",
+             one line that names the file by its full path, letting the worker read that file: \
+             `claude --allowedTools \"Read(/$PWD/task.md)\" -- \"do the task in $PWD/task.md\"`",
         ));
     }
     if !quoting_is_proven(shell) {

@@ -389,7 +389,10 @@ fn a_prompt_with_lines_is_refused_with_the_way_round_it() {
     // the brief, by a path the worker can open from its own worktree. And
     // let it open it: Claude Code in a `--worktree` tab asks before reading
     // the lead's directory, and `claude -p` there is refused the read, so an
-    // example without `--add-dir` was a worker that never saw its brief.
+    // example with no rule for the brief was a worker that never saw it.
+    // Only the brief, though: `--add-dir "$PWD"` made the lead's checkout a
+    // working directory of the worker's, which it may write to as well, and
+    // under acceptEdits without asking — the isolation `--worktree` is for.
     let refusal = spawn::command_line(
         &[
             "claude".to_owned(),
@@ -404,7 +407,7 @@ fn a_prompt_with_lines_is_refused_with_the_way_round_it() {
         "one line",
         "file",
         "$PWD/task.md",
-        "--add-dir \"$PWD\" --",
+        "--allowedTools \"Read(/$PWD/task.md)\" --",
     ] {
         assert!(
             refusal.message.contains(said),
@@ -412,6 +415,11 @@ fn a_prompt_with_lines_is_refused_with_the_way_round_it() {
             refusal.message
         );
     }
+    assert!(
+        !refusal.message.contains("--add-dir"),
+        "the refusal gives the worker the lead's checkout to write in: {}",
+        refusal.message
+    );
 }
 
 #[cfg(unix)]
