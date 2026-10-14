@@ -1499,8 +1499,9 @@ paste behind a check that the program asked for bracketed paste, made under the 
 write. Without the markers `crook_terminal::input::paste` turns every newline into the Enter key,
 so a program that has not asked is refused rather than handed a review a line at a time. The
 pane is the one in the tab whose agent has reported (`StatusSource::Agent`, or for one with no
-hooks its title: `Title`, and `TitleAtStart` for the `✳` it wears before its first turn), whose
-shell is not listening, and which works in the reviewed repository, else the focused one; a pane
+hooks its title: `Title`, and `TitleAtStart` for what it wears before its first turn: Claude
+Code's `✳`, Gemini CLI's `◇`, codex's bare folder), whose shell is not listening, and which
+works in the reviewed repository, else the focused one; a pane
 whose shell is listening is refused, because a review's quoted lines are commands there (bash
 5.3 turns bracketed paste on at its prompt, so the whole review would sit in its line editor one
 Enter from running), and `> +x` is a redirection that writes a file into the tree this column
@@ -1983,9 +1984,10 @@ opened it, or any pane up that chain (below).
 **`pane.wait`** answers when the pane gets to `until`: `idle` — its agent said so; the idle a
 pane starts in, before anything has reported, is not it, so a worker whose agent has not
 started is not taken for one that has finished, and nor is the `✳` Claude Code's title wears
-from the moment it starts, which is a report only once a `◐` has said running (until then it is
-`StatusSource::TitleAtStart`, which says an agent is there and nothing more) — `needs-input`,
-`finished` or `exited`.
+from the moment it starts (Gemini CLI's `◇`, codex's folder with no spinner before it), which is
+a report only once the title has said running (until then it is `StatusSource::TitleAtStart`,
+which says an agent is there and nothing more) — `needs-input`, which a Gemini CLI or codex title
+says as well, `finished` or `exited`.
 `finished` is a state and not an event: nothing is running, no line is waiting for the shell's
 first prompt (a tab `tab.new` just opened has not run its command yet), and a command has been
 closed by the shell's own `D`, whose exit status the answer carries — a command's, not an empty

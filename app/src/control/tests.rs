@@ -3153,6 +3153,103 @@ mod socket {
         );
     }
 
+    /// Codex and Gemini CLI say in their titles when they stop for an
+    /// approval, which Claude Code's never does, so a worker of theirs with
+    /// no hooks is heard asking as it asks, rather than when the wait runs
+    /// out.
+    #[test]
+    fn a_wait_for_needs_input_hears_the_title_ask() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["codex"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+
+        // Long, so that the answer the time running out gives cannot pass
+        // for the one the title should give at once.
+        let asking = served.start(wait(&token, worker, Until::NeedsInput, 120, false));
+        served.pump_until("the wait was never registered", |served| {
+            served.waiting() == 1
+        });
+        served.titled(worker, "proj");
+        assert_eq!(served.waiting(), 1, "answered before anything asked");
+
+        served.titled(worker, "[ ! ] Action Required | proj");
+        assert_eq!(served.waiting(), 0, "not answered when the title asked");
+        let printed = served.finish(asking).expect("answered");
+        assert_eq!(
+            (printed.text.as_str(), printed.failure),
+            ("needs-input", None)
+        );
+    }
+
+    /// The question a title asks is on the stream with the rest of what it
+    /// says, and so is the idle the end of its command takes it back to
+    /// when the agent is killed asking it.
+    #[test]
+    fn a_stream_carries_the_question_a_title_asks_and_the_end_that_takes_it_back() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["gemini"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+        // As Gemini CLI writes them, padded to 80 columns.
+        let gemini = |title: &str| format!("{title:<80}");
+
+        let following = served.start(follow(Some(&token), Some(worker)));
+        served.pump_until("the stream never started", |served| served.following() == 1);
+        served.titled(worker, &gemini("\u{25c7}  Ready (proj)"));
+        served.titled(worker, &gemini("\u{2726}  Working\u{2026} (proj)"));
+        served.titled(worker, &gemini("\u{270b}  Action Required (proj)"));
+        served.titled(worker, &gemini("\u{2726}  Working\u{2026} (proj)"));
+        served.titled(worker, &gemini("\u{270b}  Action Required (proj)"));
+        // Killed while it asks, in the order the model hands it over: what
+        // the pane runs, read off the snapshot, and then the shell's end.
+        served.update(|workspace, ctx| {
+            workspace.apply_terminal_update(&TerminalUpdate::Running(worker, None), ctx);
+            workspace.apply_terminal_update(
+                &TerminalUpdate::CommandFinished {
+                    pane: worker,
+                    command: Some("gemini".to_owned()),
+                    exit: Some(137),
+                    took: None,
+                    ran: true,
+                },
+                ctx,
+            );
+            workspace.apply(TabAction::ClosePane(worker), ctx);
+        });
+
+        let events = served.finish(following).expect("followed until it closed");
+        let pane_id = opened.pane_id;
+        let status = |status: &str| PaneEvent::Status {
+            pane_id,
+            status: status.to_owned(),
+            message: None,
+        };
+        assert_eq!(
+            events,
+            vec![
+                status("running"),
+                status("needs-input"),
+                status("running"),
+                status("needs-input"),
+                status("idle"),
+                PaneEvent::Finished {
+                    pane_id,
+                    command: Some("gemini".to_owned()),
+                    exit: Some(137),
+                    duration_ms: None,
+                },
+                PaneEvent::Closed { pane_id },
+            ]
+        );
+    }
+
     #[test]
     fn a_pane_watches_itself_without_anybodys_grant() {
         let mut served = Served::new(|_, _, _| {});

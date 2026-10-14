@@ -34423,6 +34423,225 @@ mod agent_titles {
         assert_taken_back(&harness, pane);
     }
 
+    /// A title as Gemini CLI 0.61 writes it: a glyph and two spaces before
+    /// what it is doing, the folder in brackets, and the whole padded with
+    /// spaces to 80 columns.
+    fn gemini(title: &str) -> String {
+        format!("{title:<80}")
+    }
+
+    /// Gemini CLI says what it is doing in its title too, in glyphs of its
+    /// own: `◇` ready, `✦` at work (with its thought, when it shows one), `⏲`
+    /// at work on a command it waits on, and `✋` stopped for an approval —
+    /// a question, which Claude Code's title never says. Its `◇` at start is
+    /// the idle a new tab starts in, as Claude Code's `✳` is.
+    #[test]
+    fn gemini_says_its_status_in_the_glyph_before_two_spaces() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+
+        titled(&mut harness, pane, &gemini("\u{25c7}  Ready (proj)"));
+        let (status, source) = status_and_source(&harness, pane);
+        assert_eq!(status, AgentStatus::Idle);
+        assert!(
+            matches!(source, StatusSource::TitleAtStart(_)),
+            "{source:?}"
+        );
+
+        for (title, said) in [
+            ("\u{2726}  Working\u{2026} (proj)", AgentStatus::Running),
+            ("\u{270b}  Action Required (proj)", AgentStatus::NeedsInput),
+            ("\u{23f2}  Working\u{2026} (proj)", AgentStatus::Running),
+            ("\u{270b}  Action Required (proj)", AgentStatus::NeedsInput),
+            ("\u{2726}  Reading the code (proj)", AgentStatus::Running),
+            ("\u{25c7}  Ready (proj)", AgentStatus::Idle),
+        ] {
+            titled(&mut harness, pane, &gemini(title));
+            let (status, source) = status_and_source(&harness, pane);
+            assert_eq!(status, said, "{title}");
+            assert!(
+                matches!(source, StatusSource::Title(_)),
+                "{title}: {source:?}"
+            );
+        }
+    }
+
+    /// Codex blinks its question in its title, `[ ! ]` and `[ . ]` in turn,
+    /// for as long as it waits for an approval. No build tool writes that, so
+    /// it is read in any pane — codex run through `npx`, an alias or `ssh`
+    /// as well — and a blink is one question rather than two a second.
+    #[test]
+    fn codex_stopped_for_an_approval_needs_input_in_any_pane() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+
+        titled(&mut harness, pane, "[ ! ] Action Required | proj");
+        let (status, asked) = status_and_source(&harness, pane);
+        assert_eq!(status, AgentStatus::NeedsInput);
+        assert!(matches!(asked, StatusSource::Title(_)), "{asked:?}");
+
+        titled(&mut harness, pane, "[ . ] Action Required | proj");
+        titled(&mut harness, pane, "[ ! ] Action Required | proj");
+        assert_eq!(
+            status_and_source(&harness, pane),
+            (AgentStatus::NeedsInput, asked),
+            "a blink was taken for news"
+        );
+    }
+
+    /// A braille spinner frame is codex at work only in a pane that runs
+    /// codex: every build tool draws the same frames, and `npm install` is no
+    /// agent. There, a title without one — the folder — is codex at rest,
+    /// and before its first turn it is the idle a new tab starts in.
+    #[test]
+    fn a_braille_spinner_is_codex_at_work_only_in_a_pane_running_codex() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+
+        report(
+            &mut harness,
+            TerminalUpdate::Running(pane, Some("npm install".to_owned())),
+        );
+        titled(&mut harness, pane, "\u{280b} npm install");
+        assert_eq!(status_and_source(&harness, pane).1, StatusSource::NoReport);
+        report(&mut harness, TerminalUpdate::Running(pane, None));
+
+        report(
+            &mut harness,
+            TerminalUpdate::Running(pane, Some("codex 'fix the flaky test'".to_owned())),
+        );
+        titled(&mut harness, pane, "proj");
+        let (status, source) = status_and_source(&harness, pane);
+        assert_eq!(status, AgentStatus::Idle);
+        assert!(
+            matches!(source, StatusSource::TitleAtStart(_)),
+            "{source:?}"
+        );
+
+        for (title, said) in [
+            ("\u{280b} proj", AgentStatus::Running),
+            ("\u{2819} proj", AgentStatus::Running),
+            ("[ ! ] Action Required | proj", AgentStatus::NeedsInput),
+            ("\u{2839} proj", AgentStatus::Running),
+            ("proj", AgentStatus::Idle),
+        ] {
+            titled(&mut harness, pane, title);
+            let (status, source) = status_and_source(&harness, pane);
+            assert_eq!(status, said, "{title}");
+            assert!(
+                matches!(source, StatusSource::Title(_)),
+                "{title}: {source:?}"
+            );
+        }
+    }
+
+    /// What follows a Gemini CLI or codex status is the folder, which the
+    /// row shows already, or Gemini's passing thought: no name for the work.
+    /// The pane keeps the one it has — the prompt a hook named it after, or
+    /// the command it runs — rather than wearing the status line, or a
+    /// spinner turning in front of the folder.
+    #[test]
+    fn a_title_that_only_says_the_status_keeps_the_name_the_pane_has() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+        let name = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                let session = workspace
+                    .tabs()
+                    .pane(pane)
+                    .expect("the pane is open")
+                    .session();
+                session.name().map(str::to_owned)
+            })
+        };
+
+        report(
+            &mut harness,
+            TerminalUpdate::Running(pane, Some("codex".to_owned())),
+        );
+        titled(&mut harness, pane, "\u{280b} proj");
+        titled(&mut harness, pane, "proj");
+        assert_eq!(name(&harness).as_deref(), Some("codex"));
+
+        report(
+            &mut harness,
+            TerminalUpdate::Agent {
+                pane,
+                status: AgentStatus::Running,
+                title: Some("please make the file".to_owned()),
+                message: None,
+            },
+        );
+        for title in ["\u{2819} proj", "[ ! ] Action Required | proj", "proj"] {
+            titled(&mut harness, pane, title);
+            assert_eq!(
+                name(&harness).as_deref(),
+                Some("please make the file"),
+                "{title}"
+            );
+        }
+        for title in [
+            "\u{2726}  Working\u{2026} (proj)",
+            "\u{270b}  Action Required (proj)",
+            "\u{25c7}  Ready (proj)",
+        ] {
+            titled(&mut harness, pane, &gemini(title));
+            assert_eq!(
+                name(&harness).as_deref(),
+                Some("please make the file"),
+                "{title}"
+            );
+        }
+    }
+
+    /// A question stays in the title for as long as it is open, so the
+    /// title that replaces it says it is over — even where that title can
+    /// be read for nothing else: codex through `npx`, an alias or `ssh`,
+    /// whose spinner is not taken for work. Idle, then, which is what the
+    /// row said of that agent before it asked, rather than an amber row the
+    /// title would never take back.
+    #[test]
+    fn a_title_that_stops_asking_ends_the_question() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+
+        titled(&mut harness, pane, "[ ! ] Action Required | proj");
+        assert_eq!(status_and_source(&harness, pane).0, AgentStatus::NeedsInput);
+        titled(&mut harness, pane, "\u{2819} proj");
+
+        let (status, source) = status_and_source(&harness, pane);
+        assert_eq!(status, AgentStatus::Idle);
+        assert!(matches!(source, StatusSource::Title(_)), "{source:?}");
+    }
+
+    /// A question the title asked is taken back as a running is: an agent
+    /// killed, crashed or suspended while it waits for an approval says
+    /// nothing more, and the pane going back to a prompt is the word that
+    /// it has gone — as the cleared title is for one that leaves.
+    #[test]
+    fn the_agent_going_takes_back_a_question_the_title_asked() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+
+        report(
+            &mut harness,
+            TerminalUpdate::Running(pane, Some("gemini".to_owned())),
+        );
+        titled(
+            &mut harness,
+            pane,
+            &gemini("\u{270b}  Action Required (proj)"),
+        );
+        assert_eq!(status_and_source(&harness, pane).0, AgentStatus::NeedsInput);
+        report(&mut harness, TerminalUpdate::Running(pane, None));
+        assert_taken_back(&harness, pane);
+
+        titled(&mut harness, pane, "[ ! ] Action Required | proj");
+        assert_eq!(status_and_source(&harness, pane).0, AgentStatus::NeedsInput);
+        report(&mut harness, TerminalUpdate::Title(pane, None));
+        assert_taken_back(&harness, pane);
+    }
+
     /// A stand-in for Claude Code mid-turn: its running title, then whatever
     /// `then` does. `sh -c` so that the line means the same in every shell
     /// these tests speak, fish included.

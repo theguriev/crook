@@ -8251,22 +8251,24 @@ impl Workspace {
         self.watches.heard(pane, session, watch::Heard::Status);
     }
 
-    /// Takes the status a program's title glyph said, for a pane whose agent
-    /// has no hooks to say it with.
+    /// Takes the status a program's title said, for a pane whose agent has
+    /// no hooks to say it with. See [`AgentStatus::from_title`].
     ///
-    /// A hook's report outranks it: the hooks know needs-input from idle and
-    /// the glyph does not, so a pane that has ever heard from them keeps
-    /// listening only to them. And only a change is a report — the glyph
-    /// turns several times a second while the agent works, and each turn
-    /// is the same running.
+    /// A hook's report outranks it: the hooks know needs-input from idle
+    /// where Claude Code's glyph does not, and say what a question is, so a
+    /// pane that has ever heard from them keeps listening only to them. And
+    /// only a change is a report — the glyph turns several times a second
+    /// while the agent works, and each turn is the same running, as each
+    /// blink of codex's question is the same question.
     ///
-    /// Idle only ends a running the title said. Claude Code draws `✳` from
-    /// the moment it starts, before anybody has asked it anything, and that
-    /// is the idle a new tab starts in rather than a turn that ended — the
-    /// one a lead's `crook pane wait --until idle` must not be answered by.
-    /// A running taken back when its command ended is not the title's any
+    /// Idle only ends a running or a question the title said. Claude Code
+    /// draws `✳` from the moment it starts, before anybody has asked it
+    /// anything, Gemini CLI `◇` and codex its bare folder, and that is the
+    /// idle a new tab starts in rather than a turn that ended — the one a
+    /// lead's `crook pane wait --until idle` must not be answered by. A
+    /// running taken back when its command ended is not the title's any
     /// more either, so the `✳` of the next agent in the same pane waits for
-    /// its own `◐` too.
+    /// its own `◐` too. A question is news whatever came before it.
     ///
     /// Such a `✳` still says that an agent has come, though, and the
     /// Changes column needs to know where one is to send it a review — most
@@ -8278,14 +8280,17 @@ impl Workspace {
             return;
         };
         let session = open.session();
-        let titled_running = matches!(session.source, StatusSource::Title(_))
-            && session.status == AgentStatus::Running;
+        let titled_turn = matches!(session.source, StatusSource::Title(_))
+            && matches!(
+                session.status,
+                AgentStatus::Running | AgentStatus::NeedsInput
+            );
         let now = Instant::now();
         let source = match (status, session.source) {
             (_, StatusSource::Agent(_)) => return,
-            (AgentStatus::Running, _) if titled_running => return,
-            (AgentStatus::Running, _) => StatusSource::Title(now),
-            _ if titled_running => StatusSource::Title(now),
+            _ if titled_turn && session.status == status => return,
+            (AgentStatus::Running | AgentStatus::NeedsInput, _) => StatusSource::Title(now),
+            _ if titled_turn => StatusSource::Title(now),
             (_, StatusSource::NoReport | StatusSource::CommandEnded(_)) => {
                 StatusSource::TitleAtStart(now)
             }
@@ -8294,28 +8299,65 @@ impl Workspace {
         self.agent_reported(pane, status, None, None, source, ctx);
     }
 
-    /// Takes back a running the title said, now that the pane has said the
-    /// program behind the title is no longer at work.
+    /// Ends a question the title asked, now that a title has come that
+    /// does not ask it and says nothing else Crook can read.
+    ///
+    /// Gemini CLI and codex keep a question in their titles for exactly as
+    /// long as it is open — codex blinking it — and put something else
+    /// there once it is answered. Where that says a status, as Gemini's
+    /// glyphs do and codex's titles do in a pane running codex,
+    /// [`Self::title_reported`] has taken it. This is codex where the pane
+    /// runs it through `npx`, an alias or `ssh`: its spinner is any build
+    /// tool's there, and its folder any title at all. The question is over
+    /// all the same, and an amber row nothing would take back keeps the
+    /// waiting count and the next-waiting chord on an agent that has moved
+    /// on. So idle, which is what the row said of that agent before it
+    /// asked.
+    fn title_stopped_asking(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        let asked = self.tabs.pane(pane).is_some_and(|open| {
+            matches!(open.session().source, StatusSource::Title(_))
+                && open.session().status == AgentStatus::NeedsInput
+        });
+        if !asked {
+            return;
+        }
+        self.agent_reported(
+            pane,
+            AgentStatus::Idle,
+            None,
+            None,
+            StatusSource::Title(Instant::now()),
+            ctx,
+        );
+    }
+
+    /// Takes back a running the title said, or a question it asked, now
+    /// that the pane has said the program behind the title is no longer
+    /// there to say more.
     ///
     /// A program that sets its glyph says nothing more when it is killed,
     /// crashes or is suspended mid-turn, so the running it last drew would
     /// otherwise stay on the row for good: breathing, repainting, and asking
-    /// about a working agent when the tab is closed. What says it has gone
-    /// is the pane: the shell ending the command, the pane's command going
-    /// back to a prompt, the first prompt of a shell whose startup files ran
-    /// it, or the title being cleared — which Claude Code does on its way
-    /// out, and which is the only word a shell over `ssh` passes on. The
-    /// status goes back to idle as the shell's `D` takes back a hook's
-    /// report, and is said to have come from there.
+    /// about a working agent when the tab is closed — and a question would
+    /// keep the row amber and counted as waiting. What says it has gone is
+    /// the pane: the shell ending the command, the pane's command going back
+    /// to a prompt, the first prompt of a shell whose startup files ran it,
+    /// or the title being cleared — which Claude Code and Gemini CLI do on
+    /// their way out, and which is the only word a shell over `ssh` passes
+    /// on. The status goes back to idle as the shell's `D` takes back a
+    /// hook's report, and is said to have come from there.
     ///
-    /// Only a running, and only the title's: a hook's report has the
-    /// emulator's own settle, and an idle has nothing to take back.
+    /// Only a running or a question, and only the title's: a hook's report
+    /// has the emulator's own settle, and an idle has nothing to take back.
     fn take_back_a_running_title(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
-        let titled_running = self.tabs.pane(pane).is_some_and(|open| {
+        let titled_turn = self.tabs.pane(pane).is_some_and(|open| {
             matches!(open.session().source, StatusSource::Title(_))
-                && open.session().status == AgentStatus::Running
+                && matches!(
+                    open.session().status,
+                    AgentStatus::Running | AgentStatus::NeedsInput
+                )
         });
-        if !titled_running {
+        if !titled_turn {
             return;
         }
         self.agent_reported(
@@ -8534,19 +8576,36 @@ impl Workspace {
                 self.tabs.pane(*pane).is_some()
             }
             TerminalUpdate::Title(pane, title) => {
-                let cleared = title.is_none();
-                let status = title.as_deref().and_then(AgentStatus::from_title);
-                let title = match status {
-                    Some((_, name)) => Some(name.to_owned()).filter(|name| !name.is_empty()),
-                    None => title.clone(),
+                // What the pane runs now, and not what a restore says it ran:
+                // a restored pane sits at its shell's prompt until something
+                // runs there, and the titles it gets meanwhile are the
+                // shell's, not the agent's.
+                let agent = self
+                    .tabs
+                    .pane(*pane)
+                    .and_then(|open| open.session().running_command.as_deref())
+                    .and_then(crate::agent::program_of);
+                let said = title
+                    .as_deref()
+                    .and_then(|title| AgentStatus::from_title(title, agent));
+                let titled = match said {
+                    // A status and nothing more: the name stands, and nothing
+                    // on the row moves unless the status does — codex writes
+                    // a frame of its spinner ten times a second.
+                    Some((_, None)) => self.tabs.pane(*pane).is_some(),
+                    Some((_, Some(name))) => {
+                        let name = Some(name.to_owned()).filter(|name| !name.is_empty());
+                        self.update_session(*pane, ctx, |session| session.derived_title = name)
+                    }
+                    None => {
+                        let title = title.clone();
+                        self.update_session(*pane, ctx, |session| session.derived_title = title)
+                    }
                 };
-                let status = status.map(|(status, _)| status);
-                let titled =
-                    self.update_session(*pane, ctx, |session| session.derived_title = title);
-                if let Some(status) = status {
-                    self.title_reported(*pane, status, ctx);
-                } else if cleared {
-                    self.take_back_a_running_title(*pane, ctx);
+                match said {
+                    Some((status, _)) => self.title_reported(*pane, status, ctx),
+                    None if title.is_none() => self.take_back_a_running_title(*pane, ctx),
+                    None => self.title_stopped_asking(*pane, ctx),
                 }
                 titled
             }

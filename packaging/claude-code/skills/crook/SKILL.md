@@ -194,7 +194,9 @@ minutes: keep `--timeout` under that limit and wait again rather than be killed 
 `idle` and `needs-input` are only as real as what the agent reports. A Claude Code worker without
 the hooks `crook --agent-hooks claude` prints says only what its title says — running, and idle
 when its turn ends — so a question it stops to ask reads as `idle` too, and `needs-input` never
-comes: a worker you will wait on for a question needs the hooks.
+comes: a worker you will wait on for a question needs the hooks. Codex and Gemini CLI workers
+without them say in their titles when they stop for an approval, so theirs does come, without the
+words of the question.
 
 `crook pane blocks <id> [--last N]` prints the pane's newest finished commands: the command line,
 what it printed (the end of it, when it is long), the exit status, how long it ran and where;
