@@ -18437,6 +18437,53 @@ mod shells {
     }
 
     #[test]
+    fn a_command_moving_its_cursor_back_up_into_its_output_does_not_move_the_output() {
+        // A display that redraws its last lines — `docker compose`, a
+        // package manager — rests at the start of the row under them, then
+        // goes back up with `\e[3A` to rewrite them. The open block takes the
+        // row under them for the cursor while it rests there, and has to keep
+        // it while the cursor is back inside the output: the list sits on its
+        // bottom, so giving the row back moves every line in the pane down
+        // one with nothing new printed, and taking it again moves them back.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        await_prompt(&mut harness, pane);
+        // No echo, so the line that answers the first `read` puts nothing on
+        // screen and leaves the cursor where the command put it.
+        harness.type_into(
+            pane,
+            "stty -echo; printf 'jq%sxv\\n' 1 2 3; read line; printf '\\033[3A'; read line\n",
+        );
+        harness.wait_for("the command never took the composer away", |harness| {
+            harness.terminal_text(pane).contains("jq3xv")
+                && composer_boxes(&harness.frame()).is_empty()
+        });
+        if !draws_blocks(&harness) {
+            return;
+        }
+        let cursor = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace.terminal(pane, app)?.1.cursor_cell
+            })
+        };
+        let (row, column) = cursor(&harness).expect("the cursor is on screen");
+        assert_eq!(0, column, "the command rests at the start of a row");
+        let rested = drawn_after(&harness.frame(), "jq1xv").expect("the command drew its lines");
+
+        harness.type_into(pane, "\n");
+        harness.wait_for("the cursor never went back up", |harness| {
+            cursor(harness) == Some((row - 3, 0))
+        });
+        assert_eq!(
+            Some(rested),
+            drawn_after(&harness.frame(), "jq1xv"),
+            "the output moved when only the cursor did"
+        );
+    }
+
+    #[test]
     fn a_release_over_the_tabs_panel_still_ends_a_drag_in_the_field() {
         // The field's half of the grid's rule: the button can come up over a
         // layer painted after it, and the drag has to end there all the same.

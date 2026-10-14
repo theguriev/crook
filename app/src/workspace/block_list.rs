@@ -191,6 +191,9 @@ pub struct BlockList {
     /// What layout found in view, replayed by paint. Walked once per frame
     /// rather than once per pass.
     window: Vec<Visible>,
+    /// The rows of the snapshot layout gave the open block, which paint draws
+    /// its cursor and a composition within. See [`drawn_live_rows`].
+    live: Option<(usize, usize)>,
     /// The block shown filtered, and the rows of it that are shown. See
     /// [`Self::with_filter`].
     filter: Option<(BlockId, Rc<Vec<usize>>)>,
@@ -279,6 +282,7 @@ impl BlockList {
             size: None,
             origin: None,
             window: Vec::new(),
+            live: None,
             filter: None,
             sticky: None,
             scratch: Vec::new(),
@@ -476,7 +480,18 @@ impl BlockList {
     /// out the items that are in view.
     fn measure(&mut self, size: Vector2F) {
         let metrics = self.font.metrics();
-        let live = live_height(&self.snapshot, self.surface().composer);
+        // The open block's rows, and the row under them it took for a running
+        // program's cursor, which it keeps from one layout to the next.
+        let composer = self.surface().composer;
+        let id = self.snapshot.live_block.id;
+        let reached = self.view.live_reach(id).filter(|_| !composer);
+        self.live = drawn_live_rows(&self.snapshot, composer, reached);
+        self.view.set_live_reach(
+            self.live
+                .filter(|_| !composer)
+                .map(|(first, last)| (id, last - first)),
+        );
+        let live = live_height(self.live, composer);
         // The pointer alone would be enough for as long as an `Arc` lives,
         // and the count and the eviction mark are what keep it honest across a
         // free: a new history can land on a freed one's address, and only the
@@ -1355,10 +1370,10 @@ impl BlockList {
             return;
         }
         // Where a viewport cell of the open block is drawn, when it is on one
-        // of the rows on screen: the cursor's own row included, which the
-        // block is laid out to reach before anything is printed on it. See
+        // of the rows on screen: the row under its own included, which layout
+        // gives it for the cursor before anything is printed on it. See
         // `drawn_live_rows`.
-        let last = drawn_live_rows(&self.snapshot, false).map_or(last, |(_, last)| last);
+        let last = self.live.map_or(last, |(_, last)| last);
         let drawn = |viewport_row: usize, column: usize| {
             let row = viewport_row
                 .checked_sub(first)
@@ -1907,12 +1922,13 @@ pub(super) fn padding_top(block: Option<&Block>) -> f32 {
     }
 }
 
-/// How tall the open block is, in lines.
+/// How tall the open block is, in lines, laid out over `rows` of the
+/// snapshot. See [`drawn_live_rows`].
 ///
 /// Zero when it has printed nothing, so a prompt that has not arrived yet
 /// leaves no gap above the composer.
-fn live_height(snapshot: &Snapshot, composer: bool) -> f32 {
-    let Some((first, last)) = drawn_live_rows(snapshot, composer) else {
+fn live_height(rows: Option<(usize, usize)>, composer: bool) -> f32 {
+    let Some((first, last)) = rows else {
         return 0.;
     };
     // With a composer under it, no bottom padding at all: what follows the
@@ -1929,7 +1945,8 @@ fn live_height(snapshot: &Snapshot, composer: bool) -> f32 {
 }
 
 /// The rows of the snapshot the open block is laid out over: its own, and,
-/// with no composer under it, the row the program's cursor is in as well.
+/// with no composer under it, the row under them once the program's cursor
+/// has been in it.
 ///
 /// The block's own rows end at the last one anything was printed on, so a
 /// program that printed a line and is reading at the start of the next one —
@@ -1941,15 +1958,38 @@ fn live_height(snapshot: &Snapshot, composer: bool) -> f32 {
 /// composer's caret is where typing goes, and a blank row between the prompt
 /// and it is the seam [`live_height`] exists to remove.
 ///
+/// **Once taken, the row is kept** while it is still the one under the
+/// block's own rows. `reached` is how many rows below its first the block was
+/// laid out to by the last layout ([`PaneBlocks::live_reach`]). A display that
+/// redraws its last lines — `docker compose`, a package manager — rests at the
+/// start of the row under them and goes back up with `\e[3A` to rewrite them,
+/// and the list sits on its bottom: a block that gave the row back whenever
+/// the cursor left it would move every line in the pane down one and back up
+/// again with nothing new printed. So where the cursor is only ever adds the
+/// row, and the block's bottom moves up only when its own rows do — which they
+/// did before there was a row for the cursor at all.
+///
 /// Only the layout and the cursor reach the extra row: it is blank, so there
 /// is nothing in it to draw, select or find.
-fn drawn_live_rows(snapshot: &Snapshot, composer: bool) -> Option<(usize, usize)> {
+fn drawn_live_rows(
+    snapshot: &Snapshot,
+    composer: bool,
+    reached: Option<usize>,
+) -> Option<(usize, usize)> {
     let (first, last) = snapshot.live_rows()?;
-    let cursor = snapshot
-        .cursor_cell
-        .map(|(row, _)| row)
-        .filter(|_| !composer);
-    Some((first, cursor.map_or(last, |row| last.max(row))))
+    if composer {
+        return Some((first, last));
+    }
+    // One row, and never more: the block's own rows reach the cursor's row
+    // once the cursor has left its first column, and the row above it before.
+    let under = (last + 1).min(snapshot.rows - 1);
+    let cursor = snapshot.cursor_cell.map(|(row, _)| row);
+    let kept = reached.map(|rows| first + rows);
+    let bottom = [cursor, kept]
+        .into_iter()
+        .flatten()
+        .fold(last, |bottom, row| bottom.max(row.min(under)));
+    Some((first, bottom))
 }
 
 /// The cell column the composer's first row starts at when it continues the
