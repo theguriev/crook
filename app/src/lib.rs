@@ -48,6 +48,12 @@
 //! and open no window: they ask a window that is already open, over the socket
 //! [`control`] listens on, and print the answer.
 
+// Every answer goes to stdout through `print_answer`, which takes a reader
+// that has gone as the end of the answer, where `println!` panics and the
+// process exits 101 under `| head`. A print in a path nobody pipes often —
+// `--snapshot`'s `--run` lines — is easy to miss, and this is what finds it.
+#![warn(clippy::print_stdout)]
+
 pub mod agent;
 pub mod bell;
 pub mod browser;
@@ -2469,7 +2475,7 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
                     workspace.read(&app, |workspace, app| workspace.newest_block(pane, app));
                 type_run(&mut app, &mut presenter, window_id, command);
                 let printed = settle_run(&queue, &mut app, &workspace, pane, before);
-                println!("the shell printed:\n{}", printed.trim_end());
+                print_answer(format_args!("the shell printed:\n{}\n", printed.trim_end()))?;
             }
         }
 

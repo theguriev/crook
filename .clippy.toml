@@ -21,3 +21,8 @@ disallowed-methods = [
 disallowed-types = [
   { path = "std::process::Command", reason = "use crook::process::command, which sets CREATE_NO_WINDOW on Windows" },
 ]
+
+# The app's lib warns on `println!` (see the top of app/src/lib.rs): an answer
+# goes out through `print_answer`, which takes a closed pipe as done. A test
+# printing what it measured is not an answer, and libtest captures it.
+allow-print-in-tests = true

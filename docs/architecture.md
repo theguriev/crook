@@ -2121,7 +2121,9 @@ token's account: the window is the one place that knows what a token is worth.
 A reader that stops early — `crook pane blocks 7 | head -5` — is the end of the answer, and the
 command succeeds: every answer printed without a window goes through one function that takes a
 closed pipe as done, where `println!` panicked with exit status 101, since Rust leaves SIGPIPE
-ignored and the write fails with EPIPE.
+ignored and the write fails with EPIPE. `events --follow` writes its stream itself and stops at
+a closed pipe too, and the app's crate warns on `println!`, so that a new answer cannot go round
+the function.
 What it prints carries no control character. A pane's directory arrives percent-decoded from the
 OSC 7 its shell printed, so `%1b` in it is an ESC, and a listing that printed what it was given
 would replay a pane's escape sequence into the terminal the listing runs in; the table writes
