@@ -41,6 +41,7 @@ use crate::input_keys::{Binding, Intent, Platform};
 use crate::keybindings::{Context, Keybindings, PendingSave, Recording, Resolution};
 use crate::notify::{Cooldown, LONG_COMMAND, Notice, Notifier, Occasion, Silent};
 use crate::pane_blocks::{PAGE_OVERLAP, PaneBlocks, ScrollCause};
+use crate::pane_composition::PaneComposition;
 use crate::pane_find::{Matches, PaneFind};
 use crate::pane_link::PaneLink;
 use crate::pane_selection::PaneSelection;
@@ -156,6 +157,9 @@ pub(super) struct PaneInteraction {
     /// Where the pane's block list is scrolled to and what the pointer is
     /// over. See [`PaneBlocks`].
     pub(super) blocks: PaneBlocks,
+    /// What an input method is composing into the program in the pane, while
+    /// the program has the keyboard. See [`PaneComposition`].
+    pub(super) composition: PaneComposition,
 }
 
 /// What the mouse is doing to one tab's chrome in the panel.
@@ -1390,6 +1394,13 @@ impl Workspace {
         let before = self.looking_at();
         self.window_focused = focused;
         self.report_focus(before, ctx);
+        // An input method's composition is the keyboard's, and the keyboard
+        // has just gone or come back: what was being composed before belongs
+        // to nothing now. A word committed on the way out still arrives, as a
+        // commit, whatever was drawn for it.
+        for interaction in self.interactions.values() {
+            interaction.composition.clear();
+        }
         if focused {
             let left = self.looked_at_when_left.take();
             self.attend(left, ctx);
@@ -7641,12 +7652,29 @@ impl Workspace {
 
     /// Where the caret of the field with the keyboard was last painted.
     ///
-    /// What the window puts an input method's candidate list beside. `None`
-    /// when no field has the keyboard — a full-screen program is up, or the
-    /// settings page is the focused pane — and when the caret has been
-    /// scrolled out of a field taller than its box.
+    /// What the window puts an input method's candidate list beside. With no
+    /// composer drawn — a program that has taken the keyboard, vim or Claude
+    /// Code — that is the program's cursor, or the place in a composition
+    /// drawn over it that the input method's caret is at: the composer's caret
+    /// is still where the prompt was when the program started, and a list
+    /// beside it is a list nowhere near the word it is for. See
+    /// [`PaneComposition`].
+    ///
+    /// `None` when nothing has the keyboard — the settings page is the
+    /// focused pane — and when the caret has been scrolled out of view. And
+    /// `None` while a one-line field has it — the tab search box, a find bar,
+    /// a plugin's field — which takes an input method's commit and reports no
+    /// caret, so the window leaves the list where it last put it.
     pub fn caret_rect(&self) -> Option<RectF> {
         let pane = self.tabs.focused_pane_id()?;
+        if let Some(composition) = self
+            .interactions
+            .get(&pane)
+            .map(|interaction| &interaction.composition)
+            .filter(|composition| composition.is_listening())
+        {
+            return composition.caret_rect();
+        }
         let input = self.inputs.get(&pane)?;
         input.has_keys().then(|| input.caret_rect()).flatten()
     }
@@ -10311,6 +10339,7 @@ impl Workspace {
                     links: PaneLink::new(),
                     extent: PaneExtent::new(),
                     blocks: PaneBlocks::new(),
+                    composition: PaneComposition::new(),
                 });
             // Not `or_default`: a pane's field opens with this person's own
             // shell history behind it, which is what the Up key reaches and
@@ -10392,6 +10421,33 @@ impl Workspace {
         }
     }
 
+    /// The pane typing goes to, when it goes to one: the focused pane, unless
+    /// something else in the window has taken the keyboard from it.
+    ///
+    /// What [`Self::sync_input_keys`] tells the composers, and what the frame
+    /// asks before an input method composes into a program instead of into a
+    /// composer, so the two cannot disagree about where a word goes. A
+    /// plugin's field counts as of the last sync, which is when the fields
+    /// are told whether they have the keyboard.
+    pub(super) fn pane_with_keys(&self) -> Option<PaneId> {
+        self.pane_with_keys_given(self.host.a_field_has_keys())
+    }
+
+    /// [`Self::pane_with_keys`], given whether a plugin's field has the
+    /// keyboard. See [`Self::sync_input_keys`] for why each of the others
+    /// takes it.
+    fn pane_with_keys_given(&self, a_field_has_keys: bool) -> Option<PaneId> {
+        (!self.a_popup_is_open()
+            && !self.panel.open
+            && !self.host.a_surface_is_up()
+            && !self.search_takes_keys()
+            && !self.find_takes_keys()
+            && !a_field_has_keys
+            && !self.changes_takes_keys())
+        .then(|| self.tabs.focused_pane_id())
+        .flatten()
+    }
+
     /// Tells every field whether the keyboard is its.
     ///
     /// Called wherever focus could have moved — a pane focused, closed or
@@ -10434,17 +10490,25 @@ impl Workspace {
         // comment about an agent's work is not typing to the agent.
         let comment_has_keys = self.changes_takes_keys();
         self.changes.set_draft_keys(comment_has_keys);
-        let listening = (!self.a_popup_is_open()
-            && !self.panel.open
-            && !self.host.a_surface_is_up()
-            && !self.search_takes_keys()
-            && !find_has_keys
-            && !a_field_has_keys
-            && !comment_has_keys)
-            .then(|| self.tabs.focused_pane_id())
-            .flatten();
+        let listening = self.pane_with_keys_given(a_field_has_keys);
         for (id, input) in &self.inputs {
             input.set_has_keys(Some(*id) == listening);
+        }
+        // A composition belongs to the keyboard as well, and goes with it: one
+        // left in a pane the focus has moved away from — another pane, another
+        // tab, a menu, a box beside it — would be drawn again the next time
+        // that pane had the keys, over whatever its program had drawn since.
+        // So does one in a pane a section of the sidebar has replaced: the
+        // pane is not drawn, so it hears nothing an input method says while
+        // the section is up, and the word it was drawing is gone by the time
+        // the tabs come back. Whether the pane that does have them composes
+        // into its program or into its composer is the frame's to say: see
+        // `body::contents`.
+        let composing = listening.filter(|_| self.showing_section().is_none());
+        for (id, interaction) in &self.interactions {
+            if Some(*id) != composing {
+                interaction.composition.listen(false);
+            }
         }
         // The find field of the focused pane, and no other: a background
         // pane\'s bar left open holds no keys, so a person switching to it

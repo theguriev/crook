@@ -72,6 +72,7 @@ use crookui_core::scene::{ClipBounds, CornerRadius, PointerShape, Radius, Scene}
 use crate::browser;
 use crate::clipboard::Clipboard;
 use crate::pane_blocks::{Control, PaneBlocks, ScrollCause};
+use crate::pane_composition::PaneComposition;
 use crate::pane_find::Matches;
 use crate::pane_link::{self, LinkRow, LinkSpan, PaneLink};
 use crate::pane_selection::PaneSelection;
@@ -85,7 +86,7 @@ use crate::theme::theme;
 
 use super::action::{BlockAction, WorkspaceAction};
 use super::pane_output::{Keys, Output, Typed, selection_kind};
-use super::terminal_element::{self, Ink, RowMarks, color};
+use super::terminal_element::{self, CursorRow, Ink, RowMarks, color};
 
 /// The gap between a pane's edge and the text inside it.
 ///
@@ -190,6 +191,9 @@ pub struct BlockList {
     /// What layout found in view, replayed by paint. Walked once per frame
     /// rather than once per pass.
     window: Vec<Visible>,
+    /// The rows of the snapshot layout gave the open block, which paint draws
+    /// its cursor and a composition within. See [`drawn_live_rows`].
+    live: Option<(usize, usize)>,
     /// The block shown filtered, and the rows of it that are shown. See
     /// [`Self::with_filter`].
     filter: Option<(BlockId, Rc<Vec<usize>>)>,
@@ -278,6 +282,7 @@ impl BlockList {
             size: None,
             origin: None,
             window: Vec::new(),
+            live: None,
             filter: None,
             sticky: None,
             scratch: Vec::new(),
@@ -475,7 +480,18 @@ impl BlockList {
     /// out the items that are in view.
     fn measure(&mut self, size: Vector2F) {
         let metrics = self.font.metrics();
-        let live = live_height(&self.snapshot, self.surface().composer);
+        // The open block's rows, and the row under them it took for a running
+        // program's cursor, which it keeps from one layout to the next.
+        let composer = self.surface().composer;
+        let id = self.snapshot.live_block.id;
+        let reached = self.view.live_reach(id).filter(|_| !composer);
+        self.live = drawn_live_rows(&self.snapshot, composer, reached);
+        self.view.set_live_reach(
+            self.live
+                .filter(|_| !composer)
+                .map(|(first, last)| (id, last - first)),
+        );
+        let live = live_height(self.live, composer);
         // The pointer alone would be enough for as long as an `Arc` lives,
         // and the count and the eviction mark are what keep it honest across a
         // free: a new history can land on a freed one's address, and only the
@@ -697,6 +713,14 @@ impl BlockList {
     /// the workspace keeps for it.
     pub fn with_links(mut self, links: PaneLink) -> Self {
         self.links = Some(links);
+        self
+    }
+
+    /// Attaches the pane's input method composition, which is drawn at the
+    /// running program's cursor while the list has the keyboard and no
+    /// composer. See [`Output::composition`].
+    pub fn with_composition(mut self, composition: PaneComposition) -> Self {
+        self.output = self.output.with_composition(composition);
         self
     }
 
@@ -1347,28 +1371,54 @@ impl BlockList {
         if self.surface().composer {
             return;
         }
-        let Some(cursor) = self
+        // Where a viewport cell of the open block is drawn, when it is on one
+        // of the rows on screen: the row under its own included, which layout
+        // gives it for the cursor before anything is printed on it. See
+        // `drawn_live_rows`.
+        let last = self.live.map_or(last, |(_, last)| last);
+        let drawn = |viewport_row: usize, column: usize| {
+            let row = viewport_row
+                .checked_sub(first)
+                .filter(|_| viewport_row <= last)?;
+            (row >= first_visible && row < last_visible && column < columns)
+                .then(|| vec2f(left, rows_top + row as f32 * metrics.height))
+        };
+        if let Some((cursor, row)) = self
             .snapshot
             .cursor
             .as_ref()
-            .filter(|cursor| cursor.row >= first && cursor.row <= last)
-        else {
-            return;
-        };
-        let row = cursor.row - first;
-        if row < first_visible || row >= last_visible || cursor.column >= columns {
-            return;
+            .and_then(|cursor| Some((cursor, drawn(cursor.row, cursor.column)?)))
+        {
+            terminal_element::paint_cursor_at(
+                cursor,
+                self.output.draws_focus(),
+                row + vec2f(cursor.column as f32 * metrics.width, 0.),
+                metrics,
+                ctx.scene,
+            );
         }
-        terminal_element::paint_cursor_at(
-            cursor,
-            self.output.draws_focus(),
-            vec2f(
-                left + cursor.column as f32 * metrics.width,
-                rows_top + row as f32 * metrics.height,
-            ),
-            metrics,
-            ctx.scene,
-        );
+
+        // And what an input method is composing for the program, over it.
+        // This is where Claude Code is drawn while it runs, so it is where a
+        // word composed into its prompt has to appear. See
+        // `terminal_element::paint_composition`.
+        if let Some(composition) = self.output.composition() {
+            let caret = self.snapshot.cursor_cell.and_then(|(row, column)| {
+                let origin = drawn(row, column)?;
+                Some(terminal_element::paint_composition(
+                    composition.preedit().as_ref(),
+                    CursorRow {
+                        origin,
+                        columns: columns.min(self.snapshot.columns),
+                        column,
+                    },
+                    (self.snapshot.foreground, ground),
+                    &self.font,
+                    ctx.scene,
+                ))
+            });
+            composition.set_caret_rect(caret);
+        }
     }
 
     /// Draws the pictures an item's rows hold over those rows, by the same
@@ -1701,6 +1751,12 @@ impl Element for BlockList {
             .selection()
             .and_then(|selection| selection.region(&self.addressed()));
 
+        // Until the open block says where the program's cursor is: a list
+        // scrolled away from it has no cell for an input method to sit
+        // beside, and the one it had was somewhere else on screen.
+        if let Some(composition) = self.output.composition() {
+            composition.set_caret_rect(None);
+        }
         for item in std::mem::take(&mut self.window) {
             self.paint_item(origin, item, region, ctx);
             self.window.push(item);
@@ -1874,12 +1930,13 @@ pub(super) fn padding_top(block: Option<&Block>) -> f32 {
     }
 }
 
-/// How tall the open block is, in lines.
+/// How tall the open block is, in lines, laid out over `rows` of the
+/// snapshot. See [`drawn_live_rows`].
 ///
 /// Zero when it has printed nothing, so a prompt that has not arrived yet
 /// leaves no gap above the composer.
-fn live_height(snapshot: &Snapshot, composer: bool) -> f32 {
-    let Some((first, last)) = snapshot.live_rows() else {
+fn live_height(rows: Option<(usize, usize)>, composer: bool) -> f32 {
+    let Some((first, last)) = rows else {
         return 0.;
     };
     // With a composer under it, no bottom padding at all: what follows the
@@ -1893,6 +1950,54 @@ fn live_height(snapshot: &Snapshot, composer: bool) -> f32 {
     // padding is only what keeps its last row off the window's edge.
     let bottom = if composer { 0. } else { RUNNING_PADDING_BOTTOM };
     PADDING_TOP + (last - first + 1) as f32 + bottom
+}
+
+/// The rows of the snapshot the open block is laid out over: its own, and,
+/// with no composer under it, the row under them once the program's cursor
+/// has been in it.
+///
+/// The block's own rows end at the last one anything was printed on, so a
+/// program that printed a line and is reading at the start of the next one —
+/// `cat`, `bc`, `read`, a Python `input()` — has its cursor one row past the
+/// block. That row is where the next character goes, so it is where the
+/// program's cursor is drawn, and where a word an input method is composing
+/// for the program is drawn and its list of candidates goes; a block that
+/// stopped short of it had nowhere to draw either. With a composer the
+/// composer's caret is where typing goes, and a blank row between the prompt
+/// and it is the seam [`live_height`] exists to remove.
+///
+/// **Once taken, the row is kept** while it is still the one under the
+/// block's own rows. `reached` is how many rows below its first the block was
+/// laid out to by the last layout ([`PaneBlocks::live_reach`]). A display that
+/// redraws its last lines — `docker compose`, a package manager — rests at the
+/// start of the row under them and goes back up with `\e[3A` to rewrite them,
+/// and the list sits on its bottom: a block that gave the row back whenever
+/// the cursor left it would move every line in the pane down one and back up
+/// again with nothing new printed. So where the cursor is only ever adds the
+/// row, and the block's bottom moves up only when its own rows do — which they
+/// did before there was a row for the cursor at all.
+///
+/// Only the layout and the cursor reach the extra row: it is blank, so there
+/// is nothing in it to draw, select or find.
+fn drawn_live_rows(
+    snapshot: &Snapshot,
+    composer: bool,
+    reached: Option<usize>,
+) -> Option<(usize, usize)> {
+    let (first, last) = snapshot.live_rows()?;
+    if composer {
+        return Some((first, last));
+    }
+    // One row, and never more: the block's own rows reach the cursor's row
+    // once the cursor has left its first column, and the row above it before.
+    let under = (last + 1).min(snapshot.rows - 1);
+    let cursor = snapshot.cursor_cell.map(|(row, _)| row);
+    let kept = reached.map(|rows| first + rows);
+    let bottom = [cursor, kept]
+        .into_iter()
+        .flatten()
+        .fold(last, |bottom, row| bottom.max(row.min(under)));
+    Some((first, bottom))
 }
 
 /// The cell column the composer's first row starts at when it continues the

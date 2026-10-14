@@ -297,6 +297,13 @@ struct State {
     /// the list says. Written by the list as it lays out, read by the header
     /// laid out after it in the same frame.
     sticky: Option<(BlockId, String)>,
+    /// How many rows below its first the open block was laid out to at the
+    /// last layout, and which block that was. `None` while a composer is
+    /// under it, which takes no row for a program's cursor. Written by the
+    /// list as it lays out, and read by the next layout, so a row the block
+    /// took for the cursor is not given back as soon as the cursor goes up
+    /// into the output again: see `block_list::drawn_live_rows`.
+    live_reach: Option<(BlockId, usize)>,
     heights: Heights,
 }
 
@@ -563,6 +570,22 @@ impl PaneBlocks {
     /// Records it. See [`Self::sticky`].
     pub fn set_sticky(&self, sticky: Option<(BlockId, String)>) {
         self.0.borrow_mut().sticky = sticky;
+    }
+
+    /// How many rows below its first the open block `block` was laid out to
+    /// at the last layout, when it was this block and no composer was under
+    /// it.
+    pub fn live_reach(&self, block: BlockId) -> Option<usize> {
+        self.0
+            .borrow()
+            .live_reach
+            .filter(|(id, _)| *id == block)
+            .map(|(_, rows)| rows)
+    }
+
+    /// Records it, or forgets it. See [`Self::live_reach`].
+    pub fn set_live_reach(&self, reach: Option<(BlockId, usize)>) {
+        self.0.borrow_mut().live_reach = reach;
     }
 
     /// Whether any block is.

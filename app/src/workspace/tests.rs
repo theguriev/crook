@@ -18258,6 +18258,428 @@ mod shells {
         });
     }
 
+    /// What an input method sends while a word is being composed: `text`,
+    /// with its caret at byte `caret`.
+    fn composing(text: &str, caret: usize) -> Event {
+        Event::Ime(crookui_core::event::Ime::Preedit {
+            text: text.to_owned(),
+            cursor: Some((caret, caret)),
+        })
+    }
+
+    /// Where each copy of `character` is drawn in a frame: the pen position
+    /// its glyph is drawn from, which is the left of its cell on the baseline.
+    fn drawn(scene: &Scene, character: char) -> Vec<Vector2F> {
+        scene
+            .layers()
+            .flat_map(|layer| layer.glyphs.iter())
+            .filter(|glyph| glyph.glyph_key.glyph_id == u32::from(character))
+            .map(|glyph| glyph.position)
+            .collect()
+    }
+
+    /// Where the cell after `text` begins, on its baseline, at the first place
+    /// a frame draws the whole of it on consecutive cells of one row. One cell
+    /// a character, so ASCII.
+    fn drawn_after(scene: &Scene, text: &str) -> Option<Vector2F> {
+        let width = CellFont::headless(CELL_FONT_SIZE).metrics().width;
+        let at = |character: char, position: Vector2F| {
+            drawn(scene, character).iter().any(|drawn| {
+                (drawn.x() - position.x()).abs() < 0.01 && (drawn.y() - position.y()).abs() < 0.01
+            })
+        };
+        let first = text.chars().next()?;
+        drawn(scene, first).into_iter().find_map(|start| {
+            let mut position = start;
+            for character in text.chars().skip(1) {
+                position += vec2f(width, 0.);
+                if !at(character, position) {
+                    return None;
+                }
+            }
+            Some(position + vec2f(width, 0.))
+        })
+    }
+
+    /// The cell whose glyph would be drawn from `pen`, as the rectangle the
+    /// window hands an input method.
+    fn cell_from(pen: Vector2F) -> RectF {
+        let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+        RectF::new(
+            pen - vec2f(0., cell.baseline),
+            vec2f(cell.width, cell.height),
+        )
+    }
+
+    /// Where the window would put an input method's candidate list.
+    fn ime_area(harness: &Harness) -> Option<RectF> {
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.caret_rect())
+    }
+
+    /// A program that took the screen, drew `zq7xv` and is reading a line
+    /// after it, so its cursor is in the cell after the `v`. `None` where no
+    /// shell could be started.
+    fn reading_on_the_whole_screen(harness: &mut Harness) -> Option<PaneId> {
+        let pane = one_shell(harness)?;
+        harness.frame();
+        harness.type_into(
+            pane,
+            "printf '\\033[?1049h\\033[H'; printf 'zq%sxv' 7; read line\n",
+        );
+        harness.wait_for("the program never drew its screen", |harness| {
+            harness.alt_screen(pane) && harness.terminal_text(pane).contains("zq7xv")
+        });
+        Some(pane)
+    }
+
+    #[test]
+    fn a_word_being_composed_is_drawn_at_the_program_s_cursor_and_sent_only_when_committed() {
+        // vim, `less`, an agent: there is no field to compose into, so what
+        // an input method is composing is drawn where the program's cursor
+        // is — and the program hears nothing of it until the word is
+        // committed, because every guess on the way to it would be typed.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = reading_on_the_whole_screen(&mut harness) else {
+            return;
+        };
+        let width = CellFont::headless(CELL_FONT_SIZE).metrics().width;
+        let cursor = drawn_after(&harness.frame(), "zq7xv").expect("the program drew its line");
+
+        harness.dispatch(composing("にほん", 0));
+        let scene = harness.frame();
+        assert_eq!(
+            vec![cursor],
+            drawn(&scene, 'に'),
+            "the composition is not drawn at the program's cursor"
+        );
+        // Two cells a character, as the program will print them.
+        assert_eq!(vec![cursor + vec2f(width * 2., 0.)], drawn(&scene, 'ほ'));
+        assert_eq!(vec![cursor + vec2f(width * 4., 0.)], drawn(&scene, 'ん'));
+        harness.settle(NO_LEAK_PATIENCE);
+        assert!(
+            !harness.terminal_text(pane).contains('に'),
+            "a word that was not committed reached the program"
+        );
+
+        harness.dispatch(Event::Ime(crookui_core::event::Ime::Commit(
+            "日本".to_owned(),
+        )));
+        harness.wait_for("the committed word never reached the program", |harness| {
+            harness.terminal_text(pane).contains("日本")
+        });
+        let scene = harness.frame();
+        assert!(
+            drawn(&scene, 'に').is_empty(),
+            "the composition outlived its commit"
+        );
+        assert_eq!(
+            vec![cursor],
+            drawn(&scene, '日'),
+            "the program echoed the word where it was composed"
+        );
+    }
+
+    #[test]
+    fn the_input_method_s_list_goes_beside_the_cursor_of_a_program_with_the_keyboard() {
+        // The candidate list goes beside the rectangle the window is given,
+        // which was the composer's caret and nothing else: with a program on
+        // the screen it stayed wherever the prompt had been when the program
+        // started, a long way from the word it was offering to finish.
+        let mut harness = Harness::panel(1);
+        if reading_on_the_whole_screen(&mut harness).is_none() {
+            return;
+        }
+        let width = CellFont::headless(CELL_FONT_SIZE).metrics().width;
+        let cursor = drawn_after(&harness.frame(), "zq7xv").expect("the program drew its line");
+        assert_eq!(
+            Some(cell_from(cursor)),
+            ime_area(&harness),
+            "the list is not beside the program's cursor"
+        );
+
+        // And while a word is composed, beside the input method's own caret
+        // in it: here, in front of the third character.
+        harness.dispatch(composing("にほん", "にほ".len()));
+        harness.frame();
+        assert_eq!(
+            Some(cell_from(cursor + vec2f(width * 4., 0.))),
+            ime_area(&harness)
+        );
+    }
+
+    #[test]
+    fn a_word_composed_into_a_running_command_is_drawn_at_its_hidden_cursor() {
+        // Claude Code's arrangement: a command on the primary screen that has
+        // run long enough to take the composer away, drawing a caret of its
+        // own and keeping the real cursor hidden on the field it is reading.
+        // The hidden cursor is where the word is drawn, and where the list
+        // goes.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        await_prompt(&mut harness, pane);
+        harness.type_into(
+            pane,
+            "printf '\\033[?25l'; printf 'zq%sxv' 7; read line; printf '\\033[?25h'\n",
+        );
+        harness.wait_for("the command never took the composer away", |harness| {
+            harness.terminal_text(pane).contains("zq7xv")
+                && composer_boxes(&harness.frame()).is_empty()
+        });
+        if !draws_blocks(&harness) {
+            return;
+        }
+        let cursor = drawn_after(&harness.frame(), "zq7xv").expect("the command drew its line");
+
+        harness.dispatch(composing("にほん", 0));
+        assert_eq!(
+            vec![cursor],
+            drawn(&harness.frame(), 'に'),
+            "the composition is not drawn at the command's cursor"
+        );
+        assert_eq!(Some(cell_from(cursor)), ime_area(&harness));
+        harness.settle(NO_LEAK_PATIENCE);
+        assert!(
+            !harness.terminal_text(pane).contains('に'),
+            "a word that was not committed reached the command"
+        );
+    }
+
+    #[test]
+    fn a_composition_does_not_outlive_the_command_it_was_composed_for() {
+        // A command finishing brings the composer back, which takes the
+        // keyboard from the program without the focus moving at all. A word
+        // still held then would be drawn over the next command to run.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        await_prompt(&mut harness, pane);
+        let run = |harness: &mut Harness, command: &str, marker: &str| {
+            harness.type_into(pane, command);
+            harness.wait_for("the command never took the composer away", |harness| {
+                harness.terminal_text(pane).contains(marker)
+                    && composer_boxes(&harness.frame()).is_empty()
+            });
+        };
+        run(&mut harness, "printf 'zq%sxv' 7; read line\n", "zq7xv");
+        if !draws_blocks(&harness) {
+            return;
+        }
+        harness.dispatch(composing("にほん", 0));
+        assert!(!drawn(&harness.frame(), 'に').is_empty());
+
+        // Answered behind the input method's back.
+        harness.type_into(pane, "\n");
+        harness.wait_for("the composer never came back", |harness| {
+            !composer_boxes(&harness.frame()).is_empty()
+        });
+        await_prompt(&mut harness, pane);
+
+        run(&mut harness, "printf 'qz%sxv' 8; read line\n", "qz8xv");
+        assert!(
+            drawn(&harness.frame(), 'に').is_empty(),
+            "a word composed for the last command was drawn over the next"
+        );
+    }
+
+    #[test]
+    fn a_composition_goes_with_the_input_method_and_with_the_keyboard() {
+        // What is drawn belongs to the keyboard, and a composition left over
+        // from one it no longer has would be drawn again over whatever the
+        // program had drawn since — the next time the pane had the keys.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = reading_on_the_whole_screen(&mut harness) else {
+            return;
+        };
+        let shown = |harness: &mut Harness| !drawn(&harness.frame(), 'に').is_empty();
+        harness.frame();
+
+        harness.dispatch(composing("にほん", 0));
+        assert!(shown(&mut harness));
+        harness.dispatch(Event::Ime(crookui_core::event::Ime::Disabled));
+        assert!(
+            !shown(&mut harness),
+            "the input method gave up and its word stayed"
+        );
+
+        // A find bar takes the keyboard, and gives it back without the word.
+        harness.dispatch(composing("にほん", 0));
+        assert!(shown(&mut harness));
+        harness.run_command("crook/window/find");
+        assert!(!shown(&mut harness), "the word outlived the keyboard");
+        harness.dispatch_workspace_action(WorkspaceAction::Find {
+            pane,
+            action: crate::workspace::action::FindAction::Close,
+        });
+        assert!(!shown(&mut harness), "the word came back with the keyboard");
+
+        // Another tab, which does not draw this pane at all while it is in
+        // front.
+        harness.dispatch(composing("にほん", 0));
+        assert!(shown(&mut harness));
+        let first = harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.tabs().active_id());
+        harness.dispatch_action(TabAction::New);
+        harness.frame();
+        harness.dispatch_action(TabAction::Select(first));
+        assert!(!shown(&mut harness), "the word came back with the tab");
+
+        // And the window going behind another.
+        harness.dispatch(composing("にほん", 0));
+        assert!(shown(&mut harness));
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+        assert!(
+            !shown(&mut harness),
+            "the word outlived the window's keyboard"
+        );
+
+        // And a section of the sidebar taking the pane's place. The pane is
+        // not drawn while it is up, so whatever the input method does with
+        // the word in the meantime never reaches it.
+        harness.dispatch(composing("にほん", 0));
+        assert!(shown(&mut harness));
+        harness.open_settings_page();
+        harness.show_tabs();
+        assert!(
+            !shown(&mut harness),
+            "the word came back with the tabs from a section"
+        );
+    }
+
+    #[test]
+    fn a_word_composed_into_the_tab_search_box_is_not_drawn_over_the_program() {
+        // The box beside the pane has the keyboard, and the program in the
+        // pane keeps drawing its cursor all the same: the word is the box's,
+        // not the program's.
+        let mut harness = Harness::panel(1);
+        if reading_on_the_whole_screen(&mut harness).is_none() {
+            return;
+        }
+        let cursor = drawn_after(&harness.frame(), "zq7xv").expect("the program drew its line");
+
+        harness.press_search_chord();
+        assert!(harness.panel_search_takes_keys(), "the chord found nothing");
+        harness.dispatch(composing("にほん", 0));
+        assert!(
+            !drawn(&harness.frame(), 'に').contains(&cursor),
+            "a word composed for the search box was drawn at the program's cursor"
+        );
+        // Nor does the pane claim the input method's list for the program.
+        // The box reports no caret either — a one-line field takes only the
+        // commit — so the window leaves the list where it last put it, which
+        // here is still beside the program's cursor, from before the chord.
+        assert_eq!(
+            None,
+            ime_area(&harness),
+            "the program's cursor claimed the list while the box has the keyboard"
+        );
+    }
+
+    #[test]
+    fn a_word_composed_where_a_command_reads_at_the_start_of_a_line_is_drawn_there() {
+        // `cat`, `bc`, `read`, a Python `input()` after a print: the command
+        // printed a whole line and reads at the start of the next one, a row
+        // the open block has printed nothing on yet. The word goes on that
+        // row all the same, and the input method's list beside it.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        await_prompt(&mut harness, pane);
+        harness.type_into(pane, "printf 'zq%sxv\\n' 7; read line\n");
+        harness.wait_for("the command never took the composer away", |harness| {
+            harness.terminal_text(pane).contains("zq7xv")
+                && composer_boxes(&harness.frame()).is_empty()
+        });
+        if !draws_blocks(&harness) {
+            return;
+        }
+        let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+        let scene = harness.frame();
+        // The start of the row under the printed line: the line's own start,
+        // which is the `z` drawn on the same row as the end of it, one row
+        // down.
+        let printed = drawn_after(&scene, "zq7xv").expect("the command drew its line");
+        let start = drawn(&scene, 'z')
+            .into_iter()
+            .find(|z| (z.y() - printed.y()).abs() < 0.01)
+            .expect("the line starts with a z");
+        let cursor = start + vec2f(0., cell.height);
+        let near = |a: Vector2F, b: Vector2F| (a - b).length() < 0.01;
+
+        harness.dispatch(composing("にほん", 0));
+        let composed = drawn(&harness.frame(), 'に');
+        assert!(
+            composed.len() == 1 && near(composed[0], cursor),
+            "the composition is not drawn at the start of the cursor's row: \
+             {composed:?}, not [{cursor:?}]"
+        );
+        let area = ime_area(&harness).expect("the list has nowhere to go");
+        let expected = cell_from(cursor);
+        assert!(
+            near(area.origin(), expected.origin()) && near(area.size(), expected.size()),
+            "the list is beside {area:?}, not the cursor's cell {expected:?}"
+        );
+        harness.settle(NO_LEAK_PATIENCE);
+        assert!(
+            !harness.terminal_text(pane).contains('に'),
+            "a word that was not committed reached the command"
+        );
+    }
+
+    #[test]
+    fn a_command_moving_its_cursor_back_up_into_its_output_does_not_move_the_output() {
+        // A display that redraws its last lines — `docker compose`, a
+        // package manager — rests at the start of the row under them, then
+        // goes back up with `\e[3A` to rewrite them. The open block takes the
+        // row under them for the cursor while it rests there, and has to keep
+        // it while the cursor is back inside the output: the list sits on its
+        // bottom, so giving the row back moves every line in the pane down
+        // one with nothing new printed, and taking it again moves them back.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        await_prompt(&mut harness, pane);
+        // No echo, so the line that answers the first `read` puts nothing on
+        // screen and leaves the cursor where the command put it.
+        harness.type_into(
+            pane,
+            "stty -echo; printf 'jq%sxv\\n' 1 2 3; read line; printf '\\033[3A'; read line\n",
+        );
+        harness.wait_for("the command never took the composer away", |harness| {
+            harness.terminal_text(pane).contains("jq3xv")
+                && composer_boxes(&harness.frame()).is_empty()
+        });
+        if !draws_blocks(&harness) {
+            return;
+        }
+        let cursor = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace.terminal(pane, app)?.1.cursor_cell
+            })
+        };
+        let (row, column) = cursor(&harness).expect("the cursor is on screen");
+        assert_eq!(0, column, "the command rests at the start of a row");
+        let rested = drawn_after(&harness.frame(), "jq1xv").expect("the command drew its lines");
+
+        harness.type_into(pane, "\n");
+        harness.wait_for("the cursor never went back up", |harness| {
+            cursor(harness) == Some((row - 3, 0))
+        });
+        assert_eq!(
+            Some(rested),
+            drawn_after(&harness.frame(), "jq1xv"),
+            "the output moved when only the cursor did"
+        );
+    }
+
     #[test]
     fn a_release_over_the_tabs_panel_still_ends_a_drag_in_the_field() {
         // The field's half of the grid's rule: the button can come up over a
@@ -35176,6 +35598,7 @@ mod changes_column {
             cells: Vec::new(),
             combining: Vec::new(),
             cursor: None,
+            cursor_cell: None,
             foreground: Rgb::new(0, 0, 0),
             background: Rgb::new(0, 0, 0),
             display_offset: 0,

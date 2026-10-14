@@ -661,9 +661,13 @@ Twenty-one features, and the page that configures them:
   up and down arrows, and multi-line commands with shift-enter. Enter sends the line to the
   shell, which echoes and runs it exactly as before. A full-screen program — vim, `top`,
   `less` — takes the whole keyboard back, and so does any command that has been running for
-  longer than a blink: the field goes away and its space goes to the block. `ctrl-c`, `ctrl-z`
-  and an end-of-input `ctrl-d` always reach the shell. That line is drawn in one function,
-  `app/src/input_keys.rs`, and the architecture doc's §7 says why it is drawn there.
+  longer than a blink: the field goes away and its space goes to the block. A word an input
+  method is composing for that program — Japanese, Chinese, Korean, a dead key's accent — is
+  then drawn underlined at the program's own cursor, even one it keeps hidden as Claude Code
+  does, with the candidate list beside it, and reaches the program only once it is committed.
+  `ctrl-c`, `ctrl-z` and an end-of-input `ctrl-d` always reach the shell. That line is drawn
+  in one function, `app/src/input_keys.rs`, and the architecture doc's §7 says why it is drawn
+  there.
 - **Option types on a non-US Mac.** In vim, Claude Code or any program holding the keyboard,
   Option is Meta (Esc in front of the key) except where your layout puts an ASCII symbol on it:
   German Option-L types `@` and Option-8 types `{`, British Option-3 types `#`, and US Option-F

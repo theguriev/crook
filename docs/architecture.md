@@ -2534,6 +2534,30 @@ rectangle travels back out to the window through `Proxy::set_ime_area`, so the c
 stands beside the text being composed; it has to come from the paint path, because where the
 caret is is the result of wrapping the line at the width the field was given.
 
+A pane with no composer — vim, `less`, Claude Code — composes into its program instead. The
+preedit is kept per pane in `PaneComposition`, while that pane's output has the whole keyboard,
+and drawn by `terminal_element::paint_composition` over the cells from the program's cursor,
+underlined, on the grid and on the list's open block alike; it is never written to the pty, and
+only the commit is. It is drawn where the cursor *is* rather than where it is shown: the
+snapshot carries `cursor_cell` beside `cursor`, because a program that draws its own caret hides
+the real one and parks it on the field it reads — Claude Code does — and a composition that
+waited for a visible cursor would never appear there. Where the input method's caret lands is
+written back the way the composer's is, and `Workspace::caret_rect` reads it whenever the
+output, not a composer, is listening. On the list the open block is laid out down to the
+cursor's row while no composer is drawn under it: a program reading at the start of a line —
+`cat`, `read`, a Python `input()` after a print — has its cursor one row past the last row it
+printed on, and that row is where its cursor and the composition are drawn. Once taken, the row
+is kept while it is still the one under the block's own rows (`PaneBlocks::live_reach` carries
+it from one layout to the next): a display that rests there and goes back up with `\e[3A` to
+redraw its last lines would otherwise move every line in the pane a row each time. A one-line
+field — the tab search box, a find bar, a plugin's field — takes an input method's commit but
+draws no composition and reports no caret, so while one has the keys the window leaves the
+candidate list where it last put it. A composition belongs to the keyboard: a commit or the
+input method giving up ends it, and so does focus moving, a menu, a find bar or a box beside
+the pane taking the keys, a section of the sidebar replacing the panes, the composer coming
+back, and the window going behind another. Whether the keyboard is a pane's is one predicate,
+`Workspace::pane_with_keys`, which the composers and the frame both ask.
+
 **The kitty keyboard protocol is in**, in `crook_terminal::input`. Alacritty's `Term` already
 maintained the mode stack behind a config flag that was off; turning it on and reading the
 five `TermMode` bits is the whole of the plumbing. What the encoder does with them is narrow

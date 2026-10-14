@@ -44,6 +44,32 @@ fn test_hiding_the_cursor_removes_it_from_the_snapshot() {
 }
 
 #[test]
+fn test_a_hidden_cursor_still_says_which_cell_it_is_in() {
+    // What a program that draws its own caret does — Claude Code hides the
+    // real cursor and parks it on the field it is reading — and the cell an
+    // input method composes at. Moving it while hidden is a change to draw.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b[?25lab\r\ncd");
+    let before = emulator.snapshot();
+    assert_eq!(None, before.cursor, "nothing to draw");
+    assert_eq!(Some((1, 2)), before.cursor_cell);
+
+    emulator.advance(b"\x1b[1;2H");
+    let after = emulator.snapshot();
+    assert_eq!(Some((0, 1)), after.cursor_cell);
+    assert!(
+        after.revision > before.revision,
+        "the move was not a change"
+    );
+
+    // Shown, the two agree.
+    emulator.advance(b"\x1b[?25h");
+    let shown = emulator.snapshot();
+    let cursor = shown.cursor.expect("the cursor is shown again");
+    assert_eq!(Some((cursor.row, cursor.column)), shown.cursor_cell);
+}
+
+#[test]
 fn test_an_sgr_colour_arrives_resolved() {
     let palette = Palette::default();
     let mut emulator = emulator();

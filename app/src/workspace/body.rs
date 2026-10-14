@@ -527,6 +527,24 @@ fn contents(
     } else {
         keys
     };
+    // An input method composes into the output only where the program has the
+    // whole keyboard and no composer is drawn to compose into instead. Said
+    // on every frame, because each of the ways out of that — a menu, a find
+    // bar, the composer coming back under a command that finished — is
+    // decided here and nowhere earlier, and a composition outliving it would
+    // come back drawn over the next program to take the screen.
+    //
+    // And only where the workspace says the keyboard is this pane's. `keys`
+    // above leaves a program every key while the tab search box, the Themes
+    // panel or a plugin's field is being typed into, and a word composed for
+    // the box would otherwise be drawn at the program's cursor, which would
+    // be reported as where the input method's list goes. The box reports no
+    // caret of its own, so the list stays where the window last put it.
+    if let Some(interaction) = workspace.interaction(id) {
+        interaction.composition.listen(
+            output_keys == Keys::All && !surface.composer && workspace.pane_with_keys() == Some(id),
+        );
+    }
     // The block the keyboard was standing on goes as the surface leaves the
     // list. A selection that outlived the list would keep Escape and the copy
     // chord away from the program that now owns the screen —
@@ -700,7 +718,8 @@ fn blocks(
                 interaction.selection.clone(),
                 workspace.clipboard().clone(),
             )
-            .with_links(interaction.links.clone());
+            .with_links(interaction.links.clone())
+            .with_composition(interaction.composition.clone());
     }
     let list = list.finish();
 
@@ -819,7 +838,8 @@ fn grid(
                 interaction.selection.clone(),
                 workspace.clipboard().clone(),
             )
-            .with_links(interaction.links.clone());
+            .with_links(interaction.links.clone())
+            .with_composition(interaction.composition.clone());
     }
     if let Some((showing, current)) = on_screen {
         grid = grid.with_find(showing, current);

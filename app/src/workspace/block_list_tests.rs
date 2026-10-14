@@ -84,7 +84,10 @@ fn the_open_block_is_the_rows_its_anchor_names_and_no_others() {
         "the finished block is above the open one, at rows the list must not draw"
     );
     assert_eq!(first, last, "one prompt row, and nothing under it yet");
-    assert_eq!(live_height(&snapshot, true), PADDING_TOP + 1.);
+    assert_eq!(
+        live_height(drawn_live_rows(&snapshot, true, None), true),
+        PADDING_TOP + 1.
+    );
 }
 
 #[test]
@@ -100,7 +103,10 @@ fn an_open_block_that_has_printed_nothing_takes_no_room_at_all() {
         None,
         "the block closed and the next one has printed nothing"
     );
-    assert_eq!(live_height(&snapshot, true), 0.);
+    assert_eq!(
+        live_height(drawn_live_rows(&snapshot, true, None), true),
+        0.
+    );
 }
 
 #[test]
@@ -113,12 +119,64 @@ fn the_open_block_of_a_shell_with_no_marks_is_the_whole_screen() {
     let snapshot = emulator.snapshot();
     let (first, last) = snapshot.live_rows().expect("something is on screen");
     assert_eq!((first, last), (0, 2));
-    assert_eq!(live_height(&snapshot, true), PADDING_TOP + 3.);
     assert_eq!(
-        live_height(&snapshot, false),
+        live_height(drawn_live_rows(&snapshot, true, None), true),
+        PADDING_TOP + 3.
+    );
+    assert_eq!(
+        live_height(drawn_live_rows(&snapshot, false, None), false),
         PADDING_TOP + 3. + RUNNING_PADDING_BOTTOM,
         "with no composer under it the block keeps its last row off the edge"
     );
+}
+
+#[test]
+fn the_row_a_running_program_s_cursor_took_is_kept_while_the_cursor_goes_back_up() {
+    // A display redrawing its last lines: printed, resting at the start of
+    // the row under them, then back up to rewrite them. The row under them
+    // stays laid out the whole time, or the pane moves with nothing printed.
+    let mut emulator = emulator();
+    emulator.advance(b"jq1xv\r\njq2xv\r\njq3xv\r\n");
+    let snapshot = emulator.snapshot();
+    assert_eq!(snapshot.live_rows(), Some((0, 2)));
+    assert_eq!(
+        drawn_live_rows(&snapshot, false, None),
+        Some((0, 3)),
+        "the row the cursor rests in is laid out"
+    );
+    assert_eq!(
+        drawn_live_rows(&snapshot, true, None),
+        Some((0, 2)),
+        "a composer's caret is where typing goes, and no row is taken"
+    );
+
+    emulator.advance(b"\x1b[3A");
+    let snapshot = emulator.snapshot();
+    assert_eq!(snapshot.live_rows(), Some((0, 2)), "nothing was printed");
+    assert_eq!(
+        drawn_live_rows(&snapshot, false, None),
+        Some((0, 2)),
+        "the cursor alone no longer asks for the row"
+    );
+    assert_eq!(
+        drawn_live_rows(&snapshot, false, Some(3)),
+        Some((0, 3)),
+        "the row the last layout gave the block was given back"
+    );
+    assert_eq!(drawn_live_rows(&snapshot, true, Some(3)), Some((0, 2)));
+
+    // Printed on, the row is the block's own, and no other one is taken.
+    emulator.advance(b"\x1b[3Bx");
+    let snapshot = emulator.snapshot();
+    assert_eq!(snapshot.live_rows(), Some((0, 3)));
+    assert_eq!(drawn_live_rows(&snapshot, false, Some(3)), Some((0, 3)));
+
+    // And erased, the block's own rows end higher up, and what is kept is
+    // the one row under them rather than the old bottom.
+    emulator.advance(b"\r\x1b[2A\x1b[J\x1b[A");
+    let snapshot = emulator.snapshot();
+    assert_eq!(snapshot.live_rows(), Some((0, 0)));
+    assert_eq!(drawn_live_rows(&snapshot, false, Some(3)), Some((0, 1)));
 }
 
 #[test]
@@ -285,7 +343,10 @@ fn a_shell_that_reports_nothing_keeps_the_composer_on_its_own_row() {
     // exactly as it was, with the composer under its last row.
     let snapshot = emulator.snapshot();
     assert_eq!(snapshot.live_rows(), Some((0, 0)));
-    assert_eq!(live_height(&snapshot, true), PADDING_TOP + 1.);
+    assert_eq!(
+        live_height(drawn_live_rows(&snapshot, true, None), true),
+        PADDING_TOP + 1.
+    );
 }
 
 #[test]

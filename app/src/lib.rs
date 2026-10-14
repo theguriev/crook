@@ -77,6 +77,7 @@ pub mod new_window;
 pub mod notify;
 pub mod order;
 pub mod pane_blocks;
+pub mod pane_composition;
 pub mod pane_find;
 pub mod pane_link;
 pub mod pane_selection;

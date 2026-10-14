@@ -44,6 +44,7 @@ fn snapshot(lines: &[&str], columns: usize) -> Snapshot {
         cells,
         combining: Vec::new(),
         cursor: None,
+        cursor_cell: None,
         foreground: INK,
         background: GROUND,
         display_offset: 0,
@@ -701,6 +702,158 @@ fn a_find_match_in_the_scrollback_is_drawn_against_the_line_it_is_on() {
     );
     scrolled.display_offset = 0;
     assert!(washes_in(&painted_found(&scrolled, vec![matched], None), amber).is_empty());
+}
+
+/// Paints `lines` and then `text` composed over them from `column` of the
+/// first row, with the input method's caret where `cursor` says, the way a
+/// grid with the keyboard does. Returns the scene and the cell the input
+/// method's caret was answered at.
+fn painted_composing(
+    lines: &[&str],
+    columns: usize,
+    column: usize,
+    composing: Option<(&str, Option<(usize, usize)>)>,
+) -> (Scene, RectF) {
+    let grid = snapshot(lines, columns);
+    let mut scene = paint(&grid, None, true);
+    let composition = PaneComposition::new();
+    if let Some((text, cursor)) = composing {
+        composition.set(text, cursor);
+    }
+    scene.start_layer(ClipBounds::None);
+    let caret = paint_composition(
+        composition.preedit().as_ref(),
+        CursorRow {
+            origin: Vector2F::zero(),
+            columns,
+            column,
+        },
+        (INK, GROUND),
+        &font(),
+        &mut scene,
+    );
+    scene.stop_layer();
+    (scene, caret)
+}
+
+#[test]
+fn a_composition_is_drawn_from_the_cursor_over_what_the_program_drew_and_underlined() {
+    let metrics = font().metrics();
+    let (scene, caret) = painted_composing(&["abcdef"], 8, 2, Some(("日x", Some((3, 3)))));
+
+    // In a layer over the grid's, which is the only way a ground can cover the
+    // program's glyphs: a layer draws all of its glyphs over all of its rects.
+    let layer = scene
+        .layers()
+        .last()
+        .expect("the composition has a layer of its own");
+    assert_eq!(
+        layer.clip_bounds,
+        Some(RectF::new(
+            Vector2F::zero(),
+            vec2f(metrics.width * 8., metrics.height)
+        )),
+        "and it is clipped to the cursor's row"
+    );
+    let drawn: Vec<_> = layer
+        .glyphs
+        .iter()
+        .map(|glyph| (glyph.glyph_key.glyph_id, glyph.position))
+        .collect();
+    assert_eq!(
+        drawn,
+        vec![
+            (u32::from('日'), vec2f(metrics.width * 2., metrics.baseline)),
+            // Two cells on, because the one before it is double width.
+            (u32::from('x'), vec2f(metrics.width * 4., metrics.baseline)),
+        ]
+    );
+
+    let ground = &layer.rects[0];
+    assert_eq!(ground.background, Fill::Solid(color(GROUND)));
+    assert_eq!(
+        ground.bounds,
+        RectF::new(
+            vec2f(metrics.width * 2., 0.),
+            vec2f(metrics.width * 3., metrics.height)
+        ),
+        "the ground covers the three cells the composition takes"
+    );
+    let underline = &layer.rects[1];
+    assert_eq!(underline.background, Fill::Solid(color(INK)));
+    assert!(
+        underline.bounds.min_y() > metrics.baseline,
+        "the rule is under the text"
+    );
+    assert_eq!(underline.bounds.min_x(), metrics.width * 2.);
+    assert_eq!(underline.bounds.width(), metrics.width * 3.);
+    let beam = &layer.rects[2];
+    assert_eq!(
+        beam.bounds,
+        RectF::new(
+            vec2f(metrics.width * 4., 0.),
+            vec2f(CURSOR_STROKE, metrics.height)
+        ),
+        "the input method's caret stands in front of the `x`"
+    );
+
+    assert_eq!(
+        caret,
+        RectF::new(
+            vec2f(metrics.width * 4., 0.),
+            vec2f(metrics.width, metrics.height)
+        ),
+        "and that is the cell the input method is told about"
+    );
+}
+
+#[test]
+fn with_nothing_composed_the_cursor_cell_is_answered_and_nothing_is_drawn() {
+    let metrics = font().metrics();
+    let (scene, caret) = painted_composing(&["abcdef"], 8, 3, None);
+    let (abandoned, _) = painted_composing(&["abcdef"], 8, 3, Some(("", None)));
+
+    assert_eq!(
+        scene.layer_count(),
+        abandoned.layer_count(),
+        "an empty composition is none"
+    );
+    assert_eq!(
+        glyphs(&scene).len(),
+        6,
+        "the program's line, and nothing else"
+    );
+    assert_eq!(
+        caret,
+        RectF::new(
+            vec2f(metrics.width * 3., 0.),
+            vec2f(metrics.width, metrics.height)
+        )
+    );
+}
+
+#[test]
+fn a_composition_at_the_end_of_a_row_is_drawn_back_from_it_rather_than_cut_off() {
+    let metrics = font().metrics();
+    let (scene, caret) = painted_composing(&["abcdef"], 6, 5, Some(("日本", None)));
+    let layer = scene.layers().last().expect("a layer of its own");
+
+    let columns: Vec<_> = layer
+        .glyphs
+        .iter()
+        .map(|glyph| glyph.position.x() / metrics.width)
+        .collect();
+    assert_eq!(columns, vec![2., 4.], "the whole word, ending at the edge");
+    assert_eq!(
+        layer.rects.len(),
+        2,
+        "a ground and a rule, and no caret: the input method asked for none"
+    );
+    assert_eq!(
+        caret.min_x(),
+        metrics.width * 5.,
+        "a caret past the edge is answered at the last cell"
+    );
 }
 
 #[test]

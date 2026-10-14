@@ -13,6 +13,7 @@ fn snapshot(live_block: LiveBlock, alt_screen: bool) -> Snapshot {
         cells: Vec::new(),
         combining: Vec::new(),
         cursor: None,
+        cursor_cell: None,
         foreground: Rgb::new(0, 0, 0),
         background: Rgb::new(0, 0, 0),
         display_offset: 0,
