@@ -178,6 +178,13 @@ const CARRY_STEPS: u32 = 12;
 /// How long the headless `--run` sleeps between pumps while it waits.
 const RUN_POLL: Duration = Duration::from_millis(10);
 
+/// The longest a snapshot waits for the pictures in it to be decoded.
+///
+/// Long, because a snapshot taken with a decode still out shows a faint frame
+/// where the picture should be; and one decode is tens of milliseconds, so
+/// nothing that lands at all comes near it.
+const PICTURE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Which build of Crook this is.
 ///
 /// Channels exist so a development build and a shipped one can be installed
@@ -2562,7 +2569,22 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
         frame(&mut app, &mut presenter);
     }
 
-    let scene = frame(&mut app, &mut presenter);
+    // A picture a program printed is decoded on a pool, and the frame that
+    // meets it draws only the room it will take; a window is woken for the
+    // next one when the decode lands, and this has no window to wake. So it
+    // waits for the decodes the last frame started and draws once more, as
+    // often as that frame starts more — which only a picture landing at a
+    // size the frame no longer draws it at would do.
+    let mut scene = frame(&mut app, &mut presenter);
+    let deadline = Instant::now() + PICTURE_TIMEOUT;
+    while inline_image::decoding() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if !inline_image::settle(left) {
+            log::warn!("a picture had not been decoded within {PICTURE_TIMEOUT:?}");
+            break;
+        }
+        scene = frame(&mut app, &mut presenter);
+    }
 
     let (pixels, width, height) =
         render_scene_to_rgba(&scene, size, &font_db).context("failed to render the frame")?;
@@ -4041,6 +4063,10 @@ impl Shell {
         // or the update above changed, so this call already runs it once and
         // names the window.
         let beacon = Beacon::new(launch.overrides.window_name(launch.channel), proxy.clone());
+        // And a picture a program printed, decoded on a pool of its own: the
+        // frame that met it drew its room, and the one after draws it.
+        let landed = proxy.clone();
+        inline_image::wake_with(move || landed.request_redraw());
         let redraw = proxy.clone();
         app.on_window_invalidated(
             window_id,
@@ -4392,6 +4418,10 @@ impl WindowDelegate for Shell {
     }
 
     fn frame_drawn(&mut self) {
+        // Every frame, and not only one that draws a picture: the pane a
+        // screen of them was printed in may have just closed, and then no
+        // frame will draw one again to notice.
+        inline_image::forget_the_gone();
         if self.start_expected_terminals() {
             // The shells opened after a frame that had none: the next frame
             // is the first with a field to type into, and it is asked for

@@ -166,3 +166,21 @@ fn a_preview_is_kept_to_a_thousand_pixels_on_its_long_edge() {
     let kept = decode_preview(&preview_png(800, 600)).expect("it decodes");
     assert_eq!(kept.size(), (800, 600));
 }
+
+#[test]
+fn a_picture_decoded_at_a_size_comes_out_that_size_whichever_way_it_is_resampled() {
+    // A 2000-pixel screenshot in a few cells, and an icon in a dozen of them.
+    let shrunk = decode_at(&preview_png(2000, 1000), Limits::PREVIEW, (200, 100)).expect("decodes");
+    assert_eq!(shrunk.size(), (200, 100));
+
+    let grown = decode_at(&icon_png(16), Limits::PREVIEW, (48, 48)).expect("decodes");
+    assert_eq!(grown.size(), (48, 48));
+    assert_eq!(&grown.canvas().pixels[..4], &[200, 100, 50, 255]);
+
+    let kept = decode_at(&preview_png(64, 32), Limits::PREVIEW, (64, 32)).expect("decodes");
+    assert_eq!(kept.size(), (64, 32));
+
+    let refusal =
+        decode_at(b"GIF89a....", Limits::PREVIEW, (10, 10)).expect_err("not a PNG either way");
+    assert!(refusal.contains("is not a PNG"), "{refusal}");
+}

@@ -20436,6 +20436,13 @@ mod shells {
                 .unwrap_or_default();
             assert_eq!(held, 1, "the block keeps the picture it printed");
 
+            // The frame that meets it hands it to the pool, and the one its
+            // decode asks for once it lands draws it.
+            harness.frame();
+            assert!(
+                crate::inline_image::settle(std::time::Duration::from_secs(60)),
+                "the picture was never decoded"
+            );
             let scene = harness.frame();
             let drawn: Vec<RectF> = scene
                 .layers()

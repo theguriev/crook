@@ -25,17 +25,38 @@
 //! rule a press is: the topmost layer with something at the point decides, so
 //! a menu over the output takes the I-beam away for the same reason it takes
 //! the click.
+//!
+//! Every scene is one frame, and says which with its [`FrameId`]: something
+//! painted into frame after frame — a cache of decoded pictures, say — can
+//! tell what this frame has already drawn from what only the last one did.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::fonts::{FontId, GlyphId, GlyphKey};
 use crate::geometry::{Color, Point, RectF, Vector2F, ZIndex};
 use crate::icons::IconKey;
 use crate::image::Bitmap;
 
+/// Which frame a [`Scene`] is.
+///
+/// Minted from a counter when the scene is made and never reused, so a later
+/// frame always has a larger id than an earlier one — on any thread, since
+/// the counter is the process's. A clone of a scene is the same frame.
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
+pub struct FrameId(u64);
+
+impl FrameId {
+    fn next() -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 /// One frame's worth of draw commands.
 #[derive(Clone)]
 pub struct Scene {
+    frame: FrameId,
     scale_factor: f32,
     active_layer_index_stack: Vec<ZIndex>,
     layers: Vec<Layer>,
@@ -612,6 +633,7 @@ impl Scene {
     /// An empty scene with one unclipped root layer.
     pub fn new(scale_factor: f32) -> Self {
         Self {
+            frame: FrameId::next(),
             scale_factor,
             active_layer_index_stack: vec![ZIndex::Normal(0)],
             layers: vec![Layer::default()],
@@ -623,6 +645,11 @@ impl Scene {
     /// multiplies every coordinate by it.
     pub fn scale_factor(&self) -> f32 {
         self.scale_factor
+    }
+
+    /// Which frame this is.
+    pub fn frame(&self) -> FrameId {
+        self.frame
     }
 
     /// The layer currently being painted into.
@@ -1235,5 +1262,14 @@ mod tests {
 
         assert_eq!(scene.pointer_at(vec2f(3., 5.)), PointerShape::Text);
         assert_eq!(scene.pointer_at(vec2f(8., 5.)), PointerShape::Arrow);
+    }
+
+    #[test]
+    fn every_scene_is_a_later_frame_than_the_one_before_and_a_clone_is_the_same_one() {
+        let first = Scene::new(1.);
+        let second = Scene::new(2.);
+
+        assert!(second.frame() > first.frame());
+        assert_eq!(second.clone().frame(), second.frame());
     }
 }
