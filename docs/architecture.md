@@ -1501,9 +1501,9 @@ so a program that has not asked is refused rather than handed a review a line at
 pane is the one in the tab whose agent has reported (`StatusSource::Agent`, or for one with no
 hooks its title: `Title`, `TitleAtStart` for what it wears before its first turn: Claude
 Code's `✳`, Gemini CLI's `◇`, codex's bare folder, and `TitleStoppedAsking` after a question its
-title asked), whose shell is not listening, and which
-works in the reviewed repository, else the focused one; a pane
-whose shell is listening is refused, because a review's quoted lines are commands there (bash
+title asked), whose shell is not listening, and which works in the reviewed repository, else the
+focused one; a pane whose shell is listening is refused, because a review's quoted lines are
+commands there (bash
 5.3 turns bracketed paste on at its prompt, so the whole review would sit in its line editor one
 Enter from running), and `> +x` is a redirection that writes a file into the tree this column
 promises not to touch. Whether it is listening (`a_shell_is_listening`) is the shell's word
@@ -2029,8 +2029,9 @@ answer is meant to be read runs headless.
 **`events.follow`** answers `{panes}`, what it follows as of now, then one line per event until
 the client hangs up: `status` (only when the status or the message changed — an agent reports
 `running` around every tool it calls — and never an idle `pane.wait` would not take, so a
-question a title stopped asking is not told as a turn that ended), `started`, `finished` with the command line, exit and
-duration, `opened` for a tab the caller opens later, `closed`, and `lagged`. `started` is read
+question a title stopped asking is not told as a turn that ended), `started`, `finished` with
+the command line, exit and duration, `opened` for a tab the caller opens later, `closed`, and
+`lagged`. `started` is read
 off a frame the pane's terminal published, since there is no event for a command running: one
 that starts and ends between two frames — `true`, `git status` — is never seen running, and its
 `finished` is what names it. With `pane` it follows that one pane,
