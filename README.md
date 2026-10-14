@@ -875,8 +875,8 @@ Twenty-one features, and the page that configures them:
   afresh each time the page is shown, and not offered on Windows, which has no such setting.
   The type size is also on `cmd/ctrl-plus`, `-minus` and `-0`, and every pane resizes with it:
   a pane's columns and rows are its box divided by a cell, so the ptys follow.
-  There is no shell under it, and nothing on it is typed but the search below: every control
-  on it is a click.
+  There is no shell under it, and nothing on it takes the keyboard but the search below and a
+  chord being recorded on Keyboard Shortcuts: every other control on it is a click.
 
   At the top of its rail is a **search box**, and it narrows both halves of the page at once:
   the rail keeps only the pages that hold an answer and says how many each of them holds, and
