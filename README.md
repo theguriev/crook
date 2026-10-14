@@ -158,9 +158,10 @@ downloads is quarantined, which is why that path never needed the dialog in the 
 
 **`crook` on the command line.** Nothing in an app bundle is on `PATH`, so in its own panes Crook
 puts itself there: when no `crook` answers in a pane, its `PATH` ends with
-`Crook.app/Contents/MacOS`, and every `crook …` line below works in a pane as written. It goes
-last, so it never stands in front of a `crook` of your own. For other terminals, link it once into
-a directory on your `PATH`:
+`Crook.app/Contents/MacOS`, so the `crook …` lines below work in a pane as written. It goes last,
+so it never stands in front of a `crook` of your own. A startup file that sets `PATH` outright and
+then starts another shell or tmux in its own place can still drop it, and `"$CROOK_BIN"` is the
+same command there. For other terminals, link it once into a directory on your `PATH`:
 `ln -s /Applications/Crook.app/Contents/MacOS/crook /usr/local/bin/crook`, with `sudo` if that
 directory is not yours.
 
@@ -679,12 +680,13 @@ Twenty features, and the page that configures them:
   pane is asking. `CROOK_BIN` is beside them: the absolute path of the `crook` binary the pane
   belongs to, so a hook can call it from a `PATH` it is not on — a Crook.app nobody linked, a
   build under `target/`. And `crook` itself is on the pane's `PATH`: when no `crook` answers
-  there, that binary's directory goes at the end — never the front, so it shadows nothing. The
-  zsh, bash and fish integration adds it after your own startup files have run, so one that sets
-  `PATH` outright cannot drop it, and one that adds `~/.local/bin` only when it is missing still
-  puts that first. A shell with no integration is handed it in the environment it starts with,
-  unless the directory is a `bin` in your home, which your own files place, and keeps whatever
-  its files leave; Windows panes keep the `PATH` the registry gives them. Every pane also has
+  there, that binary's directory goes at the end — never the front, so it shadows nothing. Every
+  shell is handed it in the environment it starts with, which a startup file that execs fish or
+  starts tmux passes on, unless the directory is a `bin` in your home: your own files place that
+  one, and one that adds `~/.local/bin` only when it is missing has to find it missing to put it
+  first. The zsh, bash and fish integration adds it again after your startup files have run, so
+  one that sets `PATH` outright cannot drop it, and neither can an older copy of the snippet
+  pasted into them. Windows panes keep the `PATH` the registry gives them. Every pane also has
   `CLAUDE_CODE_FORCE_STRIKETHROUGH=1`: Claude Code strikes `~~deleted~~` text through only in
   terminals it knows by name and prints the tildes everywhere else, and Crook draws it.
 

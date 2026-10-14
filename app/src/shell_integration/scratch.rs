@@ -297,34 +297,28 @@ impl Session {
         // The binary beside it for the second half of that reason: it reaches
         // every session from here, and the planners stay functions of what
         // they are handed rather than of the process they run in.
-        if let Some(binary) = running_binary() {
+        if let Some(binary) = host.binary.as_deref().and_then(Path::to_str) {
             environment.push((BIN_VARIABLE.to_owned(), binary.to_owned()));
         }
-        // And reachable as `crook`, which is what a person types. A shell
-        // with the integration is not given it here: its snippet adds the
-        // directory after the person's own startup files have run, which
-        // both survives a file that assigns `PATH` outright and keeps a
-        // directory out of the `PATH` those files start from — where a
-        // `case ":$PATH:"` guard in them would find it and skip putting it
-        // first. Every other shell gets it in its environment, from the
-        // `PATH` the host was read with, so a test can say what a pane
-        // inherits.
+        // And reachable as `crook`, which is what a person types: in the
+        // environment every shell starts with, marked or not, since that is
+        // what a startup file that execs something else — `exec fish` in a
+        // .bashrc, a .zshrc that starts tmux — hands on, and a snippet
+        // sourced after that file never runs. The snippets add it again
+        // after the person's files, for one that assigns `PATH` outright,
+        // and `path_reaching` keeps a `bin` in the home out of here, where a
+        // guard in those files would find it and leave it last. From the
+        // `PATH` and binary the host was read with, so a test can say what a
+        // pane inherits.
         #[cfg(unix)]
-        if scratch.is_none()
-            && let Some(path) =
-                host.path
-                    .as_deref()
-                    .zip(running_binary())
-                    .and_then(|(inherited, binary)| {
-                        path_reaching(inherited, Path::new(binary), host.home.as_deref())
-                    })
+        if let Some(path) = host
+            .path
+            .as_deref()
+            .zip(host.binary.as_deref())
+            .and_then(|(inherited, binary)| path_reaching(inherited, binary, host.home.as_deref()))
         {
             environment.push(("PATH".to_owned(), path));
         }
-        // Unread on Windows, where the pty builds a child's PATH out of the
-        // registry; `path_reaching` says why that is left alone.
-        #[cfg(not(unix))]
-        let _ = host;
         // Claude Code draws ~~deleted~~ text struck through only in the
         // terminals on a list of names it keeps, and prints the tildes
         // everywhere else. Crook draws SGR 9 and is not on the list, and this
@@ -395,19 +389,19 @@ pub(crate) fn running_binary() -> Option<&'static str> {
     BINARY.as_deref()
 }
 
-/// The `PATH` a shell without the integration is given so that `crook`
-/// there runs `binary`, or `None` when the one it inherits needs nothing
-/// added — or should not be added to.
+/// The `PATH` a shell is started with so that `crook` there runs `binary`,
+/// or `None` when the one it inherits needs nothing added — or should not
+/// be added to.
 ///
 /// A Crook.app dragged out of the disk image is on nobody's `PATH`: macOS
 /// never puts an app bundle's `Contents/MacOS` there, and the same is true
 /// of a tarball unpacked anywhere `script/install` did not put it and of a
 /// build under `target/`. Without this, every `crook pane list` and `crook
 /// tab new` a person was told to type in a pane answered "command not
-/// found" in Crook's own panes. A shell with the integration gets the same
-/// from its snippet instead, after its startup files — see
-/// [`Session`]'s constructor — by the same rule less the `bin`-in-the-home
-/// exception below, which only a `PATH` those files start from needs.
+/// found" in Crook's own panes. A shell with the integration has its
+/// snippet add the same again after its startup files — see [`Session`]'s
+/// constructor — by the same rule less the `bin`-in-the-home exception
+/// below, which only a `PATH` those files start from needs.
 ///
 /// The rule: nothing is added when the binary's own directory is on `PATH`
 /// already, or when any `crook` answers there at all — this binary by
@@ -418,8 +412,8 @@ pub(crate) fn running_binary() -> Option<&'static str> {
 /// Last is also what survives macOS's `path_helper`, which a login shell
 /// runs from `/etc/zprofile` and `/etc/profile`: it rebuilds `PATH` out of
 /// `/etc/paths` and keeps every entry it was handed after those. A startup
-/// file that assigns `PATH` outright drops it, and a shell with no
-/// integration has nothing to put it back.
+/// file that assigns `PATH` outright drops it, and only a shell with the
+/// integration has something to put it back.
 ///
 /// Nor is a `bin` directory inside `home` added — `~/.local/bin`, where
 /// `script/install` puts Crook by default, `~/bin`, `~/.cargo/bin`. Those are

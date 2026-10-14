@@ -14,6 +14,20 @@ case $- in
 	*) return 0 ;;
 esac
 
+# `crook`, for the commands Crook's documentation gives, once your own files
+# have had their say about PATH: Crook sources this after them. The shell
+# started with the directory at the end of PATH already, unless it is a `bin`
+# in your home, which is your own files' to place; this puts it back after a
+# file that assigned PATH outright. Only when no `crook` answers at all, and at
+# the end: a crook of your own is yours to run, and $CROOK_BIN is the pane's
+# either way. Not when the directory holds a `:`, which a PATH would read as
+# two directories. Above the guard, because a copy of this file pasted into
+# ~/.bashrc before these lines existed sets it and does none of this; running
+# twice is harmless, since once `crook` answers this adds nothing.
+if [[ ${CROOK_BIN-} == /?*/* && ${CROOK_BIN%/*} != *:* && -x $CROOK_BIN ]] && ! type -P crook >/dev/null; then
+	PATH=${PATH:+$PATH:}${CROOK_BIN%/*}
+fi
+
 # Deliberately not exported. Sourcing this twice in one shell must not install
 # the hooks twice; `exec bash` replaces the shell with one that has no hooks at
 # all, and an exported guard would tell that new shell the work was already
@@ -325,16 +339,4 @@ else
 		unset __crook_prior_prompt_command
 	fi
 	unset __crook_array_prompt_command
-fi
-
-# `crook`, for the commands Crook's documentation gives, once your own files
-# have had their say about PATH. Here and not in the environment the shell
-# starts with: a startup file that assigns PATH outright would drop it from
-# there, and one that adds a directory only when it is missing would find it
-# there, at the end, and leave it at the end. Only when no `crook` answers at
-# all, and at the end: a crook of your own is yours to run, and $CROOK_BIN is
-# the pane's either way. Not when the directory holds a `:`, which a PATH
-# would read as two directories.
-if [[ ${CROOK_BIN-} == /?*/* && ${CROOK_BIN%/*} != *:* && -x $CROOK_BIN ]] && ! type -P crook >/dev/null; then
-	PATH=${PATH:+$PATH:}${CROOK_BIN%/*}
 fi

@@ -858,17 +858,19 @@ in whatever `PATH` its agent was started with, where a Crook.app nobody linked i
 Linux a binary an upgrade has replaced reads its own path back as `… (deleted)`. The same binary
 is what a person types `crook` for, so when no `crook` answers on a pane's `PATH`, its directory
 is appended there — appended, so it stands in front of nothing, and only then, since behind a
-`crook` of the person's own it would change nothing. A shell with the integration gets that from
-its snippet, after the person's startup files have run — fish's at the first prompt, since
-`vendor_conf.d` is read before `config.fish` — and nothing in its environment: a startup file
-that assigns `PATH` outright would drop an entry from there, and one that adds a directory only
-when it is missing (uv's `~/.local/bin/env`, rustup's `~/.cargo/env`) would find it there, at the
-end, and leave it behind `/usr/bin`. Any other shell is handed the appended `PATH` in its
-environment, which macOS's `path_helper` — it rebuilds `PATH` from `/etc/paths` and keeps what it
-was handed after that — keeps too; but not when the directory is a `bin` inside the home, which
-is the person's own files' to place. Not on Windows: `portable-pty` builds a Windows child's
-`PATH` out of the registry rather than this process's, and a `PATH` written from the process's
-own would replace that. `CLAUDE_CODE_FORCE_STRIKETHROUGH=1` is set beside it: Claude Code strikes `~~deleted~~`
+`crook` of the person's own it would change nothing. Every shell is handed the appended `PATH` in
+its environment, the one thing a startup file that execs another shell or tmux passes on, and
+macOS's `path_helper` — it rebuilds `PATH` from `/etc/paths` and keeps what it was handed after
+that — keeps it too; but not when the directory is a `bin` inside the home, which is the person's
+own files' to place: one that adds a directory only when it is missing (uv's `~/.local/bin/env`,
+rustup's `~/.cargo/env`) would find it there, at the end, and leave it behind `/usr/bin`. A shell
+with the integration gets it again from its snippet, after the person's startup files have run —
+fish's at the first prompt, since `vendor_conf.d` is read before `config.fish` — so a file that
+assigns `PATH` outright cannot drop it. In bash and zsh that line sits above the snippet's guard,
+which a copy pasted into the person's own rc file before the line existed sets first. Not on
+Windows: `portable-pty` builds a Windows child's `PATH` out of the registry rather than this
+process's, and a `PATH` written from the process's own would replace that.
+`CLAUDE_CODE_FORCE_STRIKETHROUGH=1` is set beside it: Claude Code strikes `~~deleted~~`
 text through only in terminals it names, and prints the tildes in the rest. A program that
 asks the terminal rather than its environment, with XTVERSION (`CSI > q`), is told the same
 name and version, as `Crook <version>`, which reaches it through ssh and sudo where the

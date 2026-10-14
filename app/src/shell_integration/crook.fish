@@ -89,15 +89,16 @@ and begin
     bind --mode insert \e\[6339~ __crook_complete 2>/dev/null
 
     # `crook`, for the commands Crook's documentation gives, once your own
-    # files have had their say about PATH. Here and not in the environment the
-    # shell starts with: a config.fish that sets PATH outright would drop it
-    # from there, and one that adds a directory only when it is missing would
-    # find it there, at the end, and leave it at the end. Deferred to the
-    # first prompt for the reason the prompt marks below are: this is read
-    # before config.fish. Only when no `crook` answers at all, and at the end:
-    # a crook of your own is yours to run, and $CROOK_BIN is the pane's either
-    # way. Not when the directory holds a `:`, which a PATH would read as two
-    # directories.
+    # files have had their say about PATH. The shell started with the
+    # directory at the end of PATH already, unless it is a `bin` in your home,
+    # which is your own files' to place; this puts it back after a config.fish
+    # that set PATH outright. Deferred to the first prompt for the reason the
+    # prompt marks below are: this is read before config.fish — and so before
+    # a copy of this file pasted at its end, which is why it can sit behind
+    # the guard here and not in the bash and zsh files. Only when no `crook`
+    # answers at all, and at the end: a crook of your own is yours to run, and
+    # $CROOK_BIN is the pane's either way. Not when the directory holds a `:`,
+    # which a PATH would read as two directories.
     function __crook_find_crook --on-event fish_prompt
         functions --erase __crook_find_crook
         # A regex rather than a glob: fish 4 no longer reads `?` as one.

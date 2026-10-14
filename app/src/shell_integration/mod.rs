@@ -86,13 +86,16 @@
 //! it `crook`: when no `crook` answers on the pane's `PATH`, that binary's
 //! directory goes at the end of it, behind everything else, and only then —
 //! nothing is put in front of a `crook` of the person's own, or behind it
-//! where it would change nothing. zsh, bash and fish with the integration get
-//! it from their snippet, after the person's startup files have run, so a
-//! file that assigns `PATH` outright cannot drop it and a file that adds a
-//! directory only when it is missing never sees it. Any other shell gets it
-//! in the environment it starts with, unless the directory is a `bin` inside
-//! the home, which the person's own files place. Not on Windows, where the
-//! pty assembles a child's `PATH` from the registry; `scratch` says more.
+//! where it would change nothing. Every shell gets it in the environment it
+//! starts with, which a startup file that execs another shell or tmux
+//! passes on, unless the directory is a `bin` inside the home: the person's
+//! own files place that one, and a file that adds it only when it is missing
+//! would find it at the end and leave it there. zsh, bash and fish with the
+//! integration get it again from their snippet, after the person's startup
+//! files have run, so a file that assigns `PATH` outright cannot drop it —
+//! above the snippet's guard, so a copy pasted into those files before this
+//! existed cannot skip it either. Not on Windows, where the pty assembles a
+//! child's `PATH` from the registry; `scratch` says more.
 //!
 //! [`CLAUDE_STRIKETHROUGH_VARIABLE`] goes beside them, for Claude Code, which
 //! otherwise prints `~~deleted~~` text with its tildes in a terminal it does
