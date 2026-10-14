@@ -2532,8 +2532,10 @@ cursor's row while no composer is drawn under it: a program reading at the start
 `cat`, `read`, a Python `input()` after a print — has its cursor one row past the last row it
 printed on, and that row is where its cursor and the composition are drawn. A composition
 belongs to the keyboard: a commit or the input method giving up ends it, and so does focus
-moving, a menu or a find bar taking the keys, the composer coming back, and the window going
-behind another.
+moving, a menu, a find bar or a box beside the pane taking the keys, a section of the sidebar
+replacing the panes, the composer coming back, and the window going behind another. Whether
+the keyboard is a pane's is one predicate, `Workspace::pane_with_keys`, which the composers and
+the frame both ask.
 
 **The kitty keyboard protocol is in**, in `crook_terminal::input`. Alacritty's `Term` already
 maintained the mode stack behind a config flag that was off; turning it on and reading the

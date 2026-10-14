@@ -18345,6 +18345,43 @@ mod shells {
             !shown(&mut harness),
             "the word outlived the window's keyboard"
         );
+
+        // And a section of the sidebar taking the pane's place. The pane is
+        // not drawn while it is up, so whatever the input method does with
+        // the word in the meantime never reaches it.
+        harness.dispatch(composing("にほん", 0));
+        assert!(shown(&mut harness));
+        harness.open_settings_page();
+        harness.show_tabs();
+        assert!(
+            !shown(&mut harness),
+            "the word came back with the tabs from a section"
+        );
+    }
+
+    #[test]
+    fn a_word_composed_into_the_tab_search_box_is_not_drawn_over_the_program() {
+        // The box beside the pane has the keyboard, and the program in the
+        // pane keeps drawing its cursor all the same: the word is the box's,
+        // and so is the input method's list.
+        let mut harness = Harness::panel(1);
+        if reading_on_the_whole_screen(&mut harness).is_none() {
+            return;
+        }
+        let cursor = drawn_after(&harness.frame(), "zq7xv").expect("the program drew its line");
+
+        harness.press_search_chord();
+        assert!(harness.panel_search_takes_keys(), "the chord found nothing");
+        harness.dispatch(composing("にほん", 0));
+        assert!(
+            !drawn(&harness.frame(), 'に').contains(&cursor),
+            "a word composed for the search box was drawn at the program's cursor"
+        );
+        assert_ne!(
+            Some(cell_from(cursor)),
+            ime_area(&harness),
+            "the list for the search box went beside the program's cursor"
+        );
     }
 
     #[test]

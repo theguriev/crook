@@ -10299,6 +10299,33 @@ impl Workspace {
         }
     }
 
+    /// The pane typing goes to, when it goes to one: the focused pane, unless
+    /// something else in the window has taken the keyboard from it.
+    ///
+    /// What [`Self::sync_input_keys`] tells the composers, and what the frame
+    /// asks before an input method composes into a program instead of into a
+    /// composer, so the two cannot disagree about where a word goes. A
+    /// plugin's field counts as of the last sync, which is when the fields
+    /// are told whether they have the keyboard.
+    pub(super) fn pane_with_keys(&self) -> Option<PaneId> {
+        self.pane_with_keys_given(self.host.a_field_has_keys())
+    }
+
+    /// [`Self::pane_with_keys`], given whether a plugin's field has the
+    /// keyboard. See [`Self::sync_input_keys`] for why each of the others
+    /// takes it.
+    fn pane_with_keys_given(&self, a_field_has_keys: bool) -> Option<PaneId> {
+        (!self.a_popup_is_open()
+            && !self.panel.open
+            && !self.host.a_surface_is_up()
+            && !self.search_takes_keys()
+            && !self.find_takes_keys()
+            && !a_field_has_keys
+            && !self.changes_takes_keys())
+        .then(|| self.tabs.focused_pane_id())
+        .flatten()
+    }
+
     /// Tells every field whether the keyboard is its.
     ///
     /// Called wherever focus could have moved — a pane focused, closed or
@@ -10341,26 +10368,23 @@ impl Workspace {
         // comment about an agent's work is not typing to the agent.
         let comment_has_keys = self.changes_takes_keys();
         self.changes.set_draft_keys(comment_has_keys);
-        let listening = (!self.a_popup_is_open()
-            && !self.panel.open
-            && !self.host.a_surface_is_up()
-            && !self.search_takes_keys()
-            && !find_has_keys
-            && !a_field_has_keys
-            && !comment_has_keys)
-            .then(|| self.tabs.focused_pane_id())
-            .flatten();
+        let listening = self.pane_with_keys_given(a_field_has_keys);
         for (id, input) in &self.inputs {
             input.set_has_keys(Some(*id) == listening);
         }
         // A composition belongs to the keyboard as well, and goes with it: one
         // left in a pane the focus has moved away from — another pane, another
-        // tab, a menu — would be drawn again the next time that pane had the
-        // keys, over whatever its program had drawn since. Whether the pane
-        // that does have them composes into its program or into its composer
-        // is the frame's to say: see `body::contents`.
+        // tab, a menu, a box beside it — would be drawn again the next time
+        // that pane had the keys, over whatever its program had drawn since.
+        // So does one in a pane a section of the sidebar has replaced: the
+        // pane is not drawn, so it hears nothing an input method says while
+        // the section is up, and the word it was drawing is gone by the time
+        // the tabs come back. Whether the pane that does have them composes
+        // into its program or into its composer is the frame's to say: see
+        // `body::contents`.
+        let composing = listening.filter(|_| self.showing_section().is_none());
         for (id, interaction) in &self.interactions {
-            if Some(*id) != listening {
+            if Some(*id) != composing {
                 interaction.composition.listen(false);
             }
         }

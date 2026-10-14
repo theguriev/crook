@@ -658,8 +658,9 @@ Twenty-one features, and the page that configures them:
   method is composing for that program — Japanese, Chinese, Korean, a dead key's accent — is
   then drawn underlined at the program's own cursor, even one it keeps hidden as Claude Code
   does, with the candidate list beside it, and reaches the program only once it is committed.
-  `ctrl-c`, `ctrl-z` and an end-of-input `ctrl-d` always reach the shell. That line is drawn in one function,
-  `app/src/input_keys.rs`, and the architecture doc's §7 says why it is drawn there.
+  `ctrl-c`, `ctrl-z` and an end-of-input `ctrl-d` always reach the shell. That line is drawn
+  in one function, `app/src/input_keys.rs`, and the architecture doc's §7 says why it is drawn
+  there.
 - **Option types on a non-US Mac.** In vim, Claude Code or any program holding the keyboard,
   Option is Meta (Esc in front of the key) except where your layout puts an ASCII symbol on it:
   German Option-L types `@` and Option-8 types `{`, British Option-3 types `#`, and US Option-F

@@ -531,10 +531,16 @@ fn contents(
     // bar, the composer coming back under a command that finished — is
     // decided here and nowhere earlier, and a composition outliving it would
     // come back drawn over the next program to take the screen.
+    //
+    // And only where the workspace says the keyboard is this pane's. `keys`
+    // above leaves a program every key while the tab search box, the Themes
+    // panel or a plugin's field is being typed into, and a word composed for
+    // the box would otherwise be drawn at the program's cursor, with the
+    // input method's list beside it rather than beside the box.
     if let Some(interaction) = workspace.interaction(id) {
-        interaction
-            .composition
-            .listen(output_keys == Keys::All && !surface.composer);
+        interaction.composition.listen(
+            output_keys == Keys::All && !surface.composer && workspace.pane_with_keys() == Some(id),
+        );
     }
     // The block the keyboard was standing on goes as the surface leaves the
     // list. A selection that outlived the list would keep Escape and the copy

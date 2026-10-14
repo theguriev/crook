@@ -29,8 +29,9 @@
 //!
 //! A composition belongs to the keyboard, and goes when the keyboard does: a
 //! commit or an input method giving up ends it, and so does the pane losing
-//! the keyboard — focus moving to another pane or another tab, a menu or a find
-//! bar taking the keys, a composer coming back under a command that finished —
+//! the keyboard — focus moving to another pane or another tab, a menu, a find
+//! bar or a box beside the pane taking the keys, a section of the sidebar
+//! replacing the panes, a composer coming back under a command that finished —
 //! and the window going behind another. The workspace says which of those
 //! happened through [`PaneComposition::listen`]; the output asks
 //! [`PaneComposition::is_listening`] before it takes an event, because the
