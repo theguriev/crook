@@ -164,6 +164,18 @@ list`; `--json` prints `pane_id`, `tab_id` and `cwd`, and a `note` when there is
 - Everything after `--` is the command, one argument a word, and each word arrives as itself:
   quotes, `$(…)` and backticks are characters rather than shell syntax, and an alias is not
   expanded. For a pipeline or `&&`, run `sh -c '…'`.
+- No word may hold a newline, a tab or another control character: a newline ends a command
+  line, and the rest would be a second command, so the request is refused as `bad-request`.
+  Keep the prompt on one line, or write a brief that needs its lines to a file and name the
+  file in a one-line prompt, by its full path, since a `--worktree` tab starts somewhere else.
+  Claude Code asks before it reads a file outside its own directory, and `claude -p` is refused
+  one, so let the worker read that one file:
+  `claude --allowedTools "Read(/$PWD/task.md)" -- "do the task in $PWD/task.md"`. The `/` before
+  `$PWD` makes the `//` Claude Code reads as an absolute path, and the second `--` is there
+  because `--allowedTools` takes every word after it as a rule. Not `--add-dir "$PWD"`: that
+  lets the worker write in your checkout as well, and without asking under `acceptEdits`.
+  `"$(cat task.md)"` is no way round it: your own shell expands it, newlines and all, before
+  Crook sees it.
 
 The tab opens without taking the person's keyboard, as a row of its own with a dot, and its card
 says your pane opened it. Only a pane can open one: the request carries your pane's
@@ -178,7 +190,8 @@ Windows yet.
 
 ```sh
 id=$(crook tab new --worktree fix-x --in-my-group -- claude "fix the flaky test in x")
-crook pane wait "$id" --until needs-input --timeout 600   # until it stops for a person
+crook pane wait "$id" --until needs-input --timeout 110   # until it stops for a person
+# "was not needs-input within 110 seconds": still working, so run the same wait again
 crook pane blocks "$id" --last 1                          # what its last command printed
 ```
 
@@ -197,7 +210,8 @@ A state the pane is already in answers at once. When `--timeout` (seconds; at mo
 default 3600) passes first, or the pane closes first, it prints where the pane is and exits with
 a failure, so `crook pane wait "$id" --until finished && …` reads the way it looks. `--timeout
 0` answers at once. A tool that runs your shell commands may cut one off after a couple of
-minutes: keep `--timeout` under that limit and wait again rather than be killed mid-wait.
+minutes, with nothing learned: keep `--timeout` under that limit, as 110 is, and when the time
+runs out first, run the same wait again as a new command, until the pane gets there or exits.
 `idle` and `needs-input` are only as real as what the agent reports. A Claude Code worker without
 the hooks `crook --agent-hooks claude` prints says only what its title says — running, and idle
 when its turn ends — so a question it stops to ask reads as `idle` too, and `needs-input` never
@@ -227,7 +241,10 @@ and the tabs it opened (`--pane <id>` for one), until you stop it. It sends `idl
 `--until idle` would take it, so the end of a question a title asked comes as `idle` once the
 title says the turn is over or the command ends, and not before. A command is also sent as
 `started` when it runs long enough to be seen running; a quick one comes only as `finished`. A
-reader that falls behind is sent a `lagged` line saying how many events it missed.
+reader that falls behind is sent a `lagged` line saying how many events it missed. Since it
+runs until it is stopped, a tool that cuts a command off after a couple of minutes will cut it
+off: run it in the background, or as `timeout 100 crook events --follow` where there is a
+`timeout` (macOS has none of its own).
 
 Only your own pane and the tabs you opened, and the tabs those opened, can be watched: a pane a
 person opened is refused with `needs-grant`, and there is no way round that from here. Like the

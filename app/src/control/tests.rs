@@ -380,6 +380,48 @@ fn a_command_is_refused_for_a_shell_its_quoting_is_not_proven_in_and_for_a_contr
     assert_eq!(refused(&[], "/bin/bash"), code::BAD_REQUEST);
 }
 
+#[test]
+fn a_prompt_with_lines_is_refused_with_the_way_round_it() {
+    // A brief with its lines — a task, then what done looks like — is the
+    // prompt a lead most often hands a worker. A refusal that said only why
+    // left it to flatten the brief or to ask again blind, every try counting
+    // toward the stop, so it says what to do instead: name a file that holds
+    // the brief, by a path the worker can open from its own worktree. And
+    // let it open it: Claude Code in a `--worktree` tab asks before reading
+    // the lead's directory, and `claude -p` there is refused the read, so an
+    // example with no rule for the brief was a worker that never saw it.
+    // Only the brief, though: `--add-dir "$PWD"` made the lead's checkout a
+    // working directory of the worker's, which it may write to as well, and
+    // under acceptEdits without asking — the isolation `--worktree` is for.
+    let refusal = spawn::command_line(
+        &[
+            "claude".to_owned(),
+            "Task: fix the flaky test\n\tDone when: it passes".to_owned(),
+        ],
+        Path::new("/bin/bash"),
+    )
+    .expect_err("a newline is a second command");
+    assert_eq!(refusal.code, code::BAD_REQUEST);
+    for said in [
+        "newline",
+        "one line",
+        "file",
+        "$PWD/task.md",
+        "--allowedTools \"Read(/$PWD/task.md)\" --",
+    ] {
+        assert!(
+            refusal.message.contains(said),
+            "the refusal does not say {said:?}: {}",
+            refusal.message
+        );
+    }
+    assert!(
+        !refusal.message.contains("--add-dir"),
+        "the refusal gives the worker the lead's checkout to write in: {}",
+        refusal.message
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_command_arrives_in_every_shell_as_the_words_it_was_given() {

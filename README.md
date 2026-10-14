@@ -499,9 +499,10 @@ Twenty features, and the page that configures them:
   counted in, and the new row's card says which pane opened it. `sh`, `bash`, `zsh` and `fish`
   only.
   **And wait for it, and read what it did.** `crook pane wait 7 --until needs-input --timeout
-  600` blocks until pane 7's agent stops for a person — or is `idle`, or its command has
+  110` blocks until pane 7's agent stops for a person — or is `idle`, or its command has
   `finished`, or the pane has `exited`, even before you asked — and prints where it got to,
-  failing when the time runs out first; `crook pane blocks 7 --last 1` prints its newest
+  failing when the time runs out first, so an agent whose tool cuts a command off after two
+  minutes waits again rather than lose the wait; `crook pane blocks 7 --last 1` prints its newest
   finished command with what it printed, its exit status, how long it took and where, the end of
   a long output kept and marked cut; `crook events --follow` is a line of JSON for every status,
   every command finished (named, with its exit status) or seen running, and every tab opened and

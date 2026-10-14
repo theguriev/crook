@@ -519,6 +519,21 @@ fn finish(
 /// there is no word, when a word holds a control character — a newline is the
 /// character that ends a command line, and would send the rest as a second
 /// one — and when the shell is not one the quoting is proven in.
+///
+/// A control character is refused rather than written as an escape the shell
+/// decodes — `$'…'` in bash and zsh, `\n` outside the quotes in fish — since
+/// that is a second quoting with rules of its own in each shell, and `sh` has
+/// none to offer; the one here is the quoting proven in all four (#342). A
+/// prompt with lines goes in a file the command names, and the refusal says
+/// so, since the brief a lead hands a worker is the prompt that has them. Its
+/// example lets the worker read that file: a `--worktree` tab starts in
+/// another directory, and Claude Code asks before it reads outside its own,
+/// which a `claude -p` worker is refused and an interactive one stops at. The
+/// rule names the brief and nothing else — the `/` before an absolute `$PWD`
+/// makes the `//` that marks a rule's path as absolute — since
+/// `--add-dir "$PWD"` would make the lead's checkout a directory the worker
+/// may write in too, and under acceptEdits without asking, which is what
+/// `--worktree` keeps it from.
 pub fn command_line(words: &[String], shell: &Path) -> Result<String, Refusal> {
     if words.is_empty() {
         return Err(Refusal::new(
@@ -530,7 +545,9 @@ pub fn command_line(words: &[String], shell: &Path) -> Result<String, Refusal> {
         return Err(Refusal::new(
             code::BAD_REQUEST,
             "a word of the command holds a control character, and a newline in a command line \
-             is a second command",
+             is a second command; keep the prompt on one line, or write it to a file and pass \
+             one line that names the file by its full path, letting the worker read that file: \
+             `claude --allowedTools \"Read(/$PWD/task.md)\" -- \"do the task in $PWD/task.md\"`",
         ));
     }
     if !quoting_is_proven(shell) {
