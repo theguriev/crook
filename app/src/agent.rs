@@ -818,9 +818,13 @@ wrapper script that runs `BINARY --agent running` first.",
 /// the session file. A word that names no agent this module knows — `cargo`,
 /// `vim`, a `claudette` — is `None`, so a file never holds the name of a
 /// program Crook would not know how to offer back.
+///
+/// The word as the shell reads it, quotes and all: `crook tab new` types
+/// every word of its command in single quotes, so a worker it opens runs
+/// `'codex' 'fix the flaky test'`, and that is `codex` as well.
 pub fn program_of(command: &str) -> Option<&'static str> {
-    let first = command.split_whitespace().next()?;
-    let file = first.rsplit(['/', '\\']).next().unwrap_or(first);
+    let first = first_word(command)?;
+    let file = first.rsplit(['/', '\\']).next().unwrap_or(&first);
     // Windows' own spellings of the same program: the binary, and the shim
     // npm installs a Node CLI as.
     let program = file
@@ -831,6 +835,26 @@ pub fn program_of(command: &str) -> Option<&'static str> {
         .iter()
         .find(|agent| agent.name == program)
         .map(|agent| agent.name)
+}
+
+/// The first word of a command line, the way a shell splits it off: up to
+/// the first space outside quotes, with the quotes taken out — so a path
+/// with a space in it, quoted, is one word. `None` for a line with no word.
+///
+/// Quotes only. A backslash stays what it is, since in a Windows path it is
+/// the separator and not an escape; no agent's name has one to escape.
+fn first_word(command: &str) -> Option<String> {
+    let mut word = String::new();
+    let mut open = None;
+    for character in command.trim_start().chars() {
+        match (open, character) {
+            (None, character) if character.is_whitespace() => break,
+            (None, '\'' | '"') => open = Some(character),
+            (Some(quote), character) if character == quote => open = None,
+            (_, character) => word.push(character),
+        }
+    }
+    (!word.is_empty()).then_some(word)
 }
 
 /// The line that resumes `program`'s conversation in the directory it is
@@ -2033,6 +2057,23 @@ its `hooks` should be\n{}",
         );
         for agent in AGENTS {
             assert_eq!(Some(agent.name), program_of(agent.name));
+        }
+    }
+
+    #[test]
+    fn a_quoted_first_word_names_its_agent_as_the_shell_reads_it() {
+        // The line `crook tab new -- codex "fix the flaky test"` types.
+        assert_eq!(Some("codex"), program_of("'codex' 'fix the flaky test'"));
+        assert_eq!(Some("claude"), program_of("\"claude\" --continue"));
+        // A path with a space in it is one word while it is quoted.
+        assert_eq!(
+            Some("codex"),
+            program_of("'/opt/my tools/codex' 'port the tab bar'")
+        );
+        assert_eq!(Some("gemini"), program_of("/opt/'my tools'/gemini -i x"));
+        // The quotes come off the word, and nothing else is let in.
+        for command in ["'claudette'", "'echo' 'claude'", "'' claude", "'claude x'"] {
+            assert_eq!(None, program_of(command), "{command:?}");
         }
     }
 

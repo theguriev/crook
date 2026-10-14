@@ -434,6 +434,22 @@ fn a_command_arrives_in_every_shell_as_the_words_it_was_given() {
     }
 }
 
+/// A worker `tab new` opens runs the line it typed, every word quoted, and
+/// that line is what the pane's command is read off: the agent in it is the
+/// one the words started, in every shell the line is typed into.
+#[cfg(unix)]
+#[test]
+fn the_line_tab_new_types_names_the_agent_it_starts() {
+    for agent in ["claude", "codex", "gemini", "/opt/my tools/codex"] {
+        let words = [agent.to_owned(), "fix the \"flaky\" test".to_owned()];
+        for shell in ["sh", "bash", "zsh", "fish"] {
+            let line = spawn::command_line(&words, Path::new(shell)).expect("a proven shell");
+            let named = agent.rsplit('/').next();
+            assert_eq!(crate::agent::program_of(&line), named, "{shell}: {line}");
+        }
+    }
+}
+
 #[test]
 fn sixteen_refusals_in_a_row_stop_the_window_answering_that_pane_and_no_other() {
     let refusal = Refusal::new(code::BUDGET, "full");
@@ -3183,6 +3199,48 @@ mod socket {
             (printed.text.as_str(), printed.failure),
             ("needs-input", None)
         );
+    }
+
+    /// A codex worker `tab new` opened runs the line it typed, every word
+    /// quoted, and is a pane running codex all the same: its spinner is its
+    /// work, so the approval it stops for is not the end of its turn, and
+    /// only the folder it shows once the spinner stops answers a wait for
+    /// idle.
+    #[test]
+    fn a_wait_for_idle_on_a_codex_tab_new_opened_waits_out_its_approvals() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let words = ["codex", "fix the flaky test"];
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&words))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+        let owned = words.map(str::to_owned);
+        let line = spawn::command_line(&owned, Path::new("zsh")).expect("a proven shell");
+        served.update(|workspace, ctx| {
+            workspace.apply_terminal_update(&TerminalUpdate::Running(worker, Some(line)), ctx);
+        });
+        served.titled(worker, "proj");
+
+        let waiting = served.start(wait(&token, worker, Until::Idle, 120, false));
+        served.pump_until("the wait was never registered", |served| {
+            served.waiting() == 1
+        });
+        for title in [
+            "\u{280b} proj",
+            "\u{2819} proj",
+            "[ ! ] Action Required | proj",
+            "[ . ] Action Required | proj",
+            "\u{2839} proj",
+        ] {
+            served.titled(worker, title);
+            assert_eq!(served.waiting(), 1, "answered at {title:?}, mid-turn");
+        }
+        served.titled(worker, "proj");
+        assert_eq!(served.waiting(), 0, "not answered when the spinner stopped");
+        let printed = served.finish(waiting).expect("answered");
+        assert_eq!((printed.text.as_str(), printed.failure), ("idle", None));
     }
 
     /// The question a title asks is on the stream with the rest of what it
