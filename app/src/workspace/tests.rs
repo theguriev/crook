@@ -5978,6 +5978,46 @@ fn a_tabs_menu_is_the_entries_its_plugins_put_in_it() {
 }
 
 #[test]
+fn the_readme_names_every_entry_of_a_tabs_menu() {
+    // #469 put three closes in the menu, and the README's list of its entries
+    // went three releases without them: the menu is a slot, so nothing on
+    // either side read the other. Each entry is looked for by its command's
+    // title — the name the palette and the Keyboard Shortcuts page give it —
+    // in the README's paragraph on the menu, in whatever case the prose puts
+    // it. The row of colours has no title to look for, since each swatch is a
+    // command of its own.
+    const README: &str = include_str!("../../../README.md");
+    let readme = README
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    let paragraph = readme
+        .split_once("- **a tab's own menu.**")
+        .and_then(|(_, rest)| rest.split(" - **").next())
+        .expect("the README has a paragraph on a tab's own menu");
+
+    let harness = Harness::seeded();
+    for entry in harness.tab_menu_entries() {
+        let title = harness.workspace.read(&harness.app, |workspace, _| {
+            let action = ActionName::parse(&entry).expect("an entry's key is an action's name");
+            workspace.host().title_of(&action).map(str::to_lowercase)
+        });
+        let Some(title) = title else {
+            assert_eq!(
+                entry, "crook/tabs/color",
+                "{entry} has no title to look for in the README"
+            );
+            continue;
+        };
+        assert!(
+            paragraph.contains(&title),
+            "the README's paragraph on a tab's menu does not name {title:?} ({entry})"
+        );
+    }
+}
+
+#[test]
 fn a_secondary_press_opens_the_menu_on_the_row_it_was_made_on() {
     // The menu used to be about the tab and opened on the focused pane's row
     // alone. Half its entries now name a *pane*, so which row was pressed is a
