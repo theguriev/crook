@@ -850,6 +850,17 @@ batches, every command a pane reports finished in one read delivered before the 
 they asked for is served, so a plugin that asks once from each has as many waiting as there
 were commands, through nothing it did.
 
+**And so is the work done for one.** A fetch, a file, a walk, a listing and a sound are done on
+a pool of the plugins' own, not on the one the window saves its settings and reads git on: a
+fetch to a host that drops packets holds its worker for fifteen seconds, and when every request
+was a task on the window's pool, a plugin that asked for a handful held every worker it had and
+a save waited behind them. Two of one plugin's run at a time; the rest wait in the order they
+were asked and start as those finish, so a plugin whose fetches all hang holds half the
+plugins' pool and the others are answered beside it. A walk still going after a minute is given
+up on and answered `Failed`, rather than with a total that stopped part way. A plugin's fifth
+sound in one second is not played and is answered `Failed`, and the sounds the host keeps on
+disk are held under sixteen megabytes, those played longest ago going first.
+
 **Isolation.** Fuel-metered execution (wasmi has it) with a per-call deadline; a trap or an
 exhausted budget drops that contribution and counts toward self-disable; memory capped per
 instance; one instance per plugin, on the pool, never on the foreground; results come home

@@ -1943,6 +1943,14 @@ THE INPUT FIELD:
 /// each completion starting the next, so a queued update is still one task
 /// and never a worker per plugin.
 ///
+/// What a sandboxed plugin asks for is not on this pool at all. A fetch to a
+/// host that drops packets holds its worker for fifteen seconds, and every
+/// request was a task here the moment it was asked, so a plugin that asked
+/// for a handful held every worker this pool had and a save waited behind
+/// them. They run on a pool of their own instead — `requests` in the runtime
+/// of [`plugins::wasm`] — no more than two of one plugin's at a time. What a
+/// plugin parks here is its timer, which is the chain counted above.
+///
 /// The number is a count of *chains*, never of panes. That is why the child
 /// check is one task for the whole terminal model rather than one per session:
 /// a chain per pane would park a worker per pane, and a window with more panes

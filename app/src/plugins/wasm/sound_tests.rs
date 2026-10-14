@@ -159,3 +159,112 @@ fn nothing_is_on_path_under_an_empty_path() {
     }
     assert!(found, "a player was found on an empty PATH");
 }
+
+#[test]
+fn a_plugin_is_let_through_four_sounds_in_a_second_and_no_more() {
+    let mut chimes = Chimes::default();
+    let start = Instant::now();
+
+    for ring in 0..SOUNDS_PER_SECOND {
+        assert!(
+            chimes.let_through(start),
+            "sound {ring} was not let through"
+        );
+    }
+    assert!(
+        !chimes.let_through(start),
+        "one more than a second's worth was let through"
+    );
+    assert!(
+        !chimes.let_through(start + Duration::from_millis(999)),
+        "the second was over before it was"
+    );
+    // And a sound turned down is not counted: the second after the first
+    // four is a second with room for four more.
+    for ring in 0..SOUNDS_PER_SECOND {
+        assert!(
+            chimes.let_through(start + Duration::from_secs(1)),
+            "sound {ring} of the next second was not let through"
+        );
+    }
+}
+
+/// A sound of its own, `size` bytes long, that differs from every other
+/// `mark`.
+fn sound(mark: u8, size: usize) -> Vec<u8> {
+    let mut wav = header();
+    wav.resize(size, mark);
+    wav
+}
+
+/// The sounds `directory` holds, by the mark each was made with, and how
+/// many bytes they come to.
+fn kept(directory: &Path, marks: &[u8], size: usize) -> (Vec<u8>, u64) {
+    let present: Vec<u8> = marks
+        .iter()
+        .copied()
+        .filter(|mark| {
+            directory
+                .join(format!("{:016x}.wav", fingerprint(&sound(*mark, size))))
+                .exists()
+        })
+        .collect();
+    let total = fs::read_dir(directory)
+        .expect("the sounds directory is there")
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.metadata().ok())
+        .map(|facts| facts.len())
+        .sum();
+    (present, total)
+}
+
+#[test]
+fn the_sounds_directory_stays_under_its_cap_by_losing_what_was_played_longest_ago() {
+    // Content-addressed is not bounded. A plugin that sends a chime differing
+    // by one byte each time wrote a new file each time, and nothing ever
+    // deleted one. Each store is a second after the last, so that "longest
+    // ago" does not depend on how fine this filesystem's clock is.
+    let scratch = super::super::tests::Scratch::new("sounds");
+    let directory = scratch.path();
+    let size = 1000;
+    let cap = 3 * size as u64 + size as u64 / 2;
+    let at = |second: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000 + second);
+    let store = |mark: u8, second: u64| {
+        store_in(directory, &sound(mark, size), cap, at(second)).expect("a sound is written down")
+    };
+
+    store(1, 1);
+    store(2, 2);
+    store(3, 3);
+    assert_eq!(
+        kept(directory, &[1, 2, 3], size),
+        (vec![1, 2, 3], 3 * size as u64)
+    );
+
+    // The first is played again, which makes the second the one played
+    // longest ago — so the fourth costs the second its place, not the first.
+    let again = store(1, 4);
+    store(4, 5);
+
+    let (present, total) = kept(directory, &[1, 2, 3, 4], size);
+    assert!(total <= cap, "{total} bytes kept under a cap of {cap}");
+    assert_eq!(
+        present,
+        vec![1, 3, 4],
+        "what went was not the sound played longest ago"
+    );
+    assert!(again.exists());
+}
+
+#[test]
+fn the_sound_about_to_be_played_is_never_the_one_that_goes() {
+    // A cap smaller than the sound itself, which [`MAX_CACHE`] never is; the
+    // rule it checks is the one every eviction relies on, that the file just
+    // handed back is still there to be played.
+    let scratch = super::super::tests::Scratch::new("sounds-kept");
+    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+
+    let file = store_in(scratch.path(), &sound(9, 1000), 10, at).expect("a sound is written down");
+
+    assert!(file.exists(), "the sound was evicted before it was played");
+}

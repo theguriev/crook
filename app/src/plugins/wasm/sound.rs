@@ -18,13 +18,23 @@
 //! every ring after that is a spawn. Nothing is ever written outside that
 //! directory and nothing a plugin sends is ever executed.
 //!
+//! # And how much of it, and how often
+//!
+//! Content-addressed is not bounded: a plugin sending a chime that differs by
+//! one byte each time writes a new file each time. So the directory is held
+//! under [`MAX_CACHE`], the sounds played longest ago going first, and one
+//! plugin is played [`SOUNDS_PER_SECOND`] at most — past that a sound is
+//! answered with why and not played, because each is a player started and a
+//! person interrupted.
+//!
 //! [`Request::PlaySound`]: crook_plugin_api::Request::PlaySound
 
+use std::collections::VecDeque;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crook_plugin_api::Answer;
 
@@ -41,9 +51,58 @@ const GLANCE: Duration = Duration::from_millis(50);
 /// The largest sound the host will write down.
 ///
 /// Four megabytes is about forty seconds of 16-bit mono at 44.1kHz, which is
-/// far longer than anything anybody should be played at the end of a command,
-/// and small enough that a plugin cannot fill a disk one chime at a time.
+/// far longer than anything anybody should be played at the end of a command.
+/// It bounds one sound and not the directory they are kept in: that is
+/// [`MAX_CACHE`].
 const MAX_WAV: usize = 4 << 20;
+
+/// The most the sounds directory holds, every sound in it together.
+///
+/// Four of the largest sound there can be, which is a hundred or more of the
+/// chimes plugins actually send: crook-dziling's six come to under seven
+/// hundred kilobytes together. So a cache this size is one that is always hit
+/// by any plugin that rings the same few sounds. Past it the sounds played
+/// longest ago are deleted, and the next time one of them is asked for it is
+/// written down again.
+const MAX_CACHE: u64 = 4 * MAX_WAV as u64;
+
+/// How many sounds one plugin may have played in any one second.
+///
+/// Every sound is a player started and a reaper thread waiting on it for up
+/// to [`PATIENCE`], and every one is somebody interrupted. Four a second is
+/// more chimes than anybody can tell apart, and a plugin past it is one
+/// ringing because it rings.
+pub(super) const SOUNDS_PER_SECOND: usize = 4;
+
+/// The sounds one plugin has played in the last second, which is what
+/// [`SOUNDS_PER_SECOND`] counts.
+///
+/// A window of instants rather than a counter reset on a clock, because a
+/// clock would be a timer, and a window never runs while nobody is asking.
+#[derive(Default)]
+pub(super) struct Chimes {
+    /// When each was let through, oldest first; none older than a second
+    /// survives a call to [`Chimes::let_through`].
+    played: VecDeque<Instant>,
+}
+
+impl Chimes {
+    /// Whether one more may be played at `now`, counting it if so.
+    pub(super) fn let_through(&mut self, now: Instant) -> bool {
+        while self
+            .played
+            .front()
+            .is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(1))
+        {
+            self.played.pop_front();
+        }
+        if self.played.len() >= SOUNDS_PER_SECOND {
+            return false;
+        }
+        self.played.push_back(now);
+        true
+    }
+}
 
 /// Plays a sound, and says what became of it.
 pub(super) fn play(wav: &[u8], volume: u8) -> Answer {
@@ -99,10 +158,17 @@ fn store(wav: &[u8]) -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::other("this machine has no cache directory"))?
         .join("crook")
         .join("sounds");
-    fs::create_dir_all(&directory)?;
+    store_in(&directory, wav, MAX_CACHE, SystemTime::now())
+}
+
+/// [`store`], into `directory`, which is then held under `cap` bytes, as of
+/// `now`.
+fn store_in(directory: &Path, wav: &[u8], cap: u64, now: SystemTime) -> io::Result<PathBuf> {
+    fs::create_dir_all(directory)?;
 
     let file = directory.join(format!("{:016x}.wav", fingerprint(wav)));
     if file.exists() {
+        played(&file, now);
         return Ok(file);
     }
 
@@ -116,11 +182,65 @@ fn store(wav: &[u8]) -> io::Result<PathBuf> {
         std::process::id()
     ));
     fs::write(&partial, wav)?;
-    match fs::rename(&partial, &file) {
-        Ok(()) => Ok(file),
-        Err(why) => {
-            let _ = fs::remove_file(&partial);
-            Err(why)
+    if let Err(why) = fs::rename(&partial, &file) {
+        let _ = fs::remove_file(&partial);
+        return Err(why);
+    }
+    played(&file, now);
+    evict(directory, cap, &file);
+    Ok(file)
+}
+
+/// Marks a sound as played at `now`, which is what keeps it from being the
+/// next to go.
+///
+/// The file's modification time is the mark, so that what was played when
+/// survives a restart without a file of its own to keep it in. Set rather
+/// than left to the write, because a filesystem's clock is coarse enough
+/// that two sounds written a moment apart can share one. Best effort: a
+/// sound that cannot be marked is only one that may go sooner than it
+/// should, and Windows may refuse to open a file a player has open.
+fn played(file: &Path, now: SystemTime) {
+    let _ = fs::File::options()
+        .write(true)
+        .open(file)
+        .and_then(|file| file.set_modified(now));
+}
+
+/// Deletes the sounds in `directory` played longest ago until what is left
+/// fits under `cap` — never `keep`, which is about to be played.
+///
+/// Only when a sound has just been written, which is the only time the
+/// directory grows. Sounds only: a `.partial` is somebody's write in
+/// progress, perhaps another Crook's.
+fn evict(directory: &Path, cap: u64, keep: &Path) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut sounds: Vec<(SystemTime, PathBuf, u64)> = entries
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|kind| kind == "wav"))
+        .filter_map(|entry| {
+            let facts = entry.metadata().ok()?;
+            facts.is_file().then(|| {
+                let at = facts.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                (at, entry.path(), facts.len())
+            })
+        })
+        .collect();
+
+    let mut total: u64 = sounds.iter().map(|(_, _, size)| size).sum();
+    // Oldest first, and by name between two played at the same moment, so
+    // that which of them goes is the same on every run.
+    sounds.sort();
+    for (_, path, size) in sounds {
+        if total <= cap {
+            return;
+        }
+        // A sound a player still has open cannot be deleted on Windows; it
+        // is skipped, and the next oldest goes in its place.
+        if path != keep && fs::remove_file(&path).is_ok() {
+            total -= size;
         }
     }
 }

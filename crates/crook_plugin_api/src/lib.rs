@@ -880,6 +880,10 @@ pub struct MenuItem {
 /// same ticket. That is not a convenience — a guest call runs on the thread
 /// that draws, so a request that waited for a socket would be a request that
 /// cost a frame.
+///
+/// What is work — a fetch, a file, a walk, a listing, a sound — is done two
+/// of one plugin's at a time. The rest wait their turn in the order they were
+/// asked, so a plugin whose fetches hang waits on itself and on nobody else.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request {
     /// Reach the network. Needs [`Capability::Network`] naming the host in the
@@ -922,6 +926,9 @@ pub enum Request {
     /// stays with the plugin — which lines are the same event written twice,
     /// what to group by, what to add up, and what any of it means — because
     /// each of those is a *field name* it supplies. The host knows none of it.
+    ///
+    /// A walk still going a minute after it started is given up on, and is
+    /// [`Answer::Failed`] rather than a total that stopped part of the way.
     Tally {
         /// The directory to walk, granted as this string followed by `/**`.
         root: String,
@@ -969,6 +976,9 @@ pub enum Request {
     /// One format, `wav`: the host does not decode audio and has no library
     /// that could, so what it can hand a player is what every player on every
     /// platform already reads. Anything else is [`Answer::Failed`].
+    ///
+    /// Four in any one second, from one plugin. A fifth is not played, and is
+    /// [`Answer::Failed`] saying so: each sound is a person interrupted.
     PlaySound {
         /// A RIFF/WAVE file, whole, as it would sit on disk.
         wav: Vec<u8>,

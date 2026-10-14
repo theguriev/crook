@@ -150,6 +150,7 @@ fn on_one_worker() -> (App, Arc<LocalQueue>, Arc<Background>, ModelHandle<Runtim
                 Rc::new(RefCell::new(sandbox)),
                 Rc::new(Cell::new(0)),
                 Vec::new(),
+                Arc::new(Background::new(1)),
             )
         })
     });
@@ -231,21 +232,27 @@ fn allowed_to_ask_where() -> (App, Arc<LocalQueue>, ModelHandle<Runtime>) {
 fn runtime_allowed(granted: &[&str]) -> (App, Arc<LocalQueue>, ModelHandle<Runtime>) {
     let queue = LocalQueue::new();
     let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
+    let runtime = runtime_in(&mut app, granted, &Arc::new(Background::new(1)));
+    (app, queue, runtime)
+}
 
+/// One more such runtime in `app`, allowed `granted`, whose requests are
+/// worked on in `pool` — which is the plugins' pool, standing in for
+/// [`requests`] so that a test can watch it.
+fn runtime_in(app: &mut App, granted: &[&str], pool: &Arc<Background>) -> ModelHandle<Runtime> {
     let module = crate::plugins::wasm::tests::wasm_asking_where("eugen/probe", 0, 0, 0);
     let (sandbox, _) = Sandbox::open(&module, Fuel::default()).expect("the test module opens");
-    let runtime = app.update(|ctx| {
+    app.update(|ctx| {
         ctx.add_model(|_| {
             Runtime::new(
                 PluginId::parse("eugen/probe").expect("a literal that parses"),
                 Rc::new(RefCell::new(sandbox)),
                 Rc::new(Cell::new(0)),
                 granted.iter().copied().map(String::from).collect(),
+                pool.clone(),
             )
         })
-    });
-
-    (app, queue, runtime)
+    })
 }
 
 /// Asks where the pane is once per ticket, as a guest's calls would, on
@@ -518,6 +525,317 @@ fn a_burst_of_questions_bigger_than_may_wait_is_served_whole() {
     );
 }
 
+/// How soon "at once" has to be, for a test on a runner that is busy.
+///
+/// What these tests tell apart is a task started now from one started when a
+/// fetch gives up, which is [`REQUEST_TIMEOUT`] — fifteen seconds. A frame
+/// is what a person would notice, and an idle worker answers inside one, but
+/// a test binary running every other test beside this one on a loaded runner
+/// cannot promise a frame; it can promise a second.
+const PROMPTLY: Duration = Duration::from_secs(1);
+
+/// A host on this machine that takes every connection and never says a
+/// word: a fetch to it waits out the whole of [`REQUEST_TIMEOUT`], which is a
+/// host that drops packets without needing the network to have one.
+///
+/// Dropped, it closes the listener and everything it accepted, and every
+/// fetch still waiting on it fails at once — which is what lets a pool
+/// holding them be dropped at the end of a test rather than fifteen seconds
+/// after it, and why every test makes its hosts after its pools: what is
+/// made last is dropped first.
+struct Silent {
+    listener: std::net::TcpListener,
+    held: Vec<std::net::TcpStream>,
+}
+
+impl Silent {
+    fn new() -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("a port on this machine to listen on");
+        listener
+            .set_nonblocking(true)
+            .expect("a listener that can be asked without waiting");
+        Self {
+            listener,
+            held: Vec::new(),
+        }
+    }
+
+    /// A fetch from it. The grant is the host, so `net:127.0.0.1` allows
+    /// every one of these whatever its port.
+    ///
+    /// Without [`fetch`]'s header, whose `…` is not a byte a header may
+    /// carry: that fetch fails as soon as it has connected, before it can
+    /// wait on anything, and a test of what a hanging fetch holds would pass
+    /// with nothing hanging.
+    fn fetch(&self) -> Request {
+        let port = self
+            .listener
+            .local_addr()
+            .expect("a bound listener has an address")
+            .port();
+        Request::Fetch {
+            method: Method::Get,
+            url: format!("https://127.0.0.1:{port}/usage"),
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+
+    /// Whether a fetch reaches it within `within`, holding the connection
+    /// open — and silent — if one does.
+    fn reached(&mut self, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        loop {
+            match self.listener.accept() {
+                Ok((connection, _)) => {
+                    self.held.push(connection);
+                    return true;
+                }
+                Err(why) if why.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(why) => panic!("the listener broke: {why}"),
+            }
+        }
+    }
+
+    /// Hangs up on every fetch it is holding, which fails each at once.
+    fn hang_up(&mut self) {
+        self.held.clear();
+    }
+}
+
+/// Asks for `requests` in turn, on nobody's behalf, as a tick would, with
+/// tickets counting up from `first`.
+fn ask_for(app: &mut App, runtime: &ModelHandle<Runtime>, first: u32, requests: Vec<Request>) {
+    app.update(|ctx| {
+        runtime.update(ctx, |runtime, ctx| {
+            for (ticket, request) in (first..).zip(requests) {
+                runtime.start(ticket, request, Gesture::None, ctx);
+            }
+        })
+    });
+}
+
+/// The tickets a runtime has queued, and how many of its requests are on
+/// the pool.
+fn queued_and_running(app: &App, runtime: &ModelHandle<Runtime>) -> (Vec<u32>, usize) {
+    runtime.read(app, |runtime, _| {
+        let queued = runtime.queued.iter().map(|(ticket, _)| *ticket).collect();
+        (queued, runtime.running)
+    })
+}
+
+/// Asserts that none of a runtime's requests has been answered: that the
+/// fetches a test set hanging are hanging.
+///
+/// Without it a test of what a hanging fetch holds passes just as well with
+/// fetches that fail at once and hold nothing. A tenth of a second is long
+/// enough for one that fails to have come back, and a hanging one takes
+/// [`REQUEST_TIMEOUT`].
+fn still_hanging(queue: &LocalQueue, app: &App, runtime: &ModelHandle<Runtime>, asked: usize) {
+    std::thread::sleep(Duration::from_millis(100));
+    queue.run_until_parked();
+    let (queued, running) = queued_and_running(app, runtime);
+    assert_eq!(
+        queued.len() + running,
+        asked,
+        "fetches were answered, so they were not hanging and nothing here waited behind them"
+    );
+}
+
+/// Runs what lands on the foreground until `done`, or for five seconds.
+fn until(queue: &LocalQueue, mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        queue.run_until_parked();
+        if done() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_plugin_whose_fetches_hang_leaves_the_windows_pool_to_the_window() {
+    // What was measured on a machine with six workers: as many fetches to a
+    // host that drops packets as there were workers, then one more task
+    // standing in for a settings save, and the save ran fourteen point eight
+    // seconds later. Every request a plugin made was a task on the window's
+    // own pool, and a fetch holds its worker for as long as it waits. Here
+    // the window has one worker, so a single fetch on it is enough to show
+    // it — and a save that waits behind none of them is the fix.
+    let queue = LocalQueue::new();
+    let window = Arc::new(Background::new(1));
+    let mut app = App::new(queue.foreground(), window.clone());
+    let plugins = Arc::new(Background::new(REQUEST_WORKERS));
+    let runtime = runtime_in(&mut app, &["net:127.0.0.1"], &plugins);
+    let mut silent = Silent::new();
+
+    ask_for(&mut app, &runtime, 1, vec![silent.fetch(); 8]);
+    assert!(
+        silent.reached(Duration::from_secs(5)),
+        "no fetch was started at all, so nothing here is hanging"
+    );
+
+    let (ran, was_run) = std::sync::mpsc::channel();
+    window
+        .spawn(async move {
+            let _ = ran.send(());
+        })
+        .detach();
+
+    assert!(
+        was_run.recv_timeout(PROMPTLY).is_ok(),
+        "a task on the window's pool waited behind a plugin's fetches"
+    );
+    still_hanging(&queue, &app, &runtime, 8);
+}
+
+#[test]
+fn one_plugins_hanging_fetches_leave_room_for_another_plugins_requests() {
+    // The plugins' pool is shared between them, so it is the same story one
+    // level down: a plugin that asks for more fetches than the pool has
+    // workers, to a host that never answers, used to hold every worker, and
+    // the next plugin's request waited fifteen seconds behind it. At most
+    // two of a plugin's requests are on the pool; the rest wait their turn
+    // in its own queue, not in front of everybody else's.
+    let queue = LocalQueue::new();
+    let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
+    let plugins = Arc::new(Background::new(REQUEST_WORKERS));
+    let greedy = runtime_in(&mut app, &["net:127.0.0.1"], &plugins);
+    let other = runtime_in(&mut app, &["net:127.0.0.1"], &plugins);
+    let mut hanging = Silent::new();
+    let mut asked = Silent::new();
+
+    ask_for(&mut app, &greedy, 1, vec![hanging.fetch(); 8]);
+    assert!(
+        hanging.reached(Duration::from_secs(5)),
+        "none of the greedy plugin's fetches was started"
+    );
+    ask_for(&mut app, &other, 1, vec![asked.fetch()]);
+
+    assert!(
+        asked.reached(PROMPTLY),
+        "another plugin's fetch waited behind the first one's"
+    );
+    still_hanging(&queue, &app, &greedy, 8);
+    assert_eq!(
+        queued_and_running(&app, &greedy),
+        ((3..9).collect(), RUNNING_AT_ONCE),
+        "the greedy plugin had more than its share of the pool"
+    );
+}
+
+#[test]
+fn a_plugins_queued_requests_are_each_started_in_the_order_asked_as_one_finishes() {
+    // What the budget must not do, which is the rule the deeds follow too: a
+    // request waiting is a ticket a guest is waiting on, so none is dropped,
+    // and they go in the order they were asked. Five fetches, each to a host
+    // of its own, so that which one a connection arrives at says which
+    // request was started.
+    let queue = LocalQueue::new();
+    let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
+    let plugins = Arc::new(Background::new(REQUEST_WORKERS));
+    let runtime = runtime_in(&mut app, &["net:127.0.0.1"], &plugins);
+    let mut hosts: Vec<Silent> = (0..5).map(|_| Silent::new()).collect();
+
+    ask_for(
+        &mut app,
+        &runtime,
+        1,
+        hosts.iter().map(Silent::fetch).collect(),
+    );
+    assert!(
+        hosts[0].reached(Duration::from_secs(5)),
+        "the first was not started"
+    );
+    assert!(
+        hosts[1].reached(Duration::from_secs(5)),
+        "the second was not started"
+    );
+    still_hanging(&queue, &app, &runtime, 5);
+    assert_eq!(
+        queued_and_running(&app, &runtime),
+        (vec![3, 4, 5], RUNNING_AT_ONCE),
+        "more than a plugin's share was started, or the rest were not kept"
+    );
+
+    // Each that is answered makes room for exactly the oldest still waiting.
+    for (finished, next) in [(0, 2), (1, 3), (2, 4)] {
+        hosts[finished].hang_up();
+        assert!(
+            until(&queue, || hosts[next].reached(Duration::ZERO)),
+            "fetch {} was not started once fetch {} was answered",
+            next + 1,
+            finished + 1
+        );
+        let (waiting, _) = queued_and_running(&app, &runtime);
+        assert_eq!(
+            waiting,
+            (next as u32 + 2..6).collect::<Vec<_>>(),
+            "something other than the oldest was started"
+        );
+    }
+
+    for host in &mut hosts {
+        host.hang_up();
+    }
+    assert!(
+        until(&queue, || queued_and_running(&app, &runtime)
+            == (Vec::new(), 0)),
+        "not every request was answered"
+    );
+}
+
+#[test]
+fn a_sound_past_what_a_plugin_may_play_in_a_second_is_answered_and_not_played() {
+    // A sound is a player started and a person interrupted, and nothing
+    // limited how many a plugin could ask for. Past the limit it is not
+    // dropped — the guest would wait on the ticket for the rest of the
+    // session — but answered with why, and never handed to a player. These
+    // are not wavs, so the ones that are played fail before a player starts
+    // and the test makes no noise.
+    let (mut app, _queue, runtime) = runtime_allowed(&["sound.play"]);
+    let asked = SOUNDS_PER_SECOND + 2;
+    let sound = Request::PlaySound {
+        wav: b"not a wav".to_vec(),
+        volume: 0,
+    };
+
+    ask_for(&mut app, &runtime, 1, vec![sound; asked]);
+
+    let waiting = runtime.read(&app, |runtime, _| {
+        runtime
+            .queued
+            .iter()
+            .map(|(ticket, work)| match work {
+                Work::Perform(Request::PlaySound { .. }) => (*ticket, "played"),
+                Work::Answer(Answer::Failed(why)) if why.contains("sounds a second") => {
+                    (*ticket, "turned down")
+                }
+                other => panic!("ticket {ticket} became {other:?}"),
+            })
+            .collect::<Vec<_>>()
+    });
+    // The first two are already on the pool; what is queued behind them
+    // shows where the line was drawn.
+    let mut expected: Vec<(u32, &str)> = (RUNNING_AT_ONCE as u32 + 1..=SOUNDS_PER_SECOND as u32)
+        .map(|ticket| (ticket, "played"))
+        .collect();
+    expected.extend(
+        (SOUNDS_PER_SECOND as u32 + 1..=asked as u32).map(|ticket| (ticket, "turned down")),
+    );
+    assert_eq!(waiting, expected);
+}
+
 /// A directory of line-delimited JSON, written for one test.
 fn transcripts(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -735,6 +1053,53 @@ fn a_line_below_the_floor_is_not_counted() {
     };
 
     assert_eq!(lines, 1, "only the turn on the 5th is above the floor");
+}
+
+#[test]
+fn a_walk_past_its_deadline_says_it_gave_up_rather_than_answering_a_low_total() {
+    // A fetch has a socket's timeout to end it, and a walk had nothing: a
+    // granted directory holding a file of a hundred gigabytes was a worker
+    // held for as long as reading it took. What is past the deadline is not
+    // a total — a count that stopped part way is a week with fewer turns in
+    // it than it had — so the answer is that it gave up.
+    let root = transcripts("deadline");
+    let Request::Tally {
+        containing,
+        at_least,
+        distinct_by,
+        tables,
+        ..
+    } = tally_of(&root)
+    else {
+        panic!("that is a tally");
+    };
+    let later = Instant::now() + Duration::from_secs(60);
+
+    assert_eq!(
+        walk(&root, ".jsonl", 0, Instant::now()),
+        None,
+        "a walk out of time went on looking"
+    );
+    let files = walk(&root, ".jsonl", 0, later).expect("a minute is time enough for three files");
+
+    let Answer::Failed(why) = add_up(
+        &files,
+        &containing,
+        &at_least,
+        &distinct_by,
+        &tables,
+        Instant::now(),
+    ) else {
+        panic!("counting out of time answered with a total");
+    };
+    assert!(why.contains("given up"), "unhelpful answer: {why}");
+    assert!(
+        matches!(
+            add_up(&files, &containing, &at_least, &distinct_by, &tables, later),
+            Answer::Counted { lines: 3, .. }
+        ),
+        "the same files did not add up in time"
+    );
 }
 
 #[test]

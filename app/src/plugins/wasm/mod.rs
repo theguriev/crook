@@ -330,6 +330,7 @@ impl Plugin for WasmPlugin {
                 self.sandbox.clone(),
                 self.failures.clone(),
                 granted,
+                runtime::requests(),
             )
         });
         // The bridge every model-backed feature in Crook has: an answer that
