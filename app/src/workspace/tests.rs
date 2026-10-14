@@ -25038,6 +25038,21 @@ mod restoring {
     }
 
     #[test]
+    fn a_restored_agent_s_resume_line_runs_through_the_launcher_it_was_started_with() {
+        // Gemini CLI's quick start runs it through `npx`, and leaves no
+        // `gemini` on `PATH` for a bare resume line to find.
+        let scratch = Scratch::new();
+        let mut session = remembered(&[(scratch.path(), Some("gemini"))]);
+        session.tabs[0].panes[0].launcher = Some("npx @google/gemini-cli".to_owned());
+        let harness = restored(&session, Settings::ephemeral());
+
+        assert_eq!(
+            harness.field_text(harness.pane_ids()[0]),
+            "npx @google/gemini-cli --resume latest"
+        );
+    }
+
+    #[test]
     fn resume_every_agent_is_there_only_while_a_restored_line_is_waiting() {
         // A command with nothing to do declines, the way every chord of the
         // window's does, so a chord a person binds to it goes on to the shell.

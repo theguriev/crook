@@ -2975,7 +2975,14 @@ resume the most recent conversation *in the directory they run in*, and Crook's 
 each agent a directory of its own, so no session id, hook or wire change is needed. Two panes of
 one agent in one directory are offered the agent's picker instead, or nothing where it has none,
 and a CLI whose "most
-recent" is the repository's rather than the directory's is offered its picker or nothing. The
+recent" is the repository's rather than the directory's is offered its picker or nothing. One
+fact more for an agent that was not started by its name: the package runner and package, or
+the version manager, that found it (`npx @google/gemini-cli`, `mise x node@22 -- claude`),
+which the resume line is run through, since an `npx` user has no `gemini` on `PATH`. It is
+rebuilt from the line by `agent::launch_of` rather than copied, so a `VAR=value` (an API key's
+usual place), `env`, `nohup` and the runner's own options never reach the file, and a hand edit
+that is not that shape comes back as the agent alone. Aliases are not seen through: the shell
+reports the line as typed, and only that shell could expand it. The
 rule above still holds: nothing old is redrawn, and a new process starts only when a person
 presses Enter, or "Resume every agent" for every line nobody has touched.
 

