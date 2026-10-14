@@ -898,6 +898,35 @@ fn agent_arguments(
     })
 }
 
+/// Writes what a command answered without a window to standard output.
+///
+/// Every answer goes out through here rather than `println!`, which panics
+/// when the write fails. Rust leaves SIGPIPE ignored, so `crook pane blocks 7
+/// | head -5` on a long build log gets EPIPE once `head` has its lines and
+/// goes, and the lines the reader asked for came with a panic on stderr and
+/// exit status 101 — a pipeline under `pipefail` that said Crook had crashed.
+/// A reader that has gone is the end of the answer and the command succeeds,
+/// as it does for any command piped to `head`, and as `crook events --follow`
+/// already took it.
+fn print_answer(answer: std::fmt::Arguments<'_>) -> Result<()> {
+    write_answer(&mut std::io::stdout().lock(), answer)
+        .context("could not write the answer to standard output")
+}
+
+/// [`print_answer`], into `out`: what a test hands a pipe nobody reads.
+///
+/// Only a reader that has gone is let through. A full disk under `> file` is
+/// an answer that was not written, and the command fails as it should.
+fn write_answer(
+    out: &mut impl std::io::Write,
+    answer: std::fmt::Arguments<'_>,
+) -> std::io::Result<()> {
+    match out.write_fmt(answer).and_then(|()| out.flush()) {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        written => written,
+    }
+}
+
 fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<Startup> {
     let mut args = args.peekable();
     // A noun and a verb rather than a flag, and only as the first word: it is
@@ -906,7 +935,7 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
     // and everything after `tab new`'s `--` is the command it runs.
     if args.next_if(|word| word == "pane").is_some() {
         let printed = control::cli::pane(args)?;
-        println!("{}", printed.text);
+        print_answer(format_args!("{}\n", printed.text))?;
         // Printed first: a wait that did not get there still says where the
         // pane is, and the failure is what a script's `&&` reads.
         if let Some(failure) = printed.failure {
@@ -920,7 +949,7 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
     }
     if args.next_if(|word| word == "tab").is_some() {
         let printed = control::cli::tab(args)?;
-        println!("{}", printed.text);
+        print_answer(format_args!("{}\n", printed.text))?;
         if let Some(note) = printed.note {
             eprintln!("{note}");
         }
@@ -935,11 +964,15 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "-h" | "--help" => {
-                println!("{}", help_text());
+                print_answer(format_args!("{}\n", help_text()))?;
                 return Ok(Startup::Answered);
             }
             "-V" | "--version" => {
-                println!("crook {} ({})", env!("CARGO_PKG_VERSION"), channel.name());
+                print_answer(format_args!(
+                    "crook {} ({})\n",
+                    env!("CARGO_PKG_VERSION"),
+                    channel.name()
+                ))?;
                 return Ok(Startup::Answered);
             }
             "--shell-integration" => {
@@ -947,7 +980,10 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 if let Some(extra) = args.next() {
                     bail!("unrecognised argument {extra}; `--shell-integration` takes one shell");
                 }
-                println!("{}", shell_integration_text(shell.as_deref())?);
+                print_answer(format_args!(
+                    "{}\n",
+                    shell_integration_text(shell.as_deref())?
+                ))?;
                 return Ok(Startup::Answered);
             }
             // Answered without a window, like `--version`: the window this is
@@ -1012,7 +1048,7 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 if let Some(lead) = hooks.lead {
                     eprintln!("{lead}");
                 }
-                println!("{}", hooks.text);
+                print_answer(format_args!("{}\n", hooks.text))?;
                 if let Some(note) = hooks.note {
                     eprintln!("{note}");
                 }
@@ -1023,7 +1059,7 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
             // tells one that was asked to know. Stdout is the file and
             // stderr the note, so `> SKILL.md` takes exactly the file.
             "--skill" => {
-                print!("{}", agent::SKILL);
+                print_answer(format_args!("{}", agent::SKILL))?;
                 eprintln!(
                     "# Save the text above as ~/.claude/skills/crook/SKILL.md, or as a \
 project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can do."
@@ -1045,7 +1081,7 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
                 let installed = crate::plugins::wasm::install(std::path::Path::new(&path))
                     .map_err(anyhow::Error::msg)
                     .with_context(|| path.clone())?;
-                println!("installed {}", installed.display());
+                print_answer(format_args!("installed {}\n", installed.display()))?;
                 return Ok(Startup::Answered);
             }
             // The other half of `--install-plugin`, and answered the same way.
@@ -1063,7 +1099,7 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
                 let id = crook_plugin::PluginId::parse(&name).map_err(anyhow::Error::msg)?;
                 let removed = crate::plugins::wasm::uninstall(&id).map_err(anyhow::Error::msg)?;
                 forget_plugin(&id)?;
-                println!("removed {}", removed.display());
+                print_answer(format_args!("removed {}\n", removed.display()))?;
                 return Ok(Startup::Answered);
             }
             // Not a plugin and not a setting: a fixture is a *picture*, and
@@ -1094,19 +1130,19 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
                     .next()
                     .context("`--update-plugin` needs a plugin's `owner/name`")?;
                 let id = crook_plugin::PluginId::parse(&name).map_err(anyhow::Error::msg)?;
-                print!("{}", plugins_updated(Some(&id))?);
+                print_answer(format_args!("{}", plugins_updated(Some(&id))?))?;
                 return Ok(Startup::Answered);
             }
             "--update-plugins" => {
-                print!("{}", plugins_updated(None)?);
+                print_answer(format_args!("{}", plugins_updated(None)?))?;
                 return Ok(Startup::Answered);
             }
             "--check-update" => {
-                println!("{}", update_checked(channel)?);
+                print_answer(format_args!("{}\n", update_checked(channel)?))?;
                 return Ok(Startup::Answered);
             }
             "--update" => {
-                print!("{}", updated(channel)?);
+                print_answer(format_args!("{}", updated(channel)?))?;
                 return Ok(Startup::Answered);
             }
             // Answered after the loop rather than here, unlike `--version`:
@@ -1317,8 +1353,8 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
     }
     if plugins {
         match json {
-            true => println!("{}", installed_plugins_json()),
-            false => println!("{}", installed_plugins_text()),
+            true => print_answer(format_args!("{}\n", installed_plugins_json()))?,
+            false => print_answer(format_args!("{}\n", installed_plugins_text()))?,
         }
         return Ok(Startup::Answered);
     }
@@ -1544,8 +1580,10 @@ COMMANDS:
                        names it. Prints the new pane's number, or with --json
                        the window's answer. The pane is known by the secret in
                        its CROOK_TOKEN, and eight tabs may be open on behalf of
-                       one pane a person opened. sh, bash, zsh and fish only;
-                       not on Windows yet
+                       one pane a person opened. No word may hold a newline or
+                       another control character: put a prompt with lines in
+                       a file, and name the file in the command by its full
+                       path. sh, bash, zsh and fish only; not on Windows yet
     events --follow [--pane <ID>]
                        Print a line of JSON for every change of status, every
                        command finished (with its command line), every command
@@ -2526,8 +2564,10 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
         .write_image_data(&pixels)
         .context("failed to write the PNG body")?;
 
-    println!("wrote {} ({width}x{height})", path.display());
-    Ok(())
+    print_answer(format_args!(
+        "wrote {} ({width}x{height})\n",
+        path.display()
+    ))
 }
 
 /// How long a `--action` is given for whatever it asked the host for.
@@ -3585,7 +3625,7 @@ fn plugins_updated(only: Option<&crook_plugin::PluginId>) -> Result<String> {
     match failed {
         0 => Ok(said),
         _ => {
-            print!("{said}");
+            print_answer(format_args!("{said}"))?;
             bail!("{failed} of {} could not be updated", outcomes.len())
         }
     }
@@ -4487,6 +4527,37 @@ mod tests {
         // window after printing it would put a window over the shell that
         // was redirecting it into a file.
         assert_eq!(parse(&["--skill"]).expect("valid"), Startup::Answered);
+    }
+
+    #[test]
+    fn an_answer_whose_reader_has_gone_is_the_end_of_it_and_not_a_failure() {
+        // `crook pane blocks 7 | head -5`: the reader has its lines and goes,
+        // and the write into its pipe fails. That is the answer ending, as it
+        // ends for any command piped to `head`.
+        let (reader, mut writer) = std::io::pipe().expect("a pipe");
+        drop(reader);
+        write_answer(&mut writer, format_args!("pane {}\n", 7))
+            .expect("a reader that has gone is the end of the answer");
+
+        // A reader that is there gets the answer exactly as it was put.
+        let mut read = Vec::new();
+        write_answer(&mut read, format_args!("pane {}\n", 7)).expect("written");
+        assert_eq!(read, b"pane 7\n");
+
+        // And every other failure is still one: a full disk under `> file`
+        // is an answer nobody has, and a script must hear that it failed.
+        struct Full;
+        impl std::io::Write for Full {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::StorageFull.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let failed = write_answer(&mut Full, format_args!("pane {}\n", 7))
+            .expect_err("a full disk is a failure");
+        assert_eq!(failed.kind(), std::io::ErrorKind::StorageFull);
     }
 
     #[test]

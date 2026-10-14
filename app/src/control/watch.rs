@@ -2,11 +2,13 @@
 //!
 //! What a lead agent that fanned its work out into tabs does next: waits for
 //! a worker to stop, and reads what it did. `crook pane wait 7 --until
-//! needs-input --timeout 600` answers when pane 7's agent has stopped for a
-//! person, or when the ten minutes are up, and says which; `crook events
-//! --follow` is a line for every status, every command finished — named, as
-//! one too quick to be seen running is told only there — and every pane
-//! closed, for as long as it is left running.
+//! needs-input --timeout 110` answers when pane 7's agent has stopped for a
+//! person, or when the 110 seconds are up, and says which — under the couple
+//! of minutes an agent's tool gives a command before cutting it off, so the
+//! lead waits again rather than losing the wait with nothing learned; `crook
+//! events --follow` is a line for every status, every command finished —
+//! named, as one too quick to be seen running is told only there — and every
+//! pane closed, for as long as it is left running.
 //!
 //! # Who may watch what
 //!

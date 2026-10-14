@@ -1934,7 +1934,9 @@ on the pool, and the tab opens in it when git is done. The command arrives as wo
 window joins them with the quoting the plugin host types an argument with, which is proven to
 read back word for word in `sh`, `bash`, `zsh` and `fish` (#342). A new pane that would run any
 other shell is refused as `unsupported-shell`, and a word holding a control character as
-`bad-request`, since a newline in a command line is a second command. A word arrives as itself:
+`bad-request`, since a newline in a command line is a second command; the refusal says to put a
+prompt with lines in a file the command names, rather than escape it in a second quoting with
+rules of its own in each shell. A word arrives as itself:
 an alias is not expanded, `&&` is an argument, and a pipeline is `sh -c '…'`. The line is typed
 into the new pane's field at once, where a person can see it, and sent by the field's own submit
 at the shell's first prompt — the first `A` for a shell with marks, since a line submitted into
@@ -2116,6 +2118,10 @@ its output and a line of how it ended; both take `--json`. `crook events --follo
 prints the events as one JSON object a line, always, since what reads a stream is a program.
 Every request carries `$CROOK_TOKEN` when there is one, and the CLI refuses nothing on the
 token's account: the window is the one place that knows what a token is worth.
+A reader that stops early — `crook pane blocks 7 | head -5` — is the end of the answer, and the
+command succeeds: every answer printed without a window goes through one function that takes a
+closed pipe as done, where `println!` panicked with exit status 101, since Rust leaves SIGPIPE
+ignored and the write fails with EPIPE.
 What it prints carries no control character. A pane's directory arrives percent-decoded from the
 OSC 7 its shell printed, so `%1b` in it is an ESC, and a listing that printed what it was given
 would replay a pane's escape sequence into the terminal the listing runs in; the table writes
