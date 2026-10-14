@@ -58,7 +58,7 @@ pub const WINDOW_OVERLAY: SlotId = SlotId::new("window.overlay");
 ///
 /// The order is the order the shipped keybindings are written in, so a person
 /// reading one and the other is reading the same order twice.
-pub const COMMANDS: [(&str, &str, Binding); 57] = [
+pub const COMMANDS: [(&str, &str, Binding); 58] = [
     ("new-tab", "New agent tab", Binding::NewTab),
     (
         "reopen-closed-tab",
@@ -75,6 +75,15 @@ pub const COMMANDS: [(&str, &str, Binding); 57] = [
     ("split-up", "Split upwards", Binding::SplitUp),
     ("previous-tab", "Previous tab", Binding::PreviousTab),
     ("next-tab", "Next tab", Binding::NextTab),
+    // tmux's `last-window`, WezTerm's `ActivateLastTab`, alt-tab. Neither
+    // "last" nor "previous" in the name, because here both already mean a
+    // place in the strip: `select-last-tab` is the end of it and
+    // `previous-tab` the one above. "Recent" is the order this one counts in.
+    (
+        "back-to-recent-tab",
+        "Back to the tab you were on",
+        Binding::BackToRecentTab,
+    ),
     ("move-tab-left", "Move the tab left", Binding::MoveTabLeft),
     (
         "move-tab-right",

@@ -1321,6 +1321,18 @@ impl TabStrip {
         &self.mru
     }
 
+    /// The tab that was active before the active one, or `None` when there
+    /// is no other tab.
+    ///
+    /// What "back to the tab I was on" goes to, and why pressing it twice
+    /// comes home: selecting it puts it at the front of the list, and the tab
+    /// it was asked from second. Found rather than read off the second slot,
+    /// so the answer leans on nothing but the active tab's identity — the
+    /// same reason the strip stores that rather than a position.
+    pub fn used_before(&self) -> Option<TabId> {
+        self.mru.iter().copied().find(|id| *id != self.active)
+    }
+
     /// Every pane in the window, in bar order, with the tab holding it.
     pub fn panes(&self) -> impl Iterator<Item = (TabId, &Pane)> {
         self.tabs

@@ -1744,6 +1744,7 @@ KEYS (macOS):
     cmd+1 … cmd+8, cmd+9       Select a tab by position, and the last one
     alt+cmd+left/right         Select the previous/next tab
     ctrl+tab / ctrl+shift+tab  The same step, on the chord browsers use
+    shift+cmd+j                Back to the tab you were on, and again to return
     ctrl+cmd+left/right        Move the active tab
     alt+cmd+up / alt+cmd+down  Select the block above / below, and copy it with cmd+c
     shift+pageup/pagedown      Page the output
@@ -1768,6 +1769,7 @@ KEYS (Linux and Windows):
     alt+1 … alt+8, alt+9       Select a tab by position, and the last one
     ctrl+pageup/pagedown       Select the previous/next tab
     ctrl+tab / ctrl+shift+tab  The same step, on the chord browsers use
+    ctrl+shift+alt+j           Back to the tab you were on, and again to return
     ctrl+shift+pageup/pagedown Move the active tab
     ctrl+alt+up / ctrl+alt+down  Select the block above / below, and copy it with ctrl+shift+c
     shift+pageup/pagedown      Page the output

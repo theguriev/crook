@@ -880,7 +880,7 @@ Twenty features, and the page that configures them:
   page tells you where it is.
 
 - **Everything the window does has a name, and most of it has a key.** The window registers
-  fifty-seven commands of its own and ships chords for thirty-nine; the other eighteen are
+  fifty-eight commands of its own and ships chords for forty; the other eighteen are
   reached by name, from the palette or from a chord of your own. That split is deliberate — a
   shipped chord is a key taken away from the shell in every pane, forever, so it is spent on
   what is pressed often and not on what is done once a week.
@@ -888,6 +888,7 @@ Twenty features, and the page that configures them:
   | | macOS | Linux and Windows |
   |---|---|---|
   | Tab by position, and the last one | `cmd-1`…`cmd-8`, `cmd-9` | `alt-1`…`alt-8`, `alt-9` |
+  | Back to the tab you were on, and again to return | `shift-cmd-j` | `ctrl-shift-alt-j` |
   | Move between the panes of a split | `ctrl-shift-←↑↓→` | `alt-←↑↓→` |
   | The next pane, the previous one | `cmd-]`, `cmd-[` | `ctrl-shift-]`, `ctrl-shift-[` |
   | Page the output | `shift-PageUp`, `shift-PageDown` | the same |

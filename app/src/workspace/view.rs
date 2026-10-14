@@ -9531,6 +9531,11 @@ impl Workspace {
             Binding::SplitDown => TabAction::Split(Direction::Down),
             Binding::PreviousTab => TabAction::Select(self.neighbour(-1)?),
             Binding::NextTab => TabAction::Select(self.neighbour(1)?),
+            // A plain select, so the tab comes back on the pane that had the
+            // keyboard when it was left, and a folded group stays folded as
+            // it does for the digits and next-tab. Declined with one tab:
+            // there is nowhere to go back to, and the chord reaches the shell.
+            Binding::BackToRecentTab => TabAction::Select(self.tabs.used_before()?),
             Binding::MoveTabLeft => TabAction::MoveLeft,
             Binding::MoveTabRight => TabAction::MoveRight,
             // Telegram's chord for Telegram's box, and it works from anywhere

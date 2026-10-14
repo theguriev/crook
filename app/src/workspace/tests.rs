@@ -32165,6 +32165,131 @@ mod from_the_keyboard {
         assert_eq!(active_tab(&harness), before);
     }
 
+    /// The chord that goes back to the tab used before, on the platform the
+    /// test runs on: the two tables put it on different keys.
+    fn back_chord() -> Modifiers {
+        if crate::input_keys::Platform::current() == crate::input_keys::Platform::Mac {
+            Modifiers {
+                cmd: true,
+                shift: true,
+                ..Default::default()
+            }
+        } else {
+            Modifiers {
+                ctrl: true,
+                shift: true,
+                alt: true,
+                ..Default::default()
+            }
+        }
+    }
+
+    #[test]
+    fn going_back_returns_to_the_tab_used_before_and_twice_comes_home_again() {
+        // The first and the third, which are not neighbours: a step by
+        // position from either lands on the second, and the round trip a
+        // person makes after answering an agent is to wherever they were.
+        let mut harness = Harness::panel(4);
+        let tabs = tabs_in_order(&harness);
+        harness.run_command("crook/window/select-tab-1");
+        harness.run_command("crook/window/select-tab-3");
+
+        harness.run_command("crook/window/back-to-recent-tab");
+        assert_eq!(active_tab(&harness), tabs[0], "back to where they were");
+        harness.run_command("crook/window/back-to-recent-tab");
+        assert_eq!(
+            active_tab(&harness),
+            tabs[2],
+            "and back again, alt-tab's toggle"
+        );
+
+        assert!(
+            harness.press_key("j", back_chord()),
+            "the shipped chord was not consumed"
+        );
+        assert_eq!(
+            active_tab(&harness),
+            tabs[0],
+            "the chord is the same command"
+        );
+    }
+
+    #[test]
+    fn going_back_after_a_close_goes_to_the_tab_used_before_that() {
+        // The second, the fourth, then the first: back from the first is the
+        // fourth until the fourth is closed, and then it is the second —
+        // not the first's neighbour, and not the end of the strip.
+        let mut harness = Harness::panel(4);
+        let tabs = tabs_in_order(&harness);
+        harness.run_command("crook/window/select-tab-2");
+        harness.run_command("crook/window/select-tab-4");
+        harness.run_command("crook/window/select-tab-1");
+
+        harness.dispatch_action(TabAction::Close(tabs[3]));
+        harness.run_command("crook/window/back-to-recent-tab");
+
+        assert_eq!(active_tab(&harness), tabs[1]);
+    }
+
+    #[test]
+    fn going_back_with_one_tab_declines_so_the_chord_reaches_the_shell() {
+        // There is no tab to go back to, and a chord that cannot do anything
+        // is not swallowed — the same rule a digit past the end follows.
+        let mut harness = Harness::panel(1);
+        let alone = active_tab(&harness);
+
+        harness.run_command("crook/window/back-to-recent-tab");
+        assert_eq!(active_tab(&harness), alone);
+
+        assert!(
+            !harness.press_key("j", back_chord()),
+            "the chord was swallowed with nothing to go back to"
+        );
+    }
+
+    #[test]
+    fn going_back_puts_the_keyboard_in_the_pane_that_had_it() {
+        // A split focuses the pane it made, so the left pane having the
+        // keyboard is something a person did — and it is what they come
+        // back to, rather than whichever pane a tab starts on.
+        let mut harness = Harness::panel(2);
+        let tabs = tabs_in_order(&harness);
+        harness.run_command("crook/window/select-tab-1");
+        harness.run_command("crook/window/split-right");
+        harness.run_command("crook/window/focus-pane-left");
+        let left = panes(&harness)[0];
+        assert_eq!(focused(&harness), left);
+
+        harness.run_command("crook/window/select-tab-2");
+        harness.run_command("crook/window/back-to-recent-tab");
+
+        assert_eq!(active_tab(&harness), tabs[0]);
+        assert_eq!(focused(&harness), left);
+    }
+
+    #[test]
+    fn going_back_into_a_folded_group_selects_the_tab_and_leaves_it_folded() {
+        // The way every other key that selects a tab treats a folded group —
+        // the digits, next-tab, the next waiting pane. The heading wears the
+        // active tab's lift, and the fold is the person's to undo.
+        let (mut harness, group) = Harness::grouped_panel(2);
+        let grouped = harness.active_id();
+        assert_eq!(harness.group_of(grouped), Some(group));
+        harness.run_command("crook/window/select-last-tab");
+        harness.dispatch_action(TabAction::ToggleGroup(group));
+
+        harness.run_command("crook/window/back-to-recent-tab");
+
+        assert_eq!(active_tab(&harness), grouped);
+        let folded = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .group(group)
+                .is_some_and(crate::tab::TabGroup::is_collapsed)
+        });
+        assert!(folded, "going back unfolded the group");
+    }
+
     #[test]
     fn the_block_commands_decline_at_the_prompt() {
         // Nothing is selected until somebody steps off the prompt, and each of

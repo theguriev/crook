@@ -1102,6 +1102,11 @@ pub const DEFAULTS_MAC: &[(&str, &str)] = &[
     // modifiers are `plain`.
     ("ctrl+tab", "crook/window/next-tab"),
     ("ctrl+shift+tab", "crook/window/previous-tab"),
+    // The way back from where cmd-j went: that one goes to the next agent
+    // waiting, and this one, with the Shift that reverses a chord, comes back
+    // to the tab a person left to answer it. Free of the field: the cmd
+    // branch of `chord_intent` takes a Shift only on z.
+    ("shift+cmd+j", "crook/window/back-to-recent-tab"),
     ("ctrl+cmd+left", "crook/window/move-tab-left"),
     ("ctrl+cmd+right", "crook/window/move-tab-right"),
     ("cmd+=", "crook/window/zoom-in"),
@@ -1209,6 +1214,11 @@ pub const DEFAULTS_OTHER: &[(&str, &str)] = &[
     // `-crook/window/next-tab` line in `keybindings.json` gives it back.
     ("ctrl+tab", "crook/window/next-tab"),
     ("ctrl+shift+tab", "crook/window/previous-tab"),
+    // The way back from where ctrl+shift+j went, as on the Mac. That chord
+    // has already spent the Shift, so the reverse takes an Alt beside it the
+    // way reopening a closed tab does beside opening one — and `chord_intent`
+    // gives the field nothing with an Alt held.
+    ("ctrl+shift+alt+j", "crook/window/back-to-recent-tab"),
     ("ctrl+shift+pageup", "crook/window/move-tab-left"),
     ("ctrl+shift+pagedown", "crook/window/move-tab-right"),
     // ctrl+minus does not collide with anything a shell wants: the C0 range
