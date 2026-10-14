@@ -224,7 +224,7 @@ reporter — `coredumpctl`, Console.app, the Event Viewer — has the rest.
 
 ## v1 scope
 
-Twenty features, and the page that configures them:
+Twenty-one features, and the page that configures them:
 
 - **Tabs.** Open, close, switch, reorder. One agent session per tab, and the tab is named
   the way a person would answer "what is that one?": what you called it, else what the agent
@@ -247,8 +247,14 @@ Twenty features, and the page that configures them:
   base itself and a detached checkout keep the plain count.
   One more row is the Appearance page's alone: **Status marks**, which turns the dot into a
   glyph per state in the same colour — a play mark, a bell, a crossed ring, a hollow one — for
-  an eye the colour says nothing to, or a screenshot in greyscale.
+  an eye the colour says nothing to, or a screenshot in greyscale. Either way a running agent's
+  mark breathes, fading and coming back every two seconds, so a working row reads as working
+  without a pointer over it, and nothing moves once nothing runs. A row whose mark a plugin
+  has taken keeps its status on the mark's corner instead: the PowerBook Duo pirate grinning
+  while the agent works, a dot in the status colour while it waits or after it failed.
   Under that space is a `+`, which is where Warp's browser puts the one that opens another tab.
+  A new tab starts where the focused pane is working, not where Crook itself was started — from
+  the Dock, that would be your home directory every time.
   Above the list is a **search box**, Telegram's way round: it
   filters the rows by what a tab is running, where it is working, the branch it is on and its
   status word — `waiting` is the amber rows, and `running`, `failed` and `idle` are the dot's —
@@ -258,7 +264,9 @@ Twenty features, and the page that configures them:
   Enter opens the top match, and Escape gives the keyboard back to the shell.
   `cmd-b` (`ctrl-shift-b`) hides the whole panel for wide output or a small screen and brings
   it back on the next press — the search chord brings it back too, since a box nobody can see
-  is no use — and a hidden panel stays hidden across launches.
+  is no use — and a hidden panel stays hidden across launches. Its right edge is a handle:
+  dragged, it makes the panel wider or narrower, and a double click puts the default width
+  back. The width is remembered across launches too.
 
   Tabs that belong together are folded into a **group**: a heading with a chevron, a count and
   a close button, and its tabs indented under it. A worktree opened from a tab makes one out of
@@ -439,6 +447,9 @@ Twenty features, and the page that configures them:
   Code's debug log rather than a notice on every prompt; it carries the skill below too.
   `crook --agent-hooks claude` prints those two commands, then the same hooks as JSON for a
   person who would rather merge them into `~/.claude/settings.json` by hand.
+  With no hooks at all Claude Code still says half of it, in the glyph it puts in front of its
+  own terminal title — `✳` at its prompt, a turning half circle while it works — which the row
+  reads as idle and running, wearing the title without the glyph; a hook's report outranks it.
   `codex`, `gemini` and `copilot` print the same guarded hooks for Codex CLI, Gemini CLI and
   GitHub Copilot CLI in each one's own hooks file, `opencode` prints the plugin OpenCode loads
   instead, and `aider`, which has no hooks, gets a sentence saying what to do instead. Copilot
@@ -690,7 +701,9 @@ Twenty features, and the page that configures them:
   typed stands after the caret in the same dim ink a completion does. The right arrow takes
   it, the word arrow takes one word of it, and typing anything else leaves it behind. It is
   drawn rather than typed: nothing is in the line until you take it, and it never makes the
-  composer grow a row.
+  composer grow a row. Settings → Shell → *Tab key* makes Tab take it too; with nothing
+  standing after the caret Tab still asks the shell, and `ctrl-space` asks the shell whatever
+  is standing.
 - **Themes**, in a panel of their own. Thirteen built in — Crook Dark, Crook Light, Midnight,
   and ten of the palettes Omarchy dresses a desktop in (Catppuccin, Everforest, Gruvbox,
   Kanagawa, Nord, Rosé Pine, Tokyo Night and three more, each its own project's, read from
@@ -707,17 +720,27 @@ Twenty features, and the page that configures them:
   of the one you are looking at — five candidate colours clustered out of its palette, one
   click to choose the background, and everything else decided so the result is legible. What
   it writes is a file in your themes folder, in the same format as any other.
-- **A tab's own menu.** Right-click any row and it opens over that row: pin, new group with
-  tab, copy pane title, copy working directory, rename tab, rename pane, close tab, a row of
-  colours, and — inside a repository — show changes and the worktrees, with Finish task and
-  Discard task beside them on a tab in a checkout Crook made. **Pinning** holds a tab at the
-  front of the block it is in rather than of the whole list, which is the one place this cannot
-  be Warp's: a group is a contiguous block that says two checkouts are one piece of work, and
-  pinning that lifted a member out of the middle would be pinning that takes a group apart. A
-  drop can no more land an unpinned tab among the pinned ones than it can split a group. A
-  **colour** is a stripe down the leading edge of a tab's rows, not a tinted status disc — the
-  disc says what the agent is doing, and one dot cannot carry both — and it is named rather
-  than written down, so a tab made red in one theme is red in a theme written years later. Renaming turns the entry itself into a field, in the
+- **A tab's own menu.** Right-click any row and it opens over that row: pin tab, mark tab as
+  waiting, why this status, new group with tab, copy pane title, copy working directory, copy
+  git branch, rename tab, rename pane, close tab, close other tabs, close tabs below, close tabs
+  above, a row of colours, and — inside a repository — show changes and the worktree list, with
+  Finish task and Discard task beside them on a tab in a checkout Crook made; open pull request
+  and check pull request join them on a row whose agent has named one. **Marking** a tab washes
+  its row amber and counts it with the ones waiting for you, for a tab you mean to come back
+  to: it stays until you arrive at the pane or clear it from the same entry, and it never
+  answers for the agent. **Why this status** hangs a panel off the menu that says in words
+  what the dot cannot: what the agent said and when, what asked for a look — a bell, a
+  notification, a mark — and what the shell is running. The three closes after close tab are
+  Chrome's, read down the list rather than across it: they leave pinned tabs where they are,
+  and like any close they ask first when they would end something still working.
+  **Pinning** holds a tab at the front of the block it is in rather than of the whole list,
+  which is the one place this cannot be Warp's: a group is a contiguous block that says two
+  checkouts are one piece of work, and pinning that lifted a member out of the middle would be
+  pinning that takes a group apart. A drop can no more land an unpinned tab among the pinned
+  ones than it can split a group. A **colour** is a stripe down the leading edge of a tab's
+  rows, not a tinted status disc — the disc says what the agent is doing, and one dot cannot
+  carry both — and it is named rather than written down, so a tab made red in one theme is red
+  in a theme written years later. Renaming turns the entry itself into a field, in the
   column you pressed it in; Enter keeps the name, Escape drops it, and an emptied field puts
   back the name the tab was opened with. A name you typed beats the one the agent chose for
   its own work, which is the whole point of typing one, and it comes back with the window. Not one of those entries is written into the menu. It is a
@@ -828,10 +851,10 @@ Twenty features, and the page that configures them:
   1.18.33. Codex 0.149.1 and Gemini CLI 0.61.0 turn bracketed paste on when they start, but a
   paste into their prompts is not verified.
 
-- **A settings page**, which opens the way a shell does: `cmd/ctrl-,` — or the View options
-  menu's last entry — puts it in a **tab of its own**, listed beside the work it
-  configures, splittable next to that work, and closed by the same × and the same close chord
-  (`cmd-w`, `ctrl-shift-w` off macOS) as any other pane. Five pages: Appearance, Shell,
+- **A settings page**, which is a **section of the sidebar** rather than a window or a tab:
+  `cmd/ctrl-,`, the **Settings** button at the foot of the panel or the View options menu's
+  last entry puts its rail of pages where the tab list was and the page where the panes were,
+  and **Sessions** beside that button puts the work back. Five pages: Appearance, Shell,
   Notifications, Keyboard Shortcuts and About — and a plugin's page arrives on the same rail
   beside them.
   Every option on it is one the application actually reads; there is nothing there that does
@@ -842,16 +865,18 @@ Twenty features, and the page that configures them:
   LaunchAgent on macOS, an XDG autostart entry on Linux, the `Run` key on Windows — each the
   person's own and taken out again when switched off), whether a bell plays the system's alert
   sound (off, as in Warp; a pane you are not looking at is marked either way, and a burst is
-  one sound), which stops post a notification, and —
-  set in the file rather than on the page — its font family and the line each agent is resumed
-  with.
+  one sound), which stops post a notification, whether a close asks before ending agents that
+  are still working, the Shell page's login shell, Tab key and Option as Meta, whether the tabs
+  panel shows and how wide it is, and — set in the file rather than on the page — its font
+  family and the line each agent is resumed with.
   Beside them, **Default terminal** makes Crook the terminal the system opens — Launch
   Services' shell handler on macOS, what Finder runs a script with, and the first line of
   `xdg-terminals.list` on Linux — and says so once it is; it is the system's, so it is asked
   afresh each time the page is shown, and not offered on Windows, which has no such setting.
   The type size is also on `cmd/ctrl-plus`, `-minus` and `-0`, and every pane resizes with it:
   a pane's columns and rows are its box divided by a cell, so the ptys follow.
-  It is the one pane with no shell under it and no field: every control on it is a click.
+  There is no shell under it, and nothing on it is typed but the search below: every control
+  on it is a click.
 
   At the top of its rail is a **search box**, and it narrows both halves of the page at once:
   the rail keeps only the pages that hold an answer and says how many each of them holds, and
@@ -957,8 +982,10 @@ but the blocks are still short of a few things: no pointer click-to-select a blo
 jump-to-bottom *button* — the chord for it exists; [`docs/blocks.md`](docs/blocks.md) lists
 those and says what each would touch.
 A selection copies, and the paste chord puts the clipboard into the program as a bracketed
-paste. A program can write the clipboard too, with OSC 52 — what `tmux`, `nvim` and a copy over
-`ssh` use — and it is the same clipboard `cmd-c` writes; an empty write is dropped rather than
+paste. With no text on the clipboard — a screenshot, say — the chord sends a program holding
+the keyboard `ctrl-v` instead, on which Claude Code and Codex read the image off the clipboard
+themselves. A program can write the clipboard too, with OSC 52 — what `tmux`, `nvim` and a
+copy over `ssh` use — and it is the same clipboard `cmd-c` writes; an empty write is dropped rather than
 clearing what somebody had copied. What a program cannot do is *read* it: that direction is
 refused, since answering it would hand the clipboard to anything that can print to the pane.
 A program can also print a **picture**, with iTerm2's inline images — OSC 1337 `File=`, and its
@@ -1131,7 +1158,7 @@ To produce a release binary:
 ./script/bundle --check-only   # type-check with release flags, build nothing
 ```
 
-`--check-only` is the fifth check, and what the workflow runs on all three platforms on every
+`--check-only` is the sixth check, and what the workflow runs on all three platforms on every
 pull request to `main` and every push to it. It compiles the workspace with the exact profile
 and feature set a shipped build uses, which catches the class of bug where a release-only
 feature combination does not compile — cheaply, and without producing artifacts.
@@ -1152,8 +1179,9 @@ docs/plugins.md          the two plugin tiers, and what each of them may do
 docs/images/             the README's screenshots, rendered by `--snapshot`
 assets/                  the app icon: pirate.svg, composed for Apple's grid
                          in icon-macos.svg, rendered into Crook.iconset
-script/                  bootstrap, run, bundle, install, publish, icons, app-icon,
-                         and for macOS: macos-keychain, macos-app, notarize, macos-dmg
+packaging/               the Claude Code plugin, the Linux desktop entry and AppStream
+                         record, and the AUR package
+script/                  the scripts below, each explained in its own header comment
 ```
 
 Two crates are meant to leave this repository. A plugin is written outside it, by somebody with
@@ -1162,27 +1190,44 @@ for crates.io and versioned `0.<abi>.<patch>`, which makes `crook_plugin_api = "
 way of writing "built against ABI 8". `crook_wasm` goes with it for one job: `cargo install
 crook_wasm` puts `crook-plugin-info` on a machine, which is how a registry says what an
 artifact it just built actually is, using the host's own reader rather than a second one.
-`./script/publish` is what uploads them, and until the first upload every plugin carries a copy
-of the API crate instead.
+`./script/publish` is what uploads them. Both are there, and every plugin, the template
+included, depends on the published `crook_plugin_api` rather than carrying a copy of it.
+
+| script | what it does |
+|---|---|
+| `bootstrap` | prepares this machine to build Crook, or prints the command where installing is not its to do |
+| `run` | builds and runs the dev-channel binary, `crook-dev`, passing its arguments on |
+| `bundle` | a release build for this platform or one named target; `--archive` packs it with its checksum, `--check-only` builds nothing |
+| `install` | installs a released binary, checked against the release's `SHA256SUMS`; `--desktop` adds the Linux launcher entry |
+| `glibc-floor` | fails when a Linux binary needs a newer glibc than the floor it promises |
+| `release` | bumps the version, writes the changelog section, commits and tags — and refuses a commit Crook CI has not passed |
+| `release-notes` | prints what a tag's release page says, out of `CHANGELOG.md` |
+| `commit-lint` | checks that commit titles are the Conventional Commits the changelog is written from |
+| `hooks/` | `commit-msg`, which runs `commit-lint` on every commit once `git config core.hooksPath script/hooks` points git at it |
+| `publish` | publishes `crook_plugin_api` and `crook_wasm` to crates.io; a person runs it, never CI |
+| `aur` | brings the `crook-bin` AUR package up to a release that is already out, and with `--push` pushes it |
+| `icons` | regenerates the vendored Lucide icons from a pinned `lucide-static` |
+| `app-icon` | renders the macOS app icon into `assets/Crook.iconset` |
+| `macos-keychain` | puts a Developer ID certificate into a keychain `codesign` will find, on a CI runner |
+| `macos-app` | wraps a macOS binary in a signed `Crook.app` |
+| `notarize` | sends a signed app or disk image to Apple, waits for the answer and staples the ticket |
+| `macos-dmg` | puts a stapled `Crook.app` into a signed disk image |
+| `fixtures/` | what tests read: a plugin's tree for `--plugin-fixture`, and the `readelf` listing of the v0.1.13 binary `glibc-floor` is tested against |
 
 
 ## Checks
 
-Whatever you touch, these four commands are the gate, in this order, run before you push.
-`Crook CI` runs the same five again on macOS, Linux and Windows, by itself on every pull
-request to `main` and every push to `main`. A branch with no pull request to `main`, which
-includes one whose pull request is stacked on another branch, starts nothing;
+Whatever you touch, the gate is the five commands at the top of
+[`CONTRIBUTING.md`](CONTRIBUTING.md#before-you-push), run in that order before you push, and
+two more beside them for a change to a manifest, a feature gate or the plugin API. `Crook CI`
+runs all seven again on macOS, Linux and Windows, by itself on every pull request to `main`
+and every push to `main`. A branch with no pull request to `main`, which includes one whose
+pull request is stacked on another branch, starts nothing;
 `gh workflow run "Crook CI" --ref <branch>` asks for it.
 
-```sh
-cargo fmt --all --check
-cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo check --locked --workspace --all-targets
-cargo test --locked --workspace
-```
-
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the two style rules that are not enforced by a
-linter.
+The rest of [`CONTRIBUTING.md`](CONTRIBUTING.md) is the conventions no linter enforces — what a
+comment is for, where `ctx` goes, why nothing ticks while the window is idle — and the commit
+titles the release notes are written from.
 
 ## Licensing
 

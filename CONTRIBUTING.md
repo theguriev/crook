@@ -34,11 +34,22 @@ There is a sixth check, which compiles the workspace with the feature set a ship
 
 Run it if you touch a `Cargo.toml`, a feature gate, or anything under `#[cfg(...)]`.
 
+And a seventh, for the half of `crook_plugin_api` a host build never compiles: the
+`#[link_section]` arms of `icon!` and `preview!` are gated on wasm32, and they are what a plugin
+author builds against.
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo check --locked -p crook_plugin_api --tests --target wasm32-unknown-unknown
+```
+
+Run it if you touch `crates/crook_plugin_api`.
+
 ## The workflow
 
-The same five checks run on macOS, Linux and Windows as `Crook CI`, beside `--check-only` on
-all three and the Linux release binary, built in Debian 11 and held to glibc 2.31. They start
-by themselves in two places:
+The same five checks run on macOS, Linux and Windows as `Crook CI`, followed by the wasm32
+check, beside `--check-only` on all three and the Linux release binary, built in Debian 11 and
+held to glibc 2.31. They start by themselves in two places:
 
 - **A pull request to `main`**, where they check the branch merged into the `main` it would
   land on. A newer push to the pull request cancels the run it has made stale.
@@ -61,7 +72,7 @@ gh workflow run "Crook CI" --ref <branch>
 
 or the Run workflow button on the Actions tab. The three platforms are what make it worth
 having, since `crook::process::Command`, the path handling and the release feature set are the
-things four local commands on one machine cannot cover.
+things five local commands on one machine cannot cover.
 
 If `cargo metadata --locked` fails, `Cargo.lock` is out of date with a manifest. Run
 `cargo check` and commit the updated lockfile.
