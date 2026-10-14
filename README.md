@@ -241,9 +241,11 @@ Twenty-one features, and the page that configures them:
   else the directory it sits in. A number is what is left when a pane has no name, no program
   and nowhere to be, which is nowhere anybody works.
   A tab closed by mistake comes back with `cmd-shift-t` (`ctrl-shift-alt-t` off macOS) — where
-  it was, with its name, colour and split, each shell in the directory it was in, and each
-  agent that was running offered its resume line, unsent, the way a restart offers it. The
-  last ten closed are kept, for as long as the window is open.
+  it was and in the group it was in, with its name, colour and split, each shell in the
+  directory it was in, and each agent that was running offered its resume line, unsent, the
+  way a restart offers it. A group closed from its heading comes back whole in one press,
+  under the same heading, and a pane closed out of a split goes back into its tab. The last
+  ten closes are kept, for as long as the window is open.
   They live in a panel down the left edge, and a **View options** menu — the panel's own
   secondary click, on the empty space the list leaves — says what a row of them shows: which
   fact it leads with, what its second line says, which chips it carries, whether hovering it

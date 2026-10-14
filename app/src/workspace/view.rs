@@ -76,6 +76,7 @@ use super::action::{
 };
 use super::block_list::block_text;
 use super::changes_panel::{ChangesPanelState, Editor, HunkRead};
+use super::closed::{Closed, Taking};
 use super::closing::{self, Close, Question};
 use super::crash_note::CrashNote;
 use super::finish::{Again, Finishing};
@@ -580,13 +581,6 @@ pub struct Opening {
     pub plugins_directory: Option<PathBuf>,
 }
 
-/// How many closed tabs "Reopen the closed tab" can bring back, newest first.
-///
-/// A browser's own number, near enough. Past it the oldest is forgotten: a
-/// tab closed twenty closes ago is one nobody is reaching back for with a
-/// chord, and each snapshot holds its panes' names and directories.
-const CLOSED_KEPT: usize = 10;
-
 /// The window's root view.
 pub struct Workspace {
     tabs: TabStrip,
@@ -654,9 +648,10 @@ pub struct Workspace {
     /// has taken over, and it is theirs to send. See
     /// [`Self::resume_every_agent`].
     resume_offers: HashMap<PaneId, String>,
-    /// The tabs closed this session, newest last, each with where it was —
-    /// what "Reopen the closed tab" brings back. See [`CLOSED_KEPT`].
-    closed_tabs: Vec<(crate::session::TabSnapshot, usize)>,
+    /// What was closed this session, newest last, each close in one piece —
+    /// a tab, a group or a pane — with where it was: what "Reopen the closed
+    /// tab" brings back. See [`super::closed`].
+    closed: Closed,
     /// The last answer [`Self::filtered_rows`] worked out, with what it was
     /// worked out from.
     #[allow(clippy::type_complexity)]
@@ -1173,7 +1168,7 @@ impl Workspace {
             cleared_exits: HashMap::new(),
             watches: Watches::default(),
             resume_offers: HashMap::new(),
-            closed_tabs: Vec::new(),
+            closed: Closed::default(),
             filter_cache: RefCell::new(None),
             clipboard: Clipboard::new(),
             divider_drag: DividerDrag::new(),
@@ -8999,40 +8994,12 @@ impl Workspace {
     /// "the window is dirty" the same statement rather than two.
     pub fn apply(&mut self, action: TabAction, ctx: &mut ViewContext<Self>) -> TabEffect {
         let before = self.tabs.focused_pane_id();
-        // Recorded before it goes, because after it there is nothing left to
-        // record: a close of the tab, or of its last pane, is the moment a
-        // tab can be written down for "Reopen the closed tab".
-        //
-        // A close of several writes each of them down, bottom first, so that
-        // reopening — which takes the last written first — brings them back
-        // top first, and each lands at its own index with everything above
-        // it already back in place.
-        let closing: Vec<_> = match action {
-            TabAction::Close(tab) => vec![tab],
-            TabAction::ClosePane(pane) => self.tabs.tab_of(pane).into_iter().collect(),
-            TabAction::CloseOthers(_) | TabAction::CloseBelow(_) | TabAction::CloseAbove(_) => {
-                self.tabs.closed_by(action)
-            }
-            _ => Vec::new(),
-        }
-        .into_iter()
-        .rev()
-        .filter_map(|tab| {
-            let index = self.tabs.index_of(tab)?;
-            let snapshot = crate::session::TabSnapshot::of(self.tabs.get(tab)?)?;
-            Some((tab, snapshot, index))
-        })
-        .collect();
+        // Written down before it goes, because after it there is nothing left
+        // to write down, and kept only once it has gone: a close of every tab
+        // there is closes the window instead and leaves the strip as it was.
+        let taking = Taking::by(&self.tabs, action);
         let effect = self.tabs.apply(action);
-        for (tab, snapshot, index) in closing {
-            if self.tabs.get(tab).is_some() {
-                continue;
-            }
-            if self.closed_tabs.len() == CLOSED_KEPT {
-                self.closed_tabs.remove(0);
-            }
-            self.closed_tabs.push((snapshot, index));
-        }
+        self.closed.keep(taking, &self.tabs);
         self.settle(effect, before, ctx)
     }
 
@@ -9061,28 +9028,25 @@ impl Workspace {
         }
     }
 
-    /// Brings back the tab closed most recently, where it was.
+    /// Brings back what was closed most recently, where it was: a tab, a
+    /// whole group, or a pane into the tab it was closed out of. See
+    /// [`super::closed`].
     ///
-    /// The same snapshot a restart restores from, so it comes back the way a
+    /// The same snapshots a restart restores from, so it comes back the way a
     /// restored window does: its name and colour, its panes in their split,
     /// each shell in the directory it was in — and each agent that was running
     /// offered its resume line, unsent, in its own pane. The processes are
     /// not brought back; nothing can be. A directory that is gone since is a
     /// pane that starts where a new one would.
     fn reopen_closed_tab(&mut self, ctx: &mut ViewContext<Self>) {
-        let Some((snapshot, index)) = self.closed_tabs.pop() else {
-            return;
-        };
-        let Some(tab) = snapshot.restore() else {
-            return;
-        };
-        let panes: Vec<PaneId> = tab.panes().iter().map(crate::tab::Pane::id).collect();
         let before = self.tabs.focused_pane_id();
-        let effect = self.tabs.reopen(tab, index);
+        let Some((effect, panes)) = self.closed.reopen(&mut self.tabs) else {
+            return;
+        };
         self.settle(effect, before, ctx);
 
-        // Only this tab's panes: another restored pane that has not spent its
-        // line already holds it.
+        // Only the panes that came back: another restored pane that has not
+        // spent its line already holds it.
         let offers = crate::session::resume_offers(&self.tabs, |program, resume| {
             self.settings.resume_line(program, resume)
         });
@@ -9701,7 +9665,7 @@ impl Workspace {
             // Declined with nothing to bring back, so the chord reaches the
             // shell rather than being eaten by a command that does nothing.
             Binding::ReopenClosedTab => {
-                return (!self.closed_tabs.is_empty()).then_some(WorkspaceAction::ReopenClosedTab);
+                return (!self.closed.is_empty()).then_some(WorkspaceAction::ReopenClosedTab);
             }
             // Never declined: there is always somewhere to open it, the home
             // directory when the pane says nothing. See `open_new_window`.

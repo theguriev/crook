@@ -215,7 +215,7 @@ impl Route {
 pub enum Binding {
     /// Open a tab.
     NewTab,
-    /// Bring back the tab closed most recently.
+    /// Bring back what was closed most recently: a tab, a group or a pane.
     ReopenClosedTab,
     /// Open another window, fresh, in the focused pane's directory.
     NewWindow,

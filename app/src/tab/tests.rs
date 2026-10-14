@@ -717,6 +717,34 @@ fn a_split_across_the_groups_axis_appends_along_it_rather_than_nesting() {
 }
 
 #[test]
+fn a_pane_put_back_beside_the_only_one_left_takes_back_the_way_its_split_went() {
+    // Closed out of a column, and the tab split into a row and back to one
+    // pane since: the pane left says nothing about which way the closed one
+    // was, so the one coming back says it.
+    let (mut strip, ids) = strip(1);
+    let tab = ids[0];
+    strip.apply(TabAction::Split(Direction::Down));
+    let column = panes_of(&strip, tab);
+    strip.apply(TabAction::ClosePane(column[1]));
+    strip.apply(TabAction::Split(Direction::Right));
+    let row = panes_of(&strip, tab);
+    strip.apply(TabAction::ClosePane(row[1]));
+    assert_eq!(
+        strip.get(tab).expect("open").panes().axis(),
+        SplitAxis::Horizontal
+    );
+
+    let pane = Pane::new("agent 2");
+    let id = pane.id();
+    strip.reopen_pane(tab, pane, 1, SplitAxis::Vertical);
+
+    let group = strip.get(tab).expect("open").panes();
+    assert_eq!(group.axis(), SplitAxis::Vertical, "it came back in a row");
+    assert_eq!(panes_of(&strip, tab), [row[0], id]);
+    assert_eq!(group.focused_id(), id);
+}
+
+#[test]
 fn every_session_a_window_opens_gets_a_name_no_other_session_has_had() {
     // A pane and a tab are the same kind of row in `Panes` view, so a name
     // that repeats across them is exactly as ambiguous as one that repeats
