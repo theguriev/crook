@@ -8,7 +8,8 @@
 //! Pictures are drawn here too, as the same quad with the emoji flag set: the
 //! shader already passes a colour texel through untouched for an emoji, and a
 //! picture is nothing but colour texels. What they need that a glyph does not
-//! is atlases of their own, so [`Sheet`] says which set a batch samples from.
+//! is atlases of their own — and, for one wider or taller than an atlas row,
+//! a texture of its own — so [`Sheet`] says which a batch samples from.
 //!
 //! The instance layout here is the Rust half of the contract in
 //! `src/shaders/README.md`; the two must be changed together.
@@ -17,13 +18,14 @@ use std::mem;
 
 use crookui_core::fonts::{Canvas, SubpixelAlignment};
 use crookui_core::geometry::{Color, vec2f};
+use crookui_core::image::device_size;
 use crookui_core::platform::FontDb;
 use crookui_core::scene::Layer;
 use wgpu::util::BufferInitDescriptor;
 
 use super::Error;
 use super::atlas::{AllocatedRegion, TextureId};
-use super::glyph_cache::GlyphCache;
+use super::glyph_cache::{GlyphCache, ImageCacheKey, ImageTexture};
 use super::resources::{QUAD_INDICES, Resources, quad_vertex_layout};
 use super::util::create_buffer_init;
 
@@ -55,11 +57,20 @@ pub struct AtlasTexture {
 impl AtlasTexture {
     /// Allocates a `size` × `size` RGBA8 atlas and its bind group.
     pub fn new(size: u32, ctx: &AtlasContext<'_>) -> Self {
+        Self::sized(size, size, ctx)
+    }
+
+    /// Allocates a `width` × `height` RGBA8 texture and its bind group.
+    ///
+    /// For a picture too big for an atlas, which is given a texture exactly
+    /// its size: the same format, sampler and bind group layout as an atlas,
+    /// so the glyph pipeline draws from it without knowing the difference.
+    pub fn sized(width: u32, height: u32, ctx: &AtlasContext<'_>) -> Self {
         let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Glyph atlas"),
             size: wgpu::Extent3d {
-                width: size,
-                height: size,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -151,16 +162,19 @@ pub(super) struct LayerState {
     textures: Vec<PerTextureState>,
 }
 
-/// Which atlas a batch samples: a glyph atlas or an image atlas.
+/// Which texture a batch samples: a glyph atlas, an image atlas, or a
+/// picture's own.
 ///
-/// The two sets are numbered independently, so a texture id alone is
-/// ambiguous and the batch has to say which set it means.
+/// The two sets of atlases are numbered independently, so a texture id alone
+/// is ambiguous and the batch has to say which set it means.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(super) enum Sheet {
     /// A glyph atlas: masks, colour emoji and icons.
     Marks(TextureId),
     /// An image atlas: pictures only.
     Images(TextureId),
+    /// The texture of one picture too big for an image atlas.
+    Picture(ImageCacheKey),
 }
 
 struct PerTextureState {
@@ -304,16 +318,13 @@ impl Pipeline {
         // Pictures first, so a caption drawn over one in the same layer wins.
         // A picture is an emoji as far as the shader knows: its texel is
         // emitted unchanged and the tint is ignored. The quad is the drawn
-        // device size; the region is normally the same size, resampled to it
-        // on the CPU, and only past the atlas ceiling is the sampler asked to
-        // stretch a smaller region up.
+        // device size. An atlas region is the same size, resampled to it on
+        // the CPU; a texture of a picture's own holds the pixels it was
+        // handed, and when they are not the drawn size the sampler stretches
+        // them rather than the thread that draws resampling a screenful.
         for image in &layer.images {
             let origin = image.bounds.origin() * scale_factor;
-            let size = image.bounds.size() * scale_factor;
-            let drawn = (
-                size.x().round().max(0.) as u32,
-                size.y().round().max(0.) as u32,
-            );
+            let drawn = device_size(image.bounds.size(), scale_factor);
 
             let placed = match self.glyph_cache.get_image(&image.bitmap, drawn, &atlas) {
                 Ok(Some(placed)) => placed,
@@ -341,7 +352,11 @@ impl Pipeline {
                 color: Color::WHITE.to_f32_array(),
                 is_emoji: true as i32,
             };
-            batch(Sheet::Images(placed.texture_id), instance);
+            let sheet = match placed.texture {
+                ImageTexture::Atlas(texture_id) => Sheet::Images(texture_id),
+                ImageTexture::Own(key) => Sheet::Picture(key),
+            };
+            batch(sheet, instance);
         }
 
         for glyph in &layer.glyphs {
@@ -484,6 +499,7 @@ impl Pipeline {
             let texture = match state.sheet {
                 Sheet::Marks(texture_id) => self.glyph_cache.texture(texture_id),
                 Sheet::Images(texture_id) => self.glyph_cache.image_texture(texture_id),
+                Sheet::Picture(key) => self.glyph_cache.own_texture(key),
             };
             let Some(texture) = texture else {
                 log::warn!(
