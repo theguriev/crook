@@ -175,6 +175,7 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
             placeholder(),
         )
         .with_icon(Lucide::Search)
+        .with_window_focused(workspace.is_window_focused())
         // A press is the other way into the box, and it says only that: what a
         // press means is the workspace's, exactly as it is for every field a
         // section brings with it.

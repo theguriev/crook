@@ -1768,9 +1768,11 @@ until a program asks, which is what keeps `[I` off a shell's command line.
 **So does the caret.** A window behind another draws no caret in its composer and outlines a
 program's cursor, which is what a pane without the keyboard already drew inside a window in
 front and what every other terminal draws in a window without the keyboard — two windows that
-both blink look as though both are listening. `Workspace::shows_a_caret` answers no while the
-window is behind, so the blink chain repaints nothing there. Only the drawing reads the bit:
-`Keys` is decided exactly as before, so the window that comes back types where it left off.
+both blink look as though both are listening. A `TextField` with the keys — the find bar, a
+search box, the palette, a rename — is drawn as one without them there too: no caret and no
+accent ring. `Workspace::shows_a_caret` answers no while the window is behind, so the blink
+chain repaints nothing there. Only the drawing reads the bit: `Keys` and `has_keys` are decided
+exactly as before, so the window that comes back types where it left off.
 Starting out focused is also what opens a window with its caret on Wayland, which says nothing
 about focus until the keyboard first arrives.
 

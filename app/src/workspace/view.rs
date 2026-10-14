@@ -7528,12 +7528,11 @@ impl Workspace {
 
     /// Whether any field on screen is drawing a caret that blinks.
     pub(super) fn shows_a_caret(&self, app: &AppContext) -> bool {
-        // Nothing blinks in a window behind another. Its panes draw no caret
-        // at all — see `body::contents` — and a field of its own that has the
-        // keys, a find bar or a search box, holds whatever its caret showed
-        // as the window went behind: a caret blinking where nobody is typing
-        // says that somebody is, and repainting twice a second for it is the
-        // idle tick the window does not keep.
+        // Nothing blinks in a window behind another. Nothing in it draws a
+        // caret at all — not a pane's composer, see `body::contents`, nor a
+        // field with the keys, see `TextField::with_window_focused` — and
+        // repainting twice a second for a caret nobody draws is the idle tick
+        // the window does not keep.
         if !self.window_focused {
             return false;
         }

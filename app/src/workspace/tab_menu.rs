@@ -1556,6 +1556,7 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
                     state.control(Control::Branch),
                     BRANCH_PLACEHOLDER,
                 )
+                .with_window_focused(workspace.is_window_focused())
                 .with_focus(WorkspaceAction::Worktree(WorktreeAction::Focus(
                     CreatorField::Branch,
                 )))
@@ -1673,6 +1674,7 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
                     state.control(Control::Prompt),
                     PROMPT_PLACEHOLDER,
                 )
+                .with_window_focused(workspace.is_window_focused())
                 .with_focus(WorkspaceAction::Worktree(WorktreeAction::Focus(
                     CreatorField::Agent,
                 )))

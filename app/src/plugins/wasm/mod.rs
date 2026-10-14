@@ -892,7 +892,8 @@ fn drawn(
             placement,
             chrome,
             workspace.clipboard(),
-        ),
+        )
+        .with_window_focused(workspace.is_window_focused()),
         &move |action| {
             ActionName::parse(&format!("{prefix}/{action}"))
                 .ok()

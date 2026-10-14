@@ -11883,6 +11883,65 @@ fn the_box_takes_no_keys_until_it_is_asked_for() {
     assert_eq!(harness.panel_search_text(), "cd");
 }
 
+/// How the panel's search box is drawn: `(ringed, caret)` — whether its
+/// border is the accent a field with the keys is ringed in, and whether a
+/// caret stands inside it.
+///
+/// Read from a frame drawn inside the lit half of the caret's blink, so that
+/// a caret missing from it is one that was not drawn rather than one that had
+/// blinked off. A frame on a loaded machine can take longer than half a blink;
+/// such a frame says nothing either way and is drawn again.
+fn panel_search_drawn(harness: &mut Harness) -> (bool, bool) {
+    for _ in 0..10 {
+        let lit = std::time::Instant::now();
+        harness.workspace_update(|workspace, _| workspace.panel_search().input().edit(|_| ()));
+        let scene = harness.frame();
+        if lit.elapsed() >= crate::text_input::CARET_PHASE {
+            continue;
+        }
+        let field = panel_search_box(&scene);
+        let ringed = visible_rects(&scene).any(|(rect, bounds)| {
+            bounds == field && rect.border.color == Fill::Solid(theme().accent)
+        });
+        let caret = visible_rects(&scene).any(|(rect, bounds)| {
+            rect.background == Fill::Solid(theme().accent)
+                && bounds.width() < 2.
+                && field.contains_point(center(bounds))
+        });
+        return (ringed, caret);
+    }
+    panic!("no frame was drawn inside half a blink");
+}
+
+#[test]
+fn a_window_behind_another_draws_its_search_box_as_one_without_the_keys() {
+    // The composer's caret is not the only one. A field with the keys — this
+    // box, the find bar, the palette, a rename — is ringed in the accent with
+    // a caret in it, and in a window behind another application that said
+    // the window was the one being typed into. It is drawn as a field without
+    // the keys there instead, and the keys stay where they were.
+    let mut harness = Harness::panel(1);
+    harness.press_search_chord();
+    assert!(harness.panel_search_takes_keys(), "the chord found nothing");
+    assert_eq!(panel_search_drawn(&mut harness), (true, true));
+
+    harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+    assert_eq!(
+        panel_search_drawn(&mut harness),
+        (false, false),
+        "a window behind another drew its search box as the one listening"
+    );
+    assert!(
+        harness.panel_search_takes_keys(),
+        "the box lost the keyboard when the window went behind"
+    );
+
+    harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+    assert_eq!(panel_search_drawn(&mut harness), (true, true));
+    harness.type_text("cd");
+    assert_eq!(harness.panel_search_text(), "cd");
+}
+
 #[test]
 fn typing_in_the_box_filters_the_list_and_leaves_the_strip_alone() {
     // The whole feature, and the one line of it that is easy to get wrong: a

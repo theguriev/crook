@@ -288,7 +288,7 @@ impl Plugin for CommandPalette {
                 // that the selection has to be put back when the list under it
                 // has: see `rows::showing`.
                 let rows = rows::showing(workspace, &palette, app);
-                Some(list::render(&palette, &rows))
+                Some(list::render(&palette, &rows, workspace.is_window_focused()))
             }
         });
 

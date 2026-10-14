@@ -455,6 +455,9 @@ impl Held {
 /// query with a row, and the answer stops meaning anything. Every term has to
 /// match, and they need not match the same part — this is a person narrowing a
 /// list, not writing a pattern.
+///
+/// `window_focused` is whether the window has the desktop's keyboard, which the
+/// field is drawn as listening only while it does. It has the keys either way.
 pub(super) fn picker(
     chrome: &Rc<Held>,
     placeholder: &str,
@@ -462,6 +465,7 @@ pub(super) fn picker(
     choose: Option<ActionId>,
     fonts: Fonts,
     clipboard: &Clipboard,
+    window_focused: bool,
 ) -> Box<dyn Element> {
     let typed = chrome.query.editor().text().to_lowercase();
     let terms: Vec<&str> = typed.split_whitespace().collect();
@@ -495,6 +499,7 @@ pub(super) fn picker(
         placeholder.to_owned(),
     )
     .with_icon(Lucide::Search)
+    .with_window_focused(window_focused)
     .finish();
 
     let mut column = Flex::column()

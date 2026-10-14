@@ -1761,6 +1761,7 @@ fn find_bar(
         find.field(),
         placeholder,
     )
+    .with_window_focused(workspace.is_window_focused())
     .with_icon(if filtering {
         Lucide::ListFilter
     } else {

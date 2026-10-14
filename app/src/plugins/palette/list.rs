@@ -187,7 +187,11 @@ const SECONDARY_SIZE: f32 = 10.5;
 /// Only ever called with the palette up: the contribution answers a closed one
 /// with nothing at all, before there is a list to draw, so a card that is not
 /// on screen costs a branch rather than a grouped build every frame.
-pub(super) fn render(palette: &Palette, rows: &Rows) -> Box<dyn Element> {
+///
+/// `window_focused` is whether the window has the desktop's keyboard, which
+/// the query is drawn as listening only while it does. See
+/// [`TextField::with_window_focused`].
+pub(super) fn render(palette: &Palette, rows: &Rows, window_focused: bool) -> Box<dyn Element> {
     let fonts = palette.fonts();
     let mode = rows.mode();
     let mut column = Flex::column()
@@ -214,6 +218,7 @@ pub(super) fn render(palette: &Palette, rows: &Rows) -> Box<dyn Element> {
                     Mode::Settings => Lucide::Settings,
                     Mode::Keys => Lucide::Keyboard,
                 })
+                .with_window_focused(window_focused)
                 .finish(),
             )
             .with_margin_bottom(PADDING)
