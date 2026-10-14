@@ -881,9 +881,10 @@ pub struct MenuItem {
 /// that draws, so a request that waited for a socket would be a request that
 /// cost a frame.
 ///
-/// What is work — a fetch, a file, a walk, a listing, a sound — is done two
-/// of one plugin's at a time. The rest wait their turn in the order they were
-/// asked, so a plugin whose fetches hang waits on itself and on nobody else.
+/// What is work — a fetch, a file, a walk, a listing — is done two of one
+/// plugin's at a time. The rest wait their turn in the order they were asked,
+/// so a plugin whose fetches hang waits on itself and on nobody else. A sound
+/// does not wait its turn: it is played as soon as it is asked for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request {
     /// Reach the network. Needs [`Capability::Network`] naming the host in the
@@ -928,7 +929,9 @@ pub enum Request {
     /// each of those is a *field name* it supplies. The host knows none of it.
     ///
     /// A walk still going a minute after it started is given up on, and is
-    /// [`Answer::Failed`] rather than a total that stopped part of the way.
+    /// [`Answer::Failed`] rather than a total that stopped part of the way. A
+    /// line longer than sixteen megabytes is skipped, as one that is not JSON
+    /// is.
     Tally {
         /// The directory to walk, granted as this string followed by `/**`.
         root: String,
@@ -977,8 +980,9 @@ pub enum Request {
     /// that could, so what it can hand a player is what every player on every
     /// platform already reads. Anything else is [`Answer::Failed`].
     ///
-    /// Four in any one second, from one plugin. A fifth is not played, and is
-    /// [`Answer::Failed`] saying so: each sound is a person interrupted.
+    /// Four in any one second, from one plugin, counted as each is played. A
+    /// fifth is not played, and is [`Answer::Failed`] saying so: each sound is
+    /// a person interrupted.
     PlaySound {
         /// A RIFF/WAVE file, whole, as it would sit on disk.
         wav: Vec<u8>,

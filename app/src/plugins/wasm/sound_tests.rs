@@ -226,7 +226,8 @@ fn the_sounds_directory_stays_under_its_cap_by_losing_what_was_played_longest_ag
     // ago" does not depend on how fine this filesystem's clock is.
     let scratch = super::super::tests::Scratch::new("sounds");
     let directory = scratch.path();
-    let size = 1000;
+    // Whole blocks, so that what each costs the disk is its length.
+    let size = 2 * BLOCK as usize;
     let cap = 3 * size as u64 + size as u64 / 2;
     let at = |second: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000 + second);
     let store = |mark: u8, second: u64| {
@@ -267,4 +268,28 @@ fn the_sound_about_to_be_played_is_never_the_one_that_goes() {
     let file = store_in(scratch.path(), &sound(9, 1000), 10, at).expect("a sound is written down");
 
     assert!(file.exists(), "the sound was evicted before it was played");
+}
+
+#[test]
+fn sounds_too_small_to_fill_the_cap_by_length_still_fill_it_by_what_they_cost_the_disk() {
+    // The smallest wav is twelve bytes, and every file takes at least a block
+    // whatever its length. Counted by length, a cap of sixteen megabytes held
+    // over a million such sounds — gigabytes of disk — before it let one go.
+    let scratch = super::super::tests::Scratch::new("sounds-small");
+    let directory = scratch.path();
+    let size = 64;
+    let cap = 3 * BLOCK;
+    let at = |second: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000 + second);
+
+    for mark in 1..=5 {
+        store_in(directory, &sound(mark, size), cap, at(u64::from(mark)))
+            .expect("a sound is written down");
+    }
+
+    let (present, total) = kept(directory, &[1, 2, 3, 4, 5], size);
+    assert_eq!(
+        present,
+        vec![3, 4, 5],
+        "{total} bytes of sounds were kept as if they cost the disk no more than that"
+    );
 }

@@ -145,12 +145,12 @@ fn on_one_worker() -> (App, Arc<LocalQueue>, Arc<Background>, ModelHandle<Runtim
     let (sandbox, _) = Sandbox::open(&module, Fuel::default()).expect("the test module opens");
     let runtime = app.update(|ctx| {
         ctx.add_model(|_| {
-            Runtime::new(
+            Runtime::working_on(
+                Arc::new(Background::new(1)),
                 PluginId::parse("eugen/probe").expect("a literal that parses"),
                 Rc::new(RefCell::new(sandbox)),
                 Rc::new(Cell::new(0)),
                 Vec::new(),
-                Arc::new(Background::new(1)),
             )
         })
     });
@@ -244,12 +244,12 @@ fn runtime_in(app: &mut App, granted: &[&str], pool: &Arc<Background>) -> ModelH
     let (sandbox, _) = Sandbox::open(&module, Fuel::default()).expect("the test module opens");
     app.update(|ctx| {
         ctx.add_model(|_| {
-            Runtime::new(
+            Runtime::working_on(
+                pool.clone(),
                 PluginId::parse("eugen/probe").expect("a literal that parses"),
                 Rc::new(RefCell::new(sandbox)),
                 Rc::new(Cell::new(0)),
                 granted.iter().copied().map(String::from).collect(),
-                pool.clone(),
             )
         })
     })
@@ -796,44 +796,167 @@ fn a_plugins_queued_requests_are_each_started_in_the_order_asked_as_one_finishes
 }
 
 #[test]
+fn a_plugin_built_for_a_window_works_on_the_plugins_pool_and_not_the_windows() {
+    // Half of keeping a plugin's hanging fetches off the window's pool is
+    // which pool a built plugin is handed, and the window's would compile:
+    // it is the pool a model is built beside. So the runtime is built the
+    // way a plugin's is, and asked which it has.
+    let queue = LocalQueue::new();
+    let window = Arc::new(Background::new(1));
+    let mut app = App::new(queue.foreground(), window.clone());
+    let module = crate::plugins::wasm::tests::wasm_asking_where("eugen/probe", 0, 0, 0);
+    let (sandbox, _) = Sandbox::open(&module, Fuel::default()).expect("the test module opens");
+
+    let runtime = app.update(|ctx| {
+        ctx.add_model(|_| {
+            Runtime::new(
+                PluginId::parse("eugen/probe").expect("a literal that parses"),
+                Rc::new(RefCell::new(sandbox)),
+                Rc::new(Cell::new(0)),
+                Vec::new(),
+            )
+        })
+    });
+
+    runtime.read(&app, |runtime, _| {
+        assert!(
+            !Arc::ptr_eq(&runtime.pool, &window),
+            "a plugin's requests are worked on beside the window's saves"
+        );
+        assert!(
+            Arc::ptr_eq(&runtime.pool, &requests()),
+            "a plugin's requests are worked on somewhere other than the plugins' pool"
+        );
+    });
+}
+
+/// A sound that is not a wav, so that one let through fails before a
+/// player starts and a test that plays it makes no noise.
+fn quiet_sound() -> Request {
+    Request::PlaySound {
+        wav: b"not a wav".to_vec(),
+        volume: 0,
+    }
+}
+
+/// When each sound a runtime still counts against its limit was played.
+fn rung(app: &App, runtime: &ModelHandle<Runtime>) -> Vec<Instant> {
+    runtime.read(app, |runtime, _| {
+        runtime
+            .chimes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .played()
+    })
+}
+
+#[test]
 fn a_sound_past_what_a_plugin_may_play_in_a_second_is_answered_and_not_played() {
     // A sound is a player started and a person interrupted, and nothing
     // limited how many a plugin could ask for. Past the limit it is not
     // dropped — the guest would wait on the ticket for the rest of the
-    // session — but answered with why, and never handed to a player. These
-    // are not wavs, so the ones that are played fail before a player starts
-    // and the test makes no noise.
-    let (mut app, _queue, runtime) = runtime_allowed(&["sound.play"]);
-    let asked = SOUNDS_PER_SECOND + 2;
-    let sound = Request::PlaySound {
-        wav: b"not a wav".to_vec(),
-        volume: 0,
-    };
+    // session — but answered with why, and never handed to a player.
+    let chimes = Mutex::new(Chimes::default());
 
-    ask_for(&mut app, &runtime, 1, vec![sound; asked]);
+    for index in 0..SOUNDS_PER_SECOND + 2 {
+        let Answer::Failed(why) = ring(quiet_sound(), &chimes) else {
+            panic!("sound {index} was played, and it was not a wav");
+        };
+        assert_eq!(
+            why.contains("sounds a second"),
+            index >= SOUNDS_PER_SECOND,
+            "sound {index} was answered: {why}"
+        );
+    }
+}
 
-    let waiting = runtime.read(&app, |runtime, _| {
-        runtime
-            .queued
-            .iter()
-            .map(|(ticket, work)| match work {
-                Work::Perform(Request::PlaySound { .. }) => (*ticket, "played"),
-                Work::Answer(Answer::Failed(why)) if why.contains("sounds a second") => {
-                    (*ticket, "turned down")
-                }
-                other => panic!("ticket {ticket} became {other:?}"),
-            })
-            .collect::<Vec<_>>()
-    });
-    // The first two are already on the pool; what is queued behind them
-    // shows where the line was drawn.
-    let mut expected: Vec<(u32, &str)> = (RUNNING_AT_ONCE as u32 + 1..=SOUNDS_PER_SECOND as u32)
-        .map(|ticket| (ticket, "played"))
-        .collect();
-    expected.extend(
-        (SOUNDS_PER_SECOND as u32 + 1..=asked as u32).map(|ticket| (ticket, "turned down")),
+#[test]
+fn a_sound_is_counted_when_it_is_played_and_not_when_it_was_asked_for() {
+    // Counted when asked for, a sound waiting for a worker was a sound that
+    // had already been let through: a plugin asking four a second while the
+    // pool was busy for fifteen seconds had sixty played back to back when
+    // it came free. Here the pool's only worker is held while more than a
+    // second's worth are asked for, and let go.
+    let queue = LocalQueue::new();
+    let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
+    let plugins = Arc::new(Background::new(1));
+    let runtime = runtime_in(&mut app, &["sound.play"], &plugins);
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    plugins
+        .spawn(async move {
+            let _ = held.recv();
+        })
+        .detach();
+
+    ask_for(
+        &mut app,
+        &runtime,
+        1,
+        vec![quiet_sound(); SOUNDS_PER_SECOND + 2],
     );
-    assert_eq!(waiting, expected);
+    queue.run_until_parked();
+    assert_eq!(
+        rung(&app, &runtime),
+        Vec::new(),
+        "sounds were counted as played while nothing could play them"
+    );
+
+    let released = Instant::now();
+    release.send(()).expect("the worker is holding on");
+    // One worker, first come first served: when this has run, every sound
+    // asked for before it has been through the limit.
+    let (behind, through) = std::sync::mpsc::channel();
+    plugins
+        .spawn(async move {
+            let _ = behind.send(());
+        })
+        .detach();
+    through
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the pool came free");
+
+    let played = rung(&app, &runtime);
+    assert_eq!(
+        played.len(),
+        SOUNDS_PER_SECOND,
+        "more than a second's worth was played the moment the pool came free"
+    );
+    assert!(
+        played.iter().all(|at| *at >= released),
+        "a sound was counted before the pool could play it"
+    );
+}
+
+#[test]
+fn a_plugins_sound_is_played_while_its_fetches_hang() {
+    // A sound waiting its turn behind its plugin's own fetches to a host that
+    // drops packets rang fifteen seconds after what it was about. It is a
+    // write and a spawn, so it does not take a turn: it is played beside
+    // them.
+    let queue = LocalQueue::new();
+    let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
+    let plugins = Arc::new(Background::new(REQUEST_WORKERS));
+    let runtime = runtime_in(&mut app, &["net:127.0.0.1", "sound.play"], &plugins);
+    let mut silent = Silent::new();
+
+    ask_for(&mut app, &runtime, 1, vec![silent.fetch(); 4]);
+    assert!(
+        silent.reached(Duration::from_secs(5)),
+        "none of the plugin's fetches was started"
+    );
+    ask_for(&mut app, &runtime, 5, vec![quiet_sound()]);
+
+    let asked = Instant::now();
+    assert!(
+        until(&queue, || rung(&app, &runtime).len() == 1),
+        "the sound waited behind the fetches"
+    );
+    assert!(
+        asked.elapsed() < PROMPTLY,
+        "the sound took {:?} to be played",
+        asked.elapsed()
+    );
+    still_hanging(&queue, &app, &runtime, 4);
 }
 
 /// A directory of line-delimited JSON, written for one test.
@@ -1093,6 +1216,24 @@ fn a_walk_past_its_deadline_says_it_gave_up_rather_than_answering_a_low_total() 
         panic!("counting out of time answered with a total");
     };
     assert!(why.contains("given up"), "unhelpful answer: {why}");
+    // The last file alone, which is where a total that had stopped part way
+    // used to be handed over as though it were the whole: nothing came after
+    // it to notice the clock.
+    let last = &files[files.len() - 1..];
+    assert!(
+        matches!(
+            add_up(
+                last,
+                &containing,
+                &at_least,
+                &distinct_by,
+                &tables,
+                Instant::now()
+            ),
+            Answer::Failed(_)
+        ),
+        "the last file, read out of time, was answered with a total"
+    );
     assert!(
         matches!(
             add_up(&files, &containing, &at_least, &distinct_by, &tables, later),
@@ -1100,6 +1241,79 @@ fn a_walk_past_its_deadline_says_it_gave_up_rather_than_answering_a_low_total() 
         ),
         "the same files did not add up in time"
     );
+}
+
+/// What [`next_line`] makes of `text`, a line at a time, keeping at most
+/// `cap` of each: what it found, and the line when it was whole.
+fn lines_of(text: &[u8], cap: usize) -> Vec<(Line, Option<String>)> {
+    // A buffer smaller than a line, so that reading past one takes more
+    // than one look.
+    let mut reader = std::io::BufReader::with_capacity(4, text);
+    let later = Instant::now() + Duration::from_secs(60);
+    let mut bytes = Vec::new();
+    let mut found = Vec::new();
+    loop {
+        let line = next_line(&mut reader, &mut bytes, cap, later).expect("a slice can be read");
+        assert!(
+            bytes.len() <= cap,
+            "{} bytes of one line were held under a ceiling of {cap}",
+            bytes.len()
+        );
+        let whole = (line == Line::Whole).then(|| String::from_utf8_lossy(&bytes).into_owned());
+        let end = line == Line::End;
+        found.push((line, whole));
+        if end {
+            return found;
+        }
+    }
+}
+
+#[test]
+fn a_line_longer_than_a_walk_holds_is_read_past_and_the_next_one_is_read() {
+    // A line was read whole however long it was. One past the ceiling is
+    // skipped as a line that is not JSON is, and the line after it is read
+    // as though nothing had happened.
+    assert_eq!(
+        lines_of(b"short\nthis one is far too long\nnext\nlast", 8),
+        vec![
+            (Line::Whole, Some(String::from("short\n"))),
+            (Line::TooLong, None),
+            (Line::Whole, Some(String::from("next\n"))),
+            (Line::Whole, Some(String::from("last"))),
+            (Line::End, None),
+        ]
+    );
+    // Exactly as long as the ceiling, with or without its newline, fits.
+    assert_eq!(
+        lines_of(b"1234567\n12345678", 8),
+        vec![
+            (Line::Whole, Some(String::from("1234567\n"))),
+            (Line::Whole, Some(String::from("12345678"))),
+            (Line::End, None),
+        ]
+    );
+}
+
+#[test]
+fn a_line_with_no_end_is_given_up_on_at_the_deadline_and_not_held() {
+    // A disk image in a granted directory is a line with no end: read with
+    // nothing but `read_until`, it went into memory whole whatever the
+    // deadline said. An endless one here, so that only the clock can stop it.
+    let mut endless = std::io::BufReader::new(std::io::repeat(b'x'));
+    let mut bytes = Vec::new();
+
+    let outcome = next_line(
+        &mut endless,
+        &mut bytes,
+        1024,
+        Instant::now() + Duration::from_millis(50),
+    );
+
+    assert!(
+        matches!(outcome, Err(Stopped::OutOfTime)),
+        "a line with no end came to {outcome:?}"
+    );
+    assert!(bytes.len() <= 1024, "{} bytes of it were held", bytes.len());
 }
 
 #[test]

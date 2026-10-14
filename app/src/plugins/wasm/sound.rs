@@ -64,7 +64,19 @@ const MAX_WAV: usize = 4 << 20;
 /// by any plugin that rings the same few sounds. Past it the sounds played
 /// longest ago are deleted, and the next time one of them is asked for it is
 /// written down again.
+///
+/// What a sound counts against it is what it costs a disk, in whole
+/// [`BLOCK`]s, and not its length: a wav can be twelve bytes, and counted by
+/// length this would have held over a million of them — gigabytes of
+/// blocks, and a directory every new sound had to look through whole.
 const MAX_CACHE: u64 = 4 * MAX_WAV as u64;
+
+/// What one file costs a disk at least, which is what [`MAX_CACHE`] counts
+/// each sound as: its length rounded up to a whole number of these.
+///
+/// Four kilobytes is what ext4, APFS and NTFS allocate by default, and it
+/// holds [`MAX_CACHE`] to about four thousand files however small each is.
+const BLOCK: u64 = 4096;
 
 /// How many sounds one plugin may have played in any one second.
 ///
@@ -101,6 +113,12 @@ impl Chimes {
         }
         self.played.push_back(now);
         true
+    }
+
+    /// When each sound still counted was let through, oldest first.
+    #[cfg(test)]
+    pub(super) fn played(&self) -> Vec<Instant> {
+        self.played.iter().copied().collect()
     }
 }
 
@@ -207,6 +225,12 @@ fn played(file: &Path, now: SystemTime) {
         .and_then(|file| file.set_modified(now));
 }
 
+/// What a file `length` bytes long counts against [`MAX_CACHE`]. See
+/// [`BLOCK`].
+fn on_disk(length: u64) -> u64 {
+    length.div_ceil(BLOCK).max(1) * BLOCK
+}
+
 /// Deletes the sounds in `directory` played longest ago until what is left
 /// fits under `cap` — never `keep`, which is about to be played.
 ///
@@ -224,7 +248,7 @@ fn evict(directory: &Path, cap: u64, keep: &Path) {
             let facts = entry.metadata().ok()?;
             facts.is_file().then(|| {
                 let at = facts.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                (at, entry.path(), facts.len())
+                (at, entry.path(), on_disk(facts.len()))
             })
         })
         .collect();
