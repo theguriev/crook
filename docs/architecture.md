@@ -855,7 +855,21 @@ hand its shells the outer one's. Beside it is the one secret, `CROOK_TOKEN`, whi
 request says which pane it comes from, set empty on the same terms. `CROOK_BIN`, the absolute
 path of the running binary, is set in the same place, read once at the first pane: a hook runs
 in whatever `PATH` its agent was started with, where a Crook.app nobody linked is not, and on
-Linux a binary an upgrade has replaced reads its own path back as `… (deleted)`. A program that
+Linux a binary an upgrade has replaced reads its own path back as `… (deleted)`. The same binary
+is what a person types `crook` for, so when no `crook` answers on a pane's `PATH`, its directory
+is appended there — appended, so it stands in front of nothing, and only then, since behind a
+`crook` of the person's own it would change nothing. A shell with the integration gets that from
+its snippet, after the person's startup files have run — fish's at the first prompt, since
+`vendor_conf.d` is read before `config.fish` — and nothing in its environment: a startup file
+that assigns `PATH` outright would drop an entry from there, and one that adds a directory only
+when it is missing (uv's `~/.local/bin/env`, rustup's `~/.cargo/env`) would find it there, at the
+end, and leave it behind `/usr/bin`. Any other shell is handed the appended `PATH` in its
+environment, which macOS's `path_helper` — it rebuilds `PATH` from `/etc/paths` and keeps what it
+was handed after that — keeps too; but not when the directory is a `bin` inside the home, which
+is the person's own files' to place. Not on Windows: `portable-pty` builds a Windows child's
+`PATH` out of the registry rather than this process's, and a `PATH` written from the process's
+own would replace that. `CLAUDE_CODE_FORCE_STRIKETHROUGH=1` is set beside it: Claude Code strikes `~~deleted~~`
+text through only in terminals it names, and prints the tildes in the rest. A program that
 asks the terminal rather than its environment, with XTVERSION (`CSI > q`), is told the same
 name and version, as `Crook <version>`, which reaches it through ssh and sudo where the
 variables do not. `vte` has no hook for that question, so the emulator's OSC watcher stops on
@@ -1714,7 +1728,10 @@ that has been told about Crook, and the ones that have not already say "look her
 sequences other terminals show: OSC 9, iTerm2's; OSC 777 `notify`, rxvt's, which Ghostty
 reads; and OSC 99, kitty's. Claude Code writes one of them when it stops to ask, in whichever
 form its notification channel names, and it does so on a remote box with no Crook binary as
-readily as next door. The same watcher reads them, in `crates/crook_terminal/src/notify.rs`,
+readily as next door. Its channel starts as `auto`, which names a form by `TERM_PROGRAM` and
+none for Crook, so `crook --agent-hooks claude` and the skill tell a person without the plugin
+to set `preferredNotifChannel` to one of the three.
+The same watcher reads them, in `crates/crook_terminal/src/notify.rs`,
 into a `Notification` of a title and a body, putting a message `vte` split on `;` back
 together and marking one that ran past `vte`'s sixteen pieces with `…`, the way a report cut in
 the writer is. ConEmu's commands on OSC 9 — `9;4` progress, which winget among others

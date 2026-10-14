@@ -82,7 +82,21 @@
 //!
 //! [`BIN_VARIABLE`] — `CROOK_BIN` — is set there too: the path of the binary
 //! that started the pane, so a hook that has to call `crook` from a `PATH`
-//! nobody put it on can call it by that name instead.
+//! nobody put it on can call it by that name instead. And a person can call
+//! it `crook`: when no `crook` answers on the pane's `PATH`, that binary's
+//! directory goes at the end of it, behind everything else, and only then —
+//! nothing is put in front of a `crook` of the person's own, or behind it
+//! where it would change nothing. zsh, bash and fish with the integration get
+//! it from their snippet, after the person's startup files have run, so a
+//! file that assigns `PATH` outright cannot drop it and a file that adds a
+//! directory only when it is missing never sees it. Any other shell gets it
+//! in the environment it starts with, unless the directory is a `bin` inside
+//! the home, which the person's own files place. Not on Windows, where the
+//! pty assembles a child's `PATH` from the registry; `scratch` says more.
+//!
+//! [`CLAUDE_STRIKETHROUGH_VARIABLE`] goes beside them, for Claude Code, which
+//! otherwise prints `~~deleted~~` text with its tildes in a terminal it does
+//! not know by name.
 //!
 //! [`SOCKET_VARIABLE`](crate::control::SOCKET_VARIABLE) — `CROOK_SOCKET` — is
 //! set in the same place, and it *is* an address: where the window answers
@@ -174,6 +188,17 @@ pub const PANE_ID_VARIABLE: &str = "CROOK_PANE_ID";
 /// was printed from: the OpenCode plugin's string literal, which `.nothrow()`
 /// keeps from ever failing OpenCode, and the commands in aider's sentence.
 pub const BIN_VARIABLE: &str = "CROOK_BIN";
+
+/// The variable that tells Claude Code its terminal draws struck-through
+/// text: `CLAUDE_CODE_FORCE_STRIKETHROUGH`, set to `1` in every pane.
+///
+/// Claude Code decides whether to draw markdown's `~~deleted~~` with SGR 9
+/// from a list of terminal names, `TERM_PROGRAM` among them, and prints the
+/// tildes in any terminal not on it. Crook draws SGR 9 and is not on the
+/// list, and this is the override Claude Code reads before the list. Its
+/// sibling for synchronized output is not set: Claude Code finds that out
+/// from XTVERSION, which Crook answers.
+pub const CLAUDE_STRIKETHROUGH_VARIABLE: &str = "CLAUDE_CODE_FORCE_STRIKETHROUGH";
 
 /// Setting this in the environment to anything but `0` or the empty string
 /// stops Crook injecting anything into any shell, whatever the setting says.

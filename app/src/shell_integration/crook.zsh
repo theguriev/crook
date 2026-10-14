@@ -215,3 +215,15 @@ preexec_functions=(__crook_preexec ${preexec_functions:#__crook_preexec})
 # The prompt wrapper is the opposite case: it must run last, after every hook
 # that might have assigned PS1 for this prompt.
 precmd_functions=(${precmd_functions:#__crook_mark_prompt} __crook_mark_prompt)
+
+# `crook`, for the commands Crook's documentation gives, once your own files
+# have had their say about PATH: this runs after your .zshrc. Here and not in
+# the environment the shell starts with: a startup file that assigns PATH
+# outright would drop it from there, and one that adds a directory only when
+# it is missing would find it there, at the end, and leave it at the end. Only
+# when no `crook` answers at all, and at the end: a crook of your own is yours
+# to run, and $CROOK_BIN is the pane's either way. Not when the directory
+# holds a `:`, which a PATH would read as two directories.
+if [[ ${CROOK_BIN-} == /?*/* && ${CROOK_BIN:h} != *:* && -x $CROOK_BIN ]] && ! whence -p crook >/dev/null; then
+	PATH=${PATH:+$PATH:}${CROOK_BIN:h}
+fi

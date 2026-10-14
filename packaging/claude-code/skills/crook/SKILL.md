@@ -28,9 +28,11 @@ terminal you are in is the pane. `CROOK_SOCKET` is where the window answers `cro
 `CROOK_TOKEN` is your pane's own secret, which those commands send to say which pane is asking;
 it is empty when there is no socket.
 
-`CROOK_BIN` is the absolute path of the `crook` binary the pane belongs to. `crook` is not
-always on `PATH` — a Crook.app nobody linked, a build under `target/` — and `"$CROOK_BIN"` is
-the same command wherever this file says `crook`: `"$CROOK_BIN" --agent running`.
+`CROOK_BIN` is the absolute path of the `crook` binary the pane belongs to. When no `crook`
+answers on a pane's `PATH` — a Crook.app nobody linked, a build under `target/` — Crook puts that
+binary's directory at the end of it, so `crook` works in most panes. Where it does not, where
+`crook` is some other binary, or where a `PATH` you were handed was rebuilt without it,
+`"$CROOK_BIN"` is the same command wherever this file says `crook`: `"$CROOK_BIN" --agent running`.
 
 Use this skill only when the user mentions Crook or the task is about Crook. In any other
 terminal, or for any other task, do nothing Crook-specific: the flags below write an escape
@@ -102,6 +104,11 @@ project's `.claude/settings.json` by hand. Do not write either file yourself. Th
 takes `codex`, `gemini`, `copilot` and `opencode`, and prints each one's own hooks file or
 plugin with a note on stderr saying where it goes; `aider` has no hooks, and it says what to do
 instead.
+
+With neither the plugin nor the hooks, Claude Code can still light the row when it stops to ask,
+through a notification Crook reads — once its `preferredNotifChannel` setting is `ghostty`,
+`kitty` or `iterm2`. Its default, `auto`, picks by terminal name and sends nothing in Crook. That
+is the person's setting as well: tell them, rather than changing it.
 
 ## Tabs, groups and worktrees
 
