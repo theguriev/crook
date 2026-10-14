@@ -18537,6 +18537,176 @@ mod shells {
         );
     }
 
+    /// A frame drawn inside the lit half of the caret's blink, so that a
+    /// caret missing from it is one that was not drawn rather than one that
+    /// had blinked off.
+    ///
+    /// The blink is a clock, and a frame on a loaded machine can take longer
+    /// than half of it; such a frame says nothing either way and is drawn
+    /// again.
+    fn frame_with_the_caret_lit(harness: &mut Harness, pane: PaneId) -> Rc<Scene> {
+        for _ in 0..10 {
+            let lit = std::time::Instant::now();
+            harness.workspace_update(|workspace, _| {
+                if let Some(input) = workspace.input(pane) {
+                    input.edit(|_| ());
+                }
+            });
+            let scene = harness.frame();
+            if lit.elapsed() < crate::text_input::CARET_PHASE {
+                return scene;
+            }
+        }
+        panic!("no frame was drawn inside half a blink");
+    }
+
+    /// The composer's carets in a frame: bars in the terminal's cursor
+    /// colour, narrower than a cell.
+    fn carets(scene: &Scene) -> usize {
+        let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+        visible_rects(scene)
+            .filter(|(rect, bounds)| {
+                rect.background == Fill::Solid(theme().terminal.cursor)
+                    && bounds.width() < cell.width
+                    && bounds.height() <= cell.height
+            })
+            .count()
+    }
+
+    /// Whether the blink would repaint the window now, which is the whole of
+    /// what the chain a test does not start would do.
+    fn blinks(harness: &Harness) -> bool {
+        harness
+            .workspace
+            .read(&harness.app, |workspace, app| workspace.shows_a_caret(app))
+    }
+
+    #[test]
+    fn a_window_behind_another_draws_no_caret_and_does_not_blink() {
+        // Beside another application, or a second Crook, a caret blinking in
+        // the window that does not have the keyboard says it does — and the
+        // blink repainted a window nobody was typing into twice a second.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.type_field(pane, "echo hello");
+        // Before the window has said anything about its focus — which on
+        // Wayland is until the keyboard first arrives — it is in front: one
+        // assumed to be behind another would open with no caret.
+        assert_eq!(carets(&frame_with_the_caret_lit(&mut harness, pane)), 1);
+        assert!(blinks(&harness), "a caret on screen is not blinking");
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+        assert_eq!(
+            carets(&frame_with_the_caret_lit(&mut harness, pane)),
+            0,
+            "a window behind another drew the composer's caret"
+        );
+        assert!(
+            !blinks(&harness),
+            "a window behind another repaints for a caret it does not draw"
+        );
+
+        // The keyboard stays the pane's all the while: the window that comes
+        // back types where it left off, and draws the caret again.
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+        assert_eq!(carets(&frame_with_the_caret_lit(&mut harness, pane)), 1);
+        assert!(blinks(&harness));
+        type_line(&mut harness, "!");
+        assert_eq!(harness.field_text(pane), "echo hello!");
+    }
+
+    /// How a pane's program's own cursor is drawn: `(filled, outlined)`.
+    ///
+    /// Recognised by the cursor colour the emulator resolved, at the size of
+    /// one cell or less — a block, a beam or an underline filled, or the
+    /// stroke round a cell that an outline is.
+    fn program_cursor(harness: &mut Harness, pane: PaneId) -> (bool, bool) {
+        let ink = harness
+            .workspace
+            .read(&harness.app, |workspace, app| {
+                let (_, snapshot) = workspace.terminal(pane, app)?;
+                Some(Fill::Solid(crate::workspace::terminal_element::color(
+                    snapshot.cursor.as_ref()?.color,
+                )))
+            })
+            .expect("the program's cursor is on screen");
+        let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+        let in_a_cell = |bounds: RectF| {
+            bounds.width() <= cell.width + 0.5 && bounds.height() <= cell.height + 0.5
+        };
+        let scene = harness.frame();
+        let filled = visible_rects(&scene).any(|(rect, bounds)| {
+            rect.background == ink && rect.border.width == 0. && in_a_cell(bounds)
+        });
+        let outlined = visible_rects(&scene).any(|(rect, bounds)| {
+            rect.border.width > 0. && rect.border.color == ink && in_a_cell(bounds)
+        });
+        (filled, outlined)
+    }
+
+    #[test]
+    fn a_window_behind_another_outlines_the_cursor_of_a_program_on_the_whole_screen() {
+        // The grid's half: vim, `top` or an agent has every key, and draws the
+        // filled cursor that says so only while the window is in front —
+        // behind another it is outlined, the way every other terminal draws a
+        // window without the keyboard.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        harness.type_into(pane, "printf '\\033[?1049h'\n");
+        harness.wait_for("the shell never took the alt screen", |harness| {
+            harness.alt_screen(pane)
+        });
+        assert_eq!(program_cursor(&mut harness, pane), (true, false));
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+        assert_eq!(
+            program_cursor(&mut harness, pane),
+            (false, true),
+            "a window behind another drew its program's cursor filled"
+        );
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+        assert_eq!(program_cursor(&mut harness, pane), (true, false));
+    }
+
+    #[test]
+    fn a_window_behind_another_outlines_the_cursor_of_a_running_command() {
+        // The list's half: a command that has run long enough to take the
+        // composer away draws its cursor in the open block, and that cursor is
+        // the one that says where typing goes.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        await_prompt(&mut harness, pane);
+        // Something printed first, because an open block that has printed
+        // nothing has no rows for a cursor to stand on.
+        harness.type_into(pane, "printf '%s:' ready; cat\n");
+        harness.wait_for("the command never took the composer away", |harness| {
+            harness.terminal_text(pane).contains("ready:")
+                && composer_boxes(&harness.frame()).is_empty()
+        });
+        if !draws_blocks(&harness) {
+            return;
+        }
+        assert_eq!(program_cursor(&mut harness, pane), (true, false));
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+        assert_eq!(
+            program_cursor(&mut harness, pane),
+            (false, true),
+            "a window behind another drew a running command's cursor filled"
+        );
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+        assert_eq!(program_cursor(&mut harness, pane), (true, false));
+    }
+
     #[test]
     fn an_unmarked_shell_keeps_the_composer_on_a_row_of_its_own() {
         // The fallback, in the real tree. Nothing said where this prompt ends

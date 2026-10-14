@@ -262,6 +262,13 @@ impl TerminalElement {
         self
     }
 
+    /// Says whether the window has the desktop's keyboard, which the cursor is
+    /// drawn filled only while it does. See [`Output::draws_focus`].
+    pub fn with_window_focused(mut self, focused: bool) -> Self {
+        self.output = self.output.with_window_focused(focused);
+        self
+    }
+
     /// Attaches the field under this grid, whose line decides what Ctrl-D
     /// means.
     pub fn with_input(mut self, input: TextInput) -> Self {
@@ -770,7 +777,9 @@ impl Element for TerminalElement {
         // the normal screen that is the field below, so the shell's own cursor
         // is drawn as the outline an unfocused terminal gets: two filled block
         // cursors in one pane say nothing about which of them is listening.
-        let owns_caret = self.output.keys() == Keys::All
+        // Nor is it filled in a window behind another, which is not where
+        // typing goes either.
+        let owns_caret = self.output.draws_focus()
             && pane_surface::of(&self.snapshot, std::time::Instant::now()).output_owns_caret();
         let selected = self.output.selection().and_then(|selection| {
             Some((selection.anchor.block, selection.region(&self.addressed())?))

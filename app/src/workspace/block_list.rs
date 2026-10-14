@@ -298,6 +298,14 @@ impl BlockList {
         self
     }
 
+    /// Says whether the window has the desktop's keyboard, which a running
+    /// command's cursor is drawn filled only while it does. See
+    /// [`Output::draws_focus`].
+    pub fn with_window_focused(mut self, focused: bool) -> Self {
+        self.output = self.output.with_window_focused(focused);
+        self
+    }
+
     /// Attaches the composer under this list, whose line decides what Ctrl-D
     /// means.
     pub fn with_input(mut self, input: TextInput) -> Self {
@@ -1332,7 +1340,8 @@ impl BlockList {
         // claiming the same keyboard. Once the composer has gone — a command
         // has been running long enough to take the space — the program's
         // cursor is the only one there is, and it is filled where this pane
-        // has the keyboard and hollow where it does not.
+        // has the keyboard and hollow where it does not, or where the window
+        // it is in does not.
         if self.surface().composer {
             return;
         }
@@ -1350,7 +1359,7 @@ impl BlockList {
         }
         terminal_element::paint_cursor_at(
             cursor,
-            self.output.keys() == Keys::All,
+            self.output.draws_focus(),
             vec2f(
                 left + cursor.column as f32 * metrics.width,
                 rows_top + row as f32 * metrics.height,

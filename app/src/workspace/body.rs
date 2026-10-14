@@ -605,7 +605,10 @@ fn contents(
             font.clone(),
             chips,
             ComposerState {
-                focused: keys == Keys::All,
+                // Drawn as listening only in a window in front. `keys` stays
+                // as it is behind another, which is what sends the typing
+                // here again the moment the window comes back.
+                focused: keys == Keys::All && workspace.is_window_focused(),
                 cut_off,
                 inline,
                 ink,
@@ -667,6 +670,7 @@ fn blocks(
     let filtered = workspace.filtered_rows(pane, app);
     let mut list = BlockList::new(history, snapshot, font, view.clone())
         .with_terminal(handle.clone(), keyboard.keys)
+        .with_window_focused(workspace.is_window_focused())
         .with_option_as_meta(workspace.general().option_as_meta)
         .with_menu(available, menu)
         .with_find(matches.clone(), current)
@@ -802,6 +806,7 @@ fn grid(
     // surface is the program's, but for what an open find bar over it takes.
     let mut grid = TerminalElement::new(snapshot, font)
         .with_terminal(handle.clone(), keys)
+        .with_window_focused(workspace.is_window_focused())
         .with_option_as_meta(workspace.general().option_as_meta);
     if let Some(interaction) = workspace.interaction(pane) {
         grid = grid
