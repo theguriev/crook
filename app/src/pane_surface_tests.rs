@@ -1,6 +1,6 @@
-//! The four answers, one per rule, against hand-built snapshots.
+//! The answers, one per rule, against hand-built snapshots.
 
-use crook_terminal::{BlockState, LiveBlock, Rgb};
+use crook_terminal::{BlockState, LiveBlock, PromptEnd, Rgb};
 
 use super::*;
 
@@ -22,6 +22,7 @@ fn snapshot(live_block: LiveBlock, alt_screen: bool) -> Snapshot {
         live_block,
         title: None,
         mouse_reporting: false,
+        line_editor: false,
     }
 }
 
@@ -142,5 +143,76 @@ fn the_repaint_that_hides_the_composer_is_scheduled_from_the_start_of_the_comman
         until_long_running(&snapshot(running(LONG_RUNNING, now), false), now),
         None,
         "already long-running: the frame that hides the composer has been drawn"
+    );
+}
+
+/// An open block at a prompt the shell has marked both ends of.
+fn at_a_marked_prompt() -> LiveBlock {
+    LiveBlock {
+        state: BlockState::AtPrompt,
+        prompt_end: Some(PromptEnd { row: 0, column: 2 }),
+        ..LiveBlock::default()
+    }
+}
+
+#[test]
+fn the_shells_line_editor_with_the_keyboard_takes_the_composer_but_not_the_block_list() {
+    // A history search or fzf's picker is drawn in the open block, under the
+    // prompt it was started from, and the field would be over it.
+    let now = Instant::now();
+    let mut searching = snapshot(at_a_marked_prompt(), false);
+    searching.line_editor = true;
+
+    let surface = of(&searching, now);
+    assert!(!surface.composer, "the field was left over the search");
+    assert_eq!(
+        surface.surface,
+        Surface::Blocks,
+        "a search is one prompt among the commands before it"
+    );
+    assert!(
+        surface.output_owns_caret(),
+        "and the shell's cursor is drawn"
+    );
+
+    // A picker taller than the pane outgrows it like anything else.
+    let tall = LiveBlock {
+        top_row: -1,
+        ..at_a_marked_prompt()
+    };
+    let mut overflowing = snapshot(tall, false);
+    overflowing.line_editor = true;
+    assert_eq!(of(&overflowing, now).surface, Surface::Grid);
+}
+
+#[test]
+fn a_prompt_is_one_the_shell_marked_both_ends_of_with_no_program_over_it() {
+    assert!(at_prompt(&snapshot(at_a_marked_prompt(), false)));
+
+    let unfinished = LiveBlock {
+        prompt_end: None,
+        ..at_a_marked_prompt()
+    };
+    assert!(
+        !at_prompt(&snapshot(unfinished, false)),
+        "a prompt with no end says nothing about where a line editor gives it back"
+    );
+    assert!(
+        !at_prompt(&snapshot(LiveBlock::default(), false)),
+        "a shell that marks nothing"
+    );
+    assert!(
+        !at_prompt(&snapshot(
+            LiveBlock {
+                state: BlockState::Submitted,
+                ..at_a_marked_prompt()
+            },
+            false
+        )),
+        "a line sent and not yet answered"
+    );
+    assert!(
+        !at_prompt(&snapshot(at_a_marked_prompt(), true)),
+        "a full-screen program over the prompt"
     );
 }

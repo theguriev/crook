@@ -538,6 +538,22 @@ pub(crate) const PANE_KEYS: &[PaneKey] = &[
         other: "ctrl+l",
     },
     PaneKey {
+        label: "Search the shell's own history, from an empty line",
+        keywords: &[
+            "ctrl-r",
+            "reverse-i-search",
+            "fzf",
+            "atuin",
+            "readline",
+            "line editor",
+            "vi",
+            "escape",
+            "meta",
+        ],
+        mac: "ctrl+r / ctrl+t / escape",
+        other: "ctrl+r / ctrl+t / alt+c / alt+. / escape",
+    },
+    PaneKey {
         label: "Select a run of the output",
         keywords: &["mouse", "drag", "highlight", "word", "line", "column"],
         mac: "drag / double / triple click / alt+drag",
@@ -600,10 +616,14 @@ fn in_a_pane(workspace: &Workspace) -> Category {
             ui,
         ),
         widgets::note(
-            "The field goes away, and every key reaches the program instead, in three \
+            "The field goes away, and every key reaches the program instead, in four \
              cases: a full-screen program — vim, `top` — is up, the shell has reported a \
-             command running for longer than a blink, or the output is being drawn as a \
-             plain terminal because the shell reports no command boundaries at all.",
+             command running for longer than a blink, the shell's own line editor was \
+             handed a key from an empty line — its history search, fzf, vi mode's Escape — \
+             and has not yet finished a line and come back to an empty prompt (a line that \
+             runs does it, and in bash and zsh so does Enter or ctrl-c on an empty one), or \
+             the output is being drawn as a plain terminal because the shell reports no \
+             command boundaries at all.",
             ui,
         ),
     ]);

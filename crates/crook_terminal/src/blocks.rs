@@ -788,6 +788,38 @@ impl BlockTracker {
         }
     }
 
+    /// Whether the shell is sitting at a prompt whose end it has marked:
+    /// the open block is at a prompt and its `B` has arrived.
+    ///
+    /// The `B` is the half that matters. A prompt start with no end is a
+    /// prompt still being drawn, or a shell that never says where its prompt
+    /// ends, and either way [`Self::at_an_empty_prompt`] would have no cell
+    /// to ask about.
+    pub(crate) fn at_prompt(&self) -> bool {
+        self.open.state == BlockState::AtPrompt && self.open.command_start.is_some()
+    }
+
+    /// Whether the shell is at its prompt with nothing typed after it: the
+    /// next character it prints would land on the cell its `B` mark did, and
+    /// that cell is blank.
+    ///
+    /// The cursor, because a line editor holding a line usually parks it at
+    /// the end of the line. Not the cursor alone, because it can park it at
+    /// the start instead — `ctrl-a` does — with the whole line after it. And
+    /// not every cell after the prompt, because those are not the line's
+    /// alone: zsh draws a right prompt on the same row after the `B`, past a
+    /// gap, and moves back.
+    pub(crate) fn at_an_empty_prompt<T>(&self, term: &Term<T>) -> bool {
+        if !self.at_prompt() || term.mode().contains(TermMode::ALT_SCREEN) {
+            return false;
+        }
+        let input = Anchor::at_input(term);
+        self.open
+            .command_start
+            .is_some_and(|end| end.cell(term) == input.cell(term))
+            && is_blank_cell(term, input.cell(term))
+    }
+
     /// Records a picture printed with its top-left corner on grid `line` at
     /// `column`, into the open block.
     pub(crate) fn image<T>(
@@ -1608,6 +1640,18 @@ fn is_blank_line<T>(term: &Term<T>, line: i32) -> bool {
     term.grid()[Line(line)][..].iter().all(|cell| {
         (cell.c == ' ' || cell.c == '\0') && cell.zerowidth().is_none_or(<[char]>::is_empty)
     })
+}
+
+/// Whether the cell at grid `line` and `column` has nothing printed in it,
+/// in the sense of [`is_blank_line`]. A cell past the last row or column the
+/// grid has is one nothing has been printed in yet.
+fn is_blank_cell<T>(term: &Term<T>, (line, column): (i32, usize)) -> bool {
+    let grid = term.grid();
+    if line >= grid.screen_lines() as i32 || column >= grid.columns() {
+        return true;
+    }
+    let cell = &grid[Line(line)][Column(column)];
+    (cell.c == ' ' || cell.c == '\0') && cell.zerowidth().is_none_or(<[char]>::is_empty)
 }
 
 /// Appends the characters in `cells` to `text`, as a selection of them would

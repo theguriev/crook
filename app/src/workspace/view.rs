@@ -7556,6 +7556,22 @@ impl Workspace {
             .update(ctx, |model, _| model.set_shell(shell));
     }
 
+    /// Says what shells opened from now on are given in their environment,
+    /// over everything else they are given. For tests: a shell started in the
+    /// home of whoever runs the suite reads their rc files, and one of those
+    /// that binds `ctrl-r` to a picker of its own turns a test of the shell's
+    /// history search into a test of their configuration. See
+    /// [`TerminalModel::set_environment`].
+    #[cfg(test)]
+    pub fn set_shell_environment(
+        &self,
+        environment: Vec<(String, String)>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.terminals
+            .update(ctx, |model, _| model.set_environment(environment));
+    }
+
     /// Says where this window answers questions, for every shell opened from
     /// now on to be told in `CROOK_SOCKET`. See [`crate::control`].
     ///

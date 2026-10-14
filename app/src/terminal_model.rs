@@ -1709,6 +1709,26 @@ impl TerminalHandle {
         })
     }
 
+    /// Sends a key the composer had no use for to the shell's own line
+    /// editor, and the keyboard with it, returning whether it produced any
+    /// bytes. See [`Terminal::send_key_to_line_editor`].
+    ///
+    /// Under the one lock, so the snapshot this publishes already says the
+    /// line editor has the keyboard: the next key, typed before any frame has
+    /// been drawn, is routed against it and goes to the line editor too.
+    pub fn send_key_to_line_editor(&self, key: Key, modifiers: Modifiers) -> bool {
+        self.drive(|terminal| {
+            terminal.scroll_to_bottom();
+            match terminal.send_key_to_line_editor(key, modifiers) {
+                Ok(sent) => sent,
+                Err(error) => {
+                    log::debug!("could not send a key to a shell's line editor: {error}");
+                    false
+                }
+            }
+        })
+    }
+
     /// Puts pasted text into the shell, returning whether it was queued for
     /// the pty.
     ///

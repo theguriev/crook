@@ -508,6 +508,14 @@ pub struct Emulator {
     /// Whether this has ever been fed through [`Self::advance_mirrored`],
     /// which makes it an emulator that owes the child nothing for good.
     mirrored: bool,
+    /// Whether the shell's own line editor has the keyboard. See
+    /// [`Self::hand_keys_to_line_editor`].
+    line_editor: bool,
+    /// Whether the shell has finished a line, with `D`, since the line editor
+    /// was handed the keyboard, and the prompt after it has not been looked
+    /// at yet: the one moment the keyboard can come back. See
+    /// [`Self::hand_keys_to_line_editor`].
+    line_finished: bool,
     snapshot: Arc<Snapshot>,
     /// Whether something has happened since the cached snapshot was built.
     ///
@@ -540,7 +548,7 @@ impl Emulator {
 
         let blocks = BlockTracker::new();
         let live = blocks.live(&term);
-        let snapshot = Arc::new(snapshot::build(&term, &palette, 0, None, live));
+        let snapshot = Arc::new(snapshot::build(&term, &palette, 0, None, live, false));
         Self {
             term,
             parser: Processor::new(),
@@ -558,6 +566,8 @@ impl Emulator {
             replies: Vec::new(),
             version_reply: None,
             mirrored: false,
+            line_editor: false,
+            line_finished: false,
             snapshot,
             dirty: false,
         }
@@ -596,6 +606,10 @@ impl Emulator {
 
         let view = self.view();
         let mut exited = None;
+        // Whether the shell finished a line in this read, which is the only
+        // thing that can give the keyboard back to a pane whose line editor
+        // has it. See [`Self::hand_keys_to_line_editor`].
+        let mut line_finished = false;
         let mut rest = bytes;
         while !rest.is_empty() {
             let consumed = self
@@ -675,6 +689,9 @@ impl Emulator {
                     self.working_directory.as_deref(),
                 );
                 if let Some(finished) = finished {
+                    // Only a `D` the block list took: one a full-screen
+                    // program printed is its own, and finishes nothing.
+                    line_finished = true;
                     self.events.push(TerminalEvent::CommandFinished {
                         command: finished.command,
                         exit: finished.exit,
@@ -688,6 +705,7 @@ impl Emulator {
             }
             rest = remaining;
         }
+        self.give_keys_back(line_finished);
         self.keep_view(view);
         self.dirty = true;
         self.drain();
@@ -805,6 +823,92 @@ impl Emulator {
         self.dirty = true;
     }
 
+    /// Records that a key went to the shell's own line editor at its
+    /// prompt, which has the keyboard from now until it gives its line back,
+    /// and answers whether that took: only at a prompt whose end the shell
+    /// has marked.
+    ///
+    /// The key is one a pane's own command-line field had no use for —
+    /// `ctrl-r`, fzf's `ctrl-t`, Escape — and what the line editor draws in
+    /// answer is on the prompt's row and under it. [`Snapshot::line_editor`]
+    /// says so for as long as it lasts, which is until the shell finishes a
+    /// line, with `D`, and the prompt it draws next has nothing on it: the
+    /// line ran, or an empty Enter or `ctrl-c` ended it, and the line editor
+    /// starts the next one from nothing.
+    ///
+    /// Only `D`, because it is the one mark a shell prints only once its line
+    /// editor is done with a line. Everything else can come while the line
+    /// editor still holds something, and giving the keyboard back then puts
+    /// the field back over it:
+    ///
+    /// * **A prompt drawn again.** bash draws its whole prompt again, marks
+    ///   and all, whenever a search ends, with the match it kept on the line
+    ///   and the cursor at the start of it when the match starts the line;
+    ///   and whenever a `bind -x` widget returns, which is how fzf's `ctrl-t`
+    ///   puts the path it picked there. The next Enter would send the field's
+    ///   line and the kept one as one.
+    /// * **A prompt drawn again over an empty line.** Escape in vi mode
+    ///   leaves insert mode, and fish's mode prompt, a zsh theme's mode
+    ///   indicator and bash's `show-mode-in-prompt` draw the prompt again
+    ///   to say so; an Escape in emacs mode leaves a Meta prefix waiting for
+    ///   its key, and a resize draws the prompt again over it. The line is
+    ///   empty and the line editor is not: the field's next line would be
+    ///   read as vi commands, or lose its first letter to the prefix.
+    /// * **`C`.** bash runs its DEBUG trap for a `bind -x` widget too, and a
+    ///   copy of Crook's bash script from before it told the two apart, or
+    ///   another terminal's integration on a host Crook did not start the
+    ///   shell on, reports the widget starting as a command.
+    ///
+    /// And the prompt after the `D` with something on it is the line editor's
+    /// still: what was typed while the command ran went to the shell, which
+    /// puts it on the next line. The keyboard waits for that line's `D`.
+    ///
+    /// So zsh's `ctrl-g` and fish's Escape, which give a search up over an
+    /// empty line and draw no mark at all, and bash's `ctrl-g`, which draws
+    /// the prompt again, leave the line editor the keyboard until the next
+    /// Enter. fish ends an empty line with no `D` either, so there it is the
+    /// next command that gives it back.
+    ///
+    /// A shell that marks no prompt is never handed it, because nothing would
+    /// ever say it had given the keyboard back.
+    pub fn hand_keys_to_line_editor(&mut self) -> bool {
+        if !self.blocks.at_prompt() || self.is_alt_screen() {
+            return false;
+        }
+        // A `D` from before this key finished nothing it was handed.
+        self.line_finished = false;
+        if !self.line_editor {
+            self.line_editor = true;
+            self.dirty = true;
+        }
+        true
+    }
+
+    /// Gives the keyboard back from the line editor once the shell has
+    /// finished a line and drawn an empty prompt after it, at the end of a
+    /// read: the `D` comes before the prompt, and the prompt before whatever
+    /// the shell puts on its line. See [`Self::hand_keys_to_line_editor`].
+    fn give_keys_back(&mut self, line_finished: bool) {
+        if !self.line_editor {
+            return;
+        }
+        self.line_finished |= line_finished;
+        // Until the next prompt's `B` has arrived there is no line to look at.
+        if !self.line_finished || !self.blocks.at_prompt() {
+            return;
+        }
+        self.line_finished = false;
+        if self.blocks.at_an_empty_prompt(&self.term) {
+            self.line_editor = false;
+        }
+    }
+
+    /// Whether the shell's own line editor has the keyboard. Also on every
+    /// [`Snapshot`]. See [`Self::hand_keys_to_line_editor`].
+    pub fn line_editor_has_keys(&self) -> bool {
+        self.line_editor
+    }
+
     /// The finished blocks, oldest first.
     pub fn blocks(&self) -> &[Block] {
         self.blocks.finished()
@@ -900,6 +1004,7 @@ impl Emulator {
                 revision,
                 self.title.as_deref(),
                 live,
+                self.line_editor,
             );
             if !built.same_content(&self.snapshot) {
                 self.snapshot = Arc::new(built);
@@ -1028,6 +1133,9 @@ impl Emulator {
     /// it, so no later mark reopens the session.
     pub(crate) fn child_exited(&mut self, exit: ChildExit) {
         self.events.push(TerminalEvent::ChildExited(exit));
+        // Nothing is left to give it back, and a pane whose shell has gone
+        // draws what it left the way it always has.
+        self.line_editor = false;
         self.blocks.exited(
             &mut self.term,
             &self.palette,

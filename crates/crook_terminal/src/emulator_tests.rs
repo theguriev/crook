@@ -1983,3 +1983,272 @@ fn test_a_notification_and_a_report_keep_their_order_in_one_read() {
         );
     }
 }
+
+/// Wide enough for a history search and the match it found to share a row,
+/// which is where bash draws them.
+fn wide() -> Emulator {
+    Emulator::new(TerminalSize::new(60, 5), 100, Palette::default())
+}
+
+/// A shell's prompt, marked at both ends, with the cursor after it.
+const MARKED_PROMPT: &[u8] = b"\x1b]133;A\x07$ \x1b]133;B\x07";
+
+/// What bash prints for `ctrl-r`: its search prompt over the row its own
+/// prompt was on, and no mark at all.
+const BASH_SEARCH: &[u8] = b"\r(reverse-i-search)`': ";
+
+/// An emulator whose shell is at its prompt and whose line editor has just
+/// been handed the keyboard and drawn a history search for it.
+fn searching() -> Emulator {
+    let mut emulator = wide();
+    emulator.advance(MARKED_PROMPT);
+    assert!(
+        emulator.hand_keys_to_line_editor(),
+        "a marked prompt is where the line editor can have the keys"
+    );
+    emulator.advance(BASH_SEARCH);
+    emulator
+}
+
+#[test]
+fn test_the_line_editor_has_the_keyboard_from_the_key_it_was_handed() {
+    let mut emulator = wide();
+    emulator.advance(MARKED_PROMPT);
+    let before = emulator.snapshot();
+    assert!(!before.line_editor);
+
+    assert!(emulator.hand_keys_to_line_editor());
+    let after = emulator.snapshot();
+    assert!(
+        after.line_editor,
+        "the snapshot does not say who has the keys"
+    );
+    assert!(
+        after.revision > before.revision,
+        "a pane drawn from the old snapshot would keep its field up"
+    );
+
+    // Drawing the search reports nothing to take the keyboard back on.
+    emulator.advance(BASH_SEARCH);
+    assert!(emulator.snapshot().line_editor);
+    assert!(emulator.line_editor_has_keys());
+}
+
+/// What bash prints for an empty Enter: a bare `D`, and a fresh prompt with
+/// nothing on it.
+const BASH_EMPTY_ENTER: &[u8] =
+    b"\r\n\x1b[?2004l\r\x1b]133;D\x07\x1b[?2004h\x1b]133;A\x07$ \x1b]133;B\x07";
+
+/// An emulator at `prompt`, whose line editor has just been handed the
+/// keyboard with a key that drew nothing.
+fn handed_at(prompt: &[u8]) -> Emulator {
+    let mut emulator = wide();
+    emulator.advance(prompt);
+    assert!(emulator.hand_keys_to_line_editor());
+    emulator
+}
+
+#[test]
+fn test_a_search_ended_over_the_line_it_kept_keeps_the_keyboard() {
+    // bash's own bytes for each. Escape ends a search with the match on the
+    // line and the cursor where the search left it, which is the start of
+    // the line when the match starts it — the usual case, since a search is
+    // typed from the start of the command it looks for.
+    let mut emulator = searching();
+    emulator.advance(b"\r(reverse-i-search)`git': git status --short");
+    emulator.advance(b"\r\x1b[23P\x1b]133;A\x07$ \x1b]133;B\x07git\x08\x08\x08");
+    assert!(
+        emulator.snapshot().line_editor,
+        "the field came back over `git status --short`, which bash still holds"
+    );
+    emulator.advance(b"\r\n\x1b[?2004l\r\x1b]133;C\x07");
+    assert!(
+        emulator.snapshot().line_editor,
+        "the line it kept is running"
+    );
+    emulator.advance(b" M notes.txt\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    assert!(
+        !emulator.snapshot().line_editor,
+        "the line ran, and the prompt after it is empty"
+    );
+
+    // `ctrl-a` ending one: the start of the line, wherever the match was.
+    let mut emulator = searching();
+    emulator.advance(b"\r(reverse-i-search)`alp': echo alpha-one");
+    emulator.advance(b"\r\x1b[23P\x1b]133;A\x07$ \x1b]133;B\x07echo alp\x08\x08\x08\r\x1b[C\x1b[C");
+    assert!(
+        emulator.snapshot().line_editor,
+        "`echo alpha-one` is bash's"
+    );
+
+    // And with the match inside the line, the cursor inside it too.
+    let mut emulator = searching();
+    emulator.advance(b"\r(reverse-i-search)`alp': echo alpha-one\x1b[9D");
+    emulator.advance(b"\r\x1b[K\x1b]133;A\x07$ \x1b]133;B\x07echo alpha-one\x1b[9D");
+    assert!(
+        emulator.snapshot().line_editor,
+        "`echo alpha-one` is bash's"
+    );
+}
+
+#[test]
+fn test_a_widget_that_put_a_line_on_the_prompt_keeps_the_keyboard() {
+    // fzf's `ctrl-t`, a `bind -x` widget, puts the path it picked on the line
+    // and bash draws the prompt again after it. A copy of Crook's bash script
+    // from before it learned better reports the widget starting as a
+    // command, with a `C`, and that is no line given back either.
+    let mut emulator = handed_at(MARKED_PROMPT);
+    emulator.advance(b"\r\x1b[K\r\x1b]133;C\x07\x1b]133;A\x07$ \x1b]133;B\x07echo picked");
+    assert!(
+        emulator.snapshot().line_editor,
+        "the picked line is still bash's"
+    );
+    emulator.advance(b"\r\n\x1b[?2004l\rpicked\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    assert!(!emulator.snapshot().line_editor);
+}
+
+#[test]
+fn test_a_prompt_drawn_again_over_an_empty_line_keeps_the_keyboard() {
+    // Each shell's own bytes, and in each the line is empty, the cursor is on
+    // the `B` and the line editor is not where it started.
+    for (what, prompt, redrawn) in [
+        // `ctrl-g` gives a search up.
+        (
+            "bash's ctrl-g",
+            MARKED_PROMPT,
+            &b"\r(reverse-i-search)`': \r\x1b]133;A\x07$ \x1b]133;B\x07\x1b[K"[..],
+        ),
+        // Escape leaves vi's insert mode, and the mode is in the prompt.
+        (
+            "bash's vi mode",
+            b"(ins)\x1b]133;A\x07$ \x1b]133;B\x07",
+            b"\r(cmd)\x1b]133;A\x07$ \x1b]133;B\x07",
+        ),
+        (
+            "a zsh keymap-select that resets the prompt",
+            b"\x1b]133;A\x07% \x1b]133;B\x07",
+            b"\r\r\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;A\x07% \x1b]133;B\x07\x1b[K",
+        ),
+        (
+            "fish's mode prompt",
+            b"\x1b]133;A;click_events=1\x1b\\[I] > \x1b]133;B\x1b\\\x1b[K\r\x1b[6C",
+            b"\r\x1b]133;A;click_events=1\x1b\\[N] > \x1b]133;B\x1b\\\x1b[J\r\x1b[6C",
+        ),
+        // A stray Escape in emacs mode is a Meta prefix waiting for its key,
+        // and a resize draws the prompt again over it.
+        (
+            "bash resized under a Meta prefix",
+            MARKED_PROMPT,
+            b"\r\x1b[K\r\x1b]133;A\x07$ \x1b]133;B\x07",
+        ),
+    ] {
+        let mut emulator = handed_at(prompt);
+        emulator.advance(redrawn);
+        assert!(
+            emulator.snapshot().line_editor,
+            "{what}: the field came back to a line editor that is not done"
+        );
+        // An Enter then ends the line, and the next one starts afresh.
+        emulator.advance(BASH_EMPTY_ENTER);
+        assert!(!emulator.snapshot().line_editor, "{what}");
+    }
+}
+
+#[test]
+fn test_a_finished_line_gives_the_keyboard_back_at_the_prompt_after_it() {
+    // `ctrl-c` over a search: a bare `D`, then the next prompt, which can
+    // arrive in a read of its own. There is no line to look at before its
+    // `B`.
+    let mut emulator = searching();
+    emulator.advance(b"^C\x1b[?2004l\r\r\n\x1b]133;D\x07");
+    assert!(
+        emulator.snapshot().line_editor,
+        "no prompt has been drawn yet"
+    );
+    emulator.advance(b"\x1b]133;A\x07$ ");
+    assert!(
+        emulator.snapshot().line_editor,
+        "the prompt is still being drawn"
+    );
+    emulator.advance(b"\x1b]133;B\x07");
+    assert!(!emulator.snapshot().line_editor);
+
+    // The search accepted, run and finished in a single read.
+    let mut emulator = searching();
+    emulator.advance(
+        b"\r\x1b]133;A\x07$ \x1b]133;B\x07echo alpha-one\r\n\x1b]133;C\x07alpha-one\r\n\
+          \x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07",
+    );
+    assert!(!emulator.snapshot().line_editor);
+
+    // A right-hand prompt is on the row after the `B`, and the cursor goes
+    // back to where the line starts: there is no line there.
+    let mut emulator = searching();
+    emulator.advance(b"^C\r\n\x1b]133;D\x07\x1b]133;A\x07$ \x1b]133;B\x07\x1b[40C12:00\r\x1b[2C");
+    assert!(!emulator.snapshot().line_editor);
+
+    // A `D` a full-screen program printed finishes nothing of the shell's.
+    let mut emulator = handed_at(MARKED_PROMPT);
+    emulator.advance(b"\x1b[?1049h\x1b]133;D\x07\x1b[?1049l");
+    emulator.advance(b"\r\x1b]133;A\x07$ \x1b]133;B\x07");
+    assert!(emulator.snapshot().line_editor);
+}
+
+#[test]
+fn test_a_line_typed_while_a_command_ran_keeps_the_keyboard_with_the_shell() {
+    // A line found with a search runs with the keyboard still the line
+    // editor's, so what is typed meanwhile goes to the shell, which puts it
+    // on the next line. bash's bytes: the echo of the typing, then the `D`,
+    // then the prompt with the typing on it.
+    let mut emulator = searching();
+    emulator.advance(b"\r\x1b]133;A\x07$ \x1b]133;B\x07sleep 1\r\n\x1b]133;C\x07");
+    emulator.advance(b"echo typed\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07echo typed");
+    assert!(
+        emulator.snapshot().line_editor,
+        "the field came back over `echo typed`, which bash holds"
+    );
+    // The same with `ctrl-a` typed last: the cursor on the `B` and the line
+    // after it.
+    emulator.advance(b"\r\n\x1b]133;C\x07typed\r\n\x1b]133;D;0\x07");
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\x1b[2C");
+    assert!(emulator.snapshot().line_editor, "`ls` is bash's");
+
+    // That line's own `D` is the one that gives it back.
+    emulator.advance(b"\x1b[C\x1b[C\r\n\x1b]133;C\x07notes.txt\r\n\x1b]133;D;0\x07");
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+    assert!(!emulator.snapshot().line_editor);
+}
+
+#[test]
+fn test_a_shell_that_has_not_marked_the_end_of_its_prompt_is_handed_nothing() {
+    // Nothing would ever say it had given the keyboard back.
+    let mut unmarked = wide();
+    unmarked.advance(b"$ ");
+    assert!(!unmarked.hand_keys_to_line_editor());
+    assert!(!unmarked.snapshot().line_editor);
+
+    let mut unfinished = wide();
+    unfinished.advance(b"\x1b]133;A\x07$ ");
+    assert!(
+        !unfinished.hand_keys_to_line_editor(),
+        "a prompt still being drawn"
+    );
+
+    let mut running = wide();
+    running.advance(MARKED_PROMPT);
+    running.advance(b"sleep 9\r\n\x1b]133;C\x07");
+    assert!(!running.hand_keys_to_line_editor(), "a command is running");
+
+    let mut full_screen = wide();
+    full_screen.advance(MARKED_PROMPT);
+    full_screen.advance(b"\x1b[?1049h");
+    assert!(!full_screen.hand_keys_to_line_editor());
+    assert!(!full_screen.snapshot().line_editor);
+}
+
+#[test]
+fn test_the_line_editor_lets_go_of_the_keyboard_when_the_shell_exits() {
+    let mut emulator = searching();
+    emulator.child_exited(ChildExit::from_code(0));
+    assert!(!emulator.snapshot().line_editor);
+}

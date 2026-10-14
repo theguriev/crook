@@ -417,6 +417,23 @@ impl Terminal {
         Ok(true)
     }
 
+    /// Sends a key press to the shell's own line editor, and hands it the
+    /// keyboard with it: [`Snapshot::line_editor`] is true from here until the
+    /// line editor gives its line back. See
+    /// [`Emulator::hand_keys_to_line_editor`] for when that is, and for why a
+    /// shell that has not marked the end of its prompt is sent the key and
+    /// handed nothing.
+    ///
+    /// Returns what [`Self::send_key`] does. A key with no encoding hands
+    /// nothing over either: the line editor never heard it.
+    pub fn send_key_to_line_editor(&mut self, key: Key, modifiers: Modifiers) -> io::Result<bool> {
+        let sent = self.send_key(key, modifiers)?;
+        if sent {
+            self.emulator.hand_keys_to_line_editor();
+        }
+        Ok(sent)
+    }
+
     /// Sends a pointer gesture, if the child has asked to hear about it.
     ///
     /// Returns whether any bytes were sent, which is also the answer to "did

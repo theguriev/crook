@@ -917,3 +917,44 @@ fn test_a_line_submitted_behind_a_backlog_is_queued_with_its_enter_or_not_at_all
         "a refused line opened a block for a command the shell never got"
     );
 }
+
+#[test]
+fn test_a_key_sent_to_the_line_editor_reaches_the_child_and_hands_it_the_keyboard() {
+    let (mut terminal, child) = over_a_fake_link();
+    let control = Modifiers {
+        control: true,
+        ..Modifiers::NONE
+    };
+    let mut reader = terminal
+        .take_reader()
+        .expect("a fresh terminal has its reader");
+
+    // Before the shell has marked a prompt there is no line editor to hand
+    // the keyboard to, and the key goes on its own.
+    assert!(
+        terminal
+            .send_key_to_line_editor(Key::Char('r'), control)
+            .expect("the link takes a key")
+    );
+    assert!(!terminal.snapshot().line_editor);
+
+    child.say("\x1b]133;A\x07$ \x1b]133;B\x07");
+    hear(&mut terminal, &mut reader);
+    assert!(
+        terminal
+            .send_key_to_line_editor(Key::Char('r'), control)
+            .expect("the link takes a key")
+    );
+    assert_eq!(
+        b"\x12\x12".to_vec(),
+        child.received(),
+        "ctrl-r is DC2, twice"
+    );
+    assert!(terminal.snapshot().line_editor);
+
+    // And a plain send hands nothing back: only the line editor does that.
+    terminal
+        .send_key(Key::Char('a'), Modifiers::NONE)
+        .expect("the link takes a key");
+    assert!(terminal.snapshot().line_editor);
+}

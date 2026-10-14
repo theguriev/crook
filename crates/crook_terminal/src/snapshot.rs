@@ -521,6 +521,19 @@ pub struct Snapshot {
     /// rather than from the terminal, whose lock is the one the reader parses
     /// under. The same three modes as [`crate::MouseModes::is_reporting`].
     pub mouse_reporting: bool,
+    /// Whether the shell's own line editor has the keyboard: a key was handed
+    /// to it at its prompt with [`crate::Terminal::send_key_to_line_editor`],
+    /// and it has not given its line back since.
+    ///
+    /// What it draws in answer — readline's `reverse-i-search`, zle's
+    /// `bck-i-search`, fish's history pager, fzf's picker — is on the
+    /// prompt's row and under it, so a pane that composes its command lines
+    /// in a field of its own puts the field away until this is false again.
+    /// The line editor gives the keyboard back when it finishes a line, with
+    /// `D`, and draws the next prompt with nothing on it: see
+    /// [`crate::Emulator::hand_keys_to_line_editor`] for why that and not a
+    /// prompt drawn again or a `C`.
+    pub line_editor: bool,
 }
 
 impl Snapshot {
@@ -584,6 +597,7 @@ impl Snapshot {
             && self.live_block == other.live_block
             && self.title == other.title
             && self.mouse_reporting == other.mouse_reporting
+            && self.line_editor == other.line_editor
             && self.cells == other.cells
             && self.combining == other.combining
     }
@@ -737,6 +751,7 @@ pub(crate) fn build<T>(
     revision: u64,
     title: Option<&str>,
     live_block: LiveBlock,
+    line_editor: bool,
 ) -> Snapshot {
     let grid = term.grid();
     let overrides = term.colors();
@@ -781,6 +796,7 @@ pub(crate) fn build<T>(
         live_block,
         title: title.map(str::to_owned),
         mouse_reporting: term.mode().intersects(TermMode::MOUSE_MODE),
+        line_editor,
     }
 }
 

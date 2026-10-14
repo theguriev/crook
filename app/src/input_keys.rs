@@ -70,19 +70,20 @@ impl Platform {
 
 /// What the pane a keystroke arrived at is doing.
 ///
-/// Everything [`route`] needs to know beyond the keystroke itself, which is
-/// two facts: who owns the screen, and whether there is a line being composed
-/// at all.
+/// Everything [`route`] needs to know beyond the keystroke itself: who owns
+/// the screen, what the field holds, and whether the shell is waiting at its
+/// prompt for a line.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Pane {
     /// Whether there is a composer under the output to type into.
     ///
     /// The whole of "who owns the screen", because it is the same question
     /// asked once: [`crate::pane_surface`] takes the field away on the
-    /// alternate screen, on an overflowing block and once a command has been
-    /// running for longer than `pane_surface::LONG_RUNNING`, and each of
-    /// those is a pane whose keyboard belongs to the program rather than to a
-    /// field nobody can see. See rule 2 of [`route`].
+    /// alternate screen, on an overflowing block, once a command has been
+    /// running for longer than `pane_surface::LONG_RUNNING` and while the
+    /// shell's own line editor has the keyboard, and each of those is a pane
+    /// whose keyboard belongs to the program rather than to a field nobody can
+    /// see. See rule 2 of [`route`].
     pub composer: bool,
     /// Whether the field is empty. What makes Ctrl-D an end of input rather
     /// than a delete — see [`route`].
@@ -91,6 +92,17 @@ pub struct Pane {
     /// the copy chord mean the *screen* rather than the line — rule 1 of
     /// [`route`], and the only rule that can take a key away from the shell.
     pub grid_has_selection: bool,
+    /// Whether the shell has said it is sitting at its prompt, waiting for a
+    /// line: `pane_surface::at_prompt`. What gives a key the field has no use
+    /// for somewhere to go — the shell's own line editor, which answers it
+    /// there. See rule 4 of [`route`].
+    pub at_prompt: bool,
+    /// Whether a candidate the shell offered stands after the caret, drawn
+    /// and not typed. A field showing one is not empty to the person looking
+    /// at it, whatever its line holds: they are stepping through completions,
+    /// and an Escape they press there is not meant for a shell that would
+    /// take the keyboard and the offer with it. See rule 4 of [`route`].
+    pub offer_standing: bool,
 }
 
 /// What the input field should do about a keystroke.
@@ -193,6 +205,17 @@ pub enum Route {
     /// place a paste is most wanted — an agent or a REPL holding the screen —
     /// is the one place it cannot happen. See rule 2 of [`route`].
     PasteToShell,
+    /// To the pty, and the keyboard with it: a key the field has no use for,
+    /// pressed over an empty field at the shell's prompt.
+    ///
+    /// The shell's own line editor answers it — readline's and zle's history
+    /// search on `ctrl-r`, fzf's pickers on `ctrl-t` and `alt-c`, `alt-.`'s
+    /// last argument, vi mode's Escape — and what it draws for it is on the
+    /// prompt's row and under it, where the field is. So the field steps aside
+    /// and every key after this one is the line editor's, until the shell
+    /// gives its line back: see `crook_terminal::Snapshot::line_editor`. See
+    /// rule 4 of [`route`].
+    LineEditor,
     /// Nowhere. Nothing is typed and nothing is sent.
     Ignored,
 }
@@ -200,7 +223,7 @@ pub enum Route {
 impl Route {
     /// Whether the pty gets this keystroke.
     pub fn reaches_the_shell(&self) -> bool {
-        matches!(self, Self::Raw | Self::Interrupt)
+        matches!(self, Self::Raw | Self::Interrupt | Self::LineEditor)
     }
 }
 
@@ -364,11 +387,12 @@ pub enum Binding {
 ///    screen alone missed. What those panes have in common is not a screen
 ///    buffer, it is that there is no field to type into:
 ///    [`crate::pane_surface`] takes the composer away on the alt screen, on
-///    an overflowing block and once a command has been running longer than
-///    `LONG_RUNNING`, saying in its own words that every key then goes to the
-///    program. This is that sentence, asked as one question — and a keystroke
-///    on a pane with no composer goes raw to the pty rather than into a field
-///    that is not drawn. Rule 1 is deliberately above this one: text on a
+///    an overflowing block, once a command has been running longer than
+///    `LONG_RUNNING` and while the shell's own line editor has the keyboard,
+///    saying in its own words that every key then goes to the program. This
+///    is that sentence, asked as one question — and a keystroke on a pane
+///    with no composer goes raw to the pty rather than into a field that is
+///    not drawn. Rule 1 is deliberately above this one: text on a
 ///    full-screen program's screen is still text somebody selected with the
 ///    mouse, and there is no reason they cannot copy it.
 /// 3. **The signal keys always reach the shell.** Ctrl-C interrupts and
@@ -379,7 +403,21 @@ pub enum Binding {
 ///    every line editor rather than an end of file that closes the pane.
 /// 4. Everything else on the normal screen belongs to the input field, and a
 ///    keystroke the keymap has no meaning for does nothing at all rather than
-///    leaking into the shell.
+///    leaking into the shell — **except over an empty field at the shell's
+///    prompt**, where a key the shell's own line editor answers is handed to
+///    it, and the keyboard with it: Control with a letter the field does not
+///    use, Escape, and off macOS Alt with a character. `ctrl-r` is the
+///    history search a shell person reaches for before anything else, and
+///    fzf's `ctrl-t` and `alt-c`, readline's `alt-b`, `alt-f`, `alt-d` and
+///    `alt-.`, and vi mode's Escape are the rest of what the field used to
+///    keep from the shell for no use of its own. The field then steps aside
+///    — see [`Route::LineEditor`] — so that what the line editor draws is
+///    seen and every key after it is the line editor's. Only over an empty
+///    field: with a line in it the shell's own is empty, and a search started
+///    then would end with two lines and one Enter for both — and a field with
+///    a completion standing in it is not empty to anyone looking. And only at a
+///    prompt the shell has marked, since a shell that marks none would never
+///    be heard giving the keyboard back.
 pub fn route(keystroke: &Keystroke, chars: &str, pane: Pane, platform: Platform) -> Route {
     if pane.grid_has_selection && copies_the_output(keystroke, platform) {
         return Route::CopyOutput;
@@ -403,8 +441,49 @@ pub fn route(keystroke: &Keystroke, chars: &str, pane: Pane, platform: Platform)
     }
     match intent(keystroke, chars, platform) {
         Some(intent) => Route::Edit(intent),
+        None if pane.line_is_empty
+            && !pane.offer_standing
+            && pane.at_prompt
+            && belongs_to_the_line_editor(keystroke, platform) =>
+        {
+            Route::LineEditor
+        }
         None => Route::Ignored,
     }
+}
+
+/// Whether a key the field has no meaning for is one a shell's own line
+/// editor answers at its prompt — rule 4 of [`route`].
+///
+/// Control with a letter: `ctrl-r` and `ctrl-s` search the history, `ctrl-t`
+/// is fzf's file picker and `ctrl-g` gives a search up. The letters the field
+/// has its own use for never get here — the emacs keys, the clipboard's off
+/// macOS, the three signals — and neither does a Shift with them, which is
+/// the window's off macOS. Escape, bare: vi mode's way out of insert mode,
+/// and the Meta prefix in every shell. And off macOS Alt with a character,
+/// Shift or not: readline's and zle's `alt-b`, `alt-f`, `alt-d`, `alt-.`,
+/// `alt-<` and `alt->`, and fzf's `alt-c`. Not on a Mac, where Option types a
+/// character in the field as it does in every text field there; what it means
+/// to a program is [`crate::terminal_keys`]' to say.
+///
+/// Never Command, which is the window's on a Mac and means nothing to a pty
+/// anywhere.
+fn belongs_to_the_line_editor(keystroke: &Keystroke, platform: Platform) -> bool {
+    let modifiers = keystroke.modifiers;
+    if modifiers.cmd {
+        return false;
+    }
+    if keystroke.key == "escape" {
+        return !modifiers.ctrl && !modifiers.alt && !modifiers.shift;
+    }
+    let mut characters = keystroke.key.chars();
+    let (Some(character), None) = (characters.next(), characters.next()) else {
+        return false;
+    };
+    if modifiers.ctrl {
+        return !modifiers.alt && !modifiers.shift && character.is_ascii_alphabetic();
+    }
+    modifiers.alt && platform == Platform::Other && !character.is_control()
 }
 
 /// Whether this is one of the three keys that interrupt, end and suspend.
@@ -785,6 +864,8 @@ mod paste_tests {
             composer: false,
             line_is_empty: false,
             grid_has_selection: false,
+            at_prompt: false,
+            offer_standing: false,
         }
     }
     fn composing() -> Pane {
@@ -792,6 +873,8 @@ mod paste_tests {
             composer: true,
             line_is_empty: false,
             grid_has_selection: false,
+            at_prompt: true,
+            offer_standing: false,
         }
     }
 
@@ -926,21 +1009,35 @@ mod tests {
         }
     }
 
-    /// A pane on the normal screen with a line half written in its field.
+    /// A pane at the shell's prompt with a line half written in its field.
     fn composing() -> Pane {
         Pane {
             composer: true,
             line_is_empty: false,
             grid_has_selection: false,
+            at_prompt: true,
+            offer_standing: false,
         }
     }
 
-    /// A pane on the normal screen whose field is empty.
+    /// A pane at the shell's prompt whose field is empty.
     fn empty() -> Pane {
         Pane {
             composer: true,
             line_is_empty: true,
             grid_has_selection: false,
+            at_prompt: true,
+            offer_standing: false,
+        }
+    }
+
+    /// An empty field over a shell that has not said it is at its prompt:
+    /// one that reports no marks, or one a line was sent to that has not
+    /// answered yet.
+    fn unmarked() -> Pane {
+        Pane {
+            at_prompt: false,
+            ..empty()
         }
     }
 
@@ -968,6 +1065,8 @@ mod tests {
             composer: false,
             line_is_empty: true,
             grid_has_selection: false,
+            at_prompt: false,
+            offer_standing: false,
         };
         for platform in [Platform::Mac, Platform::Other] {
             for (key, modifiers) in [("left", none()), ("a", none()), ("enter", none())] {
@@ -991,6 +1090,8 @@ mod tests {
             composer: false,
             line_is_empty: true,
             grid_has_selection: false,
+            at_prompt: false,
+            offer_standing: false,
         };
         for platform in [Platform::Mac, Platform::Other] {
             for key in ["down", "up", "enter", "y", "escape"] {
@@ -1124,6 +1225,8 @@ mod tests {
             composer: false,
             line_is_empty: true,
             grid_has_selection: true,
+            at_prompt: false,
+            offer_standing: false,
         };
         for platform in [Platform::Mac, Platform::Other] {
             assert_eq!(
@@ -1267,20 +1370,196 @@ mod tests {
                 Route::Edit(Intent::CompleteBackwards),
                 "and Shift-Tab steps back through what it turned up"
             );
+            // Escape types nothing into a written line. Over an empty one it
+            // is the shell's — see
+            // `a_key_only_the_shells_line_editor_answers_reaches_it_from_an_empty_field`
+            // — and still types nothing.
+            let escape = keystroke("escape", none());
             assert_eq!(
-                route(
-                    &keystroke("escape", none()),
-                    "\u{1b}",
-                    composing(),
-                    platform
-                ),
+                route(&escape, "\u{1b}", composing(), platform),
                 Route::Ignored
             );
             assert_eq!(
-                route(&keystroke("f5", none()), "", composing(), platform),
-                Route::Ignored
+                route(&escape, "\u{1b}", empty(), platform),
+                Route::LineEditor
+            );
+            for pane in [composing(), empty()] {
+                assert_eq!(
+                    route(&keystroke("f5", none()), "", pane, platform),
+                    Route::Ignored,
+                    "no line editor answers F5"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_key_only_the_shells_line_editor_answers_reaches_it_from_an_empty_field() {
+        // `ctrl-r`'s history search and fzf's `ctrl-t`, and Escape, which is
+        // vi mode's and every shell's Meta prefix: the field has no use for
+        // any of them, and used to keep them from the shell anyway.
+        for platform in [Platform::Mac, Platform::Other] {
+            for key in ["r", "t", "s", "g", "o"] {
+                assert_eq!(
+                    route(&keystroke(key, ctrl()), "", empty(), platform),
+                    Route::LineEditor,
+                    "ctrl-{key} on {platform:?}"
+                );
+            }
+            assert_eq!(
+                route(&keystroke("escape", none()), "\u{1b}", empty(), platform),
+                Route::LineEditor,
+                "Escape on {platform:?}"
             );
         }
+        // Off macOS Alt is Meta and nothing else: readline's and zle's word
+        // keys, the last argument, fzf's directory picker. Shifted too, since
+        // `alt-<` and `alt->` are the ends of the history.
+        for (key, chars) in [("b", "b"), ("f", "f"), ("d", "d"), (".", "."), ("c", "c")] {
+            assert_eq!(
+                route(&keystroke(key, alt()), chars, empty(), Platform::Other),
+                Route::LineEditor,
+                "alt-{key}"
+            );
+        }
+        let alt_shift = Modifiers {
+            shift: true,
+            ..alt()
+        };
+        assert_eq!(
+            route(&keystroke(">", alt_shift), ">", empty(), Platform::Other),
+            Route::LineEditor
+        );
+        assert!(
+            Route::LineEditor.reaches_the_shell(),
+            "and the shell hears it"
+        );
+    }
+
+    #[test]
+    fn with_a_line_in_the_field_the_line_editors_keys_are_still_nobodys() {
+        // The shell's line is empty while the field holds one, so a search
+        // started then would end with two lines and an Enter for one of them.
+        for platform in [Platform::Mac, Platform::Other] {
+            for (key, modifiers, chars) in [
+                ("r", ctrl(), ""),
+                ("t", ctrl(), ""),
+                ("escape", none(), "\u{1b}"),
+            ] {
+                assert_eq!(
+                    route(&keystroke(key, modifiers), chars, composing(), platform),
+                    Route::Ignored,
+                    "{key} on {platform:?}"
+                );
+            }
+        }
+        assert_eq!(
+            route(&keystroke("c", alt()), "c", composing(), Platform::Other),
+            Route::Ignored
+        );
+    }
+
+    #[test]
+    fn a_completion_standing_in_an_empty_field_keeps_the_line_editors_keys_out() {
+        // Tab on an empty line offers every command, and the field is then
+        // somebody's half-finished question rather than an empty line.
+        let offered = Pane {
+            offer_standing: true,
+            ..empty()
+        };
+        for platform in [Platform::Mac, Platform::Other] {
+            for (key, modifiers, chars) in [("r", ctrl(), ""), ("escape", none(), "\u{1b}")] {
+                assert_eq!(
+                    route(&keystroke(key, modifiers), chars, offered, platform),
+                    Route::Ignored,
+                    "{key} on {platform:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_shell_that_is_not_at_its_prompt_is_handed_nothing() {
+        // No line editor is listening — or one is, and nothing will ever say
+        // it has given the keyboard back.
+        for platform in [Platform::Mac, Platform::Other] {
+            for (key, modifiers, chars) in [("r", ctrl(), ""), ("escape", none(), "\u{1b}")] {
+                assert_eq!(
+                    route(&keystroke(key, modifiers), chars, unmarked(), platform),
+                    Route::Ignored,
+                    "{key} on {platform:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_fields_own_keys_stay_the_fields_over_an_empty_line() {
+        for platform in [Platform::Mac, Platform::Other] {
+            for key in ["a", "e", "k", "l", "u", "w"] {
+                assert!(
+                    matches!(
+                        route(&keystroke(key, ctrl()), "", empty(), platform),
+                        Route::Edit(_)
+                    ),
+                    "ctrl-{key} on {platform:?} left the field"
+                );
+            }
+            assert_eq!(
+                route(&keystroke("a", none()), "a", empty(), platform),
+                Route::Edit(Intent::Insert("a".to_owned()))
+            );
+            assert_eq!(
+                route(&keystroke("c", ctrl()), "", empty(), platform),
+                Route::Interrupt
+            );
+            assert_eq!(
+                route(&keystroke("d", ctrl()), "", empty(), platform),
+                Route::Raw,
+                "an end of input, and no line editor's to keep"
+            );
+            // The window's chords, keys no line editor answers, and an
+            // Escape with a modifier on it, which is somebody's chord rather
+            // than a way out of insert mode.
+            for (key, modifiers) in [
+                ("r", ctrl_shift()),
+                ("r", cmd()),
+                ("left", alt()),
+                ("f5", none()),
+                ("escape", shift()),
+                ("escape", ctrl()),
+            ] {
+                if (key, platform) == ("left", Platform::Mac) {
+                    continue;
+                }
+                assert_eq!(
+                    route(&keystroke(key, modifiers), "", empty(), platform),
+                    Route::Ignored,
+                    "{key} with {modifiers:?} on {platform:?}"
+                );
+            }
+        }
+        // Off macOS the clipboard's plain chords are still the field's.
+        for key in ["a", "x", "v", "y"] {
+            assert!(
+                matches!(
+                    route(&keystroke(key, ctrl()), "", empty(), Platform::Other),
+                    Route::Edit(_)
+                ),
+                "ctrl-{key}"
+            );
+        }
+        // And on a Mac Option types in the field, as it does in every text
+        // field there: what it means to a program is `terminal_keys`'.
+        assert_eq!(
+            route(&keystroke("c", alt()), "\u{e7}", empty(), Platform::Mac),
+            Route::Edit(Intent::Insert("\u{e7}".to_owned()))
+        );
+        assert_eq!(
+            route(&keystroke("f", alt()), "", empty(), Platform::Mac),
+            Route::Ignored,
+            "an Option press that typed nothing is still not Meta in the field"
+        );
     }
 
     #[test]
@@ -1439,6 +1718,8 @@ mod tests {
             composer: false,
             line_is_empty: true,
             grid_has_selection: false,
+            at_prompt: false,
+            offer_standing: false,
         };
         for platform in [Platform::Mac, Platform::Other] {
             for pane in [composing(), empty(), selected(composing())] {

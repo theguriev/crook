@@ -33,6 +33,14 @@
 //! which point the block takes the space it leaves and every key goes to the
 //! program.
 //!
+//! It also goes away while the shell's own line editor has the keyboard: a key
+//! the field had no use for was handed to it over an empty line at the prompt
+//! — `ctrl-r`, fzf's `ctrl-t`, Escape; see [`crate::input_keys::route`] — and
+//! what it draws in answer is on the prompt's row and under it, where the
+//! field would be. The open block takes the space, as it does for a running
+//! command, until the shell gives its line back; see
+//! [`Snapshot::line_editor`].
+//!
 //! "Running" means the shell said so. A line handed to a shell that reports no
 //! marks is never answered, and a rule that counted it as running would take
 //! the field away at the first Enter of such a session and never give it back.
@@ -62,7 +70,7 @@
 
 use std::time::{Duration, Instant};
 
-use crook_terminal::Snapshot;
+use crook_terminal::{BlockState, Snapshot};
 
 /// How long a command runs before the composer goes away and its block takes
 /// the space.
@@ -148,8 +156,28 @@ pub fn of(snapshot: &Snapshot, now: Instant) -> PaneSurface {
         // for a minute is still one command among the ones before it, and
         // throwing the session's blocks away for the duration would be a worse
         // answer than the text field this rule exists to remove.
-        composer: !overflowing && !is_long_running(snapshot, now),
+        //
+        // And while the shell's line editor has the keyboard, for the same
+        // reason: a history search or fzf's picker is drawn in the open
+        // block, under the prompt it was started from, among the commands
+        // before it.
+        composer: !overflowing && !is_long_running(snapshot, now) && !snapshot.line_editor,
     }
+}
+
+/// Whether the shell has said it is sitting at its prompt, waiting for a
+/// line: the open block is at a prompt whose end the shell marked, and no
+/// full-screen program is up over it.
+///
+/// What gives a key the composer has no use for somewhere to go: the shell's
+/// own line editor answers `ctrl-r` there. Its end is asked for as well as
+/// its start, because the end is what the line editor gives the keyboard back
+/// at — see [`Snapshot::line_editor`] — and a shell that marks no prompt at
+/// all, or never says where one ends, would never be heard giving it back.
+pub fn at_prompt(snapshot: &Snapshot) -> bool {
+    !snapshot.alt_screen
+        && snapshot.live_block.state == BlockState::AtPrompt
+        && snapshot.live_block.prompt_end.is_some()
 }
 
 /// Whether the open block has been running long enough to take the pane.
