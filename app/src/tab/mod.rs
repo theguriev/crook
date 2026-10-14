@@ -112,28 +112,116 @@ impl AgentStatus {
         }
     }
 
-    /// What a program says it is doing in its own terminal title, when it
-    /// says so in a glyph — or `None` for a title that says nothing of it.
+    /// What a program says it is doing in its own terminal title — or
+    /// `None` for a title that says nothing of it. `agent` is the agent the
+    /// pane is running, by the name [`crate::agent::program_of`] gives it.
     ///
-    /// Claude Code puts one in front of every title it sets: `✳` while it
-    /// waits for a prompt, and a half-filled circle that turns while it
-    /// works. That is a status reaching the pane with nothing installed, so
-    /// a row is right about an agent nobody has set Crook's hooks up for.
-    /// Only those glyphs: the braille spinners every build tool draws would
-    /// make each `npm install` an agent.
+    /// Three agents say it there, which is a status reaching the pane with
+    /// nothing installed, so a row is right about an agent nobody has set
+    /// Crook's hooks up for:
     ///
-    /// Answered with the title the glyph was in front of, which is the name
-    /// the row wears: the row draws its status already, and a glyph turning
-    /// in front of the name said it twice and moved the name as it turned.
-    pub fn from_title(title: &str) -> Option<(Self, &str)> {
+    /// - Claude Code puts a glyph in front of every title it sets: `✳`
+    ///   while it waits for a prompt, and a half-filled circle that turns
+    ///   while it works.
+    /// - Gemini CLI puts a glyph and two spaces in front of its words: `◇`
+    ///   ready, `✦` at work (with its thought, when it shows one), `⏲` at
+    ///   work on a command it is waiting on, and `✋` stopped for an
+    ///   approval. Then the folder, in brackets, and spaces to 80 columns.
+    /// - Codex blinks `[ ! ] Action Required` and `[ . ] Action Required`
+    ///   in front of the folder while it waits for an approval, turns a
+    ///   braille spinner there while it works — or wherever its
+    ///   `tui.terminal_title` puts the spinner, a word of its own between
+    ///   spaces — and leaves the folder alone at rest, and while it works
+    ///   too when its animations are off
+    ///   (`[tui] animations = false`), which takes the spinner away and
+    ///   leaves the question standing still.
+    ///
+    /// The braille frames are codex's only in a pane that runs codex: every
+    /// build tool draws the same ones, which would make each `npm install`
+    /// an agent. So is the bare folder, which anywhere else is any title at
+    /// all. The rest are nobody else's, and are read wherever they come
+    /// from — codex run through `npx`, an alias or `ssh` included.
+    ///
+    /// Answered with the name the title gives the row besides. Claude
+    /// Code's is the title its glyph was in front of: the row draws its
+    /// status already, and a glyph turning in front of the name said it
+    /// twice and moved the name as it turned. Gemini CLI's and codex's give
+    /// `None`, and the pane keeps the name it has — the prompt a hook named
+    /// it after, or the command it runs: what follows their status is the
+    /// folder, which the row shows already, or a thought Gemini has for a
+    /// moment. See [`TitleSays`].
+    pub fn from_title<'title>(
+        title: &'title str,
+        agent: Option<&str>,
+    ) -> Option<TitleSays<'title>> {
         let glyph = title.chars().next()?;
-        let status = match glyph {
-            '\u{2733}' => Self::Idle,
-            '\u{25d0}'..='\u{25d3}' => Self::Running,
-            _ => return None,
+        let rest = &title[glyph.len_utf8()..];
+        let claude = match glyph {
+            '\u{2733}' => Some(Self::Idle),
+            '\u{25d0}'..='\u{25d3}' => Some(Self::Running),
+            _ => None,
         };
-        Some((status, title[glyph.len_utf8()..].trim_start()))
+        if let Some(status) = claude {
+            return Some(TitleSays {
+                status,
+                name: Some(rest.trim_start()),
+                outright: true,
+            });
+        }
+        let gemini = match glyph {
+            '\u{25c7}' => Some(Self::Idle),
+            '\u{2726}' | '\u{23f2}' => Some(Self::Running),
+            '\u{270b}' => Some(Self::NeedsInput),
+            _ => None,
+        }
+        .filter(|_| rest.starts_with("  "));
+        let codex_asks = ["[ ! ] Action Required", "[ . ] Action Required"]
+            .iter()
+            .any(|blink| title.starts_with(blink));
+        let (status, outright) = match gemini {
+            Some(status) => (status, true),
+            None if codex_asks => (Self::NeedsInput, true),
+            None if agent == Some("codex") => {
+                let frame = |word: &str| {
+                    let mut characters = word.chars();
+                    matches!(
+                        (characters.next(), characters.next()),
+                        (Some('\u{2800}'..='\u{28ff}'), None)
+                    )
+                };
+                if title.split_whitespace().any(frame) {
+                    (Self::Running, true)
+                } else {
+                    (Self::Idle, false)
+                }
+            }
+            None => return None,
+        };
+        Some(TitleSays {
+            status,
+            name: None,
+            outright,
+        })
     }
+}
+
+/// What a program's terminal title says of it, as
+/// [`AgentStatus::from_title`] reads it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TitleSays<'title> {
+    /// What the program is doing.
+    pub status: AgentStatus,
+    /// The name the title gives the row, or `None` for a title that says
+    /// the status and nothing more, where the row keeps the name it has.
+    pub name: Option<&'title str>,
+    /// Whether the title says the status in so many words. Every one does
+    /// but codex's bare folder, which says idle only by showing no spinner
+    /// and no question — and codex shows that same folder while it works
+    /// when its animations are off. So the folder ends a turn the spinner
+    /// said, but not a question: after an approval codex works on, and a
+    /// folder there says only that the question is over. See
+    /// `Workspace::title_reported`.
+    pub outright: bool,
 }
 
 /// What asked for a look at a pane while nobody was giving it one.
@@ -177,8 +265,9 @@ pub enum StatusSource {
     /// The command the agent was ended and took its last report back, at
     /// this instant. See `Emulator::settle_agent` in `crook_terminal` for a
     /// hook's report, and `Workspace::take_back_a_running_title` for a
-    /// running the title said — which a cleared title takes back too, since
-    /// that is how Claude Code leaves.
+    /// running or a question the title said, or the idle its question left
+    /// ([`Self::TitleStoppedAsking`]) — which a cleared title takes back
+    /// too, since that is how Claude Code and Gemini CLI leave.
     CommandEnded(Instant),
     /// The program's terminal title said so, at this instant. See
     /// [`AgentStatus::from_title`].
@@ -186,11 +275,25 @@ pub enum StatusSource {
     /// The program's terminal title has said since this instant that an
     /// agent is there and at rest, and has not yet said it is at work: the
     /// `✳` Claude Code draws from the moment it starts, before anybody has
-    /// asked it anything. No report of idle — the idle is the one the pane
-    /// already had, and `crook pane wait --until idle` is not answered by it
-    /// — but word that an agent is in the pane, which is where the Changes
-    /// column sends a review. See `Workspace::title_reported`.
+    /// asked it anything, and Gemini CLI's `◇` and codex's bare folder. No
+    /// report of idle — the idle is the one the pane already had, and `crook
+    /// pane wait --until idle` is not answered by it — but word that an agent
+    /// is in the pane, which is where the Changes column sends a review. See
+    /// `Workspace::title_reported`.
     TitleAtStart(Instant),
+    /// The program's terminal title stopped asking the question it had
+    /// asked, at this instant, and has not said since whether the agent is
+    /// at work. The status is idle, so the row is no longer amber and no
+    /// longer counted as waiting, but it is no report of idle: an approval
+    /// is answered by the person and the agent gets on with the turn, and
+    /// a title that says nothing more — codex's folder with its animations
+    /// off, its spinner where the pane runs it through `npx`, an alias or
+    /// `ssh` — cannot tell that from a turn that ended. So `crook pane wait
+    /// --until idle` is not answered by it, and `crook events --follow` is
+    /// not told it, until the end of the agent's command turns it into a
+    /// [`Self::CommandEnded`], which both take. See
+    /// `Workspace::title_stopped_asking`.
+    TitleStoppedAsking(Instant),
 }
 
 /// The pull request a session's work belongs to.

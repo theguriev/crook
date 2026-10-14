@@ -165,6 +165,14 @@ impl Notice {
             None if session.attention == Some(Attention::Bell) => "Rang the bell".to_owned(),
             None => match session.source {
                 StatusSource::CommandEnded(_) => "Its command ended".to_owned(),
+                // Never posted for the change that writes it. That change
+                // ends a question, so the row was amber before it, and after
+                // it is amber still, when nobody was looking, or idle: it
+                // never turns amber. Only something later with no words of
+                // its own — a notification with an empty body — finds this
+                // arm, and "done" is the one thing this source is careful
+                // not to say.
+                StatusSource::TitleStoppedAsking(_) => "No longer asking".to_owned(),
                 StatusSource::Agent(_)
                 | StatusSource::Title(_)
                 | StatusSource::TitleAtStart(_)

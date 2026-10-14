@@ -102,6 +102,11 @@ pub(super) fn lines(session: &AgentSession, now: Instant) -> Vec<String> {
              started since.",
             since(at, now)
         ),
+        StatusSource::TitleStoppedAsking(at) => format!(
+            "Status: {status} — the agent's title stopped asking {}, and has not said since \
+             whether it is at work.",
+            since(at, now)
+        ),
         StatusSource::CommandEnded(at) => format!(
             "Status: {status} — the command ended {} and took the agent's last report back.",
             since(at, now)

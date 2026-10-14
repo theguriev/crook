@@ -434,6 +434,22 @@ fn a_command_arrives_in_every_shell_as_the_words_it_was_given() {
     }
 }
 
+/// A worker `tab new` opens runs the line it typed, every word quoted, and
+/// that line is what the pane's command is read off: the agent in it is the
+/// one the words started, in every shell the line is typed into.
+#[cfg(unix)]
+#[test]
+fn the_line_tab_new_types_names_the_agent_it_starts() {
+    for agent in ["claude", "codex", "gemini", "/opt/my tools/codex"] {
+        let words = [agent.to_owned(), "fix the \"flaky\" test".to_owned()];
+        for shell in ["sh", "bash", "zsh", "fish"] {
+            let line = spawn::command_line(&words, Path::new(shell)).expect("a proven shell");
+            let named = agent.rsplit('/').next();
+            assert_eq!(crate::agent::program_of(&line), named, "{shell}: {line}");
+        }
+    }
+}
+
 #[test]
 fn sixteen_refusals_in_a_row_stop_the_window_answering_that_pane_and_no_other() {
     let refusal = Refusal::new(code::BUDGET, "full");
@@ -2247,7 +2263,7 @@ mod socket {
 
     use super::super::protocol::{BlocksRead, Follow, PaneEvent, ReadBlocks, Until, Wait, Waited};
     use super::super::watch::{self, Feed};
-    use crate::tab::{Lineage, PaneId};
+    use crate::tab::{Lineage, PaneId, StatusSource};
     use crate::terminal_model::TerminalUpdate;
 
     /// `crook pane wait`, as the command line asks it from inside a pane.
@@ -3145,6 +3161,326 @@ mod socket {
                 PaneEvent::Finished {
                     pane_id,
                     command: Some("claude".to_owned()),
+                    exit: Some(137),
+                    duration_ms: None,
+                },
+                PaneEvent::Closed { pane_id },
+            ]
+        );
+    }
+
+    /// Codex and Gemini CLI say in their titles when they stop for an
+    /// approval, which Claude Code's never does, so a worker of theirs with
+    /// no hooks is heard asking as it asks, rather than when the wait runs
+    /// out.
+    #[test]
+    fn a_wait_for_needs_input_hears_the_title_ask() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["codex"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+
+        // Long, so that the answer the time running out gives cannot pass
+        // for the one the title should give at once.
+        let asking = served.start(wait(&token, worker, Until::NeedsInput, 120, false));
+        served.pump_until("the wait was never registered", |served| {
+            served.waiting() == 1
+        });
+        served.titled(worker, "proj");
+        assert_eq!(served.waiting(), 1, "answered before anything asked");
+
+        served.titled(worker, "[ ! ] Action Required | proj");
+        assert_eq!(served.waiting(), 0, "not answered when the title asked");
+        let printed = served.finish(asking).expect("answered");
+        assert_eq!(
+            (printed.text.as_str(), printed.failure),
+            ("needs-input", None)
+        );
+    }
+
+    /// A codex worker `tab new` opened runs the line it typed, every word
+    /// quoted, and is a pane running codex all the same: its spinner is its
+    /// work, so the approval it stops for is not the end of its turn, and
+    /// only the folder it shows once the spinner stops answers a wait for
+    /// idle.
+    #[test]
+    fn a_wait_for_idle_on_a_codex_tab_new_opened_waits_out_its_approvals() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let words = ["codex", "fix the flaky test"];
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&words))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+        let owned = words.map(str::to_owned);
+        let line = spawn::command_line(&owned, Path::new("zsh")).expect("a proven shell");
+        served.update(|workspace, ctx| {
+            workspace.apply_terminal_update(&TerminalUpdate::Running(worker, Some(line)), ctx);
+        });
+        served.titled(worker, "proj");
+
+        let waiting = served.start(wait(&token, worker, Until::Idle, 120, false));
+        served.pump_until("the wait was never registered", |served| {
+            served.waiting() == 1
+        });
+        for title in [
+            "\u{280b} proj",
+            "\u{2819} proj",
+            "[ ! ] Action Required | proj",
+            "[ . ] Action Required | proj",
+            "\u{2839} proj",
+        ] {
+            served.titled(worker, title);
+            assert_eq!(served.waiting(), 1, "answered at {title:?}, mid-turn");
+        }
+        served.titled(worker, "proj");
+        assert_eq!(served.waiting(), 0, "not answered when the spinner stopped");
+        let printed = served.finish(waiting).expect("answered");
+        assert_eq!((printed.text.as_str(), printed.failure), ("idle", None));
+    }
+
+    /// A title that stops asking and says no more ends the question and not
+    /// the turn: codex in a pipeline works on after an approval, and its
+    /// spinner is any build tool's there. A wait for idle goes on, and the
+    /// stream is told the question and not an idle.
+    #[test]
+    fn a_title_that_stops_asking_tells_no_wait_or_stream_the_turn_is_over() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let words = ["sh", "-c", "codex 'fix x' | tee codex.log"];
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&words))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+        let owned = words.map(str::to_owned);
+        let line = spawn::command_line(&owned, Path::new("zsh")).expect("a proven shell");
+        served.update(|workspace, ctx| {
+            workspace.apply_terminal_update(&TerminalUpdate::Running(worker, Some(line)), ctx);
+        });
+
+        let following = served.start(follow(Some(&token), Some(worker)));
+        served.pump_until("the stream never started", |served| served.following() == 1);
+        let waiting = served.start(wait(&token, worker, Until::Idle, 120, false));
+        served.pump_until("the wait was never registered", |served| {
+            served.waiting() == 1
+        });
+        served.titled(worker, "[ ! ] Action Required | proj");
+        served.titled(worker, "\u{280b} proj");
+        served.titled(worker, "\u{2819} proj");
+        assert_eq!(
+            served.session(worker, |session| session.status),
+            AgentStatus::Idle,
+            "the question was never ended"
+        );
+        assert_eq!(
+            served.waiting(),
+            1,
+            "answered when the title stopped asking"
+        );
+
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::ClosePane(worker), ctx);
+        });
+        let printed = served.finish(waiting).expect("answered");
+        assert_ne!(printed.text, "idle");
+        assert!(printed.failure.is_some(), "{}", printed.text);
+        let events = served.finish(following).expect("followed until it closed");
+        let pane_id = opened.pane_id;
+        assert_eq!(
+            events,
+            vec![
+                PaneEvent::Status {
+                    pane_id,
+                    status: "needs-input".to_owned(),
+                    message: None,
+                },
+                PaneEvent::Closed { pane_id },
+            ]
+        );
+    }
+
+    /// The end of its command ends the turn a title stopped asking in,
+    /// though the title could not say so: the agent that might have been at
+    /// work on the approval has gone. A wait for idle is answered then, and
+    /// the stream is told `idle` before `finished`, as it is for an agent
+    /// killed while it asks. Codex that `tab new` opened, whose folder comes
+    /// back when the person declines, and codex through `npx`, whose spinner
+    /// is any build tool's.
+    #[test]
+    fn the_end_of_its_command_ends_the_turn_a_title_stopped_asking_in() {
+        // What the worker runs, the titles it shows, and what the stream
+        // says of them before the end of the command.
+        let codex: (&[&str], &[&str], &[&str]) = (
+            &["codex", "fix x"],
+            &[
+                "proj",
+                "\u{280b} proj",
+                "[ ! ] Action Required | proj",
+                "proj",
+            ],
+            &["running", "needs-input"],
+        );
+        let npx: (&[&str], &[&str], &[&str]) = (
+            &["sh", "-c", "npx @openai/codex 'fix x'"],
+            &[
+                "[ ! ] Action Required | proj",
+                "\u{280b} proj",
+                "\u{2819} proj",
+            ],
+            &["needs-input"],
+        );
+        for (words, titles, said) in [codex, npx] {
+            let mut served = Served::new(|_, _, _| {});
+            let lead = first_pane(&served);
+            let token = served.token(lead);
+            let opened = served
+                .open_tab(Some(token.clone()), new_tab(words))
+                .expect("the lead opens a worker");
+            let worker = served.pane(opened.pane_id);
+            let owned: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
+            let line = spawn::command_line(&owned, Path::new("zsh")).expect("a proven shell");
+            served.update(|workspace, ctx| {
+                workspace.apply_terminal_update(
+                    &TerminalUpdate::Running(worker, Some(line.clone())),
+                    ctx,
+                );
+            });
+
+            let following = served.start(follow(Some(&token), Some(worker)));
+            served.pump_until("the stream never started", |served| served.following() == 1);
+            let waiting = served.start(wait(&token, worker, Until::Idle, 120, false));
+            served.pump_until("the wait was never registered", |served| {
+                served.waiting() == 1
+            });
+            for title in titles {
+                served.titled(worker, title);
+            }
+            assert!(
+                served.session(worker, |session| {
+                    matches!(session.source, StatusSource::TitleStoppedAsking(_))
+                }),
+                "{words:?}: the title never stopped asking"
+            );
+            assert_eq!(
+                served.waiting(),
+                1,
+                "{words:?}: answered when the title stopped asking"
+            );
+
+            // The person quits the agent, in the order the model hands it
+            // over: what the pane runs, read off the snapshot, then the end.
+            served.update(|workspace, ctx| {
+                workspace.apply_terminal_update(&TerminalUpdate::Running(worker, None), ctx);
+                workspace.apply_terminal_update(
+                    &TerminalUpdate::CommandFinished {
+                        pane: worker,
+                        command: Some(line.clone()),
+                        exit: Some(0),
+                        took: None,
+                        ran: true,
+                    },
+                    ctx,
+                );
+            });
+            assert_eq!(
+                served.waiting(),
+                0,
+                "{words:?}: not answered when the command ended"
+            );
+            let printed = served.finish(waiting).expect("answered");
+            assert_eq!(
+                (printed.text.as_str(), printed.failure),
+                ("idle", None),
+                "{words:?}"
+            );
+
+            served.update(|workspace, ctx| {
+                workspace.apply(TabAction::ClosePane(worker), ctx);
+            });
+            let events = served.finish(following).expect("followed until it closed");
+            let pane_id = opened.pane_id;
+            let status = |status: &str| PaneEvent::Status {
+                pane_id,
+                status: status.to_owned(),
+                message: None,
+            };
+            let mut expected: Vec<PaneEvent> = said.iter().map(|said| status(said)).collect();
+            expected.extend([
+                status("idle"),
+                PaneEvent::Finished {
+                    pane_id,
+                    command: Some(line),
+                    exit: Some(0),
+                    duration_ms: None,
+                },
+                PaneEvent::Closed { pane_id },
+            ]);
+            assert_eq!(events, expected, "{words:?}");
+        }
+    }
+
+    /// The question a title asks is on the stream with the rest of what it
+    /// says, and so is the idle the end of its command takes it back to
+    /// when the agent is killed asking it.
+    #[test]
+    fn a_stream_carries_the_question_a_title_asks_and_the_end_that_takes_it_back() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["gemini"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+        // As Gemini CLI writes them, padded to 80 columns.
+        let gemini = |title: &str| format!("{title:<80}");
+
+        let following = served.start(follow(Some(&token), Some(worker)));
+        served.pump_until("the stream never started", |served| served.following() == 1);
+        served.titled(worker, &gemini("\u{25c7}  Ready (proj)"));
+        served.titled(worker, &gemini("\u{2726}  Working\u{2026} (proj)"));
+        served.titled(worker, &gemini("\u{270b}  Action Required (proj)"));
+        served.titled(worker, &gemini("\u{2726}  Working\u{2026} (proj)"));
+        served.titled(worker, &gemini("\u{270b}  Action Required (proj)"));
+        // Killed while it asks, in the order the model hands it over: what
+        // the pane runs, read off the snapshot, and then the shell's end.
+        served.update(|workspace, ctx| {
+            workspace.apply_terminal_update(&TerminalUpdate::Running(worker, None), ctx);
+            workspace.apply_terminal_update(
+                &TerminalUpdate::CommandFinished {
+                    pane: worker,
+                    command: Some("gemini".to_owned()),
+                    exit: Some(137),
+                    took: None,
+                    ran: true,
+                },
+                ctx,
+            );
+            workspace.apply(TabAction::ClosePane(worker), ctx);
+        });
+
+        let events = served.finish(following).expect("followed until it closed");
+        let pane_id = opened.pane_id;
+        let status = |status: &str| PaneEvent::Status {
+            pane_id,
+            status: status.to_owned(),
+            message: None,
+        };
+        assert_eq!(
+            events,
+            vec![
+                status("running"),
+                status("needs-input"),
+                status("running"),
+                status("needs-input"),
+                status("idle"),
+                PaneEvent::Finished {
+                    pane_id,
+                    command: Some("gemini".to_owned()),
                     exit: Some(137),
                     duration_ms: None,
                 },
