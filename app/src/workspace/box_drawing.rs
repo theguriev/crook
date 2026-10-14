@@ -348,8 +348,16 @@ fn part(extent: i32, numerator: i32, denominator: i32) -> i32 {
     (2 * extent * numerator + denominator).div_euclid(2 * denominator)
 }
 
+/// How finely the rasterizer places a corner, in steps per device pixel.
+///
+/// It moves each corner of a rectangle to the nearest 1/256 of a pixel before
+/// it decides which pixels the rectangle covers. Direct3D requires eight bits
+/// of sub-pixel precision, and the Vulkan and Metal drivers of desktop GPUs
+/// use the same.
+const SUBPIXEL_STEPS: f32 = 256.;
+
 /// The device pixel an edge at `device` device pixels lands on: the first one
-/// whose centre is at or past it.
+/// whose centre is at or past where the rasterizer puts that edge.
 ///
 /// Which is where the renderer starts an unsnapped rectangle whose top or left
 /// edge is there, and stops one whose bottom or right edge is: a pixel is
@@ -359,8 +367,15 @@ fn part(extent: i32, numerator: i32, denominator: i32) -> i32 {
 /// makes a line cover the very pixels its cell's background does. Rounding
 /// would not: an edge exactly on a half pixel rounds up, past a pixel the next
 /// row's background then paints over, and that is a gap in the line.
+///
+/// "Exactly" is to the rasterizer's [`SUBPIXEL_STEPS`], not to the last bit
+/// of an `f32`. A cell 8.1 wide, a 0.6 em font at 13.5, puts the edge after
+/// column 30 at 364.5000305 device pixels at 1.5x. The rasterizer moves it to
+/// 364.5 and stops the run before pixel 364, so a cap there has to start at
+/// pixel 364 too. `ceil(x - 0.5)` on the unmoved value would say 365, and the
+/// background would show through at pixel 364.
 fn snap_edge(device: f32) -> f32 {
-    (device - 0.5).ceil()
+    ((device * SUBPIXEL_STEPS).round() / SUBPIXEL_STEPS - 0.5).ceil()
 }
 
 /// One cell on the device-pixel grid, and the scene its rectangles go into.

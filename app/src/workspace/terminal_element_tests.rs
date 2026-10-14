@@ -728,12 +728,14 @@ fn only_a_filled_cursor_has_its_character_drawn_again_over_it() {
 }
 
 /// What colour each device pixel of a `width` by `height` box ends up, filled
-/// the way the renderer fills a rectangle: a pixel takes the colour of the
-/// last solid rectangle in the scene that holds its centre, a centre on a top
-/// or left edge counting as inside and one on a bottom or right edge as
-/// outside. `None` is a pixel nothing covers.
+/// the way the renderer fills a rectangle: each edge moved to the nearest
+/// 1/256 of a pixel, which is where the rasterizer puts it, and then a pixel
+/// takes the colour of the last solid rectangle in the scene that holds its
+/// centre, a centre on a top or left edge counting as inside and one on a
+/// bottom or right edge as outside. `None` is a pixel nothing covers.
 fn rasterized(scene: &Scene, width: usize, height: usize) -> Vec<Vec<Option<Color>>> {
     let scale = scene.scale_factor();
+    let place = |device: f32| (device * 256.).round() / 256.;
     let mut pixels = vec![vec![None; width]; height];
     for rect in rects(scene) {
         let Fill::Solid(fill) = rect.background else {
@@ -742,8 +744,9 @@ fn rasterized(scene: &Scene, width: usize, height: usize) -> Vec<Vec<Option<Colo
         // As the renderer has it: the origin and the size scaled, and the far
         // edges where the one ends up past the other.
         let (left, top) = (rect.bounds.min_x() * scale, rect.bounds.min_y() * scale);
-        let right = left + rect.bounds.width() * scale;
-        let bottom = top + rect.bounds.height() * scale;
+        let right = place(left + rect.bounds.width() * scale);
+        let bottom = place(top + rect.bounds.height() * scale);
+        let (left, top) = (place(left), place(top));
         for (y, row) in pixels.iter_mut().enumerate() {
             let centre = y as f32 + 0.5;
             if centre < top || centre >= bottom {
@@ -826,35 +829,49 @@ fn a_line_on_coloured_cells_has_no_gap_where_a_row_ends_on_a_half_pixel() {
 #[test]
 fn a_half_block_capping_a_coloured_run_leaves_no_pixel_between_them() {
     // A run of coloured cells capped with `▌` in the same colour: a pill, a
-    // tab, a meter. At 15 a cell is seven and a half pixels wide, so the run
-    // ends on a pixel centre, which the renderer leaves out of the run. The
-    // cap has to start on that pixel or a hairline is left between them.
-    let font = CellFont::headless(15.);
-    let metrics = font.metrics();
-    assert_eq!(3. * metrics.width, 22.5, "the run ends on a half pixel");
-    let mut grid = snapshot(&["   ▌"], 4);
-    for cell in &mut grid.cells[..3] {
-        cell.background = HIGHLIGHT;
-    }
-    grid.cells[3].foreground = HIGHLIGHT;
+    // tab, a meter. A run that ends on a pixel centre leaves that pixel out,
+    // so the cap has to start on it or a hairline is left between them. At 15
+    // a cell is seven and a half pixels wide, and three of them end on a
+    // centre exactly. At 16.2 a cell is 8.1, the width a 0.6 em font has at
+    // 13.5, and thirty of them at 1.5x end a hair past one, at 364.5000305,
+    // which is on it to the rasterizer.
+    for (font_size, scale, run, exactly) in [(15., 1., 3, true), (16.2, 1.5, 30, false)] {
+        let font = CellFont::headless(font_size);
+        let metrics = font.metrics();
+        let end = run as f32 * metrics.width * scale;
+        assert!(
+            (end.fract() - 0.5).abs() < 1. / 512. && (end.fract() == 0.5) == exactly,
+            "{font_size} at {scale}x: the run ends at {end}"
+        );
+        let line = " ".repeat(run) + "▌";
+        let mut grid = snapshot(&[line.as_str()], run + 1);
+        for cell in &mut grid.cells[..run] {
+            cell.background = HIGHLIGHT;
+        }
+        grid.cells[run].foreground = HIGHLIGHT;
 
-    let scene = painted_at(&grid, &font, 1.);
-    let pixels = rasterized(
-        &scene,
-        (4. * metrics.width) as usize,
-        metrics.height as usize,
-    );
-    let across = &pixels[pixels.len() / 2];
-    let pill: Vec<usize> = (0..across.len())
-        .filter(|&x| across[x] == Some(color(HIGHLIGHT)))
-        .collect();
-    assert_eq!(pill.first(), Some(&0));
-    assert_eq!(
-        pill.len(),
-        pill.last().map_or(0, |last| last + 1),
-        "one unbroken run of the colour, cap and all: {pill:?}"
-    );
-    assert!(pill.len() > 23, "the cap is part of it: {pill:?}");
+        let scene = painted_at(&grid, &font, scale);
+        let pixels = rasterized(
+            &scene,
+            ((run + 1) as f32 * metrics.width * scale) as usize,
+            (metrics.height * scale) as usize,
+        );
+        let across = &pixels[pixels.len() / 2];
+        let pill: Vec<usize> = (0..across.len())
+            .filter(|&x| across[x] == Some(color(HIGHLIGHT)))
+            .collect();
+        assert_eq!(pill.first(), Some(&0), "{font_size} at {scale}x");
+        assert_eq!(
+            pill.len(),
+            pill.last().map_or(0, |last| last + 1),
+            "{font_size} at {scale}x: one unbroken run of the colour, cap and \
+             all: {pill:?}"
+        );
+        assert!(
+            pill.len() as f32 > end + 1.,
+            "{font_size} at {scale}x: the cap is part of it: {pill:?}"
+        );
+    }
 }
 
 #[test]
