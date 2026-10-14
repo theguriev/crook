@@ -1021,11 +1021,18 @@ between two, into the focused pane — not the one under the pointer, since a dr
 position: into its composer at the caret, or with no composer to the pty as a paste, bracketed
 when the program asked for that — what Claude Code's own advice to drag a screenshot into the
 terminal counts on. Quoted for whoever reads it: the pane's shell, in its composer or at its
-prompt — double quotes for cmd.exe, PowerShell's own spelling for PowerShell — or a running
-program, in single quotes as a shell would read them. A menu, a field holding the keyboard or
-a section of the sidebar shown in place of the panes keeps a drop out of the pane, as it keeps
-the paste chord out. On macOS, Windows and X11 only: winit, which Crook's window is built on,
-has no drag-and-drop on Wayland, so there a drop does nothing.
+prompt — double quotes for cmd.exe, PowerShell's own spelling for PowerShell — or a program
+the shell reported starting, or one on the alternate screen, in single quotes as a shell would
+read them. cmd.exe and PowerShell report nothing, so Crook cannot tell their prompt from a
+program started from them: whatever reads there on the main screen — `wsl`, `ssh`, a nested
+shell, Claude Code — gets the shell's spelling. That spelling leaves out a file whose name a
+shell started from it could run part of: under cmd.exe one holding `$`, `` ` ``, `!`, `%` or a
+double quote, straight or curly, or ending in `\`; under PowerShell one with a `\` before a `'`,
+or ending in `\`. A program under PowerShell may not undo the quotes it doubles — Claude Code
+reads `Bob’’s` for `Bob’s` — and so misses a file named with one. A menu, a field holding the
+keyboard or a section of the sidebar shown in place of the panes keeps a drop out of the pane,
+as it keeps the paste chord out. On macOS, Windows and X11 only: winit, which Crook's window is
+built on, has no drag-and-drop on Wayland, so there a drop does nothing.
 A program can also print a **picture**, with iTerm2's inline images — OSC 1337 `File=`, and its
 `MultipartFile` pieces — which `imgcat`, `viu` and `chafa -f iterm` speak. It is drawn over the
 rows it pushed the cursor past: in the block it was printed in, or over the grid while the pane

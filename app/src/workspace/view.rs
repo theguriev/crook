@@ -7719,6 +7719,15 @@ impl Workspace {
     /// first screenful. Only a command the shell said is running, or the
     /// alternate screen, is a program.
     ///
+    /// Which leaves a program under a shell with no marks reading what was
+    /// spelled for the shell, in the composer or out of it: such a shell
+    /// never says a command is running, so on the main screen nothing tells
+    /// it apart from what it started — `wsl`, `ssh`, a nested shell, an
+    /// agent. Off cmd.exe and PowerShell the two spellings are one and the
+    /// same. For those two, [`file_drop::line`] leaves out a name that a
+    /// shell started from them could run part of, and a program under
+    /// PowerShell may not undo the quotes its spelling doubles.
+    ///
     /// **The focused pane, not the one under the pointer.** A drop says
     /// nothing about where it landed — see [`Event::FilesDropped`] — and the
     /// pointer's last position is from before the drag began, wherever it

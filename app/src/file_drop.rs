@@ -11,8 +11,11 @@
 //! `crook tab new`'s words go through, so there is one spelling to get right:
 //! off Windows it is proven against sh, bash, zsh and fish, by those shells.
 //! Two readers get a spelling of their own, because that one is not theirs:
-//! cmd.exe, and PowerShell. This module only picks the spelling for whoever
-//! is reading, and leaves out what cannot be typed.
+//! cmd.exe, and PowerShell. Neither reports its commands, so a program started
+//! from either reads what was spelled for the shell, and their spellings also
+//! leave out a name that a shell started from them would run part of. This
+//! module only picks the spelling for whoever is reading, and leaves out what
+//! cannot be typed.
 
 use std::path::{Path, PathBuf};
 
@@ -44,6 +47,27 @@ use crate::plugins::wasm::quote;
 ///   On Windows it is PowerShell's for a straight quote, which a POSIX reader
 ///   reads back the same but for a `'` in a path.
 ///
+/// **cmd.exe and PowerShell may not be what reads their spelling.** Neither
+/// reports command marks, so Crook never sees a program start from either:
+/// one on the main screen — `wsl`, `ssh`, a nested bash or pwsh, an agent —
+/// reads the line spelled for the shell, from the composer that stays until
+/// the first screenful and at the prompt after it alike. So their spellings
+/// leave out a path that a shell started from them would run part of, or read
+/// past its closing quote into the next name:
+///
+/// * **From cmd's double quotes**, a path holding `$`, a backtick, `!`, `%`,
+///   or a straight or curly double quote, or ending in a backslash. Every
+///   other character, `&` and `’` among them, reads as itself inside double
+///   quotes to cmd, bash, zsh, fish and PowerShell alike.
+/// * **From PowerShell's single quotes**, a path with a backslash before a
+///   straight quote, or ending in one, which fish reads as an escaped quote.
+///   The doubled quotes cost a program something too: one that reads quotes
+///   as a shell other than PowerShell does reads `’’` for `’` and nothing for
+///   `''`, and so names a file that is not there, but runs nothing. A cmd.exe
+///   started from PowerShell is the reader this does not cover: it takes no
+///   single quote as a quote, and covering it would mean leaving out every
+///   name with an `&` in it.
+///
 /// A path that is not text, or holds a control character, is left out
 /// rather than typed as something else. Typing it lossily would name a file
 /// that is not there, and a line break in a path a program has not asked for
@@ -53,15 +77,22 @@ pub fn line(paths: &[PathBuf], shell: Option<&Path>) -> Option<String> {
     let words: Vec<String> = paths
         .iter()
         .filter_map(|path| {
-            let typed = path
+            let Some(text) = path
                 .to_str()
-                .filter(|text| !text.chars().any(char::is_control));
-            if typed.is_none() {
+                .filter(|text| !text.chars().any(char::is_control))
+            else {
                 log::warn!("a dropped file whose path cannot be typed was left out: {path:?}");
+                return None;
+            };
+            if spelling.leaves_out(text) {
+                log::warn!(
+                    "a dropped file whose name a shell started from {spelling:?} could run \
+                     was left out: {path:?}"
+                );
+                return None;
             }
-            typed
+            Some(spelling.spell(text))
         })
-        .map(|path| spelling.spell(path))
         .collect();
     (!words.is_empty()).then(|| words.join(" "))
 }
@@ -87,6 +118,23 @@ impl Spelling {
         }
     }
 
+    /// Whether a shell started from this spelling's reader would read `path`,
+    /// spelled this way, as more than the one word or as something to run:
+    /// see [`line()`]. Only cmd's and PowerShell's spellings leave anything
+    /// out. Any other shell's is the one a program gets anyway, so a program
+    /// started from it is given what it would have been given regardless.
+    fn leaves_out(self, path: &str) -> bool {
+        // Right before the closing quote, a backslash is bash's and fish's
+        // escape for the quote in double quotes, and fish's in single ones:
+        // the string goes on, and the next name dropped is outside of it.
+        let escapes_the_close = path.ends_with('\\');
+        match self {
+            Self::Cmd => escapes_the_close || path.contains(CMD_EXPANDS),
+            Self::PowerShell => escapes_the_close || path.contains("\\'"),
+            Self::Host => false,
+        }
+    }
+
     fn spell(self, path: &str) -> String {
         match self {
             Self::Cmd => format!("\"{path}\""),
@@ -95,6 +143,14 @@ impl Spelling {
         }
     }
 }
+
+/// Every character that cmd.exe, or a shell started from it, does not read
+/// as itself inside double quotes: `$`, which bash, zsh, fish and PowerShell
+/// expand there; the backtick, which bash and zsh run and PowerShell escapes
+/// with; `!`, which an interactive bash or zsh expands from its history; `%`,
+/// which cmd expands itself; and the double quotes, straight and the three
+/// curly ones PowerShell ends a string at.
+const CMD_EXPANDS: [char; 8] = ['$', '`', '!', '%', '"', '\u{201C}', '\u{201D}', '\u{201E}'];
 
 /// Every character that ends a single-quoted string in PowerShell: the
 /// straight quote, and the four curly ones its tokenizer counts as the same.
@@ -210,6 +266,59 @@ mod tests {
     }
 
     #[test]
+    fn cmd_leaves_out_a_name_a_shell_started_from_it_would_run_part_of() {
+        // Inside double quotes each of these is something other than the
+        // path, to cmd itself (`%COMSPEC%`) or to a shell started from it,
+        // which reads the same line since cmd reports nothing: the readback
+        // test below has them run.
+        let cmd = Some(Path::new(r"C:\Windows\system32\cmd.exe"));
+        for path in [
+            r"C:\Users\me\Downloads\a$(touch PWNED).png",
+            r"C:\Users\me\Downloads\a`touch PWNED`.png",
+            r"C:\Users\me\Downloads\x!#; touch PWNED #.png",
+            r"C:\Users\me\Downloads\a%COMSPEC%.png",
+            "C:\\Users\\me\\Downloads\\a\u{201C}; Start-Process calc; \u{201D}.png",
+            "C:\\Users\\me\\Downloads\\a\u{201E}b.png",
+            "/tmp/a\"b.png",
+            r"D:\",
+        ] {
+            assert_eq!(line(&paths(&[path]), cmd), None, "{path}");
+        }
+
+        // One name at a time, and the rest of the drop still typed: `&`, `’`
+        // and what else cmd runs or splits on outside quotes are all read as
+        // themselves inside them.
+        let dropped = paths(&[
+            r"C:\Users\me\Downloads\a$(touch PWNED).png",
+            r"C:\Users\me\Pictures\Bob’s & Ann's (1) ^ #;.png",
+        ]);
+        assert_eq!(
+            line(&dropped, cmd).as_deref(),
+            Some(r#""C:\Users\me\Pictures\Bob’s & Ann's (1) ^ #;.png""#)
+        );
+        // A full-screen program under cmd gets a program's spelling, single
+        // quotes, inside which none of them is expanded.
+        assert!(line(&dropped[..1], None).is_some());
+    }
+
+    #[test]
+    fn powershell_leaves_out_a_name_fish_would_read_past_its_closing_quote() {
+        // In single quotes fish reads `\'` as a quote inside the string, so a
+        // backslash before a quote, or at the end before the closing one,
+        // keeps its string open where PowerShell's has ended.
+        let pwsh = Some(Path::new("pwsh"));
+        for path in [r"C:\Users\me\'; echo PWNED #.png", r"D:\"] {
+            assert_eq!(line(&paths(&[path]), pwsh), None, "{path}");
+        }
+        // Every Windows path is full of backslashes; only those two places
+        // matter.
+        assert_eq!(
+            line(&paths(&[r"C:\Users\me\it's\a.png"]), pwsh).as_deref(),
+            Some(r"'C:\Users\me\it''s\a.png'")
+        );
+    }
+
+    #[test]
     fn a_path_with_a_control_character_in_it_is_left_out() {
         assert_eq!(
             line(&paths(&["/tmp/one\ntwo", "/tmp/a.png"]), None).as_deref(),
@@ -247,7 +356,6 @@ mod tests {
             "/tmp/$HOME `id` *.png",
             "/tmp/Bob’s x’; echo PWNED; ’.png",
         ];
-        let expected: String = dropped.iter().map(|path| format!("{path}\n")).collect();
 
         for (shell, flags, print) in [
             ("sh", &["-c"][..], "printf '%s\\n'"),
@@ -261,7 +369,7 @@ mod tests {
             ),
         ] {
             let typed =
-                line(&paths(&dropped), Some(Path::new(shell))).expect("every path can be typed");
+                line(&paths(&dropped), Some(Path::new(shell))).expect("a path can be typed");
             let Ok(output) = crate::process::command(shell)
                 .args(flags)
                 .arg(format!("{print} {typed}"))
@@ -270,11 +378,134 @@ mod tests {
                 // Not on this machine.
                 continue;
             };
+            // PowerShell's spelling leaves the fish break-out out, which a
+            // fish started from PowerShell would read past its quote: see the
+            // test below.
+            let expected: String = dropped
+                .iter()
+                .filter(|path| shell != "pwsh" || !path.contains("\\'"))
+                .map(|path| format!("{path}\n"))
+                .collect();
             assert_eq!(
                 String::from_utf8_lossy(&output.stdout),
                 expected,
                 "{shell} read {typed:?} as something else"
             );
+        }
+    }
+
+    /// What `shell` prints when `words` are the arguments of a command that
+    /// prints each on a line of its own — `printf`, or PowerShell's
+    /// `Write-Output` — or `None` when it is not on this machine.
+    ///
+    /// bash is typed the line, as a person's bash is, rather than handed it
+    /// with `-c`, so that it expands `!` from its history as it does there.
+    #[cfg(unix)]
+    fn printed_by(shell: &str, words: &str) -> Option<String> {
+        use std::io::Write as _;
+        use std::process::Stdio;
+
+        let printf = format!("printf '%s\\n' {words}");
+        let output = match shell {
+            "bash" => {
+                let mut bash = crate::process::command("bash")
+                    .args(["--norc", "--noprofile", "-i"])
+                    // So that nothing typed here lands in a history file.
+                    .env("HISTFILE", "")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .ok()?;
+                bash.stdin
+                    .take()?
+                    .write_all(format!("{printf}\nexit\n").as_bytes())
+                    .expect("bash reads what it is typed");
+                bash.wait_with_output()
+            }
+            "pwsh" => crate::process::command("pwsh")
+                .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
+                .arg(format!("Write-Output {words}"))
+                .output(),
+            "zsh" => crate::process::command("zsh")
+                .args(["-f", "-c", &printf])
+                .output(),
+            "fish" => crate::process::command("fish")
+                .args(["--no-config", "-c", &printf])
+                .output(),
+            _ => crate::process::command(shell)
+                .args(["-c", &printf])
+                .output(),
+        };
+        Some(String::from_utf8_lossy(&output.ok()?.stdout).into_owned())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_shell_started_from_cmd_or_powershell_runs_any_part_of_a_name() {
+        // cmd.exe and PowerShell report no commands, so the line spelled for
+        // either may be read instead by a shell started from it: `wsl`, `ssh`,
+        // a nested bash or pwsh. Each shell on this machine is handed both
+        // spellings of each name, followed by one that runs `echo PWNED` the
+        // moment its quotes are lost, and has to print the names it was given
+        // and nothing else. Each name here is one that breaks out of one of
+        // the two spellings, in one of these shells, unless it is left out —
+        // all but the first two, which are there to be typed.
+        //
+        // (name, left out of cmd's spelling, left out of PowerShell's)
+        let names = [
+            ("/tmp/Screen Shot 2026-10-14 at 09.41.07.png", false, false),
+            ("/tmp/Bob’s & it's #1.png", false, false),
+            // bash, sh, zsh, fish and pwsh in double quotes.
+            ("/tmp/a$(echo PWNED).png", true, false),
+            // bash, sh and zsh in double quotes.
+            ("/tmp/a`echo PWNED`.png", true, false),
+            // bash's history, in double quotes: `!#` repeats the line so far,
+            // and the quote in it closes the string.
+            ("/tmp/x!#; echo PWNED #.png", true, false),
+            // pwsh ends a double-quoted string at a curly double quote.
+            ("/tmp/a\u{201C}; echo PWNED #\u{201D}.png", true, false),
+            // fish in single quotes.
+            ("/tmp/c\\'; echo PWNED #.png", false, true),
+            // bash, sh and zsh in double quotes, and fish in either.
+            ("/tmp/dir\\", true, true),
+        ];
+        let then = "/tmp/b; echo PWNED #.png";
+
+        for (name, out_of_cmd, out_of_powershell) in names {
+            for (spelling, left_out) in [("cmd", out_of_cmd), ("pwsh", out_of_powershell)] {
+                let reader = Some(Path::new(spelling));
+                let typed =
+                    line(&paths(&[name, then]), reader).expect("the last name can be typed");
+                let kept: Vec<&str> = [name, then]
+                    .into_iter()
+                    .filter(|path| line(&paths(&[path]), reader).is_some())
+                    .collect();
+                let expected: String = kept.iter().map(|path| format!("{path}\n")).collect();
+                for shell in ["sh", "bash", "zsh", "fish", "pwsh"] {
+                    let Some(printed) = printed_by(shell, &typed) else {
+                        continue;
+                    };
+                    assert!(
+                        !printed.lines().any(|line| line == "PWNED"),
+                        "{shell} ran part of {name:?} spelled for {spelling} as {typed:?}"
+                    );
+                    // Every one of them reads a double-quoted string as itself
+                    // once what it would expand is left out. PowerShell's
+                    // doubled quotes are read as the name by PowerShell alone.
+                    if spelling == "cmd" || shell == "pwsh" {
+                        assert_eq!(
+                            printed, expected,
+                            "{shell} read {typed:?}, spelled for {spelling}, as something else"
+                        );
+                    }
+                }
+                assert_eq!(
+                    !kept.contains(&name),
+                    left_out,
+                    "{name:?} spelled for {spelling}"
+                );
+            }
         }
     }
 }
