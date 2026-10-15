@@ -138,13 +138,16 @@ open Crook from the application menu or run a plain `crook`.
 `crook-v<version>-macos.dmg` on the [releases page](https://github.com/theguriev/crook/releases)
 holds `Crook.app` — one universal build for Apple Silicon and Intel both. It is signed with a
 Developer ID, notarized, and the ticket is stapled to the app before the image is built around
-it, so it opens on a double click with no dialog and no network. Drag it to Applications.
+it; the image is signed, notarized and stapled the same way. So the image opens with no warning
+and the check needs no network. Drag `Crook.app` to Applications. Its first launch asks once to
+confirm an app downloaded from the Internet, and **Open** starts it.
 
-That is the difference notarization makes, and it is worth knowing what it fixes. A Mac
-quarantines anything a *browser* downloads, and on an unnotarized build the first launch is
-refused outright — *"Apple could not verify 'crook' is free of malware"*, offering only **Move to
-Trash** and **Done**. Releases before v0.1.1 were unnotarized and do that. If you are looking at
-that dialog now, press **Done** rather than *Move to Trash*, and clear the attribute yourself:
+A question rather than a refusal is the difference notarization makes, and it is worth knowing
+what it fixes. A Mac quarantines anything a *browser* downloads, and on an unnotarized build the
+first launch is refused outright — *"Apple could not verify 'crook' is free of malware"*,
+offering only **Move to Trash** and **Done**. Releases before v0.1.1 were unnotarized and do
+that. If you are looking at that dialog now, press **Done** rather than *Move to Trash*, and
+clear the attribute yourself:
 
 ```sh
 xattr -dr com.apple.quarantine crook && ./crook
@@ -496,8 +499,10 @@ Twenty-two features, and the page that configures them:
   but for the `✳` an Esc leaves, which no hook reports and which takes a hook's running back.
   `codex`, `gemini` and `copilot` print the same guarded hooks for Codex CLI, Gemini CLI and
   GitHub Copilot CLI in each one's own hooks file, `opencode` prints the plugin OpenCode loads
-  instead, and `aider`, which has no hooks, gets a sentence saying what to do instead. A
-  subagent works in a session of its own, and Copilot CLI runs its hooks for one as for the
+  instead, and `aider`, which has no hooks, gets a sentence saying what to do instead. Codex
+  runs the hooks merged into its file only once you trust them: it asks on its next start, or in
+  its `/hooks`, and asks again whenever a hook's command changes.
+  A subagent works in a session of its own, and Copilot CLI runs its hooks for one as for the
   session you are talking to, so its hooks pass `--session -`: the pane takes a title or a stop
   only from the session whose turn it is, until that one stops, another takes the pane or its
   command ends. Its `sessionStart` hook, which no subagent runs, passes `--session-start -`. It

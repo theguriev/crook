@@ -696,6 +696,9 @@ enum Fragment {
         events: &'static [(&'static str, &'static str)],
         /// What the events cannot say, for the note.
         missing: &'static str,
+        /// What the agent asks of the person before it runs hooks merged
+        /// into its file, for a line of its own; empty when it asks nothing.
+        trust: &'static str,
         /// What the agent can be set to say with none of these hooks, for a
         /// line of its own at the end of the note; empty when nothing.
         without: &'static str,
@@ -820,6 +823,17 @@ const CODEX_EVENTS: &[(&str, &str)] = &[
     ("Stop", "idle"),
     ("SessionEnd", "idle"),
 ];
+
+/// What Codex asks before it runs the hooks, as codex-cli 0.149.1 asks it.
+///
+/// Its next start opens on "Hooks need review", and the last of the three
+/// answers is "Continue without trusting (hooks won't run)", which leaves the
+/// tab saying nothing at all. It keeps a hash of each hook it was told to
+/// trust, so a hook whose command changes — one a newer Crook prints
+/// differently, merged again — is held back for the same review, which
+/// `/hooks` also opens.
+const CODEX_TRUST: &str = "\n# Codex runs none of them until you trust them: it asks on its next \
+start, or in its /hooks, and asks again whenever a hook's command changes.";
 
 /// The Gemini CLI hooks: the same object, in `~/.gemini/settings.json`,
 /// under its own names — `BeforeAgent` for the prompt, `BeforeTool` and
@@ -1020,6 +1034,7 @@ const AGENTS: &[Agent] = &[
             file: "~/.claude/settings.json, or a project's .claude/settings.json",
             events: CLAUDE_EVENTS,
             missing: "",
+            trust: "",
             without: CLAUDE_WITHOUT_HOOKS,
         },
         prompt_flag: None,
@@ -1036,6 +1051,7 @@ const AGENTS: &[Agent] = &[
             events: CODEX_EVENTS,
             missing: " Codex has no notification hook: the row says needs-input for a \
 permission, and a question the model asks ends its turn as idle.",
+            trust: CODEX_TRUST,
             without: "",
         },
         prompt_flag: None,
@@ -1052,6 +1068,7 @@ permission, and a question the model asks ends its turn as idle.",
             events: GEMINI_EVENTS,
             missing: " Gemini CLI notifies for a tool permission only: a question the \
 model asks ends its turn as idle.",
+            trust: "",
             without: "",
         },
         prompt_flag: Some("-i"),
@@ -1772,6 +1789,7 @@ pub fn hooks_text(agent: &str, binary: &Path) -> Result<Hooks> {
             file,
             events,
             missing,
+            trust,
             without,
         } => {
             let hooks = hooks_object(events);
@@ -1779,7 +1797,7 @@ pub fn hooks_text(agent: &str, binary: &Path) -> Result<Hooks> {
                 .context("could not write the hooks as JSON")?;
             let note = format!(
                 "# Merge the `hooks` above into {file}. {} then tells the tab it runs in what it \
-is doing.{missing}{without}",
+is doing.{missing}{trust}{without}",
                 known.program
             );
             (text, Some(note))
@@ -2240,6 +2258,34 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
                 .unwrap()
                 .contains("~/.config/opencode/plugins/crook.ts")
         );
+    }
+
+    #[test]
+    fn the_codex_note_and_the_skill_say_codex_runs_the_hooks_only_once_trusted() {
+        // Codex holds hooks merged into its file back behind a review on its
+        // next start, whose third choice is "Continue without trusting (hooks
+        // won't run)", and keeps a hash of each hook it was told to trust, so
+        // a hook whose command changes is held back again. Either way the tab
+        // says nothing, and these are the two places a person, or the agent
+        // setting Codex up for them, can learn why.
+        let note = hooks_text("codex", Path::new("/opt/crook/bin/crook"))
+            .unwrap()
+            .note
+            .unwrap();
+        let trust = note
+            .lines()
+            .find(|line| line.contains("trust"))
+            .unwrap_or_else(|| panic!("the note never mentions trusting the hooks: {note}"));
+        assert!(trust.starts_with("# "), "{note}");
+        assert!(trust.contains("/hooks"), "{note}");
+        assert!(trust.contains("asks again"), "{note}");
+
+        let skill = SKILL
+            .split("\n\n")
+            .find(|paragraph| paragraph.contains("`codex`, `gemini`, `copilot` and `opencode`"))
+            .expect("the skill says what `--agent-hooks` takes");
+        assert!(skill.contains("trust"), "{skill}");
+        assert!(skill.contains("/hooks"), "{skill}");
     }
 
     #[test]
