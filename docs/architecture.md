@@ -1696,7 +1696,9 @@ was taken for a subagent's until Copilot exited. Its `sessionStart` hook is the 
 no subagent — once a session, on its first prompt, 13 ms after that prompt's
 `userPromptSubmitted` in the 1.0.89 capture, with the prompt as `initialPrompt` — so the printed
 hook reports `running --title - --session-start -`, and the title the prompt's own report lost
-comes back with it. The writer counts the session's pieces, its start's and the cut before the
+comes back with it. The prompt Copilot hands the parent when a background subagent finishes,
+`<system_notification>` and a line saying which, is reported with no title. The writer counts
+the session's pieces, its start's and the cut before the
 message first, so `vte`'s sixteen never drop them. A Crook older than the field reads the
 session into the message, which the row shows only beside `needs-input`. OpenCode's subagents
 need none of this on the wire: its plugin keeps the ids `session.created` gives a `parentID` —

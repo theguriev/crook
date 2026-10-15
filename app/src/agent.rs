@@ -463,13 +463,28 @@ fn an_ancestors_terminal(error: io::Error) -> io::Result<std::fs::File> {
 /// `initialPrompt`. Anything else — no JSON, no such field, an empty line —
 /// is no title, and the status goes without one rather than with one that
 /// says `{`.
+///
+/// Nor is a prompt Copilot wrote itself. When a background subagent
+/// finishes it hands the agent a [`SYSTEM_NOTIFICATION`] through the same
+/// `userPromptSubmitted` as a person's prompt, and its first line named the
+/// tab `<system_notification>`. The report still says the agent is running
+/// again, which it is.
 fn title_from_hook(input: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(input).ok()?;
     let prompt = ["prompt", "initialPrompt"]
         .iter()
         .find_map(|key| parsed.get(key)?.as_str())?;
+    if prompt.trim_start().starts_with(SYSTEM_NOTIFICATION) {
+        return None;
+    }
     prompt.lines().find_map(presentable)
 }
+
+/// How a prompt Copilot CLI writes to its agent begins, as captured from
+/// 1.0.89: `<system_notification>`, then a line saying what finished —
+/// `Agent "sub" (task) has finished processing and is now idle.` — and the
+/// closing tag.
+const SYSTEM_NOTIFICATION: &str = "<system_notification>";
 
 /// The message on standard input: a hook's `message`, else the tool a
 /// permission request names, else the input itself.
@@ -2008,6 +2023,23 @@ process.stdout.write(JSON.stringify({ ran, asked }))
         );
         assert_eq!(Some("second prompt".to_owned()), title_from_hook(&input));
         assert_eq!(Some(SUBAGENT.to_owned()), session_from_hook(&input));
+    }
+
+    #[test]
+    fn a_prompt_copilot_wrote_itself_names_nothing() {
+        // Copilot CLI 1.0.89's `userPromptSubmitted` when a background
+        // subagent finished, as captured: the parent's session, and a prompt
+        // no person wrote. Its first line named the tab `<system_notification>`.
+        let input = format!(
+            r#"{{"sessionId":"{SUBAGENT}","timestamp":1792018608141,"cwd":"/tmp/proj","prompt":"<system_notification>\nAgent \"sub\" (task) has finished processing and is now idle.\n</system_notification>"}}"#
+        );
+        assert_eq!(None, title_from_hook(&input));
+        assert_eq!(Some(SUBAGENT.to_owned()), session_from_hook(&input));
+        // A person's prompt that only mentions one is still a name.
+        assert_eq!(
+            Some("why does <system_notification> show up".to_owned()),
+            title_from_hook(r#"{"prompt": "why does <system_notification> show up"}"#)
+        );
     }
 
     #[test]

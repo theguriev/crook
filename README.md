@@ -471,7 +471,9 @@ Twenty-two features, and the page that configures them:
   ends. Its `sessionStart` hook, which no subagent runs, passes `--session-start -`, so a turn
   interrupted with Esc and followed by `/new` or `/resume` hands the pane to the new session. A
   subagent's prompt no longer renames the tab, and its end no longer wakes a `crook pane wait
-  --until idle` partway through the turn; its questions still light the row. The OpenCode plugin
+  --until idle` partway through the turn; its questions still light the row. Nor does the
+  `<system_notification>` prompt Copilot writes when a background subagent finishes rename the
+  tab. The OpenCode plugin
   leaves its subagents out itself, but for their questions — asking OpenCode about a session it
   did not see made, such as a subagent's that `task` resumes by its id — takes no title from
   text OpenCode wrote itself, and sends its reports one after another, each only when it says
