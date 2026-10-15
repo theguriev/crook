@@ -38,7 +38,7 @@ use crate::tab::{
     AgentSession, AgentStatus, Attention, Direction, GroupId, Pane, PaneId, PullRequest,
     PullRequestCheck, Tab, TabAction, TabId,
 };
-use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
+use crate::terminal_font::{CELL_FONT_SIZE, CellFont, CellMetrics};
 use crate::theme::theme;
 use crate::window_controls::{Recorder, Request, WindowState};
 
@@ -20804,12 +20804,18 @@ mod shells {
 
         /// A glyph's cell, from the baseline it was set on: a letter whose
         /// baseline is below a plate still has its top half under it.
-        fn cell_of(glyph: &crookui_core::scene::Glyph) -> RectF {
-            let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+        fn cell_of(glyph: &crookui_core::scene::Glyph, cell: CellMetrics) -> RectF {
             RectF::new(
                 glyph.position - vec2f(0., cell.baseline),
                 vec2f(cell.width, cell.height),
             )
+        }
+
+        /// The cell the panes are drawn in now, which the zoom chords change.
+        fn cell_now(harness: &Harness) -> CellMetrics {
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.cell_font().metrics())
         }
 
         /// Whether `part` is painted from the top of `control` down, across
@@ -20832,12 +20838,42 @@ mod shells {
             // and then each one's tint, above the text — the ground under both
             // and the gap between them, where a sliver of a letter otherwise
             // shows between two squares hiding the rest of its word.
+            //
+            // And at a size the rows are taller at: four steps up, 16.5 pt,
+            // where a row is 20 px and the first one reaches below the
+            // plates. Hidden only down to the last row edge they crossed,
+            // they hid the space above that row and none of its letters.
             let mut harness = Harness::panel(1);
             let Some((scene, panel, ground)) = a_long_failed_command_hovered(&mut harness) else {
                 return;
             };
+            the_controls_cover_the_line_they_sit_on(&scene, panel, &ground, cell_now(&harness));
+
+            for _ in 0..4 {
+                assert!(
+                    harness.press_key("=", settings_chord()),
+                    "the zoom chord was not consumed"
+                );
+            }
+            let cell = cell_now(&harness);
+            assert_eq!(cell.height, 20., "four steps up is not 16.5 pt: {cell:?}");
+            let pane = harness.focused_pane_id().expect("the pane is focused");
+            let panel = panel_of_the_pane(&mut harness);
+            let scene = hover_block(&mut harness, pane, 0);
+            the_controls_cover_the_line_they_sit_on(&scene, panel, &ground, cell);
+        }
+
+        /// What `a_block_s_controls_cover_the_command_line_they_are_drawn_over`
+        /// asserts of one frame, drawn in cells of `cell`.
+        fn the_controls_cover_the_line_they_sit_on(
+            scene: &Scene,
+            panel: RectF,
+            ground: &Fill,
+            cell: CellMetrics,
+        ) {
+            let size = cell.font_size;
             let red = theme().terminal.normal[1];
-            let controls = block_controls(&scene, panel);
+            let controls = block_controls(scene, panel);
             assert_eq!(controls.len(), 2, "the copy square and the dots");
 
             let layers: Vec<_> = scene.layers().collect();
@@ -20849,7 +20885,7 @@ mod shells {
                     .iter()
                     .position(|layer| {
                         layer.rects.iter().any(|rect| {
-                            from_the_top_of(control, rect.bounds) && rect.background == ground
+                            from_the_top_of(control, rect.bounds) && rect.background == *ground
                         })
                     })
                     .unwrap_or_else(|| {
@@ -20863,7 +20899,7 @@ mod shells {
                 let over: Vec<_> = layers[painted..]
                     .iter()
                     .flat_map(|layer| layer.glyphs.iter())
-                    .filter(|glyph| cell_of(glyph).intersection(control).is_some())
+                    .filter(|glyph| cell_of(glyph, cell).intersection(control).is_some())
                     .collect();
                 assert!(
                     over.is_empty(),
@@ -20879,7 +20915,7 @@ mod shells {
                 let [(first, opaque), (wash, washed), (tint, tinted)] = fills.as_slice() else {
                     panic!("the control at {control:?} is painted as {fills:?}");
                 };
-                assert_eq!(*first, &ground, "the ground goes down first");
+                assert_eq!(*first, ground, "the ground goes down first");
                 assert!(
                     matches!(wash, Fill::Solid(color)
                         if (color.r, color.g, color.b) == (red.r, red.g, red.b) && color.a < 255),
@@ -20904,6 +20940,38 @@ mod shells {
                         .any(|icon| control.contains_point(center(icon.bounds)))
                 });
                 assert_eq!(icon, Some(painted), "the icon is not drawn on the plate");
+
+                // The letters of the line the icon is on, the row through the
+                // plate's middle, are under the ground wherever the plate
+                // covers them.
+                let middle = (control.min_y() + control.max_y()) / 2.;
+                let on_the_line: Vec<RectF> = layers[text]
+                    .glyphs
+                    .iter()
+                    .filter(|glyph| panel.contains_point(glyph.position))
+                    .map(|glyph| cell_of(glyph, cell))
+                    .filter(|line| line.min_y() <= middle && middle < line.max_y())
+                    .filter_map(|line| line.intersection(control))
+                    .collect();
+                if on_the_line.is_empty() {
+                    eprintln!(
+                        "at {size} pt this prompt prints nothing on the line the control at \
+                         {control:?} sits on"
+                    );
+                }
+                let shown: Vec<&RectF> = on_the_line
+                    .iter()
+                    .filter(|covered| {
+                        covered.min_y() < opaque.min_y() || covered.max_y() > opaque.max_y()
+                    })
+                    .collect();
+                assert!(
+                    shown.is_empty(),
+                    "at {size} pt the control at {control:?} hides what is under it from {} to {}, \
+                     and the letters of the line it sits on show through it at {shown:?}",
+                    opaque.min_y(),
+                    opaque.max_y()
+                );
             }
         }
 
@@ -20923,10 +20991,11 @@ mod shells {
             assert_eq!(controls.len(), 2, "the copy square and the dots");
 
             let layers: Vec<_> = scene.layers().collect();
+            let cell = cell_now(&harness);
             let cells: Vec<RectF> = layers[layer_of_the_xs(&layers, panel)]
                 .glyphs
                 .iter()
-                .map(cell_of)
+                .map(|glyph| cell_of(glyph, cell))
                 .collect();
             // An edge more than a pixel inside a cell, top or bottom.
             let slices =
