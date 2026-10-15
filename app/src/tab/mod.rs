@@ -408,7 +408,7 @@ impl PullRequestCheck {
 /// from the agent-progress path — so the invariant would be one field
 /// assignment away from being false, and `index_of` would then resolve to the
 /// wrong pane. One identity, owned by [`Pane`], cannot disagree with itself.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct AgentSession {
     /// The name the session was created with. Never empty.
     pub title: String,
@@ -638,6 +638,51 @@ impl AgentSession {
             spawned_by: None,
             restored_agent: None,
         }
+    }
+
+    /// Whether `other` says everything this does, if perhaps not at the same
+    /// instant: every field the same, and the status from the same source.
+    ///
+    /// What a report is asked before the window is rebuilt for it — see
+    /// `Workspace::update_session`. The instant a [`StatusSource`] carries is
+    /// read only as a subtraction at the moment "Why this status" is drawn,
+    /// so an agent saying running again around every tool it calls has
+    /// changed nothing a frame would show. Where the status came from is what
+    /// that panel says, and a change of it is a change.
+    ///
+    /// Every field is named rather than left to a `..`, so that a field added
+    /// to the session is one this has to be told about.
+    pub fn says_the_same_as(&self, other: &Self) -> bool {
+        let Self {
+            title,
+            derived_title,
+            custom_title,
+            status,
+            message,
+            source,
+            attention,
+            marked,
+            working_directory,
+            remote,
+            pull_request,
+            running_command,
+            restored_agent,
+            spawned_by,
+        } = self;
+        *title == other.title
+            && *derived_title == other.derived_title
+            && *custom_title == other.custom_title
+            && *status == other.status
+            && *message == other.message
+            && std::mem::discriminant(source) == std::mem::discriminant(&other.source)
+            && *attention == other.attention
+            && *marked == other.marked
+            && *working_directory == other.working_directory
+            && *remote == other.remote
+            && *pull_request == other.pull_request
+            && *running_command == other.running_command
+            && *restored_agent == other.restored_agent
+            && *spawned_by == other.spawned_by
     }
 
     /// Where the pane's shell last said it was, on whichever machine that is.

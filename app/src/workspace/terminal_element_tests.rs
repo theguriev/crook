@@ -4,7 +4,9 @@
 //! id and a cell is half the font size — so an assertion here is about the grid
 //! rather than about which fonts the machine running it happens to have.
 
-use crook_terminal::{BlockId, CellCombining, Emulator, LiveBlock, Palette, TerminalSize};
+use crook_terminal::{
+    BlockId, CellCombining, Emulator, LiveBlock, MouseModes, Palette, TerminalSize,
+};
 use crookui_core::scene::{ClipBounds, Fill, Glyph, PointerShape, Rect};
 
 use super::*;
@@ -52,7 +54,7 @@ fn snapshot(lines: &[&str], columns: usize) -> Snapshot {
         alt_screen: false,
         live_block: LiveBlock::default(),
         title: None,
-        mouse_reporting: false,
+        mouse: MouseModes::NONE,
         line_editor: false,
     }
 }
@@ -334,7 +336,7 @@ fn the_pointer_over_a_program_that_has_the_mouse_is_the_arrow() {
     // A press here goes down the pty to `vim`, not into a selection, and the
     // I-beam would be promising the selection.
     let mut grid = snapshot(&["~", "~"], 10);
-    grid.mouse_reporting = true;
+    grid.mouse.click = true;
 
     let scene = painted(&grid);
 

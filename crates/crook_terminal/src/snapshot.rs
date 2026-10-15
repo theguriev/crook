@@ -41,6 +41,7 @@ use alacritty_terminal::vte::ansi::{
 };
 
 use crate::blocks::LiveBlock;
+use crate::mouse::MouseModes;
 
 /// How much of a colour survives the dim attribute.
 ///
@@ -512,15 +513,19 @@ pub struct Snapshot {
     pub live_block: LiveBlock,
     /// The title the child process last asked for, if any.
     pub title: Option<String>,
-    /// Whether the child has asked for the mouse — `?1000`, `?1002` or
-    /// `?1003` — so that a press goes to it rather than to a selection.
+    /// Which mouse reports the child has asked for, as
+    /// [`crate::Emulator::mouse_modes`] answers.
     ///
-    /// Nothing is drawn from it, but the pointer's shape is: the I-beam over a
-    /// grid a press selects in, the arrow over one a program reads the mouse
-    /// from. A frame decides that as it paints, and it paints from a snapshot
-    /// rather than from the terminal, whose lock is the one the reader parses
-    /// under. The same three modes as [`crate::MouseModes::is_reporting`].
-    pub mouse_reporting: bool,
+    /// Nothing is drawn from it, but two things the thread that draws decides
+    /// are, and neither may take the terminal's lock, which is the one the
+    /// reader parses under. The pointer's shape: the I-beam over a grid a
+    /// press selects in, the arrow over one a program reads the mouse from —
+    /// [`MouseModes::is_reporting`]. And whether a pointer move with no button
+    /// down is the program's to hear, `?1003`, which every move over a pane
+    /// asks: asked of the terminal, that was its lock and a snapshot built on
+    /// the thread that draws, per pane on screen and per move, behind a reader
+    /// parsing a flood.
+    pub mouse: MouseModes,
     /// Whether the shell's own line editor has the keyboard: a key was handed
     /// to it at its prompt with [`crate::Terminal::send_key_to_line_editor`],
     /// and it has not given its line back since.
@@ -596,7 +601,7 @@ impl Snapshot {
             && self.alt_screen == other.alt_screen
             && self.live_block == other.live_block
             && self.title == other.title
-            && self.mouse_reporting == other.mouse_reporting
+            && self.mouse == other.mouse
             && self.line_editor == other.line_editor
             && self.cells == other.cells
             && self.combining == other.combining
@@ -795,7 +800,7 @@ pub(crate) fn build<T>(
         alt_screen: term.mode().contains(TermMode::ALT_SCREEN),
         live_block,
         title: title.map(str::to_owned),
-        mouse_reporting: term.mode().intersects(TermMode::MOUSE_MODE),
+        mouse: MouseModes::of(*term.mode()),
         line_editor,
     }
 }

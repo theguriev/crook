@@ -572,20 +572,40 @@ fn test_the_snapshot_says_whether_the_child_has_the_mouse() {
     // snapshot, and asking the terminal instead would take the lock the
     // reader parses under on every frame.
     let mut emulator = emulator();
-    assert!(!emulator.snapshot().mouse_reporting);
+    assert!(!emulator.snapshot().mouse.is_reporting());
 
     emulator.advance(b"\x1b[?1000h");
     assert!(
-        emulator.snapshot().mouse_reporting,
+        emulator.snapshot().mouse.is_reporting(),
         "a mode the child asked for with nothing drawn is still a new snapshot"
     );
 
     // Any of the three reports is the mouse taken; alternate scroll is not.
     emulator.advance(b"\x1b[?1000l\x1b[?1003h");
-    assert!(emulator.snapshot().mouse_reporting);
+    assert!(emulator.snapshot().mouse.is_reporting());
     emulator.advance(b"\x1b[?1003l");
-    assert!(!emulator.snapshot().mouse_reporting);
+    assert!(!emulator.snapshot().mouse.is_reporting());
     assert!(emulator.mouse_modes().alternate_scroll);
+}
+
+#[test]
+fn test_the_snapshot_carries_every_mouse_mode_the_emulator_has() {
+    // A pointer move asks the snapshot whether the program hears motion, so
+    // a switch from clicks to every move — the mouse taken before and after,
+    // nothing drawn — has to be a new snapshot that says so, or the moves
+    // would go unreported until the screen next changed.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b[?1000h");
+    assert!(!emulator.snapshot().mouse.motion);
+
+    emulator.advance(b"\x1b[?1000l\x1b[?1003h\x1b[?1006h");
+    assert_eq!(emulator.snapshot().mouse, emulator.mouse_modes());
+    assert!(emulator.snapshot().mouse.motion);
+    assert!(emulator.snapshot().mouse.sgr);
+
+    emulator.advance(b"\x1b[?1003l\x1b[?1006l\x1b[?1007l");
+    assert_eq!(emulator.snapshot().mouse, emulator.mouse_modes());
+    assert_eq!(emulator.snapshot().mouse, MouseModes::NONE);
 }
 
 #[test]

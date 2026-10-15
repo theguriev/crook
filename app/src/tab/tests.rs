@@ -675,6 +675,61 @@ fn a_session_is_working_while_its_agent_runs_or_waits_or_its_shell_runs_a_comman
 }
 
 #[test]
+fn a_session_said_again_later_says_the_same_and_one_said_another_way_does_not() {
+    // What decides whether a report is a frame: an agent saying running
+    // again around every tool it calls has changed only when it said so.
+    let mut said = AgentSession::new("agent 1");
+    said.status = AgentStatus::Running;
+    said.source = StatusSource::Agent(Instant::now());
+    let mut again = said.clone();
+    again.source = StatusSource::Agent(Instant::now() + std::time::Duration::from_secs(1));
+    assert!(again.says_the_same_as(&said));
+
+    // Where it came from is what "Why this status" says, so a change of it
+    // is a change, however close the instant.
+    let mut titled = said.clone();
+    titled.source = StatusSource::Title(Instant::now());
+    assert!(!titled.says_the_same_as(&said));
+
+    fn changed(said: &AgentSession, change: impl FnOnce(&mut AgentSession)) -> AgentSession {
+        let mut changed = said.clone();
+        change(&mut changed);
+        changed
+    }
+    for (what, changed) in [
+        (
+            "the name",
+            changed(&said, |session| {
+                session.derived_title = Some("port the tab bar".to_owned());
+            }),
+        ),
+        (
+            "the status",
+            changed(&said, |session| session.status = AgentStatus::Idle),
+        ),
+        (
+            "the question",
+            changed(&said, |session| {
+                session.message = Some("Run the tests?".to_owned());
+            }),
+        ),
+        (
+            "a look",
+            changed(&said, |session| session.attention = Some(Attention::Bell)),
+        ),
+        ("the mark", changed(&said, |session| session.marked = true)),
+        (
+            "the command",
+            changed(&said, |session| {
+                session.running_command = Some("cargo test".to_owned());
+            }),
+        ),
+    ] {
+        assert!(!changed.says_the_same_as(&said), "{what} changed");
+    }
+}
+
+#[test]
 fn the_mru_list_holds_every_open_tab_once_with_the_active_one_at_its_head() {
     // The rule that closing the active tab returns you to the one you were on
     // before rests entirely on this: a duplicate entry, a missing tab or a

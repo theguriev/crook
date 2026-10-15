@@ -1451,14 +1451,7 @@ impl Emulator {
     /// what tells a caller that the pointer belongs to the person rather than
     /// to the program.
     pub fn mouse_modes(&self) -> MouseModes {
-        let mode = self.term.mode();
-        MouseModes {
-            click: mode.contains(TermMode::MOUSE_REPORT_CLICK),
-            drag: mode.contains(TermMode::MOUSE_DRAG),
-            motion: mode.contains(TermMode::MOUSE_MOTION),
-            sgr: mode.contains(TermMode::SGR_MOUSE),
-            alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
-        }
+        MouseModes::of(*self.term.mode())
     }
 
     /// Whether the child asked to be told when the keyboard arrives and

@@ -945,9 +945,19 @@ parsed and published, and everything its *row* shows — a title, a directory, a
 status, a command finishing — still arrives as it happens, because the row is on screen. The
 frame that brings the pane back reads the snapshot published last, not the last one drawn. Ten
 thousand lines printed in a background tab used to rebuild the window six to eight times on an
-idle laptop; `the_frame_budget` in `app/src/workspace/tests.rs` holds it to none. What the gate
-cannot see is the window itself: nothing tells the workspace that it has been minimised or
-covered, so a window nobody is looking at still asks to draw the panes it shows.
+idle laptop; `the_frame_budget` in `app/src/workspace/tests.rs` holds it to none. It holds the
+row to its changes as well: a report that leaves the session as it was — Claude Code's glyph
+turning in front of the same name about once a second, its hooks saying running again around
+every tool — asks for no frame of its own, because `Workspace::update_session` returns before
+its notify when `AgentSession::says_the_same_as` says nothing changed. Its own frame is all that
+goes. Both reports come only while an agent runs, and while one runs its mark breathes:
+`Workspace::keep_breathing` redraws the window every `BREATH_FRAME`, 80 ms, for as long as the
+tab list is in the sidebar. With the list up — the default — an agent at work in a tab nobody
+looks at still draws the window about twelve times a second; it goes quiet only with the list
+hidden or a settings page over it. Most of the budget's tests run in a harness that never lets
+the marks breathe, and the one that does hides the list. What the gate cannot see is the window
+itself: nothing tells the workspace that it has been minimised or covered, so a window nobody is
+looking at still asks to draw the panes it shows.
 
 **Nothing writes to the pty on the UI thread or under the emulator's mutex.** A write waits
 for the child to read, a child that is printing reads nothing until its output has been read,
@@ -2795,10 +2805,15 @@ do constantly.
 
 The pointer says which of the two a press will be: the grid asks for the I-beam while a press
 selects and the arrow while a program has the mouse, read from the snapshot's
-`mouse_reporting` so that a frame never takes the lock the reader parses under. That is what
+`mouse` modes so that a frame never takes the lock the reader parses under. That is what
 kitty and Alacritty show over `vim` with the mouse on. Alacritty brings the I-beam back while
 Shift is held; Crook does not, because nothing is drawn for Shift alone. A link the chord key
 has lit, below, gets the hand, on either surface, for as long as its underline is drawn.
+
+A move with no button down asks the same snapshot whether the program wants every move,
+`?1003`, and only once the pane has found the pointer over it. Every move reaches every pane on
+screen, and asking the terminal instead was its lock and a snapshot rebuilt on the thread that
+draws, per pane and per move — behind a reader that might be parsing a flood.
 
 The gesture is classified once, when the button goes down, and remembered in `PaneSelection`
 as `Selecting` or `Reporting`. Asking the terminal again on each move would be asking a

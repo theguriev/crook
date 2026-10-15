@@ -1421,6 +1421,16 @@ impl Harness {
         })
     }
 
+    /// How many times the window's side has taken a pane's terminal lock to
+    /// do something to it. See `TerminalHandle::drives`.
+    fn drives(&self, pane: PaneId) -> usize {
+        self.workspace.read(&self.app, |workspace, app| {
+            workspace
+                .terminal(pane, app)
+                .map_or(0, |(handle, _)| handle.drives())
+        })
+    }
+
     /// How many columns a pane's grid was laid out at.
     fn terminal_columns(&self, pane: PaneId) -> usize {
         self.workspace
@@ -18100,6 +18110,87 @@ mod shells {
     }
 
     #[test]
+    fn a_program_that_asked_for_every_move_hears_the_pointer_cross_it() {
+        // `?1003`, which a pointer move with no button down asks the snapshot
+        // about rather than the terminal. `cat`, in a line discipline that
+        // echoes, shows the report with its escape spelled `^[`; 35 is the
+        // SGR code for a move with no button.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        harness.type_into(
+            pane,
+            "printf '\\033[?1049h\\033[?1003h\\033[?1006h%s-%s\\n' every move; cat\n",
+        );
+        harness.wait_for("the program never asked for every move", |harness| {
+            harness.alt_screen(pane) && harness.terminal_text(pane).contains("every-move")
+        });
+        let panel = panel_of_the_pane(&mut harness);
+
+        harness.move_to(center(panel));
+
+        harness.wait_for("the program never heard the pointer move", |harness| {
+            harness.terminal_text(pane).contains("^[[<35;")
+        });
+    }
+
+    #[test]
+    fn a_pointer_moving_over_one_pane_takes_neither_pane_s_terminal_lock() {
+        // Every move reaches every pane on screen, and each asked its
+        // terminal which mouse reports were on before it looked at whether
+        // the pointer was over it at all: the lock its reader parses under,
+        // and a snapshot rebuilt there, on the thread that draws, per pane
+        // and per move. Two full-screen programs, so that both panes draw
+        // the grid that asks, and neither of them reading the mouse, so that
+        // no move is one to send.
+        let mut harness = Harness::panel(1);
+        let Some(first) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.dispatch_action(TabAction::Split(Direction::Right));
+        harness.frame();
+        let second = harness.focused_pane_id().expect("the split focused a pane");
+        assert_ne!(first, second);
+        harness.wait_for("the split's shell never opened", |harness| {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace.terminal(second, app).is_some()
+            })
+        });
+
+        // Printed by pieces, so the echo of the typed line is not the marker.
+        for pane in [first, second] {
+            harness.type_into(pane, "printf '\\033[?1049h%s-%s\\n' whole screen; cat\n");
+        }
+        harness.wait_for("the programs never took the screen", |harness| {
+            [first, second].iter().all(|pane| {
+                harness.alt_screen(*pane) && harness.terminal_text(*pane).contains("whole-screen")
+            })
+        });
+        let scene = harness.frame();
+        let boxes = panel_boxes(&scene);
+        assert_eq!(boxes.len(), 2, "two panes side by side");
+        let left = if boxes[0].min_x() < boxes[1].min_x() {
+            boxes[0]
+        } else {
+            boxes[1]
+        };
+        let before = (harness.drives(first), harness.drives(second));
+
+        for step in 1..=20 {
+            let across = step as f32 / 21.;
+            harness.move_to(left.origin() + left.size() * across);
+        }
+
+        assert_eq!(
+            (harness.drives(first), harness.drives(second)),
+            before,
+            "a pointer move over the left pane took a terminal's lock"
+        );
+    }
+
+    #[test]
     fn the_shell_printing_does_not_let_go_of_a_selection() {
         // The one thing that must *not* clear it. Output arriving is exactly
         // when somebody is reading what is already on screen, and a highlight
@@ -25835,6 +25926,160 @@ mod the_frame_budget {
 
         harness.show_tabs();
         assert!(repaint_asks_for_a_frame(&mut harness, pane));
+    }
+
+    /// Hands the window what the model's subscription hands it, and draws the
+    /// frame that asked for, if it asked for one.
+    fn heard(harness: &mut Harness, update: &TerminalUpdate) {
+        harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(update, ctx));
+        harness.draw_if_asked();
+    }
+
+    /// Claude Code's title while it works on `name`, at one turn of the glyph
+    /// in front of it.
+    fn claude_at_work(pane: PaneId, name: &str, turn: usize) -> TerminalUpdate {
+        let glyph = if turn.is_multiple_of(2) {
+            '\u{25d0}'
+        } else {
+            '\u{25d1}'
+        };
+        TerminalUpdate::Title(pane, Some(format!("{glyph} {name}")))
+    }
+
+    #[test]
+    fn a_spinner_turning_in_a_title_nobody_can_see_draws_nothing() {
+        // Claude Code turns the glyph in front of its title every 960 ms
+        // while it works, in a tab that never had the keyboard: one
+        // `crook tab new` opened, where it is never told the keyboard left.
+        // Each turn is the same name and the same running, and each was a
+        // rebuild of the whole window, for a row that looked as it did.
+        //
+        // The turns alone: this harness never lets the marks breathe. The app
+        // does, and with the tab list up the breath redraws the window every
+        // 80 ms while an agent runs whatever the title says — what goes here
+        // is each turn's own rebuild. The test after this one is the window
+        // going quiet, which takes the list hidden as well.
+        let mut harness = Harness::new(2);
+        let hidden = pane_behind(&harness);
+        heard(&mut harness, &claude_at_work(hidden, "Fixing the build", 0));
+        assert_eq!(harness.pane_title(hidden), "Fixing the build");
+        let renders = harness.workspace_renders();
+        let frames = harness.frames_built();
+
+        for turn in 1..=20 {
+            heard(
+                &mut harness,
+                &claude_at_work(hidden, "Fixing the build", turn),
+            );
+        }
+
+        assert_eq!(
+            harness.workspace_renders() - renders,
+            0,
+            "the window was rebuilt for a glyph turning in a title nobody can see"
+        );
+        assert_eq!(harness.frames_built() - frames, 0);
+    }
+
+    /// How many frames into its breath the running marks are.
+    fn breath(harness: &Harness) -> usize {
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.breath())
+    }
+
+    #[test]
+    fn with_the_tab_list_hidden_an_agent_at_work_behind_draws_nothing_while_its_mark_breathes() {
+        // The app as it ships lets the marks breathe, and the breath counts
+        // on whether or not it draws: with no tab list there is no mark to
+        // move, so neither the breath nor the glyph turning asks for a frame.
+        // Each turn waits for a breath, so that a breath that drew would be
+        // counted here.
+        let mut harness = Harness::new(2);
+        harness.run_command("crook/window/toggle-panel");
+        assert!(!harness.general().show_tabs_panel);
+        harness.workspace_update(Workspace::let_marks_breathe);
+        let hidden = pane_behind(&harness);
+        heard(&mut harness, &claude_at_work(hidden, "Fixing the build", 0));
+        let status = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().pane(hidden).map(Pane::status)
+        });
+        assert_eq!(status, Some(AgentStatus::Running));
+        harness.draw_if_asked();
+        let renders = harness.workspace_renders();
+        let frames = harness.frames_built();
+
+        for turn in 1..=5 {
+            heard(
+                &mut harness,
+                &claude_at_work(hidden, "Fixing the build", turn),
+            );
+            let was = breath(&harness);
+            harness.wait_drawing("the running mark stopped breathing", |harness| {
+                breath(harness) > was
+            });
+        }
+
+        assert_eq!(
+            harness.workspace_renders() - renders,
+            0,
+            "the window was rebuilt for an agent at work behind a hidden tab list"
+        );
+        assert_eq!(harness.frames_built() - frames, 0);
+    }
+
+    #[test]
+    fn a_title_naming_new_work_where_nobody_can_see_is_still_one_frame_for_its_row() {
+        // The row is on screen even when the pane is not, and its name is
+        // what changed: the frame that says so is the one frame there is.
+        let mut harness = Harness::new(2);
+        let hidden = pane_behind(&harness);
+        heard(&mut harness, &claude_at_work(hidden, "Fixing the build", 0));
+        heard(&mut harness, &claude_at_work(hidden, "Fixing the build", 1));
+        let renders = harness.workspace_renders();
+
+        heard(
+            &mut harness,
+            &claude_at_work(hidden, "Running the tests", 0),
+        );
+
+        assert_eq!(harness.workspace_renders() - renders, 1);
+        assert!(
+            strip_text(&harness.frame()).contains("Running the tests"),
+            "the row did not take the new name"
+        );
+    }
+
+    #[test]
+    fn a_hook_saying_running_again_where_nobody_can_see_draws_nothing_until_it_asks() {
+        // Claude Code's hooks say running around every tool it calls, and
+        // after the first each says what the row already shows. A question is
+        // a change, and the frame that shows it is drawn.
+        let mut harness = Harness::new(2);
+        let hidden = pane_behind(&harness);
+        let said = |status, message: Option<&str>| TerminalUpdate::Agent {
+            pane: hidden,
+            status,
+            title: None,
+            message: message.map(str::to_owned),
+        };
+        heard(&mut harness, &said(AgentStatus::Running, None));
+        let renders = harness.workspace_renders();
+
+        for _ in 0..20 {
+            heard(&mut harness, &said(AgentStatus::Running, None));
+        }
+        assert_eq!(
+            harness.workspace_renders() - renders,
+            0,
+            "the window was rebuilt for a running the row already showed"
+        );
+
+        heard(
+            &mut harness,
+            &said(AgentStatus::NeedsInput, Some("Run the tests?")),
+        );
+        assert_eq!(harness.workspace_renders() - renders, 1);
     }
 }
 
@@ -37860,7 +38105,8 @@ mod changes_column {
         use std::time::{Duration, Instant};
 
         use crook_terminal::{
-            BlockState, Emulator, LiveBlock, Palette, PromptEnd, Rgb, Snapshot, TerminalSize,
+            BlockState, Emulator, LiveBlock, MouseModes, Palette, PromptEnd, Rgb, Snapshot,
+            TerminalSize,
         };
 
         use crate::workspace::view::a_shell_is_listening;
@@ -37880,7 +38126,7 @@ mod changes_column {
             alt_screen,
             live_block,
             title: None,
-            mouse_reporting: false,
+            mouse: MouseModes::NONE,
             line_editor: false,
         };
         // A shell handed `(claude)` by the composer, as its emulator has it:

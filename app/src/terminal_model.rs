@@ -1812,8 +1812,17 @@ impl TerminalHandle {
     /// The one question a pointer gesture asks before it does anything: with
     /// nothing asked for it is a selection, and with something asked for it
     /// belongs to the program.
+    ///
+    /// Read off the published snapshot, never through `drive`. Every pointer
+    /// move over a pane asks it, and the drive was the terminal's lock and a
+    /// snapshot rebuilt on the thread that draws, per move — behind a reader
+    /// parsing a flood, up to twelve milliseconds a move. What the published
+    /// snapshot cannot have yet is a mode in output parsed since, which a frame
+    /// has not shown either: the program asked for the mouse in bytes it has
+    /// not been seen to print, and hears the pointer from the frame that draws
+    /// them.
     pub fn mouse_modes(&self) -> MouseModes {
-        self.drive(|terminal| terminal.emulator().mouse_modes())
+        self.0.snapshot().mouse
     }
 
     /// Sends a pointer gesture, returning whether the program took it.
@@ -1954,6 +1963,13 @@ impl TerminalHandle {
         self.0.lock().harvest_rows(first, last)
     }
 
+    /// How many times [`Self::drive`] has run against this session, for a
+    /// test that holds a gesture to leaving the lock alone.
+    #[cfg(test)]
+    pub(crate) fn drives(&self) -> usize {
+        self.0.drives.load(Ordering::Relaxed)
+    }
+
     /// Runs `work` against the terminal and republishes what it draws.
     ///
     /// Everything on this side of the handle moves the viewport — a resize
@@ -1972,6 +1988,8 @@ impl TerminalHandle {
     /// thread, and not the lock the reader needs. See the module docs, "The
     /// writer".
     fn drive<T>(&self, work: impl FnOnce(&mut Terminal) -> T) -> T {
+        #[cfg(test)]
+        self.0.drives.fetch_add(1, Ordering::Relaxed);
         let mut terminal = self.0.lock();
         let outcome = work(&mut terminal);
         let snapshot = terminal.snapshot();
@@ -2039,6 +2057,8 @@ fn start(
         resize_failing: AtomicBool::new(false),
         scroll_remainder: AtomicU32::new(0.0f32.to_bits()),
         publish: Mutex::new(PublishState::new()),
+        #[cfg(test)]
+        drives: std::sync::atomic::AtomicUsize::new(0),
     });
 
     // The reader holds a `Weak`, not an `Arc`: a pane whose pty stays open
@@ -2152,6 +2172,11 @@ struct Shared {
 
     /// The throttle: what has been parsed, and when it was last drawn.
     publish: Mutex<PublishState>,
+
+    /// How many times [`TerminalHandle::drive`] has taken the lock from this
+    /// side. See [`TerminalHandle::drives`].
+    #[cfg(test)]
+    drives: std::sync::atomic::AtomicUsize,
 }
 
 /// What the reader has parsed and what the main thread has been shown.
