@@ -38,7 +38,7 @@ fi
 CROOK_SHELL_INTEGRATION=1
 
 # bash exports these to whatever a `bind -x` widget runs, so a shell started
-# from inside one inherits them, and __crook_command_started would take every
+# from inside one inherits them, and __crook_debug_trap would take every
 # command it runs for a widget. Outside a widget they mean nothing.
 unset READLINE_LINE READLINE_POINT READLINE_MARK
 
@@ -219,14 +219,6 @@ __crook_prior_debug=''
 
 __crook_command_started() {
 	[ -n "$__crook_running" ] && return 0
-	# A `bind -x` widget — fzf's ctrl-t and ctrl-r, atuin — runs while the line
-	# is still being edited, and bash runs the DEBUG trap for it (and
-	# bash-preexec its preexec) all the same. It is no command anybody ran:
-	# reporting it as one put a C in the middle of the prompt and left the flag
-	# up, so the line the widget put there ran with no C, no start time and no
-	# notification when it finished. bash sets READLINE_POINT for the length of
-	# a widget and nowhere else, which is why it is unset below.
-	[ -n "${READLINE_POINT+set}" ] && return 0
 	__crook_running=1
 	__crook_ran=1
 	__crook_mark C
@@ -294,18 +286,41 @@ __crook_debug_trap() {
 	fi
 	# Our own prompt commands are commands too, and the first of them runs
 	# before the flag that suppresses the rest is up.
+	#
+	# And a `bind -x` widget — fzf's ctrl-t and ctrl-r, atuin's ctrl-r — is a
+	# command the trap runs for, while the line is still being edited. It is
+	# no command anybody ran: reported as one, it put a C in the middle of the
+	# prompt and left the flag up, so the line the widget put there ran with
+	# no C, no start time and no notification when it finished. bash sets
+	# READLINE_POINT for the length of a widget and nowhere else, which is why
+	# it is unset above.
 	case $BASH_COMMAND in
 		__crook_*) ;;
-		*) __crook_command_started ;;
+		*) [ -n "${READLINE_POINT+set}" ] || __crook_command_started ;;
 	esac
 	return $exit_status
+}
+
+# bash-preexec's preexec, which skips a widget only when bash-preexec's own
+# trap is what called it for one. That trap lets a widget be since 0.6.0;
+# before, it called this for one and then not for the line the widget left,
+# which nothing here can give back, but the C stays out of the middle of the
+# prompt. Any other caller is a widget running a line itself, which calls the
+# preexec functions for it from inside the widget, and that is a command
+# starting: atuin's Enter on a search result does, up to 18.9 and since then
+# for a key bound to its search with a plain `bind -x`.
+__crook_preexec() {
+	if [ -n "${READLINE_POINT+set}" ] && [ "${FUNCNAME[1]-}" = __bp_preexec_invoke_exec ]; then
+		return 0
+	fi
+	__crook_command_started
 }
 
 if [ -n "${bash_preexec_imported:-}${__bp_imported:-}" ]; then
 	# bash-preexec already owns the DEBUG trap, and it arrives under a lot of
 	# things people install — starship, ble.sh, atuin. A second DEBUG trap
 	# breaks both, so use the lists it exists to provide.
-	preexec_functions+=(__crook_command_started)
+	preexec_functions+=(__crook_preexec)
 	precmd_functions=(__crook_precmd ${precmd_functions[@]+"${precmd_functions[@]}"} __crook_prompt_ready)
 else
 	__crook_trap_dump="$(trap -p DEBUG)"
