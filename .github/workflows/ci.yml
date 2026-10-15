@@ -88,15 +88,32 @@ jobs:
         shell: bash
         run: ./script/bootstrap
 
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      # A prefix of its own, `checks-`, which no other job's key starts with.
+      # The restore key was `<OS>-cargo-`, the start of every key the
+      # release-flags job saves as well, and a restore key takes any cache
+      # whose key starts with it. Whenever Cargo.lock changes, as every
+      # release changes it, there is no exact hit, and the cache found can be
+      # that job's: 140 to 170 MB of release-profile metadata, none of which a
+      # debug build can use. On the v0.1.27 commit, run 38696954288, Linux and
+      # Windows restored it and took 11 and 20 minutes, against 4 and 7 on the
+      # commit before; macOS happened on its own cache and took 7, as before.
+      #
+      # Restored here and saved after the build, below, rather than by one
+      # actions/cache step, which saves at the end of a job and only of a
+      # green one.
+      - name: Restore the build cache
+        id: cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
+          # The same list as the save below: a cache is found by its paths as
+          # well as its key.
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: checks-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: checks-${{ runner.os }}-cargo-
 
       # A Cargo.lock that disagrees with the manifests makes every `--locked` step below fail
       # with a confusing error about an unrelated crate. Fail here instead, with a fix.
@@ -110,13 +127,21 @@ jobs:
         shell: bash
         run: cargo fmt --all --check
 
+      # No `cargo check` after it. Clippy is the compiler with more lints, run
+      # over the same targets with the same features, so a check that passes
+      # it has nothing left to find, and running it cost 11 to 30 seconds a
+      # leg.
       - name: cargo clippy
         shell: bash
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-      - name: cargo check
+      # The test binaries, built in a step of their own so that the save at
+      # the end can tell a build that finished from one that did not. The
+      # `cargo test` below compiles nothing more.
+      - name: cargo test (build)
+        id: build
         shell: bash
-        run: cargo check --locked --workspace --all-targets
+        run: cargo test --locked --workspace --no-run
 
       # The shells the integration tests run for real, where the runner does
       # not have them already. A test for a shell that is not installed skips,
@@ -157,7 +182,17 @@ jobs:
       # lying. Private items included, since almost every link is to one.
       # `redundant_explicit_links` keeps `[`Foo`](Foo)` — a target that only
       # repeats what the text already resolves to — out of the same comments.
+      #
+      # Run once the build has finished, whatever the tests did, as the wasm32
+      # check below is. The save at the end follows the build, not the tests,
+      # and a cache saved after a failed test run without what these two
+      # compile would keep it out under that key for good: every later run on
+      # the same Cargo.lock would compile it again and keep none of it. From
+      # cold the two took half a minute more on Linux and nearly a minute more
+      # on Windows than from a warm cache (run 38696954288 against
+      # 38696143320). A red run gets their own errors, too.
       - name: cargo doc
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: cargo doc --locked --no-deps --workspace --document-private-items
         env:
@@ -168,12 +203,37 @@ jobs:
       # and they are the whole of the crate a plugin author builds against.
       # Checked, not run — there is nothing to run them on — so that a
       # change to the attribute's syntax fails here rather than in every
-      # plugin's build after the crate is published.
+      # plugin's build after the crate is published. After a failed test run
+      # as well, for the cache, as cargo doc is.
       - name: cargo check (wasm32)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: |
           rustup target add wasm32-unknown-unknown
           cargo check --locked -p crook_plugin_api --tests --target wasm32-unknown-unknown
+
+      # Saved when the build above finished, whatever came of the checks after
+      # it, and so after cargo doc and the wasm32 check, which then run
+      # whatever the tests did. A red run used to save nothing, so every run
+      # after it rebuilt what it had, until one went green. But a key is saved
+      # once and never overwritten: every later run with the same Cargo.lock
+      # restores it exactly and saves nothing. A run saved wherever it failed
+      # — in clippy, with its dependencies type-checked and not yet compiled —
+      # would leave that under the key for good, and every run after it would
+      # compile them again and keep none of it. That is also why this is not
+      # Swatinem/rust-cache, whose cache-on-failure saves a red job wherever
+      # it stopped. Not a cancelled run: one a newer push superseded or one out
+      # of time, and nobody waits on what it would upload.
+      - name: Save the build cache
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
   release-flags:
     name: Release flags (${{ matrix.name }})
@@ -206,8 +266,10 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ${{ runner.os }}-cargo-release-
+          # `release-`, which the Checks job's `checks-` is not the start of,
+          # nor this of that: neither job restores the other's cache.
+          key: release-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: release-${{ runner.os }}-cargo-
 
       - name: ./script/bundle --check-only
         shell: bash
