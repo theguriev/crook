@@ -187,6 +187,21 @@ thread_local! {
 
     /// See [`deadlines_run_under`].
     static RAN_UNDER: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+
+    /// See [`started_here`].
+    static STARTED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Every git the calling thread has started since the last time it asked,
+/// each as the arguments it was given, in order.
+///
+/// What a test that promises a read is skipped has to count, since a skipped
+/// read and one that answered the same as last time look alike from outside.
+/// Thread-local for [`WRITE_DEADLINE`]'s reason; every caller here runs git on
+/// the thread that asked, the halves of a [`pipe`] included.
+#[cfg(test)]
+pub(crate) fn started_here() -> Vec<String> {
+    STARTED.with(std::cell::RefCell::take)
 }
 
 /// Every deadline a [`run`] or [`run_fed`] on the calling thread has run
@@ -473,6 +488,11 @@ fn start(
     intent: Intent,
     stdio: [Stdio; 3],
 ) -> Result<Child, Failure> {
+    #[cfg(test)]
+    STARTED.with(|started| {
+        let words: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
+        started.borrow_mut().push(words.join(" "));
+    });
     let mut git = command("git");
 
     if intent.reads() {

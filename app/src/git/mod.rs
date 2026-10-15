@@ -25,12 +25,18 @@
 //! base needs a base, which is up to three subprocesses of its own and almost
 //! never changes, so a gather is handed [`Bases`] — what the last gathers
 //! found — rather than asking again every time it runs.
+//!
+//! [`gather_remembering`] is the gather a poll runs, which is handed
+//! [`Readings`] as well — what the last gathers read, and from what — and
+//! reads only what can have changed since: the count since the base when
+//! `HEAD` or the base has moved, and a diff when the working tree may have.
 
 pub mod branch;
 pub mod changes;
 pub mod diff;
 pub mod merged;
 mod run;
+mod stamp;
 pub mod worktree;
 
 #[cfg(test)]
@@ -224,19 +230,196 @@ pub fn gather(dir: &Path, bases: &mut Bases) -> GitFacts {
     let branch = read_head(&layout.git_dir);
     let work_tree = layout.work_tree.as_deref();
     let diff = work_tree.and_then(diff_stats_blocking);
-    let since_base = match (&branch, work_tree) {
-        (Some(Head::Branch(name)), Some(work_tree)) => bases
-            .base(&layout.common_dir, work_tree, name)
-            .filter(|base| diff::base_name(base) != name.as_str())
-            .and_then(|base| since_base_blocking(work_tree, &base)),
-        _ => None,
-    };
+    let since_base = work_tree.and_then(|work_tree| {
+        let base = counted_from(branch.as_ref(), &layout, work_tree, bases)?;
+        since_base_blocking(work_tree, &base)
+    });
 
     GitFacts {
         branch,
         diff,
         since_base,
         worktree: layout.is_linked_worktree(),
+    }
+}
+
+/// [`gather`], reading only what can have changed since `readings` last read
+/// the same working tree.
+///
+/// **Blocking**, as `gather` is. What it costs when nothing has changed is one
+/// `rev-parse` for where `HEAD` and the base are and one `ls-files` for the
+/// [`stamp`](stamp::Stamp) — a list and an `lstat` per tracked file, and not
+/// a byte of any of them — in place of up to three reads that each go through
+/// the whole working tree. What each count depends on is what decides whether
+/// it is read again:
+///
+/// | count | read again when |
+/// |---|---|
+/// | the diff against `HEAD` | `HEAD` moved, or the stamp differs |
+/// | commits since the base | `HEAD` or the base moved |
+/// | lines since the base | either moved, or the stamp differs |
+///
+/// The second is a fact about two commits and nothing else. The other two
+/// read the working tree, and an edit that `git add` has not seen moves no
+/// commit and leaves the index as it was — so it is the stamp, which is about
+/// every tracked file, that keeps them, and a stamp that could not vouch for
+/// the tree keeps neither. The stamp is taken before either is read, so a file
+/// written while they are being read is one the next stamp sees.
+///
+/// A working tree is read once per cycle — which is what ends at
+/// [`Readings::forget_unvisited`] — however many of the directories the cycle
+/// gathers are in it: both counts are taken from its top, so every directory
+/// in it has the same answer.
+pub fn gather_remembering(dir: &Path, bases: &mut Bases, readings: &mut Readings) -> GitFacts {
+    let Some(layout) = discover(dir) else {
+        return GitFacts::default();
+    };
+    let branch = read_head(&layout.git_dir);
+    let Some(work_tree) = layout.work_tree.clone() else {
+        // Bare: nothing to diff, as `gather` says.
+        return GitFacts {
+            branch,
+            diff: None,
+            since_base: None,
+            worktree: layout.is_linked_worktree(),
+        };
+    };
+    if let Some(facts) = readings.this_cycle.get(&work_tree) {
+        return facts.clone();
+    }
+
+    let base = counted_from(branch.as_ref(), &layout, &work_tree, bases);
+    let tips = diff::tips(&work_tree, base.as_deref());
+    let stamp = stamp::stamp(&work_tree, &layout.git_dir);
+    let last = readings.seen.remove(&work_tree).filter(|last| {
+        tips.as_ref()
+            .is_some_and(|tips| tips.head == last.tips.head)
+    });
+    let same_tree = stamp.is_some() && last.as_ref().is_some_and(|last| last.stamp == stamp);
+    let same_base = last
+        .as_ref()
+        .zip(tips.as_ref())
+        .is_some_and(|(last, tips)| last.tips.base == tips.base);
+
+    let diff = last
+        .as_ref()
+        .and_then(|last| last.diff)
+        .filter(|_| same_tree)
+        .or_else(|| diff_stats_blocking(&work_tree));
+    let commits = base.as_deref().and_then(|base| {
+        last.as_ref()
+            .and_then(|last| last.commits)
+            .filter(|_| same_base)
+            .or_else(|| diff::commits_since(&work_tree, base))
+    });
+    let lines = match (base.as_deref(), commits) {
+        (Some(base), Some(1..)) => last
+            .as_ref()
+            .and_then(|last| last.lines)
+            .filter(|_| same_base && same_tree)
+            .or_else(|| diff::lines_since(&work_tree, base)),
+        _ => None,
+    };
+
+    let since_base = base
+        .as_deref()
+        .zip(commits)
+        .zip(lines)
+        .map(|((base, commits), diff)| SinceBase {
+            base: diff::base_name(base).to_owned(),
+            commits,
+            diff,
+        });
+    let facts = GitFacts {
+        branch,
+        diff,
+        since_base,
+        worktree: layout.is_linked_worktree(),
+    };
+
+    if let Some(tips) = tips {
+        readings.seen.insert(
+            work_tree.clone(),
+            Seen {
+                tips,
+                stamp,
+                diff,
+                commits,
+                lines,
+            },
+        );
+    }
+    readings.this_cycle.insert(work_tree, facts.clone());
+    facts
+}
+
+/// The base `branch` is counted from, if it is on one that is not the base.
+///
+/// `bases` is asked only when there is a branch to count, which is also the
+/// only time the answer is used. A branch whose name is the base's own —
+/// `main` against `refs/remotes/origin/main` as much as against
+/// `refs/heads/main` — is the base itself, and is left with the plain count
+/// alone.
+fn counted_from(
+    branch: Option<&Head>,
+    layout: &RepoLayout,
+    work_tree: &Path,
+    bases: &mut Bases,
+) -> Option<String> {
+    let Some(Head::Branch(name)) = branch else {
+        return None;
+    };
+    bases
+        .base(&layout.common_dir, work_tree, name)
+        .filter(|base| diff::base_name(base) != name.as_str())
+}
+
+/// What the gathers so far read in each working tree, and what each read was
+/// taken from — see [`gather_remembering`].
+///
+/// Carried from cycle to cycle with [`Bases`], on the same ticket, for the
+/// same reason: only the cycle holding it reads or writes it. A working tree
+/// no gather visits for a whole cycle is forgotten — see
+/// [`Self::forget_unvisited`] — which is what keeps it from growing for the
+/// life of the process.
+#[derive(Default)]
+pub struct Readings {
+    /// The last reading of each working tree, by its top directory.
+    seen: HashMap<PathBuf, Seen>,
+    /// What each working tree visited since the last
+    /// [`Self::forget_unvisited`] was found to be: the cycle's answer for
+    /// every other directory in it.
+    this_cycle: HashMap<PathBuf, GitFacts>,
+}
+
+/// One working tree's last reading.
+///
+/// A count that git did not answer is `None` here, and is read again next
+/// time whatever else stands still.
+struct Seen {
+    /// Where `HEAD` and the base were.
+    tips: diff::Tips,
+    /// The working tree, as it stood before the counts were read; `None`
+    /// when the stamp could not vouch for it.
+    stamp: Option<stamp::Stamp>,
+    /// The diff against `HEAD`.
+    diff: Option<DiffStats>,
+    /// Commits since the base, when there is one.
+    commits: Option<u32>,
+    /// Lines since the base, when there were commits to count them for.
+    lines: Option<DiffStats>,
+}
+
+impl Readings {
+    /// Forgets every working tree no gather has visited since the last call,
+    /// and starts the next cycle's visits.
+    ///
+    /// For the end of a cycle that gathered with the counts on, as
+    /// [`Bases::forget_unasked`] is, and for its reason.
+    pub fn forget_unvisited(&mut self) {
+        let visited = std::mem::take(&mut self.this_cycle);
+        self.seen
+            .retain(|work_tree, _| visited.contains_key(work_tree));
     }
 }
 

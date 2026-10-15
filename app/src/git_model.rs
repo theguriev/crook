@@ -19,13 +19,27 @@
 //! has a ticket to give it. A directory appearing does not start work: it is
 //! written into the shared list and the sleeping cycle is poked, and the cycle
 //! it wakes is the one that serves it.
+//!
+//! # What a cycle costs
+//!
+//! A cycle reads every directory a pane is in, so its cost grows with the
+//! panes, and it runs whether or not anybody is looking. Three things keep
+//! that in proportion. Each directory reads only what can have changed since
+//! the last cycle — see [`git::gather_remembering`] — so a checkout an agent
+//! finished with costs a list and an `lstat` per file rather than three walks
+//! of its tree. The wait after a cycle grows with what the cycle took, so that
+//! however many checkouts there are, git holds a quarter of a core at most;
+//! and it is four times as long while the window is behind another, which is
+//! when nothing it gathers is being looked at. And the directories whose rows
+//! are on screen are gathered and shown first, so a cycle that does have a
+//! lot to read keeps the rows somebody can see waiting least.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crookui_core::prelude::*;
 
@@ -40,6 +54,23 @@ use crate::git::{self, GitFacts};
 /// checkout shows up before it is forgotten about.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 
+/// How many times as long as the last cycle took the next one waits, when
+/// that is longer than [`REFRESH_INTERVAL`].
+///
+/// A fixed interval is a share of a core that grows with the checkouts: sixty
+/// of them, each a second to read, would keep git busy for most of every
+/// minute. Waiting three times what the last cycle took holds git to a
+/// quarter of one core however many there are, and the cost is only that a
+/// window with that much to read refreshes less often.
+const PATIENCE: u32 = 3;
+
+/// How many times as long a cycle waits while the window is behind another.
+///
+/// Nobody is reading the rows then, and a window left open behind an editor
+/// all day is the common case rather than the odd one. Coming back to it cuts
+/// the wait back down — see [`GitModel::set_window_focused`].
+const AWAY: u32 = 4;
+
 /// The right to run a gather cycle. There is exactly one.
 ///
 /// See the module docs: this is what makes a second poll chain unrepresentable
@@ -47,11 +78,25 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 ///
 /// It also carries what the chain remembers from one cycle to the next: each
 /// repository's base, which is up to three subprocesses to find and almost
-/// never changes. On the ticket rather than behind a lock on the model,
-/// because only the cycle holding the ticket ever reads or writes it, and
-/// there is only ever one.
+/// never changes, and what each working tree read last, and from what. On the
+/// ticket rather than behind a lock on the model, because only the cycle
+/// holding the ticket ever reads or writes them, and there is only ever one.
 struct Ticket {
     bases: git::Bases,
+    readings: git::Readings,
+}
+
+/// One part of a cycle, come home: what it gathered, and what is still to
+/// gather.
+struct Part {
+    ticket: Ticket,
+    gathered: Vec<(PathBuf, GitFacts)>,
+    /// The directories the cycle has yet to gather. Empty for its last part.
+    rest: Vec<PathBuf>,
+    /// Whether the cycle runs the subprocesses, as it was when it started.
+    with_diff: bool,
+    /// How long the cycle has spent gathering so far.
+    took: Duration,
 }
 
 /// Everything the tab strip knows about the repositories its sessions sit in.
@@ -78,11 +123,20 @@ pub struct GitModel {
     /// displays git.
     wants_diff: Arc<AtomicBool>,
 
-    /// Cuts the sleeping cycle's wait short.
+    /// The directories whose rows are on screen, which a cycle gathers and
+    /// delivers before the rest.
+    ///
+    /// Shared for the reason [`Self::tracked`] is. A hint and nothing more: a
+    /// directory here that is not tracked is never gathered for being here.
+    in_sight: Arc<Mutex<Vec<PathBuf>>>,
+
+    /// Cuts the sleeping cycle's wait short. Each message is the latest
+    /// moment the model wants the next gather by; the cycle wakes at the
+    /// soonest of those and its own deadline.
     ///
     /// Replaced by every [`Self::spawn_cycle`], which is why it cannot be the
     /// only record that somebody asked — see [`Self::poked`].
-    wake: Option<Sender<()>>,
+    wake: Option<Sender<Instant>>,
 
     /// Whether anybody has asked for a gather that has not happened yet.
     ///
@@ -99,6 +153,16 @@ pub struct GitModel {
 
     /// The ticket, while no cycle owns it. `Some` only before [`Self::start`].
     idle_ticket: Option<Ticket>,
+
+    /// Whether the window has the desktop's keyboard. See [`AWAY`].
+    focused: bool,
+
+    /// How long the last cycle spent gathering. See [`PATIENCE`].
+    took: Duration,
+
+    /// When the last cycle came home, which is what the wait before the next
+    /// is counted from.
+    finished: Option<Instant>,
 }
 
 // The event is the end of a cycle, emitted whether it found anything new or
@@ -117,11 +181,16 @@ impl GitModel {
             facts: HashMap::new(),
             tracked: Arc::new(Mutex::new(Vec::new())),
             wants_diff: Arc::new(AtomicBool::new(false)),
+            in_sight: Arc::new(Mutex::new(Vec::new())),
             wake: None,
             poked: Arc::new(AtomicBool::new(false)),
             idle_ticket: Some(Ticket {
                 bases: git::Bases::default(),
+                readings: git::Readings::default(),
             }),
+            focused: true,
+            took: Duration::ZERO,
+            finished: None,
         }
     }
 
@@ -163,6 +232,37 @@ impl GitModel {
         self.forget_untracked(ctx);
         if is_new {
             self.wake_cycle();
+        }
+    }
+
+    /// Tells the model which of the tracked directories have a row on
+    /// screen, for the next cycle to gather first.
+    ///
+    /// Wakes nothing: what is on screen changing changes which rows wait
+    /// least, not when anything is read.
+    pub fn set_in_sight(&mut self, mut dirs: Vec<PathBuf>) {
+        dirs.sort();
+        dirs.dedup();
+        *self.in_sight.lock().unwrap_or_else(PoisonError::into_inner) = dirs;
+    }
+
+    /// Tells the model whether the window has the desktop's keyboard.
+    ///
+    /// Losing it lengthens the wait after the next cycle — see [`AWAY`].
+    /// Getting it back shortens the wait the sleeping cycle is already in to
+    /// the one a focused window would have had, counted from when the last
+    /// cycle came home: a window that was away for longer than that gathers
+    /// at once, and one that was away for a moment waits out the rest.
+    pub fn set_window_focused(&mut self, focused: bool) {
+        if self.focused == focused {
+            return;
+        }
+        self.focused = focused;
+        if focused
+            && let Some(finished) = self.finished
+            && let Some(wake) = self.wake.as_ref()
+        {
+            let _ = wake.send(finished + self.interval());
         }
     }
 
@@ -209,6 +309,7 @@ impl GitModel {
         self.wake = Some(wake);
 
         let tracked = self.tracked.clone();
+        let in_sight = self.in_sight.clone();
         let wants_diff = self.wants_diff.clone();
         let poked = self.poked.clone();
         let background = ctx.background().clone();
@@ -220,11 +321,10 @@ impl GitModel {
             async move {
                 background
                     .spawn(async move {
-                        if !delay.is_zero() {
-                            // Returns early when `track` pokes the channel, and
-                            // on the timeout otherwise.
-                            let _ = wakeup.recv_timeout(delay);
-                        }
+                        // Returns early when the model asks for a gather sooner
+                        // — a poke, or the window coming back — and at `delay`
+                        // otherwise.
+                        wait(&wakeup, Instant::now() + delay);
 
                         // Cleared here rather than by the sender, so that a
                         // poke arriving from this line onwards is still
@@ -236,23 +336,77 @@ impl GitModel {
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner)
                             .clone();
+                        let in_sight = in_sight
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .clone();
+                        let (first, rest) = in_sight_first(dirs, &in_sight);
                         let with_diff = wants_diff.load(Ordering::Relaxed);
                         let mut ticket = ticket;
-                        let gathered = gather_all(dirs, with_diff, &mut ticket.bases);
+                        let started = Instant::now();
+                        let gathered = gather_all(first, with_diff, &mut ticket);
 
-                        (ticket, gathered)
+                        Part {
+                            ticket,
+                            gathered,
+                            rest,
+                            with_diff,
+                            took: started.elapsed(),
+                        }
                     })
                     .await
             },
-            |model, (ticket, gathered), ctx| model.finish(ticket, gathered, ctx),
+            |model, part, ctx| model.deliver(part, ctx),
         )
         .detach();
     }
 
-    /// Records a cycle's result and starts the next one.
-    fn finish(
+    /// Records one part of a cycle, then gathers the rest of it or, when
+    /// there is none, finishes it.
+    ///
+    /// The rows on screen are the first part, and they are shown before the
+    /// rest is read: the hop back to this thread between the two is what lets
+    /// a cycle with a lot to read show what somebody is looking at first.
+    fn deliver(&mut self, part: Part, ctx: &mut ModelContext<Self>) {
+        let Part {
+            ticket,
+            gathered,
+            rest,
+            with_diff,
+            took,
+        } = part;
+        self.record_gathered(gathered, ctx);
+        if rest.is_empty() {
+            self.finish(ticket, with_diff, took, ctx);
+            return;
+        }
+
+        let background = ctx.background().clone();
+        ctx.spawn(
+            async move {
+                background
+                    .spawn(async move {
+                        let mut ticket = ticket;
+                        let started = Instant::now();
+                        let gathered = gather_all(rest, with_diff, &mut ticket);
+                        Part {
+                            ticket,
+                            gathered,
+                            rest: Vec::new(),
+                            with_diff,
+                            took: took + started.elapsed(),
+                        }
+                    })
+                    .await
+            },
+            |model, part, ctx| model.deliver(part, ctx),
+        )
+        .detach();
+    }
+
+    /// Puts what a part of a cycle gathered in front of the renderer.
+    fn record_gathered(
         &mut self,
-        ticket: Ticket,
         gathered: Vec<(PathBuf, GitFacts)>,
         ctx: &mut ModelContext<Self>,
     ) {
@@ -273,7 +427,29 @@ impl GitModel {
         if changed {
             ctx.notify();
         }
-        // And every cycle says it ran, changed or not, which is the beat the
+    }
+
+    /// Ends a cycle and starts the next one.
+    ///
+    /// A cycle that ran the subprocesses forgets the repositories and working
+    /// trees none of its directories asked about; one that did not has asked
+    /// nothing, and forgetting after it would throw everything away for the
+    /// sake of a toggle.
+    fn finish(
+        &mut self,
+        mut ticket: Ticket,
+        with_diff: bool,
+        took: Duration,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if with_diff {
+            ticket.bases.forget_unasked();
+            ticket.readings.forget_unvisited();
+        }
+        self.took = took;
+        self.finished = Some(Instant::now());
+
+        // Every cycle says it ran, changed or not, which is the beat the
         // Changes column re-reads on: what it shows — commits, files — is
         // nothing gathered here, so "the facts changed" is no sign of it
         // having changed, and a column with a timer of its own would be a
@@ -294,7 +470,19 @@ impl GitModel {
         if self.poked.load(Ordering::Relaxed) {
             Duration::ZERO
         } else {
-            REFRESH_INTERVAL
+            self.interval()
+        }
+    }
+
+    /// The wait between cycles nobody has asked to hurry: [`REFRESH_INTERVAL`],
+    /// or [`PATIENCE`] times the last cycle when that is longer, and [`AWAY`]
+    /// times that while the window is behind another.
+    fn interval(&self) -> Duration {
+        let interval = REFRESH_INTERVAL.max(self.took * PATIENCE);
+        if self.focused {
+            interval
+        } else {
+            interval * AWAY
         }
     }
 
@@ -329,39 +517,68 @@ impl GitModel {
     fn wake_cycle(&self) {
         self.poked.store(true, Ordering::Relaxed);
         if let Some(wake) = self.wake.as_ref() {
-            let _ = wake.send(());
+            let _ = wake.send(Instant::now());
         }
     }
 }
 
-/// Reads every directory a cycle serves, skipping the subprocesses when
-/// nothing shows their answer.
+/// Sleeps until `by`, or until the model asks for a gather sooner.
 ///
-/// `bases` is the one the ticket carries, so a repository's base is looked up
-/// by the first cycle that needs it and read back by every one after. A cycle
-/// that ran the subprocesses then forgets the repositories none of its
-/// directories asked about; one that did not has asked nothing, and
-/// forgetting after it would throw every base away for the sake of a toggle.
+/// Every message is a moment the model wants the gather by, and the wait goes
+/// on to the soonest of them — which is how coming back to the window cuts a
+/// wait short without cutting it to nothing. A model that has gone, and taken
+/// the sender with it, ends the wait.
+fn wait(wakeup: &Receiver<Instant>, mut by: Instant) {
+    loop {
+        let left = by.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        match wakeup.recv_timeout(left) {
+            Ok(sooner) => by = by.min(sooner),
+            Err(_) => return,
+        }
+    }
+}
+
+/// `dirs`, as the part of a cycle to gather first and the part to gather
+/// after it: the directories `in_sight` names, then the rest.
+///
+/// One part, with nothing after it, when either would be empty: a second hop
+/// to the main thread buys nothing when nothing is on screen, or when
+/// everything is.
+fn in_sight_first(dirs: Vec<PathBuf>, in_sight: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let (first, rest): (Vec<_>, Vec<_>) = dirs.into_iter().partition(|dir| in_sight.contains(dir));
+    if first.is_empty() {
+        (rest, Vec::new())
+    } else {
+        (first, rest)
+    }
+}
+
+/// Reads the directories of one part of a cycle, skipping the subprocesses
+/// when nothing shows their answer.
+///
+/// What the ticket carries is what makes the reads cheap: a repository's base
+/// is looked up by the first cycle that needs it and read back by every one
+/// after, and a working tree is read again only for what can have changed
+/// since the last cycle read it. See [`GitModel::finish`] for when either is
+/// forgotten.
 fn gather_all(
     dirs: Vec<PathBuf>,
     with_diff: bool,
-    bases: &mut git::Bases,
+    ticket: &mut Ticket,
 ) -> Vec<(PathBuf, GitFacts)> {
-    let gathered = dirs
-        .into_iter()
+    dirs.into_iter()
         .map(|dir| {
             let facts = if with_diff {
-                git::gather(&dir, bases)
+                git::gather_remembering(&dir, &mut ticket.bases, &mut ticket.readings)
             } else {
                 git::facts_without_diff(&dir)
             };
             (dir, facts)
         })
-        .collect();
-    if with_diff {
-        bases.forget_unasked();
-    }
-    gathered
+        .collect()
 }
 
 #[cfg(test)]
@@ -596,6 +813,129 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn a_long_cycle_waits_three_times_as_long_before_the_next() {
+        // Sixty checkouts at a second apiece, fifteen seconds apart, would be
+        // git running for four minutes in every five.
+        let (_queue, mut app) = app();
+        let model = app.update(|ctx| ctx.add_model(GitModel::new));
+
+        app.update(|ctx| model.update(ctx, |model, _| model.took = Duration::from_secs(2)));
+        app.read(|ctx| assert_eq!(REFRESH_INTERVAL, model.as_ref(ctx).next_delay()));
+
+        app.update(|ctx| model.update(ctx, |model, _| model.took = Duration::from_secs(10)));
+        app.read(|ctx| assert_eq!(Duration::from_secs(30), model.as_ref(ctx).next_delay()));
+    }
+
+    #[test]
+    fn a_window_behind_another_waits_four_times_as_long() {
+        let (_queue, mut app) = app();
+        let model = app.update(|ctx| ctx.add_model(GitModel::new));
+
+        app.update(|ctx| model.update(ctx, |model, _| model.set_window_focused(false)));
+        app.read(|ctx| assert_eq!(REFRESH_INTERVAL * 4, model.as_ref(ctx).next_delay()));
+
+        // Somebody asking still means now, focused or not.
+        app.update(|ctx| {
+            model.update(ctx, |model, ctx| {
+                model.track(vec![PathBuf::from("/opt/appeared")], ctx);
+            });
+        });
+        app.read(|ctx| assert_eq!(Duration::ZERO, model.as_ref(ctx).next_delay()));
+    }
+
+    #[test]
+    fn coming_back_to_the_window_cuts_the_wait_it_is_in_short() {
+        // The cycle asleep was put to sleep for the minute an unfocused window
+        // waits. Coming back, the rows should be no older than a focused
+        // window's would be: counted from when the last cycle came home.
+        let (_queue, mut app) = app();
+        let model = app.update(|ctx| ctx.add_model(GitModel::new));
+        let (wake, wakeup) = mpsc::channel();
+        let came_home = Instant::now() - Duration::from_secs(20);
+        app.update(|ctx| {
+            model.update(ctx, |model, _| {
+                model.wake = Some(wake);
+                model.finished = Some(came_home);
+                model.set_window_focused(false);
+            });
+        });
+        assert!(wakeup.try_recv().is_err(), "going away hurried the cycle");
+
+        app.update(|ctx| model.update(ctx, |model, _| model.set_window_focused(true)));
+
+        assert_eq!(wakeup.try_recv().ok(), Some(came_home + REFRESH_INTERVAL));
+    }
+
+    #[test]
+    fn a_sooner_moment_on_the_channel_ends_the_wait_then() {
+        let (wake, wakeup) = mpsc::channel();
+        let started = Instant::now();
+        wake.send(started).expect("the receiver is right here");
+
+        wait(&wakeup, started + Duration::from_secs(60));
+
+        assert!(started.elapsed() < Duration::from_secs(30));
+    }
+
+    #[test]
+    fn the_rows_on_screen_come_home_before_the_rest_is_read() {
+        // A cycle with twenty checkouts to read is seconds long, and a row
+        // somebody is looking at should not wait behind nineteen nobody is.
+        struct Heard(Vec<(bool, bool)>);
+        impl Entity for Heard {
+            type Event = ();
+        }
+
+        let scratch =
+            std::env::temp_dir().join(format!("crook-git-model-in-sight-{}", std::process::id()));
+        let (seen, unseen) = (scratch.join("seen"), scratch.join("unseen"));
+        for dir in [&seen, &unseen] {
+            let _ = std::fs::create_dir_all(dir);
+        }
+
+        let (queue, mut app) = app();
+        let model = app.update(|ctx| ctx.add_model(GitModel::new));
+        let heard = app.update(|ctx| {
+            let (seen, unseen) = (seen.clone(), unseen.clone());
+            ctx.add_model(|ctx| {
+                ctx.observe(&model, move |heard: &mut Heard, model, ctx| {
+                    let model = model.as_ref(ctx);
+                    heard
+                        .0
+                        .push((model.facts(&seen).is_some(), model.facts(&unseen).is_some()));
+                });
+                Heard(Vec::new())
+            })
+        });
+        app.update(|ctx| {
+            model.update(ctx, |model, ctx| {
+                model.track(vec![seen.clone(), unseen.clone()], ctx);
+                model.set_in_sight(vec![seen.clone()]);
+                model.start(ctx);
+            });
+        });
+
+        let deadline = Instant::now() + DELIVERY_TIMEOUT;
+        loop {
+            queue.run_until_parked();
+            if app.read(|ctx| heard.as_ref(ctx).0.contains(&(true, true))) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the gather never came home");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = std::fs::remove_dir_all(&scratch);
+
+        app.read(|ctx| {
+            assert_eq!(
+                heard.as_ref(ctx).0.first(),
+                Some(&(true, false)),
+                "the row on screen came home with the rest, not before it"
+            );
+        });
     }
 
     #[test]
