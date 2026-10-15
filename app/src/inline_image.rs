@@ -117,8 +117,10 @@ pub enum Shown {
     /// The pixels: at the size the frame asked for, short of
     /// [`decoded_size`]'s cap; or — between a change of that size and the
     /// decode at the new one — at the size they last were. Either way the
-    /// caller draws them at the size it asked for, and the renderer stretches
-    /// them to it.
+    /// caller draws them at the size it asked for. The renderer stretches or
+    /// shrinks them to it on the GPU, unless that size fits an atlas row and
+    /// they fit an atlas, where it resamples them on the thread that draws: a
+    /// few megabytes made out of a few, once for that size.
     Picture(Arc<Bitmap>),
     /// Nothing to draw yet: it is being decoded, or waits for room in the
     /// budget. The caller draws the room it will take.

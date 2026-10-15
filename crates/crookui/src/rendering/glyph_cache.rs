@@ -17,8 +17,10 @@
 //! sharp as its pixels rather than stretched up from an atlas's 1022. Pixels
 //! of another size are stretched to the quad by the sampler rather than
 //! resampled here: at that size they are a screenful, and here is the thread
-//! that draws. Such a texture is a whole texture to give back, which a region
-//! of an atlas never is, so it is kept exactly while it is drawn.
+//! that draws. So are pixels bigger than an atlas drawn within a row, since a
+//! resample costs what its source weighs. Such a texture is a whole texture
+//! to give back, which a region of an atlas never is, so it is kept exactly
+//! while it is drawn.
 //!
 //! Ported from Warp's `crates/warpui/src/rendering/glyph_cache.rs` (MIT). Warp
 //! parameterizes the cache over four `dyn Fn` callbacks so one implementation
@@ -80,16 +82,24 @@ impl ImageRegion {
 /// Where a picture of `pixels` drawn at `drawn` device pixels goes, and at
 /// what size.
 ///
-/// An atlas region of `drawn` itself while both sides fit an atlas row: the
-/// pixels are resampled to it, which at an atlas row's size is a few
-/// megabytes at most, and the sampler reads them one to one. Past that, a
+/// An atlas region of `drawn` itself while both sides fit an atlas row and
+/// the pixels fit an atlas: they are resampled to it, a few megabytes made
+/// out of a few at most, and the sampler reads them one to one. Otherwise a
 /// texture of the picture's own at `pixels` — which is `drawn` for a picture
 /// decoded at the size it is drawn — and when the two differ the sampler
-/// stretches the texture to the quad. Resampled here instead, a picture
-/// handed over at another size than it is drawn — its old pixels, while it
-/// is decoded again at a new one, or pixels kept short of a size that would
-/// be made up — would be a screenful resampled on the thread that draws at
-/// every new size, with a font step a new size for every picture in view.
+/// stretches the texture to the quad, or shrinks it. Resampled here instead,
+/// a picture handed over at another size than it is drawn — its old pixels,
+/// while it is decoded again at a new one, or pixels kept short of a size
+/// that would be made up — would be a screenful resampled on the thread that
+/// draws at every new size, with a font step a new size for every picture in
+/// view. And a resample costs what its source weighs, not what it makes, so
+/// pixels bigger than an atlas are not resampled into one either: a
+/// 4000-pixel square zoomed back out to 1000 was sixteen million pixels
+/// averaged on the thread that draws, for the frame or two before its decode
+/// at the new size lands. Drawn from a texture of its own — the one the frame
+/// before gave it, when that frame drew it past a row — it costs no resample
+/// and no upload; shrunk by the sampler, which has no mipmaps, it aliases
+/// until then.
 ///
 /// Only pixels longer on a side than `max_texture_side`, the most a texture
 /// may be on this device, are resampled: both sides shrink by the same
@@ -97,7 +107,7 @@ impl ImageRegion {
 /// can see the picture is not drawn at all.
 pub fn image_region(drawn: (u32, u32), pixels: (u32, u32), max_texture_side: u32) -> ImageRegion {
     let (width, height) = drawn;
-    if width.max(height) <= MAX_IMAGE_SIDE {
+    if width.max(height) <= MAX_IMAGE_SIDE && pixels.0.max(pixels.1) <= ATLAS_SIZE {
         return ImageRegion::Atlas(width, height);
     }
     let (width, height) = if width == 0 || height == 0 {
@@ -388,10 +398,10 @@ impl GlyphCache {
     /// skipped, the way an icon squeezed to nothing is. The region is
     /// [`image_region`] of `drawn` and the bitmap's own size — the drawn size
     /// in an atlas, the bitmap's in a texture of its own — and the pixels are
-    /// resampled on the CPU only when they are not that size, which past an
-    /// atlas row takes a bitmap longer than the GPU's largest texture. A
-    /// picture already the drawn size is uploaded as it is, which is what a
-    /// caller that decoded it at the size it draws it at is spared.
+    /// resampled on the CPU only when they are not that size, which in a
+    /// texture of its own takes a bitmap longer than the GPU's largest
+    /// texture. A picture already the drawn size is uploaded as it is, which
+    /// is what a caller that decoded it at the size it draws it at is spared.
     pub fn get_image(
         &mut self,
         bitmap: &Bitmap,
@@ -873,11 +883,6 @@ mod tests {
             "a 1024-pixel preview on a card 560 logical pixels wide at 2x"
         );
         assert_eq!(
-            image_region((800, 500), (2800, 1750), 8192),
-            ImageRegion::Atlas(800, 500),
-            "within an atlas row they are resampled, to a few megabytes at most"
-        );
-        assert_eq!(
             image_region((9000, 4500), (12000, 6000), 8192),
             ImageRegion::Own(8192, 4096),
             "and past the GPU's largest texture they are shrunk to it"
@@ -913,6 +918,66 @@ mod tests {
         assert!(
             textures.iter().all(|texture| *texture == textures[0]),
             "one upload stretched to every size, not one resample a size: {textures:?}"
+        );
+    }
+
+    #[test]
+    fn pixels_bigger_than_an_atlas_drawn_within_a_row_are_shrunk_by_the_sampler_and_not_resampled()
+    {
+        // A picture zoomed in until it was decoded at 4000 pixels square, and
+        // the font put back: drawn at 1000 until the decode at that size
+        // lands, from the 4000-pixel square. Resampled into an atlas row, that
+        // was sixteen million pixels averaged on the thread that draws, since
+        // a resample costs what its source weighs; and three screenshots
+        // dragged from a 2x display to a 1x one were three of them at once.
+        assert_eq!(
+            image_region((1000, 1000), (4000, 4000), 8192),
+            ImageRegion::Own(4000, 4000)
+        );
+        assert_eq!(
+            image_region((800, 500), (2800, 1750), 8192),
+            ImageRegion::Own(2800, 1750)
+        );
+        assert_eq!(
+            image_region((560, 350), (1024, 640), 8192),
+            ImageRegion::Atlas(560, 350),
+            "a preview no bigger than an atlas, drawn small, is still resampled into one"
+        );
+
+        let Some((resources, layout, sampler)) = device() else {
+            log::warn!("skipping the shrunk texture test: no usable GPU adapter");
+            return;
+        };
+        let atlas = AtlasContext {
+            device: &resources.device,
+            queue: &resources.queue,
+            bind_group_layout: &layout,
+            sampler: &sampler,
+        };
+
+        let mut cache = GlyphCache::new();
+        let pixels = picture(1200, 600);
+        cache.sweep_images();
+        let zoomed = cache
+            .get_image(&pixels, (1200, 600), &atlas)
+            .unwrap()
+            .expect("a picture drawn at a size has pixels");
+
+        // The next frame draws it within an atlas row.
+        cache.sweep_images();
+        let put_back = cache
+            .get_image(&pixels, (600, 300), &atlas)
+            .unwrap()
+            .expect("a picture drawn at a size has pixels");
+        assert_eq!(
+            put_back.texture, zoomed.texture,
+            "drawn from the texture the frame before gave it, uploaded once"
+        );
+        let region = put_back.allocated_region.pixel_region;
+        assert_eq!((region.width, region.height), (1200, 600));
+        assert!(
+            cache.image_texture(TextureId::initial()).is_none(),
+            "resampled into an atlas row"
         );
     }
 
