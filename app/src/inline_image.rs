@@ -22,13 +22,16 @@
 //! to another display — is decoded again at it, and drawn from the old pixels
 //! until then.
 //!
-//! Short of pixels that would be made up, though: a picture drawn longer
-//! than both its own pixels and an atlas row is decoded at the larger of the
-//! two (see [`decoded_size`]) and stretched the rest of the way by the
-//! renderer, which does that on the GPU as it draws. So no picture is
-//! decoded longer on a side than the longer of its file's longest side and
-//! an atlas row, whatever font it is zoomed to — a 4096-pixel square at
-//! most, a quarter of the budget, which therefore always has room for it.
+//! Short of pixels that would be made up, though: past an atlas row, a side
+//! drawn longer than its file has pixels along it is decoded at the pixels
+//! it has — or, for a picture smaller than an atlas row, as many as it has
+//! grown to one — and stretched the rest of the way by the renderer, which
+//! does that on the GPU as it draws (see [`decoded_size`]). Side by side, so
+//! that a picture stretched out of its shape keeps every pixel of the side
+//! it has them for. So no picture is decoded longer on a side than the
+//! longer of its file's side and an atlas row, whatever font it is zoomed
+//! to — a 4096-pixel square at most, a quarter of the budget, which
+//! therefore always has room for it.
 //!
 //! # Within a budget, and never at the frame's expense
 //!
@@ -135,24 +138,42 @@ pub fn shown(image: &Arc<InlineImage>, drawn: (u32, u32), frame: FrameId) -> Sho
 
 /// The pixels a picture `own` pixels big is decoded at, drawn `drawn` big.
 ///
-/// `drawn` itself, until its longest side passes both the picture's own
-/// longest and [`EXACT_SIDE`]; past that, `drawn` shrunk to the larger of the
-/// two, its shape kept, for the renderer to stretch. A side never shrinks
-/// to nothing.
+/// `drawn` itself while neither side is longer than [`EXACT_SIDE`]. Past
+/// that, each side is `drawn`'s held to [`most_pixels`] along it, and the
+/// renderer stretches the rest. Side by side rather than with `drawn`'s shape
+/// kept, because the two shapes need not be one: a picture stretched into
+/// its cells is drawn in theirs, and a photo stretched wide and short, capped
+/// as a whole by its width, was decoded at a fraction of the rows its cells
+/// cover and blown up soft to fill them. And a picture fitted a pixel past
+/// its own size is decoded at its own size, rather than at one a rounding
+/// short of it on the other side. A side never shrinks to nothing.
 fn decoded_size(drawn: (u32, u32), own: (u32, u32)) -> (u32, u32) {
-    let limit = own.0.max(own.1).max(EXACT_SIDE);
-    let longest = drawn.0.max(drawn.1);
-    if longest <= limit {
+    if drawn.0.max(drawn.1) <= EXACT_SIDE {
         return drawn;
     }
+    let most = most_pixels(own);
+    (drawn.0.min(most.0).max(1), drawn.1.min(most.1).max(1))
+}
+
+/// The most pixels a picture `own` pixels big is decoded at along each side,
+/// once it is drawn past an atlas row.
+///
+/// Its own, or — for a picture shorter than [`EXACT_SIDE`] — its own grown,
+/// shape kept, until the longest is that: as far as the pool grows it within
+/// an atlas row, and so no further past one.
+fn most_pixels(own: (u32, u32)) -> (u32, u32) {
+    let longest = own.0.max(own.1).max(1);
+    if longest >= EXACT_SIDE {
+        return own;
+    }
     // The product before the quotient, rounded, so the longest side comes
-    // out the limit exactly and the other the nearest pixel to its share.
+    // out the row exactly and the other the nearest pixel to its share.
     let side = |pixels: u32| {
-        let scaled =
-            (u64::from(pixels) * u64::from(limit) + u64::from(longest) / 2) / u64::from(longest);
+        let scaled = (u64::from(pixels) * u64::from(EXACT_SIDE) + u64::from(longest) / 2)
+            / u64::from(longest);
         (scaled as u32).max(1)
     };
-    (side(drawn.0), side(drawn.1))
+    (side(own.0), side(own.1))
 }
 
 /// Says how to ask for a frame once a decode has landed.

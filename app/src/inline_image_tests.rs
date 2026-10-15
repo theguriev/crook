@@ -243,22 +243,41 @@ fn a_small_picture_is_grown_on_the_pool_as_far_as_an_atlas_row_and_no_further() 
 }
 
 #[test]
-fn a_size_past_the_cap_keeps_its_shape_and_never_rounds_a_side_away() {
+fn a_side_past_the_cap_is_held_to_the_pixels_its_file_has_along_it() {
     let cap = |drawn| decoded_size(drawn, (2800, 1750));
     assert_eq!(cap((2800, 1750)), (2800, 1750), "at its own pixels");
     assert_eq!(cap((1400, 875)), (1400, 875), "within them");
     assert_eq!(cap((5600, 3500)), (2800, 1750));
     assert_eq!(
-        cap((3500, 5600)),
+        cap((2801, 1750)),
+        (2800, 1750),
+        "a pixel past its own size is its own size, not a rounding short of it"
+    );
+    assert_eq!(
+        decoded_size((3500, 5600), (1750, 2800)),
         (1750, 2800),
         "the long side is capped whichever it is"
     );
 
-    // Stretched into its cells, a tall picture drawn wide is capped by its
-    // own longest side or an atlas row, whichever is longer.
-    assert_eq!(decoded_size((3000, 300), (100, 1000)), (EXACT_SIDE, 102));
+    // Stretched into its cells, out of its file's shape: a 1600x1200 photo
+    // printed across a pane 1400 logical pixels wide and ten 16-pixel rows
+    // tall, on a 2x display. Capped as a whole by its width, it was decoded
+    // 183 rows tall and blown up soft to the 320 its cells cover, from a
+    // file of 1200.
+    assert_eq!(decoded_size((2800, 320), (1600, 1200)), (1600, 320));
     assert_eq!(
-        decoded_size((40000, 3), (64, 64)),
+        decoded_size((3000, 300), (100, 1000)),
+        (102, 300),
+        "a picture shorter than a row is grown to one, its shape kept, and no further"
+    );
+
+    // Within an atlas row it is the drawn size, whatever its file's shape:
+    // the renderer would resample anything else on the thread that draws.
+    assert_eq!(decoded_size((1000, 300), (1000, 1)), (1000, 300));
+    assert_eq!(decoded_size((1000, 300), (4000, 10)), (1000, 300));
+
+    assert_eq!(
+        decoded_size((40000, 3), (1000, 1)),
         (EXACT_SIDE, 1),
         "a side is never shrunk to nothing"
     );
