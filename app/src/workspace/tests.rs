@@ -30589,6 +30589,11 @@ fn a_login_item_the_system_refuses_puts_the_switch_back_and_says_why() {
     assert!(on(&harness), "the switch did not move when it was pressed");
     harness.wait_for("the refusal to put the switch back", |harness| !on(harness));
     // Saved as it is shown, so the next window does not claim it either.
+    // Waited for by its content first: the press's own save of "on" can land
+    // and sit still for two reads while the refusal's save is still on a busy
+    // pool, which a settled file alone took for the answer. Then settled, so
+    // a stale "on" landing after it would still be caught.
+    scratch.written_containing("\"open_at_login\": false");
     let written = scratch.settled();
     assert!(
         written.contains("\"open_at_login\": false"),
