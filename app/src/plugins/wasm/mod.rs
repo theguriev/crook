@@ -1028,10 +1028,14 @@ impl Sees {
                 command: menu.command.clone(),
                 exit: menu.exit,
             }),
+            // None for a block that ran on another machine, as `Where` is
+            // for a pane there: the path is a directory over there, and a
+            // plugin handed it would read this machine's at the same path.
             place: self
                 .place
                 .then_some(menu.directory.as_deref())
                 .flatten()
+                .filter(|_| !menu.elsewhere)
                 .map(|directory| Place {
                     directory: directory.to_string_lossy().into_owned(),
                     branch: menu.branch.clone(),

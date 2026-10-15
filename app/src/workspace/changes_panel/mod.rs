@@ -358,6 +358,11 @@ pub(super) struct ChangesPanelState {
     /// the answer to, kept apart from it because only the background pool
     /// may turn the one into the other. See [`Self::follow`].
     pub(super) directory: Option<PathBuf>,
+    /// The machine the focused pane said it is on, when that is another one
+    /// and so there is no [`Self::directory`] here to read: what the column
+    /// says instead of that the pane has said nothing. See
+    /// [`Self::set_elsewhere`].
+    pub(super) elsewhere: Option<String>,
     /// The directories whose checkout is being looked for, so that one
     /// already on its way is not looked for again — kept when the column
     /// closes, because the walks are still out there.
@@ -484,6 +489,20 @@ impl ChangesPanelState {
         self.start_over(tab, directory)
     }
 
+    /// Says which machine the focused pane is on, when that is not this
+    /// one — the far side of an `ssh` — ahead of [`Self::open`] or
+    /// [`Self::follow`] being told it has no directory here.
+    ///
+    /// The column reads this machine's repositories, and the path the far
+    /// side reported names one of them only by accident: a checkout here at
+    /// the same path, which is not the one the pane is working in.
+    pub(super) fn set_elsewhere(&mut self, host: Option<String>) {
+        if self.elsewhere != host {
+            self.elsewhere = host;
+            self.relayout();
+        }
+    }
+
     /// The focused pane is somewhere else: in another tab, or after a `cd`.
     /// Answers what to look for, as [`Self::open`] does.
     ///
@@ -572,6 +591,7 @@ impl ChangesPanelState {
         self.open = false;
         self.target = None;
         self.directory = None;
+        self.elsewhere = None;
         self.reading = Reading::Nothing;
         self.in_flight = false;
         self.epoch = self.epoch.wrapping_add(1);
@@ -1103,12 +1123,14 @@ impl ChangesPanelState {
             return Vec::new();
         }
         if self.target.is_none() {
-            let message = if self.directory.is_none() {
-                "This tab has not said where it is working yet."
-            } else {
-                "Reading the repository…"
+            let message = match (&self.directory, &self.elsewhere) {
+                (Some(_), _) => "Reading the repository…".to_owned(),
+                (None, Some(host)) => {
+                    format!("This tab is working on {host}, where the column cannot read.")
+                }
+                (None, None) => "This tab has not said where it is working yet.".to_owned(),
             };
-            return vec![Row::Message(message.to_owned())];
+            return vec![Row::Message(message)];
         }
         let overview = match &self.reading {
             Reading::Nothing => return vec![Row::Message("Reading the repository…".to_owned())],

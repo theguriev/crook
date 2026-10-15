@@ -39,7 +39,7 @@ use crookui_core::elements::{MouseStateHandle, Padding};
 use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::prelude::*;
 
-use crate::git::{self, DiffStats, GitFacts, Head, SinceBase};
+use crate::git::{DiffStats, GitFacts, Head, SinceBase};
 use crate::settings::{Granularity, PrimaryInfo, Subtitle, TabOptions, resolve_subtitle};
 use crate::tab::{AgentSession, Pane, PaneId, PullRequestCheck, Tab};
 use crate::theme::theme;
@@ -139,6 +139,9 @@ pub(super) struct RowFacts {
     command: String,
     /// Where it is working, already abbreviated and cut to fit.
     directory: Option<String>,
+    /// The machine it is working on, short, when that is not this one: what
+    /// the title line leads with.
+    host: Option<String>,
     /// The branch it is on, if the directory is a repository.
     branch: Option<String>,
     /// What the agent is waiting for, while it is waiting, or what a
@@ -167,16 +170,23 @@ impl RowFacts {
         Self {
             command,
             command_is_the_directory,
-            directory: session
-                .working_directory
-                .as_deref()
-                .map(|directory| git::user_friendly_path(directory, home)),
+            directory: session.shown_path(home),
+            host: session
+                .remote
+                .as_ref()
+                .map(|remote| remote.short_host().to_owned()),
             branch: facts
                 .and_then(|facts| facts.branch.as_ref())
                 .map(Head::label)
                 .map(str::to_owned),
             message: session.row_message().map(str::to_owned),
         }
+    }
+
+    /// The machine the session is on, when it is not this one, as the title
+    /// line leads with it.
+    pub(super) fn host(&self) -> Option<&str> {
+        self.host.as_deref()
     }
 
     /// The title line, per "Pane title as".
@@ -286,11 +296,7 @@ fn command_of(session: &AgentSession, home: Option<&Path>) -> (String, bool) {
     if let Some(name) = session.name() {
         return (name.to_owned(), false);
     }
-    match session
-        .working_directory
-        .as_deref()
-        .and_then(|directory| git::directory_label(directory, home))
-    {
+    match session.directory_label(home) {
         Some(label) => (label, true),
         None => (session.display_title().to_owned(), false),
     }
@@ -790,12 +796,21 @@ fn detail_section(
                 .finish(),
         );
 
-    if let Some(directory) = session.working_directory.as_deref() {
-        let friendly = git::user_friendly_path(directory, home);
+    if let Some(friendly) = session.shown_path(home) {
         column.add_child(
             Text::new(friendly, ui, 12.)
                 .with_color(theme().text_muted)
                 .with_ellipsis(Cut::Start)
+                .finish(),
+        );
+    }
+
+    // The whole name, where the row had room for only its first part.
+    if let Some(remote) = &session.remote {
+        column.add_child(
+            Text::new(format!("on {}", remote.host), ui, 12.)
+                .with_color(theme().text_muted)
+                .with_ellipsis(Cut::End)
                 .finish(),
         );
     }
@@ -1044,6 +1059,38 @@ mod naming_tests {
         assert_eq!(
             working.subtitle(options).map(|line| line.text),
             Some("~/work/crook".to_owned())
+        );
+    }
+
+    /// A shell on the far side of an `ssh`: the row says which machine, and
+    /// prints the path as that machine said it — not cut down against this
+    /// machine's home, which says nothing about where the far side keeps
+    /// its own — and names the pane after it as it would a pane here.
+    #[test]
+    fn a_pane_on_another_machine_says_which_and_prints_its_path_as_that_machine_said_it() {
+        let mut session = AgentSession::new("agent 3");
+        session.set_remote(crate::tab::Remote {
+            host: "buildbox.internal.example.com".to_owned(),
+            directory: PathBuf::from("/Users/eugen/work/crook"),
+        });
+        session.running_command = Some("cargo test".to_owned());
+        let running = facts(&session);
+
+        assert_eq!(running.host(), Some("buildbox"));
+        assert_eq!(running.title(PrimaryInfo::Command).text, "cargo test");
+        assert_eq!(
+            running
+                .description(PrimaryInfo::Command)
+                .map(|line| line.text),
+            Some("/Users/eugen/work/crook".to_owned())
+        );
+
+        session.running_command = None;
+        assert_eq!(facts(&session).title(PrimaryInfo::Command).text, "crook");
+        // And a pane here says nothing about a machine.
+        assert_eq!(
+            facts(&self::session("/Users/eugen/work/crook")).host(),
+            None
         );
     }
 

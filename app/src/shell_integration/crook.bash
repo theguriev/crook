@@ -45,11 +45,28 @@ unset READLINE_LINE READLINE_POINT READLINE_MARK
 __crook_mark() { builtin printf '\e]133;%s\a' "$1"; }
 
 # Where the shell is, reported the way every terminal reads it: OSC 7. See the
-# zsh integration for why nothing else tells Crook, and why the authority is
-# left empty and both `%` and `;` are escaped. Bash cannot nest the two
-# substitutions the way zsh does, so `%` is escaped into a local first (before
-# `;`, so the `%` in `%3B` is left alone) and `;` in the result.
-__crook_cwd() { local d="${PWD//\%/%25}"; builtin printf '\e]7;file://%s\a' "${d//;/%3B}"; }
+# zsh integration for why nothing else tells Crook, why the authority is the
+# machine's name, and why both `%` and `;` are escaped in the path. Bash cannot
+# nest the two substitutions the way zsh does, so `%` is escaped into a local
+# first (before `;`, so the `%` in `%3B` is left alone) and `;` in the result.
+__crook_cwd() { local d="${PWD//\%/%25}"; builtin printf '\e]7;file://%s%s\a' "${__crook_host-}" "${d//;/%3B}"; }
+
+# The name, read once, and not `$HOSTNAME`, for the reason the zsh integration
+# gives for not trusting `$HOST`: bash takes it from the environment when it is
+# there, and Fedora's system-wide login profile exports it, so a shell started
+# after the network renamed the machine says the old name. `\H` is the name
+# bash read from the system itself when it started, and `${…@P}` (bash 4.4)
+# expands it with no command run; an older bash reads Linux's file, or runs
+# `uname` once.
+__crook_host=''
+if ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4))); then
+	__crook_host='\H'
+	__crook_host=${__crook_host@P}
+elif [ -r /proc/sys/kernel/hostname ]; then
+	builtin read -r __crook_host </proc/sys/kernel/hostname
+fi
+[ -n "$__crook_host" ] || __crook_host=$(command uname -n 2>/dev/null)
+[ -n "$__crook_host" ] || __crook_host=${HOSTNAME-}
 
 # Completion, which is the one thing the marks cannot do: they are an
 # announcement, and this is a question with an answer.

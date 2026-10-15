@@ -118,6 +118,213 @@ fn a_split_opens_where_the_focused_pane_is_working() {
     assert_eq!(directory_of(&strip, opened), Some(here));
 }
 
+/// The far side of an `ssh`, in a directory this machine has too.
+fn on_buildbox() -> Remote {
+    Remote {
+        host: "buildbox.internal.example.com".to_owned(),
+        directory: PathBuf::from("/home/eugen/work/app"),
+    }
+}
+
+#[test]
+fn a_tab_or_a_split_from_a_pane_on_another_machine_opens_where_a_new_tab_would() {
+    // This machine may well have a directory at the path the far side
+    // reported, and it is not the one the shell is in. A shell started here
+    // starts where one opened from nowhere does.
+    let mut strip = TabStrip::new();
+    let tab = strip.active_id();
+    let pane = focused_pane(&strip, tab);
+    let fresh = AgentSession::new("fresh").working_directory;
+    strip
+        .pane_mut(pane)
+        .expect("the pane is open")
+        .session_mut()
+        .set_remote(on_buildbox());
+
+    strip.apply(TabAction::New);
+    let opened = focused_pane(&strip, strip.active_id());
+    assert_eq!(directory_of(&strip, opened), fresh);
+
+    strip.apply(TabAction::Select(tab));
+    strip.apply(TabAction::Split(Direction::Right));
+    let split = focused_pane(&strip, tab);
+    assert_ne!(split, pane);
+    assert_eq!(directory_of(&strip, split), fresh);
+}
+
+#[test]
+fn a_shell_on_another_machine_leaves_its_pane_no_directory_here_until_it_comes_back() {
+    let mut session = AgentSession::new("agent 1");
+    let path = PathBuf::from("/home/eugen/work/app");
+    let home = Some(Path::new("/home/eugen"));
+    session.set_local_directory(path.clone());
+    assert_eq!(session.shown_path(home).as_deref(), Some("~/work/app"));
+
+    session.set_remote(on_buildbox());
+    assert_eq!(session.working_directory, None);
+    assert_eq!(session.shown_directory(), Some(path.as_path()));
+    assert_eq!(
+        session.shown_path(home).as_deref(),
+        Some("/home/eugen/work/app"),
+        "this machine's home says nothing of where the far side keeps its own"
+    );
+    assert_eq!(session.directory_label(home).as_deref(), Some("app"));
+
+    session.set_local_directory(path.clone());
+    assert_eq!(session.remote, None);
+    assert_eq!(session.working_directory, Some(path));
+}
+
+mod remote_hosts {
+    use super::super::remote::{names_of, names_this_machine, short_host};
+    use super::*;
+
+    #[test]
+    fn a_report_naming_this_machine_or_none_is_this_machine_s() {
+        let directory = PathBuf::from("/tmp");
+        let here = gethostname::gethostname().to_string_lossy().into_owned();
+        let shouted = here.to_uppercase();
+        let mut local = vec![None, Some("localhost"), Some("LocalHost")];
+        // A machine with no name has nothing for a shell to say but nothing.
+        if !here.is_empty() {
+            local.extend([Some(here.as_str()), Some(shouted.as_str())]);
+        }
+        for host in local {
+            assert_eq!(
+                Remote::reported(host, directory.clone()),
+                None,
+                "{host:?} was taken for another machine"
+            );
+        }
+
+        assert_eq!(
+            Remote::reported(Some("buildbox.invalid"), directory.clone()),
+            Some(Remote {
+                host: "buildbox.invalid".to_owned(),
+                directory,
+            })
+        );
+    }
+
+    #[test]
+    fn a_name_nothing_knows_is_asked_about_again_and_every_name_is_kept() {
+        let mut known = Vec::new();
+        let renamed = || vec!["laptop-2.lan".to_owned()];
+        let unasked = || -> Vec<String> { panic!("asked about a name it knew") };
+
+        assert!(names_this_machine("laptop", &mut known, || vec![
+            "laptop".to_owned()
+        ]));
+        assert!(names_this_machine("LAPTOP", &mut known, unasked));
+        // The machine took another name on another network, and a shell
+        // started since says that one.
+        assert!(names_this_machine("laptop-2.lan", &mut known, renamed));
+        // One started before the move still says the old one.
+        assert!(names_this_machine("laptop", &mut known, unasked));
+        // Another machine is asked about, and is not this one.
+        assert!(!names_this_machine("buildbox", &mut known, renamed));
+        assert_eq!(known, ["laptop", "laptop-2.lan"]);
+
+        assert!(names_this_machine("localhost", &mut Vec::new(), unasked));
+    }
+
+    #[test]
+    fn a_name_is_this_machine_s_by_its_first_label_but_an_address_is_not() {
+        // A startup file that set `HOST=$(hostname -s)`, and a Mac that is
+        // `eugens-mbp.local` to itself: taken for another machine, a shell
+        // here would lose every git fact on its row.
+        let mut known = vec!["Eugens-MBP.local".to_owned()];
+        let nothing_new = || vec!["Eugens-MBP.local".to_owned()];
+        assert!(names_this_machine("eugens-mbp", &mut known, nothing_new));
+        assert!(names_this_machine(
+            "eugens-mbp.lan",
+            &mut known,
+            nothing_new
+        ));
+        assert!(!names_this_machine(
+            "buildbox.local",
+            &mut known,
+            nothing_new
+        ));
+
+        let mut known = vec!["10.0.0.5".to_owned()];
+        let nothing_new = || vec!["10.0.0.5".to_owned()];
+        assert!(names_this_machine("10.0.0.5", &mut known, nothing_new));
+        assert!(!names_this_machine("10.0.0.7", &mut known, nothing_new));
+        assert!(!names_this_machine("10", &mut known, nothing_new));
+    }
+
+    #[test]
+    fn an_address_that_means_this_machine_to_whoever_says_it_is_this_machine() {
+        // `HOST=0.0.0.0` for a dev server, and Debian's `127.0.1.1` for the
+        // machine's own name: whatever shell wrote one, it is a shell here.
+        let unasked = || -> Vec<String> { panic!("asked about an address that means here") };
+        for host in [
+            "127.0.0.1",
+            "127.0.1.1",
+            "::1",
+            "[::1]",
+            "0.0.0.0",
+            "::",
+            "[::]",
+        ] {
+            assert!(
+                names_this_machine(host, &mut Vec::new(), unasked),
+                "{host} was taken for another machine"
+            );
+        }
+        let elsewhere = || vec!["laptop".to_owned()];
+        for host in ["10.0.0.7", "[fe80::1]", "128.0.0.1"] {
+            assert!(
+                !names_this_machine(host, &mut Vec::new(), elsewhere),
+                "{host} was taken for this machine"
+            );
+        }
+    }
+
+    #[test]
+    fn the_names_crook_was_started_with_are_this_machine_s() {
+        // Every shell Crook starts inherits `$HOST` and `$HOSTNAME`, and an
+        // integration that writes one into its URL writes whatever it holds:
+        // a conda environment's target triple, or the name the machine had
+        // at login. Neither is another machine.
+        let inherited = |variable: &str| match variable {
+            "HOST" => Some("x86_64-apple-darwin13.4.0".to_owned()),
+            "HOSTNAME" => Some(String::new()),
+            _ => None,
+        };
+        let names = names_of("laptop".to_owned(), inherited);
+        assert_eq!(names, ["laptop", "x86_64-apple-darwin13.4.0"]);
+
+        let mut known = Vec::new();
+        let ask = || names_of("laptop".to_owned(), inherited);
+        assert!(names_this_machine(
+            "x86_64-apple-darwin13.4.0",
+            &mut known,
+            ask
+        ));
+        assert!(!names_this_machine("buildbox", &mut known, ask));
+    }
+
+    #[test]
+    fn a_host_is_shortened_the_way_a_prompt_shortens_it() {
+        for (host, short) in [
+            ("buildbox", "buildbox"),
+            ("buildbox.internal.example.com", "buildbox"),
+            ("eugen@buildbox.lan", "eugen@buildbox"),
+            ("first.last@buildbox.lan", "first.last@buildbox"),
+            // An address is not a name with a domain after it.
+            ("10.0.0.5", "10.0.0.5"),
+            ("eugen@10.0.0.5", "eugen@10.0.0.5"),
+            ("::1", "::1"),
+            ("[fe80::1]", "[fe80::1]"),
+            (".hidden", ".hidden"),
+        ] {
+            assert_eq!(short_host(host), short, "{host}");
+        }
+    }
+}
+
 #[test]
 fn a_new_group_with_a_tab_that_is_not_active_opens_where_that_tab_is_working() {
     // A tab opened into the group of one the keyboard is not in belongs with

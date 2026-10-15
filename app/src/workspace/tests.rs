@@ -21109,6 +21109,111 @@ mod shells {
         }
 
         #[test]
+        fn a_block_that_ran_on_another_machine_offers_no_branch_from_this_one() {
+            // `ssh buildbox` from a checkout, into a server laid out the same
+            // way, and a command run there. The block is filed under the path
+            // the far side reported, which is this machine's checkout too, and
+            // its menu read this machine's branch there and offered to copy
+            // it as the branch the command ran on.
+            use crate::shell_integration::{Marks, Shell, Standing};
+            if matches!(Standing::current().marks, Marks::Installed(Shell::Fish)) {
+                // The line below that moves the shell is not fish's.
+                return;
+            }
+            let scratch = Scratch::new();
+            let checkout = scratch.path().join("checkout");
+            fs::create_dir_all(checkout.join(".git")).unwrap();
+            fs::write(
+                checkout.join(".git").join("HEAD"),
+                "ref: refs/heads/laptop-branch\n",
+            )
+            .unwrap();
+
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            run(&mut harness, pane, &format!("cd '{}'", checkout.display()));
+            let index_of = |harness: &Harness, command: &str| {
+                harness
+                    .workspace
+                    .read(&harness.app, |workspace, app| {
+                        workspace
+                            .terminal_blocks(pane, app)?
+                            .iter()
+                            .position(|block| block.command.as_deref() == Some(command))
+                    })
+                    .unwrap_or_else(|| panic!("no block ran {command:?}"))
+            };
+            let menu_facts = |harness: &Harness| {
+                harness.workspace.read(&harness.app, |workspace, _| {
+                    let menu = workspace.block_menu();
+                    (menu.branch.clone(), menu.directory.clone(), menu.elsewhere)
+                })
+            };
+
+            // Here first, so a menu that offers no branch below is one that
+            // declined to read it rather than one that could not.
+            run(&mut harness, pane, "echo HERE");
+            let index = index_of(&harness, "echo HERE");
+            open_block_menu(&mut harness, pane, index);
+            let (branch, directory, elsewhere) = menu_facts(&harness);
+            assert_eq!(branch.as_deref(), Some("laptop-branch"));
+            assert!(
+                !elsewhere,
+                "a block that ran here was taken for one elsewhere"
+            );
+            let here = directory.expect("the block was filed under the checkout");
+            harness.press("escape", Modifiers::default(), "\x1b");
+
+            // The shell says from here on that it is on another machine, the
+            // way the snippet does on the far side of an `ssh`, in the same
+            // directory.
+            run(&mut harness, pane, "__crook_host=buildbox.invalid");
+            run(&mut harness, pane, "echo THERE");
+            let index = index_of(&harness, "echo THERE");
+            let scene = open_block_menu(&mut harness, pane, index);
+            let (branch, directory, elsewhere) = menu_facts(&harness);
+            assert!(
+                elsewhere,
+                "the block that ran on buildbox was taken for one here"
+            );
+            assert_eq!(
+                branch, None,
+                "the menu offers this machine's branch for a command that ran on another"
+            );
+            assert_eq!(
+                directory,
+                Some(here),
+                "the directory to copy is still the one the shell said"
+            );
+            assert!(
+                frame_text(&scene).contains("Copy git branch"),
+                "the row is gone rather than inert"
+            );
+            harness.press("escape", Modifiers::default(), "\x1b");
+
+            // And the chord, with no menu up, which reads the branch itself.
+            let Some((clipboard, _system)) = working_clipboard(&harness) else {
+                return;
+            };
+            clipboard.write("nothing yet");
+            harness.run_command("crook/window/select-block-up");
+            harness.run_command("crook/window/copy-block-branch");
+            assert_eq!(
+                clipboard.read().as_deref(),
+                Some("nothing yet"),
+                "the chord copied this machine's branch for a command that ran on another"
+            );
+            // The block above it is the line that moved the shell, which ran
+            // here, and the same chord copies the branch for it.
+            harness.run_command("crook/window/select-block-up");
+            harness.run_command("crook/window/copy-block-branch");
+            assert_eq!(clipboard.read().as_deref(), Some("laptop-branch"));
+        }
+
+        #[test]
         fn escape_takes_the_block_menu_down() {
             // Every modal popup in the window answers Escape, and the workspace
             // claims the key before the pane under it can type one.
@@ -35667,6 +35772,37 @@ mod changes_column {
     }
 
     #[test]
+    fn a_pane_on_another_machine_is_said_to_be_there_and_nothing_here_is_read() {
+        // The column reads this machine's repositories. The far side's path
+        // names one of them only by accident, and the column used to say the
+        // pane had not said where it was, which it had.
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        let update = crate::terminal_model::TerminalUpdate::RemoteDirectory(
+            pane,
+            crate::tab::Remote {
+                host: "buildbox.internal".to_owned(),
+                directory: PathBuf::from("/work/repo"),
+            },
+        );
+        harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(&update, ctx));
+
+        harness.run_command("crook/changes/toggle");
+        let lines = column_lines(&harness.frame());
+        assert!(
+            lines
+                .iter()
+                .any(|(_, line)| line.contains("working on buildbox.internal")),
+            "the column does not say where the pane is: {lines:?}"
+        );
+        assert_eq!(changes_target(&harness), None);
+        assert!(
+            !looking_for(&harness, Path::new("/work/repo")),
+            "the column looks for a checkout here at the far side's path"
+        );
+    }
+
+    #[test]
     fn the_command_puts_the_column_beside_the_work_and_takes_it_away_again() {
         // A directory in no repository, so the column's read answers at once
         // and nothing here depends on the machine's git.
@@ -38954,6 +39090,201 @@ mod dropping_files {
             harness.field_text(pane),
             "",
             "the drop went into the composer the grid had taken the place of"
+        );
+    }
+}
+
+mod remote_panes {
+    //! A pane whose shell is on another machine: the far side of an `ssh`
+    //! that reports its directory with the host it is on.
+
+    use super::*;
+    use crate::tab::Remote;
+    use crate::terminal_model::TerminalUpdate;
+
+    /// The pane's shell said it is in `directory` on `host`, the way OSC 7
+    /// from the far side of an `ssh` does.
+    fn move_pane_to(harness: &mut Harness, pane: PaneId, host: &str, directory: &Path) {
+        let update = TerminalUpdate::RemoteDirectory(
+            pane,
+            Remote {
+                host: host.to_owned(),
+                directory: directory.to_owned(),
+            },
+        );
+        harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(&update, ctx));
+    }
+
+    /// The directories git is asked about.
+    fn tracked(harness: &Harness) -> Vec<PathBuf> {
+        harness.workspace.read(&harness.app, |workspace, app| {
+            workspace.git().as_ref(app).tracked()
+        })
+    }
+
+    #[test]
+    fn a_pane_on_another_machine_reads_nothing_here_at_the_path_it_reported() {
+        // `ssh buildbox` from a checkout, into a server laid out the same
+        // way. The path the far side reports is this machine's checkout
+        // too, and the row, a plugin's Where and the next tab all read it:
+        // this machine's branch and diff counts for the server's shell.
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        let checkout = PathBuf::from(DIRECTORY);
+        harness.set_options(TabOptions {
+            density: Density::Expanded,
+            show_diff_stats: true,
+            primary_info: PrimaryInfo::Command,
+            ..harness.options()
+        });
+        move_pane(&mut harness, pane, &checkout);
+        harness.record_git(pane, BRANCH, Some(seeded_diff()));
+        let text = strip_text(&harness.frame());
+        assert!(
+            text.contains(BRANCH) && text.contains("+12"),
+            "the row never showed this machine's checkout: {text}"
+        );
+
+        move_pane_to(&mut harness, pane, "buildbox.internal", &checkout);
+
+        let text = strip_text(&harness.frame());
+        assert!(
+            !text.contains(BRANCH) && !text.contains("+12"),
+            "the row shows this machine's checkout for a shell on another: {text}"
+        );
+        assert!(
+            text.contains("buildbox"),
+            "the row does not say which machine the pane is on: {text}"
+        );
+        assert!(
+            !text.contains("buildbox.internal"),
+            "the row spells out the whole name the card has room for: {text}"
+        );
+        assert_eq!(
+            tracked(&harness),
+            Vec::<PathBuf>::new(),
+            "git is still asked about the path"
+        );
+        harness.workspace.read(&harness.app, |workspace, app| {
+            assert_eq!(
+                workspace.git().as_ref(app).facts(&checkout),
+                None,
+                "what git said about this machine's checkout is still kept"
+            );
+            assert_eq!(
+                workspace.focused_facts(app),
+                (None, None),
+                "a plugin asking Where is told this machine's checkout"
+            );
+        });
+
+        // A new tab from it starts where one from nowhere would.
+        harness.dispatch_action(TabAction::New);
+        let opened = harness.focused_pane_id().expect("the new tab has a pane");
+        assert_eq!(
+            harness.working_directory(opened),
+            AgentSession::new("fresh").working_directory,
+            "the new tab opened in this machine's copy of the far side's directory"
+        );
+
+        // And back on this machine, the same path is this machine's again.
+        move_pane(&mut harness, pane, &checkout);
+        assert!(tracked(&harness).contains(&checkout));
+        assert_eq!(harness.working_directory(pane), Some(checkout));
+    }
+
+    #[test]
+    fn a_pane_on_another_machine_shows_none_of_the_checkout_a_pane_here_has_at_its_path() {
+        // One tab here in the checkout and one on the build server in the
+        // same path, which is the case the facts being kept by path makes
+        // worst: what git said about this machine's checkout is in the model
+        // for the pane here, and a row that looked it up by path found it.
+        let mut harness = Harness::new(2);
+        harness.set_options(TabOptions {
+            density: Density::Expanded,
+            show_diff_stats: true,
+            primary_info: PrimaryInfo::Command,
+            ..harness.options()
+        });
+        let [here_tab, there_tab] = harness.tab_ids()[..] else {
+            panic!("two tabs were asked for");
+        };
+        let here = harness.panes_of(here_tab)[0];
+        let there = harness.panes_of(there_tab)[0];
+        let checkout = PathBuf::from(DIRECTORY);
+        move_pane(&mut harness, here, &checkout);
+        harness.record_git(here, BRANCH, Some(seeded_diff()));
+        move_pane_to(&mut harness, there, "buildbox", &checkout);
+
+        let text = strip_text(&harness.frame());
+        assert_eq!(
+            text.matches(BRANCH).count(),
+            1,
+            "the pane on buildbox shows this machine's branch: {text}"
+        );
+        assert_eq!(text.matches("+12").count(), 1, "{text}");
+
+        // Its menu offers none of this machine's worktrees either.
+        harness.open_tab_menu_on(there_tab, there);
+        assert!(
+            !tab_menu_offers(&harness.frame(), "Worktrees"),
+            "the pane on buildbox was offered this machine's worktrees"
+        );
+    }
+
+    #[test]
+    fn the_output_of_a_pane_on_another_machine_names_no_file_here() {
+        // What the pane's grid and the command still running in it read the
+        // paths they print against. A pane over there has no directory here,
+        // and was read as a shell that never said one: no relative path was
+        // a link, but `~/…` was read against this machine's home and an
+        // absolute path as it is, which opened this machine's files.
+        use crate::pane_link::PathsOn;
+        use crate::workspace::body::pane_paths;
+
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        let checkout = PathBuf::from(DIRECTORY);
+        let paths = |harness: &Harness| {
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| pane_paths(workspace, pane))
+        };
+
+        move_pane(&mut harness, pane, &checkout);
+        assert_eq!(
+            paths(&harness),
+            PathsOn::ThisMachine(Some(checkout.clone()))
+        );
+
+        move_pane_to(&mut harness, pane, "buildbox.internal", &checkout);
+        assert_eq!(
+            paths(&harness),
+            PathsOn::AnotherMachine,
+            "the paths a pane on buildbox prints are read as this machine's"
+        );
+
+        move_pane(&mut harness, pane, &checkout);
+        assert_eq!(paths(&harness), PathsOn::ThisMachine(Some(checkout)));
+    }
+
+    #[test]
+    fn a_pane_on_another_machine_is_saved_with_the_machine() {
+        // So that a restore does not start a shell here in the far side's
+        // directory: see `PaneSnapshot::remote_host`.
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        let checkout = PathBuf::from(DIRECTORY);
+        move_pane_to(&mut harness, pane, "buildbox", &checkout);
+
+        let session = harness.workspace.read(&harness.app, |workspace, _| {
+            crate::session::Session::of(workspace.tabs(), None)
+        });
+        let written = &session.tabs[0].panes[0];
+        assert_eq!(written.remote_host.as_deref(), Some("buildbox"));
+        assert_eq!(
+            written.working_directory.as_deref(),
+            Some(checkout.as_path())
         );
     }
 }

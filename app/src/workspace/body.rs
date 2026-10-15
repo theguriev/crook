@@ -78,7 +78,6 @@
 //! "no shell" is a much worse answer than "the login shell is not executable".
 
 use std::cell::RefCell;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -98,6 +97,7 @@ use crate::input_keys::Platform;
 use crate::keybindings::format_chord;
 use crate::pane_blocks::PaneBlocks;
 use crate::pane_find;
+use crate::pane_link::PathsOn;
 use crate::pane_split::{DividerDrag, Drag, PaneExtent};
 use crate::pane_surface::{self, Surface};
 use crate::tab::{Pane, PaneId, SplitAxis, TabAction};
@@ -719,7 +719,7 @@ fn blocks(
                 interaction.selection.clone(),
                 workspace.clipboard().clone(),
             )
-            .with_links(interaction.links.clone(), pane_directory(workspace, pane))
+            .with_links(interaction.links.clone(), pane_paths(workspace, pane))
             .with_composition(interaction.composition.clone());
     }
     let list = list.finish();
@@ -777,12 +777,15 @@ fn blocks(
 }
 
 /// Where a pane's shell last said it was, which a path its output prints is
-/// read against. Off the session, never off the disk.
-fn pane_directory(workspace: &Workspace, pane: PaneId) -> Option<PathBuf> {
-    workspace
-        .tabs()
-        .pane(pane)
-        .and_then(|pane| pane.session().working_directory.clone())
+/// read against — or, for a shell on another machine, which it names a file
+/// on. Off the session, never off the disk.
+pub(super) fn pane_paths(workspace: &Workspace, pane: PaneId) -> PathsOn {
+    match workspace.tabs().pane(pane).map(Pane::session) {
+        Some(session) if session.remote.is_some() => PathsOn::AnotherMachine,
+        session => {
+            PathsOn::ThisMachine(session.and_then(|session| session.working_directory.clone()))
+        }
+    }
 }
 
 /// Floats a find bar over the top-right of a pane's output.
@@ -848,7 +851,7 @@ fn grid(
                 interaction.selection.clone(),
                 workspace.clipboard().clone(),
             )
-            .with_links(interaction.links.clone(), pane_directory(workspace, pane))
+            .with_links(interaction.links.clone(), pane_paths(workspace, pane))
             .with_composition(interaction.composition.clone());
     }
     if let Some((showing, current)) = on_screen {

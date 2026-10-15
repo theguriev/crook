@@ -162,7 +162,7 @@ use crookui_core::prelude::*;
 use crate::completion::{self, Completions};
 use crate::pane_surface;
 use crate::shell_integration;
-use crate::tab::{AgentStatus, PaneId};
+use crate::tab::{AgentStatus, PaneId, Remote};
 use crate::theme::theme;
 
 /// What [`TerminalHandle::paste_bracketed`] came to.
@@ -306,10 +306,14 @@ pub enum TerminalUpdate {
     /// The shell set a window title, or reset it. This is what makes a tab of
     /// shells rename itself with no rename plumbing at all.
     Title(PaneId, Option<String>),
-    /// The shell reported where it is, with OSC 7. Every git fact a row shows
-    /// is looked up by this, so it is also what makes the branch chip follow a
-    /// `cd`.
+    /// The shell reported where it is, with OSC 7, on this machine. Every git
+    /// fact a row shows is looked up by this, so it is also what makes the
+    /// branch chip follow a `cd`.
     WorkingDirectory(PaneId, PathBuf),
+    /// The shell reported where it is on another machine: OSC 7 named a host
+    /// that is not this one, which is what a shell on the far side of an
+    /// `ssh` does. Nothing on this machine is read by it — see [`Remote`].
+    RemoteDirectory(PaneId, Remote),
     /// What the pane is running, or `None` once it went back to a prompt.
     ///
     /// The command line off the open block, which the shell integration's
@@ -621,8 +625,9 @@ struct Session {
     snapshot: Arc<Snapshot>,
     /// What the shell last called itself, so a title set twice notifies once.
     title: Option<String>,
-    /// Where the shell last said it was, for the same reason.
-    directory: Option<PathBuf>,
+    /// Where the shell last said it was, and on which host, for the same
+    /// reason.
+    directory: Option<(Option<String>, PathBuf)>,
     /// What it was last running, for the same reason again.
     running: Option<String>,
     /// The secret this pane's shell was handed for the control socket, and
@@ -1286,10 +1291,15 @@ impl TerminalModel {
                         updates.push(TerminalUpdate::Title(pane, title));
                     }
                 }
-                TerminalEvent::WorkingDirectory(directory) => {
-                    if session.directory.as_ref() != Some(&directory) {
-                        session.directory = Some(directory.clone());
-                        updates.push(TerminalUpdate::WorkingDirectory(pane, directory));
+                TerminalEvent::WorkingDirectory { host, path } => {
+                    let place = (host, path);
+                    if session.directory.as_ref() != Some(&place) {
+                        let (host, path) = place.clone();
+                        session.directory = Some(place);
+                        updates.push(match Remote::reported(host.as_deref(), path.clone()) {
+                            Some(remote) => TerminalUpdate::RemoteDirectory(pane, remote),
+                            None => TerminalUpdate::WorkingDirectory(pane, path),
+                        });
                     }
                 }
                 TerminalEvent::ChildExited(exit) => {

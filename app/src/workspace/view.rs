@@ -300,6 +300,11 @@ pub struct BlockMenuState {
     pub(super) output_from: Option<usize>,
     /// Where the shell was when the block opened.
     pub(crate) directory: Option<PathBuf>,
+    /// Whether that directory is on another machine: the block ran on the
+    /// far side of an `ssh`, and its shell said so. The path is still copied
+    /// as the shell said it, and nothing on this machine is read by it — not
+    /// the branch, and not a plugin's place.
+    pub(crate) elsewhere: bool,
     /// The command line the block ran, when it has one.
     pub(crate) command: Option<String>,
     /// The status the shell reported for it, when it reported one.
@@ -392,6 +397,9 @@ struct BlockFacts {
     command: Option<String>,
     /// Where the shell was when the block opened, when it said.
     directory: Option<std::path::PathBuf>,
+    /// Whether that is a directory on another machine, as
+    /// [`BlockMenuState::elsewhere`] is.
+    elsewhere: bool,
     /// Which of the block's rows the command's own output starts on.
     output_from: Option<usize>,
 }
@@ -2867,6 +2875,7 @@ impl Workspace {
         // so to anything outside it. Read once per opening rather than on the
         // render path, where the button would read it every frame.
         let editor = Editor::from_environment();
+        self.changes.set_elsewhere(self.changes_elsewhere());
         if let Some(directory) =
             self.changes
                 .open(self.changes_tab(), self.changes_directory(), editor)
@@ -2897,6 +2906,16 @@ impl Workspace {
             .and_then(|pane| pane.session().working_directory.clone())
     }
 
+    /// The machine the focused pane is on, when that is not this one: where
+    /// the Changes column has no directory to read, and says so.
+    fn changes_elsewhere(&self) -> Option<String> {
+        self.tabs
+            .focused_pane_id()
+            .and_then(|pane| self.tabs.pane(pane))
+            .and_then(|pane| pane.session().remote.as_ref())
+            .map(|remote| remote.host.clone())
+    }
+
     /// The tab the Changes column is about: the one in front, whose focused
     /// pane it follows.
     fn changes_tab(&self) -> Option<TabId> {
@@ -2925,9 +2944,14 @@ impl Workspace {
         }
         let directory = self.changes_directory();
         let tab = self.changes_tab();
-        if directory == self.changes.directory && tab == self.changes.tab() {
+        let elsewhere = self.changes_elsewhere();
+        if directory == self.changes.directory
+            && tab == self.changes.tab()
+            && elsewhere == self.changes.elsewhere
+        {
             return;
         }
+        self.changes.set_elsewhere(elsewhere);
         if let Some(directory) = self.changes.follow(tab, directory) {
             self.look_for_checkout(directory, ctx);
         }
@@ -5877,6 +5901,7 @@ impl Workspace {
             return;
         };
         let directory = found.working_directory.clone();
+        let elsewhere = !crate::tab::on_this_machine(found.working_host.as_deref());
         let command = found.command.clone();
         let exit = found.exit;
         let output_from = found.output_from;
@@ -5891,8 +5916,13 @@ impl Workspace {
         // Cheap enough to do here — it walks up for `.git` and reads one small
         // file, and spawns nothing — which is why it is not a background task
         // whose answer would arrive after the menu was drawn.
+        //
+        // None for a block that ran on another machine: the path is a
+        // directory there, and this machine's checkout at the same path is
+        // not the one the command ran against.
         self.block_menu.branch = directory
             .as_deref()
+            .filter(|_| !elsewhere)
             .and_then(crate::git::current_branch)
             .map(|head| head.label().to_owned());
         self.block_menu.on = Some((pane, block));
@@ -5920,6 +5950,7 @@ impl Workspace {
             view.set_menu_at(None);
         }
         self.block_menu.directory = directory;
+        self.block_menu.elsewhere = elsewhere;
         self.block_menu.command = command;
         self.block_menu.exit = exit;
         self.block_menu.output_from = output_from;
@@ -5937,6 +5968,7 @@ impl Workspace {
         self.block_menu.on = None;
         self.block_menu.branch = None;
         self.block_menu.directory = None;
+        self.block_menu.elsewhere = false;
         self.block_menu.command = None;
         self.block_menu.exit = None;
         self.block_menu.output_from = None;
@@ -5970,6 +6002,7 @@ impl Workspace {
         Some(BlockFacts {
             command: found.command.clone(),
             directory: found.working_directory.clone(),
+            elsewhere: !crate::tab::on_this_machine(found.working_host.as_deref()),
             output_from: found.output_from,
         })
     }
@@ -6011,10 +6044,12 @@ impl Workspace {
             // The branch of the directory the *block* ran in. Taken from the
             // menu while one is up, because it read it when it opened and a
             // second walk could answer differently; worked out here otherwise,
-            // which is the same walk `open_block_menu` does.
+            // which is the same walk `open_block_menu` does — and, as there,
+            // none for a block that ran on another machine.
             BlockPart::Branch => match self.block_menu.on {
                 Some(_) => self.block_menu.branch.clone(),
                 None => facts
+                    .filter(|facts| !facts.elsewhere)
                     .and_then(|facts| facts.directory)
                     .as_deref()
                     .and_then(crate::git::current_branch)
@@ -9078,7 +9113,7 @@ impl Workspace {
             TerminalUpdate::WorkingDirectory(pane, directory) => {
                 let directory = directory.clone();
                 let reported = self.update_session(*pane, ctx, |session| {
-                    session.working_directory = Some(directory);
+                    session.set_local_directory(directory);
                 });
                 // Where the shells are is what the next window opens in, and
                 // a `cd` moves no tab: without this the file said where each
@@ -9089,6 +9124,25 @@ impl Workspace {
                     // Into a directory another pane already shows, the git
                     // model has nothing new to read and says nothing; the
                     // branch a pull request goes with is asked here instead.
+                    self.forget_moved_pull_requests();
+                }
+                reported
+            }
+            // Through the same `update_session`, which is what takes the pane
+            // off this machine: the git model stops tracking a directory no
+            // pane has here, the Changes column lets go of it, and a lock this
+            // window took on a checkout it was in comes off as a `cd` out of
+            // it would take it.
+            TerminalUpdate::RemoteDirectory(pane, remote) => {
+                let remote = remote.clone();
+                let reported = self.update_session(*pane, ctx, |session| {
+                    session.set_remote(remote);
+                });
+                // Saved, so the file says the directory is another machine's
+                // and a restore does not start a shell in this one's: see
+                // `PaneSnapshot::remote_host`.
+                if reported {
+                    self.save_session(ctx);
                     self.forget_moved_pull_requests();
                 }
                 reported

@@ -200,7 +200,19 @@ pub struct Block {
     /// a bare `D`, an empty line, a block closed by the next prompt arriving.
     pub exit: Option<i32>,
     /// Where the shell said it was when the block opened, if it had said.
+    ///
+    /// On the machine [`Self::working_host`] names, which may not be this
+    /// one.
     pub working_directory: Option<PathBuf>,
+    /// The host the shell named with [`Self::working_directory`], as its
+    /// OSC 7 named it: `None` when it named none.
+    ///
+    /// The directory is a path on that machine. A shell on the far side of an
+    /// `ssh` reports one there, and a pane's blocks can come from both sides
+    /// of one: the `ssh` itself ran here, and what was typed after it ran
+    /// there. Which hosts are this machine is not this crate's to say — see
+    /// the application's `tab::Remote`.
+    pub working_host: Option<String>,
     /// When the command started running, which is the `C` mark or the submit.
     ///
     /// `None` when nothing ran: an empty line, typed or submitted, which a
@@ -393,6 +405,25 @@ pub struct Finished {
     /// Not the status. bash 3.2 reports a bare `D` for a `( … )` line, which
     /// did run, and its command line is what says so.
     pub ran: bool,
+}
+
+/// Where the shell last said it was, as a block is filed under it: the
+/// directory, and the host its OSC 7 named with it.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Whereabouts<'a> {
+    directory: &'a Path,
+    host: Option<&'a str>,
+}
+
+impl<'a> Whereabouts<'a> {
+    /// The pair, or `None` when the shell has not said where it is: a host
+    /// with no directory is nowhere a block can be filed under.
+    pub(crate) fn of(directory: Option<&'a Path>, host: Option<&'a str>) -> Option<Self> {
+        Some(Self {
+            directory: directory?,
+            host,
+        })
+    }
 }
 
 /// What the block model is being told. The columns of [`TABLE`].
@@ -636,6 +667,8 @@ struct OpenBlock {
     output_start: Option<Anchor>,
     command: Option<String>,
     working_directory: Option<PathBuf>,
+    /// The host the shell named with [`Self::working_directory`].
+    working_host: Option<String>,
     started_at: Option<Instant>,
     /// The pictures printed in it, each anchored to the cell its top-left
     /// corner is on so it scrolls with the rows it covers. The placement's
@@ -694,6 +727,7 @@ impl BlockTracker {
                 output_start: None,
                 command: None,
                 working_directory: None,
+                working_host: None,
                 started_at: None,
                 images: Vec::new(),
                 reflowed: false,
@@ -844,7 +878,7 @@ impl BlockTracker {
         mark: ShellMark,
         term: &mut Term<T>,
         palette: &Palette,
-        working_directory: Option<&Path>,
+        whereabouts: Option<Whereabouts<'_>>,
     ) -> Option<Finished> {
         let signal = match mark {
             ShellMark::PromptStart(PromptKind::Initial) => Signal::PromptStart,
@@ -857,7 +891,7 @@ impl BlockTracker {
             ShellMark::CommandFinished(status) => status,
             _ => None,
         };
-        self.apply(signal, exit, None, term, palette, working_directory)
+        self.apply(signal, exit, None, term, palette, whereabouts)
     }
 
     /// Records that a command line has been handed to the shell.
@@ -869,7 +903,7 @@ impl BlockTracker {
         command: &str,
         term: &mut Term<T>,
         palette: &Palette,
-        working_directory: Option<&Path>,
+        whereabouts: Option<Whereabouts<'_>>,
     ) {
         // A submit opens a block; only the shell reporting `D` closes one with
         // a status, so there is never anything here to announce.
@@ -879,7 +913,7 @@ impl BlockTracker {
             Some(command),
             term,
             palette,
-            working_directory,
+            whereabouts,
         );
     }
 
@@ -888,11 +922,11 @@ impl BlockTracker {
         &mut self,
         term: &mut Term<T>,
         palette: &Palette,
-        working_directory: Option<&Path>,
+        whereabouts: Option<Whereabouts<'_>>,
     ) {
         // A session ending closes the open block without the shell reporting
         // on it, which is not a command finishing.
-        let _ = self.apply(Signal::Exit, None, None, term, palette, working_directory);
+        let _ = self.apply(Signal::Exit, None, None, term, palette, whereabouts);
     }
 
     /// Re-finds the open block's first row, because a column change has
@@ -1233,7 +1267,7 @@ impl BlockTracker {
         command: Option<&str>,
         term: &mut Term<T>,
         palette: &Palette,
-        working_directory: Option<&Path>,
+        whereabouts: Option<Whereabouts<'_>>,
     ) -> Option<Finished> {
         // Block tracking is suspended on the alternate screen outright: the
         // marks a TUI emits belong to whatever it is displaying, not to the
@@ -1324,8 +1358,10 @@ impl BlockTracker {
                 // "where was this run" is the directory it was typed in.
                 if matches!(state, BlockState::Submitted | BlockState::Executing)
                     && self.open.working_directory.is_none()
+                    && let Some(whereabouts) = whereabouts
                 {
-                    self.open.working_directory = working_directory.map(Path::to_path_buf);
+                    self.open.working_directory = Some(whereabouts.directory.to_path_buf());
+                    self.open.working_host = whereabouts.host.map(str::to_owned);
                 }
                 // `C` is the one moment anything knows where the echo of the
                 // command ends and the command's own output begins: the shell
@@ -1351,7 +1387,7 @@ impl BlockTracker {
                     _ => None,
                 };
                 self.close(BlockState::Done, exit, term, palette);
-                self.reopen(state, term, working_directory);
+                self.reopen(state, term, whereabouts);
                 // Only the shell saying so. A block also closes when the next
                 // prompt arrives or the session ends, and neither of those is
                 // a command reporting how it went — announcing them as one
@@ -1367,7 +1403,7 @@ impl BlockTracker {
             }
             Transition::Terminate => {
                 self.close(BlockState::Terminated, exit, term, palette);
-                self.reopen(BlockState::Terminated, term, working_directory);
+                self.reopen(BlockState::Terminated, term, whereabouts);
             }
         }
         self.last_ignored = None;
@@ -1444,6 +1480,7 @@ impl BlockTracker {
                 command: self.open.command.take(),
                 exit,
                 working_directory: self.open.working_directory.take(),
+                working_host: self.open.working_host.take(),
                 started_at: self.open.started_at,
                 finished_at: Some(Instant::now()),
                 rows,
@@ -1489,7 +1526,7 @@ impl BlockTracker {
         &mut self,
         state: BlockState,
         term: &mut Term<T>,
-        working_directory: Option<&Path>,
+        whereabouts: Option<Whereabouts<'_>>,
     ) {
         // Where the shell will print next, which is the cursor's own row when
         // it is at column zero and the row after it otherwise. Not the row
@@ -1528,7 +1565,8 @@ impl BlockTracker {
             command_start: None,
             output_start: None,
             command: None,
-            working_directory: working_directory.map(Path::to_path_buf),
+            working_directory: whereabouts.map(|at| at.directory.to_path_buf()),
+            working_host: whereabouts.and_then(|at| at.host).map(str::to_owned),
             started_at: None,
             images: Vec::new(),
             reflowed: false,

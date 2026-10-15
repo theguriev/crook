@@ -1155,6 +1155,82 @@ fn an_agent_whose_directory_is_gone_comes_back_offering_nothing() {
 }
 
 #[test]
+fn a_pane_on_another_machine_is_written_with_it_and_comes_back_as_a_shell_on_this_one() {
+    // The far side of an ssh, in a directory this machine has too, running
+    // an agent there. The file says where the shell was and on which
+    // machine. What comes back is a new shell here, so neither the far
+    // side's directory nor its agent is the pane's: the directory here is
+    // this machine's checkout of something, and the conversation is on the
+    // other machine with the shell that had it.
+    let directory = scratch("remote-pane");
+    let path = directory.join("session.json");
+    let mut strip = running(&[(&directory, Some("claude"))]);
+    let pane = strip.focused_pane_id().expect("a pane");
+    strip
+        .pane_mut(pane)
+        .expect("the pane is open")
+        .session_mut()
+        .set_remote(crate::tab::Remote {
+            host: "buildbox".to_owned(),
+            directory: directory.clone(),
+        });
+
+    let session = Session::of(&strip, None);
+    let written = &session.tabs[0].panes[0];
+    assert_eq!(written.remote_host.as_deref(), Some("buildbox"));
+    assert_eq!(
+        written.working_directory.as_deref(),
+        Some(directory.as_path())
+    );
+    session.save_blocking(&path).expect("writable");
+    let reread = Session::load(&path);
+    assert_eq!(reread, session);
+
+    let restored = reread.restore().expect("restored");
+    let came_back = restored
+        .panes()
+        .next()
+        .map(|(_, pane)| pane.session())
+        .expect("a pane came back");
+    assert_ne!(
+        came_back.working_directory.as_deref(),
+        Some(directory.as_path()),
+        "a shell here was started in the far side's directory"
+    );
+    assert_eq!(came_back.remote, None, "a shell here is on this machine");
+    assert_eq!(agents(&restored), [None]);
+    assert!(offers(&restored).is_empty());
+}
+
+#[test]
+fn a_file_from_before_remote_hosts_were_written_comes_back_on_this_machine() {
+    let directory = scratch("remote-old-file");
+    let path = directory.join("session.json");
+    fs::write(
+        &path,
+        serde_json::json!({
+            "tabs": [{"name": "old", "panes": [{
+                "title": "old",
+                "working_directory": directory,
+                "flex": 1.0,
+            }]}],
+        })
+        .to_string(),
+    )
+    .expect("writable");
+
+    let session = Session::load(&path);
+    assert_eq!(session.tabs[0].panes[0].remote_host, None);
+    assert!(backups(&directory).is_empty());
+    let restored = session.restore().expect("restored");
+    let came_back = restored
+        .panes()
+        .next()
+        .and_then(|(_, pane)| pane.session().working_directory.clone());
+    assert_eq!(came_back.as_deref(), Some(directory.as_path()));
+}
+
+#[test]
 fn a_restored_agent_is_forgotten_once_anything_runs_in_its_pane() {
     let directory = scratch("agent-forgotten");
     let session = Session::of(&running(&[(&directory, Some("claude"))]), None);

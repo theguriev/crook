@@ -37,12 +37,14 @@ use crate::settings::Granularity;
 
 mod group;
 mod pane;
+mod remote;
 
 #[cfg(test)]
 mod tests;
 
 pub use group::{GroupId, TabGroup};
 pub use pane::{Direction, Pane, PaneEffect, PaneGroup, PaneId, SplitAxis};
+pub use remote::{Remote, on_this_machine};
 
 /// A tab's identity, stable for as long as the tab exists.
 ///
@@ -461,10 +463,26 @@ pub struct AgentSession {
     /// to say yet. An agent runtime that chooses a directory sets this, and
     /// every git fact a row shows is looked up by it.
     ///
-    /// `None` only when the process has no readable working directory at all —
-    /// a directory deleted out from under it — in which case a row falls back
-    /// to the session title.
+    /// `None` when the process has no readable working directory at all — a
+    /// directory deleted out from under it — in which case a row falls back to
+    /// the session title. And `None` while the shell is on another machine,
+    /// which is what keeps every reader of this field off this machine's disk
+    /// for it: see [`Self::remote`].
     pub working_directory: Option<PathBuf>,
+    /// The machine the pane's shell is on, and the directory it is in there,
+    /// when that machine is not this one.
+    ///
+    /// Written when the shell reports a directory under another host's name —
+    /// the far side of an `ssh`, the inside of a container — and taken off
+    /// when it reports one here again, through [`Self::set_remote`] and
+    /// [`Self::set_local_directory`], which keep the two fields from both
+    /// being set. A pane with this has no [`Self::working_directory`], so
+    /// nothing reads git, the Changes column, the worktree menu, a plugin's
+    /// Where answer or a new tab's directory from a path that names another
+    /// machine's directory and, here, this machine's checkout of something
+    /// else. The row prints the host and the path instead — see
+    /// [`Self::shown_directory`].
+    pub remote: Option<Remote>,
     /// The pull request this session's work belongs to, as its agent said.
     ///
     /// Written by the agent, over its own terminal — `crook --agent running
@@ -595,11 +613,57 @@ impl AgentSession {
             attention: None,
             marked: false,
             working_directory: starting_directory(),
+            remote: None,
             pull_request: None,
             running_command: None,
             spawned_by: None,
             restored_agent: None,
         }
+    }
+
+    /// Where the pane's shell last said it was, on whichever machine that is.
+    ///
+    /// What a row prints and a pane is named after, and never a directory to
+    /// read a disk by: that is [`Self::working_directory`], which a pane on
+    /// another machine does not have.
+    pub fn shown_directory(&self) -> Option<&Path> {
+        match &self.remote {
+            Some(remote) => Some(&remote.directory),
+            None => self.working_directory.as_deref(),
+        }
+    }
+
+    /// [`Self::shown_directory`] as a row prints it: shortened against
+    /// `home`, this machine's home directory, for a directory here — and as
+    /// the far side said it for one on another machine, whose home this one
+    /// cannot know.
+    pub fn shown_path(&self, home: Option<&Path>) -> Option<String> {
+        let home = home.filter(|_| self.remote.is_none());
+        Some(crate::git::user_friendly_path(
+            self.shown_directory()?,
+            home,
+        ))
+    }
+
+    /// The short name of [`Self::shown_directory`], which is what a row with
+    /// no other name calls the session — see [`crate::git::directory_label`],
+    /// and [`Self::shown_path`] for why another machine's is not `~`.
+    pub fn directory_label(&self, home: Option<&Path>) -> Option<String> {
+        let home = home.filter(|_| self.remote.is_none());
+        crate::git::directory_label(self.shown_directory()?, home)
+    }
+
+    /// Records that the shell said it is in `directory`, on this machine.
+    pub fn set_local_directory(&mut self, directory: PathBuf) {
+        self.working_directory = Some(directory);
+        self.remote = None;
+    }
+
+    /// Records that the shell said it is in a directory on another machine,
+    /// which leaves the pane with no directory on this one.
+    pub fn set_remote(&mut self, remote: Remote) {
+        self.working_directory = None;
+        self.remote = Some(remote);
     }
 
     /// The coding agent this pane is running, or was running when the window

@@ -224,8 +224,19 @@ pub struct PaneSnapshot {
     ///
     /// This is the whole point of the file: a window that comes back with its
     /// shells in the directories they were in is a window somebody can carry
-    /// on working in.
+    /// on working in. On the machine [`Self::remote_host`] names, when it
+    /// names one.
     pub working_directory: Option<PathBuf>,
+    /// The machine that directory is on, when it is not this one — a shell on
+    /// the far side of an `ssh` — by the name the shell gave it.
+    ///
+    /// What keeps a restore from starting a shell *here* in the far side's
+    /// directory, which on a machine laid out the same way is this machine's
+    /// checkout of something, and from offering an agent's resume line there:
+    /// the conversation is on the other machine too. A pane that had one
+    /// comes back as a new shell in the directory a new tab opens in. `None`
+    /// for a pane on this machine, and for a file that predates this key.
+    pub remote_host: Option<String>,
     /// The share of the split this pane took, from a dragged divider.
     pub flex: f32,
     /// The coding agent the pane was running, by its program's name —
@@ -581,7 +592,8 @@ impl PaneSnapshot {
         Self {
             title: session.title.clone(),
             custom_title: session.custom_title.clone(),
-            working_directory: session.working_directory.clone(),
+            working_directory: session.shown_directory().map(Path::to_path_buf),
+            remote_host: session.remote.as_ref().map(|remote| remote.host.clone()),
             flex: pane.flex(),
             agent: session.agent().map(str::to_owned),
         }
@@ -619,11 +631,14 @@ impl PaneSnapshot {
         // Only a directory that still exists. A repository moved or deleted
         // between two launches would otherwise start a shell in a directory
         // that is not there, which most shells answer by starting in `/` — a
-        // worse answer than the one Crook was started from.
-        if self
-            .working_directory
-            .as_ref()
-            .is_some_and(|path| path.is_dir())
+        // worse answer than the one Crook was started from. And only one on
+        // this machine: another machine's is not where the new shell is,
+        // whatever this one has at the same path.
+        if self.remote_host.is_none()
+            && self
+                .working_directory
+                .as_ref()
+                .is_some_and(|path| path.is_dir())
         {
             pane.session_mut().working_directory = self.working_directory.clone();
             // Only here, beside the directory: the conversation is kept by

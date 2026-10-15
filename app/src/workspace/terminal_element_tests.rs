@@ -1405,15 +1405,17 @@ fn a_folded_url_on_the_grid_is_one_link_from_either_row() {
 
 /// A path on the grid is read against where the pane's shell last said it
 /// was, which is where the full-screen program or the command still running
-/// on it was started — and is no link at all when the shell never said.
+/// on it was started — and is no link at all when the shell never said, or
+/// said it is on another machine, where every path it prints is that
+/// machine's.
 #[test]
 fn a_path_on_the_grid_is_read_against_where_the_shell_said_it_was() {
-    use crate::pane_link::{FileLink, LinkTarget, PaneLink};
+    use crate::pane_link::{FileLink, LinkTarget, PaneLink, PathsOn};
     use crookui_core::event::Modifiers;
     use crookui_core::geometry::{Point, ZIndex};
     use std::path::{Path, PathBuf};
 
-    let grid = Arc::new(snapshot(&["error: src/main.rs:3"], 20));
+    let grid = Arc::new(snapshot(&["error: src/main.rs:3", "see ~/notes.md"], 20));
     let font = font();
     let metrics = font.metrics();
     let follow = if cfg!(target_os = "macos") {
@@ -1428,15 +1430,17 @@ fn a_path_on_the_grid_is_read_against_where_the_shell_said_it_was() {
         }
     };
     let on_the_path = vec2f(10.5 * metrics.width, 0.5 * metrics.height);
-    let element = |directory: Option<PathBuf>| {
+    let on_the_home_path = vec2f(6.5 * metrics.width, 1.5 * metrics.height);
+    let element = |paths: PathsOn| {
         let mut element =
-            TerminalElement::new(grid.clone(), font.clone()).with_links(PaneLink::new(), directory);
-        element.size = Some(vec2f(20. * metrics.width, metrics.height));
+            TerminalElement::new(grid.clone(), font.clone()).with_links(PaneLink::new(), paths);
+        element.size = Some(vec2f(20. * metrics.width, 2. * metrics.height));
         element.origin = Some(Point::from_vec2f(Vector2F::zero(), ZIndex::Normal(0)));
         element
     };
 
-    let link = element(Some(PathBuf::from("/project")))
+    let here = element(PathsOn::ThisMachine(Some(PathBuf::from("/project"))));
+    let link = here
         .link_at(on_the_path, follow)
         .expect("the path is a link");
     assert_eq!(
@@ -1448,9 +1452,30 @@ fn a_path_on_the_grid_is_read_against_where_the_shell_said_it_was() {
         })
     );
     assert_eq!(
-        element(None).link_at(on_the_path, follow),
+        here.link_at(on_the_home_path, follow)
+            .map(|link| link.target),
+        std::env::home_dir().map(|home| LinkTarget::File(FileLink {
+            path: home.join("notes.md"),
+            line: None,
+            column: None,
+        })),
+        "the path under ~"
+    );
+    assert_eq!(
+        element(PathsOn::ThisMachine(None)).link_at(on_the_path, follow),
         None,
         "a relative path was read against nothing"
+    );
+    let elsewhere = element(PathsOn::AnotherMachine);
+    assert_eq!(
+        elsewhere.link_at(on_the_path, follow),
+        None,
+        "a relative path printed on another machine was read here"
+    );
+    assert_eq!(
+        elsewhere.link_at(on_the_home_path, follow),
+        None,
+        "a path under ~ printed on another machine opens this machine's file"
     );
 }
 

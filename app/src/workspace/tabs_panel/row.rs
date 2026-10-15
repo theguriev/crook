@@ -467,7 +467,8 @@ fn expanded_column(
 }
 
 /// The title line of either density: the title, led by the tab's number when
-/// there is one to show.
+/// there is one to show, and by the machine the pane is on when that is not
+/// this one.
 ///
 /// The number is muted where the title is not, so the eye lands on the name
 /// and reads the digit only when it goes looking for one; it is the title's
@@ -475,6 +476,15 @@ fn expanded_column(
 /// title yields to the number and not the other way round — a `10` must
 /// never be cut to a `1` by a long name, since a wrong number is worse than a
 /// shorter title.
+///
+/// The host is the number's kind of fact and drawn the number's way, muted
+/// and at the title's size, so `buildbox app` reads as a place and a name.
+/// On the title line, because it is the one line every density and every
+/// "Pane title as" draws: a pane on another machine shows no branch and no
+/// diff, and a row that did not say why would look like one outside any
+/// repository. It gives way before the title does, past a third of the line,
+/// with a mark where it is cut: the name is the row's, and the host is the
+/// card's to spell out.
 fn title_line(
     facts: &RowFacts,
     number: Option<usize>,
@@ -487,19 +497,33 @@ fn title_line(
         Weight::Normal,
         ui,
     );
-    let Some(number) = number else {
+    if number.is_none() && facts.host().is_none() {
         return title;
-    };
+    }
 
-    Flex::row()
+    let mut line = Flex::row()
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
-        .with_spacing(NUMBER_GAP)
-        .with_child(
+        .with_spacing(NUMBER_GAP);
+    if let Some(number) = number {
+        line.add_child(
             Text::new(number.to_string(), ui, TITLE_SIZE)
                 .with_color(theme().text_muted)
                 .finish(),
-        )
-        .with_child(Shrinkable::new(1., title).finish())
+        );
+    }
+    if let Some(host) = facts.host() {
+        line.add_child(
+            Shrinkable::new(
+                1.,
+                Text::new(host.to_owned(), ui, TITLE_SIZE)
+                    .with_color(theme().text_muted)
+                    .with_ellipsis(Cut::End)
+                    .finish(),
+            )
+            .finish(),
+        );
+    }
+    line.with_child(Shrinkable::new(2., title).finish())
         .finish()
 }
 

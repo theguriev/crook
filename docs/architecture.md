@@ -1221,6 +1221,15 @@ involved: this is read once, on a gesture, and thrown away when the menu closes.
 its session *before* the shells are synced, because that is the moment a pty's cwd is decided
 and the only moment it can be. Nothing ever issues a `cd` into a running pty, and the session
 directory stops being authoritative the instant the shell reports a different one over OSC 7.
+A report that names another machine — the URL's host, which the snippets fill in with the
+name the system gave when the shell started, and which is the far side of an `ssh` when it is
+not this machine's — takes the session's directory away rather than moving it: the path is a
+directory over there, and everything that reads a session's directory, the worktree menu
+included, reads this machine's disk. The row prints the host and the path instead; see
+`app/src/tab/remote.rs`. A block keeps the host it was filed under beside its directory, since
+one pane's blocks can come from both ends of an `ssh`, and a block from the far end is read for
+no branch. No path in it is a link, and none on the grid or in the open block of a pane over
+there, relative or not, since each names a file on that machine; see `app/src/pane_link.rs`.
 The agent's line keeps the same rule: it is put in the new tab's *composer*, unsent, where a
 person reads a line before pressing Enter on it, and it reaches the shell only because somebody
 pressed — Enter there, or the creator's Start, which is a press for exactly that. Enter in the

@@ -452,7 +452,8 @@ pub struct BlockFacts {
     /// [`Capability::ReadBlock`].
     pub ran: Option<Ran>,
     /// Where it ran, or `None` without [`Capability::ReadWorkingDirectory`] —
-    /// and `None` as well for a shell that never said.
+    /// and `None` as well for a shell that never said, and for a command
+    /// that ran on another machine, as [`Answer::Where`] says of a pane.
     pub place: Option<Place>,
 }
 
@@ -505,7 +506,8 @@ pub struct TabFacts {
     /// What the tab is, or `None` without [`Capability::ReadTabs`].
     pub tab: Option<TabInfo>,
     /// Where it is working, or `None` without
-    /// [`Capability::ReadWorkingDirectory`].
+    /// [`Capability::ReadWorkingDirectory`] — and for a tab whose shell is
+    /// on another machine, as [`Answer::Where`] says.
     pub place: Option<Place>,
 }
 
@@ -1195,7 +1197,10 @@ pub enum Answer {
     /// Where the active pane is.
     ///
     /// `place` is `None` for a pane whose shell has not said where it is,
-    /// which is the state every pane is in for a moment after it opens.
+    /// which is the state every pane is in for a moment after it opens — and
+    /// for one whose shell said it is on another machine, the far side of an
+    /// `ssh`: the path it reported is a directory there, and here it names
+    /// some other directory or none.
     Where {
         /// Where it is working, said the way a tab row's own place is.
         place: Option<Place>,

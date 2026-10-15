@@ -714,6 +714,66 @@ fn a_first_prompt_without_marks_is_handed_over_before_the_title_beside_it() {
     assert_eq!(batches.batch(&[frame]), ["prompted", "title"]);
 }
 
+impl Batches {
+    /// Hands `read` over and answers where the workspace heard the shell
+    /// went: `here` and a path for a directory on this machine, and the host
+    /// and a path for one on another.
+    fn moves(&mut self, read: &str) -> Vec<(String, PathBuf)> {
+        self.shared.feed(read.as_bytes());
+        self.shared.publish();
+        self.queue.run_until_parked();
+        let heard = self.app.update(|ctx| {
+            self.heard
+                .update(ctx, |heard, _| std::mem::take(&mut heard.0))
+        });
+        heard
+            .into_iter()
+            .filter_map(|update| match update {
+                TerminalUpdate::WorkingDirectory(_, path) => Some(("here".to_owned(), path)),
+                TerminalUpdate::RemoteDirectory(_, remote) => Some((remote.host, remote.directory)),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+#[test]
+fn a_directory_on_another_machine_is_heard_as_that_machine_s_and_one_here_as_this_one_s() {
+    // The far side of an ssh with Crook's snippet pasted in, in a directory
+    // this machine has too, and back: the path is the same all three times,
+    // and where it is is not. A report naming no host, `localhost` or this
+    // machine's own name is this machine's, which is what every shell Crook
+    // starts says — fish 4 by itself, and the snippets by the name the
+    // system gave when the shell started.
+    let Some(mut batches) = Batches::new(true) else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    let here = gethostname::gethostname().to_string_lossy().into_owned();
+    let path = PathBuf::from("/home/eugen/work/app");
+    let osc = |host: &str| format!("\x1b]7;file://{host}/home/eugen/work/app\x07");
+
+    assert_eq!(
+        batches.moves(&osc(&here)),
+        [("here".to_owned(), path.clone())]
+    );
+    assert_eq!(
+        batches.moves(&osc("buildbox.internal")),
+        [("buildbox.internal".to_owned(), path.clone())]
+    );
+    assert_eq!(batches.moves(&osc("")), [("here".to_owned(), path.clone())]);
+    assert_eq!(
+        batches.moves(&osc("buildbox.internal")),
+        [("buildbox.internal".to_owned(), path.clone())]
+    );
+    assert_eq!(
+        batches.moves(&osc("localhost")),
+        [("here".to_owned(), path.clone())]
+    );
+    // A second report of the same place says nothing new.
+    assert_eq!(batches.moves(&osc("localhost")), []);
+}
+
 #[test]
 fn a_closed_pane_frees_its_terminal_even_while_its_reader_is_still_blocked() {
     // A `sleep 60 &` keeps the pty open after the pane is closed, so the read
