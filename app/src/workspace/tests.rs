@@ -17158,6 +17158,9 @@ mod shells {
         // Switched to in the moment between the restore and its shell
         // arriving, a tab is one whose shell is coming, as the active tab's
         // is for the frame before the shells start — not one that has none.
+        // The first tab behind the active one is the one whose shell the pool
+        // is already spawning, which a switch leaves to arrive; a tab still
+        // waiting its turn opens in place instead, see the test below.
         let mut harness = Harness::panel(3);
         if !a_shell_these_tests_speak() {
             return;
@@ -17181,7 +17184,7 @@ mod shells {
         harness.dispatch_action(TabAction::Select(behind));
         assert!(
             !has_a_shell(&harness, pane),
-            "switching to the tab opened its shell on the thread that draws"
+            "switching to the tab opened a second shell for it on the thread that draws"
         );
         let shown = frame_text(&harness.frame());
         assert!(
@@ -17192,6 +17195,75 @@ mod shells {
         harness.wait_for("the tab switched to never got its shell", |harness| {
             has_a_shell(harness, pane)
         });
+    }
+
+    #[test]
+    fn a_tab_switched_to_before_its_shell_s_turn_opens_it_at_once_and_takes_what_is_typed() {
+        // A restore opens the tabs behind the active one a shell at a time,
+        // in strip order, so the last tab's turn comes after every other's.
+        // Until it came, its pane drew no composer and no grid, and what was
+        // typed into it the moment it was switched to reached nothing.
+        const TABS: usize = 6;
+        let mut harness = Harness::panel(TABS);
+        if !a_shell_these_tests_speak() {
+            return;
+        }
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_shell_spawn_cost(RESTORED_SPAWN, ctx);
+            workspace.expect_terminals(ctx);
+        });
+        harness.frame();
+        if !harness.start_terminals() {
+            return;
+        }
+
+        let active = harness.active_id();
+        let behind: Vec<_> = harness
+            .tab_ids()
+            .into_iter()
+            .filter(|tab| *tab != active)
+            .collect();
+        let (last, between) = behind.split_last().expect("tabs behind the active one");
+        // Past the first, whose shell the pool is already spawning: nothing
+        // has pumped the queue, so none of these can have arrived.
+        let waiting: Vec<PaneId> = between[1..]
+            .iter()
+            .flat_map(|tab| harness.panes_of(*tab))
+            .collect();
+        let pane = harness.panes_of(*last)[0];
+
+        harness.dispatch_action(TabAction::Select(*last));
+        assert!(
+            has_a_shell(&harness, pane),
+            "a tab switched to waited for its turn behind the tabs before it"
+        );
+        assert!(
+            !waiting.iter().any(|pane| has_a_shell(&harness, *pane)),
+            "switching to one tab started the shells of the tabs before it on the thread that draws"
+        );
+
+        // Typed straight away, into the frame the switch asked for. Either
+        // the composer has it or the pty echoed it: what matters is that it
+        // reached the pane rather than nothing.
+        harness.frame();
+        harness.type_text("echo crook-typed-at-once");
+        harness.wait_for(
+            "what was typed into the tab switched to never reached it",
+            |harness| {
+                harness.field_text(pane).contains("crook-typed-at-once")
+                    || harness.terminal_text(pane).contains("crook-typed-at-once")
+            },
+        );
+
+        harness.wait_for(
+            "a tab behind the active one never got its shell",
+            |harness| {
+                behind
+                    .iter()
+                    .flat_map(|tab| harness.panes_of(*tab))
+                    .all(|pane| has_a_shell(harness, pane))
+            },
+        );
     }
 
     #[test]

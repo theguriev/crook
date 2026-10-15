@@ -163,6 +163,13 @@
 //! the frame before `start` — and its arrival is a
 //! [`TerminalUpdate::Repainted`], a frame only if somebody is looking.
 //!
+//! A tab switched to before its turn has come is about to be drawn, so its
+//! shells leave the queue and start in place
+//! ([`TerminalModel::open_shown`]): a pane with no shell draws no composer
+//! and no grid, nothing a key typed into it could reach, and waiting out the
+//! queue would lose what was typed meanwhile. Only the one shell already on
+//! the pool is left to arrive, a spawn away.
+//!
 //! A pane that closes while its shell is on the pool is ended by whichever of
 //! the two sides gets there second, and a window that goes counts it among
 //! the shells it waits for: see [`Opening`]. Everything else starts in place,
@@ -897,6 +904,32 @@ impl TerminalModel {
             if !self.sessions.contains_key(pane) && !self.is_opening(*pane) {
                 self.open(*pane, directory.clone(), ctx);
             }
+        }
+    }
+
+    /// Starts here and now the shells of `shown` that are still waiting
+    /// their turn on the pool: a tab behind the active one, switched to
+    /// before a restore got to it.
+    ///
+    /// Its panes are about to be drawn, and a pane with no shell draws no
+    /// composer and no grid, so whatever was typed into it until its turn
+    /// came would reach nothing. One tab's shells cost what a new tab's do.
+    /// The one shell already being spawned on the pool is left to arrive. See
+    /// "What a restore costs" in the module docs.
+    pub fn open_shown(&mut self, shown: &[PaneId], ctx: &mut ModelContext<Self>) {
+        if !self.live {
+            return;
+        }
+        let mut brought = Vec::new();
+        self.queued.retain(|(pane, directory)| {
+            let waits = !shown.contains(pane);
+            if !waits {
+                brought.push((*pane, directory.clone()));
+            }
+            waits
+        });
+        for (pane, directory) in brought {
+            self.open(pane, directory, ctx);
         }
     }
 

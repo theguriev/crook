@@ -1646,6 +1646,52 @@ fn shells_behind_the_shown_ones_open_off_the_thread_that_draws_and_all_arrive() 
 }
 
 #[test]
+fn a_shown_pane_waiting_its_turn_opens_in_place_and_the_one_on_the_pool_is_left_to_arrive() {
+    // A tab switched to before a restore got to it: the first is on the
+    // pool, the second and third wait their turn, and the first and third
+    // are shown.
+    let behind: Vec<_> = (0..3).map(|_| pane()).collect();
+    let Some((queue, mut app, model)) = opening_behind(&behind) else {
+        return;
+    };
+    app.update(|ctx| {
+        model.update(ctx, |model, ctx| {
+            model.open_shown(&[behind[0], behind[2]], ctx);
+        });
+    });
+    app.read(|ctx| {
+        let model = model.as_ref(ctx);
+        assert!(
+            model.handle(behind[2]).is_some(),
+            "a shown pane is still waiting its turn on the pool"
+        );
+        assert!(
+            !model.is_opening(behind[2]),
+            "a shown pane opened in place is still queued for a second shell"
+        );
+        assert!(
+            model.handle(behind[0]).is_none() && model.is_opening(behind[0]),
+            "the shell the pool was spawning was started a second time in place"
+        );
+        assert!(
+            model.handle(behind[1]).is_none() && model.is_opening(behind[1]),
+            "a pane nobody shows did not wait its turn"
+        );
+    });
+
+    pump_until(
+        &queue,
+        &app,
+        "a shell left on the pool never arrived",
+        |ctx| {
+            behind
+                .iter()
+                .all(|pane| model.as_ref(ctx).handle(*pane).is_some())
+        },
+    );
+}
+
+#[test]
 fn a_pane_closed_while_its_shell_is_on_the_way_never_gets_one() {
     // The first is on the pool and the second waits its turn when both
     // close; the third, still open, is the one that arrives.

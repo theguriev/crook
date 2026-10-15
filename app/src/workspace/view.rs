@@ -7552,11 +7552,7 @@ impl Workspace {
         // The active tab's shells here, for the frame after this one to draw,
         // and the rest off this thread behind them: forking sixty in place
         // held the window for most of a second. See `TerminalModel::start`.
-        let active: Vec<PaneId> = self
-            .tabs
-            .active()
-            .map(|tab| tab.panes().iter().map(Pane::id).collect())
-            .unwrap_or_default();
+        let active = self.active_pane_ids();
         let (shown, behind): (Vec<_>, Vec<_>) = self
             .open_panes()
             .into_iter()
@@ -11019,11 +11015,19 @@ impl Workspace {
     /// Called from [`Self::apply`] like [`Self::sync_git`], so that "a pane
     /// exists" and "a shell is running in it" are one statement rather than two
     /// that can disagree. Before [`Self::start_terminals`] it opens nothing.
+    ///
+    /// And starts in place the shells of the active tab that are still
+    /// queued behind a restore's, for a tab switched to before its turn came:
+    /// the next frame draws it, and a pane with no shell takes no keys. See
+    /// [`TerminalModel::open_shown`].
     fn sync_terminals(&mut self, ctx: &mut ViewContext<Self>) {
         self.estimate_unmeasured_panes(ctx);
         let panes = self.open_panes();
-        self.terminals
-            .update(ctx, |model, ctx| model.sync(&panes, ctx));
+        let shown = self.active_pane_ids();
+        self.terminals.update(ctx, |model, ctx| {
+            model.sync(&panes, ctx);
+            model.open_shown(&shown, ctx);
+        });
     }
 
     /// Gives every pane no layout has measured the grid the layout would
@@ -11063,6 +11067,14 @@ impl Workspace {
             .panes()
             .map(|(_, pane)| (pane.id(), pane.session().working_directory.clone()))
             .collect()
+    }
+
+    /// The panes of the active tab, which the next frame draws.
+    fn active_pane_ids(&self) -> Vec<PaneId> {
+        self.tabs
+            .active()
+            .map(|tab| tab.panes().iter().map(Pane::id).collect())
+            .unwrap_or_default()
     }
 
     /// Applies one option, or opens and closes the menu.

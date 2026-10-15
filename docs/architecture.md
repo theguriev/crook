@@ -994,7 +994,10 @@ threads are made on the worker, and the session comes home through `ctx.spawn` a
 (`is_opening`), drawn as its ground; a pane that closes meanwhile has its shell ended by
 whichever side holds it (`Opening`), and a window that goes while one is being spawned waits
 for it with the rest. A new tab or a split still starts in place: one shell, with a frame
-waiting to draw it.
+waiting to draw it. So does a tab switched to before its turn came (`open_shown`, from the
+workspace's `sync_terminals`): a pane with no shell draws no composer and no grid, and what was
+typed into it while it waited would reach nothing. Only the one shell already on the pool is
+left to arrive.
 
 **On macOS the writer never lets unread input wrap the kernel's ring.** XNU keeps a child's
 unread input in a ring of 1024 bytes, and when the child turns canonical mode on, the kernel
