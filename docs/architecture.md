@@ -944,9 +944,10 @@ and a plugin switched off under the section it was showing, and a push missed in
 them would freeze a pane somebody is looking at. A pane nobody can see goes on being read,
 parsed and published, and everything its *row* shows — a title, a directory, a bell, an agent's
 status, a command finishing — still arrives as it happens, because the row is on screen. The
-frame that brings the pane back reads the snapshot published last, not the last one drawn. Ten
-thousand lines printed in a background tab used to rebuild the window six to eight times on an
-idle laptop; `the_frame_budget` in `app/src/workspace/tests.rs` holds it to none. It holds the
+frame that brings the pane back reads a current snapshot, not the last one drawn: the one
+published last, or one built then when no publication built it (below). Ten thousand lines
+printed in a background tab used to rebuild the window six to eight times on an idle laptop;
+`the_frame_budget` in `app/src/workspace/tests.rs` holds it to none. It holds the
 row to its changes as well: a report that leaves the session as it was — Claude Code's glyph
 turning in front of the same name about once a second, its hooks saying running again around
 every tool — asks for no frame of its own, because `Workspace::update_session` returns before
@@ -959,6 +960,21 @@ hidden or a settings page over it. Most of the budget's tests run in a harness t
 the marks breathe, and the one that does hides the list. What the gate cannot see is the window
 itself: nothing tells the workspace that it has been minimised or covered, so a window nobody is
 looking at still asks to draw the panes it shows.
+
+**Nor does a pane nobody can see build snapshots.** A snapshot is every cell of the viewport
+resolved through the palette and compared with the last — about 160 µs for a 200 by 50 grid, at
+up to the repaint ceiling — and a window of agents can have dozens of panes printing behind the
+one in front. So the workspace's render, which is where the answer is drawn, also hands it to
+the model (`TerminalModel::draw_only`), and a publication for a pane no frame draws hands over
+its block list, its open block and its events with no snapshot built. The open block is all the
+model reads of a publication — whether a command is running, whether the shell has reached its
+prompt — save the grid's text for a shell with no marks until its first prompt, which it asks
+for. The snapshot is built when something asks for it — the frame that brings the pane back, a
+find, a copy, the control socket — under the emulator's mutex, from what the emulator holds by
+then, with the block list synced beside it. That is what makes this push safe where the one
+above would not be: it decides where a snapshot is built and never which one is drawn, and a
+pane wrongly said to be off screen is still reported repainted, and drawn current by the frame
+that asks for its snapshot.
 
 **Nothing writes to the pty on the UI thread or under the emulator's mutex.** A write waits
 for the child to read, a child that is printing reads nothing until its output has been read,
@@ -1037,14 +1053,18 @@ count, so a line typed ahead of a busy program and corrected as it goes does not
 The emulator's mutex is never held across a frame, or across a write. The reader takes it to
 parse, and again to build a snapshot, and publishes the `Arc` into a slot of its own before it
 lets go; painting clones that `Arc` and walks owned data. The UI thread publishes too, after a
-keystroke or a resize, and both writers keep the mutex until their snapshot is in the slot: one
+keystroke or a resize, and so does whoever asks for the snapshot of a pane that was published
+off screen without one. Every writer keeps the mutex until its snapshot is in the slot: one
 that installed it after letting go could be overtaken in the gap and put an older snapshot back
-beside a newer block list, which painted a finished command twice. What the child asked for in
-those bytes — a title, a bell, a command's end — is set aside as it is parsed and handed over
-by the same publication, once the snapshot and the block list are in place: handed over at
-once, a command's end answered `crook pane wait --until finished` up to a frame before `crook
-pane blocks` could read the block it ended. Layout — which asks "did the grid move?" on every
-single frame — answers from an atomic before it ever asks for the lock.
+beside a newer block list, which painted a finished command twice. Where the slot and the
+mutex are held together the mutex is taken first, and a reader that finds the snapshot missing
+lets go of the slot before it takes the mutex to build one, so nothing waits on them the other
+way round. What the child asked for in those bytes — a title, a bell, a command's end — is set
+aside as it is parsed and handed over by the same publication, once the snapshot and the block
+list are in place: handed over at once, a command's end answered `crook pane wait --until
+finished` up to a frame before `crook pane blocks` could read the block it ended. Layout —
+which asks "did the grid move?" on every single frame — answers from an atomic before it ever
+asks for the lock.
 
 ### Blocks: the output is a list of commands
 

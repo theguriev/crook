@@ -42,9 +42,12 @@
 //! There are three more filters behind that one. The reader publishes a
 //! snapshot the emulator only rebuilds when the drawn content differs, so an
 //! escape sequence that changed nothing visible hands back the same `Arc`; and
-//! [`TerminalModel::absorb`] compares that `Arc` by pointer before it reports
-//! a [`TerminalUpdate::Repainted`]. A frame is only ever spent on a grid that
-//! actually changed — and only on one somebody can see, which is the third.
+//! [`TerminalModel::absorb`] reports a [`TerminalUpdate::Repainted`] only for a
+//! publication that installed a different one — or, for a pane off screen,
+//! one that found the grid moved and left its snapshot unbuilt (see below),
+//! which cannot tell an invisible change from a visible one. A frame is only
+//! ever spent on a grid that actually changed — and only on one somebody can
+//! see, which is the third.
 //!
 //! # Only what is on screen
 //!
@@ -54,11 +57,25 @@
 //! section of the sidebar has the body — the workspace's state, which it
 //! reads at the moment the repaint arrives rather than having it pushed here
 //! from every place that state can change. A pane that is not on screen goes
-//! on being read, parsed and published exactly as before, and everything its
-//! *row* shows still arrives as it happens — a title, a bell, an agent's
-//! status, a command finishing — because those are the tab's facts and the
-//! tab is on screen. Only its grid stops costing frames, and the frame that
-//! puts it back on screen reads the latest snapshot, not the last one drawn.
+//! on being read, parsed and published, and everything its *row* shows still
+//! arrives as it happens — a title, a bell, an agent's status, a command
+//! finishing — because those are the tab's facts and the tab is on screen.
+//! Only its grid stops costing frames, and the frame that puts it back on
+//! screen reads a current snapshot, not the last one drawn.
+//!
+//! Nor does its grid cost a snapshot. Building one walks every cell of the
+//! viewport through the palette and compares it with the last — a hundred and
+//! sixty microseconds for a 200 by 50 grid, at up to the repaint ceiling — and
+//! a window of agents can have dozens of panes printing behind the one in
+//! front. So the render, which is what decides the answer, also says it here
+//! ([`TerminalModel::draw_only`]), and a publication for a pane no frame draws
+//! hands over its block list, its open block and its events and builds no
+//! snapshot. The snapshot is built when somebody asks for one — the frame that
+//! brings the pane back, a find, a copy, the control socket — under the
+//! terminal's lock, from what the emulator holds by then. That makes the
+//! push a hint rather than a fact anything depends on: a pane wrongly said to
+//! be off screen is still reported repainted, and the frame that draws it
+//! builds its snapshot, current, on the way.
 //!
 //! # The writer
 //!
@@ -100,11 +117,12 @@
 //! takes it to feed bytes, and again to build a snapshot, and publishes the
 //! `Arc` into a slot of its own before letting go; painting clones that `Arc`
 //! and walks owned data. The UI thread publishes too, after a keystroke or a
-//! resize, and doing it under the same lock is what stops either writer from
-//! putting an older snapshot back over the other's newer one — see
-//! `Shared::latest`. Layout takes the lock only when the computed grid
-//! actually changed, which it establishes first with an atomic — so a window
-//! being dragged does not contend with a shell that is printing.
+//! resize, and so does whoever asks for the snapshot of a pane that was
+//! published off screen without one. Doing all of it under the same lock is
+//! what stops any writer from putting an older snapshot back over another's
+//! newer one — see `Shared::latest`. Layout takes the lock only when the
+//! computed grid actually changed, which it establishes first with an atomic —
+//! so a window being dragged does not contend with a shell that is printing.
 //!
 //! # What a closed pane costs
 //!
@@ -379,7 +397,7 @@ pub enum TerminalUpdate {
         /// Whether the shell had said a command was running when it did.
         ///
         /// Read here rather than worked out later because this is where the
-        /// snapshot is: by the time the workspace hears about the bell the
+        /// open block is: by the time the workspace hears about the bell the
         /// command may have ended, and a bell is told apart from a shell's own
         /// prompt-time ringing by what was running at the moment it rang.
         while_running: bool,
@@ -668,9 +686,15 @@ struct Session {
     /// One at a time: a command that prints while it runs would otherwise
     /// queue a timer per batch, all of them landing on the same frame.
     long_running_timer: bool,
-    /// The last snapshot delivered to the main thread. Compared by pointer to
-    /// decide whether a frame is worth spending.
-    snapshot: Arc<Snapshot>,
+    /// The open block as the last publication taken in left it: whether a
+    /// command is running, and since when.
+    ///
+    /// Not the snapshot it came with, since a pane off screen is published
+    /// with none — see [`Latest`] — and nothing here needs one.
+    live_block: LiveBlock,
+    /// How far the picture had moved at that publication. Compared to decide
+    /// whether a frame is worth spending: see [`Latest::moved`].
+    moved: u64,
     /// What the shell last called itself, so a title set twice notifies once.
     title: Option<String>,
     /// Where the shell last said it was, and on which host, for the same
@@ -988,6 +1012,27 @@ impl TerminalModel {
         self.failures.get(&pane).map(String::as_str)
     }
 
+    /// Says which panes the frame being built draws, so that the shells of
+    /// the rest stop building snapshots of grids nothing draws.
+    ///
+    /// Asked by the workspace's render, which is the one place the answer
+    /// cannot go stale: a tab switch, a split, a zoom or a section over the
+    /// body is drawn by a frame, and that frame says it here first. And
+    /// nothing goes stale if a pane is wrongly said to be off screen anyway:
+    /// its reader goes on publishing everything but the grid, a repaint is
+    /// still reported for it, and the snapshot no publication built is built
+    /// by whoever asks for it — the frame that draws the pane among them.
+    /// The cost of being wrong is where a snapshot is built, never which one
+    /// is drawn. See the module docs, "Only what is on screen".
+    pub fn draw_only(&self, on_screen: impl Fn(PaneId) -> bool) {
+        for (pane, session) in &self.sessions {
+            session
+                .shared
+                .on_screen
+                .store(on_screen(*pane), Ordering::Relaxed);
+        }
+    }
+
     /// What the pane is showing right now.
     ///
     /// For a caller that wants the text rather than the pixels — the
@@ -1174,7 +1219,7 @@ impl TerminalModel {
         if palette != self.palette {
             shared.repaint_in(self.palette.clone());
         }
-        let snapshot = shared.snapshot();
+        let (live_block, moved) = shared.glance();
 
         self.failures.remove(&pane);
         self.sessions.insert(
@@ -1183,7 +1228,8 @@ impl TerminalModel {
                 shared,
                 _integration: integration,
                 long_running_timer: false,
-                snapshot,
+                live_block,
+                moved,
                 title: None,
                 directory: None,
                 running: None,
@@ -1421,22 +1467,27 @@ impl TerminalModel {
             return;
         };
 
-        let snapshot = session.shared.snapshot();
+        // The open block rather than the snapshot: a pane off screen is
+        // published with none, and building one here for every publication
+        // would only move the cost onto the thread that draws.
+        let (live_block, moved) = session.shared.glance();
         let events = session.shared.take_events();
         let finished = session.shared.is_finished();
 
-        let changed = !Arc::ptr_eq(&session.snapshot, &snapshot);
-        session.snapshot = snapshot;
+        let changed = session.moved != moved;
+        session.moved = moved;
+        session.live_block = live_block;
 
         // Collected before anything is emitted: emitting borrows the context,
         // and the session borrow has to be over by then.
         let mut updates = Vec::new();
 
-        // Read off the snapshot rather than from an event, because there is no
-        // event for it: a block opens and closes as the marks arrive, and what
-        // matters here is the resting state after they have. `None` the moment
-        // the block stops running, so a tab goes back to naming itself after
-        // its directory rather than after the last thing it happened to run.
+        // Read off the open block rather than from an event, because there is
+        // no event for it: a block opens and closes as the marks arrive, and
+        // what matters here is the resting state after they have. `None` the
+        // moment the block stops running, so a tab goes back to naming itself
+        // after its directory rather than after the last thing it happened to
+        // run.
         //
         // A start goes out ahead of the batch's events, since what the command
         // wrote came after it: its first title is the command's. A stop waits
@@ -1448,7 +1499,7 @@ impl TerminalModel {
         // before the batch's first end of a command, where a `D` stopped the
         // block, so a command is still heard to stop before it is heard to
         // finish; or after every event, when an `A` with no `D` stopped it.
-        let running = running_command(&session.snapshot.live_block);
+        let running = running_command(&session.live_block);
         let mut stopped = None;
         if session.running != running {
             session.running = running.clone();
@@ -1457,10 +1508,12 @@ impl TerminalModel {
                 None => stopped = Some(TerminalUpdate::Running(pane, None)),
             }
         }
-        // Read off the snapshot for the reason `running` is: what matters is
+        // Read off the open block for the reason `running` is: what matters is
         // where the shell has come to rest, not which marks it took to get
         // there. Only until it has been said once, so the text of a grid is
-        // built for a shell with no marks until it prints and never after.
+        // built for a shell with no marks until it prints and never after —
+        // the one thing here that needs a snapshot, which for a pane off
+        // screen this builds.
         //
         // In a shell with marks the first prompt is an `A`, written after
         // anything the startup files ran, so it waits for the events as a stop
@@ -1471,8 +1524,8 @@ impl TerminalModel {
         let mut prompted_after_the_events = None;
         if !session.prompted {
             let prompted = match session.marks {
-                true => session.snapshot.live_block.state == BlockState::AtPrompt,
-                false => !session.snapshot.text().trim().is_empty(),
+                true => session.live_block.state == BlockState::AtPrompt,
+                false => !session.shared.snapshot().text().trim().is_empty(),
             };
             if prompted {
                 session.prompted = true;
@@ -1510,7 +1563,7 @@ impl TerminalModel {
                 TerminalEvent::Exit => log::debug!("the shell in pane {pane:?} asked to close"),
                 TerminalEvent::Bell => updates.push(TerminalUpdate::Bell {
                     pane,
-                    while_running: session.snapshot.live_block.state.is_running(),
+                    while_running: session.live_block.state.is_running(),
                 }),
                 TerminalEvent::CommandFinished {
                     command,
@@ -1605,7 +1658,7 @@ impl TerminalModel {
         let Some(session) = self.sessions.get_mut(&pane) else {
             return;
         };
-        let Some(waiting) = pane_surface::until_long_running(&session.snapshot, Instant::now())
+        let Some(waiting) = pane_surface::until_long_running(&session.live_block, Instant::now())
         else {
             // Either nothing is running or the frame that hid the composer has
             // already been drawn. Either way the next command arms a fresh
@@ -1804,8 +1857,20 @@ pub struct TerminalHandle(Arc<Shared>);
 impl TerminalHandle {
     /// What the pane should draw. Owned data: no lock is held while it is
     /// painted, and the same `Arc` comes back until the content changes.
+    ///
+    /// Current whether or not a frame has been drawing the pane: for one that
+    /// was off screen when its shell last printed, the snapshot no
+    /// publication built is built by this call, under the terminal's lock.
+    /// See [`TerminalModel::draw_only`].
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.0.snapshot()
+    }
+
+    /// How many snapshots have been built for this pane, for a test counting
+    /// the ones a pane nobody draws does not build.
+    #[cfg(test)]
+    pub fn snapshots_built(&self) -> u64 {
+        self.0.built.load(Ordering::Relaxed)
     }
 
     /// The commands that have finished in this pane, oldest first.
@@ -1815,6 +1880,21 @@ impl TerminalHandle {
     /// pointer rebuilds nothing on a frame that only moved the live block.
     pub fn blocks(&self) -> Arc<BlockHistory> {
         self.0.blocks()
+    }
+
+    /// What the pane should draw, and the finished commands beside it, read
+    /// in the one order that keeps the two together.
+    ///
+    /// The snapshot first. For a pane published off screen, asking for it
+    /// builds it from what the emulator holds now and syncs the block list in
+    /// the same acquisition of the terminal's lock, so the list read after it
+    /// has every command the picture shows as ended. Read the other way round,
+    /// the list can be a publication older than the picture: a command that
+    /// ended in between is in neither, and `crook pane blocks` would answer
+    /// for a worker behind the active tab that it is at rest with nothing run.
+    pub fn snapshot_with_blocks(&self) -> (Arc<Snapshot>, Arc<BlockHistory>) {
+        let snapshot = self.snapshot();
+        (snapshot, self.blocks())
     }
 
     /// Runs a composed command line, reporting whether it was queued for the
@@ -2192,12 +2272,12 @@ impl TerminalHandle {
         self.0.drives.fetch_add(1, Ordering::Relaxed);
         let mut terminal = self.0.lock();
         let outcome = work(&mut terminal);
-        let snapshot = terminal.snapshot();
+        let snapshot = self.0.build(&mut terminal);
         self.0.sync_blocks(&terminal);
         // Installed before the terminal is let go, never after: the reader
         // could otherwise publish a newer snapshot in between and have this
         // older one put back over it. See `Shared::latest` for the lock order.
-        *self.0.latest.lock().unwrap_or_else(PoisonError::into_inner) = snapshot;
+        self.0.latest().install(snapshot);
         drop(terminal);
         outcome
     }
@@ -2431,7 +2511,7 @@ fn start(
     let snapshot = terminal.snapshot();
     let shared = Arc::new(Shared {
         terminal: Mutex::new(terminal),
-        latest: Mutex::new(snapshot),
+        latest: Mutex::new(Latest::new(snapshot)),
         blocks: Mutex::new(Arc::default()),
         unpublished: Mutex::new(Vec::new()),
         events: Mutex::new(Vec::new()),
@@ -2442,6 +2522,8 @@ fn start(
         publish: Mutex::new(PublishState::new()),
         #[cfg(test)]
         drives: std::sync::atomic::AtomicUsize::new(0),
+        on_screen: AtomicBool::new(true),
+        built: AtomicU64::new(0),
     });
 
     // The reader holds a `Weak`, not an `Arc`: a pane whose pty stays open
@@ -2476,27 +2558,32 @@ fn whole_lines(carried: f32, delta: f32) -> (i32, f32) {
 struct Shared {
     terminal: Mutex<Terminal>,
 
-    /// The most recent snapshot the reader built, so painting never waits on
-    /// parsing.
+    /// The most recent snapshot built, so painting never waits on parsing —
+    /// and, for a pane off screen, what the last publication left in place of
+    /// one. See [`Latest`].
     ///
     /// **Written only while `terminal` is locked**, by the same acquisition
     /// that built the snapshot and synced the block list beside it. There are
-    /// two writers, the reader's `publish` and the UI thread's
-    /// [`TerminalHandle::drive`], and a writer that installed its snapshot
-    /// after letting go of the terminal could be overtaken in that gap: the
-    /// other one published a newer snapshot and block list, and the first then
-    /// put its older snapshot back beside the newer list. A command that
-    /// finished during a resize was painted twice, as its block and again in
-    /// the live viewport, and its tab stayed labelled running until the next
-    /// key press.
+    /// three writers, the reader's `publish`, the UI thread's
+    /// [`TerminalHandle::drive`] and whoever asks [`Self::snapshot`] for a
+    /// picture a publication left unbuilt, and a writer that installed its
+    /// snapshot after letting go of the terminal could be overtaken in that
+    /// gap: another one published a newer snapshot and block list, and the
+    /// first then put its older snapshot back beside the newer list. A command
+    /// that finished during a resize was painted twice, as its block and again
+    /// in the live viewport, and its tab stayed labelled running until the
+    /// next key press.
     ///
     /// So the lock order is `terminal`, then this, and it cannot deadlock
-    /// because nothing takes the two the other way round. [`Self::snapshot`] is
-    /// the one reader, and it holds this slot for a clone and takes nothing
-    /// else. Nothing is locked while it is held apart from `terminal`, either:
-    /// [`Self::sync_blocks`] has let go of the block list before this is taken,
-    /// and the snapshot it replaces is plain data whose drop takes no lock.
-    latest: Mutex<Arc<Snapshot>>,
+    /// because nothing takes the two the other way round. [`Self::snapshot`]
+    /// and [`Self::glance`] are the readers, and each holds this slot for a
+    /// clone and takes nothing else while it does: a snapshot that has to be
+    /// built is built after the slot has been let go, under `terminal`, which
+    /// takes the slot again only to install it. Nothing is locked while it is
+    /// held apart from `terminal`, either: [`Self::sync_blocks`] has let go of
+    /// the block list before this is taken, and the snapshot it replaces is
+    /// plain data whose drop takes no lock.
+    latest: Mutex<Latest>,
 
     /// The finished blocks, rebuilt beside every snapshot and for the same
     /// reason. See [`BlockHistory`].
@@ -2516,10 +2603,10 @@ struct Shared {
     ///
     /// Filled only by the acquisition of `terminal` that parsed the bytes, and
     /// emptied only by the one that publishes them, so what `publish` finds
-    /// here is exactly what its snapshot shows. Kept here rather than left in
-    /// the emulator because bells and notifications are folded as they arrive
-    /// (see [`Self::collect`]), and a program ringing in a loop would otherwise
-    /// queue a frame's worth of them.
+    /// here is exactly what its publication shows. Kept here rather than left
+    /// in the emulator because bells and notifications are folded as they
+    /// arrive (see [`Self::collect`]), and a program ringing in a loop would
+    /// otherwise queue a frame's worth of them.
     unpublished: Mutex<Vec<TerminalEvent>>,
 
     /// What the child has asked for in output that has been published, and
@@ -2560,6 +2647,91 @@ struct Shared {
     /// side. See [`TerminalHandle::drives`].
     #[cfg(test)]
     drives: std::sync::atomic::AtomicUsize,
+
+    /// Whether a frame draws this pane, as the workspace last said — see
+    /// [`TerminalModel::draw_only`]. On until it says otherwise.
+    ///
+    /// What decides whether a publication builds a snapshot, and nothing
+    /// else: one that does not leaves it to whoever asks for it next, so a
+    /// pane this is wrong about costs a snapshot built late, on the thread
+    /// that asked, and never a stale one. Relaxed for that reason; it orders
+    /// nothing.
+    on_screen: AtomicBool,
+
+    /// How many snapshots have been built for this pane: every call to
+    /// [`Terminal::snapshot`] that found the emulator with something new to
+    /// look at.
+    ///
+    /// The number a test counts to see a pane nobody draws build none, as
+    /// [`PublishState::count`] is the one it counts to see the ceiling hold.
+    built: AtomicU64,
+}
+
+/// What the last publication left for the main thread to read.
+///
+/// A snapshot is a copy of every cell of the viewport, each resolved through
+/// the palette and compared against the last one: about a hundred and sixty
+/// microseconds for a 200 by 50 grid, up to once per [`PAINT_INTERVAL`]. That
+/// is worth it for a pane a frame draws, and nothing at all for one it does
+/// not — a tab behind the active one, a pane a zoom hides — of which a window
+/// running agents can have dozens printing at once. So a publication for a
+/// pane off screen builds none, and leaves here only what the main thread
+/// needs of the grid whether or not anybody looks at it: the open block,
+/// which says whether a command is running and whether the shell has come to
+/// its prompt. The snapshot is built when somebody asks for it, which is the
+/// frame that brings the pane back on screen, or a find, a copy or a question
+/// on the control socket about the pane where it is.
+struct Latest {
+    /// The newest snapshot built, which is the current one unless
+    /// [`Self::unbuilt`] says otherwise.
+    snapshot: Arc<Snapshot>,
+    /// The open block, when a publication since [`Self::snapshot`] was built
+    /// found the grid moved and built no snapshot of it, read off the emulator
+    /// instead.
+    unbuilt: Option<LiveBlock>,
+    /// Moved on by every publication that may have changed what the pane
+    /// draws: a new snapshot installed, or one left unbuilt.
+    ///
+    /// What [`TerminalModel::absorb`] compares to decide whether a repaint is
+    /// worth reporting, as it compared the snapshot's pointer when every
+    /// publication built one — and a repaint is still reported for a pane off
+    /// screen, since whether it is worth a frame is the workspace's to decide.
+    moved: u64,
+}
+
+impl Latest {
+    fn new(snapshot: Arc<Snapshot>) -> Self {
+        Self {
+            snapshot,
+            unbuilt: None,
+            moved: 0,
+        }
+    }
+
+    /// Puts a snapshot that has just been built in place, which settles any
+    /// publication that left one unbuilt.
+    ///
+    /// The emulator hands back the very same `Arc` while the drawn content has
+    /// not changed, and that is not a move.
+    fn install(&mut self, snapshot: Arc<Snapshot>) {
+        if !Arc::ptr_eq(&self.snapshot, &snapshot) {
+            self.snapshot = snapshot;
+            self.moved += 1;
+        }
+        self.unbuilt = None;
+    }
+
+    /// Records a publication that found the grid moved and built no snapshot
+    /// of it, with the open block it read instead.
+    fn leave_unbuilt(&mut self, live_block: LiveBlock) {
+        self.unbuilt = Some(live_block);
+        self.moved += 1;
+    }
+
+    /// The open block as the last publication left it.
+    fn live_block(&self) -> &LiveBlock {
+        self.unbuilt.as_ref().unwrap_or(&self.snapshot.live_block)
+    }
 }
 
 /// What the reader has parsed and what the main thread has been shown.
@@ -2725,11 +2897,61 @@ impl Shared {
         }
     }
 
+    fn latest(&self) -> MutexGuard<'_, Latest> {
+        self.latest.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// What the pane shows, as of the last publication or later.
+    ///
+    /// The published snapshot, for the price of a clone — unless the pane was
+    /// off screen when it was last published, and the publication built none.
+    /// Then it is built here, on the thread that asked, from what the emulator
+    /// holds now: the frame that brings the pane back draws what it printed
+    /// while nobody was looking, not what it showed when it was last seen.
+    ///
+    /// Built the way [`TerminalHandle::drive`] builds one, for the same
+    /// reasons: under `terminal`, installed before it is let go, and with the
+    /// block list synced in the same acquisition, since a picture newer than
+    /// the list beside it would paint a command that has finished as still
+    /// open. Newer than the events handed over, possibly, as drive's is: an
+    /// event never arrives ahead of the picture of the bytes that carried it,
+    /// which is the promise `unpublished` keeps, and that still holds.
+    ///
+    /// Never called with `terminal` held, which it may take.
     fn snapshot(&self) -> Arc<Snapshot> {
-        self.latest
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        {
+            let latest = self.latest();
+            if latest.unbuilt.is_none() {
+                return latest.snapshot.clone();
+            }
+        }
+
+        let mut terminal = self.lock();
+        let snapshot = self.build(&mut terminal);
+        self.sync_blocks(&terminal);
+        self.latest().install(snapshot.clone());
+        drop(terminal);
+        snapshot
+    }
+
+    /// The open block, and how far the picture has moved, as the last
+    /// publication left them — what the main thread needs of every
+    /// publication, read without building a snapshot for a pane that is not
+    /// drawn.
+    fn glance(&self) -> (LiveBlock, u64) {
+        let latest = self.latest();
+        (latest.live_block().clone(), latest.moved)
+    }
+
+    /// Builds a snapshot of the grid, or hands back the last one when nothing
+    /// has happened since — counted, when there was something to build.
+    ///
+    /// Only ever with `terminal` held, by the caller that installs it.
+    fn build(&self, terminal: &mut Terminal) -> Arc<Snapshot> {
+        if terminal.emulator().is_dirty() {
+            self.built.fetch_add(1, Ordering::Relaxed);
+        }
+        terminal.snapshot()
     }
 
     fn blocks(&self) -> Arc<BlockHistory> {
@@ -2848,15 +3070,31 @@ impl Shared {
     /// The `Arc` goes into a slot of its own so that painting never waits on
     /// parsing; the emulator returns the very same one when the drawn content
     /// did not change, which is what makes the wake-up free to ignore.
+    ///
+    /// For a pane no frame draws, everything but the grid: the block list, the
+    /// open block and the events, with no snapshot built. See [`Latest`].
     fn publish(&self) {
         let mut terminal = self.lock();
-        let snapshot = terminal.snapshot();
+        let snapshot = self
+            .on_screen
+            .load(Ordering::Relaxed)
+            .then(|| self.build(&mut terminal));
         let events = terminal.take_events();
         self.sync_blocks(&terminal);
         // Under the terminal's lock for the same reason `TerminalHandle::drive`
         // is: a keystroke landing in the gap would otherwise be overwritten by
         // this older snapshot. See `latest` for the lock order.
-        *self.latest.lock().unwrap_or_else(PoisonError::into_inner) = snapshot;
+        let mut latest = self.latest();
+        match snapshot {
+            Some(snapshot) => latest.install(snapshot),
+            // A clean emulator has been drawn since it last moved, by
+            // whoever installed the snapshot in place, and that one stands.
+            None if terminal.emulator().is_dirty() => {
+                latest.leave_unbuilt(terminal.live_block());
+            }
+            None => {}
+        }
+        drop(latest);
         // Handed over only once the picture they belong to is in place, and
         // before the terminal is let go, so that nothing parsed after this
         // snapshot goes with them. The emulator's own leftovers — a child's
