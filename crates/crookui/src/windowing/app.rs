@@ -555,10 +555,23 @@ impl ApplicationHandler<CrookEvent> for App {
             }
 
             // Reconfiguring the swapchain here would cost one `configure` per
-            // resize event; flagging it costs one per frame instead. A scale
-            // change is a resize too, because the swapchain is sized in
+            // resize event; flagging it costs one per frame instead.
+            //
+            // And the application hears of a size with no room in it, which
+            // is how Windows minimises a window and the only way it says so.
+            // See `InputState::resized`.
+            WindowEvent::Resized(size) => {
+                self.with_window(Window::mark_resized);
+                if let Some(occluded) = self.input.resized(size)
+                    && self.delegate.handle_event(occluded)
+                {
+                    self.with_window(Window::request_redraw);
+                }
+                return;
+            }
+            // A scale change is a resize too, because the swapchain is sized in
             // physical pixels even when the logical size did not move.
-            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+            WindowEvent::ScaleFactorChanged { .. } => {
                 self.with_window(Window::mark_resized);
                 return;
             }

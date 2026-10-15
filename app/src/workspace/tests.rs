@@ -32,7 +32,8 @@ use crate::git::{DiffStats, GitFacts, Head, SinceBase};
 use crate::keybindings::Recording;
 use crate::platform_insets::{ControlLayout, WindowChrome};
 use crate::settings::{
-    Density, GeneralOptions, Granularity, PrimaryInfo, Settings, StatusMarks, Subtitle, TabOptions,
+    Density, GeneralOptions, Granularity, Motion, PrimaryInfo, Settings, StatusMarks, Subtitle,
+    TabOptions,
 };
 use crate::tab::{
     AgentSession, AgentStatus, Attention, Direction, GroupId, Pane, PaneId, PullRequest,
@@ -13743,6 +13744,336 @@ fn only_a_running_mark_breathes() {
             "a {status:?} mark faded with the breath"
         );
     }
+}
+
+impl Harness {
+    /// Whether a frame of the breath would repaint the window now, which is
+    /// the whole of what the chain a test does not start would do with it.
+    fn breath_shows(&self) -> bool {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.breath_shows())
+    }
+
+    /// Whether a chain is moving the breath.
+    fn is_breathing(&self) -> bool {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.is_breathing())
+    }
+
+    /// Whether a chain is blinking the caret.
+    fn is_blinking(&self) -> bool {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.is_blinking())
+    }
+
+    /// Chooses an answer to "Motion", the way the Appearance page does.
+    fn set_motion(&mut self, motion: Motion) {
+        self.dispatch_workspace_action(SettingsAction::SetMotion(motion).into());
+    }
+
+    /// Selects `tab` and draws, which scrolls the panel to its row.
+    fn select_and_draw(&mut self, tab: TabId) {
+        self.dispatch_action(TabAction::Select(tab));
+        self.frame();
+    }
+
+    /// Starts the two chains the window on a desktop starts and a test
+    /// otherwise does not.
+    fn start_the_animations(&mut self) {
+        self.workspace_update(|workspace, ctx| {
+            workspace.start_caret_blink(ctx);
+            workspace.let_marks_breathe(ctx);
+        });
+    }
+
+    /// The colour of the mark on the panel's one group heading, drawn now.
+    fn heading_mark(&mut self) -> Option<Color> {
+        let scene = self.frame();
+        heading_disc(&scene, panel_heading(&scene))
+    }
+
+    /// Whether the blink chain would repaint on its next tick, as that tick
+    /// would decide it.
+    fn blink_repaints(&mut self) -> bool {
+        let mut repainted = false;
+        self.workspace_update(|workspace, ctx| repainted = workspace.blink_repaints(ctx));
+        repainted
+    }
+
+    /// Whether any field on screen is drawing a caret that blinks.
+    fn shows_a_caret(&self) -> bool {
+        self.workspace
+            .read(&self.app, |workspace, app| workspace.shows_a_caret(app))
+    }
+}
+
+#[test]
+fn a_window_out_of_sight_keeps_no_breath_going() {
+    // Minimised, or under other windows: the marks would be drawn for nobody,
+    // and on X11 and Windows every one of those frames is drawn all the same.
+    let mut harness = Harness::panel(2);
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| session.status = AgentStatus::Running);
+    harness.frame();
+    assert!(
+        harness.breath_shows(),
+        "a running mark in view is not breathed for"
+    );
+
+    harness.workspace_update(|workspace, ctx| workspace.set_window_occluded(true, ctx));
+    assert!(
+        !harness.breath_shows(),
+        "a window nobody can see repaints for a breath"
+    );
+    harness.workspace_update(|workspace, ctx| workspace.let_marks_breathe(ctx));
+    assert!(
+        !harness.is_breathing(),
+        "a breath was started in a window nobody can see"
+    );
+
+    // Back in view, the mark that is still running breathes again.
+    harness.workspace_update(|workspace, ctx| workspace.set_window_occluded(false, ctx));
+    assert!(harness.breath_shows());
+    assert!(
+        harness.is_breathing(),
+        "the breath did not come back with the window"
+    );
+}
+
+#[test]
+fn a_running_mark_scrolled_out_of_the_panel_is_not_breathed_for() {
+    let mut harness = Harness::panel(40);
+    let tabs = harness.tab_ids();
+    let first = harness.panes_of(tabs[0])[0];
+    harness.update_session(first, |session| session.status = AgentStatus::Running);
+    harness.select_and_draw(tabs[0]);
+    assert!(
+        harness.breath_shows(),
+        "a running mark in view is not breathed for"
+    );
+
+    harness.select_and_draw(*tabs.last().expect("a last tab"));
+    assert!(
+        !harness.breath_shows(),
+        "the panel repaints for a running mark scrolled out of it"
+    );
+
+    // One that is in view, and only that, brings the breath back.
+    let last = harness.panes_of(*tabs.last().expect("a last tab"))[0];
+    harness.update_session(last, |session| session.status = AgentStatus::Running);
+    harness.frame();
+    assert!(harness.breath_shows());
+}
+
+#[test]
+fn a_folded_group_s_heading_is_breathed_for_while_it_is_in_view() {
+    // The running member is behind the fold and has no row: the heading's
+    // mark is the one that breathes for it.
+    let (mut harness, group) = Harness::grouped_panel(40);
+    let members = harness.members_of(group);
+    let hidden = harness.panes_of(members[0])[0];
+    harness.update_session(hidden, |session| session.status = AgentStatus::Running);
+    harness.dispatch_action(TabAction::ToggleGroup(group));
+    let near_the_top = harness
+        .tab_ids()
+        .into_iter()
+        .find(|tab| !members.contains(tab))
+        .expect("a tab outside the group");
+    harness.select_and_draw(near_the_top);
+    assert!(
+        harness.breath_shows(),
+        "the heading's running mark is not breathed for"
+    );
+
+    harness.select_and_draw(*harness.tab_ids().last().expect("a last tab"));
+    assert!(
+        !harness.breath_shows(),
+        "the panel repaints for a heading scrolled out of it"
+    );
+}
+
+#[test]
+fn reduced_motion_keeps_a_running_mark_at_its_full_colour() {
+    let (mut harness, _) = Harness::folded_group_with(AgentStatus::Running);
+    let accent = super::status_color(AgentStatus::Running);
+    harness.set_motion(Motion::Reduced);
+
+    harness.breathe_to(crate::plugins::tabs::BREATH_FRAMES / 2);
+    assert_eq!(
+        harness.heading_mark(),
+        Some(accent),
+        "a running mark faded with the breath while motion is reduced"
+    );
+
+    // And breathes again once motion is back.
+    harness.set_motion(Motion::Full);
+    assert_ne!(harness.heading_mark(), Some(accent));
+}
+
+#[test]
+fn reduced_motion_starts_no_breath_and_no_blink() {
+    // No timer at all, not one that wakes to repaint nothing: a window
+    // asked to keep still has nothing to tick for.
+    let mut harness = Harness::panel(1);
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| session.status = AgentStatus::Running);
+    harness.set_motion(Motion::Reduced);
+
+    harness.start_the_animations();
+    assert!(
+        !harness.is_breathing(),
+        "the marks breathe with motion reduced"
+    );
+    assert!(
+        !harness.is_blinking(),
+        "the caret blinks with motion reduced"
+    );
+
+    harness.set_motion(Motion::Full);
+    assert!(
+        harness.is_breathing(),
+        "the breath did not come back with motion"
+    );
+    assert!(
+        harness.is_blinking(),
+        "the blink did not come back with motion"
+    );
+}
+
+#[test]
+fn a_desktop_asking_for_less_motion_is_obeyed_until_told_otherwise() {
+    // "System" is the default, and it does as the desktop says. Each of the
+    // other two answers outranks the desktop.
+    let (mut harness, _) = Harness::folded_group_with(AgentStatus::Running);
+    let accent = super::status_color(AgentStatus::Running);
+    harness.breathe_to(crate::plugins::tabs::BREATH_FRAMES / 2);
+    assert_ne!(
+        harness.heading_mark(),
+        Some(accent),
+        "the mark does not breathe at all"
+    );
+
+    harness.workspace_update(|workspace, ctx| workspace.adopt_desktop_motion(Some(true), ctx));
+    assert_eq!(
+        harness.heading_mark(),
+        Some(accent),
+        "the desktop's word was ignored"
+    );
+
+    harness.set_motion(Motion::Full);
+    assert_ne!(
+        harness.heading_mark(),
+        Some(accent),
+        "Full did not outrank the desktop"
+    );
+}
+
+/// Whether a caret was drawn in the settings rail's search box on a frame
+/// drawn `idle` after the box was last used.
+///
+/// The frame is drawn again if drawing it took long enough to carry it into
+/// the other half of the blink, since it then says nothing either way.
+fn rail_caret_after(harness: &mut Harness, idle: std::time::Duration) -> bool {
+    let margin = std::time::Duration::from_millis(400);
+    for _ in 0..10 {
+        let asked = std::time::Instant::now();
+        harness.workspace_update(|workspace, _| {
+            let input = workspace
+                .field(crate::plugins::settings::SETTINGS_SECTION, "search")
+                .1;
+            input.edit(|_| ());
+            input.backdate(idle);
+        });
+        let scene = harness.frame();
+        if asked.elapsed() >= margin {
+            continue;
+        }
+        let field = panel_search_box(&scene);
+        return visible_rects(&scene).any(|(rect, bounds)| {
+            rect.background == Fill::Solid(theme().accent)
+                && bounds.width() < 2.
+                && field.contains_point(center(bounds))
+        });
+    }
+    panic!("no frame was drawn inside the margin");
+}
+
+/// The settings page, open, with the keyboard in its search box.
+fn rail_search_with_the_keys() -> Harness {
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.frame();
+    harness.type_text("x");
+    harness.frame();
+    harness
+}
+
+/// A little way into the dark half of a blink.
+const IN_THE_DARK: std::time::Duration =
+    std::time::Duration::from_millis(crate::text_input::CARET_PHASE.as_millis() as u64 + 100);
+
+#[test]
+fn the_caret_blinks_in_a_field_somebody_is_using() {
+    // What the two tests below depart from.
+    let mut harness = rail_search_with_the_keys();
+    assert!(rail_caret_after(&mut harness, std::time::Duration::ZERO));
+    assert!(
+        !rail_caret_after(&mut harness, IN_THE_DARK),
+        "the caret never went out"
+    );
+    assert!(harness.shows_a_caret());
+}
+
+#[test]
+fn reduced_motion_draws_a_solid_caret_and_repaints_nothing_for_it() {
+    let mut harness = rail_search_with_the_keys();
+    harness.set_motion(Motion::Reduced);
+
+    assert!(
+        rail_caret_after(&mut harness, IN_THE_DARK),
+        "the caret went out with motion reduced"
+    );
+    assert!(
+        !harness.shows_a_caret(),
+        "the blink would repaint for a caret that keeps still"
+    );
+}
+
+#[test]
+fn a_caret_left_alone_for_ten_seconds_holds_still_lit() {
+    // In the dark half of a blink, had it gone on.
+    let rested = crate::text_input::CARET_REST + std::time::Duration::from_millis(100);
+    let mut harness = rail_search_with_the_keys();
+
+    assert!(
+        rail_caret_after(&mut harness, rested),
+        "a caret nobody has typed at for ten seconds went on blinking"
+    );
+    assert!(
+        !harness.shows_a_caret(),
+        "the blink would go on repainting a caret at rest"
+    );
+}
+
+#[test]
+fn the_blink_repaints_once_more_for_a_caret_coming_to_rest() {
+    // Its last frame may have been drawn in the dark half of a blink, and
+    // with nothing else to repaint the window the caret would stay out.
+    let mut harness = rail_search_with_the_keys();
+    assert!(
+        harness.blink_repaints(),
+        "a blinking caret is not repainted"
+    );
+
+    rail_caret_after(&mut harness, crate::text_input::CARET_REST);
+    assert!(
+        harness.blink_repaints(),
+        "the caret's last frame was its dark half"
+    );
+    assert!(
+        !harness.blink_repaints(),
+        "a caret at rest is repainted for nothing"
+    );
 }
 
 #[test]

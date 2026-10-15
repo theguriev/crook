@@ -21,6 +21,12 @@
 //! caret that is solid for half a second after every keystroke is a caret
 //! nobody loses — and whether this field is the one the keyboard belongs to,
 //! which is the one fact the element beside it cannot work out for itself.
+//!
+//! The blink stops, lit, in two cases: [`CARET_REST`] after the field was
+//! last used, and for good while the window keeps still — the Appearance
+//! page's "Motion", which [`let_carets_blink`] puts in force. Both are
+//! answered here, where the caret is drawn from, so that no field can blink
+//! where another holds still.
 
 use std::cell::{Cell, Ref, RefCell};
 use std::rc::Rc;
@@ -39,6 +45,57 @@ use crate::input_keys::Intent;
 /// enough. It is also how often the workspace's blink chain wakes up, so a
 /// shorter one is a real cost rather than a preference.
 pub const CARET_PHASE: Duration = Duration::from_millis(530);
+
+/// How long a caret goes on blinking after its field was last used, before
+/// it holds still, lit.
+///
+/// GNOME's `cursor-blink-timeout`, whose default it is; kitty and Alacritty
+/// stop theirs too, after fifteen seconds and five. A blink is for finding
+/// the caret again after looking away, and a caret nobody has typed at for
+/// ten seconds is not being looked for — it is a pulse at the edge of the
+/// eye of somebody reading something else.
+pub const CARET_REST: Duration = Duration::from_secs(10);
+
+thread_local! {
+    /// Whether a caret on this thread's window blinks at all: the Appearance
+    /// page's "Motion", as the workspace resolves it.
+    ///
+    /// Per thread, as the theme in force is and as
+    /// [`crate::clipboard::use_primary`] is, and for the same reasons: it is
+    /// the window's, and it reaches every field on it — a plugin's own
+    /// included — without being handed to the dozen places a field is drawn.
+    static BLINKS: Cell<bool> = const { Cell::new(true) };
+
+    /// When a field on this thread's window was last used, which is the
+    /// latest of every field's own [`Inner::active_since`].
+    ///
+    /// What lets the blink chain ask "is any caret still blinking" without
+    /// finding the field that has the keyboard: only that field is typed in,
+    /// so the latest use is nearly always its own. Never earlier than any
+    /// field's own, which is the half that matters — a caret that can still
+    /// be in the dark half of its blink is a caret the chain is still
+    /// repainting for.
+    static LAST_USED: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// Says whether a caret on this thread's window blinks, which is what the
+/// "Motion" setting resolves to. A caret that does not is drawn solid.
+pub fn let_carets_blink(blink: bool) {
+    BLINKS.set(blink);
+}
+
+/// Whether a caret on this thread's window may be blinking now: carets blink
+/// at all, and a field was used within [`CARET_REST`].
+///
+/// What the workspace's blink chain asks before it repaints: once it says
+/// no, every caret on the window is solid, and another frame would draw the
+/// same one.
+pub fn a_caret_blinks() -> bool {
+    BLINKS.get()
+        && LAST_USED
+            .get()
+            .is_some_and(|used| used.elapsed() < CARET_REST)
+}
 
 /// One text field: its editor, and what the mouse is doing to it.
 ///
@@ -200,7 +257,7 @@ impl TextInput {
 
     /// An empty input with nothing typed into it.
     pub fn new() -> Self {
-        Self(Rc::new(Inner {
+        let input = Self(Rc::new(Inner {
             editor: RefCell::new(Editor::new()),
             drag: Cell::new(None),
             active_since: Cell::new(Instant::now()),
@@ -208,7 +265,37 @@ impl TextInput {
             preedit: RefCell::new(Preedit::default()),
             completion: RefCell::new(CompletionState::default()),
             caret_rect: Cell::new(None),
-        }))
+        }));
+        // A field starts its blink lit, and the window's clock has to know,
+        // or a caret drawn in the field's dark half would be one the blink
+        // chain thought was at rest.
+        input.used();
+        input
+    }
+
+    /// Restarts the caret's blink: the field is being used.
+    fn used(&self) {
+        let now = Instant::now();
+        self.0.active_since.set(now);
+        LAST_USED.set(Some(now));
+    }
+
+    /// Puts the field's last use `by` further back, as though nobody had
+    /// touched it since — and the window's with it, as the field a test has
+    /// just used is the last one used.
+    ///
+    /// For a test of what a caret does half a blink, or ten seconds, after
+    /// it was used, which would otherwise have to sleep for it.
+    #[cfg(test)]
+    pub(crate) fn backdate(&self, by: Duration) {
+        let then = self
+            .0
+            .active_since
+            .get()
+            .checked_sub(by)
+            .expect("the clock goes back that far");
+        self.0.active_since.set(then);
+        LAST_USED.set(Some(then));
     }
 
     /// What an input method is composing in this field, if anything.
@@ -453,7 +540,7 @@ impl TextInput {
         drop(preedit);
         // The caret is solid while somebody is composing, for the same reason
         // it is solid while somebody is typing: it is being looked at.
-        self.0.active_since.set(Instant::now());
+        self.used();
         true
     }
 
@@ -492,6 +579,13 @@ impl TextInput {
     /// is about to forget, which is the one case an element cannot notice on
     /// its own.
     pub fn set_has_keys(&self, has_keys: bool) {
+        // A caret the keyboard has just come to starts its blink lit, as one
+        // just typed at does: arriving in the dark half of a blink, or at
+        // rest after a while unused, it would be a caret somebody has to
+        // wait for or look twice to find.
+        if has_keys && !self.0.has_keys.get() {
+            self.used();
+        }
         self.0.has_keys.set(has_keys);
     }
 
@@ -503,7 +597,7 @@ impl TextInput {
     /// Changes the editor, and restarts the caret's blink so that the caret is
     /// solid at the moment somebody is looking for it.
     pub fn edit<T>(&self, change: impl FnOnce(&mut Editor) -> T) -> T {
-        self.0.active_since.set(Instant::now());
+        self.used();
         change(&mut self.0.editor.borrow_mut())
     }
 
@@ -567,9 +661,16 @@ impl TextInput {
     }
 
     /// Whether the caret is drawn at this instant.
+    ///
+    /// Always, where carets keep still and once the field has gone
+    /// [`CARET_REST`] unused: a caret that holds still holds still lit.
     pub fn caret_is_visible(&self) -> bool {
+        let idle = self.0.active_since.get().elapsed();
+        if !BLINKS.get() || idle >= CARET_REST {
+            return true;
+        }
         let phase = CARET_PHASE.as_millis();
-        self.0.active_since.get().elapsed().as_millis() % (phase * 2) < phase
+        idle.as_millis() % (phase * 2) < phase
     }
 
     /// Starts a selection at `offset`, selecting a character, a word or a line
@@ -1109,5 +1210,66 @@ mod tests {
             input.caret_is_visible(),
             "a caret that blinked out under somebody's fingers is a lost caret"
         );
+    }
+
+    /// A little way into a half of the blink, so that a test asking about it
+    /// at once is still in that half on a loaded machine.
+    const INTO_A_HALF: Duration = Duration::from_millis(100);
+
+    #[test]
+    fn a_caret_goes_dark_half_a_blink_after_the_field_was_used() {
+        // What every test below departs from: the caret does blink.
+        let input = holding("x");
+        input.backdate(CARET_PHASE + INTO_A_HALF);
+        assert!(!input.caret_is_visible(), "the caret never went out");
+        assert!(a_caret_blinks());
+    }
+
+    #[test]
+    fn a_caret_left_alone_holds_still_lit_and_stops_asking_for_frames() {
+        let input = holding("x");
+        // Ten seconds and a little: the dark half of a blink, had it gone on.
+        input.backdate(CARET_REST + INTO_A_HALF);
+        assert!(
+            input.caret_is_visible(),
+            "a caret nobody has used for ten seconds went on blinking"
+        );
+        assert!(
+            !a_caret_blinks(),
+            "the blink chain would go on repainting a caret at rest"
+        );
+
+        input.edit(|editor| editor.set_text("xy"));
+        assert!(a_caret_blinks(), "typing again did not start the blink");
+    }
+
+    #[test]
+    fn a_caret_that_may_not_blink_is_solid() {
+        let input = holding("x");
+        input.backdate(CARET_PHASE + INTO_A_HALF);
+        let_carets_blink(false);
+        let (visible, blinks) = (input.caret_is_visible(), a_caret_blinks());
+        let_carets_blink(true);
+
+        assert!(visible, "a caret asked to keep still went dark");
+        assert!(
+            !blinks,
+            "the blink chain would repaint a caret that keeps still"
+        );
+    }
+
+    #[test]
+    fn a_field_the_keyboard_comes_to_starts_its_blink_lit() {
+        // A caret that arrived in the dark half of a blink, or at rest after
+        // a long while unused, is a caret a person has to wait to find.
+        let input = holding("x");
+        input.backdate(CARET_PHASE + INTO_A_HALF);
+        input.set_has_keys(true);
+        assert!(input.caret_is_visible());
+
+        // Told again, it is not news, and the blink goes on where it was.
+        input.backdate(CARET_PHASE + INTO_A_HALF);
+        input.set_has_keys(true);
+        assert!(!input.caret_is_visible());
     }
 }

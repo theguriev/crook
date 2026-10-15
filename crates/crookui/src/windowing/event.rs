@@ -47,6 +47,14 @@ pub(super) struct InputState {
     /// The files of a drop that is still arriving, one `DroppedFile` at a
     /// time. See [`Self::finish_drop`].
     dropped: Vec<PathBuf>,
+    /// Whether the desktop last said every pixel of the window is hidden.
+    covered: bool,
+    /// Whether the window's last size had no room in it, which is how
+    /// Windows minimises one. See [`Self::resized`].
+    shrunk: bool,
+    /// What the application was last told about the two together: out of
+    /// sight while either holds. See [`Self::occlusion`].
+    occluded: bool,
 }
 
 #[derive(Debug)]
@@ -59,8 +67,8 @@ struct Click {
 
 impl InputState {
     /// Converts one winit window event, or `None` when it is not input or one
-    /// of the two things the desktop says about the window — its theme and
-    /// whether it has the focus.
+    /// of the things the desktop says about the window — its theme, whether
+    /// it has the focus, and whether it can be seen.
     ///
     /// A dropped file is input, and is `None` here all the same: it is one
     /// file of a drop that may have more, and what crosses the line is the
@@ -147,6 +155,15 @@ impl InputState {
             // only winit knows how each desktop says it.
             WindowEvent::Focused(focused) => Some(Event::WindowFocused(*focused)),
 
+            // The window went out of sight or came back, which the desktop
+            // says the way it says the rest. Folded in with the other way a
+            // window goes out of sight rather than passed on as it is: see
+            // `occlusion`.
+            WindowEvent::Occluded(covered) => {
+                self.covered = *covered;
+                self.occlusion()
+            }
+
             // An input method is composing. These arrive *instead of* the key
             // presses that belong to the composition, which is why a field
             // that ignores them cannot type Japanese, Chinese or Korean at all.
@@ -217,6 +234,33 @@ impl InputState {
         Some(Event::FilesDropped {
             paths: std::mem::take(&mut self.dropped),
         })
+    }
+
+    /// Notes the window's new size, and says so as [`Event::WindowOccluded`]
+    /// when it has just shrunk to nothing or grown out of it.
+    ///
+    /// Windows sends no `Occluded` — winit reports it on X11 and macOS only
+    /// — and minimising a window there resizes it to nothing, the one size no
+    /// window anybody can see has. So a window with no room in it is out of
+    /// sight on any desktop, and on Windows it is the only word there is.
+    pub(super) fn resized(&mut self, size: winit::dpi::PhysicalSize<u32>) -> Option<Event> {
+        self.shrunk = size.width == 0 || size.height == 0;
+        self.occlusion()
+    }
+
+    /// [`Event::WindowOccluded`], when whether the window can be seen has
+    /// just changed.
+    ///
+    /// Out of sight while either way of hiding it holds, so that a window
+    /// still under others is not said to be back because it was restored
+    /// to a size, nor one still minimised because the desktop said the
+    /// windows over it had gone. Only a change is said, since the desktop
+    /// repeats itself: X11 sends `Occluded(true)` again for each window
+    /// that moves over one already covered.
+    fn occlusion(&mut self) -> Option<Event> {
+        let occluded = self.covered || self.shrunk;
+        (occluded != std::mem::replace(&mut self.occluded, occluded))
+            .then_some(Event::WindowOccluded(occluded))
     }
 
     /// Forgets every button it believes is held.
@@ -513,7 +557,7 @@ fn named_key_name(key: NamedKey) -> String {
 
 #[cfg(test)]
 mod tests {
-    use winit::dpi::PhysicalPosition;
+    use winit::dpi::{PhysicalPosition, PhysicalSize};
 
     use super::*;
 
@@ -598,6 +642,61 @@ mod tests {
         assert!(matches!(
             input.convert(&WindowEvent::Focused(true), 1.),
             Some(Event::WindowFocused(true))
+        ));
+    }
+
+    #[test]
+    fn the_window_going_out_of_sight_and_back_crosses_the_line_once_each_way() {
+        let mut input = InputState::default();
+
+        assert!(matches!(
+            input.convert(&WindowEvent::Occluded(true), 1.),
+            Some(Event::WindowOccluded(true))
+        ));
+        // X11 says it again for each window that moves over one already
+        // covered, and the application has already been told.
+        assert!(input.convert(&WindowEvent::Occluded(true), 1.).is_none());
+        assert!(matches!(
+            input.convert(&WindowEvent::Occluded(false), 1.),
+            Some(Event::WindowOccluded(false))
+        ));
+    }
+
+    #[test]
+    fn a_window_shrunk_to_nothing_is_out_of_sight_until_it_has_room_again() {
+        // How Windows minimises a window, and the only word of it winit
+        // passes on: there is no `Occluded` there.
+        let mut input = InputState::default();
+
+        assert!(input.resized(PhysicalSize::new(800, 600)).is_none());
+        assert!(matches!(
+            input.resized(PhysicalSize::new(0, 0)),
+            Some(Event::WindowOccluded(true))
+        ));
+        assert!(matches!(
+            input.resized(PhysicalSize::new(800, 600)),
+            Some(Event::WindowOccluded(false))
+        ));
+        assert!(input.resized(PhysicalSize::new(900, 600)).is_none());
+    }
+
+    #[test]
+    fn a_window_is_in_sight_only_once_neither_way_of_hiding_it_holds() {
+        let mut input = InputState::default();
+
+        assert!(matches!(
+            input.convert(&WindowEvent::Occluded(true), 1.),
+            Some(Event::WindowOccluded(true))
+        ));
+        assert!(input.resized(PhysicalSize::new(0, 0)).is_none());
+        // Room again, under the same windows as before.
+        assert!(
+            input.resized(PhysicalSize::new(800, 600)).is_none(),
+            "a window still covered was said to be in sight"
+        );
+        assert!(matches!(
+            input.convert(&WindowEvent::Occluded(false), 1.),
+            Some(Event::WindowOccluded(false))
         ));
     }
 

@@ -260,9 +260,14 @@ Twenty-two features, and the page that configures them:
   glyph per state in the same colour — a play mark, a bell, a crossed ring, a hollow one — for
   an eye the colour says nothing to, or a screenshot in greyscale. Either way a running agent's
   mark breathes, fading and coming back every two seconds, so a working row reads as working
-  without a pointer over it, and nothing moves once nothing runs. A row whose mark a plugin
-  has taken keeps its status on the mark's corner instead: the PowerBook Duo pirate grinning
-  while the agent works, a dot in the status colour while it waits or after it failed.
+  without a pointer over it, and nothing moves once nothing runs — nor while the window is
+  minimised or covered, nor for a row scrolled out of the panel. **Motion**, on the same page,
+  keeps the marks and the caret still: *System*, the default, does as the desktop's own reduce
+  motion switch says (macOS, Windows, and GNOME's animations), and *Reduced* and *Full* say it
+  for Crook alone. A caret left alone for ten seconds stops blinking either way. A row whose
+  mark a plugin has taken keeps its status on the mark's corner instead: the PowerBook Duo
+  pirate grinning while the agent works, a dot in the status colour while it waits or after it
+  failed.
   Under that space is a `+`, which is where Warp's browser puts the one that opens another tab.
   A new tab starts where the focused pane is working, not where Crook itself was started — from
   the Dock, that would be your home directory every time.

@@ -231,6 +231,19 @@ pub enum Event {
     /// desktop that never says leaves an application exactly as it was.
     WindowFocused(bool),
 
+    /// Nothing of the window can be seen (`true`) — it is minimised, or
+    /// every pixel of it is under other windows — or some of it can again
+    /// (`false`).
+    ///
+    /// Sent on every change and not when the window opens, for the reason
+    /// [`Self::WindowFocused`] is: a window is in view until told otherwise,
+    /// so a desktop that never says leaves an application drawing as it
+    /// always did. Not every desktop does say. X11 and macOS report it, and
+    /// on Windows a minimised window is the one shrunk to nothing; Wayland
+    /// says nothing and holds a hidden window's frames back instead, which
+    /// is the same saving made by the compositor.
+    WindowOccluded(bool),
+
     /// Files were dragged from somewhere else — a file manager, a
     /// screenshot's thumbnail, a browser's downloads — and let go over the
     /// window.
@@ -319,6 +332,7 @@ impl Event {
             | Self::Ime(_)
             | Self::SystemTheme(_)
             | Self::WindowFocused(_)
+            | Self::WindowOccluded(_)
             | Self::FilesDropped { .. } => None,
         }
     }
@@ -350,6 +364,7 @@ impl Event {
             Self::Ime(_)
             | Self::SystemTheme(_)
             | Self::WindowFocused(_)
+            | Self::WindowOccluded(_)
             | Self::FilesDropped { .. } => Modifiers::default(),
         }
     }
@@ -404,6 +419,7 @@ impl DispatchedEvent {
             | Event::Ime(_)
             | Event::SystemTheme(_)
             | Event::WindowFocused(_)
+            | Event::WindowOccluded(_)
             | Event::FilesDropped { .. }
             | Event::MouseMoved { .. }
             | Event::ModifiersChanged { .. } => Some(&self.event),

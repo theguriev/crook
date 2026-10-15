@@ -351,6 +351,56 @@ impl StatusMarks {
     }
 }
 
+/// Whether anything in the window moves on its own: a running agent's mark
+/// breathing, and the caret blinking.
+///
+/// The two things in Crook that move with nobody touching anything, and one
+/// setting for both, because the person who wants one of them still wants
+/// the other still too: what it is for is a pulse in the corner of the eye
+/// for hours, and a caret blinking beside it is the same pulse. Every
+/// desktop has a switch for exactly this — macOS's Reduce motion, GNOME's
+/// animations, Windows' animation effects — so the default is to do as that
+/// switch says, and the other two answers are for a person who wants Crook
+/// to differ from the rest of their desktop.
+#[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Motion {
+    /// As the desktop says: still where it asks for less motion, and
+    /// moving where it does not or cannot be asked. See [`crate::motion`].
+    #[default]
+    System,
+    /// Running marks breathe and the caret blinks, whatever the desktop
+    /// says.
+    Full,
+    /// Nothing moves: a running mark is drawn in its full colour and the
+    /// caret is solid, and no timer runs for either.
+    Reduced,
+}
+
+impl Motion {
+    /// Every value, in the order the page offers them.
+    pub const ALL: [Self; 3] = [Self::System, Self::Full, Self::Reduced];
+
+    /// What the page calls this.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Full => "Full",
+            Self::Reduced => "Reduced",
+        }
+    }
+
+    /// Whether nothing should move, given whether the desktop asks for less
+    /// motion.
+    pub fn is_reduced(self, desktop_reduces: bool) -> bool {
+        match self {
+            Self::System => desktop_reduces,
+            Self::Full => false,
+            Self::Reduced => true,
+        }
+    }
+}
+
 /// Everything the settings page writes that is not about the tab strip.
 ///
 /// A type size and eight switches, and that is not an accident of
@@ -504,6 +554,9 @@ pub struct GeneralOptions {
     /// and offered only there: on macOS and Windows there is nothing for it to
     /// switch. See [`crate::clipboard`].
     pub middle_click_paste: bool,
+    /// Whether running marks breathe and the caret blinks, or the window
+    /// keeps still. See [`Motion`].
+    pub motion: Motion,
 }
 
 /// How wide the tabs panel is until its edge is dragged: Warp's
@@ -531,6 +584,7 @@ impl Default for GeneralOptions {
             open_at_login: false,
             audible_bell: false,
             middle_click_paste: true,
+            motion: Motion::System,
         }
     }
 }
@@ -1914,6 +1968,44 @@ mod tests {
     }
 
     #[test]
+    fn test_motion_is_written_as_three_words_and_follows_the_desktop_by_default() {
+        assert_eq!(GeneralOptions::default().motion, Motion::System);
+        for (motion, word) in [
+            (Motion::System, "system"),
+            (Motion::Full, "full"),
+            (Motion::Reduced, "reduced"),
+        ] {
+            let scratch = ScratchDirectory::new("motion");
+            let mut settings = Settings::load(scratch.settings_file());
+            settings.set_general(GeneralOptions {
+                motion,
+                ..settings.general()
+            });
+            settings.save_blocking().expect("the save should succeed");
+
+            let written: Map<String, Value> = serde_json::from_str(
+                &fs::read_to_string(scratch.settings_file()).expect("the file should be readable"),
+            )
+            .expect("the file should be a JSON object");
+            assert_eq!(Some(&Value::from(word)), written.get("motion"));
+            assert_eq!(
+                Settings::load(scratch.settings_file()).general().motion,
+                motion,
+                "{word} did not come back"
+            );
+        }
+    }
+
+    #[test]
+    fn test_only_the_system_answer_listens_to_the_desktop() {
+        for desktop in [false, true] {
+            assert_eq!(Motion::System.is_reduced(desktop), desktop);
+            assert!(!Motion::Full.is_reduced(desktop));
+            assert!(Motion::Reduced.is_reduced(desktop));
+        }
+    }
+
+    #[test]
     fn test_an_option_as_meta_this_build_cannot_read_is_auto() {
         // `true` is what Ghostty takes, and a person moving a setting across
         // would try it. It costs that key and nothing beside it.
@@ -1964,6 +2056,9 @@ mod tests {
                 // and a middle click pastes it. Written everywhere, read only
                 // where a desktop keeps one.
                 "middle_click_paste",
+                // Crook's own: whether running marks breathe and the caret
+                // blinks, or the window keeps still as the desktop asks.
+                "motion",
                 // Crook's own: which of a pane's stops post a desktop
                 // notification while the window is behind another.
                 "notify_on_failed",
@@ -2179,11 +2274,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Nine tab options, fifteen general ones and three theme names, and
+        // Nine tab options, sixteen general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(27, written.len());
+        assert_eq!(28, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),

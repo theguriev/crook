@@ -1,7 +1,9 @@
-//! The Appearance page: where the tabs are, and what a row of them looks like.
+//! The Appearance page: where the tabs are, what a row of them looks like,
+//! and whether anything on screen moves on its own.
 //!
 //! Warp's Appearance page carries eleven categories; the two of them that
-//! describe a tab strip are the two here, plus the text size and the theme.
+//! describe a tab strip are the two here, plus the text size and the theme,
+//! and one Warp has no word for: whether the window keeps still.
 //!
 //! # Every control writes through the action the gear menu dispatches
 //!
@@ -18,8 +20,8 @@ use crook_plugin::{Manifest, PluginId, Tier};
 
 use crate::plugin::{BuildError, Host, Plugin};
 use crate::settings::{
-    Density, FONT_SIZE_STEP, Granularity, PrimaryInfo, StatusMarks, TabOptions, resolve_subtitle,
-    subtitle_options_for,
+    Density, FONT_SIZE_STEP, Granularity, Motion, PrimaryInfo, StatusMarks, TabOptions,
+    resolve_subtitle, subtitle_options_for,
 };
 use crate::workspace::settings_page::search::Words;
 use crate::workspace::settings_page::widgets::{self, Category, Entry, Segment};
@@ -233,7 +235,56 @@ fn appearance(workspace: &Workspace) -> Vec<Category> {
                 .collect(),
         ),
         widgets::category("Rows", rows_category(workspace)),
+        widgets::category("Motion", motion_category(workspace)),
     ]
+}
+
+/// The "Motion" category: whether anything in the window moves on its own.
+///
+/// A category of one row, because what it holds is about the whole window
+/// rather than the tabs or the text — a running mark is in the panel and the
+/// caret is in every field — and a person looking for it is looking for the
+/// word their desktop's own switch is called by.
+fn motion_category(workspace: &Workspace) -> Vec<Entry> {
+    let ui = workspace.fonts().ui;
+    let state = workspace.settings_page();
+    let chosen = workspace.general().motion;
+
+    vec![widgets::row(
+        Words::new("Motion")
+            .with_description(
+                "Whether a running agent's mark breathes and the caret blinks. Reduced keeps \
+                 both still; System does as the desktop's own reduce motion setting says.",
+            )
+            .with_keywords(&[
+                "reduce",
+                "reduced",
+                "animation",
+                "animations",
+                "animate",
+                "blink",
+                "caret",
+                "cursor",
+                "breathe",
+                "pulse",
+                "still",
+                "accessibility",
+            ]),
+        true,
+        widgets::segmented(
+            Motion::ALL
+                .into_iter()
+                .map(|motion| Segment {
+                    label: motion.label(),
+                    selected: chosen == motion,
+                    command: Some(SettingsAction::SetMotion(motion).into()),
+                    state: state.control(keyed("motion", motion)),
+                })
+                .collect(),
+            ui,
+        ),
+        ui,
+    )]
 }
 /// The "Text" category: how big the terminal's own type is, and which family
 /// it is set in.

@@ -73,6 +73,7 @@ pub mod inline_image;
 pub mod input_keys;
 pub mod keybindings;
 pub mod login_item;
+pub mod motion;
 pub mod new_window;
 pub mod notify;
 pub mod order;
@@ -4095,6 +4096,12 @@ impl Shell {
                 workspace.start_git_poll(ctx);
                 workspace.start_caret_blink(ctx);
                 workspace.let_marks_breathe(ctx);
+                // Asked after both have started, rather than before them,
+                // because the answer is on the pool and the window does not
+                // wait for it: a desktop asking for less motion stops both
+                // on its answer, which comes milliseconds into a caret's
+                // first half-blink — the lit one — and a mark's first breath.
+                workspace.ask_the_desktop_about_motion(ctx);
                 // Last, and not yet: the shells open after the first frame,
                 // which is what measures the panes they open in — see
                 // `frame_drawn`. Announced here so that the frame draws the
@@ -4429,6 +4436,21 @@ impl WindowDelegate for Shell {
             self.app.update(|ctx| {
                 workspace.update(ctx, |workspace, ctx| {
                     workspace.set_window_focused(focused, ctx);
+                });
+            });
+            return self
+                .app
+                .read(|ctx| ctx.has_window_invalidations(self.window_id));
+        }
+
+        // And for whether the window can be seen at all, which decides
+        // whether anything in it is worth animating — the workspace's to
+        // weigh, since it is the one that animates.
+        if let Event::WindowOccluded(occluded) = event {
+            let workspace = &self.workspace;
+            self.app.update(|ctx| {
+                workspace.update(ctx, |workspace, ctx| {
+                    workspace.set_window_occluded(occluded, ctx);
                 });
             });
             return self

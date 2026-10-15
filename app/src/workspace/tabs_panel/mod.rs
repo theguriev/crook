@@ -689,20 +689,30 @@ fn group_block(
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(heading(
-            workspace,
-            group,
-            data.name(),
-            heading_line(
-                base_branch(workspace, members, app).as_deref(),
-                Count {
-                    shown: members.len(),
-                    all,
-                },
-            ),
-            collapsed,
-            rollup,
-        ));
+        .with_child(
+            // Where it was drawn is written down as a row's is, because the
+            // mark on it breathes for a member that is running, and a breath
+            // scrolled out of the panel is one nobody sees.
+            geometry::Tracked::heading(
+                group,
+                workspace.panel_rows(),
+                heading(
+                    workspace,
+                    group,
+                    data.name(),
+                    heading_line(
+                        base_branch(workspace, members, app).as_deref(),
+                        Count {
+                            shown: members.len(),
+                            all,
+                        },
+                    ),
+                    collapsed,
+                    rollup,
+                ),
+            )
+            .finish(),
+        );
 
     if !collapsed {
         let spacing = match granularity {
