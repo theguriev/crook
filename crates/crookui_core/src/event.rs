@@ -226,9 +226,12 @@ pub enum Event {
     ///
     /// About the window, not about anything in it: an element's own focus is
     /// the application's business and never arrives this way. Sent on every
-    /// change and not when the window opens — a window is focused until told
-    /// otherwise, which is what every window was before this was sent, so a
-    /// desktop that never says leaves an application exactly as it was.
+    /// change, and as the window opens only when it opens without the
+    /// keyboard — a window is focused until told otherwise, which is what
+    /// every window was before this was sent, so a desktop that never says
+    /// leaves an application exactly as it was. A window that opens behind
+    /// another hears `false` before its first frame, and `true` when the
+    /// keyboard first arrives.
     WindowFocused(bool),
 
     /// Nothing of the window can be seen (`true`) — it is minimised, or

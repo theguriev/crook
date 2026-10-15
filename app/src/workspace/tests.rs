@@ -15651,16 +15651,133 @@ fn a_resize_is_written_into_the_session_file_too() {
     // and closed it never took.
     let scratch = Scratch::new();
     let mut harness = Harness::with_settings(1, scratch.settings());
-    let size = harness
-        .workspace
-        .read(&harness.app, |workspace, _| workspace.window_size_cell());
-    size.set(vec2f(777., 555.));
-    harness.workspace_update(|workspace, ctx| workspace.window_resized(ctx));
+    harness.workspace_update(|workspace, ctx| {
+        workspace.window_placed(crate::session::Placement::sized([777., 555.]), ctx);
+    });
 
     let written = session_written(&scratch, "777");
     assert!(
         written.contains("555"),
         "the session does not carry the size the window is: {written}"
+    );
+}
+
+#[test]
+fn where_the_window_is_and_whether_it_is_maximised_are_written_into_the_session_file() {
+    // Maximised on a second monitor: the size written is the one it goes
+    // back to, not the work area's, and the corner is that size's corner.
+    let scratch = Scratch::new();
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    // The frame of a maximised window, which the file must not take for the
+    // window's own size.
+    harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.window_size_cell())
+        .set(vec2f(2560., 1400.));
+    harness.workspace_update(|workspace, ctx| {
+        workspace.window_placed(
+            crate::session::Placement {
+                size: [1111., 666.],
+                position: Some([2333, 144]),
+                maximized: true,
+                fullscreen: false,
+            },
+            ctx,
+        );
+    });
+
+    let written = session_written(&scratch, "2333");
+    let session: crate::session::Session = serde_json::from_str(&written).expect("a session file");
+    assert_eq!(session.window, Some([1111., 666.]), "{written}");
+    assert_eq!(session.window_position, Some([2333, 144]), "{written}");
+    assert!(session.maximized && !session.fullscreen, "{written}");
+
+    // Restored again, it is an ordinary window where it is.
+    harness.workspace_update(|workspace, ctx| {
+        workspace.window_placed(
+            crate::session::Placement {
+                size: [1111., 666.],
+                position: Some([2444, 155]),
+                maximized: false,
+                fullscreen: false,
+            },
+            ctx,
+        );
+    });
+    let written = session_written(&scratch, "2444");
+    assert!(written.contains("\"maximized\": false"), "{written}");
+}
+
+#[test]
+fn a_window_that_does_not_keep_the_session_writes_nowhere_it_has_been() {
+    // #490's rule holds for where the window is as for its tabs: a second
+    // window, or a launcher's, moved about and closed, leaves the file to the
+    // window that keeps it.
+    let scratch = Scratch::new();
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    harness.workspace_update(|workspace, ctx| {
+        workspace.window_placed(crate::session::Placement::sized([801., 601.]), ctx);
+    });
+    session_written(&scratch, "801");
+
+    harness.workspace_update(|workspace, _| workspace.stop_saving_the_session());
+    harness.workspace_update(|workspace, ctx| {
+        workspace.window_placed(
+            crate::session::Placement {
+                position: Some([4321, 99]),
+                ..crate::session::Placement::sized([802., 602.])
+            },
+            ctx,
+        );
+    });
+    harness.workspace.read(&harness.app, |workspace, _| {
+        workspace.finish_saving_the_session();
+    });
+    let path = crate::session::session_path_beside(&scratch.path().join("settings.json"));
+    let written = std::fs::read_to_string(&path).expect("the keeper's file");
+    assert!(
+        !written.contains("4321") && !written.contains("802"),
+        "a window that does not keep the file wrote where it is into it: {written}"
+    );
+}
+
+#[test]
+fn the_last_place_the_window_was_in_is_written_before_the_window_goes() {
+    // The window's place as it closes is told a moment before the process
+    // ends, and the pool its save would run on ends with it. What is still on
+    // its way is written there and then, so the file holds it the moment the
+    // call returns — no waiting, since nothing will be there to wait.
+    let scratch = Scratch::new();
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    // Both of the pool's workers held, so the save asked for below waits in
+    // its queue for as long as this test says: a write that landed by the
+    // time the file is read below landed on this thread, or not at all.
+    let (releases, held): (Vec<_>, Vec<_>) =
+        (0..2).map(|_| std::sync::mpsc::channel::<()>()).unzip();
+    harness.workspace_update(|workspace, ctx| {
+        for held in held {
+            ctx.background()
+                .spawn(async move {
+                    let _ = held.recv();
+                })
+                .detach();
+        }
+        workspace.window_placed(
+            crate::session::Placement {
+                position: Some([3141, 59]),
+                ..crate::session::Placement::sized([900., 600.])
+            },
+            ctx,
+        );
+        workspace.finish_saving_the_session();
+    });
+
+    let path = crate::session::session_path_beside(&scratch.path().join("settings.json"));
+    let written = std::fs::read_to_string(&path).unwrap_or_default();
+    drop(releases);
+    assert!(
+        written.contains("3141"),
+        "the save asked for as the window closed had not reached the file: {written}"
     );
 }
 

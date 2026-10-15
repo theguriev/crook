@@ -808,6 +808,14 @@ pub struct Workspace {
     /// cell rather than a field so that recording it costs no `update` and
     /// therefore no frame.
     window_size: Rc<std::cell::Cell<Vector2F>>,
+    /// Where the window is on the desktop and what it is doing, as the
+    /// windowing layer last said — see [`Self::window_placed`] — which the
+    /// session file carries so that the next window opens there.
+    ///
+    /// `None` until it has said, and in a test or a headless picture, which
+    /// have no window to say it: the file then carries the frame's size and
+    /// nothing else.
+    window_placement: Option<crate::session::Placement>,
 
     /// Every chord the window answers to: the shipped table, what the
     /// plugins asked for, and what a person wrote in `keybindings.json`.
@@ -889,10 +897,12 @@ pub struct Workspace {
     ///
     /// Focused until told otherwise, which is what every window was before
     /// this was recorded: a desktop that never says leaves the strip exactly
-    /// as it always behaved. It is also what the caret and a program's cursor
-    /// are drawn against, so the same default is what opens a window with its
-    /// caret — on Wayland, which sends no word of focus until the keyboard
-    /// arrives, a window that assumed the opposite would open without one.
+    /// as it always behaved, and a test and a headless picture, which have no
+    /// desktop, draw a caret. A window that opens without the keyboard is
+    /// told so before its first frame, on Wayland too, where the first word
+    /// of focus is otherwise the keyboard arriving; it draws its caret from
+    /// the moment the keyboard does arrive, which on X11 and macOS, and on
+    /// Wayland for a window opened in front, is as it appears.
     window_focused: bool,
     /// Whether nothing of the window can be seen — minimised, or under other
     /// windows — as of the last thing the window said about it.
@@ -1355,6 +1365,7 @@ impl Workspace {
             #[cfg(test)]
             bells_sounded: 0,
             window_size: Rc::new(std::cell::Cell::new(Vector2F::zero())),
+            window_placement: None,
             system_is_dark: true,
             window_focused: true,
             window_occluded: false,
@@ -4668,15 +4679,24 @@ impl Workspace {
         ctx.notify();
     }
 
-    /// Records that the window is another size, which the session file
-    /// carries so that the next window opens the size this one was.
+    /// Records where the window is on the desktop and what it is doing,
+    /// which the session file carries so that the next window opens there:
+    /// the place, the size it goes back to, maximised and fullscreen.
     ///
-    /// The size itself is read off the cell the delegate writes before every
-    /// frame; this is the delegate saying it changed, since a resize moves no
-    /// tab and the file was otherwise written at the size of the last tab
-    /// action. Coalesced like every session save: a drag that resizes sixty
-    /// times a second asks sixty times and writes once.
-    pub fn window_resized(&self, ctx: &mut ViewContext<Self>) {
+    /// Told by the windowing layer as the window opens and after each batch of
+    /// events that moved or resized it, and saved only when it changed, since
+    /// a move or a resize moves no tab and the file was otherwise written as
+    /// of the last tab action. Coalesced like every session save: of the saves
+    /// a drag asks for while one is being written, only the last is written.
+    pub fn window_placed(
+        &mut self,
+        placement: crate::session::Placement,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.window_placement == Some(placement) {
+            return;
+        }
+        self.window_placement = Some(placement);
         self.save_session(ctx);
     }
 
@@ -12415,25 +12435,11 @@ impl Workspace {
     /// reason: two gestures a millisecond apart must not race each other to the
     /// file with the earlier one winning.
     fn save_session(&self, ctx: &mut ViewContext<Self>) {
-        if !self.saves_session || !self.general().restore_session {
-            return;
-        }
-        // Beside the settings file, wherever that is. An ephemeral run — a
-        // test, the headless snapshot — has nowhere to write its settings and
-        // writes no session either; a run with its settings in a scratch
-        // directory writes its session there, and never into the real one's
-        // place.
-        let Some(path) = self
-            .settings
-            .path()
-            .map(crate::session::session_path_beside)
-        else {
+        let Some((path, session)) = self.session_to_save() else {
             return;
         };
-
         let asked_at = self.session_saves.ask();
         let saves = self.session_saves.clone();
-        let session = crate::session::Session::of(&self.tabs, self.window_size());
 
         let written = ctx.background().spawn(async move {
             saves.write_if_last(asked_at, || {
@@ -12444,6 +12450,54 @@ impl Workspace {
             })
         });
         ctx.spawn(written, Self::note_session_save).detach();
+    }
+
+    /// Writes the session here and now if a save asked for has not reached
+    /// the file yet.
+    ///
+    /// For the window's last moment. A save runs on the background pool, and
+    /// the pool goes with the process: a save asked for as the window closed
+    /// — the place it was closed in, a tab closed on the way out — could go
+    /// with it, and the next window would open on the file from before. This
+    /// one overtakes those still on their way, which then find a later save
+    /// asked for and write nothing. Nothing at all when every save has
+    /// landed, which is almost always, and nothing in a window that does not
+    /// keep the file.
+    pub fn finish_saving_the_session(&self) {
+        if self.session_saves.is_settled() {
+            return;
+        }
+        let Some((path, session)) = self.session_to_save() else {
+            return;
+        };
+        let asked_at = self.session_saves.ask();
+        let written = self
+            .session_saves
+            .write_if_last(asked_at, || session.save_blocking(&path));
+        if let Some(Err(error)) = written {
+            log::warn!("could not save the session: {error:#}");
+        }
+    }
+
+    /// Where the session file is and what to write in it, for a window that
+    /// keeps the file; `None` for one that does not.
+    fn session_to_save(&self) -> Option<(PathBuf, crate::session::Session)> {
+        if !self.saves_session || !self.general().restore_session {
+            return None;
+        }
+        // Beside the settings file, wherever that is. An ephemeral run — a
+        // test, the headless snapshot — has nowhere to write its settings and
+        // writes no session either; a run with its settings in a scratch
+        // directory writes its session there, and never into the real one's
+        // place.
+        let path = self
+            .settings
+            .path()
+            .map(crate::session::session_path_beside)?;
+        let window = self
+            .window_placement
+            .or_else(|| self.window_size().map(crate::session::Placement::sized));
+        Some((path, crate::session::Session::of(&self.tabs, window)))
     }
 
     /// How tall the window was when it was last laid out, or zero where it

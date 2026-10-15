@@ -27,14 +27,25 @@
 //! the platform for, what a frameless window has to do about its own resize
 //! edges, and [`WindowControls`], the four verbs and two questions the
 //! application needs to move a window it is drawing the title bar of.
+//!
+//! # A window that comes back where it was
+//!
+//! [`WindowOptions`] can open a window at a position, maximised or
+//! fullscreen, and [`WindowDelegate::placed`] tells the application where the
+//! window is each time that changes, as a [`WindowPlacement`] it can keep for
+//! the next launch. `placement` is where a remembered position is checked
+//! against the monitors there are now.
 
 mod app;
 mod chrome;
 mod dock;
 mod event;
+mod fullscreen_entered;
+mod placement;
 #[cfg(any(target_os = "macos", test))]
 mod quit;
 mod window;
 
 pub use app::{Platform, Proxy, WindowDelegate, WindowOptions, run};
 pub use chrome::{ResizeEdge, WindowChrome, WindowControls};
+pub use placement::WindowPlacement;
