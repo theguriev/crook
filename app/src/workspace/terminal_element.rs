@@ -632,16 +632,23 @@ impl TerminalElement {
     /// Hit-tested, unlike a drag: with no button down there is no gesture that
     /// began here, so a pointer crossing a neighbouring pane is not this one's
     /// to report.
+    ///
+    /// **Hit-tested first**, because every move reaches every pane on screen:
+    /// nothing filters a move by what covers it, and a flex hands every event
+    /// to every child. The modes are the snapshot's, which is a clone of an
+    /// `Arc` — asked of the terminal, they were its lock and a snapshot built
+    /// here, on the thread that draws, for every pane on every move, each
+    /// waiting on a reader that might be parsing a flood.
     fn moved(&self, position: Vector2F, modifiers: Modifiers) -> bool {
-        if self.output.is_dragging()
-            || self.output.is_reporting()
-            || !self.output.mouse_modes().motion
-        {
-            return false;
-        }
         if !self
             .bounds()
             .is_some_and(|bounds| bounds.contains_point(position))
+        {
+            return false;
+        }
+        if self.output.is_dragging()
+            || self.output.is_reporting()
+            || !self.output.mouse_modes().motion
         {
             return false;
         }
@@ -1156,7 +1163,7 @@ fn paint_grid(
     // what is true of the press a person makes without it.
     scene.request_pointer(
         RectF::new(origin, size),
-        if snapshot.mouse_reporting {
+        if snapshot.mouse.is_reporting() {
             PointerShape::Arrow
         } else {
             PointerShape::Text

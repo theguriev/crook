@@ -2748,10 +2748,15 @@ do constantly.
 
 The pointer says which of the two a press will be: the grid asks for the I-beam while a press
 selects and the arrow while a program has the mouse, read from the snapshot's
-`mouse_reporting` so that a frame never takes the lock the reader parses under. That is what
+`mouse` modes so that a frame never takes the lock the reader parses under. That is what
 kitty and Alacritty show over `vim` with the mouse on. Alacritty brings the I-beam back while
 Shift is held; Crook does not, because nothing is drawn for Shift alone. A link the chord key
 has lit, below, gets the hand, on either surface, for as long as its underline is drawn.
+
+A move with no button down asks the same snapshot whether the program wants every move,
+`?1003`, and only once the pane has found the pointer over it. Every move reaches every pane on
+screen, and asking the terminal instead was its lock and a snapshot rebuilt on the thread that
+draws, per pane and per move — behind a reader that might be parsing a flood.
 
 The gesture is classified once, when the button goes down, and remembered in `PaneSelection`
 as `Selecting` or `Reporting`. Asking the terminal again on each move would be asking a

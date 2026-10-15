@@ -319,6 +319,7 @@ fn session() -> Option<Arc<Shared>> {
         resize_failing: AtomicBool::new(false),
         scroll_remainder: AtomicU32::new(0.0f32.to_bits()),
         publish: Mutex::new(PublishState::new()),
+        drives: std::sync::atomic::AtomicUsize::new(0),
     }))
 }
 
@@ -965,6 +966,33 @@ fn the_reader_publishes_what_it_drew_before_it_lets_go_of_the_terminal() {
     assert_the_terminal_is_held_until_the_snapshot_is_published(&shared, move || {
         publishing.publish();
     });
+}
+
+#[test]
+fn the_mouse_modes_a_pointer_move_asks_for_wait_on_nothing_the_reader_holds() {
+    // Every pointer move over a pane asks this, on the thread that draws, and
+    // asking took the terminal's lock and rebuilt the snapshot under it: a
+    // reader holding the lock through a flood held up every move the window
+    // was given. The modes the frame showed are in the snapshot it was drawn
+    // from.
+    let Some(shared) = session() else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    shared.feed(b"\x1b[?1003h\x1b[?1006h");
+    shared.publish();
+    let handle = TerminalHandle(shared.clone());
+
+    let parsing = shared.lock();
+    let asked = returns(move || handle.mouse_modes());
+    drop(parsing);
+
+    let modes = asked.expect("the mouse modes waited on the terminal's lock");
+    assert!(
+        modes.motion,
+        "the modes were not the ones the program asked for"
+    );
+    assert!(modes.sgr);
 }
 
 /// How long something a person did is given to come back before the test
