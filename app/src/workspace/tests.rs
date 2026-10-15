@@ -10899,13 +10899,15 @@ fn a_checkout_crook_makes_is_locked_until_the_last_pane_in_it_closes() {
     );
 
     harness.dispatch_action(TabAction::ClosePane(second));
-    harness.wait_for("the lock to go with the last pane", |_| {
-        lock_on(&repository, &checkout).is_none()
-    });
+    // The window's word first, and git's once that is in: a listing that
+    // runs while the unlock does can die on the lock file it is deleting.
+    wait_for_the_locks_to_come_off(&mut harness);
+    assert_eq!(
+        lock_on(&repository, &checkout),
+        None,
+        "the lock did not go with the last pane"
+    );
     assert!(checkout.is_dir(), "closing the pane took the checkout too");
-    harness.wait_for("the window to stop counting it as held", |harness| {
-        held_checkouts(harness).is_empty()
-    });
 }
 
 #[test]
@@ -11404,12 +11406,13 @@ fn a_pane_that_leaves_the_checkout_crook_made_takes_its_lock_off_with_it() {
     );
 
     moved(&mut harness, repository.clone());
-    harness.wait_for("the lock to go with the pane that left", |_| {
-        lock_on(&repository, &checkout).is_none()
-    });
-    harness.wait_for("the window to stop counting it as held", |harness| {
-        held_checkouts(harness).is_empty()
-    });
+    // The window's word first, and git's once that is in, as above.
+    wait_for_the_locks_to_come_off(&mut harness);
+    assert_eq!(
+        lock_on(&repository, &checkout),
+        None,
+        "the lock did not go with the pane that left"
+    );
     assert!(
         harness.pane_ids().contains(&pane),
         "the pane that left was closed"
