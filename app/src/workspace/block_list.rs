@@ -1535,23 +1535,53 @@ impl BlockList {
             self.view.set_menu_at(None);
             return;
         };
+        let item = *item;
 
+        // Hit-recorded here, in the list's own layer, so that a press on a
+        // control is a press on it rather than on the block's text underneath,
+        // and the pointer over one is the arrow rather than the list's I-beam.
         for control in self.controls().iter().copied() {
-            let bounds = self.control_at(origin, *item, control);
+            ctx.scene
+                .draw_rect_with_hit_recording(self.control_at(origin, item, control));
+        }
+
+        // Painted a layer up. A layer draws its glyphs after all of its rects,
+        // so a plate in the list's own layer is under the prompt line it sits
+        // on however opaque it is, and a command long enough to reach the
+        // controls would show through them with the icons over its letters.
+        // Click-through, so the hits stay the ones recorded above.
+        ctx.scene.start_layer(ClipBounds::ActiveLayer);
+        ctx.scene.set_active_layer_click_through();
+
+        // Each plate is the pane's ground, then the block's washes in the order
+        // `paint_item` lays them down — or the plate would be a hole cut in a
+        // failed or a selected block — and then its own tint.
+        let ground = color(self.snapshot.background);
+        let washes = [
+            (self.verdict(item.index) == Verdict::Failed)
+                .then(|| theme().terminal.normal[1].with_alpha(WASH_ALPHA)),
+            (self.block(item.index).map(|block| block.id) == self.view.selected())
+                .then(|| theme().accent.with_alpha(SELECT_WASH_ALPHA)),
+        ];
+        for control in self.controls().iter().copied() {
+            let bounds = self.control_at(origin, item, control);
             // The dots stay lit while their menu is up, because they are what
             // it belongs to.
             let held = self.menu == Some(shown) && control == Control::Menu;
-            let plate = if held || self.view.on_control() == Some(control) {
+            let tint = if held || self.view.on_control() == Some(control) {
                 theme().overlay_3
             } else {
                 theme().overlay_1
             };
-            // Hit-recorded, so that a press on it is a press on the control
-            // rather than on the block's text underneath.
-            ctx.scene
-                .draw_rect_with_hit_recording(bounds)
-                .with_background(plate)
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CONTROL_RADIUS)));
+            let fills = std::iter::once(ground)
+                .chain(washes.into_iter().flatten())
+                .chain(std::iter::once(tint));
+            for fill in fills {
+                ctx.scene
+                    .draw_rect_without_hit_recording(bounds)
+                    .with_background(fill)
+                    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CONTROL_RADIUS)));
+            }
 
             let inset = (CONTROL_SIZE - CONTROL_ICON_SIZE) / 2.;
             ctx.scene.draw_icon(
@@ -1568,6 +1598,7 @@ impl BlockList {
                     .set_menu_at(Some(bounds.origin() + bounds.size() - origin));
             }
         }
+        ctx.scene.stop_layer();
     }
 
     /// Paints the thumb, in the geometry the general-purpose scrollable uses.

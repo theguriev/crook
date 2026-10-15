@@ -486,10 +486,22 @@ fn titled(entry: &Entry, ui: FamilyId) -> Box<dyn Element> {
     // as a truncated word rather than a name shortened to fit — "Copy the
     // block's working director" against its own action id. The end goes,
     // because a command is known by what it starts with.
-    let title = Text::new(entry.title.clone(), ui, 12.)
-        .with_color(theme().text_primary)
-        .with_ellipsis(Cut::End)
-        .finish();
+    //
+    // Set in an `Align`, because `Expanded` hands the title the row's height
+    // as well as its width — a flexible child gets the row's own minimum
+    // across it — and a `Text` stretched to that sets its line at the top of
+    // the box, a few pixels above the keys and the name beside it, which are
+    // inflexible and so centred by the row. The `Align` takes the box and
+    // centres the line in it, without changing how every other row in the
+    // window lays out its flexible children.
+    let title = Align::new(
+        Text::new(entry.title.clone(), ui, 12.)
+            .with_color(theme().text_primary)
+            .with_ellipsis(Cut::End)
+            .finish(),
+    )
+    .left()
+    .finish();
 
     let Some(note) = entry.note else {
         return Expanded::new(1., title).finish();

@@ -20341,7 +20341,8 @@ mod shells {
         /// the same square with the same radius in the header above it. Sorted
         /// by where they are rather than by the order they were painted in:
         /// which is the copy square and which is the menu is a thing about the
-        /// picture.
+        /// picture. One plate is painted as several squares in one place —
+        /// the pane's ground, the block's wash, the tint — and is one control.
         fn block_controls(scene: &Scene, panel: RectF) -> Vec<RectF> {
             let mut controls: Vec<RectF> = visible_rects(scene)
                 .filter(|(rect, bounds)| {
@@ -20354,6 +20355,7 @@ mod shells {
                 .filter(|bounds| panel.contains_point(center(*bounds)))
                 .collect();
             controls.sort_by(|left, right| left.min_x().total_cmp(&right.min_x()));
+            controls.dedup();
             controls
         }
 
@@ -20748,6 +20750,125 @@ mod shells {
                 copied.trim_end(),
                 "the block's trailing blank rows came with it"
             );
+        }
+
+        #[test]
+        fn a_block_s_controls_cover_the_command_line_they_are_drawn_over() {
+            // The controls sit on the prompt line, and their plates were a
+            // tint in the list's own layer — under its glyphs, since a layer
+            // draws its text after its rects. A command long enough to reach
+            // them showed through, letters and icons over each other. Each
+            // plate is the pane's own ground now, then the block's wash, then
+            // the tint, above the text.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            // Failed, for the wash, and long enough to fold: the rows of the
+            // command line run the whole width, to under the controls.
+            let long = "x".repeat(300);
+            if run(&mut harness, pane, &format!("echo {long}; false")) == 0 {
+                return;
+            }
+
+            let ground = harness
+                .workspace
+                .read(&harness.app, |workspace, app| {
+                    let (_, snapshot) = workspace.terminal(pane, app)?;
+                    Some(Fill::Solid(crate::workspace::terminal_element::color(
+                        snapshot.background,
+                    )))
+                })
+                .expect("the pane has a terminal");
+            let red = theme().terminal.normal[1];
+            let panel = panel_of_the_pane(&mut harness);
+            let scene = hover_block(&mut harness, pane, 0);
+            let controls = block_controls(&scene, panel);
+            assert_eq!(controls.len(), 2, "the copy square and the dots");
+
+            let layers: Vec<_> = scene.layers().collect();
+            // The layer the block's text is drawn in: the one holding the
+            // three hundred folded `x`s. Which rows reach the controls is the
+            // host prompt's business — a blank line before it moves the
+            // command down one — so what is asserted is the order the two are
+            // drawn in, and an overlap only where there is one.
+            let text = (0..layers.len())
+                .max_by_key(|&index| {
+                    layers[index]
+                        .glyphs
+                        .iter()
+                        .filter(|glyph| {
+                            glyph.glyph_key.glyph_id == u32::from('x')
+                                && panel.contains_point(glyph.position)
+                        })
+                        .count()
+                })
+                .expect("the frame has layers");
+            // A glyph's cell, from the baseline it was set on: a letter whose
+            // baseline is below a plate still has its top half under it.
+            let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+            let cell_of = |glyph: &crookui_core::scene::Glyph| {
+                RectF::new(
+                    glyph.position - vec2f(0., cell.baseline),
+                    vec2f(cell.width, cell.height),
+                )
+            };
+            for control in controls {
+                let painted = layers
+                    .iter()
+                    .position(|layer| {
+                        layer
+                            .rects
+                            .iter()
+                            .any(|rect| rect.bounds == control && rect.background == ground)
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("nothing opaque is under the control at {control:?}")
+                    });
+                assert!(
+                    text < painted,
+                    "the control at {control:?} is painted in layer {painted}, under the \
+                     block's text in layer {text}"
+                );
+                let over: Vec<_> = layers[painted..]
+                    .iter()
+                    .flat_map(|layer| layer.glyphs.iter())
+                    .filter(|glyph| cell_of(glyph).intersection(control).is_some())
+                    .collect();
+                assert!(
+                    over.is_empty(),
+                    "text is drawn over the control at {control:?}: {over:?}"
+                );
+
+                let fills: Vec<&Fill> = layers[painted]
+                    .rects
+                    .iter()
+                    .filter(|rect| rect.bounds == control)
+                    .map(|rect| &rect.background)
+                    .collect();
+                let [first, wash, tint] = fills.as_slice() else {
+                    panic!("the control at {control:?} is painted as {fills:?}");
+                };
+                assert_eq!(*first, &ground, "the ground goes down first");
+                assert!(
+                    matches!(wash, Fill::Solid(color)
+                        if (color.r, color.g, color.b) == (red.r, red.g, red.b) && color.a < 255),
+                    "the failed block's wash is not over the ground: {wash:?}"
+                );
+                assert_eq!(
+                    *tint,
+                    &Fill::Solid(theme().overlay_1),
+                    "the plate's own tint goes on top"
+                );
+                let icon = layers.iter().position(|layer| {
+                    layer
+                        .icons
+                        .iter()
+                        .any(|icon| control.contains_point(center(icon.bounds)))
+                });
+                assert_eq!(icon, Some(painted), "the icon is not drawn on the plate");
+            }
         }
 
         /// Every plugin a release binary carries except the one that owns the
@@ -25388,6 +25509,45 @@ fn the_row_height_the_panel_scrolls_by_is_the_height_it_draws() {
     );
 }
 
+#[test]
+fn a_theme_card_s_divider_runs_across_the_card() {
+    // The rule over the miniature input field is the field's top edge, and it
+    // was drawn on a row as wide as the cursor in it: a two-pixel dash over the
+    // caret instead of a line between the output and the prompt.
+    let themes = Scratch::new();
+    let mut harness = Harness::new(1);
+    let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    harness.set_themes_directory(themes.path().to_owned());
+    harness.open_theme_panel();
+
+    let scene = harness.frame();
+    // The cards wholly on screen: one the list cuts off at the bottom has its
+    // divider below the cut.
+    let cards: Vec<RectF> = theme_cards(&scene)
+        .into_iter()
+        .filter(|card| (card.height() - super::theme_preview::PANEL_CARD.y()).abs() < 2.5)
+        .collect();
+    assert!(!cards.is_empty(), "the panel drew no whole card");
+    for card in cards {
+        let dividers: Vec<RectF> = visible_rects(&scene)
+            .filter(|(rect, _)| {
+                rect.border.top && !rect.border.left && !rect.border.bottom && !rect.border.right
+            })
+            .map(|(_, bounds)| bounds)
+            .filter(|bounds| card.contains_point(center(*bounds)))
+            .collect();
+        let [divider] = dividers.as_slice() else {
+            panic!("a card draws one divider, and {card:?} draws {dividers:?}");
+        };
+        // Inside the card's padding and its border on both sides, and no
+        // further in: the card pads its content by eight.
+        assert!(
+            divider.min_x() - card.min_x() < 12. && card.max_x() - divider.max_x() < 12.,
+            "the divider is {divider:?} in a card at {card:?}"
+        );
+    }
+}
+
 /// The tabs panel scrolling to the row a selection landed on.
 mod panel_autoscroll {
     use super::*;
@@ -29709,6 +29869,58 @@ fn a_palette_title_too_wide_for_a_narrow_card_ends_in_a_mark() {
 }
 
 #[test]
+fn a_palette_row_s_title_sits_on_the_line_its_keys_and_name_are_centred_on() {
+    // The title is the row's flexible child, and a flexible child was handed
+    // the row's whole height as its minimum: the line box stretched to it and
+    // the glyphs were set at its top, three pixels above the keycap and the
+    // action id beside them, which were centred.
+    let mut harness = Harness::new(1);
+    open_palette(&mut harness, "new agent");
+    let scene = harness.frame();
+    let band = palette_selected_row(&scene);
+
+    // Where the middle of each glyph's line box is. The stub shaper's face is
+    // eight tenths ascent and two descent, so the box is found from the
+    // baseline by the rule a line uses to put the baseline in it.
+    let middles = |size: f32| -> Vec<f32> {
+        let baseline = crookui_core::text_layout::default_compute_baseline_position(
+            size,
+            crookui_core::fonts::DEFAULT_UI_LINE_HEIGHT_RATIO,
+            size * 0.8,
+            size * 0.2,
+        );
+        let half = size * crookui_core::fonts::DEFAULT_UI_LINE_HEIGHT_RATIO / 2.;
+        scene
+            .layers()
+            .flat_map(|layer| layer.glyphs.iter())
+            .filter(|glyph| band.contains_point(glyph.position))
+            .filter(|glyph| glyph.glyph_key.font_size == size)
+            .map(|glyph| glyph.position.y() - baseline + half)
+            .collect()
+    };
+    let title = middles(12.);
+    let beside = middles(10.5);
+    assert!(
+        !title.is_empty() && !beside.is_empty(),
+        "the selected row has no title or nothing beside it"
+    );
+
+    let centre = band.min_y() + band.height() / 2.;
+    for middle in beside {
+        assert!(
+            (middle - centre).abs() < 1.,
+            "the keys and the name are centred on {middle}, the row on {centre}"
+        );
+    }
+    for middle in title {
+        assert!(
+            (middle - centre).abs() < 1.,
+            "the title is centred on {middle}, the row and what is beside it on {centre}"
+        );
+    }
+}
+
+#[test]
 fn typing_narrows_the_palette() {
     let mut harness = Harness::new(1);
     harness.press("p", palette_chord(), "");
@@ -29967,16 +30179,23 @@ fn drawn_line(scene: &Scene, text: &str) -> Option<Vector2F> {
 
 /// What the selected row is called.
 ///
-/// The topmost line inside the band, which is the title: a row's keys and its
-/// action name are set two pixels lower, in the secondary size, so they group
-/// as a line of their own.
+/// The band's text in the title's size. A row's keys and its action name are
+/// in the secondary size and centred on the title's line, so their baselines
+/// are a fraction of a pixel from its own and a line of the band's text can
+/// be the three of them run together, in either order.
 fn palette_selected_title(scene: &Scene) -> String {
     let band = palette_selected_row(scene);
-    text_lines(scene, |at| band.contains_point(at))
-        .into_iter()
-        .next()
-        .map(|(_, line)| line)
-        .unwrap_or_default()
+    lines_of(
+        scene
+            .layers()
+            .flat_map(|layer| layer.glyphs.iter())
+            .filter(|glyph| glyph.glyph_key.font_size == 12.),
+        |at| band.contains_point(at),
+    )
+    .into_iter()
+    .next()
+    .map(|(_, line)| line)
+    .unwrap_or_default()
 }
 
 /// The chord the shipped table binds `command` to, as a row's cap prints it.

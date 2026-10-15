@@ -88,10 +88,13 @@ pub(crate) fn card(
                     .finish(),
             )
             .with_child(Expanded::new(1., Empty::new().finish()).finish())
-            // The divider and the cursor: the input field, in miniature.
+            // The divider and the cursor: the input field, in miniature. The
+            // divider is the field's top edge, so the field takes the card's
+            // width: at its own, the edge is a dash as wide as the cursor.
             .with_child(
                 Container::new(
                     Flex::row()
+                        .with_main_axis_size(MainAxisSize::Max)
                         .with_cross_axis_alignment(CrossAxisAlignment::Center)
                         .with_child(
                             Container::new(

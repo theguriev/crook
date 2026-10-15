@@ -326,7 +326,10 @@ There is no box. A block has no border, no corner radius and no fill in its rest
 * **The controls** — two 26 px squares at the top-right of the *hovered* block, the outer one
   12 px in from the pane's right edge so it clears the thumb. They follow the block into view
   rather than sitting on its top edge, because a block taller than the pane is the one most
-  worth acting on and its top edge is usually above the window.
+  worth acting on and its top edge is usually above the window. They land on the prompt line,
+  so each square is opaque — the pane's ground, the block's wash, then its tint — and painted a
+  layer above the block's text: a command long enough to reach them would otherwise show
+  through, its letters under the icons.
 
   The first is **copy**. Clicking it puts exactly that block's command and output on the
   clipboard: no neighbour's text, no trailing blank rows, no space injected after a wide
