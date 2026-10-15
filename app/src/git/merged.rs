@@ -95,10 +95,10 @@
 //! repository with sixty branches, for an answer that had not changed. So the
 //! menu keeps what it was told in [`Proofs`], and [`merged_remembering`] proves
 //! again only the branches that have moved since — and a menu opened again
-//! while a pass is still running stops that pass between branches rather than
-//! leaving it to finish for nobody, see [`merged_while`]. The deletion never
-//! asks the kept answers: it proves again, from nothing, right before it
-//! deletes.
+//! while a pass is still running stops that pass at its next branch or pass
+//! over history rather than leaving it to finish for nobody, see
+//! [`merged_while`]. The deletion never asks the kept answers: it proves
+//! again, from nothing, right before it deletes.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
@@ -331,12 +331,17 @@ pub fn merged(repository: &Path, base: &str, branches: &[String]) -> HashMap<Str
 
 /// [`merged`], for a caller that can stop wanting the answer part way.
 ///
-/// `going` is asked before each branch and before each pass over history, and
-/// the first time it says no the proof stops there and answers `None`: a menu
+/// `going` is asked before the reads of each branch, before each pass over
+/// history, and before each branch's look for work it moved off, and the
+/// first time it says no the proof stops there and answers `None`: a menu
 /// opened again, or closed, while a pass was proving sixty branches for it
 /// would otherwise have that pass run on for seconds for nobody, on the pool
-/// every other read shares. A pass is never stopped inside a read, so
-/// stopping costs at most the read under way.
+/// every other read shares. Those are the only points a proof stops at, so
+/// what runs on once nobody wants it is at most what lies between two of
+/// them: one branch's reads; one pass over history, with the reads that find
+/// where it starts; or one branch's look for the work it moved off, a few
+/// reads for each commit it moved off — and every read of the look shares
+/// its one [`PASS_DEADLINE`].
 pub fn merged_while(
     repository: &Path,
     base: &str,
@@ -405,11 +410,11 @@ fn merged_within(
             pending.push((branch, reference, tip, fork, patch));
         }
     }
+    if pending.is_empty() {
+        return nothing_dropped(repository, base, proved, commits, deadline, going);
+    }
     if !going() {
         return None;
-    }
-    if pending.is_empty() {
-        return Some(nothing_dropped(repository, base, proved, commits, deadline));
     }
 
     let forks: Vec<&str> = pending
@@ -429,6 +434,9 @@ fn merged_within(
         let Some(candidates) = patches.get(&patch) else {
             continue;
         };
+        if !going() {
+            return None;
+        }
         // The pass reads back to the oldest fork of all of them, so for a
         // branch that left the base later it also reads commits from before
         // that — and one of those can never be this branch's squash. A change
@@ -452,10 +460,10 @@ fn merged_within(
         }
     }
 
+    let mut landed = nothing_dropped(repository, base, proved, commits, deadline, going)?;
     if !going() {
         return None;
     }
-    let mut landed = nothing_dropped(repository, base, proved, commits, deadline);
     let subjects = {
         let commits: Vec<&str> = landed
             .values()
@@ -770,20 +778,27 @@ pub fn dropped(
 /// and commits it is for. A deadline spent before a branch's commits are
 /// settled leaves it unproved, and a git that could not be asked takes every
 /// proof away.
+///
+/// `None` when `going` stopped it: it is asked first, before the pass over
+/// the base, and before each branch's look — see [`merged_while`].
 fn nothing_dropped(
     repository: &Path,
     base: &str,
     proved: Vec<(Landed, Vec<Entry>)>,
     commits: usize,
     deadline: Duration,
-) -> HashMap<String, Landed> {
+    going: &dyn Fn() -> bool,
+) -> Option<HashMap<String, Landed>> {
+    if !going() {
+        return None;
+    }
     let made: Vec<&str> = proved
         .iter()
         .flat_map(|(_, reflog)| made_on(reflog))
         .collect();
     let tips: Vec<&str> = proved.iter().map(|(landed, _)| landed.tip()).collect();
     let Some(nowhere) = unheld(repository, Some(base), &made, &tips) else {
-        return HashMap::new();
+        return Some(HashMap::new());
     };
     let moved_off: Vec<Vec<String>> = proved
         .iter()
@@ -796,6 +811,9 @@ fn nothing_dropped(
         })
         .collect();
 
+    if !going() {
+        return None;
+    }
     let until = Instant::now() + deadline;
     // Where the oldest commit each branch moved off left the base, so that
     // one pass back to the oldest of those serves every branch.
@@ -812,15 +830,15 @@ fn nothing_dropped(
         held_on(repository, &[base], needed.as_deref(), commits, left(until))
     };
 
-    proved
-        .into_iter()
-        .zip(moved_off)
-        .filter(|((landed, reflog), moved_off)| {
-            if moved_off.is_empty() {
-                return true;
-            }
-            if moved_off.len() > MOST_DROPPED {
-                return false;
+    let mut kept = HashMap::new();
+    for ((landed, reflog), moved_off) in proved.into_iter().zip(moved_off) {
+        let nothing_lost = if moved_off.is_empty() {
+            true
+        } else if moved_off.len() > MOST_DROPPED {
+            false
+        } else {
+            if !going() {
+                return None;
             }
             let on_tip = match landed.proof() {
                 Proof::Ancestor => HashMap::new(),
@@ -839,16 +857,19 @@ fn nothing_dropped(
             unaccounted(
                 repository,
                 Some(base),
-                reflog,
-                moved_off,
+                &reflog,
+                &moved_off,
                 &held,
                 true,
                 until,
             )
             .is_empty()
-        })
-        .map(|((landed, _), _)| (landed.branch.clone(), landed))
-        .collect()
+        };
+        if nothing_lost {
+            kept.insert(landed.branch.clone(), landed);
+        }
+    }
+    Some(kept)
 }
 
 /// What is left of a deadline that ends at `until`, for the next pass that

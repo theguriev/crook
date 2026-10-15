@@ -1353,7 +1353,8 @@ branches outlasts any read's deadline without a read running out. What a proof a
 every other ref, which may be what holds a commit a branch moved off — is not watched, so a
 badge can go stale until a tip moves; nothing is deleted on it, because the deletion proves
 again from nothing. A pass the menu no longer wants, because it opened again or closed, stops
-between branches.
+before the next branch's reads, the next pass over history, or the next branch's look for work
+it moved off.
 
 **A branch is deleted only on a proof.** `git::worktree` said from the start that a removal
 never deletes the branch — "not as an option, not under `force`" — because a branch is the work

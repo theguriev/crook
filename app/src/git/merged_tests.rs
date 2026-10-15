@@ -1478,6 +1478,53 @@ fn a_proof_that_ran_out_of_time_keeps_no_unproved_answer() {
     assert_eq!(proofs(given_time).get("forwarded"), Some(&Proof::Ancestor));
 }
 
+#[test]
+fn a_pass_nobody_wants_any_more_stops_before_looking_for_work_its_branches_moved_off() {
+    // The look for work the proved branches moved off is the longest part of
+    // a proof: a pass over the base, then a few reads for every commit each
+    // branch moved off. A pass superseded as the look begins does not go on
+    // into it for an answer the menu drops on arrival.
+    if without_git(
+        "a_pass_nobody_wants_any_more_stops_before_looking_for_work_its_branches_moved_off",
+    ) {
+        return;
+    }
+    let scratch = ScratchDir::new("superseded-look");
+    let branches = ["forwarded", "followed"];
+    let repo = rebased_and_forwarded(&scratch, &branches);
+    let kept = Mutex::new(Proofs::default());
+    reads_since();
+    // Wanted until the look has begun, which it does by asking which of the
+    // commits the branches made nothing else holds.
+    let started = std::cell::RefCell::new(Vec::new());
+    let look_begun = |started: &[String]| {
+        started
+            .iter()
+            .any(|read| read.starts_with("rev-list --ignore-missing"))
+    };
+    let wanted_until_the_look = || {
+        started.borrow_mut().extend(reads_since());
+        !look_begun(&started.borrow())
+    };
+
+    let stopped = merged_remembering(
+        &repo,
+        MAIN,
+        &names(&branches),
+        &kept,
+        &wanted_until_the_look,
+    );
+
+    started.borrow_mut().extend(reads_since());
+    let started = started.into_inner();
+    assert_eq!(stopped, None);
+    assert!(look_begun(&started), "the look never began: {started:?}");
+    assert!(
+        !started.iter().any(|read| read.contains(" log -p ")),
+        "a pass nobody wanted went on to read history: {started:?}"
+    );
+}
+
 // --- which branch is the base ---------------------------------------------------
 
 #[test]

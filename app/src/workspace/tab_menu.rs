@@ -632,10 +632,11 @@ pub(super) struct TabMenuState {
     /// Which pass of the proof is the one wanted, counted up by each that
     /// starts and by the menu opening again or closing.
     ///
-    /// A pass compares it with the count it started at between branches, and
-    /// stops at the first that is not its own: its answer would be dropped
-    /// on arrival, and proving sixty branches for nobody holds a worker of
-    /// the pool every other read here shares.
+    /// A pass compares it with the count it started at between branches and
+    /// before each pass over history, and stops at the first that is not its
+    /// own: its answer would be dropped on arrival, and proving sixty
+    /// branches for nobody holds a worker of the pool every other read here
+    /// shares.
     pub(super) landed_pass: Arc<AtomicU64>,
     /// Where Crook keeps checkouts it made.
     pub(super) store: Option<PathBuf>,
@@ -721,7 +722,8 @@ impl TabMenuState {
     }
 
     /// Starts a pass of the proof, as the only one wanted: the answer is
-    /// whether it still is. Every pass before it stops at its next branch.
+    /// whether it still is. Every pass before it stops at its next branch or
+    /// pass over history.
     pub(super) fn start_landed_pass(&self) -> impl Fn() -> bool + Send + 'static {
         let pass = self.landed_pass.clone();
         let this = pass.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
