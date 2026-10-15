@@ -1912,13 +1912,21 @@ exactly as before, so the window that comes back types where it left off.
 Starting out focused is also what opens a window with its caret on Wayland, which says nothing
 about focus until the keyboard first arrives.
 
-**Out of sight is another bit, and only the breath reads it.** crookui forwards winit's
-`WindowEvent::Occluded` — X11 and macOS send it — as `Event::WindowOccluded`, and on Windows,
-which sends none, a window resized to nothing is the minimised one (`InputState::resized`). The
-breath chain ends while the window cannot be seen and starts again when it can, because X11 and
-Windows draw every frame asked of a hidden window; Wayland holds those frames back by itself.
-Focus is not read on purpose: a window behind another but beside it is where a working agent is
-watched from. Within a window in sight, a breath repaints only while a running mark is inside
+**Out of sight is another bit, and only the breath reads it.** crookui folds three ways of
+hearing it into one `Event::WindowOccluded`, in `InputState`. winit's `WindowEvent::Occluded`
+says a window is covered or minimised on macOS, but on X11 only that it is covered, and only
+with no compositor running, which reports every window in view. Windows sends none, and a
+window resized to nothing is the minimised one there (`InputState::resized`). X11 says nothing
+of a minimised window, which its window manager unmaps, and the server sends no visibility
+event for a window that stops being viewable. So crookui asks: winit's `is_minimized` reads
+`_NET_WM_STATE_HIDDEN`, and that is a round trip to the server. It is asked when the focus
+moves, when the desktop says the window was covered or uncovered, and before each frame while
+the window lacks the keyboard or was minimised when last asked (`InputState::may_be_minimised`).
+A covered window on Windows or under an X11 compositor goes unremarked. The breath chain ends
+while the window cannot be seen and starts again when it can, because X11 and Windows draw
+every frame asked of a hidden window. Wayland holds those frames back by itself. The breath
+does not read the focus, on purpose: a window behind another but beside it is where a working
+agent is watched from. Within a window in sight, a breath repaints only while a running mark is inside
 the panel's viewport, on a row or on a group heading — the panel's `RowGeometry` keeps where
 both were drawn — since a frame is the whole window and its cost grows with every tab.
 

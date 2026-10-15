@@ -579,7 +579,17 @@ impl ApplicationHandler<CrookEvent> for App {
             // A new frame may have moved the world out from under a pointer
             // that never moved — a menu opened under it, a link lit up when
             // the chord key went down — so the pointer is asked again.
+            //
+            // And before the frame, a window that may be minimised asks
+            // whether it is, since X11 never says: see
+            // `InputState::minimised`. A frame is the moment to ask because
+            // one asked for is what a hidden window would waste, and one
+            // drawn when it comes back — X11 exposes a window it maps again —
+            // is the first sign of that.
             WindowEvent::RedrawRequested => {
+                if self.input.may_be_minimised() && self.ask_whether_minimised() {
+                    self.with_window(Window::request_redraw);
+                }
                 if self.redraw(event_loop) {
                     self.update_pointer();
                 }
@@ -596,12 +606,33 @@ impl ApplicationHandler<CrookEvent> for App {
             // own. Then on to the delegate as an event, like losing the
             // keyboard, because the workspace keeps whether the window is in
             // front.
-            WindowEvent::Focused(true) => {
-                self.controls.focused();
-                if std::mem::take(&mut self.attention_requested) {
-                    self.with_window(|window| window.withdraw_attention_request());
+            //
+            // Gained or lost, the keyboard moving is also when a window is
+            // minimised or comes back, so it asks whether it is: losing it is
+            // how a minimise starts, and X11 says the focus again when it
+            // maps a window it had minimised.
+            WindowEvent::Focused(focused) => {
+                if focused {
+                    self.controls.focused();
+                    if std::mem::take(&mut self.attention_requested) {
+                        self.with_window(|window| window.withdraw_attention_request());
+                    }
+                    self.delegate.focused();
                 }
-                self.delegate.focused();
+                if self.ask_whether_minimised() {
+                    self.with_window(Window::request_redraw);
+                }
+            }
+
+            // So is the desktop saying the window was covered or uncovered.
+            // Asked before that word is folded in, so that a window coming
+            // back is not held out of sight by an answer from while it was
+            // minimised: macOS says both, and the window it restores may get
+            // neither the keyboard nor a frame to ask at.
+            WindowEvent::Occluded(_) => {
+                if self.ask_whether_minimised() {
+                    self.with_window(Window::request_redraw);
+                }
             }
 
             _ => {}
@@ -653,6 +684,20 @@ impl App {
                 .as_mut()
                 .expect("the window was matched by id a moment ago"),
         )
+    }
+
+    /// Asks the desktop whether the window is minimised, and tells the
+    /// application when the answer changed whether it can be seen. Returns
+    /// whether the application wants a frame for it.
+    ///
+    /// Asked rather than heard, because X11 never says: see
+    /// [`InputState::minimised`]. Elsewhere the answer agrees with what the
+    /// desktop already said by itself, or is `None`.
+    fn ask_whether_minimised(&mut self) -> bool {
+        let minimised = self.with_window(|window| window.is_minimised());
+        self.input
+            .minimised(minimised)
+            .is_some_and(|occluded| self.delegate.handle_event(occluded))
     }
 
     /// Hands the application the drop that `next` ends, if one is arriving

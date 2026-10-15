@@ -238,10 +238,17 @@ pub enum Event {
     /// Sent on every change and not when the window opens, for the reason
     /// [`Self::WindowFocused`] is: a window is in view until told otherwise,
     /// so a desktop that never says leaves an application drawing as it
-    /// always did. Not every desktop does say. X11 and macOS report it, and
-    /// on Windows a minimised window is the one shrunk to nothing; Wayland
-    /// says nothing and holds a hidden window's frames back instead, which
-    /// is the same saving made by the compositor.
+    /// always did. Not every desktop says all of it:
+    ///
+    /// - macOS says both.
+    /// - Windows says neither; a minimised window is the one shrunk to
+    ///   nothing, and a covered one goes unremarked.
+    /// - X11 says a window is covered only when no compositor is running,
+    ///   since a compositor draws every window off screen and the server
+    ///   calls each of them in view; and says nothing of a minimised one,
+    ///   which is asked about while the window does not have the keyboard.
+    /// - Wayland says neither, and holds a hidden window's frames back
+    ///   instead, which is the same saving made by the compositor.
     WindowOccluded(bool),
 
     /// Files were dragged from somewhere else — a file manager, a

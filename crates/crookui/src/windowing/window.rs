@@ -184,6 +184,16 @@ impl Window {
         self.window.request_user_attention(None);
     }
 
+    /// Whether the desktop says the window is minimised, or `None` where it
+    /// cannot say, which on Wayland is always.
+    ///
+    /// On X11 this is a round trip to the server, for the window manager's
+    /// `_NET_WM_STATE_HIDDEN`; see `InputState::may_be_minimised` for when
+    /// it is asked.
+    pub(super) fn is_minimised(&self) -> Option<bool> {
+        self.window.is_minimized()
+    }
+
     /// Whether a frame is already built and waiting to be drawn.
     pub(super) fn has_scene(&self) -> bool {
         self.scene.is_some()
