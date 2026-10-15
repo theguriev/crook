@@ -5,6 +5,45 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.28
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.27...v0.1.28)
+
+### Features
+
+- **appearance:** Add Motion, and stop breathing for marks nobody can see ([#527](https://github.com/theguriev/crook/pull/527))
+- **window:** Reopen the window where and as it was, and tell one opened behind another it is unfocused ([#533](https://github.com/theguriev/crook/pull/533))
+
+### Performance
+
+- **git:** Read only what changed for tab rows and the worktree menu ([#530](https://github.com/theguriev/crook/pull/530))
+- Take no terminal lock on a pointer move and rebuild nothing for an agent report that changed nothing ([#526](https://github.com/theguriev/crook/pull/526))
+- **terminal:** Start a restore's hidden tabs' shells off the thread that draws ([#535](https://github.com/theguriev/crook/pull/535))
+- **terminal:** Build no snapshot for a pane no frame draws ([#528](https://github.com/theguriev/crook/pull/528))
+
+### Fixes
+
+- 15 px default rows, opaque block controls, centred palette titles and a full theme-card divider ([#536](https://github.com/theguriev/crook/pull/536))
+- **worktrees:** Say a removal git only half did went, and where its files are ([#531](https://github.com/theguriev/crook/pull/531))
+- Name a binary that exists at login and find agents where their installers put them ([#529](https://github.com/theguriev/crook/pull/529))
+
+### Documentation
+
+- Lead release pages with the notarized app, and say Codex hooks need trust ([#532](https://github.com/theguriev/crook/pull/532))
+
+### Tests
+
+- Stop four tests failing for reasons outside the code they check ([#534](https://github.com/theguriev/crook/pull/534))
+- Write fake programs where no fork can hold them, and start tmux hooks once the pane is drawn ([#538](https://github.com/theguriev/crook/pull/538))
+
+### CI
+
+- Stop Checks restoring the release cache, keep what red runs build, and give dev builds line tables only ([#537](https://github.com/theguriev/crook/pull/537))
+
+### ❤️ Contributors
+
+- Eugen Guriev <gurievcreative@gmail.com>
+
 ## v0.1.27
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.26...v0.1.27)
