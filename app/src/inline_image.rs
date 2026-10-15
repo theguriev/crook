@@ -213,7 +213,18 @@ thread_local! {
     static CACHE: RefCell<Cache> = RefCell::new(Cache::new(BUDGET));
 }
 
-/// The decoded pictures, what they weigh, and the pool that decodes them.
+/// The pool the pictures are decoded on, started the first time one is.
+///
+/// The process's, and never dropped, rather than the cache's: dropping a
+/// [`Background`] joins its workers, and the cache is a thread-local, dropped
+/// as its thread exits. On Windows a thread-local's destructor runs under the
+/// loader lock, which a worker has to take to exit, so that join waited for
+/// good — and held up every thread starting or exiting in the process behind
+/// it, which stopped the whole test binary at the first test thread to draw
+/// a picture.
+static POOL: OnceLock<Background> = OnceLock::new();
+
+/// The decoded pictures, and what they weigh.
 struct Cache {
     entries: HashMap<u64, Entry>,
     /// What the entries weigh together: the pixels drawn, and those being
@@ -223,8 +234,6 @@ struct Cache {
     budget: usize,
     /// The last frame that asked for anything.
     frame: Option<FrameId>,
-    /// Started the first time a picture is decoded.
-    pool: Option<Background>,
     wake: Arc<dyn Fn() + Send + Sync>,
     flight: Arc<Flight>,
 }
@@ -280,7 +289,6 @@ impl Cache {
             weight: 0,
             budget,
             frame: None,
-            pool: None,
             wake: Arc::new(|| {}),
             flight: Arc::default(),
         }
@@ -413,8 +421,7 @@ impl Cache {
             flight: self.flight.clone(),
         };
         *self.flight.out() += 1;
-        self.pool
-            .get_or_insert_with(|| Background::new(DECODERS))
+        POOL.get_or_init(|| Background::new(DECODERS))
             .spawn(async move { job.run() })
             .detach();
         Decoding { size, slot }
