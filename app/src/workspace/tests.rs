@@ -7851,7 +7851,10 @@ fn a_window_with_an_agent(scratch: &Scratch) -> Option<(Harness, PathBuf, PathBu
     let mut harness = Harness::seeded();
     harness.workspace_update(|workspace, _| {
         workspace.set_worktrees_directory(store.clone());
-        workspace.set_agent_directories(vec![agents]);
+        workspace.set_agent_directories(crate::agent::SearchPath {
+            by_name: vec![agents],
+            installers: Vec::new(),
+        });
     });
     let pane = harness.pane_ids()[0];
     harness.update_session(pane, |session| {
@@ -8146,6 +8149,55 @@ fn a_new_task_leaves_the_agents_quoted_line_unsent_in_the_new_tabs_composer() {
         harness.focused_pane_id(),
         Some(opened),
         "the line is in a composer nobody is looking at"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_only_its_installer_put_there_is_typed_by_its_path() {
+    // A window the Dock or a launcher started has none of the agents'
+    // installer directories on its `PATH`, and the pane's shell may not have
+    // the one it was found in either: nvm puts only its default node there.
+    // So the creator still offers the agent, and the line names it where it
+    // was found.
+    let scratch = Scratch::new();
+    let Some((mut harness, _, store)) = a_window_with_an_agent(&scratch) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let installer = scratch.path().join("agents");
+    harness.workspace_update(|workspace, ctx| {
+        workspace.set_shell(Some(PathBuf::from("/bin/bash")), ctx);
+        workspace.set_agent_directories(crate::agent::SearchPath {
+            by_name: Vec::new(),
+            installers: vec![installer.clone()],
+        });
+    });
+
+    harness.run_command("crook/worktrees/new-task");
+    harness.wait_for("the creator to open on the task", |harness| {
+        harness.worktree_menu_is_creating()
+    });
+    assert_eq!(
+        harness.worktree_agent(),
+        Some("claude"),
+        "the agent its installer put on no PATH was not offered"
+    );
+    harness.frame();
+    harness.type_text("fix it");
+    let before = harness.pane_ids().len();
+    assert!(harness.press_key("enter", Modifiers::default()));
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > before
+    });
+
+    let opened = harness
+        .pane_under(&store)
+        .expect("no pane was opened in the new checkout");
+    assert_eq!(
+        harness.field_text(opened),
+        format!("{} 'fix it'", installer.join("claude").display()),
+        "the line names a program the pane's shell may not find"
     );
 }
 
@@ -30509,6 +30561,66 @@ fn open_at_login_is_a_setting_the_page_switches() {
     assert!(!harness.workspace.read(&harness.app, |workspace, _| {
         workspace.general().open_at_login
     }));
+}
+
+#[test]
+fn a_login_item_the_system_refuses_puts_the_switch_back_and_says_why() {
+    // The entry is the system's, and a test never writes it: it says what
+    // the system answered, here what a read-only autostart directory does.
+    let scratch = Scratch::new();
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    harness.workspace_update(|workspace, _| {
+        workspace.apply_login_items_with(|enabled| match enabled {
+            true => Err(
+                "could not write /home/someone/.config/autostart/crook.desktop: \
+                         Read-only file system (os error 30)"
+                    .to_owned(),
+            ),
+            false => Ok(()),
+        });
+    });
+    let on = |harness: &Harness| {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.general().open_at_login
+        })
+    };
+
+    harness.dispatch_workspace_action(SettingsAction::ToggleOpenAtLogin.into());
+    assert!(on(&harness), "the switch did not move when it was pressed");
+    harness.wait_for("the refusal to put the switch back", |harness| !on(harness));
+    // Saved as it is shown, so the next window does not claim it either.
+    let written = scratch.settled();
+    assert!(
+        written.contains("\"open_at_login\": false"),
+        "the file still says on: {written}"
+    );
+
+    harness.open_settings_page();
+    harness.frame();
+    harness.type_text("login");
+    let scene = harness.frame();
+    assert!(
+        says(&scene, "Could not be switched on") && says(&scene, "Read-only file system"),
+        "the row does not say why: {}",
+        frame_text(&scene)
+    );
+
+    // Pressed again once the system allows it: the reason goes with the
+    // press, and the switch stays on.
+    harness.workspace_update(|workspace, _| {
+        workspace.apply_login_items_with(|_| Ok(()));
+    });
+    harness.dispatch_workspace_action(SettingsAction::ToggleOpenAtLogin.into());
+    harness.queue.run_until_parked();
+    assert!(on(&harness), "an entry the system took was switched off");
+    assert_eq!(
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace
+                .login_item_refused()
+                .map(str::to_owned)),
+        None
+    );
 }
 
 #[test]

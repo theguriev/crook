@@ -173,9 +173,12 @@
 //! press; the tab's own "New worktree…" opens it on "Shell only", which makes
 //! exactly the worktree it always made and types nothing.
 //!
-//! Which agents are installed is a look for their programs on `PATH`, made on
-//! the background pool with the repository's reads when the menu opens —
-//! never a program started to ask, and never anything on the frame. A shell
+//! Which agents are installed is a look for their programs on `PATH` and
+//! where their own installers put them, made on the background pool with the
+//! repository's reads when the menu opens — never a program started to ask,
+//! and never anything on the frame. One found only where its installer put
+//! it is started by its path, since the pane's shell may not have that
+//! directory on its `PATH`; see [`crate::agent::search_path`]. A shell
 //! the host's quoting is not proven in gets the agent's bare name and no
 //! prompt field, rather than a line that means something else there.
 //!
@@ -582,7 +585,7 @@ pub(super) struct TabMenuState {
     pub(super) base_scroll: ScrollStateHandle,
     /// The coding agents the creator can start, as of when the menu opened:
     /// the ones [`crate::agent::found_on`] found installed, in its order.
-    pub(super) agents: Vec<&'static str>,
+    pub(super) agents: Vec<crate::agent::Installed>,
     /// Which to start in the new checkout, as a row of the creator's list:
     /// `0` is "Shell only", and every other row is one of [`Self::agents`].
     pub(super) agent: usize,
@@ -798,8 +801,13 @@ impl TabMenuState {
 
     /// The agent the creator would start, or `None` for "Shell only".
     pub(super) fn picked_agent(&self) -> Option<&'static str> {
+        self.picked().map(|installed| installed.agent)
+    }
+
+    /// The same, with how the line that starts it names its program.
+    pub(super) fn picked(&self) -> Option<&crate::agent::Installed> {
         let index = self.agent.checked_sub(1)?;
-        self.agents.get(index).copied()
+        self.agents.get(index)
     }
 
     /// Whether the creator is asking for a prompt: an agent is picked, and
@@ -1642,17 +1650,20 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
             WorktreeAction::PickAgent(0),
             ui,
         ));
-        for (index, agent) in state.agents.iter().enumerate() {
+        for (index, installed) in state.agents.iter().enumerate() {
+            let agent = installed.agent;
             let row = index + 1;
             // The program's own name, and the word that will be typed beside
-            // it, since that word is what the composer is about to say.
+            // it, since that word is what the composer is about to say — at
+            // the end of its path, for one found only where its installer
+            // put it, which is too long for the row.
             let program = crate::agent::program(agent).unwrap_or(agent);
             column.add_child(check_row(
                 state.control(Control::Agent(row)),
                 state.agent == row,
                 lit && state.agent == row,
                 program,
-                (program != *agent).then_some(*agent),
+                (program != agent).then_some(agent),
                 WorktreeAction::PickAgent(row),
                 ui,
             ));

@@ -779,6 +779,19 @@ pub struct Workspace {
     /// the settings were shown; `None` where that cannot be asked or made so,
     /// and until it has been. See [`crate::default_terminal`].
     default_terminal: Option<bool>,
+    /// What puts Crook's login entry in place or takes it out:
+    /// [`crate::login_item::apply`], everywhere but a test.
+    ///
+    /// A field for the reason [`Self::path_editor`] is one, and because the
+    /// real one would leave a login item on the machine running the suite: a
+    /// test's says `Ok` to everything until the test says otherwise.
+    apply_login_item: fn(bool) -> Result<(), String>,
+    /// How many times Open at login has been switched, which is how the
+    /// system's answer to an earlier press is told from the last one's.
+    login_item_asked: u64,
+    /// Why the system refused the last switch of Open at login, which the
+    /// row says until it is switched again. See [`Self::adopt_login_item`].
+    login_item_refused: Option<String>,
     /// When the bell last made a sound; see [`Self::sound_the_bell`].
     bell_sounded: Option<Instant>,
     /// How many times it has, which is what a test can hear.
@@ -1002,7 +1015,7 @@ pub struct Workspace {
     /// Where the worktree creator looks for the agents it offers, in place of
     /// [`crate::agent::search_path`]. For a test, which must find the agent it
     /// wrote and not whichever ones the machine running it has.
-    agent_directories: Option<Vec<PathBuf>>,
+    agent_directories: Option<crate::agent::SearchPath>,
     /// The locks this window took on the checkouts it made, until it takes
     /// them off. See [`HeldLocks`].
     held: HeldLocks,
@@ -1225,6 +1238,13 @@ impl Workspace {
             recording: std::cell::RefCell::new(None),
             watching_keybindings: false,
             default_terminal: None,
+            apply_login_item: if cfg!(test) {
+                |_| Ok(())
+            } else {
+                crate::login_item::apply
+            },
+            login_item_asked: 0,
+            login_item_refused: None,
             bell_sounded: None,
             #[cfg(test)]
             bells_sounded: 0,
@@ -1851,7 +1871,11 @@ impl Workspace {
     /// The agents the creator offers, as their command names, in its order.
     /// For a test.
     pub fn worktree_agents(&self) -> Vec<&'static str> {
-        self.tab_menu.agents.clone()
+        self.tab_menu
+            .agents
+            .iter()
+            .map(|installed| installed.agent)
+            .collect()
     }
 
     /// Which of them is picked while the creator is up — `None` for "Shell
@@ -3474,7 +3498,7 @@ impl Workspace {
 
     /// Makes the worktree creator look for agents in these directories and
     /// nowhere else. A test's, for the reason the one above is.
-    pub fn set_agent_directories(&mut self, directories: Vec<PathBuf>) {
+    pub fn set_agent_directories(&mut self, directories: crate::agent::SearchPath) {
         self.agent_directories = Some(directories);
     }
 
@@ -4443,6 +4467,43 @@ impl Workspace {
             self.default_terminal = answer;
             ctx.notify();
         }
+    }
+
+    /// Why the system refused the last switch of Open at login, while the
+    /// row says so.
+    pub fn login_item_refused(&self) -> Option<&str> {
+        self.login_item_refused.as_deref()
+    }
+
+    /// Takes the system's answer to the `asked`th switch of Open at login.
+    ///
+    /// A refusal puts the switch back where it was, which is where the entry
+    /// on disk still is, and saves that; the row says why until the next
+    /// press. An answer to an earlier press is the log's alone: the last
+    /// press asked again, and its own answer is the one that says what is
+    /// on disk.
+    fn adopt_login_item(
+        &mut self,
+        asked: u64,
+        applied: Result<(), String>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Err(why) = applied else {
+            return;
+        };
+        log::warn!("could not change the login item: {why}");
+        if asked != self.login_item_asked {
+            return;
+        }
+        let mut general = self.general();
+        let enabled = general.open_at_login;
+        general.open_at_login = !enabled;
+        self.set_general(general, ctx);
+        self.login_item_refused = Some(match enabled {
+            true => format!("Could not be switched on: {why}"),
+            false => format!("Could not be switched off: {why}"),
+        });
+        ctx.notify();
     }
 
     /// Records that the window is another size, which the session file
@@ -6337,14 +6398,14 @@ impl Workspace {
         // Made now, from what the creator says now, rather than when the
         // checkout lands: the fields are cleared by the next creator, and a
         // line made later could be made from somebody else's prompt.
-        let launch = self.tab_menu.picked_agent().and_then(|agent| {
+        let launch = self.tab_menu.picked().and_then(|installed| {
             let prompt = match self.worktree_prompt() {
                 Some(prompt) if self.tab_menu.asks_for_a_prompt() => {
                     prompt.editor().text().to_owned()
                 }
                 _ => String::new(),
             };
-            crate::agent::launch_line(agent, &prompt)
+            installed.launch_line(&prompt)
         });
 
         self.tab_menu.working = true;
@@ -8511,6 +8572,14 @@ impl Workspace {
     #[cfg(test)]
     pub(crate) fn set_gh(&mut self, program: String) {
         self.gh = program;
+    }
+
+    /// Puts the login entry in place with `apply` rather than
+    /// [`crate::login_item::apply`], for a test that says what the system
+    /// answered.
+    #[cfg(test)]
+    pub(super) fn apply_login_items_with(&mut self, apply: fn(bool) -> Result<(), String>) {
+        self.apply_login_item = apply;
     }
 
     /// Records that a pane's shell rang the bell.
@@ -11330,19 +11399,20 @@ impl Workspace {
                 general.open_at_login = !general.open_at_login;
                 let enabled = general.open_at_login;
                 self.set_general(general, ctx);
+                self.login_item_refused = None;
+                self.login_item_asked += 1;
+                let asked = self.login_item_asked;
                 // The setting is what the person asked for; the entry is the
                 // system's, written on the pool — Windows' is a process — and
-                // never from a test, which must not leave a login item on the
-                // machine running the suite.
-                if !cfg!(test) {
-                    ctx.background()
-                        .spawn(async move {
-                            if let Err(why) = crate::login_item::apply(enabled) {
-                                log::warn!("could not change the login item: {why}");
-                            }
-                        })
-                        .detach();
-                }
+                // its answer handed back, so that a refusal puts the switch
+                // back rather than leaving the row claiming an entry that is
+                // not there.
+                let apply = self.apply_login_item;
+                let applying = ctx.background().spawn(async move { apply(enabled) });
+                ctx.spawn(applying, move |workspace, applied, ctx| {
+                    workspace.adopt_login_item(asked, applied, ctx);
+                })
+                .detach();
             }
             SettingsAction::MakeDefaultTerminal => {
                 if self.default_terminal != Some(false) {
