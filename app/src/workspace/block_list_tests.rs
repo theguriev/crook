@@ -792,3 +792,95 @@ fn a_list_scrolled_up_keeps_its_block_when_the_oldest_are_evicted() {
         emulator.blocks_evicted()
     );
 }
+
+/// Where a hovered block's controls hide the text under them, at every size
+/// the font can be set to.
+///
+/// The plates are 26 px tall and 12 px under the block's top at every size,
+/// and the rows are not. At the default 12.5 pt they start above the first row
+/// and their lower edge is 6.5 px into the second. From 15.5 pt, with rows of
+/// 19 px, the first row reaches below them. With rows of 10 px or less, about
+/// 8 pt and under, they start a pixel or more into the first row and cover the
+/// next row or two whole. The rule they were cut by held from 8.5 to 15 pt
+/// only: from 15.5 pt the ground stopped at the top of the first row, the
+/// icons back over its letters, and with rows of 10 px or less it ran all the
+/// way down, through the tops of a row of output.
+#[test]
+fn a_block_s_controls_hide_the_line_they_sit_on_and_cut_no_row_under_it_at_any_size() {
+    use crate::settings::{FONT_SIZE_STEP, MAX_FONT_SIZE, MIN_FONT_SIZE};
+    use crookui_core::geometry::{Point, ZIndex, vec2f};
+    use std::sync::Arc;
+
+    let mut emulator = emulator();
+    cycle(&mut emulator, "c", "1\n2\n3\n4\n5\n6", 1);
+    let history = Arc::new(BlockHistory::new(
+        emulator.blocks().iter().cloned().map(Arc::new).collect(),
+        0,
+    ));
+    let snapshot = emulator.snapshot();
+    // The one block, laid out in a window `rows` of its own rows tall, and
+    // the band its controls are drawn across with the part of it that hides
+    // what is under it.
+    let laid_out = |font_size: f32, rows: f32| {
+        let font = crate::terminal_font::CellFont::headless(font_size);
+        let size = vec2f(600., rows * font.metrics().height);
+        let mut list = BlockList::new(history.clone(), snapshot.clone(), font, PaneBlocks::new())
+            .with_menu(true, None);
+        list.size = Some(size);
+        list.origin = Some(Point::from_vec2f(vec2f(0., 0.), ZIndex::Normal(0)));
+        list.measure(size);
+        let item = list.window.first().copied().expect("the block is in view");
+        let origin = list.bounds().expect("the list has bounds").origin();
+        let plates = list.plates(origin, item).expect("the block has controls");
+        let opaque = list.opaque_part(origin, item, plates);
+        (list, item, origin, plates, opaque)
+    };
+
+    let mut font_size = MIN_FONT_SIZE;
+    while font_size <= MAX_FONT_SIZE {
+        let (list, item, origin, plates, opaque) = laid_out(font_size, 40.);
+        assert!(
+            item.top >= 0.,
+            "at {font_size} pt the block's top is not in view"
+        );
+        let height = list.font.metrics().height;
+        let rows_top = origin.y() + item.top + PADDING_TOP * height;
+        let row = |index: f32| (rows_top + index * height, rows_top + (index + 1.) * height);
+        let at = format!("at {font_size} pt, over {height} px rows, the plates at {plates:?}");
+        assert_eq!(opaque.min_y(), plates.min_y(), "{at} hide from {opaque:?}");
+
+        // The line the icons are on: the row through the plates' middle, or
+        // the first row while that is still in the space above it.
+        let middle = (plates.min_y() + plates.max_y()) / 2.;
+        let line = ((middle - rows_top) / height).floor().max(0.);
+        let (top, bottom) = row(line);
+        assert!(
+            opaque.max_y() >= plates.max_y().min(bottom),
+            "{at} hide only {opaque:?}, not all of the line they sit on at {top}..{bottom}"
+        );
+
+        // Below that line, the row their lower edge reaches into is the tint
+        // alone rather than cut through the tops of its letters.
+        let reached = ((opaque.max_y() - rows_top) / height).floor();
+        let (top, bottom) = row(reached);
+        assert!(
+            reached <= line || opaque.max_y() <= top + 1. || opaque.max_y() >= bottom - 1.,
+            "{at} hide what is under them down to {}, {} px into the row at {top}..{bottom}",
+            opaque.max_y(),
+            opaque.max_y() - top,
+        );
+
+        // Over a block whose top has scrolled away, no line is theirs.
+        let (_, item, _, plates, opaque) = laid_out(font_size, 3.);
+        assert!(
+            item.top < 0.,
+            "at {font_size} pt the block's top is still in view"
+        );
+        assert_eq!(
+            opaque, plates,
+            "at {font_size} pt the plates over a block's output hide only part of it"
+        );
+
+        font_size += FONT_SIZE_STEP / 2.;
+    }
+}

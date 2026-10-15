@@ -125,7 +125,8 @@ Code's settings, for a person who would rather merge it into `~/.claude/settings
 project's `.claude/settings.json` by hand. Do not write either file yourself. The same flag
 takes `codex`, `gemini`, `copilot` and `opencode`, and prints each one's own hooks file or
 plugin with a note on stderr saying where it goes; `aider` has no hooks, and it says what to do
-instead.
+instead. Codex runs merged hooks only once the person trusts them: it asks on its next start, or
+in its `/hooks`, and asks again whenever a hook's command changes, so tell them that as well.
 
 With neither the plugin nor the hooks, Claude Code can still light the row when it stops to ask,
 through a notification Crook reads — once its `preferredNotifChannel` setting is `ghostty`,

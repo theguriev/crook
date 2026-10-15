@@ -45,6 +45,8 @@
 //! neighbour of these modes but is about the keyboard rather than the pointer,
 //! so it lives with the keys: see [`crate::input::focus`].
 
+use alacritty_terminal::term::TermMode;
+
 use crate::input::Modifiers;
 
 /// A pointer button, as a terminal names one.
@@ -133,6 +135,22 @@ impl MouseModes {
         sgr: false,
         alternate_scroll: false,
     };
+
+    /// The modes an emulator in `mode` has in force.
+    ///
+    /// One reading for the two places that ask: the emulator, for a gesture
+    /// on its way to the pty, and the snapshot, which carries them to the
+    /// thread that draws so that a pointer move need not take the lock the
+    /// reader parses under to ask.
+    pub(crate) fn of(mode: TermMode) -> Self {
+        Self {
+            click: mode.contains(TermMode::MOUSE_REPORT_CLICK),
+            drag: mode.contains(TermMode::MOUSE_DRAG),
+            motion: mode.contains(TermMode::MOUSE_MOTION),
+            sgr: mode.contains(TermMode::SGR_MOUSE),
+            alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
+        }
+    }
 
     /// Whether the child is reading the mouse at all.
     ///

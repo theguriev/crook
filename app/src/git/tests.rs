@@ -1059,6 +1059,319 @@ fn a_repository_no_gather_asked_about_for_a_whole_cycle_is_looked_up_afresh() {
     assert_eq!(LOOKUPS.load(Ordering::Relaxed), 2);
 }
 
+// --- reading only what changed ------------------------------------------------
+//
+// A poll gathers every directory a pane is in, every cycle, and almost none of
+// them have changed since the last. These count the gits a second gather
+// starts, because a read skipped and a read that answered what it answered
+// last time look the same from the facts alone.
+
+/// Lets every stamp this thread takes stand at once, rather than refusing
+/// files the test wrote a moment ago — see `stamp::settling`.
+fn settle_at_once() {
+    stamp::SETTLING_FOR.with(|settling| settling.set(std::time::Duration::ZERO));
+}
+
+/// The gits this thread has started since it last asked, by subcommand and
+/// what tells the two diffs apart: `diff HEAD`, `diff --merge-base`,
+/// `rev-list`.
+fn reads_since() -> Vec<String> {
+    run::started_here()
+        .into_iter()
+        .map(|read| {
+            let words: Vec<&str> = read.split(' ').collect();
+            match words.as_slice() {
+                ["diff", rest @ ..] if rest.contains(&"--merge-base") => {
+                    "diff --merge-base".to_owned()
+                }
+                ["diff", rest @ ..] if rest.contains(&"HEAD") => "diff HEAD".to_owned(),
+                [command, ..] => (*command).to_owned(),
+                [] => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// A repository on `agent/task`, a commit ahead of `main` and with an edit
+/// nobody has added, gathered once already through `readings`.
+fn gathered_once(scratch: &ScratchDir, readings: &mut Readings, bases: &mut Bases) -> PathBuf {
+    let repo = repo_with_a_commit(scratch, "repo");
+    git(&repo, &["switch", "-c", "agent/task"]);
+    commit(&repo, "tracked.txt", "one\ntwo\nthree\nfour\n", "four");
+    write(&repo.join("tracked.txt"), "one\ntwo\nthree\nfour\nfive\n");
+
+    let facts = gather_remembering(&repo, bases, readings);
+    assert_eq!(
+        facts.since_base.as_ref().map(|since| since.commits),
+        Some(1),
+        "the first gather counted nothing: {facts:?}"
+    );
+    readings.forget_unvisited();
+    reads_since();
+    repo
+}
+
+#[test]
+fn a_work_tree_nothing_has_written_to_is_not_read_again() {
+    // A checkout an agent has finished with sits on screen for hours, and each
+    // of the three reads goes through its whole tree — in a checkout that
+    // `worktree add` has just made, hashing every file in it. A second gather
+    // with nothing moved asks where the commits are and lists the tree, and
+    // reads nothing.
+    if without_git("a_work_tree_nothing_has_written_to_is_not_read_again") {
+        return;
+    }
+    settle_at_once();
+    let scratch = ScratchDir::new("unchanged");
+    let (mut readings, mut bases) = (Readings::default(), Bases::default());
+    let repo = gathered_once(&scratch, &mut readings, &mut bases);
+    let first = gather(&repo, &mut Bases::default());
+    reads_since();
+
+    let second = gather_remembering(&repo, &mut bases, &mut readings);
+
+    assert_eq!(second, first, "the kept counts are not the counts");
+    assert_eq!(reads_since(), vec!["rev-parse", "ls-files"]);
+}
+
+#[test]
+fn an_edit_nobody_has_added_is_read_again_and_the_commits_are_not_counted_again() {
+    // The edit moves no commit and leaves the index as it was: what a gather
+    // keeps cannot be keyed on those alone. Both diffs read the working tree
+    // and are read again; the count of commits is about two commits that did
+    // not move.
+    if without_git("an_edit_nobody_has_added_is_read_again_and_the_commits_are_not_counted_again") {
+        return;
+    }
+    settle_at_once();
+    let scratch = ScratchDir::new("edited");
+    let (mut readings, mut bases) = (Readings::default(), Bases::default());
+    let repo = gathered_once(&scratch, &mut readings, &mut bases);
+
+    write(
+        &repo.join("tracked.txt"),
+        "one\ntwo\nthree\nfour\nfive\nsix\n",
+    );
+    let second = gather_remembering(&repo, &mut bases, &mut readings);
+
+    assert_eq!(
+        reads_since(),
+        vec!["rev-parse", "ls-files", "diff HEAD", "diff --merge-base"]
+    );
+    assert_eq!(second, gather(&repo, &mut Bases::default()));
+    assert_eq!(second.diff.map(|diff| diff.lines_added), Some(2));
+}
+
+#[test]
+fn a_commit_reads_everything_again() {
+    if without_git("a_commit_reads_everything_again") {
+        return;
+    }
+    settle_at_once();
+    let scratch = ScratchDir::new("committed");
+    let (mut readings, mut bases) = (Readings::default(), Bases::default());
+    let repo = gathered_once(&scratch, &mut readings, &mut bases);
+
+    git(&repo, &["commit", "--no-verify", "-am", "five"]);
+    let second = gather_remembering(&repo, &mut bases, &mut readings);
+
+    assert_eq!(
+        reads_since(),
+        vec![
+            "rev-parse",
+            "ls-files",
+            "diff HEAD",
+            "rev-list",
+            "diff --merge-base"
+        ]
+    );
+    assert_eq!(second, gather(&repo, &mut Bases::default()));
+    assert_eq!(second.since_base.map(|since| since.commits), Some(2));
+}
+
+#[test]
+fn a_head_that_moved_under_an_index_nobody_wrote_is_read_again() {
+    // `reset --soft` moves `HEAD` and leaves the index and every file as they
+    // were, so the stamp is the stamp it was — and the diff against `HEAD` is
+    // not the diff it was.
+    if without_git("a_head_that_moved_under_an_index_nobody_wrote_is_read_again") {
+        return;
+    }
+    settle_at_once();
+    let scratch = ScratchDir::new("soft-reset");
+    let (mut readings, mut bases) = (Readings::default(), Bases::default());
+    let repo = gathered_once(&scratch, &mut readings, &mut bases);
+
+    git(&repo, &["reset", "--soft", "HEAD~1"]);
+    let second = gather_remembering(&repo, &mut bases, &mut readings);
+
+    assert_eq!(second, gather(&repo, &mut Bases::default()));
+    assert_eq!(second.diff.map(|diff| diff.lines_added), Some(2));
+    assert_eq!(second.since_base, None);
+}
+
+#[test]
+fn a_base_that_moved_is_counted_from_again_and_the_tree_is_not_read_for_it() {
+    // `main` moving on — a fetch, a merge somebody else made — changes what
+    // the branch has done since it, and nothing about the working tree
+    // against its own `HEAD`.
+    if without_git("a_base_that_moved_is_counted_from_again_and_the_tree_is_not_read_for_it") {
+        return;
+    }
+    settle_at_once();
+    let scratch = ScratchDir::new("base-moved");
+    let (mut readings, mut bases) = (Readings::default(), Bases::default());
+    let repo = gathered_once(&scratch, &mut readings, &mut bases);
+
+    let tree = git(&repo, &["rev-parse", "main^{tree}"]);
+    let moved = git(
+        &repo,
+        &["commit-tree", &tree, "-p", "main", "-m", "main moves on"],
+    );
+    git(&repo, &["update-ref", "refs/heads/main", &moved]);
+    let second = gather_remembering(&repo, &mut bases, &mut readings);
+
+    assert_eq!(
+        reads_since(),
+        vec!["rev-parse", "ls-files", "rev-list", "diff --merge-base"]
+    );
+    assert_eq!(second, gather(&repo, &mut Bases::default()));
+}
+
+#[test]
+fn a_work_tree_is_read_once_a_cycle_however_many_directories_are_in_it() {
+    if without_git("a_work_tree_is_read_once_a_cycle_however_many_directories_are_in_it") {
+        return;
+    }
+    settle_at_once();
+    let scratch = ScratchDir::new("one-tree");
+    let (mut readings, mut bases) = (Readings::default(), Bases::default());
+    let repo = repo_with_a_commit(&scratch, "repo");
+    let deeper = repo.join("src");
+    commit(&repo, "src/lib.rs", "fn main() {}\n", "src");
+    write(&repo.join("tracked.txt"), "one\n");
+
+    let top = gather_remembering(&repo, &mut bases, &mut readings);
+    reads_since();
+    let below = gather_remembering(&deeper, &mut bases, &mut readings);
+
+    assert_eq!(below, top);
+    assert_eq!(reads_since(), Vec::<String>::new());
+
+    // And read again, once, the next cycle.
+    readings.forget_unvisited();
+    gather_remembering(&deeper, &mut bases, &mut readings);
+    assert_eq!(reads_since(), vec!["rev-parse", "ls-files"]);
+}
+
+#[test]
+fn a_stamp_taken_while_a_file_is_still_settling_vouches_for_nothing() {
+    // A file written twice inside one tick of the file system's clock, the
+    // same length both times, looks the same both times; a stamp taken in
+    // that tick would keep the first count for the second file.
+    if without_git("a_stamp_taken_while_a_file_is_still_settling_vouches_for_nothing") {
+        return;
+    }
+    let scratch = ScratchDir::new("settling");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    write(&repo.join("tracked.txt"), "uno\ndos\ntres\n");
+
+    assert_eq!(stamp::stamp(&repo, &repo.join(".git")), None);
+
+    settle_at_once();
+    assert!(stamp::stamp(&repo, &repo.join(".git")).is_some());
+}
+
+#[test]
+fn a_submodule_is_never_vouched_for() {
+    // What git counts for one is its own `HEAD` and whether anything inside
+    // it is dirty, and neither shows on the directory it is checked out in.
+    if without_git("a_submodule_is_never_vouched_for") {
+        return;
+    }
+    settle_at_once();
+    let scratch = ScratchDir::new("submodule-stamp");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    std::fs::create_dir_all(repo.join("vendored")).expect("the scratch directory is writable");
+    git(
+        &repo,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{head},vendored"),
+        ],
+    );
+
+    assert_eq!(stamp::stamp(&repo, &repo.join(".git")), None);
+}
+
+#[test]
+fn a_sparse_checkout_is_stamped_by_the_files_it_has_checked_out() {
+    // A sparse checkout is how a monorepo too big to check out is worked in,
+    // and its index still lists every file the repository has. The diffs pass
+    // over the ones left out; a stamp that went through them would cost the
+    // whole tree every cycle, and listing a sparse index the plain way expands
+    // it to every file first, which git itself calls slow.
+    if without_git("a_sparse_checkout_is_stamped_by_the_files_it_has_checked_out") {
+        return;
+    }
+    settle_at_once();
+    let scratch = ScratchDir::new("sparse");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    commit(&repo, "inside/kept.txt", "kept\n", "inside");
+    commit(&repo, "outside/left.txt", "left out\n", "outside");
+    git(
+        &repo,
+        &[
+            "sparse-checkout",
+            "set",
+            "--cone",
+            "--sparse-index",
+            "inside",
+        ],
+    );
+    assert!(
+        !repo.join("outside").exists(),
+        "the sparse checkout checked out what it was to leave out"
+    );
+    let (mut readings, mut bases) = (Readings::default(), Bases::default());
+
+    gather_remembering(&repo, &mut bases, &mut readings);
+    readings.forget_unvisited();
+    let listings: Vec<String> = run::started_here()
+        .into_iter()
+        .filter(|read| read.starts_with("ls-files"))
+        .collect();
+    assert_eq!(listings, ["ls-files -z -t --sparse"]);
+
+    gather_remembering(&repo, &mut bases, &mut readings);
+    readings.forget_unvisited();
+    assert_eq!(reads_since(), vec!["rev-parse", "ls-files"]);
+
+    // What is checked out is still watched.
+    write(&repo.join("inside/kept.txt"), "kept, and edited\n");
+    let edited = gather_remembering(&repo, &mut bases, &mut readings);
+    assert_eq!(reads_since(), vec!["rev-parse", "ls-files", "diff HEAD"]);
+    assert_eq!(edited, gather(&repo, &mut Bases::default()));
+    assert_eq!(edited.diff.map(|diff| diff.lines_added), Some(1));
+}
+
+#[test]
+fn what_a_sparse_checkout_leaves_out_is_not_stamped() {
+    // `S` is skip-worktree, which the diffs never look at — a file, or with
+    // `--sparse` a whole directory a sparse index keeps as one entry. `H` is
+    // an ordinary file and `M` one in the middle of a merge, both read.
+    let listed = b"H kept.txt\0S left/out.txt\0S left/\0M both.txt\0";
+    assert_eq!(
+        stamp::checked_out(listed),
+        Some(vec![&b"kept.txt"[..], &b"both.txt"[..]])
+    );
+    // Untagged is not the listing asked for, and vouches for nothing.
+    assert_eq!(stamp::checked_out(b"kept.txt\0"), None);
+}
+
 // --- what a repository's configuration may run ---------------------------------
 //
 // A read is git run on nobody's say-so: the row's counts, every fifteen seconds

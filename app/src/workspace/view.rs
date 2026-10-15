@@ -1114,7 +1114,7 @@ impl Workspace {
         // the model checks before it notifies. A branch that changed is also
         // what a pull request's link goes with.
         ctx.observe(&git, |workspace, _, ctx| {
-            workspace.forget_moved_pull_requests();
+            workspace.forget_moved_pull_requests(ctx);
             ctx.notify();
         });
         // And the end of every cycle, changed or not, is when the Changes
@@ -1433,6 +1433,10 @@ impl Workspace {
         let before = self.looking_at();
         self.window_focused = focused;
         self.report_focus(before, ctx);
+        // The rows' counts are for somebody looking at them, and a window
+        // behind another has nobody: the gather waits longer while it is.
+        self.git
+            .update(ctx, |model, _| model.set_window_focused(focused));
         // An input method's composition is the keyboard's, and the keyboard
         // has just gone or come back: what was being composed before belongs
         // to nothing now. A word committed on the way out still arrives, as a
@@ -4905,6 +4909,17 @@ impl Workspace {
             }
             WorktreeAction::Finish => self.finish_task(false, ctx),
             WorktreeAction::Discard => self.finish_task(true, ctx),
+            // Where the button is drawn and nowhere else: under the sentence
+            // that offered it, on the list. The menu stays up, since a file
+            // manager that opened behind the window is a press somebody will
+            // want to make again.
+            WorktreeAction::ShowLeftBehind => {
+                if self.tab_menu.mode == WorktreeMode::Listing
+                    && let Some(folder) = self.tab_menu.left_behind()
+                {
+                    crate::browser::open_folder(folder);
+                }
+            }
             WorktreeAction::ReviewDiscard => {
                 // Only from Discard's first question, and only once it has
                 // something to say: the second names what the first could
@@ -5148,6 +5163,8 @@ impl Workspace {
 
         let epoch = self.tab_menu.next_epoch();
         self.tab_menu.opening = self.tab_menu.opening.wrapping_add(1);
+        // The last opening's proof would be dropped on arrival.
+        self.tab_menu.stop_landed_pass();
         self.tab_menu.tab = Some(tab);
         self.tab_menu.pane_directory = Some(directory.clone());
         self.tab_menu.mode = WorktreeMode::Listing;
@@ -5262,11 +5279,17 @@ impl Workspace {
         let branches = self.tab_menu.branches.clone();
         let tab = self.tab_menu.tab;
         let opening = self.tab_menu.opening;
+        let proofs = self.tab_menu.proofs.clone();
+        let going = self.tab_menu.start_landed_pass();
 
         let reading = ctx.background().spawn(async move {
-            super::tab_menu::landed_branches(&directory, &worktrees, &branches)
+            super::tab_menu::landed_branches(&directory, &worktrees, &branches, &proofs, &going)
         });
         ctx.spawn(reading, move |workspace, landed, ctx| {
+            // A pass that stopped was superseded, and has nothing to say.
+            let Some(landed) = landed else {
+                return;
+            };
             if workspace.tab_menu.tab != tab || workspace.tab_menu.opening != opening {
                 return;
             }
@@ -5337,11 +5360,13 @@ impl Workspace {
                         .clone()
                         .unwrap_or_else(crate::agent::search_path),
                 );
-                self.tab_menu.landed = Some(super::tab_menu::landed_branches(
+                self.tab_menu.landed = super::tab_menu::landed_branches(
                     &directory,
                     &worktrees,
                     &self.tab_menu.branches,
-                ));
+                    &self.tab_menu.proofs,
+                    &|| true,
+                );
                 Contents::Ready(worktrees)
             }
             Err(problem) => Contents::Failed(problem.to_string()),
@@ -5434,6 +5459,7 @@ impl Workspace {
         }
 
         self.tab_menu.next_epoch();
+        self.tab_menu.stop_landed_pass();
         self.tab_menu.tab = None;
         self.tab_menu.mode = WorktreeMode::Listing;
         self.tab_menu.selected = None;
@@ -6105,15 +6131,17 @@ impl Workspace {
         block_text(&Blocks::list(&history, &snapshot), block, from, filter)
     }
 
-    /// Whether a pane's shell has gone: it has exited, or it never opened.
+    /// Whether a pane's shell has gone: it has exited, or it never opened
+    /// and is not on its way.
     ///
     /// For the command line's `--run`, which has nothing left to type into
     /// once this is true.
     pub fn shell_is_gone(&self, pane: PaneId, app: &AppContext) -> bool {
-        self.terminals
-            .as_ref(app)
-            .handle(pane)
-            .is_none_or(|handle| handle.has_exited())
+        let terminals = self.terminals.as_ref(app);
+        !terminals.is_opening(pane)
+            && terminals
+                .handle(pane)
+                .is_none_or(|handle| handle.has_exited())
     }
 
     /// Every finished block of a pane as a report: the command line, then
@@ -6654,21 +6682,16 @@ impl Workspace {
         self.start_chomping(ctx);
         ctx.notify();
 
-        self.remove_next(repository, remaining, 0, 0, epoch, ctx);
+        self.remove_next(repository, remaining, Tally::default(), epoch, ctx);
     }
 
-    /// Removes the next checkout of a sweep, and then the one after it.
+    /// Removes the next checkout of a sweep, and then the one after it,
+    /// counting in `tally` what it will have to say when it ends.
     ///
-    /// `refused` counts the ones git would not let go. Never forced, and one
-    /// refusal does not stop the others: a checkout somebody started working
-    /// in between the counting and the button is a checkout to leave
-    /// standing, not a reason to abandon the five that are finished.
-    ///
-    /// `in_use` counts the ones a pane of this window had entered by their
-    /// turn, which are left standing without asking git: a checkout is on the
-    /// list for having no pane in it, and nothing locks it again when one
-    /// comes back — a reopened tab, a restored session, a shell's `cd` — so
-    /// git would have nothing to refuse over. See [`remove_unless_in_use`].
+    /// Never forced, and one refusal does not stop the others: a checkout
+    /// somebody started working in between the counting and the button is a
+    /// checkout to leave standing, not a reason to abandon the five that are
+    /// finished.
     ///
     /// The chain runs to the end whether or not the menu is still up — the
     /// removals were asked for, and closing a popup is not a way of asking
@@ -6679,8 +6702,7 @@ impl Workspace {
         &mut self,
         repository: PathBuf,
         mut remaining: std::collections::VecDeque<Going>,
-        refused: usize,
-        in_use: usize,
+        mut tally: Tally,
         epoch: u64,
         ctx: &mut ViewContext<Self>,
     ) {
@@ -6714,14 +6736,20 @@ impl Workspace {
             if stopped {
                 sentences.push(format!("Stopped after {done} of {of}."));
             }
-            match in_use {
+            match tally.in_use {
                 0 => {}
                 1 => sentences.push("One checkout is in use now and was kept.".to_owned()),
                 in_use => {
                     sentences.push(format!("{in_use} checkouts are in use now and were kept."));
                 }
             }
-            match refused {
+            let left =
+                super::tab_menu::swept_but_left(&tally.left_behind, self.tab_menu.store.as_deref());
+            let folder = left.as_ref().and_then(|(_, folder)| folder.clone());
+            if let Some((said, _)) = left {
+                sentences.push(said);
+            }
+            match tally.refused {
                 0 => {}
                 1 => sentences.push("One checkout would not go; the log says why.".to_owned()),
                 refused => {
@@ -6731,7 +6759,7 @@ impl Workspace {
                 }
             }
             if !sentences.is_empty() {
-                self.tab_menu.problem = Some(sentences.join(" "));
+                self.tab_menu.say_left_behind(sentences.join(" "), folder);
                 ctx.notify();
             }
             return;
@@ -6758,20 +6786,28 @@ impl Workspace {
 
         // The pirate moves past one it leaves standing as past one that went.
         ctx.spawn(removing, move |workspace, removed, ctx| {
-            let (refused, in_use) = match removed {
-                Ok(Removal::Gone) => (refused, in_use),
+            match removed {
+                Ok(Removal::Gone) => {}
                 Ok(Removal::InUse) => {
                     log::info!(
                         "{} was kept: a pane is working in it now",
                         going.path.display()
                     );
-                    (refused, in_use + 1)
+                    tally.in_use += 1;
+                }
+                Err(crate::git::worktree::Error::PartlyRemoved { path, message }) => {
+                    log::warn!(
+                        "{} was removed, but files are left in {}: {message}",
+                        going.label,
+                        path.display()
+                    );
+                    tally.left_behind.push((going.label, path));
                 }
                 Err(problem) => {
                     log::warn!("{} was not removed: {problem}", going.path.display());
-                    (refused + 1, in_use)
+                    tally.refused += 1;
                 }
-            };
+            }
             if workspace.tab_menu.epoch == epoch
                 && let Sweep::Removing { done, current, .. } = &mut workspace.tab_menu.sweep
             {
@@ -6779,7 +6815,7 @@ impl Workspace {
                 *current = remaining.front().map(|going| going.label.clone());
                 ctx.notify();
             }
-            workspace.remove_next(repository, remaining, refused, in_use, epoch, ctx);
+            workspace.remove_next(repository, remaining, tally, epoch, ctx);
         })
         .detach();
     }
@@ -6838,6 +6874,12 @@ impl Workspace {
                     Ok(Removal::InUse) => {
                         log::info!("{label} was kept: a pane is working in it now")
                     }
+                    Err(crate::git::worktree::Error::PartlyRemoved { path, message }) => {
+                        log::warn!(
+                            "{label} was removed, but files are left in {}: {message}",
+                            path.display()
+                        );
+                    }
                     Err(problem) => log::warn!("a removal nobody is waiting for failed: {problem}"),
                 }
                 return;
@@ -6864,6 +6906,24 @@ impl Workspace {
                     }
                     workspace.tab_menu.problem =
                         Some(format!("{label} is in use now and was kept."));
+                    ctx.notify();
+                }
+                // Gone as far as git is concerned, so back to the list as for
+                // one that went — the confirmation's checkout is not on it any
+                // more — saying where the files git could not delete are.
+                Err(crate::git::worktree::Error::PartlyRemoved { path, message }) => {
+                    log::warn!(
+                        "{label} was removed, but files are left in {}: {message}",
+                        path.display()
+                    );
+                    if let Some(tab) = workspace.tab_menu.tab {
+                        workspace.tab_menu.tab = None;
+                        workspace.open_tab_menu(tab, ctx);
+                    }
+                    workspace.tab_menu.say_left_behind(
+                        super::tab_menu::partly_removed(&label, &path),
+                        Some(path),
+                    );
                     ctx.notify();
                 }
                 // The one refusal that is a question rather than an error:
@@ -7190,17 +7250,19 @@ impl Workspace {
         let doing = ctx.background().spawn(async move {
             super::finish::carry_out(&repository, &plan, discard, store.as_deref())
         });
-        ctx.spawn(doing, move |workspace, report, ctx| {
+        ctx.spawn(doing, move |workspace, done, ctx| {
             let Some(tab) = landing.filter(|tab| {
                 workspace.tab_menu.tab == Some(*tab) && Some(workspace.tab_menu.opening) == opening
             }) else {
-                log::info!("a task finished with nobody waiting: {report}");
+                log::info!("a task finished with nobody waiting: {}", done.report);
                 return;
             };
             // Back to the list, read again, with what happened under it.
             workspace.tab_menu.tab = None;
             workspace.open_tab_menu(tab, ctx);
-            workspace.tab_menu.problem = Some(report);
+            workspace
+                .tab_menu
+                .say_left_behind(done.report, done.left_behind);
             ctx.notify();
         })
         .detach();
@@ -7520,6 +7582,15 @@ impl Workspace {
         self.terminals.as_ref(app).is_expected()
     }
 
+    /// Whether a pane's shell is coming: every pane's, before
+    /// [`Self::start_terminals`], and afterwards a pane's whose shell is still
+    /// being opened behind the active tab's. See
+    /// [`TerminalModel::is_opening`].
+    pub fn terminal_coming(&self, pane: PaneId, app: &AppContext) -> bool {
+        let terminals = self.terminals.as_ref(app);
+        terminals.is_expected() || terminals.is_opening(pane)
+    }
+
     /// Where a pane with no terminal writes the grid it measured, for the
     /// shell that opens in it later.
     pub(super) fn pane_measure(&self, app: &AppContext) -> crate::terminal_model::Measured {
@@ -7538,9 +7609,16 @@ impl Workspace {
         // The frame measured the active tab's panes; the tabs behind it are
         // worked out from what it measured, before their shells open.
         self.estimate_unmeasured_panes(ctx);
-        let panes = self.open_panes();
+        // The active tab's shells here, for the frame after this one to draw,
+        // and the rest off this thread behind them: forking sixty in place
+        // held the window for most of a second. See `TerminalModel::start`.
+        let active = self.active_pane_ids();
+        let (shown, behind): (Vec<_>, Vec<_>) = self
+            .open_panes()
+            .into_iter()
+            .partition(|(pane, _)| active.contains(pane));
         self.terminals
-            .update(ctx, |model, ctx| model.start(&panes, ctx));
+            .update(ctx, |model, ctx| model.start(&shown, &behind, ctx));
     }
 
     /// Ends the shell in every pane, for a window whose event loop is
@@ -7605,6 +7683,14 @@ impl Workspace {
     ) {
         self.terminals
             .update(ctx, |model, _| model.set_environment(environment));
+    }
+
+    /// Makes every shell opened from now on take `cost` longer to spawn. For
+    /// tests: see [`TerminalModel::set_spawn_cost`].
+    #[cfg(test)]
+    pub fn set_shell_spawn_cost(&self, cost: Duration, ctx: &mut ViewContext<Self>) {
+        self.terminals
+            .update(ctx, |model, _| model.set_spawn_cost(cost));
     }
 
     /// Says where this window answers questions, for every shell opened from
@@ -8196,19 +8282,6 @@ impl Workspace {
         });
     }
 
-    /// Reports the agent's progress into one session, and repaints the chip
-    /// that shows it. Returns whether the pane is still open.
-    ///
-    /// A closure rather than a returned `&mut AgentSession`, because the
-    /// repaint has to be part of the same call: a caller that renamed a
-    /// session and did not notify would leave the old title on screen with
-    /// nothing reporting an error, until some unrelated click happened to
-    /// rebuild the frame.
-    ///
-    /// Addressed by [`PaneId`], because a session belongs to a pane. Taking a
-    /// [`TabId`] would mean writing into whichever pane of that tab happens to
-    /// be focused when the agent reports — a race between a person clicking
-    /// and a background task finishing.
     /// Renames a tab, or takes the rename back.
     ///
     /// `None` puts back the name the tab was opened with, which is where a
@@ -8245,6 +8318,36 @@ impl Workspace {
         }
     }
 
+    /// Reports the agent's progress into one session, and repaints the chip
+    /// that shows it. Returns whether the pane is still open.
+    ///
+    /// A closure rather than a returned `&mut AgentSession`, because the
+    /// repaint has to be part of the same call: a caller that renamed a
+    /// session and did not notify would leave the old title on screen with
+    /// nothing reporting an error, until some unrelated click happened to
+    /// rebuild the frame.
+    ///
+    /// Addressed by [`PaneId`], because a session belongs to a pane. Taking a
+    /// [`TabId`] would mean writing into whichever pane of that tab happens to
+    /// be focused when the agent reports — a race between a person clicking
+    /// and a background task finishing.
+    ///
+    /// **A report that changed nothing asks for no frame**, and follows
+    /// nothing either: it returns before the git lookup, the Changes column
+    /// and the notify, every one of which is about a session that moved. A
+    /// working agent sends a great many of them. Claude Code turns the glyph
+    /// in front of its title about once a second while it works, in a tab
+    /// that never had the keyboard — one `crook tab new` opened — and each
+    /// turn is the same name and the same running; its hooks say running
+    /// again around every tool it calls. Each was a rebuild of the whole
+    /// window of its own, for a row that looked exactly as it did. What
+    /// counts as a change is [`AgentSession::says_the_same_as`]'s to say.
+    ///
+    /// The report's own rebuild is all that goes. Both reports come only
+    /// while an agent runs, and while one runs `Self::keep_breathing`
+    /// redraws the window every breath for as long as the tab list is
+    /// showing; the window goes quiet for an agent at work behind it only
+    /// with the list hidden or a settings page up.
     pub fn update_session(
         &mut self,
         id: PaneId,
@@ -8255,8 +8358,12 @@ impl Workspace {
             return false;
         };
 
-        let was_working = super::finish::at_work(pane.session()).is_some();
+        let before = pane.session().clone();
         report(pane.session_mut());
+        if pane.session().says_the_same_as(&before) {
+            return true;
+        }
+        let was_working = super::finish::at_work(&before).is_some();
         let stopped = was_working && super::finish::at_work(pane.session()).is_none();
         // A report can move the session somewhere else, and the git facts a
         // row shows are looked up by directory — which is what makes the branch
@@ -8311,7 +8418,7 @@ impl Workspace {
     /// it. What counts as leaving is [`PullRequest::is_left_for`]'s: another
     /// branch, another repository or none — not a rebase, and not a detached
     /// `HEAD` in the same repository.
-    fn forget_moved_pull_requests(&mut self) {
+    fn forget_moved_pull_requests(&mut self, ctx: &mut ViewContext<Self>) {
         let moved: Vec<PaneId> = self
             .tabs
             .panes()
@@ -8327,6 +8434,12 @@ impl Workspace {
             })
             .map(|(_, pane)| pane.id())
             .collect();
+        // Its own repaint, since a directory said again is a report that
+        // changed nothing and repaints nothing, and the pull request that
+        // goes may be another pane's.
+        if !moved.is_empty() {
+            ctx.notify();
+        }
         for pane in moved {
             if let Some(pane) = self.tabs.pane_mut(pane) {
                 pane.session_mut().pull_request = None;
@@ -9210,6 +9323,10 @@ impl Workspace {
                     // on the row moves unless the status does — codex writes
                     // a frame of its spinner ten times a second.
                     Some(None) => self.tabs.pane(*pane).is_some(),
+                    // Claude Code's glyph turns in front of the same name
+                    // about once a second while it works, and the same name
+                    // is a report that changed nothing: `update_session`
+                    // asks for no frame for it.
                     Some(Some(name)) => {
                         let name = Some(name.to_owned()).filter(|name| !name.is_empty());
                         self.update_session(*pane, ctx, |session| session.derived_title = name)
@@ -9240,7 +9357,7 @@ impl Workspace {
                     // Into a directory another pane already shows, the git
                     // model has nothing new to read and says nothing; the
                     // branch a pull request goes with is asked here instead.
-                    self.forget_moved_pull_requests();
+                    self.forget_moved_pull_requests(ctx);
                 }
                 reported
             }
@@ -9259,7 +9376,7 @@ impl Workspace {
                 // `PaneSnapshot::remote_host`.
                 if reported {
                     self.save_session(ctx);
-                    self.forget_moved_pull_requests();
+                    self.forget_moved_pull_requests(ctx);
                 }
                 reported
             }
@@ -10972,15 +11089,50 @@ impl Workspace {
         }
     }
 
-    /// Tells the git model which directories the strip is showing.
+    /// Tells the git model which directories the strip is showing, and which
+    /// of them are on screen.
     fn sync_git(&mut self, ctx: &mut ViewContext<Self>) {
         let directories: Vec<PathBuf> = self
             .tabs
             .panes()
             .filter_map(|(_, pane)| pane.session().working_directory.clone())
             .collect();
-        self.git
-            .update(ctx, |model, ctx| model.track(directories, ctx));
+        let in_sight = self.directories_in_sight();
+        self.git.update(ctx, |model, ctx| {
+            model.track(directories, ctx);
+            model.set_in_sight(in_sight);
+        });
+    }
+
+    /// The directories of the panes a person can see the facts of: the
+    /// active tab's, and every pane whose row in the tab list was inside the
+    /// list's viewport on the last frame.
+    ///
+    /// As of the last change to the strip, which is when this is asked: a
+    /// scroll of the list does not ask it again. It only decides which rows a
+    /// cycle reads first, and a row scrolled into view is read by the same
+    /// cycle a moment later.
+    fn directories_in_sight(&self) -> Vec<PathBuf> {
+        let mut panes: Vec<&Pane> = self
+            .tabs
+            .active()
+            .map(|tab| tab.panes().iter().collect())
+            .unwrap_or_default();
+        // Drawn exactly when `render` builds the tab list; otherwise its rows
+        // are where some earlier frame left them.
+        if self.showing_section().is_none() && self.tabs_panel_is_showing() {
+            let scroll = self.panel_scroll.lock();
+            let (top, bottom) = (scroll.offset(), scroll.offset() + scroll.viewport());
+            panes.extend(self.tabs.panes().map(|(_, pane)| pane).filter(|pane| {
+                self.panel_rows
+                    .get(pane.id())
+                    .is_some_and(|row| row.top < bottom && row.top + row.height > top)
+            }));
+        }
+        panes
+            .into_iter()
+            .filter_map(|pane| pane.session().working_directory.clone())
+            .collect()
     }
 
     /// Opens a shell for every pane that has none, and ends the ones whose
@@ -10989,11 +11141,19 @@ impl Workspace {
     /// Called from [`Self::apply`] like [`Self::sync_git`], so that "a pane
     /// exists" and "a shell is running in it" are one statement rather than two
     /// that can disagree. Before [`Self::start_terminals`] it opens nothing.
+    ///
+    /// And starts in place the shells of the active tab that are still
+    /// queued behind a restore's, for a tab switched to before its turn came:
+    /// the next frame draws it, and a pane with no shell takes no keys. See
+    /// [`TerminalModel::open_shown`].
     fn sync_terminals(&mut self, ctx: &mut ViewContext<Self>) {
         self.estimate_unmeasured_panes(ctx);
         let panes = self.open_panes();
-        self.terminals
-            .update(ctx, |model, ctx| model.sync(&panes, ctx));
+        let shown = self.active_pane_ids();
+        self.terminals.update(ctx, |model, ctx| {
+            model.sync(&panes, ctx);
+            model.open_shown(&shown, ctx);
+        });
     }
 
     /// Gives every pane no layout has measured the grid the layout would
@@ -11033,6 +11193,14 @@ impl Workspace {
             .panes()
             .map(|(_, pane)| (pane.id(), pane.session().working_directory.clone()))
             .collect()
+    }
+
+    /// The panes of the active tab, which the next frame draws.
+    fn active_pane_ids(&self) -> Vec<PaneId> {
+        self.tabs
+            .active()
+            .map(|tab| tab.panes().iter().map(Pane::id).collect())
+            .unwrap_or_default()
     }
 
     /// Applies one option, or opens and closes the menu.
@@ -12189,6 +12357,25 @@ enum Removal {
     InUse,
 }
 
+/// What a sweep has to say once it ends, counted as it goes: see
+/// [`Workspace::remove_next`].
+#[derive(Debug, Default)]
+struct Tally {
+    /// The checkouts git would not let go.
+    refused: usize,
+    /// The ones a pane of this window had entered by their turn, which are
+    /// left standing without asking git: a checkout is on the list for having
+    /// no pane in it, and nothing locks it again when one comes back — a
+    /// reopened tab, a restored session, a shell's `cd` — so git would have
+    /// nothing to refuse over. See [`remove_unless_in_use`].
+    in_use: usize,
+    /// The ones git took out of the repository without deleting every file
+    /// in them, each by its name in the list and the directory the files are
+    /// in. Gone, as far as the list is concerned, and said apart from the
+    /// ones that would not go.
+    left_behind: Vec<(String, PathBuf)>,
+}
+
 /// Removes the checkout at `path` unless one of `panes` — where the window's
 /// panes were as the removal started — is in it, taking Crook's lock off it
 /// first when `release` says to.
@@ -12246,8 +12433,10 @@ fn a_directory_is_in(directories: &[PathBuf], checkout: &Path) -> bool {
 ///
 /// **Blocking**, both halves, and the second only after the first has
 /// succeeded: a checkout git refused to remove is still in its directory, and
-/// the directories above it are not empty anyway. The branch stays, as it
-/// always has — see [`crate::git::worktree::remove`].
+/// the directories above it are not empty anyway — nor are they above one git
+/// could only half remove, whose directory stays with the files it could not
+/// delete. The branch stays, as it always has — see
+/// [`crate::git::worktree::remove`].
 pub(super) fn remove_checkout(
     repository: &Path,
     path: &Path,

@@ -182,7 +182,7 @@ fn a_shell_prints_what_it_was_asked_to_and_the_pane_learns_about_it() {
             // them, a finished command's output is harvested into a block,
             // and the live grid this reads holds only the next prompt.
             model.set_shell_marks(false);
-            model.start(&[(pane, None)], ctx)
+            model.start(&[(pane, None)], &[], ctx)
         });
     });
 
@@ -247,7 +247,7 @@ fn a_program_that_asks_which_terminal_it_is_in_is_told_crook_and_its_version() {
     app.update(|ctx| {
         model.update(ctx, |model, ctx| {
             model.set_shell_marks(false);
-            model.start(&[(pane, None)], ctx)
+            model.start(&[(pane, None)], &[], ctx)
         });
     });
     let failure = app.read(|ctx| model.as_ref(ctx).failure(pane).map(str::to_owned));
@@ -319,6 +319,7 @@ fn session() -> Option<Arc<Shared>> {
         resize_failing: AtomicBool::new(false),
         scroll_remainder: AtomicU32::new(0.0f32.to_bits()),
         publish: Mutex::new(PublishState::new()),
+        drives: std::sync::atomic::AtomicUsize::new(0),
     }))
 }
 
@@ -967,6 +968,33 @@ fn the_reader_publishes_what_it_drew_before_it_lets_go_of_the_terminal() {
     });
 }
 
+#[test]
+fn the_mouse_modes_a_pointer_move_asks_for_wait_on_nothing_the_reader_holds() {
+    // Every pointer move over a pane asks this, on the thread that draws, and
+    // asking took the terminal's lock and rebuilt the snapshot under it: a
+    // reader holding the lock through a flood held up every move the window
+    // was given. The modes the frame showed are in the snapshot it was drawn
+    // from.
+    let Some(shared) = session() else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    shared.feed(b"\x1b[?1003h\x1b[?1006h");
+    shared.publish();
+    let handle = TerminalHandle(shared.clone());
+
+    let parsing = shared.lock();
+    let asked = returns(move || handle.mouse_modes());
+    drop(parsing);
+
+    let modes = asked.expect("the mouse modes waited on the terminal's lock");
+    assert!(
+        modes.motion,
+        "the modes were not the ones the program asked for"
+    );
+    assert!(modes.sgr);
+}
+
 /// How long something a person did is given to come back before the test
 /// calls the window frozen.
 ///
@@ -1016,7 +1044,7 @@ fn without_history(given: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// A session started the way [`TerminalModel::open`] starts one — its reader
+/// A session started the way [`spawn_session`] starts one — its reader
 /// and its writer each on a thread, its deferred batches drawn by `flusher` —
 /// running `program`, or `None` where it cannot be started.
 fn started(program: Program, flusher: &Arc<Flusher>) -> Option<Arc<Shared>> {
@@ -1317,7 +1345,7 @@ impl Shells {
                 // The order a window takes: the shells are expected before
                 // its first frame, and started after it.
                 model.expect();
-                model.start(&open, ctx);
+                model.start(&open, &[], ctx);
             });
         });
         let shells = Self {
@@ -1551,5 +1579,350 @@ fn a_shell_started_here_leaves_the_history_file_it_was_handed_alone() {
         modified().ok(),
         Some(written),
         "a shell started here rewrote the history file it was handed"
+    );
+}
+
+/// What one spawn is made to cost in the tests of shells opened on the pool:
+/// long enough that the test can act while one is being spawned.
+const POOL_SPAWN: Duration = Duration::from_millis(300);
+
+/// A model whose panes `behind` are queued for the pool, with every spawn
+/// costing [`POOL_SPAWN`], and none of them opened yet: the task for the
+/// first is on its way and nothing has been taken in. `None` where no shell
+/// can be started, and on Windows, as for [`Shells`].
+fn opening_behind(behind: &[PaneId]) -> Option<(Arc<LocalQueue>, App, ModelHandle<TerminalModel>)> {
+    if cfg!(windows) {
+        return None;
+    }
+    let (queue, mut app) = app();
+    let model = app.update(|ctx| ctx.add_model(TerminalModel::new));
+    let behind: Vec<_> = behind.iter().map(|pane| (*pane, None)).collect();
+    app.update(|ctx| {
+        model.update(ctx, |model, ctx| {
+            model.set_shell(Some(PathBuf::from("/bin/sh")));
+            model.set_environment(without_history(&[]));
+            model.set_shell_marks(false);
+            model.set_shell_login(false);
+            model.set_spawn_cost(POOL_SPAWN);
+            model.expect();
+            model.start(&[], &behind, ctx);
+        });
+    });
+    Some((queue, app, model))
+}
+
+/// Pumps the queue until `settled`, or panics with `what` past
+/// [`REPLY_TIMEOUT`].
+fn pump_until(
+    queue: &LocalQueue,
+    app: &App,
+    what: &str,
+    mut settled: impl FnMut(&AppContext) -> bool,
+) {
+    let deadline = Instant::now() + REPLY_TIMEOUT;
+    loop {
+        queue.run_until_parked();
+        if app.read(|ctx| settled(ctx)) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "{what}");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn shells_behind_the_shown_ones_open_off_the_thread_that_draws_and_all_arrive() {
+    // A restore's tabs behind the active one: the thread that draws waited on
+    // every fork in turn, and the frame after the restore waited for all of
+    // them.
+    let behind: Vec<_> = (0..3).map(|_| pane()).collect();
+    let started = Instant::now();
+    let Some((queue, app, model)) = opening_behind(&behind) else {
+        return;
+    };
+    let took = started.elapsed();
+    assert!(
+        took < POOL_SPAWN,
+        "queueing three shells held the thread that draws for {took:?}"
+    );
+    app.read(|ctx| {
+        let model = model.as_ref(ctx);
+        for pane in &behind {
+            assert!(model.is_opening(*pane), "{pane:?} is not on its way");
+            assert!(model.handle(*pane).is_none() && model.failure(*pane).is_none());
+        }
+    });
+
+    pump_until(
+        &queue,
+        &app,
+        "a shell opened on the pool never arrived",
+        |ctx| {
+            behind
+                .iter()
+                .all(|pane| model.as_ref(ctx).handle(*pane).is_some())
+        },
+    );
+    app.read(|ctx| {
+        assert!(
+            !behind
+                .iter()
+                .any(|pane| model.as_ref(ctx).is_opening(*pane)),
+            "a shell that arrived is still on its way"
+        );
+    });
+}
+
+#[test]
+fn a_shown_pane_waiting_its_turn_opens_in_place_and_the_one_on_the_pool_is_left_to_arrive() {
+    // A tab switched to before a restore got to it: the first is on the
+    // pool, the second and third wait their turn, and the first and third
+    // are shown.
+    let behind: Vec<_> = (0..3).map(|_| pane()).collect();
+    let Some((queue, mut app, model)) = opening_behind(&behind) else {
+        return;
+    };
+    app.update(|ctx| {
+        model.update(ctx, |model, ctx| {
+            model.open_shown(&[behind[0], behind[2]], ctx);
+        });
+    });
+    app.read(|ctx| {
+        let model = model.as_ref(ctx);
+        assert!(
+            model.handle(behind[2]).is_some(),
+            "a shown pane is still waiting its turn on the pool"
+        );
+        assert!(
+            !model.is_opening(behind[2]),
+            "a shown pane opened in place is still queued for a second shell"
+        );
+        assert!(
+            model.handle(behind[0]).is_none() && model.is_opening(behind[0]),
+            "the shell the pool was spawning was started a second time in place"
+        );
+        assert!(
+            model.handle(behind[1]).is_none() && model.is_opening(behind[1]),
+            "a pane nobody shows did not wait its turn"
+        );
+    });
+
+    pump_until(
+        &queue,
+        &app,
+        "a shell left on the pool never arrived",
+        |ctx| {
+            behind
+                .iter()
+                .all(|pane| model.as_ref(ctx).handle(*pane).is_some())
+        },
+    );
+}
+
+#[test]
+fn a_pane_closed_while_its_shell_is_on_the_way_never_gets_one() {
+    // The first is on the pool and the second waits its turn when both
+    // close; the third, still open, is the one that arrives.
+    let behind: Vec<_> = (0..3).map(|_| pane()).collect();
+    let Some((queue, mut app, model)) = opening_behind(&behind) else {
+        return;
+    };
+    app.update(|ctx| {
+        model.update(ctx, |model, ctx| model.sync(&[(behind[2], None)], ctx));
+    });
+    app.read(|ctx| {
+        let model = model.as_ref(ctx);
+        assert!(
+            !model.is_opening(behind[1]),
+            "a pane that closed before its turn is still waiting for it"
+        );
+        assert!(model.is_opening(behind[2]));
+    });
+
+    pump_until(
+        &queue,
+        &app,
+        "the pane still open never got its shell",
+        |ctx| model.as_ref(ctx).handle(behind[2]).is_some(),
+    );
+    app.read(|ctx| {
+        let model = model.as_ref(ctx);
+        for pane in &behind[..2] {
+            assert!(
+                model.handle(*pane).is_none(),
+                "a pane closed while its shell was on the way got one"
+            );
+            assert!(model.failure(*pane).is_none());
+            assert!(!model.is_opening(*pane));
+        }
+    });
+}
+
+#[test]
+fn a_window_that_goes_while_a_shell_is_being_spawned_waits_for_that_one_too() {
+    // The task that spawns it is the only thing that can end it, and the
+    // process may be gone by the time it would have come home: what the
+    // window waits for before the process ends has to count it.
+    let pane = pane();
+    let started = Instant::now();
+    let Some((queue, mut app, model)) = opening_behind(&[pane]) else {
+        return;
+    };
+    // Begun, rather than waiting for a worker: a task that has not begun
+    // spawns nothing once its pane has gone, and there is nothing to wait for.
+    let begun = |app: &App| {
+        app.read(|ctx| {
+            model
+                .as_ref(ctx)
+                .opening
+                .as_ref()
+                .is_some_and(|(_, opening)| !matches!(*opening.lock(), OpeningState::Queued))
+        })
+    };
+    let deadline = Instant::now() + REPLY_TIMEOUT;
+    while !begun(&app) {
+        assert!(Instant::now() < deadline, "the pool never began the spawn");
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    let endings = app.update(|ctx| model.update(ctx, |model, _| model.close_all()));
+    assert!(
+        endings.wait(REPLY_TIMEOUT),
+        "a window that is going gave up waiting for its shells"
+    );
+    // The spawn began after `started` and takes `POOL_SPAWN` at the least.
+    let waited = started.elapsed();
+    assert!(
+        waited >= POOL_SPAWN,
+        "the wait came back {waited:?} in, before the shell being spawned could have been"
+    );
+
+    queue.run_until_parked();
+    app.read(|ctx| {
+        assert!(
+            model.as_ref(ctx).handle(pane).is_none(),
+            "a window that is going took in a shell"
+        );
+    });
+}
+
+/// A shell that ignores the hang-up a close sends first, started the way a
+/// pool task starts one and past its `trap` — or `None` where none can be
+/// started. Ending it takes the `SIGKILL` the escalation sends, which only an
+/// ending gets to.
+fn deaf_shell(flusher: &Arc<Flusher>) -> Option<Opened> {
+    let pane = pane();
+    // `exec`, so the process the pty started is the one that ignores it: the
+    // disposition outlives the exec.
+    let script = "trap '' HUP; printf 'crook-%s\\n' ready; exec sleep 600";
+    let shared = started(sh(script, &[])?, flusher)?;
+    assert!(
+        comes_to_show(&shared, "crook-ready"),
+        "a shell never got ready"
+    );
+    Some(Opened {
+        shared,
+        integration: shell_integration::Session::open(
+            pane,
+            &shell_integration::Options {
+                enabled: false,
+                ..Default::default()
+            },
+        ),
+        marks: false,
+        token: None,
+        shell: PathBuf::from("/bin/sh"),
+        palette: Palette::default(),
+    })
+}
+
+/// Whether `shared`'s child is ended, by a signal, and reaped.
+fn ended_by_a_signal(shared: &Shared) -> bool {
+    comes_to_be_reaped(shared)
+        && shared
+            .lock()
+            .try_wait()
+            .ok()
+            .flatten()
+            .is_some_and(|exit| exit.signal.is_some())
+}
+
+#[test]
+fn a_shell_whose_pane_went_while_it_was_spawned_is_ended_by_the_task_that_spawned_it() {
+    let flusher = repainting();
+    let Some(opened) = deaf_shell(&flusher) else {
+        eprintln!("skipped: no shell could be started here");
+        flusher.stop();
+        return;
+    };
+    let shared = opened.shared.clone();
+    let (pane, endings, opening) = (pane(), Endings::default(), Opening::default());
+
+    opening.fill(
+        pane,
+        || {
+            opening.abandon(pane, &endings);
+            Ok(opened)
+        },
+        &endings,
+    );
+
+    assert!(
+        opening.take().is_none(),
+        "a shell nobody wants was left for the model to take in"
+    );
+    assert!(endings.wait(REPLY_TIMEOUT), "the shell's ending never came");
+    assert!(
+        ended_by_a_signal(&shared),
+        "a shell spawned for a pane that had gone was left running"
+    );
+    flusher.stop();
+}
+
+#[test]
+fn a_shell_spawned_before_its_pane_went_is_ended_by_the_close() {
+    let flusher = repainting();
+    let Some(opened) = deaf_shell(&flusher) else {
+        eprintln!("skipped: no shell could be started here");
+        flusher.stop();
+        return;
+    };
+    let shared = opened.shared.clone();
+    let (pane, endings, opening) = (pane(), Endings::default(), Opening::default());
+
+    opening.fill(pane, || Ok(opened), &endings);
+    opening.abandon(pane, &endings);
+
+    assert!(
+        opening.take().is_none(),
+        "a shell nobody wants was left for the model to take in"
+    );
+    assert!(endings.wait(REPLY_TIMEOUT), "the shell's ending never came");
+    assert!(
+        ended_by_a_signal(&shared),
+        "a shell whose pane went before it was taken in was left running"
+    );
+    flusher.stop();
+}
+
+#[test]
+fn a_shell_whose_pane_went_before_the_pool_got_to_it_is_never_spawned() {
+    let (pane, endings, opening) = (pane(), Endings::default(), Opening::default());
+    let mut spawned = false;
+
+    opening.abandon(pane, &endings);
+    opening.fill(
+        pane,
+        || {
+            spawned = true;
+            Err("spawned".to_owned())
+        },
+        &endings,
+    );
+
+    assert!(!spawned, "a shell was spawned for a pane that had gone");
+    assert!(
+        endings.wait(Duration::ZERO),
+        "a window would wait for a shell that was never spawned"
     );
 }

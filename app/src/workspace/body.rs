@@ -491,9 +491,11 @@ fn contents(
     let Some((handle, snapshot)) = terminal else {
         let failure = workspace.terminal_failure(pane.id(), app);
         // A shell that is coming gets the ground and nothing else for the
-        // frame before it, which is what the frame after it draws too; the
-        // notice is for a pane that has no shell and is not getting one.
-        let body = if failure.is_none() && workspace.terminals_expected(app) {
+        // frame before it, which is what the frame after it draws too — the
+        // window's first frame, or a tab whose shell is still being opened
+        // behind the active one's. The notice is for a pane that has no
+        // shell and is not getting one.
+        let body = if failure.is_none() && workspace.terminal_coming(pane.id(), app) {
             Empty::new().finish()
         } else {
             let reason = failure.map_or_else(
@@ -1133,7 +1135,7 @@ fn grid_of(font: &CellFont, size: Vector2F) -> TerminalSize {
 ///
 /// [`PaneSizer`] with nowhere to send the number: the grid goes into
 /// [`Measured`](crate::terminal_model::Measured), where
-/// `TerminalModel::open` reads it. Everything else is pass-through, as there.
+/// `TerminalModel::launch` reads it. Everything else is pass-through, as there.
 struct PaneMeasurer {
     pane: PaneId,
     measured: crate::terminal_model::Measured,

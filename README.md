@@ -138,13 +138,16 @@ open Crook from the application menu or run a plain `crook`.
 `crook-v<version>-macos.dmg` on the [releases page](https://github.com/theguriev/crook/releases)
 holds `Crook.app` — one universal build for Apple Silicon and Intel both. It is signed with a
 Developer ID, notarized, and the ticket is stapled to the app before the image is built around
-it, so it opens on a double click with no dialog and no network. Drag it to Applications.
+it; the image is signed, notarized and stapled the same way. So the image opens with no warning
+and the check needs no network. Drag `Crook.app` to Applications. Its first launch asks once to
+confirm an app downloaded from the Internet, and **Open** starts it.
 
-That is the difference notarization makes, and it is worth knowing what it fixes. A Mac
-quarantines anything a *browser* downloads, and on an unnotarized build the first launch is
-refused outright — *"Apple could not verify 'crook' is free of malware"*, offering only **Move to
-Trash** and **Done**. Releases before v0.1.1 were unnotarized and do that. If you are looking at
-that dialog now, press **Done** rather than *Move to Trash*, and clear the attribute yourself:
+A question rather than a refusal is the difference notarization makes, and it is worth knowing
+what it fixes. A Mac quarantines anything a *browser* downloads, and on an unnotarized build the
+first launch is refused outright — *"Apple could not verify 'crook' is free of malware"*,
+offering only **Move to Trash** and **Done**. Releases before v0.1.1 were unnotarized and do
+that. If you are looking at that dialog now, press **Done** rather than *Move to Trash*, and
+clear the attribute yourself:
 
 ```sh
 xattr -dr com.apple.quarantine crook && ./crook
@@ -496,8 +499,10 @@ Twenty-two features, and the page that configures them:
   but for the `✳` an Esc leaves, which no hook reports and which takes a hook's running back.
   `codex`, `gemini` and `copilot` print the same guarded hooks for Codex CLI, Gemini CLI and
   GitHub Copilot CLI in each one's own hooks file, `opencode` prints the plugin OpenCode loads
-  instead, and `aider`, which has no hooks, gets a sentence saying what to do instead. A
-  subagent works in a session of its own, and Copilot CLI runs its hooks for one as for the
+  instead, and `aider`, which has no hooks, gets a sentence saying what to do instead. Codex
+  runs the hooks merged into its file only once you trust them: it asks on its next start, or in
+  its `/hooks`, and asks again whenever a hook's command changes.
+  A subagent works in a session of its own, and Copilot CLI runs its hooks for one as for the
   session you are talking to, so its hooks pass `--session -`: the pane takes a title or a stop
   only from the session whose turn it is, until that one stops, another takes the pane or its
   command ends. Its `sessionStart` hook, which no subagent runs, passes `--session-start -`. It
@@ -921,7 +926,10 @@ Twenty-two features, and the page that configures them:
   the base — merged, or squashed in by the forge, which git itself cannot tell — is marked
   `merged`, worked out from the repository alone with nothing sent anywhere, and
   `Remove 2 merged checkouts…` takes just those, on the same terms. A removal also takes the
-  directories of the store it leaves empty. Deleting a *branch* is a gesture of its own, and
+  directories of the store it leaves empty. One git can only half do — over a file it may not
+  delete, such as one a container wrote as root — is said as that rather than as a refusal: git
+  no longer lists the checkout, the menu names the folder the rest is left in, and
+  `Show the folder` opens it. Deleting a *branch* is a gesture of its own, and
   only on that proof: `Delete 4 merged branches…` names each one with the commit on the base
   that has its work, proves it again the moment before it goes, and keeps any that moved in
   between; a branch the proof cannot reach is never offered. On a tab in a checkout Crook made,
@@ -1319,7 +1327,7 @@ To produce a release binary:
 ./script/bundle --check-only   # type-check with release flags, build nothing
 ```
 
-`--check-only` is the sixth check, and what the workflow runs on all three platforms on every
+`--check-only` is the fifth check, and what the workflow runs on all three platforms on every
 pull request to `main` and every push to it. It compiles the workspace with the exact profile
 and feature set a shipped build uses, which catches the class of bug where a release-only
 feature combination does not compile — cheaply, and without producing artifacts.
@@ -1378,10 +1386,10 @@ included, depends on the published `crook_plugin_api` rather than carrying a cop
 
 ## Checks
 
-Whatever you touch, the gate is the five commands at the top of
+Whatever you touch, the gate is the four commands at the top of
 [`CONTRIBUTING.md`](CONTRIBUTING.md#before-you-push), run in that order before you push, and
 two more beside them for a change to a manifest, a feature gate or the plugin API. `Crook CI`
-runs all seven again on macOS, Linux and Windows, by itself on every pull request to `main`
+runs all six again on macOS, Linux and Windows, by itself on every pull request to `main`
 and every push to `main`. A branch with no pull request to `main`, which includes one whose
 pull request is stacked on another branch, starts nothing;
 `gh workflow run "Crook CI" --ref <branch>` asks for it.

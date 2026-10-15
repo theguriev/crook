@@ -1,6 +1,6 @@
 //! The answers, one per rule, against hand-built snapshots.
 
-use crook_terminal::{BlockState, LiveBlock, PromptEnd, Rgb};
+use crook_terminal::{BlockState, LiveBlock, MouseModes, PromptEnd, Rgb};
 
 use super::*;
 
@@ -21,7 +21,7 @@ fn snapshot(live_block: LiveBlock, alt_screen: bool) -> Snapshot {
         alt_screen,
         live_block,
         title: None,
-        mouse_reporting: false,
+        mouse: MouseModes::NONE,
         line_editor: false,
     }
 }

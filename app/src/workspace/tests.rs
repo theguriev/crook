@@ -38,7 +38,7 @@ use crate::tab::{
     AgentSession, AgentStatus, Attention, Direction, GroupId, Pane, PaneId, PullRequest,
     PullRequestCheck, Tab, TabAction, TabId,
 };
-use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
+use crate::terminal_font::{CELL_FONT_SIZE, CellFont, CellMetrics};
 use crate::theme::theme;
 use crate::window_controls::{Recorder, Request, WindowState};
 
@@ -1418,6 +1418,16 @@ impl Harness {
             workspace
                 .terminal(pane, app)
                 .is_some_and(|(_, snapshot)| snapshot.alt_screen)
+        })
+    }
+
+    /// How many times the window's side has taken a pane's terminal lock to
+    /// do something to it. See `TerminalHandle::drives`.
+    fn drives(&self, pane: PaneId) -> usize {
+        self.workspace.read(&self.app, |workspace, app| {
+            workspace
+                .terminal(pane, app)
+                .map_or(0, |(handle, _)| handle.drives())
         })
     }
 
@@ -7248,6 +7258,7 @@ fn the_cross_on_a_row_asks_about_removing_it_rather_than_opening_it() {
         .focused_pane_id()
         .expect("the split focused its pane");
     harness.dispatch_action(TabAction::ClosePane(opened));
+    wait_for_the_locks_to_come_off(&mut harness);
 
     // Back on the first tab's menu, with two checkouts in it now.
     let first = harness.tab_ids()[0];
@@ -8361,6 +8372,7 @@ fn new_task_leaves_a_menu_that_is_working_or_asking_alone() {
         .expect("the checkout opened a pane");
     harness.dispatch_action(TabAction::ClosePane(opened));
     harness.dispatch_action(TabAction::Select(tab));
+    wait_for_the_locks_to_come_off(&mut harness);
 
     // That checkout is free now, so the list offers to sweep it.
     harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
@@ -8505,6 +8517,7 @@ fn escape_takes_the_menu_down_and_enter_removes_the_checkout() {
         .focused_pane_id()
         .expect("the split focused its pane");
     harness.dispatch_action(TabAction::ClosePane(made));
+    wait_for_the_locks_to_come_off(&mut harness);
 
     harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
     harness.wait_for("both checkouts to be read", |harness| {
@@ -8583,7 +8596,7 @@ fn escape_takes_the_menu_down_and_enter_removes_the_checkout() {
 ///
 /// The pane it opened in is closed again, because a checkout a tab is working
 /// in is not free — which is the rule these tests set up rather than the one
-/// they are about.
+/// they are about — and this returns once the lock that pane held is off.
 fn spare_checkout(harness: &mut Harness, tab: TabId, store: &Path, made: &[PathBuf]) -> PathBuf {
     harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
     harness.wait_for("the repository to be read", |harness| {
@@ -8611,7 +8624,23 @@ fn spare_checkout(harness: &mut Harness, tab: TabId, store: &Path, made: &[PathB
 
     harness.dispatch_action(TabAction::ClosePane(opened));
     harness.dispatch_action(TabAction::Select(tab));
+    wait_for_the_locks_to_come_off(harness);
     path
+}
+
+/// Waits for the window to take off every lock it took, which closing the
+/// last pane in a checkout it made asks for on the background pool.
+///
+/// Before anything lists the worktrees again: `git worktree list` reads a
+/// checkout's lock file after asking whether there is one, and dies —
+/// "failed to read '.git/worktrees/…/locked': No such file or directory" —
+/// when the unlock deletes it in between. The menu then shows that failure
+/// instead of the checkouts, and a wait for them runs out: on a Windows
+/// runner, where the gap is wide enough to land in, a minute and a failure.
+fn wait_for_the_locks_to_come_off(harness: &mut Harness) {
+    harness.wait_for("the window to take its locks off", |harness| {
+        held_checkouts(harness).is_empty()
+    });
 }
 
 /// The worktree menu open over a scratch repository with one free checkout
@@ -9420,6 +9449,169 @@ fn removing_the_last_checkout_leaves_no_empty_directory_in_the_store() {
     assert!(store.is_dir(), "the store itself went with it");
 }
 
+#[cfg(unix)]
+#[test]
+fn the_cross_on_a_half_removed_checkout_goes_back_to_the_list_saying_where_its_files_are() {
+    // git took the checkout out of the repository and could not delete a
+    // file a container left in it. The confirmation used to stay up saying
+    // git's error, over a checkout the list no longer has.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    ignoring_builds(&repository);
+    let made = spare_checkout(&mut harness, tab, &store, &[]);
+    let branch = git_in(&made, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let Some(_undeletable) = Undeletable::at(&made.join("build/as-root")) else {
+        return;
+    };
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    let index = harness
+        .worktree_index_under(&store)
+        .expect("the checkout that was made is not in the menu");
+    harness.dispatch_worktree(WorktreeAction::AskRemove(index));
+    harness.dispatch_worktree(WorktreeAction::Remove { force: false });
+    harness.wait_for("the list to be read again", |harness| {
+        harness.worktrees_listed() == Some(1)
+    });
+
+    assert_eq!(
+        harness.worktree_problem(),
+        Some(format!(
+            "Removed the checkout of {branch}, but some files could not be deleted: {}.",
+            made.display()
+        ))
+    );
+    assert!(made.join("build/as-root/built.o").is_file());
+    assert_eq!(show_the_folder(&mut harness), [made.display().to_string()]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_sweep_counts_a_half_removed_checkout_as_removed_and_says_where_its_files_are() {
+    // It used to count as one that "would not go", though git no longer
+    // knows it and the list will never offer it again.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    ignoring_builds(&repository);
+    let built = spare_checkout(&mut harness, tab, &store, &[]);
+    let clean = spare_checkout(&mut harness, tab, &store, std::slice::from_ref(&built));
+    let branch = git_in(&built, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let Some(_undeletable) = Undeletable::at(&built.join("build/as-root")) else {
+        return;
+    };
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("every checkout to be read", |harness| {
+        harness.worktrees_listed() == Some(3)
+    });
+    harness.dispatch_worktree(WorktreeAction::AskTidy);
+    harness.wait_for("the checkouts to be looked in", |harness| {
+        harness.worktrees_going() == Some(2)
+    });
+    harness.dispatch_worktree(WorktreeAction::Tidy);
+    harness.wait_for(
+        "the sweep to end and the list to be read again",
+        |harness| !harness.worktree_menu_is_tidying() && harness.worktrees_listed() == Some(1),
+    );
+
+    assert!(!clean.exists(), "the clean checkout was not removed");
+    assert_eq!(
+        harness.worktree_problem(),
+        Some(format!(
+            "Removed the checkout of {branch}, but some files could not be deleted: {}.",
+            built.display()
+        ))
+    );
+    assert_eq!(show_the_folder(&mut harness), [built.display().to_string()]);
+}
+
+#[test]
+fn a_sweep_that_left_files_in_several_checkouts_shows_the_folder_they_are_all_in() {
+    let store = Path::new("/store");
+    let repository = store.join("repo");
+    let left = [
+        ("feat/a".to_owned(), repository.join("feat").join("a")),
+        ("fix-b".to_owned(), repository.join("fix-b")),
+    ];
+
+    let (said, folder) = super::tab_menu::swept_but_left(&left, Some(store))
+        .expect("two checkouts left files behind");
+
+    assert_eq!(folder, Some(repository.clone()));
+    assert_eq!(
+        said,
+        format!(
+            "Removed 2 checkouts, but some of their files could not be deleted: they are in {}.",
+            repository.display()
+        )
+    );
+    assert_eq!(super::tab_menu::swept_but_left(&[], Some(store)), None);
+}
+
+#[test]
+fn a_sweep_shows_no_folder_where_the_one_its_leftovers_share_shows_none_of_them() {
+    // A sweep takes checkouts made by hand too. One in the store and one in
+    // ~/code share only the home directory, and one in /srv shares only /:
+    // a folder neither can be seen in. Side by side, they are seen together.
+    let store = Path::new("/home/me/.local/share/crook/worktrees");
+    let code = Path::new("/home/me/code");
+    let far_apart = [
+        [
+            ("feat-a".to_owned(), store.join("repo").join("feat-a")),
+            ("repo-b".to_owned(), code.join("repo-b")),
+        ],
+        [
+            ("srv".to_owned(), PathBuf::from("/srv/repo-c")),
+            ("repo-b".to_owned(), code.join("repo-b")),
+        ],
+    ];
+
+    for left in far_apart {
+        let (said, folder) = super::tab_menu::swept_but_left(&left, Some(store))
+            .expect("two checkouts left files behind");
+        assert_eq!(folder, None, "a folder was offered for {left:?}");
+        assert_eq!(
+            said,
+            "Removed 2 checkouts, but some of their files could not be deleted; the log says \
+             where."
+        );
+    }
+
+    let side_by_side = [
+        ("repo-a".to_owned(), code.join("repo-a")),
+        ("repo-b".to_owned(), code.join("repo-b")),
+    ];
+    let (_, folder) = super::tab_menu::swept_but_left(&side_by_side, Some(store))
+        .expect("two checkouts left files behind");
+    assert_eq!(folder.as_deref(), Some(code));
+}
+
+#[test]
+fn show_the_folder_goes_with_the_sentence_that_offered_it() {
+    // A later sentence on the menu must not stand over a button offering a
+    // folder it never mentioned.
+    let folder = PathBuf::from("/store/repo/feat-x");
+    let mut state = super::tab_menu::TabMenuState::default();
+
+    state.say_left_behind("Some files were left.".to_owned(), Some(folder.clone()));
+    assert_eq!(state.left_behind(), Some(folder.as_path()));
+
+    state.problem = Some("Something else happened.".to_owned());
+    assert_eq!(state.left_behind(), None);
+    state.problem = None;
+    assert_eq!(state.left_behind(), None);
+
+    state.say_left_behind("Nothing was left.".to_owned(), None);
+    assert_eq!(state.left_behind(), None);
+}
+
 /// The harness's one tab working in a fresh scratch repository, with the
 /// store pointed into the scratch. `None` where there is no git.
 fn window_on_a_repository(scratch: &Scratch) -> Option<(Harness, PathBuf, PathBuf, TabId)> {
@@ -9786,6 +9978,132 @@ fn finishing_a_task_whose_work_has_not_landed_keeps_its_branch_and_says_so() {
     assert!(
         worktree_menu_reads(&scene, &format!("Kept {kept}")),
         "the list does not say the branch was kept"
+    );
+}
+
+/// A directory holding a file nobody can delete until this drops: what a
+/// container run as root leaves in a bind-mounted `build/`.
+///
+/// A copy of the one the worktree module's tests keep, for the reason that
+/// file gives for copying its scratch harness.
+#[cfg(unix)]
+struct Undeletable {
+    directory: PathBuf,
+}
+
+#[cfg(unix)]
+impl Undeletable {
+    /// Makes `directory` with a file in it and takes away the permission
+    /// deleting that file needs — or, for a user the permission does not
+    /// stop, says so and answers `None`, since there is nothing to test.
+    fn at(directory: &Path) -> Option<Self> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::create_dir_all(directory).expect("the checkout is there");
+        fs::write(directory.join("built.o"), "written by a container\n")
+            .expect("the checkout is there");
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o555))
+            .expect("the scratch directory is ours to chmod");
+        let undeletable = Self {
+            directory: directory.to_owned(),
+        };
+        if fs::write(directory.join("probe"), "").is_ok() {
+            eprintln!("skipping: this user writes into a directory nobody may write into");
+            return None;
+        }
+        Some(undeletable)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Undeletable {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Before the scratch directory goes, which could not delete it either.
+        let _ = fs::set_permissions(&self.directory, fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// Commits a `.gitignore` of `build/` on what `repository` has checked out,
+/// so that a checkout made from it afterwards holds a build git removes
+/// without being forced.
+///
+/// Unix only, like the tests that call it: an item the Windows build never
+/// uses is an error under the CI's `-D warnings` there.
+#[cfg(unix)]
+fn ignoring_builds(repository: &Path) {
+    fs::write(repository.join(".gitignore"), "build/\n").expect("the repository is there");
+    git_in(repository, &["add", ".gitignore"]);
+    git_in(
+        repository,
+        &["commit", "--no-verify", "-m", "ignore the build"],
+    );
+}
+
+/// Presses Show the folder under the list's sentence, and answers what that
+/// asked the platform to open.
+#[cfg(unix)]
+fn show_the_folder(harness: &mut Harness) -> Vec<String> {
+    crate::browser::record_opens();
+    let scene = harness.frame();
+    harness.click(
+        center(worktree_row_saying(&scene, "Show the folder")),
+        MouseButton::Left,
+    );
+    crate::browser::opened()
+}
+
+#[cfg(unix)]
+#[test]
+fn finish_says_where_a_half_removed_checkout_left_files_and_deletes_the_landed_branch() {
+    // A container run as root left a file in the checkout's ignored build/,
+    // and git cannot delete it. git stops there, unregisters the checkout
+    // all the same, and fails. That read "The checkout of X was kept", left
+    // the landed branch, and left the directory in the store with nothing
+    // to list it. The checkout went, as far as git is concerned, so its
+    // branch goes on the same proof as after any removal, and the list says
+    // where the files are.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    ignoring_builds(&repository);
+    let (checkout, pane) = task_checkout(&mut harness, tab, &store);
+    let branch = git_in(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    commit_in(&checkout, "task.txt", "the task");
+    squash_in(&repository, &branch);
+    let Some(_undeletable) = Undeletable::at(&checkout.join("build/as-root")) else {
+        return;
+    };
+
+    ask_about_the_task(&mut harness, pane, false);
+    harness.dispatch_worktree(WorktreeAction::Finish);
+    wait_for_the_task_to_go(&mut harness);
+
+    let said = harness
+        .worktree_problem()
+        .expect("the list says nothing about the task");
+    assert!(
+        said.starts_with(&format!(
+            "Removed the checkout of {branch}, but some files could not be deleted: {}. \
+             Deleted {branch}: ",
+            checkout.display()
+        )),
+        "the list does not say the checkout went and where its files are: {said}"
+    );
+    assert!(
+        !has_branch(&repository, &branch),
+        "the landed branch was kept"
+    );
+    assert!(
+        !harness.pane_ids().contains(&pane),
+        "the tab working in the checkout is still open"
+    );
+    assert!(checkout.join("build/as-root/built.o").is_file());
+    assert_eq!(
+        show_the_folder(&mut harness),
+        [checkout.display().to_string()]
     );
 }
 
@@ -10236,7 +10554,7 @@ fn carrying_out_a_task_keeps_everything_when_its_checkout_changed_after_the_last
 
     let plan = super::finish::read_plan(&checkout, &store).expect("the checkout is looked at");
     fs::write(checkout.join("late.txt"), "nobody named me\n").expect("the checkout is there");
-    let report = super::finish::carry_out(&repository, &plan, true, Some(&store));
+    let report = super::finish::carry_out(&repository, &plan, true, Some(&store)).report;
     assert!(
         report.contains("late.txt appeared in it"),
         "the report does not say why: {report}"
@@ -10248,7 +10566,7 @@ fn carrying_out_a_task_keeps_everything_when_its_checkout_changed_after_the_last
     let plan = super::finish::read_plan(&checkout, &store).expect("the checkout is looked at");
     git_in(&checkout, &["switch", "--detach"]);
     let stranded = commit_in(&checkout, "stranded.txt", "on no branch");
-    let report = super::finish::carry_out(&repository, &plan, false, Some(&store));
+    let report = super::finish::carry_out(&repository, &plan, false, Some(&store)).report;
     assert!(
         report.contains("1 commit on no branch"),
         "the report does not say why: {report}"
@@ -10284,7 +10602,7 @@ fn an_ignored_file_written_after_the_last_look_keeps_the_checkout() {
         assert_eq!(plan.local.ignored, 0, "the question would have counted it");
         fs::write(checkout.join("keys.secret"), "nobody counted me\n")
             .expect("the checkout is there");
-        let report = super::finish::carry_out(&repository, &plan, discard, Some(&store));
+        let report = super::finish::carry_out(&repository, &plan, discard, Some(&store)).report;
         assert!(
             report.contains("1 ignored appeared in it"),
             "the report does not say why (discard: {discard}): {report}"
@@ -10457,7 +10775,7 @@ fn a_commit_made_in_a_submodule_after_the_last_look_keeps_the_checkout() {
     git_in(&lib, &["switch", "--quiet", "-c", "more"]);
     let later = commit_in(&lib, "later.txt", "nobody named me");
     git_in(&lib, &["switch", "--quiet", "fix"]);
-    let report = super::finish::carry_out(&repository, &plan, true, Some(&store));
+    let report = super::finish::carry_out(&repository, &plan, true, Some(&store)).report;
     assert!(
         report.contains("only the submodule lib holds appeared in it"),
         "the report does not say why: {report}"
@@ -10652,6 +10970,7 @@ fn nothing_offers_to_tidy_a_checkout_a_tab_is_working_in() {
     harness.dispatch_worktree(WorktreeAction::CloseMenu);
     harness.dispatch_action(TabAction::ClosePane(opened));
     harness.dispatch_action(TabAction::Select(tab));
+    wait_for_the_locks_to_come_off(&mut harness);
     harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
     harness.wait_for("both checkouts to be read again", |harness| {
         harness.worktrees_listed() == Some(2)
@@ -10863,13 +11182,15 @@ fn a_checkout_crook_makes_is_locked_until_the_last_pane_in_it_closes() {
     );
 
     harness.dispatch_action(TabAction::ClosePane(second));
-    harness.wait_for("the lock to go with the last pane", |_| {
-        lock_on(&repository, &checkout).is_none()
-    });
+    // The window's word first, and git's once that is in: a listing that
+    // runs while the unlock does can die on the lock file it is deleting.
+    wait_for_the_locks_to_come_off(&mut harness);
+    assert_eq!(
+        lock_on(&repository, &checkout),
+        None,
+        "the lock did not go with the last pane"
+    );
     assert!(checkout.is_dir(), "closing the pane took the checkout too");
-    harness.wait_for("the window to stop counting it as held", |harness| {
-        held_checkouts(harness).is_empty()
-    });
 }
 
 #[test]
@@ -11368,12 +11689,13 @@ fn a_pane_that_leaves_the_checkout_crook_made_takes_its_lock_off_with_it() {
     );
 
     moved(&mut harness, repository.clone());
-    harness.wait_for("the lock to go with the pane that left", |_| {
-        lock_on(&repository, &checkout).is_none()
-    });
-    harness.wait_for("the window to stop counting it as held", |harness| {
-        held_checkouts(harness).is_empty()
-    });
+    // The window's word first, and git's once that is in, as above.
+    wait_for_the_locks_to_come_off(&mut harness);
+    assert_eq!(
+        lock_on(&repository, &checkout),
+        None,
+        "the lock did not go with the pane that left"
+    );
     assert!(
         harness.pane_ids().contains(&pane),
         "the pane that left was closed"
@@ -11640,6 +11962,7 @@ fn enter_does_not_remove_a_checkout_git_has_already_refused() {
         .focused_pane_id()
         .expect("the split focused its pane");
     harness.dispatch_action(TabAction::ClosePane(made));
+    wait_for_the_locks_to_come_off(&mut harness);
 
     // The work git will refuse over: one file that is in the checkout and in
     // nothing else.
@@ -11731,6 +12054,7 @@ fn showing_a_checkout_opens_it_in_the_group_and_never_twice() {
         .expect("the new tab focused its pane");
     harness.dispatch_action(TabAction::ClosePane(made));
     assert_eq!(harness.tab_ids().len(), 1, "the tab did not close");
+    wait_for_the_locks_to_come_off(&mut harness);
 
     harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
     harness.wait_for("both checkouts to be read", |harness| {
@@ -17058,10 +17382,195 @@ mod shells {
         if one_shell(&mut harness).is_none() {
             return;
         }
+        // Opened off the thread that draws, after the active tab's. Waiting
+        // draws no frame, and no frame lays out a tab behind the active one,
+        // so the grid read below is still the one it opened at.
+        harness.wait_for(
+            "the pane behind the active tab never got its shell",
+            |harness| has_a_shell(harness, pane),
+        );
         assert_eq!(
             grid_opened(&harness, pane),
             Some(body),
             "the pane behind the active tab did not open at the body's grid"
+        );
+    }
+
+    /// What one spawn is made to cost in the restore tests: about what one
+    /// cost on a loaded machine with a restore's earlier shells starting up
+    /// beside it. See `TerminalModel::set_spawn_cost`.
+    pub(super) const RESTORED_SPAWN: Duration = Duration::from_millis(200);
+
+    /// Whether a pane has a shell running in it.
+    pub(super) fn has_a_shell(harness: &Harness, pane: PaneId) -> bool {
+        harness.workspace.read(&harness.app, |workspace, app| {
+            workspace.terminal(pane, app).is_some()
+        })
+    }
+
+    #[test]
+    fn a_restore_opens_the_active_tab_s_shells_at_once_and_the_rest_off_the_thread_that_draws() {
+        // Every shell of a restore was forked on the thread that draws, the
+        // tabs behind the active one too, and the parent waits for each child
+        // to exec: sixty tabs held the window for most of a second on a
+        // loaded machine. Each spawn here is made to cost what one cost
+        // there, so what is measured is what the thread that draws spends
+        // and not how fast this machine forks.
+        const TABS: usize = 10;
+        let mut harness = Harness::panel(TABS);
+        if !a_shell_these_tests_speak() {
+            return;
+        }
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_shell_spawn_cost(RESTORED_SPAWN, ctx);
+            workspace.expect_terminals(ctx);
+        });
+        harness.frame();
+
+        let started = std::time::Instant::now();
+        if !harness.start_terminals() {
+            return;
+        }
+        let took = started.elapsed();
+        // The one shell the next frame draws, and room beside it for a loaded
+        // machine's own fork. The nine behind it cost nine times that.
+        assert!(
+            took < RESTORED_SPAWN * 4,
+            "starting {TABS} tabs' shells held the thread that draws for {took:?}"
+        );
+
+        let active = harness.active_pane_ids();
+        let behind: Vec<PaneId> = harness
+            .pane_ids()
+            .into_iter()
+            .filter(|pane| !active.contains(pane))
+            .collect();
+        assert_eq!(behind.len(), TABS - 1);
+        assert!(
+            active.iter().all(|pane| has_a_shell(&harness, *pane)),
+            "the active tab had no shell for the frame after the restore"
+        );
+        assert!(
+            !behind.iter().any(|pane| has_a_shell(&harness, *pane)),
+            "a tab behind the active one opened its shell before the active tab's frame"
+        );
+
+        harness.wait_for(
+            "a tab behind the active one never got its shell",
+            |harness| behind.iter().all(|pane| has_a_shell(harness, *pane)),
+        );
+    }
+
+    #[test]
+    fn a_tab_whose_shell_is_still_opening_draws_its_ground_rather_than_a_notice() {
+        // Switched to in the moment between the restore and its shell
+        // arriving, a tab is one whose shell is coming, as the active tab's
+        // is for the frame before the shells start — not one that has none.
+        // The first tab behind the active one is the one whose shell the pool
+        // is already spawning, which a switch leaves to arrive; a tab still
+        // waiting its turn opens in place instead, see the test below.
+        let mut harness = Harness::panel(3);
+        if !a_shell_these_tests_speak() {
+            return;
+        }
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_shell_spawn_cost(RESTORED_SPAWN, ctx);
+            workspace.expect_terminals(ctx);
+        });
+        harness.frame();
+        if !harness.start_terminals() {
+            return;
+        }
+
+        let active = harness.active_id();
+        let behind = harness
+            .tab_ids()
+            .into_iter()
+            .find(|tab| *tab != active)
+            .expect("three tabs");
+        let pane = harness.panes_of(behind)[0];
+        harness.dispatch_action(TabAction::Select(behind));
+        assert!(
+            !has_a_shell(&harness, pane),
+            "switching to the tab opened a second shell for it on the thread that draws"
+        );
+        let shown = frame_text(&harness.frame());
+        assert!(
+            !shown.contains("no shell is running"),
+            "a shell on its way was drawn as one that is not coming: {shown:?}"
+        );
+
+        harness.wait_for("the tab switched to never got its shell", |harness| {
+            has_a_shell(harness, pane)
+        });
+    }
+
+    #[test]
+    fn a_tab_switched_to_before_its_shell_s_turn_opens_it_at_once_and_takes_what_is_typed() {
+        // A restore opens the tabs behind the active one a shell at a time,
+        // in strip order, so the last tab's turn comes after every other's.
+        // Until it came, its pane drew no composer and no grid, and what was
+        // typed into it the moment it was switched to reached nothing.
+        const TABS: usize = 6;
+        let mut harness = Harness::panel(TABS);
+        if !a_shell_these_tests_speak() {
+            return;
+        }
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_shell_spawn_cost(RESTORED_SPAWN, ctx);
+            workspace.expect_terminals(ctx);
+        });
+        harness.frame();
+        if !harness.start_terminals() {
+            return;
+        }
+
+        let active = harness.active_id();
+        let behind: Vec<_> = harness
+            .tab_ids()
+            .into_iter()
+            .filter(|tab| *tab != active)
+            .collect();
+        let (last, between) = behind.split_last().expect("tabs behind the active one");
+        // Past the first, whose shell the pool is already spawning: nothing
+        // has pumped the queue, so none of these can have arrived.
+        let waiting: Vec<PaneId> = between[1..]
+            .iter()
+            .flat_map(|tab| harness.panes_of(*tab))
+            .collect();
+        let pane = harness.panes_of(*last)[0];
+
+        harness.dispatch_action(TabAction::Select(*last));
+        assert!(
+            has_a_shell(&harness, pane),
+            "a tab switched to waited for its turn behind the tabs before it"
+        );
+        assert!(
+            !waiting.iter().any(|pane| has_a_shell(&harness, *pane)),
+            "switching to one tab started the shells of the tabs before it on the thread that draws"
+        );
+
+        // Typed straight away, into the frame the switch asked for. Either
+        // the composer has it or the pty echoed it: what matters is that it
+        // reached the pane rather than nothing.
+        harness.frame();
+        harness.type_text("echo crook-typed-at-once");
+        harness.wait_for(
+            "what was typed into the tab switched to never reached it",
+            |harness| {
+                harness.field_text(pane).contains("crook-typed-at-once")
+                    || harness.terminal_text(pane).contains("crook-typed-at-once")
+            },
+        );
+
+        harness.wait_for(
+            "a tab behind the active one never got its shell",
+            |harness| {
+                behind
+                    .iter()
+                    .flat_map(|tab| harness.panes_of(*tab))
+                    .all(|pane| has_a_shell(harness, pane))
+            },
         );
     }
 
@@ -17766,6 +18275,87 @@ mod shells {
             (heard.matches("^[[I").count(), heard.matches("^[[O").count()),
             (1, 0),
             "the pane without the keyboard heard about the window: {heard:?}"
+        );
+    }
+
+    #[test]
+    fn a_program_that_asked_for_every_move_hears_the_pointer_cross_it() {
+        // `?1003`, which a pointer move with no button down asks the snapshot
+        // about rather than the terminal. `cat`, in a line discipline that
+        // echoes, shows the report with its escape spelled `^[`; 35 is the
+        // SGR code for a move with no button.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        harness.type_into(
+            pane,
+            "printf '\\033[?1049h\\033[?1003h\\033[?1006h%s-%s\\n' every move; cat\n",
+        );
+        harness.wait_for("the program never asked for every move", |harness| {
+            harness.alt_screen(pane) && harness.terminal_text(pane).contains("every-move")
+        });
+        let panel = panel_of_the_pane(&mut harness);
+
+        harness.move_to(center(panel));
+
+        harness.wait_for("the program never heard the pointer move", |harness| {
+            harness.terminal_text(pane).contains("^[[<35;")
+        });
+    }
+
+    #[test]
+    fn a_pointer_moving_over_one_pane_takes_neither_pane_s_terminal_lock() {
+        // Every move reaches every pane on screen, and each asked its
+        // terminal which mouse reports were on before it looked at whether
+        // the pointer was over it at all: the lock its reader parses under,
+        // and a snapshot rebuilt there, on the thread that draws, per pane
+        // and per move. Two full-screen programs, so that both panes draw
+        // the grid that asks, and neither of them reading the mouse, so that
+        // no move is one to send.
+        let mut harness = Harness::panel(1);
+        let Some(first) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.dispatch_action(TabAction::Split(Direction::Right));
+        harness.frame();
+        let second = harness.focused_pane_id().expect("the split focused a pane");
+        assert_ne!(first, second);
+        harness.wait_for("the split's shell never opened", |harness| {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace.terminal(second, app).is_some()
+            })
+        });
+
+        // Printed by pieces, so the echo of the typed line is not the marker.
+        for pane in [first, second] {
+            harness.type_into(pane, "printf '\\033[?1049h%s-%s\\n' whole screen; cat\n");
+        }
+        harness.wait_for("the programs never took the screen", |harness| {
+            [first, second].iter().all(|pane| {
+                harness.alt_screen(*pane) && harness.terminal_text(*pane).contains("whole-screen")
+            })
+        });
+        let scene = harness.frame();
+        let boxes = panel_boxes(&scene);
+        assert_eq!(boxes.len(), 2, "two panes side by side");
+        let left = if boxes[0].min_x() < boxes[1].min_x() {
+            boxes[0]
+        } else {
+            boxes[1]
+        };
+        let before = (harness.drives(first), harness.drives(second));
+
+        for step in 1..=20 {
+            let across = step as f32 / 21.;
+            harness.move_to(left.origin() + left.size() * across);
+        }
+
+        assert_eq!(
+            (harness.drives(first), harness.drives(second)),
+            before,
+            "a pointer move over the left pane took a terminal's lock"
         );
     }
 
@@ -20325,7 +20915,8 @@ mod shells {
         /// the same square with the same radius in the header above it. Sorted
         /// by where they are rather than by the order they were painted in:
         /// which is the copy square and which is the menu is a thing about the
-        /// picture.
+        /// picture. One plate is painted as several squares in one place —
+        /// the pane's ground, the block's wash, the tint — and is one control.
         fn block_controls(scene: &Scene, panel: RectF) -> Vec<RectF> {
             let mut controls: Vec<RectF> = visible_rects(scene)
                 .filter(|(rect, bounds)| {
@@ -20338,6 +20929,7 @@ mod shells {
                 .filter(|bounds| panel.contains_point(center(*bounds)))
                 .collect();
             controls.sort_by(|left, right| left.min_x().total_cmp(&right.min_x()));
+            controls.dedup();
             controls
         }
 
@@ -20732,6 +21324,288 @@ mod shells {
                 copied.trim_end(),
                 "the block's trailing blank rows came with it"
             );
+        }
+
+        /// A pane whose block 0 is a failed command long enough to fold across
+        /// the whole width, hovered: the frame, the pane's panel and the fill
+        /// of the pane's own ground. `None` on a machine with no shell these
+        /// tests speak.
+        ///
+        /// Failed, for the wash, and folded so that the rows of the command
+        /// line run to under the controls. Which of its rows those are is the
+        /// host prompt's business — a blank line before it moves the command
+        /// down one.
+        fn a_long_failed_command_hovered(
+            harness: &mut Harness,
+        ) -> Option<(Rc<Scene>, RectF, Fill)> {
+            let pane = marked_shell(harness)?;
+            harness.frame();
+            let long = "x".repeat(300);
+            if run(harness, pane, &format!("echo {long}; false")) == 0 {
+                return None;
+            }
+
+            let ground = harness
+                .workspace
+                .read(&harness.app, |workspace, app| {
+                    let (_, snapshot) = workspace.terminal(pane, app)?;
+                    Some(Fill::Solid(crate::workspace::terminal_element::color(
+                        snapshot.background,
+                    )))
+                })
+                .expect("the pane has a terminal");
+            let panel = panel_of_the_pane(harness);
+            let scene = hover_block(harness, pane, 0);
+            Some((scene, panel, ground))
+        }
+
+        /// The layer a block's text is drawn in: the one holding the most
+        /// `x`s inside `panel`.
+        fn layer_of_the_xs(layers: &[&crookui_core::scene::Layer], panel: RectF) -> usize {
+            (0..layers.len())
+                .max_by_key(|&index| {
+                    layers[index]
+                        .glyphs
+                        .iter()
+                        .filter(|glyph| {
+                            glyph.glyph_key.glyph_id == u32::from('x')
+                                && panel.contains_point(glyph.position)
+                        })
+                        .count()
+                })
+                .expect("the frame has layers")
+        }
+
+        /// A glyph's cell, from the baseline it was set on: a letter whose
+        /// baseline is below a plate still has its top half under it.
+        fn cell_of(glyph: &crookui_core::scene::Glyph, cell: CellMetrics) -> RectF {
+            RectF::new(
+                glyph.position - vec2f(0., cell.baseline),
+                vec2f(cell.width, cell.height),
+            )
+        }
+
+        /// The cell the panes are drawn in now, which the zoom chords change.
+        fn cell_now(harness: &Harness) -> CellMetrics {
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.cell_font().metrics())
+        }
+
+        /// Whether `part` is painted from the top of `control` down, across
+        /// the whole of its width and no lower than it: the ground under the
+        /// plates, or the control's own tint.
+        fn from_the_top_of(control: RectF, part: RectF) -> bool {
+            part.min_y() == control.min_y()
+                && part.min_x() <= control.min_x()
+                && part.max_x() >= control.max_x()
+                && part.max_y() <= control.max_y()
+        }
+
+        #[test]
+        fn a_block_s_controls_cover_the_command_line_they_are_drawn_over() {
+            // The controls sit on the prompt line, and their plates were a
+            // tint in the list's own layer — under its glyphs, since a layer
+            // draws its text after its rects. A command long enough to reach
+            // them showed through, letters and icons over each other. The
+            // plates are on the pane's own ground now, then the block's wash,
+            // and then each one's tint, above the text — the ground under both
+            // and the gap between them, where a sliver of a letter otherwise
+            // shows between two squares hiding the rest of its word.
+            //
+            // And at a size the rows are taller at: four steps up, 16.5 pt,
+            // where a row is 20 px and the first one reaches below the
+            // plates. Hidden only down to the last row edge they crossed,
+            // they hid the space above that row and none of its letters.
+            let mut harness = Harness::panel(1);
+            let Some((scene, panel, ground)) = a_long_failed_command_hovered(&mut harness) else {
+                return;
+            };
+            the_controls_cover_the_line_they_sit_on(&scene, panel, &ground, cell_now(&harness));
+
+            for _ in 0..4 {
+                assert!(
+                    harness.press_key("=", settings_chord()),
+                    "the zoom chord was not consumed"
+                );
+            }
+            let cell = cell_now(&harness);
+            assert_eq!(cell.height, 20., "four steps up is not 16.5 pt: {cell:?}");
+            let pane = harness.focused_pane_id().expect("the pane is focused");
+            let panel = panel_of_the_pane(&mut harness);
+            let scene = hover_block(&mut harness, pane, 0);
+            the_controls_cover_the_line_they_sit_on(&scene, panel, &ground, cell);
+        }
+
+        /// What `a_block_s_controls_cover_the_command_line_they_are_drawn_over`
+        /// asserts of one frame, drawn in cells of `cell`.
+        fn the_controls_cover_the_line_they_sit_on(
+            scene: &Scene,
+            panel: RectF,
+            ground: &Fill,
+            cell: CellMetrics,
+        ) {
+            let size = cell.font_size;
+            let red = theme().terminal.normal[1];
+            let controls = block_controls(scene, panel);
+            assert_eq!(controls.len(), 2, "the copy square and the dots");
+
+            let layers: Vec<_> = scene.layers().collect();
+            // What is asserted is the order the text and the plates are drawn
+            // in, and an overlap only where there is one.
+            let text = layer_of_the_xs(&layers, panel);
+            for &control in &controls {
+                let painted = layers
+                    .iter()
+                    .position(|layer| {
+                        layer.rects.iter().any(|rect| {
+                            from_the_top_of(control, rect.bounds) && rect.background == *ground
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("nothing opaque is under the control at {control:?}")
+                    });
+                assert!(
+                    text < painted,
+                    "the control at {control:?} is painted in layer {painted}, under the \
+                     block's text in layer {text}"
+                );
+                let over: Vec<_> = layers[painted..]
+                    .iter()
+                    .flat_map(|layer| layer.glyphs.iter())
+                    .filter(|glyph| cell_of(glyph, cell).intersection(control).is_some())
+                    .collect();
+                assert!(
+                    over.is_empty(),
+                    "text is drawn over the control at {control:?}: {over:?}"
+                );
+
+                let fills: Vec<(&Fill, RectF)> = layers[painted]
+                    .rects
+                    .iter()
+                    .filter(|rect| from_the_top_of(control, rect.bounds))
+                    .map(|rect| (&rect.background, rect.bounds))
+                    .collect();
+                let [(first, opaque), (wash, washed), (tint, tinted)] = fills.as_slice() else {
+                    panic!("the control at {control:?} is painted as {fills:?}");
+                };
+                assert_eq!(*first, ground, "the ground goes down first");
+                assert!(
+                    matches!(wash, Fill::Solid(color)
+                        if (color.r, color.g, color.b) == (red.r, red.g, red.b) && color.a < 255),
+                    "the failed block's wash is not over the ground: {wash:?}"
+                );
+                assert_eq!(washed, opaque, "the wash is not where the ground is");
+                assert!(
+                    opaque.min_x() <= controls[0].min_x() && opaque.max_x() >= controls[1].max_x(),
+                    "the ground at {opaque:?} is not under both controls and the gap between \
+                     them: {controls:?}"
+                );
+                assert_eq!(
+                    *tint,
+                    &Fill::Solid(theme().overlay_1),
+                    "the plate's own tint goes on top"
+                );
+                assert_eq!(*tinted, control, "the tint is not the whole plate");
+                let icon = layers.iter().position(|layer| {
+                    layer
+                        .icons
+                        .iter()
+                        .any(|icon| control.contains_point(center(icon.bounds)))
+                });
+                assert_eq!(icon, Some(painted), "the icon is not drawn on the plate");
+
+                // The letters of the line the icon is on, the row through the
+                // plate's middle, are under the ground wherever the plate
+                // covers them.
+                let middle = (control.min_y() + control.max_y()) / 2.;
+                let on_the_line: Vec<RectF> = layers[text]
+                    .glyphs
+                    .iter()
+                    .filter(|glyph| panel.contains_point(glyph.position))
+                    .map(|glyph| cell_of(glyph, cell))
+                    .filter(|line| line.min_y() <= middle && middle < line.max_y())
+                    .filter_map(|line| line.intersection(control))
+                    .collect();
+                if on_the_line.is_empty() {
+                    eprintln!(
+                        "at {size} pt this prompt prints nothing on the line the control at \
+                         {control:?} sits on"
+                    );
+                }
+                let shown: Vec<&RectF> = on_the_line
+                    .iter()
+                    .filter(|covered| {
+                        covered.min_y() < opaque.min_y() || covered.max_y() > opaque.max_y()
+                    })
+                    .collect();
+                assert!(
+                    shown.is_empty(),
+                    "at {size} pt the control at {control:?} hides what is under it from {} to {}, \
+                     and the letters of the line it sits on show through it at {shown:?}",
+                    opaque.min_y(),
+                    opaque.max_y()
+                );
+            }
+        }
+
+        #[test]
+        fn a_block_s_controls_leave_the_row_under_their_line_whole() {
+            // A plate is 26 px over 15 px rows, and on the block's top it
+            // reaches 6.5 px into the row after the line it sits on: the first
+            // line of output, or the command itself under a prompt that starts
+            // with a blank line. Made opaque all the way down, it cut the tops
+            // off the letters in that row. What it hides it hides by whole
+            // rows; the overhang is the tint alone, which they show through.
+            let mut harness = Harness::panel(1);
+            let Some((scene, panel, ground)) = a_long_failed_command_hovered(&mut harness) else {
+                return;
+            };
+            let controls = block_controls(&scene, panel);
+            assert_eq!(controls.len(), 2, "the copy square and the dots");
+
+            let layers: Vec<_> = scene.layers().collect();
+            let cell = cell_now(&harness);
+            let cells: Vec<RectF> = layers[layer_of_the_xs(&layers, panel)]
+                .glyphs
+                .iter()
+                .map(|glyph| cell_of(glyph, cell))
+                .collect();
+            // An edge more than a pixel inside a cell, top or bottom.
+            let slices =
+                |edge: f32, cell: &RectF| cell.min_y() + 1. < edge && edge < cell.max_y() - 1.;
+            for control in controls {
+                let opaque = layers
+                    .iter()
+                    .flat_map(|layer| layer.rects.iter())
+                    .find(|rect| from_the_top_of(control, rect.bounds) && rect.background == ground)
+                    .unwrap_or_else(|| panic!("nothing opaque is under the control at {control:?}"))
+                    .bounds;
+                let under: Vec<RectF> = cells
+                    .iter()
+                    .copied()
+                    .filter(|cell| cell.intersection(control).is_some())
+                    .collect();
+                // The row the plate's lower edge crosses, where the fold puts
+                // the command or its output on any prompt of one or two lines.
+                if !under.iter().any(|cell| cell.max_y() > control.max_y()) {
+                    eprintln!(
+                        "skipped: this prompt prints nothing under the lower edge of the control \
+                         at {control:?}"
+                    );
+                    return;
+                }
+                let cut: Vec<RectF> = under
+                    .into_iter()
+                    .filter(|cell| slices(opaque.min_y(), cell) || slices(opaque.max_y(), cell))
+                    .collect();
+                assert!(
+                    cut.is_empty(),
+                    "the control at {control:?} hides what is under it down to {}, through the \
+                     middle of the letters in {cut:?}",
+                    opaque.max_y()
+                );
+            }
         }
 
         /// Every plugin a release binary carries except the one that owns the
@@ -22930,14 +23804,24 @@ mod shells {
             );
         }
 
-        /// How many washes of `fill` a frame painted inside `panel`.
-        fn washes(scene: &Scene, panel: RectF, fill: Fill) -> usize {
-            scene
+        /// How many cells a frame washed with `fill` inside `panel`.
+        ///
+        /// Cells rather than rects, because a match the pane wraps in the
+        /// middle of is one rect at the end of a row and another at the start
+        /// of the next — the same cells, in two pieces. The command line
+        /// follows the prompt of whoever runs the suite, and a directory and
+        /// branch just long enough to leave the query across the pane's
+        /// right edge made one match two washes.
+        fn washed_cells(scene: &Scene, panel: RectF, fill: Fill) -> usize {
+            let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+            let width: f32 = scene
                 .layers()
                 .flat_map(|layer| layer.rects.iter())
                 .filter(|rect| rect.background == fill)
                 .filter(|rect| panel.contains_point(rect.bounds.origin()))
-                .count()
+                .map(|rect| rect.bounds.width())
+                .sum();
+            (width / cell.width).round() as usize
         }
 
         #[test]
@@ -22962,19 +23846,30 @@ mod shells {
                     .with_alpha(crate::workspace::block_list::FIND_CURRENT_ALPHA),
             );
 
+            // A match is as many cells as the query has characters.
+            let one = "wqz".len();
+
             let scene = harness.frame();
             assert_eq!(2, matches(&harness, pane));
             assert_eq!(
-                2,
-                washes(&scene, panel, amber),
+                2 * one,
+                washed_cells(&scene, panel, amber),
                 "the command line's match and the output's"
             );
-            assert_eq!(1, washes(&scene, panel, accent), "the current one, once");
+            assert_eq!(
+                one,
+                washed_cells(&scene, panel, accent),
+                "the current one, once"
+            );
 
             step(&mut harness, pane, true);
             let scene = harness.frame();
-            assert_eq!(2, washes(&scene, panel, amber));
-            assert_eq!(1, washes(&scene, panel, accent), "still one current match");
+            assert_eq!(2 * one, washed_cells(&scene, panel, amber));
+            assert_eq!(
+                one,
+                washed_cells(&scene, panel, accent),
+                "still one current match"
+            );
         }
 
         /// The find bar, by its ground: the one `surface_raised` box with the
@@ -25201,6 +26096,160 @@ mod the_frame_budget {
         harness.show_tabs();
         assert!(repaint_asks_for_a_frame(&mut harness, pane));
     }
+
+    /// Hands the window what the model's subscription hands it, and draws the
+    /// frame that asked for, if it asked for one.
+    fn heard(harness: &mut Harness, update: &TerminalUpdate) {
+        harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(update, ctx));
+        harness.draw_if_asked();
+    }
+
+    /// Claude Code's title while it works on `name`, at one turn of the glyph
+    /// in front of it.
+    fn claude_at_work(pane: PaneId, name: &str, turn: usize) -> TerminalUpdate {
+        let glyph = if turn.is_multiple_of(2) {
+            '\u{25d0}'
+        } else {
+            '\u{25d1}'
+        };
+        TerminalUpdate::Title(pane, Some(format!("{glyph} {name}")))
+    }
+
+    #[test]
+    fn a_spinner_turning_in_a_title_nobody_can_see_draws_nothing() {
+        // Claude Code turns the glyph in front of its title every 960 ms
+        // while it works, in a tab that never had the keyboard: one
+        // `crook tab new` opened, where it is never told the keyboard left.
+        // Each turn is the same name and the same running, and each was a
+        // rebuild of the whole window, for a row that looked as it did.
+        //
+        // The turns alone: this harness never lets the marks breathe. The app
+        // does, and with the tab list up the breath redraws the window every
+        // 80 ms while an agent runs whatever the title says — what goes here
+        // is each turn's own rebuild. The test after this one is the window
+        // going quiet, which takes the list hidden as well.
+        let mut harness = Harness::new(2);
+        let hidden = pane_behind(&harness);
+        heard(&mut harness, &claude_at_work(hidden, "Fixing the build", 0));
+        assert_eq!(harness.pane_title(hidden), "Fixing the build");
+        let renders = harness.workspace_renders();
+        let frames = harness.frames_built();
+
+        for turn in 1..=20 {
+            heard(
+                &mut harness,
+                &claude_at_work(hidden, "Fixing the build", turn),
+            );
+        }
+
+        assert_eq!(
+            harness.workspace_renders() - renders,
+            0,
+            "the window was rebuilt for a glyph turning in a title nobody can see"
+        );
+        assert_eq!(harness.frames_built() - frames, 0);
+    }
+
+    /// How many frames into its breath the running marks are.
+    fn breath(harness: &Harness) -> usize {
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.breath())
+    }
+
+    #[test]
+    fn with_the_tab_list_hidden_an_agent_at_work_behind_draws_nothing_while_its_mark_breathes() {
+        // The app as it ships lets the marks breathe, and the breath counts
+        // on whether or not it draws: with no tab list there is no mark to
+        // move, so neither the breath nor the glyph turning asks for a frame.
+        // Each turn waits for a breath, so that a breath that drew would be
+        // counted here.
+        let mut harness = Harness::new(2);
+        harness.run_command("crook/window/toggle-panel");
+        assert!(!harness.general().show_tabs_panel);
+        harness.workspace_update(Workspace::let_marks_breathe);
+        let hidden = pane_behind(&harness);
+        heard(&mut harness, &claude_at_work(hidden, "Fixing the build", 0));
+        let status = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().pane(hidden).map(Pane::status)
+        });
+        assert_eq!(status, Some(AgentStatus::Running));
+        harness.draw_if_asked();
+        let renders = harness.workspace_renders();
+        let frames = harness.frames_built();
+
+        for turn in 1..=5 {
+            heard(
+                &mut harness,
+                &claude_at_work(hidden, "Fixing the build", turn),
+            );
+            let was = breath(&harness);
+            harness.wait_drawing("the running mark stopped breathing", |harness| {
+                breath(harness) > was
+            });
+        }
+
+        assert_eq!(
+            harness.workspace_renders() - renders,
+            0,
+            "the window was rebuilt for an agent at work behind a hidden tab list"
+        );
+        assert_eq!(harness.frames_built() - frames, 0);
+    }
+
+    #[test]
+    fn a_title_naming_new_work_where_nobody_can_see_is_still_one_frame_for_its_row() {
+        // The row is on screen even when the pane is not, and its name is
+        // what changed: the frame that says so is the one frame there is.
+        let mut harness = Harness::new(2);
+        let hidden = pane_behind(&harness);
+        heard(&mut harness, &claude_at_work(hidden, "Fixing the build", 0));
+        heard(&mut harness, &claude_at_work(hidden, "Fixing the build", 1));
+        let renders = harness.workspace_renders();
+
+        heard(
+            &mut harness,
+            &claude_at_work(hidden, "Running the tests", 0),
+        );
+
+        assert_eq!(harness.workspace_renders() - renders, 1);
+        assert!(
+            strip_text(&harness.frame()).contains("Running the tests"),
+            "the row did not take the new name"
+        );
+    }
+
+    #[test]
+    fn a_hook_saying_running_again_where_nobody_can_see_draws_nothing_until_it_asks() {
+        // Claude Code's hooks say running around every tool it calls, and
+        // after the first each says what the row already shows. A question is
+        // a change, and the frame that shows it is drawn.
+        let mut harness = Harness::new(2);
+        let hidden = pane_behind(&harness);
+        let said = |status, message: Option<&str>| TerminalUpdate::Agent {
+            pane: hidden,
+            status,
+            title: None,
+            message: message.map(str::to_owned),
+        };
+        heard(&mut harness, &said(AgentStatus::Running, None));
+        let renders = harness.workspace_renders();
+
+        for _ in 0..20 {
+            heard(&mut harness, &said(AgentStatus::Running, None));
+        }
+        assert_eq!(
+            harness.workspace_renders() - renders,
+            0,
+            "the window was rebuilt for a running the row already showed"
+        );
+
+        heard(
+            &mut harness,
+            &said(AgentStatus::NeedsInput, Some("Run the tests?")),
+        );
+        assert_eq!(harness.workspace_renders() - renders, 1);
+    }
 }
 
 #[test]
@@ -25370,6 +26419,45 @@ fn the_row_height_the_panel_scrolls_by_is_the_height_it_draws() {
         "rows are drawn {drawn} apart and scrolled by {}",
         crate::workspace::theme_panel::ROW_HEIGHT
     );
+}
+
+#[test]
+fn a_theme_card_s_divider_runs_across_the_card() {
+    // The rule over the miniature input field is the field's top edge, and it
+    // was drawn on a row as wide as the cursor in it: a two-pixel dash over the
+    // caret instead of a line between the output and the prompt.
+    let themes = Scratch::new();
+    let mut harness = Harness::new(1);
+    let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    harness.set_themes_directory(themes.path().to_owned());
+    harness.open_theme_panel();
+
+    let scene = harness.frame();
+    // The cards wholly on screen: one the list cuts off at the bottom has its
+    // divider below the cut.
+    let cards: Vec<RectF> = theme_cards(&scene)
+        .into_iter()
+        .filter(|card| (card.height() - super::theme_preview::PANEL_CARD.y()).abs() < 2.5)
+        .collect();
+    assert!(!cards.is_empty(), "the panel drew no whole card");
+    for card in cards {
+        let dividers: Vec<RectF> = visible_rects(&scene)
+            .filter(|(rect, _)| {
+                rect.border.top && !rect.border.left && !rect.border.bottom && !rect.border.right
+            })
+            .map(|(_, bounds)| bounds)
+            .filter(|bounds| card.contains_point(center(*bounds)))
+            .collect();
+        let [divider] = dividers.as_slice() else {
+            panic!("a card draws one divider, and {card:?} draws {dividers:?}");
+        };
+        // Inside the card's padding and its border on both sides, and no
+        // further in: the card pads its content by eight.
+        assert!(
+            divider.min_x() - card.min_x() < 12. && card.max_x() - divider.max_x() < 12.,
+            "the divider is {divider:?} in a card at {card:?}"
+        );
+    }
 }
 
 /// The tabs panel scrolling to the row a selection landed on.
@@ -25743,6 +26831,61 @@ mod restoring {
             !resume_is_offered(&harness),
             "a line that has been sent is still offered"
         );
+    }
+
+    #[test]
+    fn an_agent_in_a_tab_behind_the_active_one_keeps_its_line_until_its_shell_opens_and_takes_it() {
+        // The tabs behind the active one open their shells after the window
+        // has drawn, off the thread that draws. The restore's line is in the
+        // pane's composer before then, and the shell that arrives is the one
+        // it goes to.
+        let scratch = Scratch::new();
+        fs::write(
+            scratch.path().join("settings.json"),
+            r#"{"resume_lines": {"claude": "echo resumed-claude"}}"#,
+        )
+        .expect("writable scratch");
+        let mut session = remembered(&[(scratch.path(), None)]);
+        session
+            .tabs
+            .extend(remembered(&[(scratch.path(), Some("claude"))]).tabs);
+        session.active = 0;
+        let mut harness = restored(&session, scratch.settings());
+        let behind = harness.tab_ids()[1];
+        assert_ne!(behind, harness.active_id(), "the agent's tab is in front");
+        let agent = harness.panes_of(behind)[0];
+
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_shell_spawn_cost(super::shells::RESTORED_SPAWN, ctx);
+        });
+        if super::shells::marked_shell(&mut harness).is_none() {
+            return;
+        }
+        assert!(
+            !super::shells::has_a_shell(&harness, agent),
+            "the tab behind the active one opened its shell on the thread that draws"
+        );
+        assert_eq!(
+            harness.field_text(agent),
+            "echo resumed-claude",
+            "the line is not waiting in the composer of a pane whose shell is on its way"
+        );
+
+        super::shells::await_prompt(&mut harness, agent);
+        harness.run_command("crook/window/resume-agents");
+        harness.wait_for("the line never reached the shell that arrived", |harness| {
+            harness
+                .workspace
+                .read(&harness.app, |workspace, app| {
+                    Some(
+                        workspace
+                            .terminal_blocks(agent, app)?
+                            .iter()
+                            .any(|block| block.command.as_deref() == Some("echo resumed-claude")),
+                    )
+                })
+                .unwrap_or_default()
+        });
     }
 
     /// The agent a pane's session names, which is what the file is written
@@ -29693,6 +30836,58 @@ fn a_palette_title_too_wide_for_a_narrow_card_ends_in_a_mark() {
 }
 
 #[test]
+fn a_palette_row_s_title_sits_on_the_line_its_keys_and_name_are_centred_on() {
+    // The title is the row's flexible child, and a flexible child was handed
+    // the row's whole height as its minimum: the line box stretched to it and
+    // the glyphs were set at its top, three pixels above the keycap and the
+    // action id beside them, which were centred.
+    let mut harness = Harness::new(1);
+    open_palette(&mut harness, "new agent");
+    let scene = harness.frame();
+    let band = palette_selected_row(&scene);
+
+    // Where the middle of each glyph's line box is. The stub shaper's face is
+    // eight tenths ascent and two descent, so the box is found from the
+    // baseline by the rule a line uses to put the baseline in it.
+    let middles = |size: f32| -> Vec<f32> {
+        let baseline = crookui_core::text_layout::default_compute_baseline_position(
+            size,
+            crookui_core::fonts::DEFAULT_UI_LINE_HEIGHT_RATIO,
+            size * 0.8,
+            size * 0.2,
+        );
+        let half = size * crookui_core::fonts::DEFAULT_UI_LINE_HEIGHT_RATIO / 2.;
+        scene
+            .layers()
+            .flat_map(|layer| layer.glyphs.iter())
+            .filter(|glyph| band.contains_point(glyph.position))
+            .filter(|glyph| glyph.glyph_key.font_size == size)
+            .map(|glyph| glyph.position.y() - baseline + half)
+            .collect()
+    };
+    let title = middles(12.);
+    let beside = middles(10.5);
+    assert!(
+        !title.is_empty() && !beside.is_empty(),
+        "the selected row has no title or nothing beside it"
+    );
+
+    let centre = band.min_y() + band.height() / 2.;
+    for middle in beside {
+        assert!(
+            (middle - centre).abs() < 1.,
+            "the keys and the name are centred on {middle}, the row on {centre}"
+        );
+    }
+    for middle in title {
+        assert!(
+            (middle - centre).abs() < 1.,
+            "the title is centred on {middle}, the row and what is beside it on {centre}"
+        );
+    }
+}
+
+#[test]
 fn typing_narrows_the_palette() {
     let mut harness = Harness::new(1);
     harness.press("p", palette_chord(), "");
@@ -29951,16 +31146,23 @@ fn drawn_line(scene: &Scene, text: &str) -> Option<Vector2F> {
 
 /// What the selected row is called.
 ///
-/// The topmost line inside the band, which is the title: a row's keys and its
-/// action name are set two pixels lower, in the secondary size, so they group
-/// as a line of their own.
+/// The band's text in the title's size. A row's keys and its action name are
+/// in the secondary size and centred on the title's line, so their baselines
+/// are a fraction of a pixel from its own and a line of the band's text can
+/// be the three of them run together, in either order.
 fn palette_selected_title(scene: &Scene) -> String {
     let band = palette_selected_row(scene);
-    text_lines(scene, |at| band.contains_point(at))
-        .into_iter()
-        .next()
-        .map(|(_, line)| line)
-        .unwrap_or_default()
+    lines_of(
+        scene
+            .layers()
+            .flat_map(|layer| layer.glyphs.iter())
+            .filter(|glyph| glyph.glyph_key.font_size == 12.),
+        |at| band.contains_point(at),
+    )
+    .into_iter()
+    .next()
+    .map(|(_, line)| line)
+    .unwrap_or_default()
 }
 
 /// The chord the shipped table binds `command` to, as a row's cap prints it.
@@ -37127,7 +38329,8 @@ mod changes_column {
         use std::time::{Duration, Instant};
 
         use crook_terminal::{
-            BlockState, Emulator, LiveBlock, Palette, PromptEnd, Rgb, Snapshot, TerminalSize,
+            BlockState, Emulator, LiveBlock, MouseModes, Palette, PromptEnd, Rgb, Snapshot,
+            TerminalSize,
         };
 
         use crate::workspace::view::a_shell_is_listening;
@@ -37147,7 +38350,7 @@ mod changes_column {
             alt_screen,
             live_block,
             title: None,
-            mouse_reporting: false,
+            mouse: MouseModes::NONE,
             line_editor: false,
         };
         // A shell handed `(claude)` by the composer, as its emulator has it:

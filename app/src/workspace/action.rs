@@ -472,6 +472,9 @@ pub enum WorktreeAction {
     ReviewDiscard,
     /// Do what Discard's second question said.
     Discard,
+    /// Open, in the file manager, the directory a removal left files in that
+    /// git could not delete, while the list is saying so.
+    ShowLeftBehind,
     /// Back to the list, from the creator or from the confirmation.
     Cancel,
     /// Step the keyboard's row through the list by this many places.

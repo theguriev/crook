@@ -140,8 +140,43 @@
 //! the write blocks on the master. Either way an orphan holding the pty open
 //! then holds the writer too — the thread and its copy of the master — until
 //! the orphan exits. See `crook_terminal`'s `nonblocking` module for both.
+//!
+//! # What a restore costs
+//!
+//! **The thread that draws starts the shells of the panes it is about to
+//! draw, and no others.** Starting one is a fork the parent waits on until
+//! the child has exec'd — `portable-pty` sets the child up in a `pre_exec`,
+//! which rules out `posix_spawn` — and with a restore's earlier shells
+//! starting up beside it, that wait grew from a millisecond to a quarter of a
+//! second. Sixty restored tabs, every shell started in place, held the window
+//! for most of a second after its first frame.
+//!
+//! So [`TerminalModel::start`] starts the active tab's shells where it is
+//! called, for the frame after it, and queues the rest for the background
+//! pool, one at a time in the strip's order, each arrival sending the next:
+//! a restore holds one worker however many tabs it brings back, and the wait
+//! on each fork is that worker's rather than the frame's. The integration's
+//! stub files, the spawn and the reader and writer threads are all made on
+//! the worker, and what comes home through `ctx.spawn` is a session ready to
+//! be listened to. Until then the pane's shell is on its way
+//! ([`TerminalModel::is_opening`]) — drawn as its ground, as every pane is in
+//! the frame before `start` — and its arrival is a
+//! [`TerminalUpdate::Repainted`], a frame only if somebody is looking.
+//!
+//! A tab switched to before its turn has come is about to be drawn, so its
+//! shells leave the queue and start in place
+//! ([`TerminalModel::open_shown`]): a pane with no shell draws no composer
+//! and no grid, nothing a key typed into it could reach, and waiting out the
+//! queue would lose what was typed meanwhile. Only the one shell already on
+//! the pool is left to arrive, a spawn away.
+//!
+//! A pane that closes while its shell is on the pool is ended by whichever of
+//! the two sides gets there second, and a window that goes counts it among
+//! the shells it waits for: see [`Opening`]. Everything else starts in place,
+//! as it always has — a new tab, a split, a tab brought back — since each is
+//! one shell, a few milliseconds, with a frame waiting to draw it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -236,7 +271,7 @@ const INITIAL_GRID: TerminalSize = TerminalSize::new(80, 24);
 /// by the element the tab's panes are laid out in, so that a pane no layout
 /// has seen — one in a tab behind the active one, one just split off — can
 /// be given the grid the layout *would* give it, from the box and the tab's
-/// own weights. Read by [`TerminalModel::open`].
+/// own weights. Read by [`TerminalModel::launch`].
 #[derive(Clone, Default)]
 pub struct Measured(Arc<Mutex<MeasuredState>>);
 
@@ -535,6 +570,14 @@ pub struct TerminalModel {
     /// snapshot and a test render the real view tree without spawning a process.
     live: bool,
 
+    /// The shells still to be opened on the background pool, next first: the
+    /// tabs behind the active one, when the window started. See "What a
+    /// restore costs" in the module docs.
+    queued: VecDeque<(PaneId, Option<PathBuf>)>,
+
+    /// The one shell being opened on the pool, while it is.
+    opening: Option<(PaneId, Opening)>,
+
     /// Whether [`Self::start`] is coming, once a frame has measured the panes.
     ///
     /// The one frame between the two is drawn with no shell in any pane, and
@@ -604,6 +647,11 @@ pub struct TerminalModel {
     /// See [`Self::set_environment`].
     #[cfg(test)]
     environment: Vec<(String, String)>,
+
+    /// How long every spawn is made to take on top of its own cost. See
+    /// [`Self::set_spawn_cost`].
+    #[cfg(test)]
+    spawn_cost: Duration,
 }
 
 /// One running shell, as the model holds it.
@@ -655,6 +703,8 @@ impl TerminalModel {
             sessions: HashMap::new(),
             failures: HashMap::new(),
             live: false,
+            queued: VecDeque::new(),
+            opening: None,
             expected: false,
             measured: Measured::default(),
             palette: crook_palette(),
@@ -668,20 +718,35 @@ impl TerminalModel {
             endings: Endings::default(),
             #[cfg(test)]
             environment: Vec::new(),
+            #[cfg(test)]
+            spawn_cost: Duration::ZERO,
         }
     }
 
-    /// Lets panes open shells, and opens one for every pane already there.
+    /// Lets panes open shells, and opens one for every pane already there:
+    /// `shown`'s here, before this returns, for the next frame to draw, and
+    /// `behind`'s on the background pool, one after another in the order
+    /// given. See "What a restore costs" in the module docs.
     ///
     /// Call once, after the window exists. Separate from [`Self::new`] for the
     /// reason the poll chains' `start` is: nothing renders a frame in CI with
     /// four shells running underneath it.
-    pub fn start(&mut self, panes: &[(PaneId, Option<PathBuf>)], ctx: &mut ModelContext<Self>) {
+    pub fn start(
+        &mut self,
+        shown: &[(PaneId, Option<PathBuf>)],
+        behind: &[(PaneId, Option<PathBuf>)],
+        ctx: &mut ModelContext<Self>,
+    ) {
         if self.live {
             return;
         }
         self.live = true;
-        self.sync(panes, ctx);
+        // Queued before the sync, which opens in place every pane that has
+        // no shell and is not waiting for one.
+        self.queued = behind.iter().cloned().collect();
+        let panes: Vec<_> = shown.iter().chain(behind).cloned().collect();
+        self.sync(&panes, ctx);
+        self.open_next(ctx);
     }
 
     /// Whether shells are being opened at all.
@@ -703,6 +768,21 @@ impl TerminalModel {
     /// Whether shells are coming and have not been started yet.
     pub fn is_expected(&self) -> bool {
         self.expected && !self.live
+    }
+
+    /// Whether `pane`'s shell is on its way: waiting its turn, or being
+    /// opened on the pool.
+    ///
+    /// Such a pane has no terminal yet and has not failed to get one. It is
+    /// drawn as every pane is in the frame before [`Self::start`], its ground
+    /// and nothing else, and nothing should take it for a pane whose shell
+    /// has gone.
+    pub fn is_opening(&self, pane: PaneId) -> bool {
+        self.queued.iter().any(|(queued, _)| *queued == pane)
+            || self
+                .opening
+                .as_ref()
+                .is_some_and(|(opening, _)| *opening == pane)
     }
 
     /// Where a pane with no terminal writes the grid it measured.
@@ -769,6 +849,19 @@ impl TerminalModel {
         self.environment = environment;
     }
 
+    /// Makes every shell opened from now on take `cost` longer to spawn, on
+    /// whichever thread spawns it. For tests.
+    ///
+    /// What a loaded machine charges: the parent waits for each child to
+    /// exec, and with a restore's earlier shells starting up beside it that
+    /// wait reached a quarter of a second. A test that measures what the
+    /// thread that draws spends on a restore states the cost instead of
+    /// depending on how fast the machine running it forks.
+    #[cfg(test)]
+    pub fn set_spawn_cost(&mut self, cost: Duration) {
+        self.spawn_cost = cost;
+    }
+
     /// Whether a shell was named, rather than the user's own resolved.
     pub fn shell_is_named(&self) -> bool {
         self.shell.is_some()
@@ -790,6 +883,15 @@ impl TerminalModel {
         for pane in closed {
             self.close(pane);
         }
+        // A pane that closed before its turn came is never opened, and one
+        // whose shell is being opened is ended by whichever side holds it.
+        self.queued
+            .retain(|(pane, _)| panes.iter().any(|(open, _)| open == pane));
+        if let Some((pane, opening)) = &self.opening
+            && !panes.iter().any(|(open, _)| open == pane)
+        {
+            opening.abandon(*pane, &self.endings);
+        }
         self.failures
             .retain(|pane, _| panes.iter().any(|(open, _)| open == pane));
         self.measured
@@ -799,9 +901,35 @@ impl TerminalModel {
             return;
         }
         for (pane, directory) in panes {
-            if !self.sessions.contains_key(pane) {
+            if !self.sessions.contains_key(pane) && !self.is_opening(*pane) {
                 self.open(*pane, directory.clone(), ctx);
             }
+        }
+    }
+
+    /// Starts here and now the shells of `shown` that are still waiting
+    /// their turn on the pool: a tab behind the active one, switched to
+    /// before a restore got to it.
+    ///
+    /// Its panes are about to be drawn, and a pane with no shell draws no
+    /// composer and no grid, so whatever was typed into it until its turn
+    /// came would reach nothing. One tab's shells cost what a new tab's do.
+    /// The one shell already being spawned on the pool is left to arrive. See
+    /// "What a restore costs" in the module docs.
+    pub fn open_shown(&mut self, shown: &[PaneId], ctx: &mut ModelContext<Self>) {
+        if !self.live {
+            return;
+        }
+        let mut brought = Vec::new();
+        self.queued.retain(|(pane, directory)| {
+            let waits = !shown.contains(pane);
+            if !waits {
+                brought.push((*pane, directory.clone()));
+            }
+            waits
+        });
+        for (pane, directory) in brought {
+            self.open(pane, directory, ctx);
         }
     }
 
@@ -943,8 +1071,27 @@ impl TerminalModel {
         ctx.notify();
     }
 
-    /// Starts a shell for one pane and the thread that reads it.
+    /// Starts a shell for one pane, and the threads that read and write it,
+    /// here and now.
     fn open(&mut self, pane: PaneId, directory: Option<PathBuf>, ctx: &mut ModelContext<Self>) {
+        let opened = self
+            .launch(pane, directory)
+            .and_then(|launch| spawn_session(launch, &self.flusher));
+        match opened {
+            Ok(opened) => self.register(pane, opened, ctx),
+            Err(reason) => {
+                self.failures.insert(pane, reason);
+            }
+        }
+        ctx.notify();
+    }
+
+    /// Works out everything a pane's shell is started with, from what the
+    /// model says now, so that the spawn itself can happen on any thread.
+    ///
+    /// Refuses a shell that cannot be started, with the reason the pane
+    /// shows.
+    fn launch(&mut self, pane: PaneId, directory: Option<PathBuf>) -> Result<Launch, String> {
         // A shell named by a path that is not there is refused here, before
         // anything is spawned, because below here the platforms disagree
         // about it: Linux reports the missing program from the spawn, macOS
@@ -960,9 +1107,14 @@ impl TerminalModel {
         {
             let reason = format!("{} does not exist", shell.display());
             log::error!("could not open a shell for pane {pane:?}: {reason}");
-            self.failures.insert(pane, reason);
-            ctx.notify();
-            return;
+            return Err(reason);
+        }
+
+        // Before the spawn, wherever that happens: the reader hands this
+        // thread the batches it parsed too soon to draw from its first read.
+        if let Err(error) = self.start_flushing() {
+            log::error!("could not start the repaint thread for pane {pane:?}: {error}");
+            return Err(format!("{error}"));
         }
 
         // Only for a window that has a socket to send it to: a token that
@@ -972,73 +1124,56 @@ impl TerminalModel {
             .is_some()
             .then(crate::control::mint_token)
             .flatten();
-        // The integration writes its stub files before the shell is started
-        // and removes them when this value is dropped, so it is moved into the
-        // session below rather than left to fall out of scope here.
-        let integration = shell_integration::Session::open(
+        Ok(Launch {
             pane,
-            &shell_integration::Options {
+            integration: shell_integration::Options {
                 enabled: self.shell_marks,
                 login: self.shell_login,
                 shell: self.shell.clone(),
                 control_socket: self.control_socket.clone(),
                 control_token: token.clone(),
             },
-        );
-        let marks = integration.marks();
-        let mut options = TerminalOptions {
-            size: self.measured.get(pane).unwrap_or(INITIAL_GRID),
-            working_directory: directory,
-            palette: self.palette.clone(),
-            // What `TERM_PROGRAM` and `TERM_PROGRAM_VERSION` say, for a
-            // program that asks the terminal instead of its environment.
-            // The answer reaches it through ssh and sudo, where the
-            // variables do not, and Claude Code waits on it before it will
-            // draw its frames whole.
-            name_and_version: Some(format!(
-                "{} {}",
-                shell_integration::TERM_PROGRAM,
-                shell_integration::VERSION
-            )),
-            ..Default::default()
-        };
-        integration.apply(&mut options);
-        #[cfg(test)]
-        options.environment.extend(self.environment.iter().cloned());
-        if !marks {
-            log::debug!(
-                "pane {pane:?} is running {:?}, which Crook has no command marks for; \
-                 its output will be one continuous block",
-                integration.shell()
-            );
+            options: TerminalOptions {
+                size: self.measured.get(pane).unwrap_or(INITIAL_GRID),
+                working_directory: directory,
+                palette: self.palette.clone(),
+                // What `TERM_PROGRAM` and `TERM_PROGRAM_VERSION` say, for a
+                // program that asks the terminal instead of its environment.
+                // The answer reaches it through ssh and sudo, where the
+                // variables do not, and Claude Code waits on it before it will
+                // draw its frames whole.
+                name_and_version: Some(format!(
+                    "{} {}",
+                    shell_integration::TERM_PROGRAM,
+                    shell_integration::VERSION
+                )),
+                ..Default::default()
+            },
+            token,
+            shell: self.shell(),
+            #[cfg(test)]
+            environment: self.environment.clone(),
+            #[cfg(test)]
+            cost: self.spawn_cost,
+        })
+    }
+
+    /// Takes a shell that has started into the model, and starts listening
+    /// to it.
+    fn register(&mut self, pane: PaneId, opened: Opened, ctx: &mut ModelContext<Self>) {
+        let Opened {
+            shared,
+            integration,
+            marks,
+            token,
+            shell,
+            palette,
+        } = opened;
+        // A theme applied while the shell was being opened on the pool
+        // reached every session but this one.
+        if palette != self.palette {
+            shared.repaint_in(self.palette.clone());
         }
-
-        let terminal = match Terminal::spawn(options) {
-            Ok(terminal) => terminal,
-            Err(error) => {
-                let reason = format!("{error:#}");
-                log::error!("could not open a shell for pane {pane:?}: {reason}");
-                self.failures.insert(pane, reason);
-                ctx.notify();
-                return;
-            }
-        };
-
-        if let Err(error) = self.start_flushing() {
-            log::error!("could not start the repaint thread for pane {pane:?}: {error}");
-            self.failures.insert(pane, format!("{error}"));
-            ctx.notify();
-            return;
-        }
-
-        let shared = match start(terminal, pane, &self.flusher) {
-            Ok(shared) => shared,
-            Err(reason) => {
-                self.failures.insert(pane, reason);
-                ctx.notify();
-                return;
-            }
-        };
         let snapshot = shared.snapshot();
 
         self.failures.remove(&pane);
@@ -1055,12 +1190,70 @@ impl TerminalModel {
                 token,
                 marks,
                 prompted: false,
-                shell: self.shell(),
+                shell,
             },
         );
         self.watch(pane, ctx);
         self.watch_children(ctx);
-        ctx.notify();
+    }
+
+    /// Opens the next queued shell on the background pool, unless one is
+    /// being opened there already or the model has stopped opening any.
+    ///
+    /// One at a time, each arrival starting the next — the shape "Update
+    /// all" drains its downloads in — so a restore of sixty tabs holds one
+    /// worker rather than every worker the pool has, and the shells start in
+    /// the order the strip lists them.
+    fn open_next(&mut self, ctx: &mut ModelContext<Self>) {
+        while self.live && self.opening.is_none() {
+            let Some((pane, directory)) = self.queued.pop_front() else {
+                return;
+            };
+            let launch = match self.launch(pane, directory) {
+                Ok(launch) => launch,
+                Err(reason) => {
+                    self.failures.insert(pane, reason);
+                    ctx.notify();
+                    continue;
+                }
+            };
+
+            let opening = Opening::default();
+            let filling = opening.clone();
+            let flusher = self.flusher.clone();
+            let endings = self.endings.clone();
+            let opened = ctx.background().spawn(async move {
+                filling.fill(pane, || spawn_session(launch, &flusher), &endings);
+            });
+            ctx.spawn(opened, move |model, (), ctx| model.arrive(pane, ctx))
+                .detach();
+            self.opening = Some((pane, opening));
+        }
+    }
+
+    /// Takes in the shell the pool opened for `pane`, and opens the next.
+    fn arrive(&mut self, pane: PaneId, ctx: &mut ModelContext<Self>) {
+        let Some((_, opening)) = self.opening.take_if(|(opening, _)| *opening == pane) else {
+            return;
+        };
+        match opening.take() {
+            Some(Ok(opened)) => {
+                self.register(pane, opened, ctx);
+                // Reported rather than notified, as a changed grid is: a pane
+                // that has just got its shell is worth a frame only if it is
+                // on screen, which is the workspace's to know — and a pane a
+                // restore opens here almost never is.
+                ctx.emit(TerminalUpdate::Repainted(pane));
+            }
+            Some(Err(reason)) => {
+                self.failures.insert(pane, reason);
+                ctx.notify();
+            }
+            // Its pane closed, or its window went, while it was on the way,
+            // and whichever got there second has ended it.
+            None => {}
+        }
+        self.open_next(ctx);
     }
 
     /// Notices that a shell has exited even though its pty has not.
@@ -1187,6 +1380,13 @@ impl TerminalModel {
         // one whose next frame starts them.
         self.live = false;
         self.expected = false;
+        // The shells still waiting their turn never get one. The one on its
+        // way is ended by whichever side holds it, and counted in what this
+        // hands back either way.
+        self.queued.clear();
+        if let Some((pane, opening)) = &self.opening {
+            opening.abandon(*pane, &self.endings);
+        }
         for pane in self.sessions.keys().copied().collect::<Vec<_>>() {
             self.close(pane);
         }
@@ -1812,8 +2012,17 @@ impl TerminalHandle {
     /// The one question a pointer gesture asks before it does anything: with
     /// nothing asked for it is a selection, and with something asked for it
     /// belongs to the program.
+    ///
+    /// Read off the published snapshot, never through `drive`. Every pointer
+    /// move over a pane asks it, and the drive was the terminal's lock and a
+    /// snapshot rebuilt on the thread that draws, per move — behind a reader
+    /// parsing a flood, up to twelve milliseconds a move. What the published
+    /// snapshot cannot have yet is a mode in output parsed since, which a frame
+    /// has not shown either: the program asked for the mouse in bytes it has
+    /// not been seen to print, and hears the pointer from the frame that draws
+    /// them.
     pub fn mouse_modes(&self) -> MouseModes {
-        self.drive(|terminal| terminal.emulator().mouse_modes())
+        self.0.snapshot().mouse
     }
 
     /// Sends a pointer gesture, returning whether the program took it.
@@ -1954,6 +2163,13 @@ impl TerminalHandle {
         self.0.lock().harvest_rows(first, last)
     }
 
+    /// How many times [`Self::drive`] has run against this session, for a
+    /// test that holds a gesture to leaving the lock alone.
+    #[cfg(test)]
+    pub(crate) fn drives(&self) -> usize {
+        self.0.drives.load(Ordering::Relaxed)
+    }
+
     /// Runs `work` against the terminal and republishes what it draws.
     ///
     /// Everything on this side of the handle moves the viewport — a resize
@@ -1972,6 +2188,8 @@ impl TerminalHandle {
     /// thread, and not the lock the reader needs. See the module docs, "The
     /// writer".
     fn drive<T>(&self, work: impl FnOnce(&mut Terminal) -> T) -> T {
+        #[cfg(test)]
+        self.0.drives.fetch_add(1, Ordering::Relaxed);
         let mut terminal = self.0.lock();
         let outcome = work(&mut terminal);
         let snapshot = terminal.snapshot();
@@ -1982,6 +2200,189 @@ impl TerminalHandle {
         *self.0.latest.lock().unwrap_or_else(PoisonError::into_inner) = snapshot;
         drop(terminal);
         outcome
+    }
+}
+
+/// Everything a pane's shell is started with, worked out on the UI thread
+/// from what the model said when the shell was asked for. See
+/// [`TerminalModel::launch`].
+struct Launch {
+    pane: PaneId,
+    integration: shell_integration::Options,
+    options: TerminalOptions,
+    token: Option<String>,
+    shell: PathBuf,
+    /// See [`TerminalModel::set_environment`].
+    #[cfg(test)]
+    environment: Vec<(String, String)>,
+    /// See [`TerminalModel::set_spawn_cost`].
+    #[cfg(test)]
+    cost: Duration,
+}
+
+/// A shell that has started, with what its session is made of.
+struct Opened {
+    shared: Arc<Shared>,
+    /// The scratch the shell was started against. See [`Session`].
+    integration: shell_integration::Session,
+    marks: bool,
+    token: Option<String>,
+    shell: PathBuf,
+    /// What its cells were resolved against when it started, which a theme
+    /// applied since may have moved on from.
+    palette: Palette,
+}
+
+/// Starts the shell a [`Launch`] describes and the threads that read and
+/// write it, on whichever thread calls this: the UI thread for a pane about
+/// to be drawn, and the background pool for the panes behind it. See "What a
+/// restore costs" in the module docs.
+fn spawn_session(launch: Launch, flusher: &Arc<Flusher>) -> Result<Opened, String> {
+    let Launch {
+        pane,
+        integration,
+        mut options,
+        token,
+        shell,
+        ..
+    } = launch;
+    // The integration writes its stub files before the shell is started and
+    // removes them when this value is dropped, so it is moved into the
+    // session rather than left to fall out of scope here.
+    let integration = shell_integration::Session::open(pane, &integration);
+    let marks = integration.marks();
+    integration.apply(&mut options);
+    #[cfg(test)]
+    options.environment.extend(launch.environment);
+    if !marks {
+        log::debug!(
+            "pane {pane:?} is running {:?}, which Crook has no command marks for; \
+             its output will be one continuous block",
+            integration.shell()
+        );
+    }
+    let palette = options.palette.clone();
+
+    #[cfg(test)]
+    thread::sleep(launch.cost);
+    let terminal = Terminal::spawn(options).map_err(|error| {
+        let reason = format!("{error:#}");
+        log::error!("could not open a shell for pane {pane:?}: {reason}");
+        reason
+    })?;
+    let shared = start(terminal, pane, flusher)?;
+    Ok(Opened {
+        shared,
+        integration,
+        marks,
+        token,
+        shell,
+        palette,
+    })
+}
+
+/// A shell being opened on the background pool, as the model and the task
+/// opening it both hold it.
+///
+/// What it settles is who ends a shell whose pane has gone by the time it has
+/// started — closed, or its window gone, while the task was waiting on the
+/// fork. Either side can get there first: the task with what it opened, the
+/// model with word that nobody wants it. Whichever arrives second ends it,
+/// through [`Endings`] and under this one lock, so a shell is never left
+/// running with nothing reading it and nobody to end it — and a window that
+/// is going while one is being spawned counts it among the shells it waits
+/// for, so that one which ignores the hang-up does not outlive Crook.
+///
+/// A task that has not begun when its pane goes spawns nothing, and nothing
+/// waits for it: a pool that is shutting down drops the tasks it never ran,
+/// and a wait on one of those would last the window's whole patience.
+#[derive(Clone, Default)]
+struct Opening(Arc<Mutex<OpeningState>>);
+
+#[derive(Default)]
+enum OpeningState {
+    /// The task is waiting for a worker.
+    #[default]
+    Queued,
+    /// The task is spawning the shell.
+    Spawning,
+    /// The task has finished, and this is what it came to, for the model to
+    /// take in. Boxed, being a terminal's worth of state in an enum whose
+    /// other states are a word.
+    Opened(Box<Result<Opened, String>>),
+    /// Nobody wants it any more.
+    ///
+    /// Holds a count in the window's [`Endings`] while the task is still
+    /// spawning, so that a wait for the window's shells to end waits for this
+    /// one too; the task lets go of it once the shell it opened has an ending
+    /// counted of its own.
+    Abandoned(Option<Ending>),
+}
+
+impl Opening {
+    fn lock(&self) -> MutexGuard<'_, OpeningState> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Opens the shell with `open`, on the pool, and leaves it for the model
+    /// — or ends it, if its pane went while it was being opened.
+    fn fill(&self, pane: PaneId, open: impl FnOnce() -> Result<Opened, String>, endings: &Endings) {
+        {
+            let mut state = self.lock();
+            if matches!(*state, OpeningState::Abandoned(_)) {
+                return;
+            }
+            *state = OpeningState::Spawning;
+        }
+        // Not under the lock, which a close on the thread that draws takes:
+        // the spawn can take a quarter of a second.
+        let opened = open();
+        let mut state = self.lock();
+        match &mut *state {
+            OpeningState::Abandoned(ending) => {
+                if let Ok(opened) = opened {
+                    endings.end(pane, opened.shared, opened.integration);
+                }
+                // After the ending above has counted itself, so that a wait
+                // never finds nothing to wait for in between.
+                ending.take();
+            }
+            _ => *state = OpeningState::Opened(Box::new(opened)),
+        }
+    }
+
+    /// What the task opened, for the model to take in once the task is done
+    /// — or `None` when the shell was abandoned, and whoever got there second
+    /// has ended it.
+    fn take(&self) -> Option<Result<Opened, String>> {
+        let mut state = self.lock();
+        match std::mem::replace(&mut *state, OpeningState::Abandoned(None)) {
+            OpeningState::Opened(opened) => Some(*opened),
+            other => {
+                *state = other;
+                None
+            }
+        }
+    }
+
+    /// Says nobody wants the shell any more, and ends it if it has already
+    /// started.
+    fn abandon(&self, pane: PaneId, endings: &Endings) {
+        let mut state = self.lock();
+        match std::mem::replace(&mut *state, OpeningState::Abandoned(None)) {
+            // The task finds this before it spawns anything.
+            OpeningState::Queued => {}
+            OpeningState::Spawning => {
+                *state = OpeningState::Abandoned(Some(Ending::start(endings)));
+            }
+            OpeningState::Opened(opened) => {
+                // A shell that could not be started has nothing to end.
+                if let Ok(opened) = *opened {
+                    endings.end(pane, opened.shared, opened.integration);
+                }
+            }
+            abandoned @ OpeningState::Abandoned(_) => *state = abandoned,
+        }
     }
 }
 
@@ -2039,6 +2440,8 @@ fn start(
         resize_failing: AtomicBool::new(false),
         scroll_remainder: AtomicU32::new(0.0f32.to_bits()),
         publish: Mutex::new(PublishState::new()),
+        #[cfg(test)]
+        drives: std::sync::atomic::AtomicUsize::new(0),
     });
 
     // The reader holds a `Weak`, not an `Arc`: a pane whose pty stays open
@@ -2152,6 +2555,11 @@ struct Shared {
 
     /// The throttle: what has been parsed, and when it was last drawn.
     publish: Mutex<PublishState>,
+
+    /// How many times [`TerminalHandle::drive`] has taken the lock from this
+    /// side. See [`TerminalHandle::drives`].
+    #[cfg(test)]
+    drives: std::sync::atomic::AtomicUsize,
 }
 
 /// What the reader has parsed and what the main thread has been shown.

@@ -178,8 +178,8 @@ impl Layer {
     /// Within a layer the last request wins, as the last thing painted is the
     /// one on top — a link asked for over the grid it was printed in — and a
     /// hit rect painted after it wins over it with the arrow: a block's
-    /// controls are drawn into the list's own layer, over the I-beam the list
-    /// asked for, and a press on one is the control's.
+    /// controls are hit-recorded into the list's own layer, over the I-beam the
+    /// list asked for, and a press on one is the control's.
     fn pointer_at(&self, point: Vector2F) -> Option<PointerShape> {
         let request = self
             .pointers

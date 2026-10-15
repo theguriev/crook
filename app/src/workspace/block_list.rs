@@ -143,9 +143,11 @@ const CONTROL_GAP: f32 = 4.;
 
 /// How far below a block's top edge the controls sit.
 ///
-/// Warp's `overflow_offset`. Below the divider rather than on it, and above
-/// the first row, so the control lands on the block's prompt line and never on
-/// its output.
+/// Warp's `overflow_offset`. Below the divider rather than on it, and at the
+/// default size starting above the first row, so the control sits on the
+/// block's first line. The rows grow and shrink with the font and this does
+/// not, so how far the control reaches into the rows under that line, and how
+/// much of it is opaque, depends on the size: see `BlockList::opaque_part`.
 pub(super) const CONTROL_OFFSET: f32 = 12.;
 
 /// How round the control's plate is.
@@ -622,6 +624,68 @@ impl BlockList {
             origin + vec2f(size.x() - from_right - CONTROL_SIZE, top),
             vec2f(CONTROL_SIZE, CONTROL_SIZE),
         )
+    }
+
+    /// The band a block's controls are drawn across: every plate, and the gap
+    /// between them.
+    fn plates(&self, origin: Vector2F, item: Visible) -> Option<RectF> {
+        self.controls()
+            .iter()
+            .map(|control| self.control_at(origin, item, *control))
+            .reduce(|span, plate| {
+                RectF::from_points(
+                    vec2f(
+                        span.min_x().min(plate.min_x()),
+                        span.min_y().min(plate.min_y()),
+                    ),
+                    vec2f(
+                        span.max_x().max(plate.max_x()),
+                        span.max_y().max(plate.max_y()),
+                    ),
+                )
+            })
+    }
+
+    /// The part of `plates`, the band a block's controls are drawn across,
+    /// that hides the text under it.
+    ///
+    /// On a block's top the plates hide its first line wherever they cover
+    /// it, even where they end inside it, and then every row under it that
+    /// they cover to its bottom edge. Where their lower edge stops part of the
+    /// way into a row under the first line, they are their tint alone there,
+    /// and that row's letters show through: opaque, the edge would cut the
+    /// tops off them. That row is the first line of output, or the command
+    /// itself under a prompt that starts with a blank line.
+    ///
+    /// The plates are 26 px tall and 12 px under the block's top at every
+    /// size, and the rows are not. At the default size they start above the
+    /// first row and reach 6.5 px into the second. From 15.5 pt, with rows of
+    /// 19 px, the first row reaches below them, and they hide all they cover.
+    /// With rows of 10 px or less, about 8 pt and under, they start a pixel or
+    /// more into the first row and cover the next row or two whole.
+    ///
+    /// Over the output of a block whose top has scrolled away, or of one with
+    /// no command and so no space above its first row, the rows fall wherever
+    /// the scroll or the output puts them and no line is theirs; they hide all
+    /// of what is under them there.
+    fn opaque_part(&self, origin: Vector2F, item: Visible, plates: RectF) -> RectF {
+        let height = self.font.metrics().height;
+        let padding = self.padding_top(item.index);
+        // The same sum `paint_item` sets the rows by.
+        let rows_top = origin.y() + item.top + padding * height;
+        // On the first line while the block's top is in view, and while it
+        // is scrolling away for as long as the plates still start above it.
+        let on_the_first_line = item.top >= 0. || plates.min_y() <= rows_top;
+        if padding <= 0. || !on_the_first_line || height <= 0. {
+            return plates;
+        }
+        // The first row is the plates' own line even when they end inside it.
+        let rows = ((plates.max_y() - rows_top) / height).floor().max(1.);
+        let bottom = rows_top + rows * height;
+        if bottom >= plates.max_y() {
+            return plates;
+        }
+        RectF::from_points(plates.origin(), vec2f(plates.max_x(), bottom))
     }
 
     /// Which item a window position is over, and which of that item's controls
@@ -1535,23 +1599,68 @@ impl BlockList {
             self.view.set_menu_at(None);
             return;
         };
+        let item = *item;
+
+        // Hit-recorded here, in the list's own layer, so that a press on a
+        // control is a press on it rather than on the block's text underneath,
+        // and the pointer over one is the arrow rather than the list's I-beam.
+        for control in self.controls().iter().copied() {
+            ctx.scene
+                .draw_rect_with_hit_recording(self.control_at(origin, item, control));
+        }
+
+        // Painted a layer up. A layer draws its glyphs after all of its rects,
+        // so a plate in the list's own layer is under the prompt line it sits
+        // on however opaque it is, and a command long enough to reach the
+        // controls would show through them with the icons over its letters.
+        // Click-through, so the hits stay the ones recorded above.
+        ctx.scene.start_layer(ClipBounds::ActiveLayer);
+        ctx.scene.set_active_layer_click_through();
+
+        // Under the plates, the pane's ground, then the block's washes in the
+        // order `paint_item` lays them down — or the plates would be holes cut
+        // in a failed or a selected block. Once, under both plates and the
+        // gap between them: a gap left open shows a sliver of the letter under
+        // it, between two squares that hide the rest of its word. They stop
+        // where `opaque_part` says; each plate's tint is the whole square.
+        let ground = color(self.snapshot.background);
+        let washes = [
+            (self.verdict(item.index) == Verdict::Failed)
+                .then(|| theme().terminal.normal[1].with_alpha(WASH_ALPHA)),
+            (self.block(item.index).map(|block| block.id) == self.view.selected())
+                .then(|| theme().accent.with_alpha(SELECT_WASH_ALPHA)),
+        ];
+        let round = Radius::Pixels(CONTROL_RADIUS);
+        if let Some(span) = self.plates(origin, item) {
+            let opaque = self.opaque_part(origin, item, span);
+            // Square along a cut, which is a row's edge rather than a plate's.
+            let corners = if opaque == span {
+                CornerRadius::with_all(round)
+            } else {
+                CornerRadius::with_top(round)
+            };
+            for fill in std::iter::once(ground).chain(washes.into_iter().flatten()) {
+                ctx.scene
+                    .draw_rect_without_hit_recording(opaque)
+                    .with_background(fill)
+                    .with_corner_radius(corners);
+            }
+        }
 
         for control in self.controls().iter().copied() {
-            let bounds = self.control_at(origin, *item, control);
+            let bounds = self.control_at(origin, item, control);
             // The dots stay lit while their menu is up, because they are what
             // it belongs to.
             let held = self.menu == Some(shown) && control == Control::Menu;
-            let plate = if held || self.view.on_control() == Some(control) {
+            let tint = if held || self.view.on_control() == Some(control) {
                 theme().overlay_3
             } else {
                 theme().overlay_1
             };
-            // Hit-recorded, so that a press on it is a press on the control
-            // rather than on the block's text underneath.
             ctx.scene
-                .draw_rect_with_hit_recording(bounds)
-                .with_background(plate)
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CONTROL_RADIUS)));
+                .draw_rect_without_hit_recording(bounds)
+                .with_background(tint)
+                .with_corner_radius(CornerRadius::with_all(round));
 
             let inset = (CONTROL_SIZE - CONTROL_ICON_SIZE) / 2.;
             ctx.scene.draw_icon(
@@ -1568,6 +1677,7 @@ impl BlockList {
                     .set_menu_at(Some(bounds.origin() + bounds.size() - origin));
             }
         }
+        ctx.scene.stop_layer();
     }
 
     /// Paints the thumb, in the geometry the general-purpose scrollable uses.
