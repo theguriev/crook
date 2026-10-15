@@ -536,6 +536,9 @@ pub(super) enum Control {
     Start,
     /// The button that does the thing.
     Confirm,
+    /// "Show the folder", under a sentence saying a removal left files in
+    /// one.
+    ShowLeftBehind,
 }
 
 /// Whether a menu is up, on which tab, and what it is showing.
@@ -640,6 +643,10 @@ pub(super) struct TabMenuState {
     pub(super) look: u64,
     /// What git said about the last thing that was asked of it, if it refused.
     pub(super) problem: Option<String>,
+    /// The sentence that said a removal left files git could not delete, and
+    /// the directory they are in: what Show the folder opens, while that
+    /// sentence is the one [`Self::problem`] holds. See [`Self::left_behind`].
+    left_behind: Option<(String, PathBuf)>,
     /// Whether a git command is running for the creator or the confirmation
     /// right now. The sweep keeps its own, inside [`Sweep`], because its
     /// running state has a count in it.
@@ -731,6 +738,25 @@ impl TabMenuState {
     pub(super) fn next_epoch(&mut self) -> u64 {
         self.epoch = self.epoch.wrapping_add(1);
         self.epoch
+    }
+
+    /// Says `problem` under the list, and offers under it to show `folder`:
+    /// where a removal left the files git could not delete.
+    pub(super) fn say_left_behind(&mut self, problem: String, folder: Option<PathBuf>) {
+        self.left_behind = folder.map(|folder| (problem.clone(), folder));
+        self.problem = Some(problem);
+    }
+
+    /// The directory Show the folder opens, while the sentence that offered
+    /// it is still the one the menu says.
+    ///
+    /// Kept with its sentence rather than cleared beside it, because over
+    /// twenty places in the window put a sentence on this menu or take one
+    /// off, and a button that outlived its sentence would stand under
+    /// somebody else's, offering a folder that sentence never mentioned.
+    pub(super) fn left_behind(&self) -> Option<&Path> {
+        let (said, folder) = self.left_behind.as_ref()?;
+        (self.problem.as_ref() == Some(said)).then_some(folder.as_path())
     }
 
     /// The mouse state for one control.
@@ -1059,8 +1085,31 @@ fn listing(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     if let Some(problem) = &state.problem {
         column.add_child(note(problem.as_str(), ui));
     }
+    if state.left_behind().is_some() {
+        column.add_child(show_left_behind(workspace, ui));
+    }
 
     column.finish()
+}
+
+/// Show the folder, under the sentence saying a removal left files in one.
+///
+/// The files are nowhere Crook will list again — git no longer knows the
+/// checkout, so neither does this menu — and they are ones this user could
+/// not delete, so the way to them is the way out of this menu: a file
+/// manager, where a person can see what they are and deal with them.
+fn show_left_behind(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
+    let state = workspace.tab_menu();
+    Container::new(button(
+        state.control(Control::ShowLeftBehind),
+        "Show the folder",
+        false,
+        Some(WorkspaceAction::Worktree(WorktreeAction::ShowLeftBehind)),
+        ui,
+    ))
+    .with_horizontal_padding(ROW_INSET)
+    .with_margin_bottom(4.)
+    .finish()
 }
 
 /// Every branch proved to have landed that no listed checkout has checked
@@ -2090,6 +2139,66 @@ pub(super) fn pruned(deleted: &[(String, Result<(), crate::git::worktree::Error>
         }
     }
     sentences.join(" ")
+}
+
+/// What the list says about a checkout git took out of the repository
+/// without deleting every file in it — see
+/// [`crate::git::worktree::Error::PartlyRemoved`]: that it went, and where
+/// what is left is.
+///
+/// The directory in full, because nothing in Crook will list it again: it is
+/// where a person goes, in a file manager or a shell, to delete what git
+/// could not.
+pub(super) fn partly_removed(label: &str, path: &Path) -> String {
+    format!(
+        "Removed the checkout of {label}, but some files could not be deleted: {}.",
+        path.display()
+    )
+}
+
+/// What a sweep says about the checkouts in `left` — each by its name in the
+/// list and its directory — that git took out of the repository without
+/// deleting every file in them, with the directory Show the folder opens:
+/// the one checkout's own, or the nearest that holds them all.
+///
+/// Said apart from the ones that would not go: these went, as far as git and
+/// the list are concerned, and what is left of them is files to delete.
+pub(super) fn swept_but_left(left: &[(String, PathBuf)]) -> Option<(String, Option<PathBuf>)> {
+    match left {
+        [] => None,
+        [(label, path)] => Some((partly_removed(label, path), Some(path.clone()))),
+        several => {
+            let folder = holding_all(several.iter().map(|(_, path)| path.as_path()));
+            let said = match &folder {
+                Some(folder) => format!(
+                    "Removed {} checkouts, but some of their files could not be deleted: they \
+                     are in {}.",
+                    several.len(),
+                    folder.display()
+                ),
+                None => format!(
+                    "Removed {} checkouts, but some of their files could not be deleted; the \
+                     log says where.",
+                    several.len()
+                ),
+            };
+            Some((said, folder))
+        }
+    }
+}
+
+/// The deepest directory every one of `paths` is in, or `None` when they
+/// share none — two drives on Windows.
+fn holding_all<'a>(mut paths: impl Iterator<Item = &'a Path>) -> Option<PathBuf> {
+    let mut holding = paths.next()?.to_path_buf();
+    for path in paths {
+        while !path.starts_with(&holding) {
+            if !holding.pop() {
+                return None;
+            }
+        }
+    }
+    Some(holding)
 }
 
 /// One branch a deletion would take: its name, and under it what proved its

@@ -9430,6 +9430,130 @@ fn removing_the_last_checkout_leaves_no_empty_directory_in_the_store() {
     assert!(store.is_dir(), "the store itself went with it");
 }
 
+#[cfg(unix)]
+#[test]
+fn the_cross_on_a_half_removed_checkout_goes_back_to_the_list_saying_where_its_files_are() {
+    // git took the checkout out of the repository and could not delete a
+    // file a container left in it. The confirmation used to stay up saying
+    // git's error, over a checkout the list no longer has.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    ignoring_builds(&repository);
+    let made = spare_checkout(&mut harness, tab, &store, &[]);
+    let branch = git_in(&made, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let Some(_undeletable) = Undeletable::at(&made.join("build/as-root")) else {
+        return;
+    };
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    let index = harness
+        .worktree_index_under(&store)
+        .expect("the checkout that was made is not in the menu");
+    harness.dispatch_worktree(WorktreeAction::AskRemove(index));
+    harness.dispatch_worktree(WorktreeAction::Remove { force: false });
+    harness.wait_for("the list to be read again", |harness| {
+        harness.worktrees_listed() == Some(1)
+    });
+
+    assert_eq!(
+        harness.worktree_problem(),
+        Some(format!(
+            "Removed the checkout of {branch}, but some files could not be deleted: {}.",
+            made.display()
+        ))
+    );
+    assert!(made.join("build/as-root/built.o").is_file());
+    assert_eq!(show_the_folder(&mut harness), [made.display().to_string()]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_sweep_counts_a_half_removed_checkout_as_removed_and_says_where_its_files_are() {
+    // It used to count as one that "would not go", though git no longer
+    // knows it and the list will never offer it again.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    ignoring_builds(&repository);
+    let built = spare_checkout(&mut harness, tab, &store, &[]);
+    let clean = spare_checkout(&mut harness, tab, &store, std::slice::from_ref(&built));
+    let branch = git_in(&built, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let Some(_undeletable) = Undeletable::at(&built.join("build/as-root")) else {
+        return;
+    };
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("every checkout to be read", |harness| {
+        harness.worktrees_listed() == Some(3)
+    });
+    harness.dispatch_worktree(WorktreeAction::AskTidy);
+    harness.wait_for("the checkouts to be looked in", |harness| {
+        harness.worktrees_going() == Some(2)
+    });
+    harness.dispatch_worktree(WorktreeAction::Tidy);
+    harness.wait_for(
+        "the sweep to end and the list to be read again",
+        |harness| !harness.worktree_menu_is_tidying() && harness.worktrees_listed() == Some(1),
+    );
+
+    assert!(!clean.exists(), "the clean checkout was not removed");
+    assert_eq!(
+        harness.worktree_problem(),
+        Some(format!(
+            "Removed the checkout of {branch}, but some files could not be deleted: {}.",
+            built.display()
+        ))
+    );
+    assert_eq!(show_the_folder(&mut harness), [built.display().to_string()]);
+}
+
+#[test]
+fn a_sweep_that_left_files_in_several_checkouts_shows_the_folder_they_are_all_in() {
+    let repository = Path::new("/store/repo");
+    let left = [
+        ("feat/a".to_owned(), repository.join("feat").join("a")),
+        ("fix-b".to_owned(), repository.join("fix-b")),
+    ];
+
+    let (said, folder) =
+        super::tab_menu::swept_but_left(&left).expect("two checkouts left files behind");
+
+    assert_eq!(folder.as_deref(), Some(repository));
+    assert_eq!(
+        said,
+        format!(
+            "Removed 2 checkouts, but some of their files could not be deleted: they are in {}.",
+            repository.display()
+        )
+    );
+    assert_eq!(super::tab_menu::swept_but_left(&[]), None);
+}
+
+#[test]
+fn show_the_folder_goes_with_the_sentence_that_offered_it() {
+    // A later sentence on the menu must not stand over a button offering a
+    // folder it never mentioned.
+    let folder = PathBuf::from("/store/repo/feat-x");
+    let mut state = super::tab_menu::TabMenuState::default();
+
+    state.say_left_behind("Some files were left.".to_owned(), Some(folder.clone()));
+    assert_eq!(state.left_behind(), Some(folder.as_path()));
+
+    state.problem = Some("Something else happened.".to_owned());
+    assert_eq!(state.left_behind(), None);
+    state.problem = None;
+    assert_eq!(state.left_behind(), None);
+
+    state.say_left_behind("Nothing was left.".to_owned(), None);
+    assert_eq!(state.left_behind(), None);
+}
+
 /// The harness's one tab working in a fresh scratch repository, with the
 /// store pointed into the scratch. `None` where there is no git.
 fn window_on_a_repository(scratch: &Scratch) -> Option<(Harness, PathBuf, PathBuf, TabId)> {
@@ -9796,6 +9920,127 @@ fn finishing_a_task_whose_work_has_not_landed_keeps_its_branch_and_says_so() {
     assert!(
         worktree_menu_reads(&scene, &format!("Kept {kept}")),
         "the list does not say the branch was kept"
+    );
+}
+
+/// A directory holding a file nobody can delete until this drops: what a
+/// container run as root leaves in a bind-mounted `build/`.
+///
+/// A copy of the one the worktree module's tests keep, for the reason that
+/// file gives for copying its scratch harness.
+#[cfg(unix)]
+struct Undeletable {
+    directory: PathBuf,
+}
+
+#[cfg(unix)]
+impl Undeletable {
+    /// Makes `directory` with a file in it and takes away the permission
+    /// deleting that file needs — or, for a user the permission does not
+    /// stop, says so and answers `None`, since there is nothing to test.
+    fn at(directory: &Path) -> Option<Self> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::create_dir_all(directory).expect("the checkout is there");
+        fs::write(directory.join("built.o"), "written by a container\n")
+            .expect("the checkout is there");
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o555))
+            .expect("the scratch directory is ours to chmod");
+        let undeletable = Self {
+            directory: directory.to_owned(),
+        };
+        if fs::write(directory.join("probe"), "").is_ok() {
+            eprintln!("skipping: this user writes into a directory nobody may write into");
+            return None;
+        }
+        Some(undeletable)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Undeletable {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Before the scratch directory goes, which could not delete it either.
+        let _ = fs::set_permissions(&self.directory, fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// Commits a `.gitignore` of `build/` on what `repository` has checked out,
+/// so that a checkout made from it afterwards holds a build git removes
+/// without being forced.
+fn ignoring_builds(repository: &Path) {
+    fs::write(repository.join(".gitignore"), "build/\n").expect("the repository is there");
+    git_in(repository, &["add", ".gitignore"]);
+    git_in(
+        repository,
+        &["commit", "--no-verify", "-m", "ignore the build"],
+    );
+}
+
+/// Presses Show the folder under the list's sentence, and answers what that
+/// asked the platform to open.
+fn show_the_folder(harness: &mut Harness) -> Vec<String> {
+    crate::browser::record_opens();
+    let scene = harness.frame();
+    harness.click(
+        center(worktree_row_saying(&scene, "Show the folder")),
+        MouseButton::Left,
+    );
+    crate::browser::opened()
+}
+
+#[cfg(unix)]
+#[test]
+fn finish_says_where_a_half_removed_checkout_left_files_and_deletes_the_landed_branch() {
+    // A container run as root left a file in the checkout's ignored build/,
+    // and git cannot delete it. git stops there, unregisters the checkout
+    // all the same, and fails. That read "The checkout of X was kept", left
+    // the landed branch, and left the directory in the store with nothing
+    // to list it. The checkout went, as far as git is concerned, so its
+    // branch goes on the same proof as after any removal, and the list says
+    // where the files are.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, store, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    ignoring_builds(&repository);
+    let (checkout, pane) = task_checkout(&mut harness, tab, &store);
+    let branch = git_in(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    commit_in(&checkout, "task.txt", "the task");
+    squash_in(&repository, &branch);
+    let Some(_undeletable) = Undeletable::at(&checkout.join("build/as-root")) else {
+        return;
+    };
+
+    ask_about_the_task(&mut harness, pane, false);
+    harness.dispatch_worktree(WorktreeAction::Finish);
+    wait_for_the_task_to_go(&mut harness);
+
+    let said = harness
+        .worktree_problem()
+        .expect("the list says nothing about the task");
+    assert!(
+        said.starts_with(&format!(
+            "Removed the checkout of {branch}, but some files could not be deleted: {}. \
+             Deleted {branch}: ",
+            checkout.display()
+        )),
+        "the list does not say the checkout went and where its files are: {said}"
+    );
+    assert!(
+        !has_branch(&repository, &branch),
+        "the landed branch was kept"
+    );
+    assert!(
+        !harness.pane_ids().contains(&pane),
+        "the tab working in the checkout is still open"
+    );
+    assert!(checkout.join("build/as-root/built.o").is_file());
+    assert_eq!(
+        show_the_folder(&mut harness),
+        [checkout.display().to_string()]
     );
 }
 
@@ -10246,7 +10491,7 @@ fn carrying_out_a_task_keeps_everything_when_its_checkout_changed_after_the_last
 
     let plan = super::finish::read_plan(&checkout, &store).expect("the checkout is looked at");
     fs::write(checkout.join("late.txt"), "nobody named me\n").expect("the checkout is there");
-    let report = super::finish::carry_out(&repository, &plan, true, Some(&store));
+    let report = super::finish::carry_out(&repository, &plan, true, Some(&store)).report;
     assert!(
         report.contains("late.txt appeared in it"),
         "the report does not say why: {report}"
@@ -10258,7 +10503,7 @@ fn carrying_out_a_task_keeps_everything_when_its_checkout_changed_after_the_last
     let plan = super::finish::read_plan(&checkout, &store).expect("the checkout is looked at");
     git_in(&checkout, &["switch", "--detach"]);
     let stranded = commit_in(&checkout, "stranded.txt", "on no branch");
-    let report = super::finish::carry_out(&repository, &plan, false, Some(&store));
+    let report = super::finish::carry_out(&repository, &plan, false, Some(&store)).report;
     assert!(
         report.contains("1 commit on no branch"),
         "the report does not say why: {report}"
@@ -10294,7 +10539,7 @@ fn an_ignored_file_written_after_the_last_look_keeps_the_checkout() {
         assert_eq!(plan.local.ignored, 0, "the question would have counted it");
         fs::write(checkout.join("keys.secret"), "nobody counted me\n")
             .expect("the checkout is there");
-        let report = super::finish::carry_out(&repository, &plan, discard, Some(&store));
+        let report = super::finish::carry_out(&repository, &plan, discard, Some(&store)).report;
         assert!(
             report.contains("1 ignored appeared in it"),
             "the report does not say why (discard: {discard}): {report}"
@@ -10467,7 +10712,7 @@ fn a_commit_made_in_a_submodule_after_the_last_look_keeps_the_checkout() {
     git_in(&lib, &["switch", "--quiet", "-c", "more"]);
     let later = commit_in(&lib, "later.txt", "nobody named me");
     git_in(&lib, &["switch", "--quiet", "fix"]);
-    let report = super::finish::carry_out(&repository, &plan, true, Some(&store));
+    let report = super::finish::carry_out(&repository, &plan, true, Some(&store)).report;
     assert!(
         report.contains("only the submodule lib holds appeared in it"),
         "the report does not say why: {report}"

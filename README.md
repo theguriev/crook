@@ -921,7 +921,10 @@ Twenty-two features, and the page that configures them:
   the base — merged, or squashed in by the forge, which git itself cannot tell — is marked
   `merged`, worked out from the repository alone with nothing sent anywhere, and
   `Remove 2 merged checkouts…` takes just those, on the same terms. A removal also takes the
-  directories of the store it leaves empty. Deleting a *branch* is a gesture of its own, and
+  directories of the store it leaves empty. One git can only half do — over a file it may not
+  delete, such as one a container wrote as root — is said as that rather than as a refusal: git
+  no longer lists the checkout, the menu names the folder the rest is left in, and
+  `Show the folder` opens it. Deleting a *branch* is a gesture of its own, and
   only on that proof: `Delete 4 merged branches…` names each one with the commit on the base
   that has its work, proves it again the moment before it goes, and keeps any that moved in
   between; a branch the proof cannot reach is never offered. On a tab in a checkout Crook made,

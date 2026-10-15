@@ -4905,6 +4905,17 @@ impl Workspace {
             }
             WorktreeAction::Finish => self.finish_task(false, ctx),
             WorktreeAction::Discard => self.finish_task(true, ctx),
+            // Where the button is drawn and nowhere else: under the sentence
+            // that offered it, on the list. The menu stays up, since a file
+            // manager that opened behind the window is a press somebody will
+            // want to make again.
+            WorktreeAction::ShowLeftBehind => {
+                if self.tab_menu.mode == WorktreeMode::Listing
+                    && let Some(folder) = self.tab_menu.left_behind()
+                {
+                    crate::browser::open_folder(folder);
+                }
+            }
             WorktreeAction::ReviewDiscard => {
                 // Only from Discard's first question, and only once it has
                 // something to say: the second names what the first could
@@ -6654,21 +6665,16 @@ impl Workspace {
         self.start_chomping(ctx);
         ctx.notify();
 
-        self.remove_next(repository, remaining, 0, 0, epoch, ctx);
+        self.remove_next(repository, remaining, Tally::default(), epoch, ctx);
     }
 
-    /// Removes the next checkout of a sweep, and then the one after it.
+    /// Removes the next checkout of a sweep, and then the one after it,
+    /// counting in `tally` what it will have to say when it ends.
     ///
-    /// `refused` counts the ones git would not let go. Never forced, and one
-    /// refusal does not stop the others: a checkout somebody started working
-    /// in between the counting and the button is a checkout to leave
-    /// standing, not a reason to abandon the five that are finished.
-    ///
-    /// `in_use` counts the ones a pane of this window had entered by their
-    /// turn, which are left standing without asking git: a checkout is on the
-    /// list for having no pane in it, and nothing locks it again when one
-    /// comes back — a reopened tab, a restored session, a shell's `cd` — so
-    /// git would have nothing to refuse over. See [`remove_unless_in_use`].
+    /// Never forced, and one refusal does not stop the others: a checkout
+    /// somebody started working in between the counting and the button is a
+    /// checkout to leave standing, not a reason to abandon the five that are
+    /// finished.
     ///
     /// The chain runs to the end whether or not the menu is still up — the
     /// removals were asked for, and closing a popup is not a way of asking
@@ -6679,8 +6685,7 @@ impl Workspace {
         &mut self,
         repository: PathBuf,
         mut remaining: std::collections::VecDeque<Going>,
-        refused: usize,
-        in_use: usize,
+        mut tally: Tally,
         epoch: u64,
         ctx: &mut ViewContext<Self>,
     ) {
@@ -6714,14 +6719,19 @@ impl Workspace {
             if stopped {
                 sentences.push(format!("Stopped after {done} of {of}."));
             }
-            match in_use {
+            match tally.in_use {
                 0 => {}
                 1 => sentences.push("One checkout is in use now and was kept.".to_owned()),
                 in_use => {
                     sentences.push(format!("{in_use} checkouts are in use now and were kept."));
                 }
             }
-            match refused {
+            let left = super::tab_menu::swept_but_left(&tally.left_behind);
+            let folder = left.as_ref().and_then(|(_, folder)| folder.clone());
+            if let Some((said, _)) = left {
+                sentences.push(said);
+            }
+            match tally.refused {
                 0 => {}
                 1 => sentences.push("One checkout would not go; the log says why.".to_owned()),
                 refused => {
@@ -6731,7 +6741,7 @@ impl Workspace {
                 }
             }
             if !sentences.is_empty() {
-                self.tab_menu.problem = Some(sentences.join(" "));
+                self.tab_menu.say_left_behind(sentences.join(" "), folder);
                 ctx.notify();
             }
             return;
@@ -6758,20 +6768,28 @@ impl Workspace {
 
         // The pirate moves past one it leaves standing as past one that went.
         ctx.spawn(removing, move |workspace, removed, ctx| {
-            let (refused, in_use) = match removed {
-                Ok(Removal::Gone) => (refused, in_use),
+            match removed {
+                Ok(Removal::Gone) => {}
                 Ok(Removal::InUse) => {
                     log::info!(
                         "{} was kept: a pane is working in it now",
                         going.path.display()
                     );
-                    (refused, in_use + 1)
+                    tally.in_use += 1;
+                }
+                Err(crate::git::worktree::Error::PartlyRemoved { path, message }) => {
+                    log::warn!(
+                        "{} was removed, but files are left in {}: {message}",
+                        going.label,
+                        path.display()
+                    );
+                    tally.left_behind.push((going.label, path));
                 }
                 Err(problem) => {
                     log::warn!("{} was not removed: {problem}", going.path.display());
-                    (refused + 1, in_use)
+                    tally.refused += 1;
                 }
-            };
+            }
             if workspace.tab_menu.epoch == epoch
                 && let Sweep::Removing { done, current, .. } = &mut workspace.tab_menu.sweep
             {
@@ -6779,7 +6797,7 @@ impl Workspace {
                 *current = remaining.front().map(|going| going.label.clone());
                 ctx.notify();
             }
-            workspace.remove_next(repository, remaining, refused, in_use, epoch, ctx);
+            workspace.remove_next(repository, remaining, tally, epoch, ctx);
         })
         .detach();
     }
@@ -6838,6 +6856,12 @@ impl Workspace {
                     Ok(Removal::InUse) => {
                         log::info!("{label} was kept: a pane is working in it now")
                     }
+                    Err(crate::git::worktree::Error::PartlyRemoved { path, message }) => {
+                        log::warn!(
+                            "{label} was removed, but files are left in {}: {message}",
+                            path.display()
+                        );
+                    }
                     Err(problem) => log::warn!("a removal nobody is waiting for failed: {problem}"),
                 }
                 return;
@@ -6864,6 +6888,24 @@ impl Workspace {
                     }
                     workspace.tab_menu.problem =
                         Some(format!("{label} is in use now and was kept."));
+                    ctx.notify();
+                }
+                // Gone as far as git is concerned, so back to the list as for
+                // one that went — the confirmation's checkout is not on it any
+                // more — saying where the files git could not delete are.
+                Err(crate::git::worktree::Error::PartlyRemoved { path, message }) => {
+                    log::warn!(
+                        "{label} was removed, but files are left in {}: {message}",
+                        path.display()
+                    );
+                    if let Some(tab) = workspace.tab_menu.tab {
+                        workspace.tab_menu.tab = None;
+                        workspace.open_tab_menu(tab, ctx);
+                    }
+                    workspace.tab_menu.say_left_behind(
+                        super::tab_menu::partly_removed(&label, &path),
+                        Some(path),
+                    );
                     ctx.notify();
                 }
                 // The one refusal that is a question rather than an error:
@@ -7190,17 +7232,19 @@ impl Workspace {
         let doing = ctx.background().spawn(async move {
             super::finish::carry_out(&repository, &plan, discard, store.as_deref())
         });
-        ctx.spawn(doing, move |workspace, report, ctx| {
+        ctx.spawn(doing, move |workspace, done, ctx| {
             let Some(tab) = landing.filter(|tab| {
                 workspace.tab_menu.tab == Some(*tab) && Some(workspace.tab_menu.opening) == opening
             }) else {
-                log::info!("a task finished with nobody waiting: {report}");
+                log::info!("a task finished with nobody waiting: {}", done.report);
                 return;
             };
             // Back to the list, read again, with what happened under it.
             workspace.tab_menu.tab = None;
             workspace.open_tab_menu(tab, ctx);
-            workspace.tab_menu.problem = Some(report);
+            workspace
+                .tab_menu
+                .say_left_behind(done.report, done.left_behind);
             ctx.notify();
         })
         .detach();
@@ -12189,6 +12233,25 @@ enum Removal {
     InUse,
 }
 
+/// What a sweep has to say once it ends, counted as it goes: see
+/// [`Workspace::remove_next`].
+#[derive(Debug, Default)]
+struct Tally {
+    /// The checkouts git would not let go.
+    refused: usize,
+    /// The ones a pane of this window had entered by their turn, which are
+    /// left standing without asking git: a checkout is on the list for having
+    /// no pane in it, and nothing locks it again when one comes back — a
+    /// reopened tab, a restored session, a shell's `cd` — so git would have
+    /// nothing to refuse over. See [`remove_unless_in_use`].
+    in_use: usize,
+    /// The ones git took out of the repository without deleting every file
+    /// in them, each by its name in the list and the directory the files are
+    /// in. Gone, as far as the list is concerned, and said apart from the
+    /// ones that would not go.
+    left_behind: Vec<(String, PathBuf)>,
+}
+
 /// Removes the checkout at `path` unless one of `panes` — where the window's
 /// panes were as the removal started — is in it, taking Crook's lock off it
 /// first when `release` says to.
@@ -12246,8 +12309,10 @@ fn a_directory_is_in(directories: &[PathBuf], checkout: &Path) -> bool {
 ///
 /// **Blocking**, both halves, and the second only after the first has
 /// succeeded: a checkout git refused to remove is still in its directory, and
-/// the directories above it are not empty anyway. The branch stays, as it
-/// always has — see [`crate::git::worktree::remove`].
+/// the directories above it are not empty anyway — nor are they above one git
+/// could only half remove, whose directory stays with the files it could not
+/// delete. The branch stays, as it always has — see
+/// [`crate::git::worktree::remove`].
 pub(super) fn remove_checkout(
     repository: &Path,
     path: &Path,

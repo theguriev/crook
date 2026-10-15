@@ -45,7 +45,10 @@
 //!    still keeping the repository of a submodule that was: git removes that
 //!    only when forced, and the force deletes the submodule's repository with
 //!    the checkout — so Discard's questions name the commits and stashes
-//!    only a submodule holds as they name the branch's.
+//!    only a submodule holds as they name the branch's. A removal git could
+//!    only half do, over a file it may not delete, has still taken the
+//!    checkout out of the repository: the list says where the files it left
+//!    are, offers to show them, and the branch is dealt with as below.
 //! 3. The branch goes if the proof holds — or, for Discard, whether or not it
 //!    does, provided it has not moved since its commits were counted.
 //!
@@ -89,7 +92,7 @@ use crate::tab::{AgentSession, AgentStatus, PaneId};
 use super::action::WorktreeAction;
 use super::tab_menu::{
     NAMED, busy_line, buttons, divider, evidence, header, holding, local_summary, named, note,
-    stranded_summary,
+    partly_removed, stranded_summary,
 };
 use super::view::Workspace;
 
@@ -713,6 +716,16 @@ fn losses(plan: &Plan) -> Vec<String> {
     lines
 }
 
+/// What carrying out a task did, for the list it lands on to say.
+#[derive(Debug)]
+pub(super) struct Done {
+    /// What happened, in a sentence or two.
+    pub(super) report: String,
+    /// The directory the removal left files in that git could not delete, if
+    /// it did: what the list offers to show under the report.
+    pub(super) left_behind: Option<PathBuf>,
+}
+
 /// Removes the checkout and deletes or keeps its branch, and answers what
 /// happened in a sentence or two.
 ///
@@ -723,20 +736,25 @@ fn losses(plan: &Plan) -> Vec<String> {
 /// The branch is not touched unless the checkout went: a checkout git would
 /// not remove still has it checked out, and the deletion would refuse it
 /// anyway. Neither is touched if [`appeared_since`] finds anything the
-/// question did not say.
+/// question did not say. A checkout git took out of the repository without
+/// deleting every file in it went, as far as its branch is concerned — see
+/// [`crate::git::worktree::Error::PartlyRemoved`].
 pub(super) fn carry_out(
     repository: &Path,
     plan: &Plan,
     discard: bool,
     store: Option<&Path>,
-) -> String {
+) -> Done {
     use crate::git::worktree;
 
     if let Some(why) = appeared_since(repository, plan, discard) {
-        return format!(
-            "The checkout of {} was kept, and so was its branch: {why}.",
-            plan.label()
-        );
+        return Done {
+            report: format!(
+                "The checkout of {} was kept, and so was its branch: {why}.",
+                plan.label()
+            ),
+            left_behind: None,
+        };
     }
     let checkout = plan.checkout();
     // A checkout this window made is locked for as long as a pane works in
@@ -749,12 +767,39 @@ pub(super) fn carry_out(
     if let Err(problem) = worktree::release(repository, &checkout.path) {
         log::debug!("could not unlock {}: {problem}", checkout.path.display());
     }
-    if let Err(problem) = super::view::remove_checkout(repository, &checkout.path, discard, store) {
-        return format!("The checkout of {} was kept: {problem}.", plan.label());
-    }
-    let removed = format!("Removed the checkout of {}.", plan.label());
+    let left_behind = match super::view::remove_checkout(repository, &checkout.path, discard, store)
+    {
+        Ok(()) => None,
+        // git unregistered the checkout before it said what it could not
+        // delete, so the branch is checked out nowhere: the state a whole
+        // removal leaves it in. So it is dealt with as after one and by the
+        // same rules — proved again, and its tip checked, before it goes;
+        // for Discard, the tip its commits were counted from — and what is
+        // left in the directory is files git no longer knows of.
+        Err(worktree::Error::PartlyRemoved { path, message }) => {
+            log::warn!(
+                "{} was removed, but files are left in {}: {message}",
+                plan.label(),
+                path.display()
+            );
+            Some(path)
+        }
+        Err(problem) => {
+            return Done {
+                report: format!("The checkout of {} was kept: {problem}.", plan.label()),
+                left_behind: None,
+            };
+        }
+    };
+    let removed = match &left_behind {
+        Some(path) => partly_removed(&plan.label(), path),
+        None => format!("Removed the checkout of {}.", plan.label()),
+    };
     let Some(branch) = &checkout.branch else {
-        return removed;
+        return Done {
+            report: removed,
+            left_behind,
+        };
     };
 
     let branch_said = match (&plan.landed, discard) {
@@ -768,7 +813,10 @@ pub(super) fn carry_out(
         },
         (None, true) => {
             let Some(tip) = &plan.tip else {
-                return removed;
+                return Done {
+                    report: removed,
+                    left_behind,
+                };
             };
             match worktree::discard_branch(repository, branch, tip, plan.base.as_deref()) {
                 Ok(()) => match plan.lost.len() + plan.dropped.len() {
@@ -780,7 +828,10 @@ pub(super) fn carry_out(
             }
         }
     };
-    format!("{removed} {branch_said}")
+    Done {
+        report: format!("{removed} {branch_said}"),
+        left_behind,
+    }
 }
 
 /// What has appeared in the checkout since `plan` was read that the press

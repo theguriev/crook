@@ -63,8 +63,9 @@ pub fn open(url: &str) -> bool {
 /// Shows `folder` in the platform's file manager, reporting whether the
 /// attempt was made.
 ///
-/// For the folders Crook itself writes into — its logs and crash reports —
-/// and never for anything a program printed, which is what [`open`] and its
+/// For the folders Crook itself knows of — its logs and crash reports, and a
+/// checkout git listed whose removal left files it could not delete — and
+/// never for anything a program printed, which is what [`open`] and its
 /// list of schemes are for. A path rather than a `file://` URL, which would
 /// need every space and `%` in a home directory escaped to mean the same
 /// folder. Only a folder that exists is handed over: `explorer` given a

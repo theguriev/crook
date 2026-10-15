@@ -361,6 +361,21 @@ pub enum Error {
         /// The path that was asked for.
         path: PathBuf,
     },
+    /// git took the checkout at `path` out of the repository and could not
+    /// delete everything in its directory: a removal half done, which
+    /// [`remove`] reports rather than calling it a refusal.
+    ///
+    /// The checkout is gone as far as git is concerned — its registration
+    /// went whatever became of its files, and its branch is checked out
+    /// nowhere — and what is left at `path` is files git no longer knows of:
+    /// the one it could not delete, most often one a container wrote as
+    /// another user, and whatever its walk had not reached when it stopped.
+    PartlyRemoved {
+        /// The directory the files that would not go are still in.
+        path: PathBuf,
+        /// git's own diagnostic, tidied into one line.
+        message: String,
+    },
     /// The branch is the one work lands on — the base itself, or the local
     /// branch a remote base shares its name with — and is never deleted.
     IsBase {
@@ -455,6 +470,11 @@ impl std::fmt::Display for Error {
             Self::NotAWorktree { path } => {
                 write!(formatter, "There is no worktree at {}", path.display())
             }
+            Self::PartlyRemoved { path, message } => write!(
+                formatter,
+                "Some files in {} could not be deleted: {message}",
+                path.display()
+            ),
             Self::IsBase { branch } => write!(formatter, "{branch} is the branch work lands on"),
             Self::BranchInUse { branch, at } => {
                 write!(formatter, "{branch} is checked out at {}", at.display())
@@ -1410,6 +1430,13 @@ pub fn add(repository: &Path, path: &Path, branch: &str, base: Option<&str>) -> 
 /// quietly also mean "take the checkout another agent is working in". The one
 /// lock Crook takes off before a removal is its own, through [`release`], and
 /// only once nothing in the window is working there.
+///
+/// A removal git could only half do is [`Error::PartlyRemoved`] and not a
+/// refusal. At a file it may not delete — one a container wrote as root,
+/// most often — git 2.55.0 stops deleting, leaving that file and whatever it
+/// had not reached, deletes the checkout's registration all the same, and
+/// exits 255 with "failed to delete". Called a refusal, that said the
+/// checkout was kept while nothing in the repository knew of it any more.
 pub fn remove(repository: &Path, path: &Path, force: bool) -> Result<(), Error> {
     let mut args = vec![OsStr::new("worktree"), OsStr::new("remove")];
     if force {
@@ -1422,7 +1449,32 @@ pub fn remove(repository: &Path, path: &Path, force: bool) -> Result<(), Error> 
     if finished.success {
         return Ok(());
     }
-    Err(classify(&finished.stderr))
+    Err(match classify(&finished.stderr) {
+        // Told by the listing rather than by git's sentence, which git
+        // translates and which says only that the directory would not go.
+        // Every refusal comes before git deletes anything and leaves the
+        // checkout listed, and git unregisters it whether or not its files
+        // went — "there's no going back from here", its source says there.
+        Error::Failed { message } if !still_listed(repository, path) => Error::PartlyRemoved {
+            path: path.to_owned(),
+            message,
+        },
+        refused => refused,
+    })
+}
+
+/// Whether the repository still lists a checkout at `path`, spelled as git
+/// lists it or leading where it does: git finds the checkout a removal names
+/// by where the path leads, so a link names one too. A listing that fails
+/// answers yes, which leaves a failure reported as git reported it.
+fn still_listed(repository: &Path, path: &Path) -> bool {
+    let Ok(worktrees) = list(repository) else {
+        return true;
+    };
+    let place = same_place(path);
+    worktrees
+        .iter()
+        .any(|worktree| worktree.path == path || same_place(&worktree.path) == place)
 }
 
 /// Deletes the directories `removed` sat in that are empty now, from the
