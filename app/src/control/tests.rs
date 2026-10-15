@@ -3351,8 +3351,8 @@ mod socket {
     /// work on the approval has gone. A wait for idle is answered then, and
     /// the stream is told `idle` before `finished`, as it is for an agent
     /// killed while it asks. Codex that `tab new` opened, whose folder comes
-    /// back when the person declines, and codex through `npx`, whose spinner
-    /// is any build tool's.
+    /// back when the person declines, and codex through `sh -c`, whose
+    /// spinner is any build tool's.
     #[test]
     fn the_end_of_its_command_ends_the_turn_a_title_stopped_asking_in() {
         // What the worker runs, the titles it shows, and what the stream

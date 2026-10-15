@@ -305,9 +305,22 @@ Twenty-two features, and the page that configures them:
   every agent** in the palette (`resume-agents`) sends every line a restore typed that you
   have not touched, in one press. What is remembered is the program's name and nothing after
   it, so a prompt typed on the command line never reaches the file, and it needs the shell
-  integration, which is what says what a pane is running. A line of your own goes in
-  `settings.json` under `resume_lines`, keyed by program — `{"claude": "claude --continue
-  --model opus"}` — and an empty one offers nothing. OpenCode and aider have no line until you
+  integration, which is what says what a pane is running. An agent started through a package
+  runner or a version manager is known too — `npx @google/gemini-cli`, the way Gemini CLI's
+  quick start has it, or `bunx`, `pnpm dlx`, `yarn dlx`, `npm exec`, `mise x … --` and
+  `asdf exec` — and its line is offered through the same one, `npx @google/gemini-cli --resume
+  latest`, since there may be no `gemini` on your `PATH`; the runner and the package are kept,
+  and its options are not. So is one behind `env`, a `VAR=value`, `command`, `exec`, `time`,
+  `nohup` or `nice`, none of which is kept, so an API key set on the line stays off the disk;
+  nor is a `PATH=`, so an agent only that `PATH` finds is offered its bare line. One run in
+  another directory (`env -C`, `mise x -C`, `npx --workspace`), in a sandbox (`mise x
+  --deny-all`), or with an option of `env`'s, the runner's or `mise x`'s that changes how it
+  runs (`-E`) or that Crook does not know is offered nothing, since a line without those would
+  resume another directory's conversation or run it some other way; its status is still read
+  from its title while it runs. An alias is not seen through: the shell reports the line the
+  way you typed it. A line of your own goes in `settings.json` under `resume_lines`, keyed by program — `{"claude":
+  "claude --continue --model opus"}` — and an empty one offers nothing; one that starts with
+  the agent's name is run through the same runner. OpenCode and aider have no line until you
   give them one: OpenCode's `--continue` reaches across a repository's worktrees, and aider's
   `--restore-chat-history` is left for you to choose. No output comes back, and no process
   does.

@@ -1341,6 +1341,283 @@ fn two_panes_of_one_agent_in_one_directory_are_each_offered_the_picker() {
     );
 }
 
+/// What each pane of a session's first tab says its agent was started
+/// through.
+fn written_launchers(session: &Session) -> Vec<Option<&str>> {
+    session.tabs[0]
+        .panes
+        .iter()
+        .map(|pane| pane.launcher.as_deref())
+        .collect()
+}
+
+#[test]
+fn an_agent_started_through_a_launcher_is_remembered_with_it_and_nothing_else_of_the_line() {
+    let directory = scratch("launcher-written");
+    let path = directory.join("session.json");
+    let strip = running(&[
+        (
+            &directory,
+            Some("GEMINI_API_KEY=secret npx -y @google/gemini-cli -i 'port the tab bar'"),
+        ),
+        (
+            &directory,
+            Some("mise x --quiet -j 8 node@22 -- codex --model o4"),
+        ),
+        (&directory, Some("env ANTHROPIC_API_KEY=secret claude")),
+        // A sandbox no resume line would keep: no agent, and no path.
+        (
+            &directory,
+            Some("mise x --allow-read /srv/confined -- claude"),
+        ),
+        // Another directory's agents, however env or npm was told it.
+        (&directory, Some("env -iC/srv/elsewhere claude")),
+        (
+            &directory,
+            Some("npx --workspace=packages/web @openai/codex"),
+        ),
+    ]);
+    Session::of(&strip, None)
+        .save_blocking(&path)
+        .expect("writable");
+
+    let session = Session::load(&path);
+    assert_eq!(
+        written_agents(&session),
+        [
+            Some("gemini"),
+            Some("codex"),
+            Some("claude"),
+            None,
+            None,
+            None
+        ]
+    );
+    assert_eq!(
+        written_launchers(&session),
+        [
+            Some("npx @google/gemini-cli"),
+            Some("mise x node@22 -- codex"),
+            None,
+            None,
+            None,
+            None
+        ]
+    );
+    let written = fs::read_to_string(&path).expect("readable");
+    for kept_out in [
+        "secret",
+        "API_KEY",
+        "port the tab bar",
+        "npx -y",
+        "--quiet",
+        "/srv/confined",
+        "--allow-read",
+        "/srv/elsewhere",
+        "packages/web",
+        "--model",
+    ] {
+        assert!(
+            !written.contains(kept_out),
+            "the file holds {kept_out:?}: {written}"
+        );
+    }
+}
+
+#[test]
+fn a_restored_pane_is_offered_its_resume_line_through_the_launcher_it_ran() {
+    let [gemini, codex, claude, shared] = ["gemini", "codex", "claude", "shared"]
+        .map(|name| scratch(&format!("launcher-offer-{name}")));
+    let path = shared.join("session.json");
+    Session::of(
+        &running(&[
+            (&gemini, Some("npx @google/gemini-cli")),
+            (
+                &codex,
+                Some("bunx @openai/codex@0.98.0 'fix the flaky test'"),
+            ),
+            (&claude, Some("mise x node@22 -- claude")),
+            (&shared, Some("claude")),
+            (&shared, Some("npx @anthropic-ai/claude-code")),
+        ]),
+        None,
+    )
+    .save_blocking(&path)
+    .expect("writable");
+
+    let restored = Session::load(&path).restore().expect("restored");
+    let panes: Vec<_> = restored.panes().map(|(_, pane)| pane.id()).collect();
+    assert_eq!(
+        offers(&restored),
+        [
+            (
+                panes[0],
+                "npx @google/gemini-cli --resume latest".to_owned()
+            ),
+            (
+                panes[1],
+                "bunx @openai/codex@0.98.0 resume --last".to_owned()
+            ),
+            (panes[2], "mise x node@22 -- claude --continue".to_owned()),
+            // One agent in one directory, however each was started: its
+            // conversations are kept in one place whatever ran it.
+            (panes[3], "claude --resume".to_owned()),
+            (
+                panes[4],
+                "npx @anthropic-ai/claude-code --resume".to_owned()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_person_s_own_resume_line_runs_through_the_launcher_when_it_starts_the_agent_by_name() {
+    let [by_name, by_alias] = ["by-name", "by-alias"].map(|name| scratch(&format!("own-{name}")));
+    let restored = Session::of(
+        &running(&[
+            (&by_name, Some("npx @google/gemini-cli")),
+            (&by_alias, Some("npx @openai/codex")),
+        ]),
+        None,
+    )
+    .restore()
+    .expect("restored");
+    let panes: Vec<_> = restored.panes().map(|(_, pane)| pane.id()).collect();
+
+    let own = resume_offers(&restored, |program, _| match program {
+        "gemini" => Some("gemini --resume latest --yolo".to_owned()),
+        _ => Some("cx resume --last".to_owned()),
+    });
+    assert_eq!(
+        own,
+        [
+            (
+                panes[0],
+                "npx @google/gemini-cli --resume latest --yolo".to_owned()
+            ),
+            // Started some other way, the line says how it is to be run.
+            (panes[1], "cx resume --last".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn a_file_from_before_launchers_were_remembered_reads_whole_and_offers_the_agent_s_own_line() {
+    let directory = scratch("launcher-old-file");
+    let path = directory.join("session.json");
+    fs::write(
+        &path,
+        serde_json::json!({
+            "tabs": [{"name": "old", "panes": [{"title": "old", "flex": 1.0,
+                "agent": "gemini", "working_directory": directory}]}]
+        })
+        .to_string(),
+    )
+    .expect("writable");
+
+    let session = Session::load(&path);
+    assert_eq!(written_agents(&session), [Some("gemini")]);
+    assert_eq!(written_launchers(&session), [None]);
+    assert!(
+        backups(&directory).is_empty(),
+        "a file missing the new key was treated as one that did not read"
+    );
+
+    let restored = session.restore().expect("restored");
+    let pane = restored.focused_pane_id().expect("a pane");
+    assert_eq!(
+        offers(&restored),
+        [(pane, "gemini --resume latest".to_owned())]
+    );
+}
+
+#[test]
+fn a_launcher_that_is_not_one_comes_back_as_the_agent_alone() {
+    let directory = scratch("launcher-salvage");
+    let path = directory.join("session.json");
+    let [a, b, c] = ["a", "b", "c"].map(|name| scratch(&format!("launcher-salvage-{name}")));
+    fs::write(
+        &path,
+        serde_json::json!({
+            "tabs": [
+                {"name": "edited", "panes": [{"title": "edited", "flex": 1.0,
+                    "agent": "claude", "launcher": "rm -rf ~; claude", "working_directory": a}]},
+                {"name": "another", "panes": [{"title": "another", "flex": 1.0,
+                    "agent": "claude", "launcher": "npx @google/gemini-cli",
+                    "working_directory": b}]},
+                {"name": "number", "panes": [{"title": "number", "flex": 1.0,
+                    "agent": "claude", "launcher": 7, "working_directory": c}]},
+            ]
+        })
+        .to_string(),
+    )
+    .expect("writable");
+
+    let session = Session::load(&path);
+    assert_eq!(
+        session
+            .tabs
+            .iter()
+            .map(|tab| tab.name.as_str())
+            .collect::<Vec<_>>(),
+        ["edited", "another", "number"],
+        "a bad launcher cost a tab"
+    );
+    assert_eq!(session.tabs[2].panes[0].launcher, None);
+
+    // What is offered comes from the table, never from the file: each pane
+    // is offered its agent's own line, and nothing the file put in front of
+    // it.
+    let restored = session.restore().expect("restored");
+    let lines: Vec<String> = offers(&restored)
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "claude --continue",
+            "claude --continue",
+            "claude --continue"
+        ]
+    );
+}
+
+#[test]
+fn resuming_an_agent_through_another_launcher_is_news_for_the_file() {
+    let directory = scratch("launcher-changed");
+
+    // Remembered by its name, resumed through `npx`: the next restart has to
+    // offer it through `npx` too.
+    let mut restored = Session::of(&running(&[(&directory, Some("claude"))]), None)
+        .restore()
+        .expect("restored");
+    let pane = restored.focused_pane_id().expect("a pane");
+    let resumed = restored.pane_mut(pane).expect("the pane").session_mut();
+    assert!(
+        resumed.set_running_command(Some("npx @anthropic-ai/claude-code --continue".to_owned())),
+        "the file went on saying claude was run by its name"
+    );
+    assert_eq!(
+        written_launchers(&Session::of(&restored, None)),
+        [Some("npx @anthropic-ai/claude-code")]
+    );
+
+    // The line a restore offered, run as it was offered, is no news at all.
+    let mut restored = Session::of(
+        &running(&[(&directory, Some("npx @google/gemini-cli"))]),
+        None,
+    )
+    .restore()
+    .expect("restored");
+    let pane = restored.focused_pane_id().expect("a pane");
+    let resumed = restored.pane_mut(pane).expect("the pane").session_mut();
+    assert!(
+        !resumed.set_running_command(Some("npx @google/gemini-cli --resume latest".to_owned())),
+        "resuming the agent the way it was offered is not a change"
+    );
+}
+
 #[test]
 fn one_window_keeps_the_session_file_until_it_closes() {
     // Two ordinary windows of one person: the first keeps the file, the

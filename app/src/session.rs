@@ -36,6 +36,11 @@
 //! restored pane to offer the agent's resume line — typed into its composer,
 //! unsent, because starting a process is a person's press and not a
 //! restore's. See [`resume_offers`] for which line each pane is offered.
+//! Beside the name, for an agent that was not started by it, the package
+//! runner or version manager it was started through — `npx
+//! @google/gemini-cli` — since without it the line is a program the person
+//! does not have; never the assignments or options around it — see
+//! [`PaneSnapshot::launcher`].
 //!
 //! **Not the settings pane.** It is a pane, so it *could* be, and it should not
 //! be: it is a thing somebody opened to change a setting, and a window that
@@ -74,7 +79,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::Resume;
+use crate::agent::{Launch, Resume};
 use crate::settings::{atomic_write, config_directory, ensure_directory};
 use crate::tab::{Pane, PaneGroup, SplitAxis, Tab, TabGroup, TabId, TabStrip};
 
@@ -240,7 +245,8 @@ pub struct PaneSnapshot {
     /// The share of the split this pane took, from a dragged divider.
     pub flex: f32,
     /// The coding agent the pane was running, by its program's name —
-    /// `claude`, `codex` — and nothing else of its command line.
+    /// `claude`, `codex` — and nothing else of its command line but
+    /// [`Self::launcher`].
     ///
     /// The one fact about a process the file keeps, and it is a name rather
     /// than the process: see the module docs. A value that is not a string —
@@ -249,6 +255,21 @@ pub struct PaneSnapshot {
     /// much less than one that does not come back.
     #[serde(deserialize_with = "a_name_or_none")]
     pub agent: Option<String>,
+    /// What that agent was started through, when it was not its own name:
+    /// a package runner and the agent's package, or a version manager —
+    /// `npx @google/gemini-cli`, `mise x node@22 -- claude`.
+    ///
+    /// Kept because a resume line is run the same way or not at all:
+    /// somebody who follows Gemini CLI's quick start runs it through `npx`
+    /// and has no `gemini` on `PATH`. Rebuilt by
+    /// [`launch_of`](crate::agent::launch_of) rather than copied from the
+    /// line, so never an assignment or a runner's option, which is where an
+    /// API key or a registry's password would be. `None` for an agent
+    /// started by its name and for a file that predates this key; a value
+    /// that is not a string reads as `None`, as [`Self::agent`]'s does, and
+    /// one that is not a launcher at all comes back as the agent alone.
+    #[serde(deserialize_with = "a_name_or_none")]
+    pub launcher: Option<String>,
 }
 
 impl Session {
@@ -589,13 +610,15 @@ impl PaneSnapshot {
     /// Records one pane.
     pub(crate) fn of(pane: &Pane) -> Self {
         let session = pane.session();
+        let launch = session.launch();
         Self {
             title: session.title.clone(),
             custom_title: session.custom_title.clone(),
             working_directory: session.shown_directory().map(Path::to_path_buf),
             remote_host: session.remote.as_ref().map(|remote| remote.host.clone()),
             flex: pane.flex(),
-            agent: session.agent().map(str::to_owned),
+            agent: launch.as_ref().map(|launch| launch.agent.to_owned()),
+            launcher: launch.and_then(|launch| launch.launcher),
         }
     }
 
@@ -645,17 +668,18 @@ impl PaneSnapshot {
             // the directory it was had in, and offered anywhere else it would
             // resume another directory's work, or none. By the table's name
             // for it, so a hand-edited name that no agent answers to comes
-            // back as nothing.
+            // back as nothing, and a launcher only in a shape the table's
+            // reading of a command line gives back.
             pane.session_mut().restored_agent = self
                 .agent
                 .as_deref()
-                .and_then(crate::agent::program_of)
-                .map(str::to_owned);
+                .and_then(|agent| Launch::remembered(agent, self.launcher.as_deref()));
         }
     }
 }
 
-/// A string, or `None` for any other value — see [`PaneSnapshot::agent`].
+/// A string, or `None` for any other value — see [`PaneSnapshot::agent`]
+/// and [`PaneSnapshot::launcher`].
 fn a_name_or_none<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
@@ -671,19 +695,22 @@ fn a_name_or_none<'de, D: serde::Deserializer<'de>>(
 /// most recent conversation in the pane's directory. Two or more panes of
 /// one agent in one directory are each offered [`Resume::Pick`] instead,
 /// because the directory is the only key there is and it names one
-/// conversation where they had several. `line` answers what each form is
-/// spelled as, and a pane it has no answer for is offered nothing.
+/// conversation where they had several — however each was started, since
+/// the agent keeps its conversations in one place whatever ran it. `line`
+/// answers what each form is spelled as, and a pane it has no answer for
+/// is offered nothing. What it answers is run through the launcher the
+/// agent was started with — see [`Launch::through_launcher`].
 pub fn resume_offers(
     strip: &TabStrip,
     line: impl Fn(&str, Resume) -> Option<String>,
 ) -> Vec<(crate::tab::PaneId, String)> {
-    let restored: Vec<(crate::tab::PaneId, &str, Option<&Path>)> = strip
+    let restored: Vec<(crate::tab::PaneId, &Launch, Option<&Path>)> = strip
         .panes()
         .filter_map(|(_, pane)| {
             let session = pane.session();
             Some((
                 pane.id(),
-                session.restored_agent.as_deref()?,
+                session.restored_agent.as_ref()?,
                 session.working_directory.as_deref(),
             ))
         })
@@ -691,17 +718,17 @@ pub fn resume_offers(
 
     restored
         .iter()
-        .filter_map(|(pane, agent, directory)| {
+        .filter_map(|(pane, launch, directory)| {
             let sharing = restored
                 .iter()
-                .filter(|(_, other, there)| other == agent && there == directory)
+                .filter(|(_, other, there)| other.agent == launch.agent && there == directory)
                 .count();
             let resume = if sharing > 1 {
                 Resume::Pick
             } else {
                 Resume::Last
             };
-            Some((*pane, line(agent, resume)?))
+            Some((*pane, launch.through_launcher(line(launch.agent, resume)?)))
         })
         .collect()
 }
