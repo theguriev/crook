@@ -22963,14 +22963,24 @@ mod shells {
             );
         }
 
-        /// How many washes of `fill` a frame painted inside `panel`.
-        fn washes(scene: &Scene, panel: RectF, fill: Fill) -> usize {
-            scene
+        /// How many cells a frame washed with `fill` inside `panel`.
+        ///
+        /// Cells rather than rects, because a match the pane wraps in the
+        /// middle of is one rect at the end of a row and another at the start
+        /// of the next — the same cells, in two pieces. The command line
+        /// follows the prompt of whoever runs the suite, and a directory and
+        /// branch just long enough to leave the query across the pane's
+        /// right edge made one match two washes.
+        fn washed_cells(scene: &Scene, panel: RectF, fill: Fill) -> usize {
+            let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+            let width: f32 = scene
                 .layers()
                 .flat_map(|layer| layer.rects.iter())
                 .filter(|rect| rect.background == fill)
                 .filter(|rect| panel.contains_point(rect.bounds.origin()))
-                .count()
+                .map(|rect| rect.bounds.width())
+                .sum();
+            (width / cell.width).round() as usize
         }
 
         #[test]
@@ -22995,19 +23005,30 @@ mod shells {
                     .with_alpha(crate::workspace::block_list::FIND_CURRENT_ALPHA),
             );
 
+            // A match is as many cells as the query has characters.
+            let one = "wqz".len();
+
             let scene = harness.frame();
             assert_eq!(2, matches(&harness, pane));
             assert_eq!(
-                2,
-                washes(&scene, panel, amber),
+                2 * one,
+                washed_cells(&scene, panel, amber),
                 "the command line's match and the output's"
             );
-            assert_eq!(1, washes(&scene, panel, accent), "the current one, once");
+            assert_eq!(
+                one,
+                washed_cells(&scene, panel, accent),
+                "the current one, once"
+            );
 
             step(&mut harness, pane, true);
             let scene = harness.frame();
-            assert_eq!(2, washes(&scene, panel, amber));
-            assert_eq!(1, washes(&scene, panel, accent), "still one current match");
+            assert_eq!(2 * one, washed_cells(&scene, panel, amber));
+            assert_eq!(
+                one,
+                washed_cells(&scene, panel, accent),
+                "still one current match"
+            );
         }
 
         /// The find bar, by its ground: the one `surface_raised` box with the
