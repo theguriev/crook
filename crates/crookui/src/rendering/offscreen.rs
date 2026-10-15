@@ -551,10 +551,18 @@ mod tests {
         };
 
         assert_eq!(pixel(&pixels, width, 0, 1), [255, 0, 0, 255]);
-        assert_eq!(
-            pixel(&pixels, width, 1119, 1),
-            [0, 0, 255, 255],
-            "the last drawn column is the picture's right edge"
+        // Blue to within one on each channel. The last column's centre falls
+        // a hair short of the last texel's, 0.9996 of the way from red, and a
+        // GPU may filter with as few as eight bits of that fraction — the
+        // Direct3D minimum, and what the Windows runner's adapter does — which
+        // reads [1, 0, 254, 255]. A picture cut off short of 1120 reads the
+        // clear there.
+        let edge = pixel(&pixels, width, 1119, 1);
+        assert!(
+            edge.into_iter()
+                .zip([0, 0, 255, 255])
+                .all(|(got, blue)| got.abs_diff(blue) <= 1),
+            "the last drawn column is the picture's right edge: {edge:?}"
         );
         assert_eq!(
             pixel(&pixels, width, 1125, 1),
