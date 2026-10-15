@@ -705,7 +705,7 @@ fn a_written_theme_is_spelled_the_way_warp_spells_one() {
         ),
         "the file does not open the way Warp writes one: {text}"
     );
-    assert!(text.contains("  normal:\n    black: '#000000'\n    red: '#cd0000'\n"));
+    assert!(text.contains("  normal:\n    black: '#000000'\n    red: '#f05f5a'\n"));
     assert!(text.contains("  bright:\n    black: '#7f7f7f'\n"));
     assert_eq!(
         text.lines().count(),

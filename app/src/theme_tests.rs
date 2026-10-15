@@ -139,6 +139,48 @@ fn every_built_in_theme_is_legible() {
 }
 
 #[test]
+fn every_colour_a_program_prints_in_reads_on_crooks_own_themes() {
+    // `ls` paints directories in colour 4 and `git diff` its removals in
+    // colour 1, so these are text, and text is held to WCAG's 4.5:1. The
+    // xterm set fails it on a dark grid — its blue was 1.79:1 on Crook Dark —
+    // which is why Crook's own dark themes carry a set of their own.
+    //
+    // Colour 0 is left out: on a dark grid black is the slot a program fills
+    // behind light text or paints dark ink on a coloured fill with, and a
+    // black that read as text on the grid would do neither.
+    //
+    // The palettes in `omarchy` are their authors' and are not held to this.
+    let crooks: Vec<Builtin> = BUILTIN
+        .into_iter()
+        .filter(|builtin| {
+            !omarchy::OMARCHY
+                .iter()
+                .any(|(name, _)| *name == builtin.name)
+        })
+        .collect();
+    assert_eq!(
+        crooks
+            .iter()
+            .map(|builtin| builtin.name)
+            .collect::<Vec<_>>(),
+        ["Crook Dark", "Crook Light", "Midnight"],
+        "the themes this holds to the bar are not the ones Crook ships"
+    );
+
+    for builtin in crooks {
+        let terminal = builtin.theme.terminal;
+        for (index, color) in terminal.normal.iter().enumerate().skip(1) {
+            let ratio = contrast(*color, terminal.background);
+            assert!(
+                ratio >= 4.5,
+                "{}: colour {index}, {color:?}, is {ratio:.2}:1 on its grid",
+                builtin.name
+            );
+        }
+    }
+}
+
+#[test]
 fn whether_a_theme_is_light_is_inferred_from_its_text() {
     // Warp's rule, and the reason no theme file declares a mode: a palette
     // whose text is dark is a palette meant for a light background, and
