@@ -1449,18 +1449,36 @@ pub fn remove(repository: &Path, path: &Path, force: bool) -> Result<(), Error> 
     if finished.success {
         return Ok(());
     }
-    Err(match classify(&finished.stderr) {
-        // Told by the listing rather than by git's sentence, which git
-        // translates and which says only that the directory would not go.
-        // Every refusal comes before git deletes anything and leaves the
-        // checkout listed, and git unregisters it whether or not its files
-        // went — "there's no going back from here", its source says there.
-        Error::Failed { message } if !still_listed(repository, path) => Error::PartlyRemoved {
-            path: path.to_owned(),
-            message,
-        },
-        refused => refused,
-    })
+    Err(half_done(repository, path, classify(&finished.stderr)))
+}
+
+/// `failed`, a removal of `path` that git did not finish, as what it was: a
+/// removal half done when git gave no reason this module knows, the
+/// directory is still there and the repository no longer lists a checkout
+/// at it — and otherwise as git said it.
+///
+/// Told by the directory and the listing rather than by git's sentence,
+/// which git translates and which says only that the directory would not
+/// go. Every refusal comes before git deletes anything and leaves the
+/// checkout listed, and git unregisters it whether or not its files went —
+/// "there's no going back from here", its source says there.
+///
+/// The directory is asked about first, because the listing alone cannot
+/// tell a half removal from a refusal [`classify`] could not read: git
+/// speaks the user's language, so `'<path>' is not a working tree` comes
+/// back as [`Error::Failed`] when it is not in English, over a path no
+/// listing has — a row a removal made elsewhere left stale. A removal half
+/// done always leaves the directory, holding what git could not delete.
+fn half_done(repository: &Path, path: &Path, failed: Error) -> Error {
+    match failed {
+        Error::Failed { message } if path.is_dir() && !still_listed(repository, path) => {
+            Error::PartlyRemoved {
+                path: path.to_owned(),
+                message,
+            }
+        }
+        failed => failed,
+    }
 }
 
 /// Whether the repository still lists a checkout at `path`, spelled as git

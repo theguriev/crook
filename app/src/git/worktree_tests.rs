@@ -1041,6 +1041,38 @@ fn a_refusal_that_leaves_the_checkout_registered_is_not_a_removal_half_done() {
     entry(&list(&repo).expect("git answered"), &checkout);
 }
 
+#[test]
+fn a_refusal_classify_cannot_read_over_a_checkout_that_is_gone_is_not_a_removal_half_done() {
+    // git speaks the user's language and classify reads English: under
+    // LANGUAGE=de git 2.55.0 says "is not a working tree" as "Schwerwiegend:
+    // '<path>' ist kein Arbeitsverzeichnis", which comes back as Failed. A
+    // row whose checkout a removal elsewhere took is that case: no listing
+    // has the path, and this removal deleted nothing. Only a directory still
+    // standing makes a failure a removal half done.
+    if without_git(
+        "a_refusal_classify_cannot_read_over_a_checkout_that_is_gone_is_not_a_removal_half_done",
+    ) {
+        return;
+    }
+    let scratch = ScratchDir::new("remove-refused-in-german");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    let checkout = scratch.spot("elsewhere");
+    add(&repo, &checkout, "elsewhere", Some("main")).expect("git added the worktree");
+    remove(&repo, &checkout, false).expect("git removed it, as another pane would");
+
+    let said = format!(
+        "Schwerwiegend: '{}' ist kein Arbeitsverzeichnis",
+        checkout.display()
+    );
+    let refused = Error::Failed {
+        message: said.clone(),
+    };
+    match half_done(&repo, &checkout, refused) {
+        Error::Failed { message } => assert_eq!(message, said),
+        other => panic!("expected git's own words, got {other:?}"),
+    }
+}
+
 // --- deleting a branch -----------------------------------------------------------
 
 const MAIN: &str = "refs/heads/main";
