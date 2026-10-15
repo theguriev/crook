@@ -327,14 +327,19 @@ impl Terminal {
     /// the child; one of kind [`WouldBlock`](io::ErrorKind::WouldBlock) means
     /// these bytes were refused, whole, behind a backlog the child has not
     /// read, and what was queued before them is still on its way.
+    ///
+    /// The emulator is told what was sent, which it needs to know while the
+    /// shell's line editor has the keyboard: see [`Emulator::typed`].
     pub fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
         match &mut self.input {
             Input::Direct(writer) => {
                 writer.write_all(bytes)?;
-                writer.flush()
+                writer.flush()?;
             }
-            Input::Queued(outbox) => outbox.input(bytes),
+            Input::Queued(outbox) => outbox.input(bytes)?,
         }
+        self.emulator.typed(bytes);
+        Ok(())
     }
 
     /// Runs a command line: writes the line followed by the carriage return
@@ -415,6 +420,23 @@ impl Terminal {
         };
         self.write(&bytes)?;
         Ok(true)
+    }
+
+    /// Sends a key press to the shell's own line editor, and hands it the
+    /// keyboard with it: [`Snapshot::line_editor`] is true from here until the
+    /// line editor gives its line back. See
+    /// [`Emulator::hand_keys_to_line_editor`] for when that is, and for why a
+    /// shell that has not marked the end of its prompt is sent the key and
+    /// handed nothing.
+    ///
+    /// Returns what [`Self::send_key`] does. A key with no encoding hands
+    /// nothing over either: the line editor never heard it.
+    pub fn send_key_to_line_editor(&mut self, key: Key, modifiers: Modifiers) -> io::Result<bool> {
+        let sent = self.send_key(key, modifiers)?;
+        if sent {
+            self.emulator.hand_keys_to_line_editor();
+        }
+        Ok(sent)
     }
 
     /// Sends a pointer gesture, if the child has asked to hear about it.

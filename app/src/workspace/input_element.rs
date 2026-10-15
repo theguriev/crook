@@ -95,6 +95,7 @@ use crate::editor::Editor;
 use crate::input_keys::{self, Intent, Platform, Route};
 use crate::pane_blocks::{PaneBlocks, ScrollCause};
 use crate::pane_selection::PaneSelection;
+use crate::pane_surface;
 use crate::selection::Cells;
 use crate::settings::TabKey;
 use crate::tab::PaneId;
@@ -317,11 +318,21 @@ impl CommandInput {
             return false;
         }
 
+        // The terminal's own word, as of this keystroke rather than of the
+        // frame this element was built in.
+        let snapshot = self.terminal.as_ref().map(TerminalHandle::snapshot);
         let pane = input_keys::Pane {
             // There is one, and it is this element: nothing draws a composer
             // where `pane_surface` said there is none, which is the whole of
-            // rule 2 seen from the field's side.
-            composer: true,
+            // rule 2 seen from the field's side. Unless the shell's line
+            // editor has taken the keyboard since the frame was built: the
+            // key that handed it over and the next one typed can both arrive
+            // before the frame that takes this element away, and the next one
+            // is the line editor's as well — `ctrl-r` then the first letter of
+            // the search.
+            composer: !snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.line_editor),
             line_is_empty: self.input.editor().is_empty(),
             // Asked even though the answer only ever takes a key *away* from
             // this element: routing the same keystroke against a different
@@ -341,6 +352,8 @@ impl CommandInput {
                 .selection
                 .as_ref()
                 .is_some_and(|selection| selection.has_selection_in(Cells::List)),
+            at_prompt: snapshot.as_deref().is_some_and(pane_surface::at_prompt),
+            offer_standing: self.input.has_offer(),
         };
         match input_keys::route(keystroke, chars, pane, Platform::current()) {
             // Not an edit: the line goes to the shell and the answer comes
@@ -413,8 +426,13 @@ impl CommandInput {
             // here for exhaustiveness and nothing else — it is only ever
             // returned for a pane with no composer, and this element *is* the
             // composer, so a route that says the program owns the keyboard
-            // cannot reach it.
-            Route::CopyOutput | Route::PasteToShell | Route::Raw | Route::Ignored => false,
+            // cannot reach it. A key for the shell's line editor is the grid's
+            // to send too, and the keyboard goes with it.
+            Route::CopyOutput
+            | Route::PasteToShell
+            | Route::Raw
+            | Route::LineEditor
+            | Route::Ignored => false,
         }
     }
 

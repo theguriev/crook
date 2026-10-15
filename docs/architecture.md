@@ -2405,8 +2405,9 @@ disagree, because they are the same range.
    and read every key themselves — and so does an agent or a REPL that never leaves the
    primary screen and is read by the very same keys. What those panes have in common is not a
    screen buffer, it is that there is no field on them: `pane_surface::of` takes the composer
-   away on the alt screen, on an overflowing block, and once a command has been running longer
-   than `LONG_RUNNING`, and every one of those is "the program is reading the keyboard now".
+   away on the alt screen, on an overflowing block, once a command has been running longer
+   than `LONG_RUNNING`, and while the shell's own line editor has the keyboard (rule 4), and
+   every one of those is "the program is reading the keyboard now".
    So the test is whether a composer was attached, which is the same question asked once and
    the reason `Down` reaches a menu inside a long-running program instead of walking the
    field's history. Rule 1 sits above this one: what vim has drawn is still text somebody
@@ -2421,7 +2422,47 @@ disagree, because they are the same range.
    so nothing is left uninterruptible, and a reflexive `ctrl-c` to get out of it would
    interrupt the very program it is asking whether to end.
 4. **Everything else on the normal screen is the field's**, and a key the keymap has no
-   meaning for does nothing rather than leaking into the shell.
+   meaning for does nothing rather than leaking into the shell — **except over an empty field
+   at a prompt the shell has marked**, where it is a key the shell's own line editor answers
+   and the field never did: Control with a letter the field does not use (`ctrl-r`'s history
+   search, fzf's `ctrl-t`), a bare Escape (vi mode, and every shell's Meta prefix), and off
+   macOS Alt with a character (`alt-b`, `alt-f`, `alt-d`, `alt-.`, fzf's `alt-c`). On a Mac
+   Option types in the field as it does in every text field there. That key goes to the pty
+   and hands the line editor the keyboard: the emulator's `line_editor` flag goes up on the
+   snapshot, `pane_surface::of` takes the composer away as it does for a running command, and
+   rule 2 sends every key after it to the shell — from the very next key, which both elements
+   route against the live snapshot rather than the frame they were built in. The flag comes
+   down only once the shell has finished a line, with `D` (it ran, or an empty Enter or
+   `ctrl-c` ended it), and drawn the next prompt with nothing on it: the cursor on its `B`
+   cell, and that cell blank. Not on a prompt drawn again, because bash redraws its prompt,
+   marks and all, with the match a search kept or the path fzf picked on the line after it —
+   and a composer back over a line the shell still holds would send the two as one — and
+   because a prompt drawn again over an empty line can still be a line editor that is not
+   done: vi's normal mode after an Escape, which fish, a zsh theme and bash's
+   `show-mode-in-prompt` all redraw the prompt for, or a Meta prefix waiting for its key when
+   a resize redraws it. Not on `C`, which an older copy of `crook.bash`, or another
+   terminal's integration, reports for a `bind -x` widget like fzf's `ctrl-t` while it puts a
+   line on the prompt. And not on a `D` the shell has a line for: what was typed while the
+   command ran went to the shell, which draws it on the next prompt only after the prompt
+   itself, in a write of its own — so the read the prompt arrives in shows an empty line, and
+   the cells cannot say. `Terminal::write` tells the emulator what it sent instead, and while
+   the line editor has the keyboard and the shell is away from its prompt the emulator counts
+   it: a prompt for each line ended with an Enter, which the shell will run, and one for the
+   start of a line after them, which it will keep. Each prompt after a `D` takes one of them
+   and keeps the keyboard. `ctrl-c`, `ctrl-\` and `ctrl-z` throw the count away with the
+   input the line discipline drops for them, and keys typed to a program that asked for the
+   alternate screen, bracketed pastes, the mouse, focus reports or kitty's keyboard — none of
+   which a shell leaves on while a command runs — are that program's, and not counted. A
+   command that read what was typed without asking for any of those, a `read` or a password
+   prompt, leaves the keyboard with the shell a line longer than it needed, which is the
+   side to be wrong on. So a search given up over an empty line keeps the keyboard with the
+   shell until the next Enter, and in fish, which ends an empty line with no `D`, until the
+   next command.
+   With a line in the field none of this happens, since the shell's own line is empty and a
+   search started from it would end with two lines and one Enter, nor with a completion the
+   shell offered standing in it, which is not an empty field to anyone looking; and a shell
+   that marks no prompt is never handed the keyboard, because nothing would ever say it had
+   given it back.
 
 **Which chords are Crook's** is `app/src/keybindings.rs`, and it is VSCode's model whole: a
 binding is `{ key, command, when }`, the shipped table and a person's `keybindings.json` are

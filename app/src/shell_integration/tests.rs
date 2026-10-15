@@ -2392,6 +2392,190 @@ fn test_a_real_bash_keeps_its_marks_when_the_users_own_files_trap_debug() {
 }
 
 #[test]
+fn test_a_real_bash_reports_the_line_a_widget_put_on_its_prompt_and_not_the_widget() {
+    // fzf's `ctrl-t` and `ctrl-r`, and atuin, are `bind -x` widgets: a shell
+    // function run while the line is still being edited, which puts a line on
+    // the prompt for Enter to run. bash runs the DEBUG trap for the widget as
+    // for any command, and the snippet used to report it as one — a C in the
+    // middle of the prompt — and then had its flag up when the line the
+    // widget left ran, which got no C at all: no start time, no running
+    // block, no notification when a long one finished.
+    let widget = "__test_pick_a_line() {\n\
+                  \tREADLINE_LINE=\"printf 'CROOK_PICKED[%s]\\\\n' ok\"\n\
+                  \tREADLINE_POINT=${#READLINE_LINE}\n\
+                  }\n\
+                  bind -x '\"\\C-t\": __test_pick_a_line'\n";
+    if !bash_has_widget_lines() {
+        return;
+    }
+    let home_files = [(".bashrc", widget)];
+    let Some(ran) = (RealShell {
+        name: "bash",
+        login: false,
+        home_files: &home_files,
+        // `ctrl-t`, and the Enter `run` types after every command.
+        command: "\x14",
+        ..RealShell::default()
+    })
+    .run() else {
+        return;
+    };
+    let seen = &ran.seen;
+    let output = seen
+        .find("CROOK_PICKED[ok]")
+        .unwrap_or_else(|| panic!("the widget's line never ran: {seen:?}"));
+    // The line the widget put there, drawn on the prompt before Enter.
+    let drawn = seen
+        .find("CROOK_PICKED[%s]")
+        .expect("bash draws the widget's line on its prompt");
+    let starts: Vec<usize> = seen.match_indices("\x1b]133;C").map(|(at, _)| at).collect();
+    assert_eq!(
+        starts.len(),
+        1,
+        "one command ran, and it said so once: {seen:?}"
+    );
+    assert!(
+        drawn < starts[0] && starts[0] < output,
+        "the C was the widget's rather than the line's: {seen:?}"
+    );
+}
+
+/// Whether the `bash` here gives a `bind -x` widget a line to edit: bash 3.2,
+/// the one macOS ships, has `bind -x` but no READLINE_LINE.
+fn bash_has_widget_lines() -> bool {
+    crate::process::command("bash")
+        .args(["-c", "echo ${BASH_VERSINFO[0]}"])
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|text| text.trim().parse::<u32>().ok())
+        .is_some_and(|major| major >= 4)
+}
+
+/// A stand-in for bash-preexec, for a home's `.bashrc`: the parts of it that
+/// decide who reports a command. It owns the DEBUG trap, as
+/// `__bp_preexec_invoke_exec`, and calls the preexec functions once a prompt
+/// has been drawn and not again until the next one. `skips_widgets` is
+/// 0.6.0's change: the trap lets a `bind -x` widget be. Before it, the trap
+/// called the preexec functions for one, and so not for the line after it.
+fn bash_preexec(skips_widgets: bool) -> String {
+    let skip = if skips_widgets {
+        "[ -n \"${READLINE_POINT:-}\" ] && return 0"
+    } else {
+        ":"
+    };
+    format!(
+        "bash_preexec_imported=defined\n\
+         preexec_functions=()\n\
+         precmd_functions=()\n\
+         __bp_preexec_interactive_mode=''\n\
+         __bp_status() {{ return \"$1\"; }}\n\
+         __bp_precmd_invoke_cmd() {{\n\
+         \tlocal status=$? f\n\
+         \tfor f in \"${{precmd_functions[@]}}\"; do __bp_status \"$status\"; \"$f\"; done\n\
+         }}\n\
+         __bp_interactive_mode() {{ __bp_preexec_interactive_mode=on; }}\n\
+         __bp_preexec_invoke_exec() {{\n\
+         \t{skip}\n\
+         \t[ -n \"$__bp_preexec_interactive_mode\" ] || return 0\n\
+         \t__bp_preexec_interactive_mode=''\n\
+         \tcase $BASH_COMMAND in __bp_*) return 0 ;; esac\n\
+         \tlocal f\n\
+         \tfor f in \"${{preexec_functions[@]}}\"; do \"$f\" \"$BASH_COMMAND\"; done\n\
+         }}\n\
+         trap '__bp_preexec_invoke_exec' DEBUG\n\
+         PROMPT_COMMAND=$'__bp_precmd_invoke_cmd\\n__bp_interactive_mode'\n"
+    )
+}
+
+#[test]
+fn test_a_real_bash_under_bash_preexec_reports_a_line_a_widget_ran_or_left() {
+    // Under bash-preexec the C comes from its preexec functions, and two
+    // kinds of widget reach them. fzf's puts a line on the prompt for Enter
+    // to run. atuin's Enter on a search result runs the line itself, from
+    // inside the widget: it draws the prompt with the line on it, calls every
+    // preexec function for it and evals it — up to atuin 18.9, and since for
+    // a key bound to its search with a plain `bind -x`.
+    if !bash_has_widget_lines() {
+        return;
+    }
+    let leaves_a_line = "__test_leave_a_line() {\n\
+                         \tREADLINE_LINE=\"printf 'CROOK_PICKED[%s]\\\\n' ok\"\n\
+                         \tREADLINE_POINT=${#READLINE_LINE}\n\
+                         }\n\
+                         bind -x '\"\\C-t\": __test_leave_a_line'\n";
+    let runs_a_line = "__test_run_a_line() {\n\
+                       \tlocal line=\"printf 'CROOK_PICKED[%s]\\\\n' ok\"\n\
+                       \tprintf '$ %s\\n' \"$line\"\n\
+                       \thistory -s \"$line\"\n\
+                       \tlocal f\n\
+                       \tfor f in \"${preexec_functions[@]}\"; do \"$f\" \"$line\"; done\n\
+                       \teval -- \"$line\"\n\
+                       \teval -- \"$PROMPT_COMMAND\"\n\
+                       }\n\
+                       bind -x '\"\\C-t\": __test_run_a_line'\n";
+    for (skips_widgets, widget, what) in [
+        (true, leaves_a_line, "a line left on the prompt"),
+        (true, runs_a_line, "a line the widget ran"),
+        (false, runs_a_line, "a line the widget ran, before 0.6.0"),
+    ] {
+        let bashrc = format!("{}{widget}", bash_preexec(skips_widgets));
+        let home_files = [(".bashrc", bashrc.as_str())];
+        let Some(ran) = (RealShell {
+            name: "bash",
+            login: false,
+            home_files: &home_files,
+            command: "\x14",
+            ..RealShell::default()
+        })
+        .run() else {
+            return;
+        };
+        let seen = &ran.seen;
+        let drawn = seen
+            .find("CROOK_PICKED[%s]")
+            .unwrap_or_else(|| panic!("{what}: the line was never drawn: {seen:?}"));
+        let output = seen
+            .find("CROOK_PICKED[ok]")
+            .unwrap_or_else(|| panic!("{what}: the line never ran: {seen:?}"));
+        let starts: Vec<usize> = seen.match_indices("\x1b]133;C").map(|(at, _)| at).collect();
+        assert_eq!(
+            1,
+            starts.len(),
+            "{what}: one command ran, and it said so once: {seen:?}"
+        );
+        assert!(
+            drawn < starts[0] && starts[0] < output,
+            "{what}: the C was not the line's: {seen:?}"
+        );
+    }
+
+    // A widget bash-preexec before 0.6.0 called the preexec functions for is
+    // kept out of the middle of the prompt. The line it left gets no C, as
+    // that bash-preexec calls nothing more until the next prompt.
+    let bashrc = format!("{}{leaves_a_line}", bash_preexec(false));
+    let home_files = [(".bashrc", bashrc.as_str())];
+    let Some(ran) = (RealShell {
+        name: "bash",
+        login: false,
+        home_files: &home_files,
+        command: "\x14",
+        ..RealShell::default()
+    })
+    .run() else {
+        return;
+    };
+    let seen = &ran.seen;
+    let drawn = seen
+        .find("CROOK_PICKED[%s]")
+        .unwrap_or_else(|| panic!("the line was never drawn: {seen:?}"));
+    assert!(
+        seen.match_indices("\x1b]133;C").all(|(at, _)| at > drawn),
+        "the widget was reported as a command: {seen:?}"
+    );
+}
+
+#[test]
 fn test_a_real_fish_emits_the_four_marks() {
     // fish 4.0 marks prompts itself, and the snippet stands down when it does,
     // so the only way to see Crook's own hooks work is to turn fish's off.

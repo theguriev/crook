@@ -24293,6 +24293,508 @@ mod shells {
             );
         }
     }
+
+    /// The keys a shell's own line editor answers and the composer does not:
+    /// handed to the shell from an empty composer at its prompt, with the
+    /// keyboard, and the composer back once the shell gives its line back.
+    mod line_editor {
+        use super::*;
+        use crate::shell_integration::{Marks, Standing};
+
+        /// Where `program` is on `PATH`, or `None` when it is not installed
+        /// here — a machine with no zsh is not a failing test.
+        fn installed(program: &str) -> Option<PathBuf> {
+            let path = std::env::var_os("PATH")?;
+            std::env::split_paths(&path)
+                .map(|directory| directory.join(program))
+                .find(|candidate| candidate.is_file())
+        }
+
+        /// A pane running `shell` with Crook's marks, in `home` rather than
+        /// the home of whoever runs the suite, waiting at its first prompt —
+        /// or `None` where that shell is not here or would get no marks.
+        ///
+        /// A home of the test's own, because the shell's own rc files are
+        /// exactly what decides what `ctrl-r` does: a bashrc that sources
+        /// fzf's key bindings turns readline's search into fzf's picker. The
+        /// history goes there too, so a line typed here is in nobody's file.
+        fn a_shell_at_home(harness: &mut Harness, shell: &str, home: &Scratch) -> Option<PaneId> {
+            if cfg!(windows) {
+                return None;
+            }
+            let Some(program) = installed(shell) else {
+                eprintln!("skipped: no {shell} here");
+                return None;
+            };
+            let standing = Standing::of(program.clone(), crate::shell_integration::opted_out());
+            if !matches!(standing.marks, Marks::Installed(_)) {
+                eprintln!("skipped: {shell} would get no marks here");
+                return None;
+            }
+            if shell == "zsh" && !zsh_knows_the_terminal(&program) {
+                eprintln!("skipped: this zsh finds no description of a pane's terminal");
+                return None;
+            }
+            let home = home.path().display().to_string();
+            // An empty one, unless the test wrote its own.
+            let inputrc = format!("{home}/inputrc");
+            if !Path::new(&inputrc).exists() {
+                fs::write(&inputrc, "").expect("an inputrc in a scratch home");
+            }
+            let environment = [
+                ("HOME", home.clone()),
+                // What the zsh stubs source the person's own files from.
+                ("USER_ZDOTDIR", home.clone()),
+                ("XDG_CONFIG_HOME", format!("{home}/config")),
+                ("XDG_DATA_HOME", format!("{home}/data")),
+                ("HISTFILE", format!("{home}/history")),
+                ("INPUTRC", format!("{home}/inputrc")),
+                // zsh starts in vi mode, where `ctrl-r` is no search, when
+                // either of these names an editor with `vi` in it.
+                ("EDITOR", String::new()),
+                ("VISUAL", String::new()),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect();
+            harness.workspace_update(|workspace, ctx| {
+                workspace.set_shell(Some(program), ctx);
+                workspace.set_shell_environment(environment, ctx);
+            });
+            if !harness.start_terminals_with_marks() {
+                return None;
+            }
+            let pane = harness.focused_pane_id()?;
+            await_prompt(harness, pane);
+            harness.frame();
+            Some(pane)
+        }
+
+        /// Whether `zsh` can read what a pane's terminal is, which its line
+        /// editor needs to draw a search on the row under the prompt and
+        /// come back up. A statically built zsh carries descriptions it can
+        /// only find where its installer put them, and without one it draws
+        /// no search line at all — a fact about the machine, not about Crook.
+        fn zsh_knows_the_terminal(program: &Path) -> bool {
+            crate::process::command(&program.to_string_lossy())
+                .args(["-fc", "zmodload zsh/terminfo && [[ -n $terminfo[cuu1] ]]"])
+                .env("TERM", "xterm-256color")
+                .status()
+                .is_ok_and(|status| status.success())
+        }
+
+        /// What each shell's history search says while it is up: readline's
+        /// prompt, zle's, and the label on fish's history pager.
+        fn search_says(shell: &str) -> &'static str {
+            match shell {
+                "bash" => "reverse-i-search",
+                "zsh" => "bck-i-search",
+                _ => "search:",
+            }
+        }
+
+        fn ctrl() -> Modifiers {
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            }
+        }
+
+        /// Whether the shell's own line editor has the keyboard, as the
+        /// terminal says it.
+        fn the_shell_has_the_keys(harness: &Harness, pane: PaneId) -> bool {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace
+                    .terminal(pane, app)
+                    .is_some_and(|(_, snapshot)| snapshot.line_editor)
+            })
+        }
+
+        fn finished_blocks(harness: &Harness, pane: PaneId) -> usize {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace
+                    .terminal_blocks(pane, app)
+                    .map_or(0, |blocks| blocks.iter().count())
+            })
+        }
+
+        fn newest_output(harness: &Harness, pane: PaneId) -> Option<String> {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace.newest_block_output(pane, app)
+            })
+        }
+
+        /// Whether the pane is back at its prompt with an empty composer
+        /// drawn under it, after `blocks` commands.
+        fn composing_again(harness: &mut Harness, pane: PaneId, blocks: usize) -> bool {
+            finished_blocks(harness, pane) == blocks
+                && harness.field_text(pane).is_empty()
+                && !composer_boxes(&harness.frame()).is_empty()
+                && harness.workspace.read(&harness.app, |workspace, app| {
+                    workspace
+                        .terminal(pane, app)
+                        .is_some_and(|(_, snapshot)| crate::pane_surface::at_prompt(&snapshot))
+                })
+        }
+
+        /// Sends a line from the composer, as a person does, and waits for it
+        /// to have run and the composer to be back.
+        fn run(harness: &mut Harness, pane: PaneId, line: &str) {
+            let blocks = finished_blocks(harness, pane);
+            type_line(harness, line);
+            harness.press("enter", Modifiers::default(), "\r");
+            harness.wait_for("a line sent from the composer never ran", |harness| {
+                composing_again(harness, pane, blocks + 1)
+            });
+        }
+
+        /// The whole gesture in one shell: `ctrl-r` from an empty composer,
+        /// a search typed into the shell's own prompt for it, and Enter on
+        /// what it found — which runs it, and gives the composer back.
+        fn the_history_search_is_the_shells(shell: &str) {
+            let home = Scratch::new();
+            let mut harness = Harness::panel(1);
+            let Some(pane) = a_shell_at_home(&mut harness, shell, &home) else {
+                return;
+            };
+            // Printed by pieces, so the output is nowhere in the line that
+            // runs it.
+            run(&mut harness, pane, "printf 'zq%sxv\\n' 7");
+            assert_eq!(Some("zq7xv".to_owned()), newest_output(&harness, pane));
+            let blocks = finished_blocks(&harness, pane);
+            let says = search_says(shell);
+            assert!(!harness.terminal_text(pane).contains(says));
+
+            harness.press("r", ctrl(), "\u{12}");
+            harness.wait_for(
+                &format!("{shell} never drew its history search"),
+                |harness| {
+                    harness.terminal_text(pane).contains(says)
+                        && composer_boxes(&harness.frame()).is_empty()
+                },
+            );
+            assert!(
+                frame_text(&harness.frame()).contains(says),
+                "{shell}'s search is in the grid and not on screen"
+            );
+
+            // Every key is the shell's now, and none of them the composer's.
+            type_line(&mut harness, "zq%s");
+            harness.wait_for(&format!("{shell} never found the line"), |harness| {
+                harness.terminal_text(pane).contains("printf 'zq%sxv")
+            });
+            assert_eq!(
+                "",
+                harness.field_text(pane),
+                "the search went into the composer"
+            );
+            harness.press("enter", Modifiers::default(), "\r");
+            if shell == "fish" {
+                // fish's pager puts what it found on the line; the line's own
+                // Enter runs it.
+                harness.wait_for(
+                    "fish never put the line it found on its prompt",
+                    |harness| !harness.terminal_text(pane).contains(says),
+                );
+                harness.press("enter", Modifiers::default(), "\r");
+            }
+            harness.wait_for(
+                &format!("{shell} ran what it found and the composer never came back"),
+                |harness| composing_again(harness, pane, blocks + 1),
+            );
+            assert_eq!(
+                Some("zq7xv".to_owned()),
+                newest_output(&harness, pane),
+                "what {shell} ran was not the line it found"
+            );
+        }
+
+        #[test]
+        fn ctrl_r_from_an_empty_composer_is_bashs_history_search() {
+            the_history_search_is_the_shells("bash");
+        }
+
+        #[test]
+        fn ctrl_r_from_an_empty_composer_is_zshs_history_search() {
+            the_history_search_is_the_shells("zsh");
+        }
+
+        #[test]
+        fn ctrl_r_from_an_empty_composer_is_fishs_history_search() {
+            the_history_search_is_the_shells("fish");
+        }
+
+        #[test]
+        fn a_search_bash_ended_over_the_line_it_kept_keeps_the_composer_away() {
+            // Escape ends a search with the match on the line. When the match
+            // starts the line — a search typed from the start of the command
+            // it looks for — bash draws its prompt again, marks and all, with
+            // the cursor on the prompt's end and the whole line after it. A
+            // composer back there would send its own line and bash's as one.
+            let home = Scratch::new();
+            let mut harness = Harness::panel(1);
+            let Some(pane) = a_shell_at_home(&mut harness, "bash", &home) else {
+                return;
+            };
+            run(&mut harness, pane, "printf 'zq%sxv\\n' 7");
+            let blocks = finished_blocks(&harness, pane);
+            let says = search_says("bash");
+
+            harness.press("r", ctrl(), "\u{12}");
+            type_line(&mut harness, "printf 'zq");
+            harness.wait_for("bash never found the line", |harness| {
+                harness.terminal_text(pane).contains("printf 'zq%sxv")
+                    && harness.terminal_text(pane).contains(says)
+            });
+            harness.press("escape", Modifiers::default(), "\u{1b}");
+            harness.wait_for("bash never ended its search", |harness| {
+                !harness.terminal_text(pane).contains(says)
+            });
+            harness.settle(NO_LEAK_PATIENCE);
+            assert!(
+                the_shell_has_the_keys(&harness, pane),
+                "the composer came back over the line bash kept"
+            );
+            assert!(composer_boxes(&harness.frame()).is_empty());
+            assert!(
+                harness.terminal_text(pane).contains("printf 'zq%sxv"),
+                "the line bash kept is on its prompt"
+            );
+
+            // The line is bash's, and so is the Enter that runs it.
+            harness.press("enter", Modifiers::default(), "\r");
+            harness.wait_for(
+                "bash ran the line it kept and the composer never came back",
+                |harness| composing_again(harness, pane, blocks + 1),
+            );
+            assert_eq!(Some("zq7xv".to_owned()), newest_output(&harness, pane));
+        }
+
+        /// Escape at an empty composer in vi mode: the shell leaves insert
+        /// mode and draws its prompt again, marks and all, to show the mode
+        /// it is in, over a line that is still empty. The composer stays away
+        /// — a line typed into it would reach a shell reading vi commands —
+        /// until the shell has run a line.
+        fn escape_into_vi_mode_keeps_the_composer_away(shell: &str, insert: &str, normal: &str) {
+            let home = Scratch::new();
+            match shell {
+                "bash" => fs::write(
+                    home.path().join("inputrc"),
+                    "set editing-mode vi\nset show-mode-in-prompt on\n",
+                ),
+                _ => fs::create_dir_all(home.path().join("config/fish")).and_then(|()| {
+                    fs::write(
+                        home.path().join("config/fish/config.fish"),
+                        "fish_vi_key_bindings\n",
+                    )
+                }),
+            }
+            .expect("a vi mode in a scratch home");
+            let mut harness = Harness::panel(1);
+            let Some(pane) = a_shell_at_home(&mut harness, shell, &home) else {
+                return;
+            };
+            assert!(!harness.terminal_text(pane).contains(normal));
+            // bash 3.2's readline has no mode in its prompt and draws nothing
+            // for Escape: there this holds the composer to no redraw at all.
+            // Asked of the window as well as the grid, because bash draws the
+            // mode in front of the prompt's start mark, and the first prompt's
+            // is in a block of its own.
+            let shows_the_mode = harness.terminal_text(pane).contains(insert)
+                || frame_text(&harness.frame()).contains(insert);
+
+            harness.press("escape", Modifiers::default(), "\u{1b}");
+            if shows_the_mode {
+                harness.wait_for(&format!("{shell} never left insert mode"), |harness| {
+                    harness.terminal_text(pane).contains(normal)
+                });
+            }
+            harness.settle(NO_LEAK_PATIENCE);
+            assert!(
+                the_shell_has_the_keys(&harness, pane),
+                "the composer came back to {shell} in vi's normal mode"
+            );
+            assert!(composer_boxes(&harness.frame()).is_empty());
+
+            // `i` is vi's insert, and the line typed after it is the shell's.
+            type_line(&mut harness, "i");
+            harness.wait_for(
+                &format!("{shell} never went back to insert mode"),
+                |harness| !harness.terminal_text(pane).contains(normal),
+            );
+            type_line(&mut harness, "printf 'zq%sxv\\n' 7");
+            harness.press("enter", Modifiers::default(), "\r");
+            // Not a count of blocks: bash draws its mode in front of the
+            // prompt's start mark, and that text is a block of its own.
+            harness.wait_for(
+                &format!("{shell} never ran the line and the composer never came back"),
+                |harness| {
+                    !the_shell_has_the_keys(harness, pane)
+                        && harness.field_text(pane).is_empty()
+                        && !composer_boxes(&harness.frame()).is_empty()
+                        && frame_text(&harness.frame()).contains("zq7xv")
+                },
+            );
+        }
+
+        #[test]
+        fn escape_into_bashs_vi_mode_keeps_the_composer_away() {
+            escape_into_vi_mode_keeps_the_composer_away("bash", "(ins)", "(cmd)");
+        }
+
+        #[test]
+        fn escape_into_fishs_vi_mode_keeps_the_composer_away() {
+            escape_into_vi_mode_keeps_the_composer_away("fish", "[I]", "[N]");
+        }
+
+        /// Escape reaches the shell only from an empty composer, and the key
+        /// after it with it: `alt-.`, typed as Escape and a dot, is the last
+        /// argument of the line before, put on the shell's own line.
+        fn escape_is_the_shells_only_over_an_empty_line(shell: &str) {
+            let home = Scratch::new();
+            let mut harness = Harness::panel(1);
+            let Some(pane) = a_shell_at_home(&mut harness, shell, &home) else {
+                return;
+            };
+            run(&mut harness, pane, "true qz7xv-last");
+            let blocks = finished_blocks(&harness, pane);
+            // The premise: the line that ran left the grid with its block.
+            assert!(!harness.terminal_text(pane).contains("qz7xv"));
+
+            type_line(&mut harness, "ab");
+            harness.press("escape", Modifiers::default(), "\u{1b}");
+            type_line(&mut harness, ".");
+            harness.settle(NO_LEAK_PATIENCE);
+            assert_eq!(
+                "ab.",
+                harness.field_text(pane),
+                "a line in the composer lost its keys to the shell"
+            );
+            assert!(
+                !composer_boxes(&harness.frame()).is_empty(),
+                "the composer went away over the line it holds"
+            );
+            assert!(
+                !harness.terminal_text(pane).contains("qz7xv"),
+                "{shell} heard an Escape over a written line"
+            );
+
+            harness.press("u", ctrl(), "\u{15}");
+            assert_eq!("", harness.field_text(pane));
+            harness.press("escape", Modifiers::default(), "\u{1b}");
+            type_line(&mut harness, ".");
+            harness.wait_for(
+                &format!("{shell} never put the last argument on its line"),
+                |harness| {
+                    harness.terminal_text(pane).contains("qz7xv-last")
+                        && composer_boxes(&harness.frame()).is_empty()
+                },
+            );
+            assert_eq!(
+                "",
+                harness.field_text(pane),
+                "the dot went into the composer"
+            );
+
+            // The line is the shell's, and so is the Enter that runs it.
+            harness.press("enter", Modifiers::default(), "\r");
+            harness.wait_for(
+                &format!("{shell} ran its own line and the composer never came back"),
+                |harness| composing_again(harness, pane, blocks + 1),
+            );
+        }
+
+        #[test]
+        fn escape_reaches_bash_only_from_an_empty_composer() {
+            escape_is_the_shells_only_over_an_empty_line("bash");
+        }
+
+        #[test]
+        fn escape_reaches_zsh_only_from_an_empty_composer() {
+            escape_is_the_shells_only_over_an_empty_line("zsh");
+        }
+
+        #[test]
+        fn escape_over_a_completion_standing_in_an_empty_composer_stays_out_of_the_shell() {
+            // Tab on an empty line offers every command the shell knows, and
+            // the composer then shows the first of them, dim, after its caret:
+            // not an empty composer to anyone looking at it.
+            let home = Scratch::new();
+            let mut harness = Harness::panel(1);
+            let answers = installed("bash").is_some_and(|bash| {
+                crate::process::command(&bash.to_string_lossy())
+                    .args(["-c", "echo ${BASH_VERSINFO[0]}"])
+                    .output()
+                    .ok()
+                    .and_then(|output| String::from_utf8(output.stdout).ok())
+                    .and_then(|major| major.trim().parse::<u32>().ok())
+                    .is_some_and(|major| major >= 4)
+            });
+            if !answers {
+                eprintln!("skipped: no bash here that answers a completion");
+                return;
+            }
+            let Some(pane) = a_shell_at_home(&mut harness, "bash", &home) else {
+                return;
+            };
+            let offered = |harness: &Harness| {
+                harness.workspace.read(&harness.app, |workspace, _| {
+                    workspace
+                        .input(pane)
+                        .is_some_and(crate::text_input::TextInput::has_offer)
+                })
+            };
+            harness.press("tab", Modifiers::default(), "\t");
+            harness.wait_for("bash offered nothing for an empty line", |harness| {
+                offered(harness)
+            });
+            assert_eq!(
+                "",
+                harness.field_text(pane),
+                "the premise: nothing is typed"
+            );
+
+            harness.press("escape", Modifiers::default(), "\u{1b}");
+            harness.settle(NO_LEAK_PATIENCE);
+            let handed = harness.workspace.read(&harness.app, |workspace, app| {
+                workspace
+                    .terminal(pane, app)
+                    .is_some_and(|(_, snapshot)| snapshot.line_editor)
+            });
+            assert!(!handed, "the shell was handed the keyboard over the offer");
+            assert!(offered(&harness), "the offer went with the Escape");
+            assert!(
+                !composer_boxes(&harness.frame()).is_empty(),
+                "the composer went away over the offer it shows"
+            );
+        }
+
+        #[test]
+        fn ctrl_r_over_a_written_line_stays_out_of_the_shell() {
+            // The shell's own line is empty while the composer holds one, and
+            // a search found from there would be a second line with one Enter
+            // for the two of them.
+            let home = Scratch::new();
+            let mut harness = Harness::panel(1);
+            let Some(pane) = a_shell_at_home(&mut harness, "bash", &home) else {
+                return;
+            };
+            type_line(&mut harness, "echo ab");
+            // Alone: any key after it would end a search it started, and
+            // the search would be gone by the time anything looked.
+            harness.press("r", ctrl(), "\u{12}");
+            harness.settle(NO_LEAK_PATIENCE);
+            assert!(
+                !harness.terminal_text(pane).contains(search_says("bash")),
+                "ctrl-r over a written line reached the shell"
+            );
+            assert_eq!("echo ab", harness.field_text(pane));
+            assert!(
+                !composer_boxes(&harness.frame()).is_empty(),
+                "the composer went away over the line it holds"
+            );
+        }
+    }
 }
 
 /// What the window spends a frame on, counted.
@@ -36225,6 +36727,7 @@ mod changes_column {
             live_block,
             title: None,
             mouse_reporting: false,
+            line_editor: false,
         };
         // A shell handed `(claude)` by the composer, as its emulator has it:
         // one that has drawn a marked prompt, or one that has printed a

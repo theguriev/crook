@@ -536,7 +536,7 @@ fn the_arrows_step_over_a_fact() {
 
 #[test]
 fn the_keys_a_pane_eats_are_the_table_the_settings_page_prints() {
-    assert_eq!(PANE_KEYS.len(), 11);
+    assert_eq!(PANE_KEYS.len(), 12);
 
     let signals = parts(pane("Interrupt, suspend, end the input").keys());
     assert_eq!(signals.len(), 3);

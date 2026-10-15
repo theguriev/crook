@@ -204,10 +204,17 @@ fn test_copied_text_drops_wide_spacers_and_keeps_combining_marks() {
     );
     assert_eq!("a\u{65e5}b\ne\u{301}f", rows.to_text());
     assert_eq!(
-        snapshot::build(&term, &Palette::default(), 0, None, LiveBlock::default())
-            .text()
-            .trim_end()
-            .to_owned(),
+        snapshot::build(
+            &term,
+            &Palette::default(),
+            0,
+            None,
+            LiveBlock::default(),
+            false
+        )
+        .text()
+        .trim_end()
+        .to_owned(),
         rows.to_text(),
         "a copied block and a copied selection disagree"
     );

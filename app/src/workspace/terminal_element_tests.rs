@@ -53,6 +53,7 @@ fn snapshot(lines: &[&str], columns: usize) -> Snapshot {
         live_block: LiveBlock::default(),
         title: None,
         mouse_reporting: false,
+        line_editor: false,
     }
 }
 

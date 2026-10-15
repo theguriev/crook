@@ -917,3 +917,81 @@ fn test_a_line_submitted_behind_a_backlog_is_queued_with_its_enter_or_not_at_all
         "a refused line opened a block for a command the shell never got"
     );
 }
+
+#[test]
+fn test_a_key_sent_to_the_line_editor_reaches_the_child_and_hands_it_the_keyboard() {
+    let (mut terminal, child) = over_a_fake_link();
+    let control = Modifiers {
+        control: true,
+        ..Modifiers::NONE
+    };
+    let mut reader = terminal
+        .take_reader()
+        .expect("a fresh terminal has its reader");
+
+    // Before the shell has marked a prompt there is no line editor to hand
+    // the keyboard to, and the key goes on its own.
+    assert!(
+        terminal
+            .send_key_to_line_editor(Key::Char('r'), control)
+            .expect("the link takes a key")
+    );
+    assert!(!terminal.snapshot().line_editor);
+
+    child.say("\x1b]133;A\x07$ \x1b]133;B\x07");
+    hear(&mut terminal, &mut reader);
+    assert!(
+        terminal
+            .send_key_to_line_editor(Key::Char('r'), control)
+            .expect("the link takes a key")
+    );
+    assert_eq!(
+        b"\x12\x12".to_vec(),
+        child.received(),
+        "ctrl-r is DC2, twice"
+    );
+    assert!(terminal.snapshot().line_editor);
+
+    // And a plain send hands nothing back: only the line editor does that.
+    terminal
+        .send_key(Key::Char('a'), Modifiers::NONE)
+        .expect("the link takes a key");
+    assert!(terminal.snapshot().line_editor);
+}
+
+#[test]
+fn test_what_is_typed_while_the_line_editors_line_runs_is_counted_as_it_is_sent() {
+    let (mut terminal, child) = over_a_fake_link();
+    let mut reader = terminal
+        .take_reader()
+        .expect("a fresh terminal has its reader");
+    let control = Modifiers {
+        control: true,
+        ..Modifiers::NONE
+    };
+    child.say("\x1b]133;A\x07$ \x1b]133;B\x07");
+    hear(&mut terminal, &mut reader);
+    terminal
+        .send_key_to_line_editor(Key::Char('r'), control)
+        .expect("the link takes a key");
+    child.say("\r\x1b]133;A\x07$ \x1b]133;B\x07sleep 1\r\n\x1b]133;C\x07");
+    hear(&mut terminal, &mut reader);
+
+    // Typed and pasted while the line runs, each the way a pane sends it.
+    terminal
+        .send_key(Key::Char('l'), Modifiers::NONE)
+        .expect("the link takes a key");
+    terminal.paste("s -a").expect("the link takes a paste");
+
+    // The `D` and the prompt in reads of their own, before the shell draws
+    // `ls -a` on its line.
+    for read in ["\x1b]133;D;0\x07", "\x1b]133;A\x07$ \x1b]133;B\x07"] {
+        child.say(read);
+        hear(&mut terminal, &mut reader);
+    }
+    assert!(
+        terminal.snapshot().line_editor,
+        "the keyboard came back at a prompt the shell is about to draw `ls -a` on"
+    );
+    assert!(child.received().ends_with(b"ls -a"));
+}

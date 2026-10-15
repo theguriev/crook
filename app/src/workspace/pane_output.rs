@@ -28,6 +28,7 @@ use crate::clipboard::{self, Clipboard};
 use crate::input_keys::{self, Platform, Route};
 use crate::pane_composition::PaneComposition;
 use crate::pane_selection::PaneSelection;
+use crate::pane_surface;
 use crate::selection::{Anchor, Blocks, Cells, Filter, Selection};
 use crate::settings::OptionAsMeta;
 use crate::tab::PaneId;
@@ -143,8 +144,9 @@ pub struct Output {
     /// with no field is a pane whose keys are the program's — see rule 2 of
     /// [`input_keys::route`] — so this is attached exactly when
     /// [`crate::pane_surface`] said a composer is drawn, and never on an alt
-    /// screen, an overflowing block or a command that has been running long
-    /// enough to take the field away.
+    /// screen, an overflowing block, a command that has been running long
+    /// enough to take the field away or a shell whose line editor has the
+    /// keyboard.
     ///
     /// The line itself is read at the moment a key arrives rather than baked
     /// in when the frame was built, because it decides what Ctrl-D means: an
@@ -375,16 +377,23 @@ impl Output {
         // alone — see [`Keys::hands_on`]; only a menu takes the selection's
         // claim on `ctrl-c` as well.
         let can_copy = self.keys != Keys::Signals && self.mouse.is_some();
+        let snapshot = handle.snapshot();
         let pane = input_keys::Pane {
             // Which screen this is was answered when the frame was built, by
             // the one function that answers it: a composer was attached, or
-            // there is none to attach.
-            composer: self.input.is_some(),
+            // there is none to attach. Except that the shell's line editor
+            // may have taken the keyboard since, with a key this frame
+            // routed, and then the composer still attached is one the next
+            // frame takes away: see `CommandInput::type_key`, which asks the
+            // same.
+            composer: self.input.is_some() && !snapshot.line_editor,
             line_is_empty: self
                 .input
                 .as_ref()
                 .is_none_or(|input| input.editor().is_empty()),
             grid_has_selection: can_copy && self.has_selection(),
+            at_prompt: pane_surface::at_prompt(&snapshot),
+            offer_standing: self.input.as_ref().is_some_and(TextInput::has_offer),
         };
         let route = input_keys::route(keystroke, chars, pane, Platform::current());
 
@@ -454,7 +463,12 @@ impl Output {
         let Some((key, modifiers)) = terminal_keys::key_for(keystroke, chars, origin, alt) else {
             return Typed::Ignored;
         };
-        if handle.send_key(key, modifiers) {
+        let sent = if route == Route::LineEditor {
+            handle.send_key_to_line_editor(key, modifiers)
+        } else {
+            handle.send_key(key, modifiers)
+        };
+        if sent {
             Typed::SentToPty
         } else {
             Typed::Ignored
@@ -871,6 +885,8 @@ mod tests {
             composer: false,
             line_is_empty: true,
             grid_has_selection: false,
+            at_prompt: false,
+            offer_standing: false,
         }
     }
 

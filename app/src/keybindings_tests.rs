@@ -469,6 +469,8 @@ fn no_shipped_binding_takes_a_chord_the_input_field_needs() {
         composer: true,
         line_is_empty: false,
         grid_has_selection: false,
+        at_prompt: true,
+        offer_standing: false,
     };
 
     for platform in [Platform::Mac, Platform::Other] {

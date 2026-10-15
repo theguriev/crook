@@ -678,9 +678,19 @@ Twenty-two features, and the page that configures them:
   method is composing for that program — Japanese, Chinese, Korean, a dead key's accent — is
   then drawn underlined at the program's own cursor, even one it keeps hidden as Claude Code
   does, with the candidate list beside it, and reaches the program only once it is committed.
-  `ctrl-c`, `ctrl-z` and an end-of-input `ctrl-d` always reach the shell. That line is drawn
-  in one function, `app/src/input_keys.rs`, and the architecture doc's §7 says why it is drawn
-  there.
+  `ctrl-c`, `ctrl-z` and an end-of-input `ctrl-d` always reach the shell. So do the keys your
+  shell's own line editor answers and the composer does not, pressed at an empty composer:
+  `ctrl-r`'s history search, fzf's `ctrl-t` and `alt-c`, `alt-b`, `alt-f`, `alt-d` and `alt-.`
+  off macOS, and Escape for vi mode. The composer steps aside for the search or the picker,
+  and every key goes to the shell until it has finished a line and is back at its prompt
+  with nothing typed: the line ran, or in bash and zsh an Enter or `ctrl-c` ended it. What
+  you type while that line runs goes to the shell as well, which puts it on its next prompt,
+  and the composer waits for that line too; typing into vim, a REPL or Claude Code run from
+  there does not count. A search you give up leaves the shell's own empty line in charge
+  until then, and in fish, which reports nothing for an empty Enter, until the next command
+  runs. That line is drawn
+  in one function, `app/src/input_keys.rs`, and the architecture doc's §7 says why it is
+  drawn there.
 - **Option types on a non-US Mac.** In vim, Claude Code or any program holding the keyboard,
   Option is Meta (Esc in front of the key) except where your layout puts an ASCII symbol on it:
   German Option-L types `@` and Option-8 types `{`, British Option-3 types `#`, and US Option-F
