@@ -941,6 +941,138 @@ fn neither_the_main_worktree_nor_a_path_that_is_not_one_can_be_removed() {
     assert!(repo.join("tracked.txt").is_file());
 }
 
+/// A directory holding a file nobody can delete until this drops: what a
+/// container run as root leaves in a bind-mounted `build/`.
+#[cfg(unix)]
+struct Undeletable {
+    directory: PathBuf,
+}
+
+#[cfg(unix)]
+impl Undeletable {
+    /// Makes `directory` with a file in it and takes away the permission
+    /// deleting that file needs — or, for a user the permission does not
+    /// stop, says so and answers `None`, since there is nothing to test.
+    fn at(directory: &Path) -> Option<Self> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        write(&directory.join("built.o"), "written by a container\n");
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o555))
+            .expect("the scratch directory is ours to chmod");
+        let undeletable = Self {
+            directory: directory.to_owned(),
+        };
+        if std::fs::write(directory.join("probe"), "").is_ok() {
+            eprintln!("skipping: this user writes into a directory nobody may write into");
+            return None;
+        }
+        Some(undeletable)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Undeletable {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Before the scratch directory goes, which could not delete it either.
+        let _ = std::fs::set_permissions(&self.directory, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_removal_git_could_only_half_do_is_reported_as_one_rather_than_as_a_refusal() {
+    // git 2.55.0 stops deleting at a file it cannot delete, deletes the
+    // checkout's registration all the same, and exits 255 with "failed to
+    // delete". The checkout is gone as far as git is concerned; read as a
+    // refusal, Finish said it was kept and left its branch, and the
+    // directory stayed in the store with nothing to list it.
+    if without_git("a_removal_git_could_only_half_do_is_reported_as_one_rather_than_as_a_refusal") {
+        return;
+    }
+    let scratch = ScratchDir::new("remove-partly");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    write(&repo.join(".gitignore"), "build/\n");
+    git(&repo, &["add", ".gitignore"]);
+    git(&repo, &["commit", "--no-verify", "-m", "ignore the build"]);
+    let checkout = scratch.spot("built");
+    add(&repo, &checkout, "built", Some("main")).expect("git added the worktree");
+    let Some(_undeletable) = Undeletable::at(&checkout.join("build/as-root")) else {
+        return;
+    };
+
+    match remove(&repo, &checkout, false).expect_err("a file in it would not go") {
+        Error::PartlyRemoved { path, .. } => assert_eq!(path, checkout),
+        other => panic!("expected PartlyRemoved, got {other:?}"),
+    }
+    assert!(checkout.join("build/as-root/built.o").is_file());
+    assert_eq!(
+        list(&repo).expect("git answered").len(),
+        1,
+        "git still lists the checkout, so this was no half-done removal"
+    );
+    assert_eq!(git(&repo, &["branch", "--list", "built"]).trim(), "built");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_refusal_that_leaves_the_checkout_registered_is_not_a_removal_half_done() {
+    // A half-done removal is told from a refusal by asking git whether the
+    // checkout is still registered, and a refusal git makes before deleting
+    // anything — a submodule checked out in it — leaves it so. Asked through
+    // a link too: git finds a checkout by where a path leads, so a removal
+    // can be asked for by a spelling git never lists.
+    if without_git("a_refusal_that_leaves_the_checkout_registered_is_not_a_removal_half_done") {
+        return;
+    }
+    let scratch = ScratchDir::new("remove-refused-registered");
+    let (repo, checkout) = repo_with_a_submodule(&scratch);
+    git_with_local_submodules(&checkout, &["submodule", "update", "--init", "--quiet"]);
+    let link = scratch.spot("link");
+    std::os::unix::fs::symlink(&checkout, &link).expect("the scratch directory is writable");
+
+    for path in [&checkout, &link] {
+        match remove(&repo, path, false) {
+            Err(Error::Failed { .. }) => {}
+            other => panic!("expected Failed through {}, got {other:?}", path.display()),
+        }
+    }
+    entry(&list(&repo).expect("git answered"), &checkout);
+}
+
+#[test]
+fn a_refusal_classify_cannot_read_over_a_checkout_that_is_gone_is_not_a_removal_half_done() {
+    // git speaks the user's language and classify reads English: under
+    // LANGUAGE=de git 2.55.0 says "is not a working tree" as "Schwerwiegend:
+    // '<path>' ist kein Arbeitsverzeichnis", which comes back as Failed. A
+    // row whose checkout a removal elsewhere took is that case: no listing
+    // has the path, and this removal deleted nothing. Only a directory still
+    // standing makes a failure a removal half done.
+    if without_git(
+        "a_refusal_classify_cannot_read_over_a_checkout_that_is_gone_is_not_a_removal_half_done",
+    ) {
+        return;
+    }
+    let scratch = ScratchDir::new("remove-refused-in-german");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    let checkout = scratch.spot("elsewhere");
+    add(&repo, &checkout, "elsewhere", Some("main")).expect("git added the worktree");
+    remove(&repo, &checkout, false).expect("git removed it, as another pane would");
+
+    let said = format!(
+        "Schwerwiegend: '{}' ist kein Arbeitsverzeichnis",
+        checkout.display()
+    );
+    let refused = Error::Failed {
+        message: said.clone(),
+    };
+    match half_done(&repo, &checkout, refused) {
+        Error::Failed { message } => assert_eq!(message, said),
+        other => panic!("expected git's own words, got {other:?}"),
+    }
+}
+
 // --- deleting a branch -----------------------------------------------------------
 
 const MAIN: &str = "refs/heads/main";

@@ -63,13 +63,16 @@ pub fn open(url: &str) -> bool {
 /// Shows `folder` in the platform's file manager, reporting whether the
 /// attempt was made.
 ///
-/// For the folders Crook itself writes into — its logs and crash reports —
-/// and never for anything a program printed, which is what [`open`] and its
-/// list of schemes are for. A path rather than a `file://` URL, which would
-/// need every space and `%` in a home directory escaped to mean the same
-/// folder. Only a folder that exists is handed over: `explorer` given a
-/// program runs it, and `open` given an application launches it, so a path
-/// that is not a folder is refused here rather than trusted there.
+/// For the folders Crook itself knows of — its logs and crash reports, and
+/// where removals left files git could not delete: a checkout git listed,
+/// or for several, a folder in Crook's store or the one they are all
+/// directly in — and never for anything a program printed, which is what
+/// [`open`] and its list of schemes are for. A path rather than a `file://`
+/// URL, which would need every space and `%` in a home directory escaped to
+/// mean the same folder. Only a folder that exists is handed over:
+/// `explorer` given a program runs it, and `open` given an application
+/// launches it, so a path that is not a folder is refused here rather than
+/// trusted there.
 pub fn open_folder(folder: &Path) -> bool {
     if !folder.is_dir() {
         log::debug!("refusing to open {}: not a folder", folder.display());

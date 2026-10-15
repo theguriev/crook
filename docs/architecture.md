@@ -1372,7 +1372,16 @@ them — the checks are what `-d` stood in for. Three gestures reach it:
   deinitialised or `git rm`ed there, which git removes only when forced. The panes
   close first — a shell sitting in a directory keeps Windows from deleting it — and since the
   menu hung off a row that is now gone, it moves to a tab in the main checkout and says what
-  happened under the list.
+  happened under the list. A removal git could only half do, over a file it may not delete,
+  has still unregistered the checkout before failing — `worktree::remove` tells it from a
+  refusal by the directory still standing and the checkouts listed again without it, never by
+  git's sentence, which git translates, and answers `Error::PartlyRemoved` — so the branch
+  is dealt with as after a whole removal, on the same proof made again, and the list names the
+  folder the rest is in, with `Show the folder` to open it. The × says the same, and a sweep
+  counts such a checkout as gone, not as one that would not go. For several, it names the
+  folder holding them all only when that is in the store or the one they are each directly
+  in; one in the store and one in `~/code` share only the home directory, so the log names
+  each instead.
 - **Discard task** is the one way to delete a branch nobody proved, and it asks twice. The
   second question names the commits only that branch holds — on no other branch, tag or
   remote, since one that is elsewhere is not lost — then those only its history holds, which
