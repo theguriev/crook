@@ -8,8 +8,8 @@
 //! handle kept open here stands in for it exactly, and needs no luck with
 //! the scheduler to land where it has to.
 
-use std::fs::{File, OpenOptions, Permissions};
-use std::io::{ErrorKind, Write as _};
+use std::fs::{OpenOptions, Permissions};
+use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -51,6 +51,9 @@ const PROGRAM: &str = "#!/bin/sh\necho ran\n";
 #[cfg(target_os = "linux")]
 #[test]
 fn a_program_open_for_writing_anywhere_is_refused_under_any_name() {
+    use std::fs::File;
+    use std::io::Write as _;
+
     // The CI failure, on purpose: written, closed, made runnable — and still
     // open for writing in the child a fork made in between.
     let scratch = Scratch::new("busy");
