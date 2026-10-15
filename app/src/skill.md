@@ -96,8 +96,14 @@ not to standard output, so it works from a hook whose output belongs to someone 
 command with no terminal of its own, such as a hook Claude Code starts in a session of its
 own, writes to the terminal of the program that ran it, which is the same pane. The report
 needs no socket and no pane id: the terminal you have is the pane. The same sequence reaches the
-pane over `ssh` and from inside a container, and every other terminal drops it unread. A
-status never taken back goes when the shell's own marks say the command ended.
+pane over `ssh` and from inside a container, and every other terminal drops it unread. Inside
+tmux, which keeps a sequence it does not know to itself, it goes to the terminals of tmux's
+clients instead, the pane among them, and needs nothing set in tmux. Only where `tmux` cannot
+be asked, or no client takes the report, is it wrapped in tmux's passthrough, and then only if
+`TERM_PROGRAM` says tmux. A tmux older than 3.3 passes that on regardless; 3.3 and later pass
+it on only with `allow-passthrough` `on`, from a pane on screen, or, from 3.4, `all`. That
+configuration is the person's to change, so tell them rather than changing it. A status never
+taken back goes when the shell's own marks say the command ended.
 
 Claude Code reports all of this by itself once Crook's plugin is installed: running when a
 prompt is sent and around every tool, needing input on every notification, idle on stop, and

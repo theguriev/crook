@@ -462,14 +462,30 @@ Twenty-two features, and the page that configures them:
   terminal it has *is* the pane — so the command works from a hook, over `ssh` and inside a
   container, and every other terminal drops the sequence unread. A hook with no terminal of its own —
   every hook Claude Code runs — writes to the terminal of the program that ran it: the same
-  pane. Claude Code says all of it by itself — running when a prompt is sent and around every
-  tool, needing input whenever it stops to ask, with the notification's own text as the
-  message, idle when it is done — once Crook's plugin is installed:
+  pane. Inside tmux in a pane, which keeps a sequence it does not know to itself, it goes round
+  tmux to the terminal of each tmux client attached to the agent's session — the pane among
+  them, and any other terminal drops it unread — as `tmux` names them, and a client whose
+  terminal is not being read is given a fifth of a second. Written beside tmux's own output, a
+  report can land in a sequence tmux was cut off in the middle of writing to a terminal that
+  reads slowly, and leave a few stray characters until tmux redraws them. tmux's own
+  passthrough, a sequence wrapped for tmux to pass on in step with what it draws, is no cure
+  for that, whatever `allow-passthrough` says: tmux throws a passthrough away with everything
+  else it has yet to write to a client that has fallen that far behind, and never sends it
+  again, so on that terminal the report would be lost rather than followed by a few stray
+  characters. A report is wrapped that way only where `tmux` cannot be asked or no client takes
+  it, and then only if `TERM_PROGRAM` says tmux, as it does from 3.2 on; a tmux older than 3.3
+  passes the wrapper on regardless, and 3.3 and later only where `allow-passthrough` is `on`,
+  from a pane on screen, or — from 3.4 — `all`. Claude Code's own notifications (OSC 9, below)
+  are its own to send, and inside tmux they reach the row only as far as tmux passes them on,
+  which takes the same option. Claude Code says all of it by itself — running when a prompt
+  is sent and around every tool, needing input whenever it stops to ask, with the notification's
+  own text as the message, idle when it is done — once Crook's plugin is installed:
   `claude plugin marketplace add theguriev/crook`, then `claude plugin install crook@crook`,
   with a Crook newer than 0.1.13. That is Claude Code writing its own settings, not anyone
-  merging JSON; the plugin's hooks call `$CROOK_BIN`, do nothing in any other terminal, and
-  exit 0 even when a report fails, so a Crook that cannot be reached is a line in Claude
-  Code's debug log rather than a notice on every prompt; it carries the skill below too.
+  merging JSON; the plugin's hooks call `$CROOK_BIN`, do nothing in any other terminal unless
+  it runs tmux, and exit 0 even when a report fails, so a Crook that cannot be reached is a
+  line in Claude Code's debug log rather than a notice on every prompt; it carries the skill
+  below too.
   `crook --agent-hooks claude` prints those two commands, then the same hooks as JSON for a
   person who would rather merge them into `~/.claude/settings.json` by hand.
   With no hooks at all Claude Code still says half of it, in the glyph it puts in front of its
@@ -496,16 +512,20 @@ Twenty-two features, and the page that configures them:
   something new. Copilot CLI refuses the tool call a hook failed over, so no hook ever fails:
   outside Crook, with no terminal to report to, or with the binary gone, each one exits 0.
   Outside Crook means where
-  neither `TERM_PROGRAM=Crook` nor `CROOK_PANE_ID` reaches, and `ssh` and `docker exec` carry
-  neither, so an agent on the far side of either reports nothing through these command hooks,
-  the Claude Code plugin's included, until two things hold there. `TERM_PROGRAM` is passed
-  on: `SendEnv TERM_PROGRAM` in the ssh client's configuration with `AcceptEnv TERM_PROGRAM`
-  in the server's, or `docker exec -e TERM_PROGRAM`. And the hooks find a `crook` on that
-  machine, since they carry no path of their own: one on its `PATH`, or `CROOK_BIN` set there
-  to its path, as in `docker exec -e TERM_PROGRAM -e CROOK_BIN=/opt/crook/crook` for a binary
-  mounted off `PATH`. The OpenCode plugin and aider's command have no guard: they run the
-  binary by the path they were printed with wherever they are loaded, so they report over
-  `ssh` and from a container with nothing passed on.
+  neither `TERM_PROGRAM=Crook` nor `CROOK_PANE_ID` reaches and nothing runs inside tmux. Inside
+  any tmux the hooks run, since only tmux can name the terminals its clients are on:
+  `crook --agent` asks it for them and writes the report to each, and one that is not Crook
+  drops it unread. `ssh` and `docker exec` carry neither variable, so an agent on the far side
+  of either reports nothing through these command hooks, the Claude Code plugin's included,
+  until two things hold there.
+  `TERM_PROGRAM` is passed on: `SendEnv TERM_PROGRAM` in the ssh client's configuration with
+  `AcceptEnv TERM_PROGRAM` in the server's, or `docker exec -e TERM_PROGRAM`. And the hooks find
+  a `crook` on that machine, since they carry no path of their own: one on its `PATH`, or
+  `CROOK_BIN` set there to its path, as in
+  `docker exec -e TERM_PROGRAM -e CROOK_BIN=/opt/crook/crook` for a binary mounted off `PATH`.
+  The OpenCode plugin and aider's command have no guard: they run the binary by the path they
+  were printed with wherever they are loaded, so they report over `ssh` and from a container
+  with nothing passed on.
   `--pull-request <url>` beside any status says which pull request the work is, and the row
   carries it as a chip that opens it — https only, capped, on a sequence of its own,
   `OSC 6342` — until the pane moves to another branch (a rebase is not a move); the Claude

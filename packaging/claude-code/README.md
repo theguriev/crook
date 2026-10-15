@@ -13,12 +13,14 @@ merges JSON and Crook opens no file it does not own:
 
 - `hooks/hooks.json` — the hooks `crook --agent-hooks claude` prints, calling `"$CROOK_BIN"`
   (the binary every pane is told it belongs to, or `crook` on `PATH` when a pane has none) and
-  exiting 0 without a word unless `TERM_PROGRAM` is `Crook` or `CROOK_PANE_ID` is set. In any
-  other terminal they do nothing. In a pane they exit 0 after the report too, whatever it did,
-  so a Crook that cannot be reached is a line of stderr in Claude Code's debug log rather than
-  a notice on every prompt and tool call. Claude Code runs each hook with no terminal of its
-  own, and `crook --agent` reaches the pane through the terminal of the program that ran it,
-  which needs a Crook newer than 0.1.13.
+  exiting 0 without a word unless `TERM_PROGRAM` is `Crook` or `CROOK_PANE_ID` is set, or they
+  run inside tmux; anywhere else they do nothing. Inside tmux `crook --agent` asks tmux for the
+  terminals of its clients and writes the report to each, and a terminal that is not Crook
+  drops it unread. In a pane they exit 0 after the report too, whatever it did, so a Crook
+  that cannot be reached is a line of stderr in Claude Code's debug log rather than a notice on
+  every prompt and tool call. Claude Code runs each hook with no terminal of its own, and
+  `crook --agent` reaches the pane through the terminal of the program that ran it, which
+  needs a Crook newer than 0.1.13.
 - `skills/crook/SKILL.md` — the skill `crook --skill` prints.
 
 Both are copies of what lives in `app/src`, and the tests in `app/src/agent.rs` fail when they
@@ -28,7 +30,10 @@ byte. Edit those, then copy the result here — the failing test prints the `hoo
 `app/tests/claude_code_hooks.rs` runs each command the way Claude Code does, with the real
 binary in a session of its own below a process on a pty, and fails unless the report arrives
 on that pty — and once more below a program with no terminal, the way `claude -p` is when
-another agent runs it, and fails if anything arrives.
+another agent runs it, and fails if anything arrives. Where tmux is installed it runs them again
+with the agent inside tmux on that pty, which keeps the sequence to itself unless
+`crook --agent` goes round it, and once with a second tmux client whose terminal nobody reads,
+which must not hold the hook.
 
 There is no `version` in `plugin.json` on purpose: without one, Claude Code takes the commit
 the plugin was installed from as its version, so `claude plugin update crook@crook` picks up

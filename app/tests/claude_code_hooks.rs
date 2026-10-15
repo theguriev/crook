@@ -21,12 +21,22 @@
 //! CLI denies the tool call whose `preToolUse` hook errored, so a report that
 //! could not be written stopped every tool of a `copilot -p` under CI, and of
 //! every Copilot anywhere once the binary the hooks named had moved.
+//!
+//! And inside tmux, which a person runs in a pane to keep agents alive across
+//! a restart of Crook, which keeps no processes. tmux drops every OSC it does
+//! not know, 6340 among them, so a report written to the agent's terminal —
+//! one of tmux's panes — never reached Crook's. These start tmux on the pty,
+//! with the agent in a pane of tmux's own, and read what reaches the pty, which
+//! is the pane Crook draws. And once with tmux only named in the environment,
+//! the way every pane of a Crook started from inside tmux names it, where the
+//! report has to stay on the pane rather than go to that tmux's client.
 
 #![cfg(unix)]
 
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
@@ -103,6 +113,148 @@ enum Agent {
     Detached,
 }
 
+/// What the pty runs the agent in.
+#[derive(Clone, Copy)]
+enum Pane<'a> {
+    /// Nothing: the pty is the pane, and the agent's terminal.
+    Plain,
+    /// tmux, started on the pty, with the agent in its one pane: the pty is
+    /// tmux's client's terminal, and the agent's is tmux's pane.
+    Tmux(&'a Tmux),
+    /// Nothing, in an environment that names a pane of a tmux all the same —
+    /// its `TMUX` and its `TMUX_PANE` — the way every pane of a Crook started
+    /// from inside that tmux names it.
+    NamingTmux {
+        /// The `TMUX` the environment has.
+        tmux: &'a str,
+        /// The `TMUX_PANE` it has.
+        pane: &'a str,
+    },
+}
+
+/// The configuration every [`Tmux`] starts with. `/bin/sh` for the command a
+/// session is started on, whatever shell the person running the tests uses;
+/// and a pane that stays after its command ends, so what the command wrote
+/// last is drawn on the client before the server is killed, rather than lost
+/// with a window that closed first.
+const TMUX_CONFIG: &str = "set -g default-shell /bin/sh\nset -g remain-on-exit on\n";
+
+/// A tmux server of the test's own, killed when this is dropped: on a socket
+/// of its own, so neither a person's tmux nor another test's is touched, and
+/// with no configuration but [`TMUX_CONFIG`] and what a case adds.
+struct Tmux {
+    /// The socket's name, under tmux's own directory.
+    socket: String,
+    /// Where the configuration file is.
+    config: Scratch,
+}
+
+impl Tmux {
+    /// A server yet to start, with `config` after [`TMUX_CONFIG`]; `None`,
+    /// saying so, where no tmux runs.
+    ///
+    /// Skipped rather than failed without one, on CI too: tmux is what a
+    /// person chooses to run in a pane, not something Crook needs, and a
+    /// runner image is not promised to carry it.
+    fn new(config: &str) -> Option<Self> {
+        let here = crook::process::command("tmux")
+            .arg("-V")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !here {
+            eprintln!("skipped: no tmux to run");
+            return None;
+        }
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let socket = format!(
+            "crook-hooks-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let directory = Scratch::new();
+        fs::write(
+            directory.0.join("tmux.conf"),
+            format!("{TMUX_CONFIG}{config}"),
+        )
+        .expect("the configuration should be writable");
+        Some(Self {
+            socket,
+            config: directory,
+        })
+    }
+
+    /// Whether this tmux is at least `major.minor`, by what `tmux -V` says; a
+    /// build that names no number — `tmux master` — is taken to be.
+    fn at_least(&self, major: u32, minor: u32) -> bool {
+        let said = crook::process::command("tmux")
+            .arg("-V")
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+            .unwrap_or_default();
+        // `tmux 3.7c`, or `tmux next-3.8` for a build between releases.
+        let version = said.split_whitespace().nth(1).unwrap_or_default();
+        let mut numbers = version.trim_start_matches("next-").split('.').map(|part| {
+            part.trim_end_matches(|character: char| !character.is_ascii_digit())
+                .parse::<u32>()
+                .ok()
+        });
+        match (numbers.next().flatten(), numbers.next().flatten()) {
+            (Some(its_major), Some(its_minor)) => (its_major, its_minor) >= (major, minor),
+            _ => true,
+        }
+    }
+
+    /// `rest` after the arguments that make a `tmux` this server's.
+    fn arguments(&self, rest: &[&str]) -> Vec<String> {
+        let config = self.config.0.join("tmux.conf");
+        let config = config.to_str().expect("the scratch path is text");
+        ["-L", &self.socket, "-f", config]
+            .iter()
+            .chain(rest)
+            .map(|word| (*word).to_owned())
+            .collect()
+    }
+
+    /// A client of this server on the pty, running the command `rest` says.
+    fn client(&self, rest: &[&str]) -> Program {
+        Program::command("tmux", self.arguments(rest))
+    }
+
+    /// What the tmux command `rest` prints, run beside the server and not on
+    /// a terminal.
+    fn ask(&self, rest: &[&str]) -> String {
+        let output = crook::process::command("tmux")
+            .args(self.arguments(rest))
+            .env_remove("TMUX")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .expect("tmux runs");
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_owned()
+    }
+}
+
+impl Drop for Tmux {
+    fn drop(&mut self) {
+        // A server that is killed leaves its socket behind, one more file in
+        // tmux's directory for every case of every run.
+        let socket = self.ask(&["display-message", "-p", "#{socket_path}"]);
+        let _ = crook::process::command("tmux")
+            .args(["-L", &self.socket, "kill-server"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if !socket.is_empty() {
+            let _ = fs::remove_file(socket);
+        }
+    }
+}
+
 /// A directory that removes itself.
 struct Scratch(PathBuf);
 
@@ -173,13 +325,19 @@ fn perl_is_here() -> bool {
 /// than the hook: the agent's session, like the probe's, is started from the
 /// pty's process.
 fn run_as_a_hook(command: &str, agent: Agent) -> Ran {
+    run_as_a_hook_in(command, agent, Pane::Plain)
+}
+
+/// [`run_as_a_hook`], with the agent where `place` says rather than always on
+/// the pty itself.
+fn run_as_a_hook_in(command: &str, agent: Agent, place: Pane) -> Ran {
     let scratch = Scratch::new();
     fs::write(scratch.0.join("input"), INPUT).expect("the input should be writable");
     let (hook, under_the_agent) = match agent {
         Agent::OnThePane => (command, ""),
         Agent::Detached => (UNDER_A_DETACHED_AGENT, command),
     };
-    let environment = [
+    let mut environment = vec![
         ("TERM_PROGRAM", "Crook"),
         ("CROOK_BIN", CROOK),
         ("HOOK_COMMAND", hook),
@@ -188,35 +346,39 @@ fn run_as_a_hook(command: &str, agent: Agent) -> Ran {
             "HOOK_DIR",
             scratch.0.to_str().expect("the scratch path is text"),
         ),
-    ]
-    .map(|(key, value)| (key.to_owned(), value.to_owned()));
+        // No tmux but the one a case names: a test run from inside a person's
+        // own tmux would otherwise hand that one to every hook.
+        ("TMUX", ""),
+        // Nor the id of the pane the tests were run from, which a tmux
+        // started here would hand on to its panes and the hooks' guard would
+        // let them through on, as though the server had been started in one.
+        ("CROOK_PANE_ID", ""),
+    ];
+    let script = Program::command("/bin/sh", ["-c", SCRIPT]);
+    let program = match place {
+        Pane::Plain => script,
+        // With no pane id for tmux to hand on, the way a server started
+        // outside Crook has none: tmux says `TERM_PROGRAM=tmux` to its own
+        // panes, and the hooks' guard lets them through on its `TMUX`.
+        Pane::Tmux(tmux) => tmux.client(&["new-session", SCRIPT]),
+        Pane::NamingTmux { tmux, pane } => {
+            environment.extend([("TMUX", tmux), ("TMUX_PANE", pane)]);
+            script
+        }
+    };
+    let environment: Vec<_> = environment
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
     let mut pty = Pty::spawn(
-        &Program::command("/bin/sh", ["-c", SCRIPT]),
+        &program,
         TerminalSize::new(200, 24),
         Some(scratch.0.as_path()),
         &environment,
     )
     .expect("a shell should start on a pty");
 
-    let (sender, receiver) = mpsc::channel();
-    let mut reader = pty.take_reader().expect("a fresh pty has its reader");
-    thread::spawn(move || {
-        let mut buffer = [0; 4096];
-        while let Ok(read) = reader.read(&mut buffer) {
-            if read == 0 || sender.send(buffer[..read].to_vec()).is_err() {
-                return;
-            }
-        }
-    });
-    let mut pane = String::new();
-    let deadline = Instant::now() + DEADLINE;
-    while !pane.contains(DONE) {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let Ok(chunk) = receiver.recv_timeout(remaining) else {
-            break;
-        };
-        pane.push_str(&String::from_utf8_lossy(&chunk));
-    }
+    let pane = read_until(&reading(&mut pty), DONE);
     let _ = pty.kill();
     assert!(
         pane.contains(DONE),
@@ -229,6 +391,36 @@ fn run_as_a_hook(command: &str, agent: Agent) -> Ran {
         stdout: scratch.read("stdout"),
         stderr: scratch.read("stderr"),
     }
+}
+
+/// What arrives on `pty`, chunk by chunk, read on a thread of its own.
+fn reading(pty: &mut Pty) -> mpsc::Receiver<Vec<u8>> {
+    let (sender, receiver) = mpsc::channel();
+    let mut reader = pty.take_reader().expect("a fresh pty has its reader");
+    thread::spawn(move || {
+        let mut buffer = [0; 4096];
+        while let Ok(read) = reader.read(&mut buffer) {
+            if read == 0 || sender.send(buffer[..read].to_vec()).is_err() {
+                return;
+            }
+        }
+    });
+    receiver
+}
+
+/// What `arriving` brings until it has brought `marker`, or until
+/// [`DEADLINE`], whichever is first.
+fn read_until(arriving: &mpsc::Receiver<Vec<u8>>, marker: &str) -> String {
+    let mut arrived = String::new();
+    let deadline = Instant::now() + DEADLINE;
+    while !arrived.contains(marker) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(chunk) = arriving.recv_timeout(remaining) else {
+            break;
+        };
+        arrived.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    arrived
 }
 
 /// The report `command`'s `--agent` arguments make of [`INPUT`]: the status
@@ -268,7 +460,12 @@ fn expected_report(command: &str) -> String {
 /// Asserts that `command`, run as a hook, told the pane what its arguments
 /// say, exited 0, and printed nothing Claude Code would read.
 fn assert_reaches_the_pane(event: &str, command: &str) {
-    let ran = run_as_a_hook(command, Agent::OnThePane);
+    assert_reaches_the_pane_from(event, command, Pane::Plain);
+}
+
+/// [`assert_reaches_the_pane`], with the agent where `place` says.
+fn assert_reaches_the_pane_from(event: &str, command: &str, place: Pane) {
+    let ran = run_as_a_hook_in(command, Agent::OnThePane, place);
     assert_eq!(
         "detached\n", ran.probe,
         "{event}: a hook here has to be where Claude Code puts one, with no terminal of its own"
@@ -291,7 +488,13 @@ fn assert_reaches_the_pane(event: &str, command: &str) {
 /// no terminal anything, failed saying so, and still exited 0 and printed
 /// nothing Claude Code would read.
 fn assert_reaches_nothing_from_a_detached_agent(event: &str, command: &str) {
-    let ran = run_as_a_hook(command, Agent::Detached);
+    assert_reaches_nothing_from_a_detached_agent_in(event, command, Pane::Plain);
+}
+
+/// [`assert_reaches_nothing_from_a_detached_agent`], with the agent's own
+/// agent where `place` says.
+fn assert_reaches_nothing_from_a_detached_agent_in(event: &str, command: &str, place: Pane) {
+    let ran = run_as_a_hook_in(command, Agent::Detached, place);
     assert_eq!(
         "detached\n", ran.probe,
         "{event}: the agent here has to have no terminal of its own, as under a Bash tool"
@@ -432,4 +635,275 @@ fn no_plugin_hook_of_an_agent_with_no_terminal_reports_on_the_pane_above_it() {
             .expect("a hook has a command");
         assert_reaches_nothing_from_a_detached_agent(event, command);
     }
+}
+
+/// The Claude Code plugin's hooks, each beside the event it is for.
+fn plugin_hooks() -> Vec<(String, String)> {
+    let shipped: Value = serde_json::from_str(PLUGIN_HOOKS).expect("hooks.json is JSON");
+    let events = shipped["hooks"].as_object().expect("hooks.json has hooks");
+    assert!(!events.is_empty());
+    events
+        .iter()
+        .map(|(event, groups)| {
+            let command = groups[0]["hooks"][0]["command"]
+                .as_str()
+                .expect("a hook has a command");
+            (event.clone(), command.to_owned())
+        })
+        .collect()
+}
+
+/// The plugin's hook for `event`.
+fn plugin_hook(event: &str) -> String {
+    plugin_hooks()
+        .into_iter()
+        .find_map(|(name, command)| (name == event).then_some(command))
+        .unwrap_or_else(|| panic!("the plugin has no {event} hook"))
+}
+
+#[test]
+fn every_plugin_hook_reaches_the_pane_from_inside_tmux_in_it() {
+    // tmux drops the report written to its own pane, so it goes to the
+    // terminal of tmux's client instead, which is the pane Crook draws.
+    if !perl_is_here() {
+        return;
+    }
+    for (event, command) in plugin_hooks() {
+        let Some(tmux) = Tmux::new("") else {
+            return;
+        };
+        assert_reaches_the_pane_from(&event, &command, Pane::Tmux(&tmux));
+    }
+}
+
+#[test]
+fn a_hook_that_cannot_ask_tmux_reaches_the_pane_through_tmuxs_passthrough() {
+    // With no `tmux` on its PATH to ask which terminal the client is on, the
+    // report goes the one other way out of a tmux pane: wrapped for tmux to
+    // pass on, which it does where `allow-passthrough` is on. `-q`, because a
+    // tmux older than the option passes the wrapper on without being asked.
+    if !perl_is_here() {
+        return;
+    }
+    let Some(tmux) = Tmux::new("set -gq allow-passthrough on\n") else {
+        return;
+    };
+    // Without an answer from tmux, what says the pane is tmux's is the
+    // TERM_PROGRAM tmux gives its panes, which it has since 3.2.
+    if !tmux.at_least(3, 2) {
+        eprintln!("skipped: a tmux older than 3.2 says nothing in TERM_PROGRAM");
+        return;
+    }
+    let command = format!("PATH=/nonexistent; {}", plugin_hook("Notification"));
+    assert_reaches_the_pane_from("Notification", &command, Pane::Tmux(&tmux));
+}
+
+#[test]
+fn no_plugin_hook_of_an_agent_with_no_terminal_inside_tmux_reports_on_the_pane() {
+    // `claude -p` run by the Bash tool of a Claude Code in tmux: its hooks
+    // know the tmux pane from the environment they inherit, and the pane is
+    // still the outer agent's, not theirs.
+    if !perl_is_here() {
+        return;
+    }
+    for (event, command) in plugin_hooks() {
+        let Some(tmux) = Tmux::new("") else {
+            return;
+        };
+        assert_reaches_nothing_from_a_detached_agent_in(&event, &command, Pane::Tmux(&tmux));
+    }
+}
+
+#[test]
+fn a_pane_of_a_crook_started_inside_tmux_reports_on_itself_and_not_to_that_tmux() {
+    // Crook started from a terminal running tmux hands that tmux's `TMUX`
+    // and `TMUX_PANE` to every pane of its own, where nothing is inside tmux
+    // at all: a report sent to that tmux's client would light the terminal
+    // Crook was started from, or be wrapped for a tmux that never sees it.
+    if !perl_is_here() {
+        return;
+    }
+    let Some(tmux) = Tmux::new("") else {
+        return;
+    };
+    let mut outer = Pty::spawn(
+        &tmux.client(&["new-session", "sleep 600"]),
+        TerminalSize::new(200, 24),
+        None,
+        &[("TMUX".to_owned(), String::new())],
+    )
+    .expect("tmux should start on a pty");
+    let outer_arrived = reading(&mut outer);
+    let deadline = Instant::now() + DEADLINE;
+    while tmux
+        .ask(&["list-clients", "-F", "#{client_tty}"])
+        .is_empty()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "tmux's client did not attach in {DEADLINE:?}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let variable = tmux
+        .ask(&[
+            "display-message",
+            "-p",
+            "#{socket_path},#{pid},#{session_id}",
+        ])
+        .replace('$', "");
+    let pane = tmux.ask(&["display-message", "-p", "#{pane_id}"]);
+
+    let command = plugin_hook("Notification");
+    let ran = run_as_a_hook_in(
+        &command,
+        Agent::OnThePane,
+        Pane::NamingTmux {
+            tmux: &variable,
+            pane: &pane,
+        },
+    );
+    let report = expected_report(&command);
+    assert!(
+        ran.pane.contains(&report) && !ran.pane.contains("\x1bPtmux;"),
+        "the pane did not get {report:?} as it is; it got {:?}, and the hook said {:?}",
+        ran.pane,
+        ran.stderr
+    );
+    // Whatever the hook wrote to tmux's client is on that terminal before
+    // what tmux draws there after the hook has finished.
+    tmux.ask(&["display-message", "crook-after-the-hook"]);
+    let outer_got = read_until(&outer_arrived, "crook-after-the-hook");
+    let _ = outer.kill();
+    assert!(
+        outer_got.contains("crook-after-the-hook"),
+        "tmux drew nothing on its client in {DEADLINE:?}: {outer_got:?}"
+    );
+    assert!(
+        !outer_got.contains("6340"),
+        "the report went to the terminal Crook was started from: {outer_got:?}"
+    );
+}
+
+/// `O_NONBLOCK`, which the standard library has no name for: the same on
+/// Linux's x86 and Arm, and on macOS and the BSDs.
+#[cfg(target_os = "linux")]
+const O_NONBLOCK: i32 = 0o4000;
+#[cfg(not(target_os = "linux"))]
+const O_NONBLOCK: i32 = 0x0004;
+
+/// Fills `terminal` until it takes no more: a terminal nobody is reading,
+/// the way one is behind an `ssh` whose connection has gone quiet.
+///
+/// In smaller and smaller pieces, down to one byte: a terminal that refuses a
+/// large write can still have room for a short one, and a report is short.
+fn fill(terminal: &Path) {
+    use std::io::{ErrorKind, Write as _};
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let mut terminal = fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(O_NONBLOCK)
+        .open(terminal)
+        .expect("the client's terminal opens");
+    let mut taken = 0;
+    for size in [4096, 256, 16, 1] {
+        let piece = vec![b'x'; size];
+        // A refusal can be a moment's, while tmux writes to the same
+        // terminal; five in a row, a few milliseconds apart, are a full one.
+        let mut refused = 0;
+        while refused < 5 {
+            match terminal.write(&piece) {
+                Ok(written) => {
+                    taken += written;
+                    refused = 0;
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    refused += 1;
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("the client's terminal would not be written to: {error}"),
+            }
+            // Far more than any terminal holds, so that one that never fills
+            // is a failure rather than a test that never ends.
+            assert!(
+                taken < 1 << 24,
+                "the client's terminal took 16 MiB and still had room"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_tmux_client_on_a_terminal_nobody_reads_holds_no_hook() {
+    // A second attach to the agent's session, over an `ssh` whose connection
+    // has gone quiet — a laptop shut, a network dropped — stops being read,
+    // and its terminal fills. A report written there waits for it to be read
+    // again, and the hook with it, and the agent behind every tool call,
+    // until the connection dies; and the Crook pane's client, if it came
+    // after that one, never got the report at all.
+    if !perl_is_here() {
+        return;
+    }
+    let Some(tmux) = Tmux::new("") else {
+        return;
+    };
+    let gate = Scratch::new();
+    let go = gate.0.join("go");
+    // The hook waits for the second client to be attached and filled.
+    let command = format!(
+        "until [ -e '{}' ]; do sleep 0.05; done; {}",
+        go.display(),
+        plugin_hook("Notification")
+    );
+    let (finished, finishing) = mpsc::channel::<()>();
+    let (tmux, go) = (&tmux, &go);
+    thread::scope(|scope| {
+        scope.spawn(move || {
+            let deadline = Instant::now() + DEADLINE;
+            let clients = || tmux.ask(&["list-clients", "-F", "#{client_tty}"]);
+            let mut first = clients();
+            while first.is_empty() {
+                assert!(Instant::now() < deadline, "tmux's client never attached");
+                thread::sleep(Duration::from_millis(50));
+                first = clients();
+            }
+            // Never read: its reader is never taken.
+            let mut stalled = Pty::spawn(
+                &tmux.client(&["attach-session"]),
+                TerminalSize::new(200, 24),
+                None,
+                &[("TMUX".to_owned(), String::new())],
+            )
+            .expect("a second tmux client should start on a pty");
+            let second = loop {
+                let attached = clients();
+                let is_new = |client: &&str| first.lines().all(|known| known != *client);
+                if let Some(second) = attached.lines().find(is_new) {
+                    break second.to_owned();
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the second client never attached"
+                );
+                thread::sleep(Duration::from_millis(50));
+            };
+            fill(Path::new(&second));
+            fs::write(go, "").expect("the gate should be writable");
+            // Attached until the hook is over: a client that has left is one
+            // tmux no longer names.
+            let _ = finishing.recv();
+            let _ = stalled.kill();
+        });
+        let started = Instant::now();
+        assert_reaches_the_pane_from("Notification", &command, Pane::Tmux(tmux));
+        drop(finished);
+        // Most of this is tmux starting and the hook's gate; the report
+        // itself is given a fraction of a second.
+        assert!(
+            started.elapsed() < DEADLINE / 2,
+            "the hook took {:?}",
+            started.elapsed()
+        );
+    });
 }
