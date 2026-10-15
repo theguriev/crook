@@ -273,10 +273,16 @@ pub struct Icon {
 /// One picture, stretched into a box.
 ///
 /// The box is where it goes and how big it is drawn, in logical pixels; the
-/// bitmap's own size is only its resolution. The renderer resamples the
-/// pixels to the box's device size, so a picture drawn at half its size is
-/// averaged down rather than sampled sparsely. An image records no hit rect,
-/// for the same reason a glyph does not — wrap it to make it clickable.
+/// bitmap's own size is only its resolution. While the box's device size fits
+/// an atlas row and the bitmap an atlas, the renderer resamples the pixels to
+/// that size on the CPU, so a picture drawn at half its size is averaged down
+/// rather than sampled sparsely. Past that it uploads them as they are and
+/// the sampler, which has no mipmaps, stretches or shrinks them to the box —
+/// so pixels much bigger than their box are sampled sparsely, and a caller
+/// that draws such pictures hands over pixels at the box's device size, as
+/// the terminal does for the pictures a program prints. An image records no
+/// hit rect, for the same reason a glyph does not — wrap it to make it
+/// clickable.
 #[derive(Clone, Debug)]
 pub struct Image {
     /// The pixels, shared with whoever decoded them.

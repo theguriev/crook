@@ -535,9 +535,9 @@ mod tests {
     #[test]
     fn a_picture_wider_than_an_atlas_is_drawn_at_its_full_width() {
         // A 560-logical preview on a 2x display is 1120 device pixels, past
-        // the atlas edge. The region is placed at the ceiling and the quad is
-        // still the drawn size, so the picture's right edge is where it was
-        // asked to be and not where the atlas ran out.
+        // an atlas row. The 2x1 bitmap gets a texture of its own, as it is,
+        // and the quad is the drawn size, so the sampler stretches it to 1120
+        // and the picture's right edge is where it was asked to be.
         let bitmap = Arc::new(
             Bitmap::rgba8(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).expect("two texels"),
         );

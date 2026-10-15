@@ -8,8 +8,9 @@
 //! Pictures are drawn here too, as the same quad with the emoji flag set: the
 //! shader already passes a colour texel through untouched for an emoji, and a
 //! picture is nothing but colour texels. What they need that a glyph does not
-//! is atlases of their own — and, for one wider or taller than an atlas row,
-//! a texture of its own — so [`Sheet`] says which a batch samples from.
+//! is atlases of their own — and, for one drawn wider or taller than an atlas
+//! row or handed over bigger than an atlas, a texture of its own — so
+//! [`Sheet`] says which a batch samples from.
 //!
 //! The instance layout here is the Rust half of the contract in
 //! `src/shaders/README.md`; the two must be changed together.

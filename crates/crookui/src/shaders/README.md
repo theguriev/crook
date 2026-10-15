@@ -201,10 +201,10 @@ Semantics:
 | 1 | 0 | `texture_2d<f32>` — the atlas, `Rgba8Unorm` | `FRAGMENT` |
 | 1 | 1 | `sampler` — `SamplerBindingType::Filtering` | `FRAGMENT` |
 
-One bind group per atlas texture, so the draw loop is one `set_bind_group(1, …)` +
-`draw_indexed` per (layer, atlas) pair. Group 0 is declared but only the vertex stage reads it;
-`ShaderStages::VERTEX` is the correct visibility, and the binding must still appear in the
-pipeline layout.
+One bind group per atlas texture, and per picture's own texture, so the draw loop is one
+`set_bind_group(1, …)` + `draw_indexed` per (layer, texture) pair. Group 0 is declared but only
+the vertex stage reads it; `ShaderStages::VERTEX` is the correct visibility, and the binding must
+still appear in the pipeline layout.
 
 The sampler must be `FilterMode::Linear` for both `mag_filter` and `min_filter`, with the default
 `ClampToEdge` address modes. Linear filtering is load-bearing: it is what turns the horizontal
@@ -230,23 +230,40 @@ at the edges.
    those are identical. For emoji, `k` is computed from the sampled texel and then thrown away by
    the `max(contrasted, f32(in.is_emoji))` — emoji alpha is already final and must not be pushed
    through a contrast curve. Do not "simplify" the `max` away.
-5. **Pictures are `is_emoji = 1` blits, resampled on the CPU to the size they are drawn at.**
-   A scene image has a *logical* size chosen by whoever drew it — a plugin's icon is 12 or 18
+5. **Pictures are `is_emoji = 1` blits, each quad the device size its picture is drawn at.** A
+   scene image has a *logical* size chosen by whoever drew it — a plugin's icon is 12 or 18
    logical px, a preview captured at 2x is its pixel count halved — and the renderer multiplies
-   that by `scale_factor` exactly once, like every other primitive. `GlyphCache::get_image` then
-   resamples the bitmap to that device size (area-averaged when shrinking, bilinear when growing,
-   premultiplied in between so transparent pixels bleed no colour) before uploading it, so rule 1
-   holds for pictures too: `bounds.zw` is the region size because the region was *made* the drawn
-   size, and the linear sampler reads every texel at its centre. The one exception is a side past
-   1022 device px — a 480-logical preview at 2.13x and up — where the region is clamped, both sides
-   by the same factor, and the quad is still drawn at its full size; that quad's `uv_bounds` are
-   pulled in by half a texel on every side so the filter never reaches the padding, which is the
-   fringe rule 1 is about. Pictures go into atlases of their own, never the glyph atlases
-   (`Sheet::Images` versus `Sheet::Marks` in `glyph.rs`), and that whole set is dropped at the top
-   of a frame once there are more than eight of them — 32 MB — while the glyph atlases are never
-   dropped at all. There is no picture shader and no new attribute: `mix(…, 1.0)` selects the
-   texel and `max(contrasted, 1.0)` leaves its alpha alone, so the texel is emitted as uploaded —
-   which is also why the atlas holds *straight* alpha, the same rule as item 1 of the rect list.
+   that by `scale_factor` exactly once, like every other primitive, through
+   `crookui_core::image::device_size`, which a caller that decodes a picture at its drawn size
+   calls too, so the two agree to the pixel. `image_region` in `glyph_cache.rs` then sends the
+   bitmap one of two ways:
+   - **Into a shared image atlas, resampled on the CPU**, while both drawn sides fit an atlas row
+     (1022 device px) and the bitmap fits an atlas (1024 px a side). `GlyphCache::get_image`
+     resamples it to the drawn size (area-averaged when shrinking, bilinear when growing,
+     premultiplied in between so transparent pixels bleed no colour) before uploading it, so rule
+     1 holds for pictures too: `bounds.zw` is the region size because the region was *made* the
+     drawn size, and the linear sampler reads every texel at its centre. These atlases are
+     pictures' own, never the glyph atlases (`Sheet::Images` versus `Sheet::Marks` in
+     `glyph.rs`), and that whole set is dropped at the top of a frame once there are more than
+     eight of them — 32 MB — while the glyph atlases are never dropped at all.
+   - **Into a texture of its own, as it is**, past that: a side drawn longer than an atlas row,
+     or a bitmap bigger than an atlas at whatever size it is drawn, since a resample would cost
+     what its source weighs, on the thread that draws. The texture is the bitmap's size,
+     resampled only past the device's `max_texture_dimension_2d`; the batch samples
+     `Sheet::Picture(key)`, keyed by the bitmap's id and that size; and the texture is kept only
+     while it is drawn — the sweep at the top of a frame releases each one the frame before did
+     not draw, one at a time. A caller that decoded the picture at its drawn size, as the
+     terminal's inline pictures are on a pool, hands over exactly that, and the sampler reads it
+     one to one. Anything else — old pixels while a decode at a new size is on its way, pixels
+     held short of ones that would be made up — is stretched or shrunk to the quad by the
+     sampler, which has no mipmaps.
+
+   Whenever the region and the quad differ in size, which is only ever on the second path, the
+   quad's `uv_bounds` are pulled in by half a texel on every side, so the filter never reaches
+   past the region's edge into whatever lies beyond it, which is the fringe rule 1 is about.
+   There is no picture shader and no new attribute: `mix(…, 1.0)` selects the texel and
+   `max(contrasted, 1.0)` leaves its alpha alone, so the texel is emitted as uploaded — which is
+   also why the atlas holds *straight* alpha, the same rule as item 1 of the rect list.
 
 ---
 
