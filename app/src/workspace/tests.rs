@@ -9515,16 +9515,17 @@ fn a_sweep_counts_a_half_removed_checkout_as_removed_and_says_where_its_files_ar
 
 #[test]
 fn a_sweep_that_left_files_in_several_checkouts_shows_the_folder_they_are_all_in() {
-    let repository = Path::new("/store/repo");
+    let store = Path::new("/store");
+    let repository = store.join("repo");
     let left = [
         ("feat/a".to_owned(), repository.join("feat").join("a")),
         ("fix-b".to_owned(), repository.join("fix-b")),
     ];
 
-    let (said, folder) =
-        super::tab_menu::swept_but_left(&left).expect("two checkouts left files behind");
+    let (said, folder) = super::tab_menu::swept_but_left(&left, Some(store))
+        .expect("two checkouts left files behind");
 
-    assert_eq!(folder.as_deref(), Some(repository));
+    assert_eq!(folder, Some(repository.clone()));
     assert_eq!(
         said,
         format!(
@@ -9532,7 +9533,45 @@ fn a_sweep_that_left_files_in_several_checkouts_shows_the_folder_they_are_all_in
             repository.display()
         )
     );
-    assert_eq!(super::tab_menu::swept_but_left(&[]), None);
+    assert_eq!(super::tab_menu::swept_but_left(&[], Some(store)), None);
+}
+
+#[test]
+fn a_sweep_shows_no_folder_where_the_one_its_leftovers_share_shows_none_of_them() {
+    // A sweep takes checkouts made by hand too. One in the store and one in
+    // ~/code share only the home directory, and one in /srv shares only /:
+    // a folder neither can be seen in. Side by side, they are seen together.
+    let store = Path::new("/home/me/.local/share/crook/worktrees");
+    let code = Path::new("/home/me/code");
+    let far_apart = [
+        [
+            ("feat-a".to_owned(), store.join("repo").join("feat-a")),
+            ("repo-b".to_owned(), code.join("repo-b")),
+        ],
+        [
+            ("srv".to_owned(), PathBuf::from("/srv/repo-c")),
+            ("repo-b".to_owned(), code.join("repo-b")),
+        ],
+    ];
+
+    for left in far_apart {
+        let (said, folder) = super::tab_menu::swept_but_left(&left, Some(store))
+            .expect("two checkouts left files behind");
+        assert_eq!(folder, None, "a folder was offered for {left:?}");
+        assert_eq!(
+            said,
+            "Removed 2 checkouts, but some of their files could not be deleted; the log says \
+             where."
+        );
+    }
+
+    let side_by_side = [
+        ("repo-a".to_owned(), code.join("repo-a")),
+        ("repo-b".to_owned(), code.join("repo-b")),
+    ];
+    let (_, folder) = super::tab_menu::swept_but_left(&side_by_side, Some(store))
+        .expect("two checkouts left files behind");
+    assert_eq!(folder.as_deref(), Some(code));
 }
 
 #[test]

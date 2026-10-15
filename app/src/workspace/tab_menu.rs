@@ -2159,16 +2159,32 @@ pub(super) fn partly_removed(label: &str, path: &Path) -> String {
 /// What a sweep says about the checkouts in `left` — each by its name in the
 /// list and its directory — that git took out of the repository without
 /// deleting every file in them, with the directory Show the folder opens:
-/// the one checkout's own, or the nearest that holds them all.
+/// the one checkout's own, or the nearest that holds them all, when that is
+/// in `store` or is the folder each of them is directly in.
 ///
 /// Said apart from the ones that would not go: these went, as far as git and
 /// the list are concerned, and what is left of them is files to delete.
-pub(super) fn swept_but_left(left: &[(String, PathBuf)]) -> Option<(String, Option<PathBuf>)> {
+///
+/// Not just any folder they share. A sweep takes checkouts made by hand as
+/// well, wherever they are, and the nearest folder holding one in the store
+/// and one in `~/code` is the home directory — `/`, for one in `/srv` —
+/// where neither can be seen. Then the sentence sends a person to the log,
+/// which names each, and no folder is offered.
+pub(super) fn swept_but_left(
+    left: &[(String, PathBuf)],
+    store: Option<&Path>,
+) -> Option<(String, Option<PathBuf>)> {
     match left {
         [] => None,
         [(label, path)] => Some((partly_removed(label, path), Some(path.clone()))),
         several => {
-            let folder = holding_all(several.iter().map(|(_, path)| path.as_path()));
+            let folder =
+                holding_all(several.iter().map(|(_, path)| path.as_path())).filter(|folder| {
+                    store.is_some_and(|store| folder.starts_with(store))
+                        || several
+                            .iter()
+                            .all(|(_, path)| path.parent() == Some(folder.as_path()))
+                });
             let said = match &folder {
                 Some(folder) => format!(
                     "Removed {} checkouts, but some of their files could not be deleted: they \

@@ -6726,7 +6726,8 @@ impl Workspace {
                     sentences.push(format!("{in_use} checkouts are in use now and were kept."));
                 }
             }
-            let left = super::tab_menu::swept_but_left(&tally.left_behind);
+            let left =
+                super::tab_menu::swept_but_left(&tally.left_behind, self.tab_menu.store.as_deref());
             let folder = left.as_ref().and_then(|(_, folder)| folder.clone());
             if let Some((said, _)) = left {
                 sentences.push(said);
