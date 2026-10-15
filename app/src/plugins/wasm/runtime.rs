@@ -22,9 +22,30 @@
 //! taken on the next of those. A plugin that wants to poll asks from its tick,
 //! which is what a tick is for.
 //!
+//! # Its work is done a little at a time, and never on the window's pool
+//!
+//! A fetch and a file are work: they belong on a pool and come back here. Not
+//! the window's pool, though. That one is sized for the chains that park on
+//! it and a spare, and a fetch to a host that drops packets holds its worker
+//! for the whole of [`REQUEST_TIMEOUT`] — so a plugin that asked for a handful
+//! of them held every worker the window had, and a settings save, a session
+//! save and the git gather queued behind them for fifteen seconds. Plugins'
+//! work runs on [`requests`], a pool of their own that nothing else uses.
+//!
+//! **And one plugin may not take all of that either.** At most
+//! [`RUNNING_AT_ONCE`] of a plugin's requests are on it at a time; the rest
+//! wait here in the order they were asked, and each one that finishes starts
+//! the next — the shape the deeds below have, for the same reason. A plugin
+//! whose fetches all hang holds half the pool and no more, and the other
+//! plugins' requests go on being answered beside it.
+//!
+//! A sound does not wait behind its plugin's fetches: it is a write and a
+//! spawn, and a chime that rang after those fetches gave up would ring about
+//! nothing. Sounds take turns of their own, [`SOUNDS_AT_ONCE`] at a time,
+//! and how many a plugin may play in a second is counted as each is played.
+//!
 //! # Three of the things it may ask for are not this model's to answer
 //!
-//! A fetch and a file are work: they belong on the pool and come back here.
 //! Where the active pane is, what Crook can be asked to do, typing a line into
 //! a shell and running one of Crook's own commands are none of them work —
 //! they are questions about, and changes to, the window this plugin is drawn
@@ -58,14 +79,15 @@
 //! rather than "something went wrong".
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{self, Sender};
-use std::time::Duration;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
-use crookui_core::executor::Task;
+use crookui_core::executor::{Background, Task};
 use crookui_core::prelude::*;
 
 use crook_plugin::PluginId;
@@ -75,14 +97,84 @@ use crook_plugin_api::{
 use crook_wasm::Sandbox;
 
 use super::GIVE_UP_AFTER;
+use super::sound::{Chimes, SOUNDS_PER_SECOND};
 
 /// How long one request may take before it is given up on.
 ///
 /// The same fifteen seconds the usage poller used when it was in the box. A
-/// plugin waiting on a socket costs nobody a frame — the work is on the pool —
-/// but a request with no ceiling is a background thread held for the rest of
-/// the session.
+/// plugin waiting on a socket costs nobody a frame — the work is on
+/// [`requests`] — but a request with no ceiling is a worker held for the rest
+/// of the session. A walk has a ceiling of its own, [`WALK_TIMEOUT`].
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long one [`Request::Tally`] may walk before it is given up on.
+///
+/// Longer than [`REQUEST_TIMEOUT`], because a walk is not waiting on
+/// somebody else's server: it is reading this disk, and on a machine that is
+/// used all day that is real work. A week of one person's transcripts was
+/// three hundred and fifty megabytes, and a debug build on a busy machine
+/// took forty-seven seconds over it. A minute is room for that even in a
+/// build nobody ships. What it ends is a walk that is not that: a granted
+/// directory holding a file of a hundred gigabytes was a worker held for as
+/// long as the reading took.
+const WALK_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How many of one plugin's requests may be worked on at once, sounds aside
+/// — see `Runtime::start`.
+///
+/// The rest wait in [`Runtime::queued`], in the order they were asked, and
+/// each one that finishes starts the next. Before this every request was a
+/// task of its own the moment it was asked, and a plugin that asked for a
+/// dozen fetches to a host that drops packets held a dozen workers for
+/// fifteen seconds each — more than the window's whole pool, which is where
+/// they ran.
+///
+/// Two, because that is the most any plugin that exists has running at once:
+/// the pirate's usage fetch beside its walk of the transcripts. One would put
+/// the walk behind a fetch that hangs. A plugin that asks for more is served
+/// as fast as two at a time goes, and only one whose requests hang notices.
+pub(super) const RUNNING_AT_ONCE: usize = 2;
+
+/// How many of one plugin's sounds may be worked on at once — see
+/// `Runtime::start`.
+///
+/// A sound does not wait behind its plugin's fetches, but it is not handed
+/// to the pool the moment it is asked for either. Handed over at once, the
+/// only bound on how many a plugin had on the pool was the sandbox's on one
+/// call, and every answer delivered is a call. A plugin that asked for a
+/// two-note chime from every answer, the "four a second" answers among
+/// them, had twice as many on the pool after every round, and the window's
+/// thread was handed their answers faster than it could deliver them.
+/// [`SOUNDS_PER_SECOND`] bounds what is played, and nothing about it bounds
+/// what is asked. The rest wait in [`Runtime::sounds`], as fetches wait in
+/// [`Runtime::queued`].
+///
+/// Two, as [`RUNNING_AT_ONCE`] is. A sound holds its worker for a write and
+/// a spawn, so two at once is a two-note chime started together, and a
+/// plugin that rings without end has two short tasks on the pool at a time.
+pub(super) const SOUNDS_AT_ONCE: usize = 2;
+
+/// How many workers every plugin's requests share between them.
+///
+/// Twice [`RUNNING_AT_ONCE`], so that a plugin waiting on everything it may
+/// have running holds half of these and never the whole: another plugin's
+/// fetch, file or sound is started beside it rather than behind it.
+const REQUEST_WORKERS: usize = 2 * RUNNING_AT_ONCE;
+
+/// The pool plugins' requests run on, which nothing else runs on.
+///
+/// Not the window's, which is sized for the chains that park on it and one
+/// spare — see `PARKED_WORKERS` in the crate root — and is where settings,
+/// sessions and git are saved and read. A plugin's request may hold a worker
+/// for [`REQUEST_TIMEOUT`], and on that pool one was a save that waited as
+/// long. Made the first time a plugin is built, and kept for the life of the
+/// process, so that a plugin rebuilt while its fetches hang does not wait for
+/// them to let go of a pool that is being dropped.
+fn requests() -> Arc<Background> {
+    static POOL: LazyLock<Arc<Background>> =
+        LazyLock::new(|| Arc::new(Background::new(REQUEST_WORKERS)));
+    Arc::clone(&POOL)
+}
 
 /// How long to wait before ticking a plugin that has just failed.
 ///
@@ -228,6 +320,25 @@ pub(super) enum Gesture {
     None,
 }
 
+/// What one of a plugin's requests comes to on [`requests`].
+#[derive(Debug)]
+enum Work {
+    /// Nothing to do but answer: a refusal, or a request turned down.
+    Answer(Answer),
+    /// The request itself, done.
+    Perform(Request),
+}
+
+/// Which of a plugin's two budgets one of its requests on [`requests`]
+/// counts against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Budget {
+    /// One of the [`RUNNING_AT_ONCE`]: everything but a sound.
+    Requests,
+    /// One of the [`SOUNDS_AT_ONCE`].
+    Sounds,
+}
+
 /// One sandboxed plugin's runtime: what it asked for, and what came back.
 pub(super) struct Runtime {
     /// Whose requests these are, for the log line when one is refused.
@@ -301,6 +412,31 @@ pub(super) struct Runtime {
     /// for the rest of the session. See [`OVERRUNS_ALLOWED`] and
     /// [`MAX_WAITING`].
     stopped: bool,
+    /// Where its requests are worked on, which is [`requests`] everywhere
+    /// but in a test that needs a pool it can watch.
+    pool: Arc<Background>,
+    /// What it asked the pool for and has not been started, oldest first.
+    /// See [`RUNNING_AT_ONCE`].
+    ///
+    /// Each has already been checked against the grant, as a deed has: what
+    /// waits here is the work, or the refusal on its way back. Never a sound
+    /// it may play, which waits in `sounds` — see `start`.
+    queued: VecDeque<(u32, Work)>,
+    /// How many of its requests are on the pool now, not counting sounds.
+    running: usize,
+    /// The sounds it may play that have not been started, oldest first. See
+    /// [`SOUNDS_AT_ONCE`].
+    sounds: VecDeque<(u32, Work)>,
+    /// How many of its sounds are on the pool now.
+    ringing: usize,
+    /// The sounds it has played in the last second. See
+    /// [`SOUNDS_PER_SECOND`].
+    ///
+    /// Shared with the pool, because that is where a sound is played and so
+    /// where it is counted: a sound counted when it was asked for and played
+    /// once a worker came free would be a limit on asking, and a pool busy
+    /// for fifteen seconds would let a minute of them through at once.
+    chimes: Arc<Mutex<Chimes>>,
 }
 
 impl Entity for Runtime {
@@ -308,8 +444,25 @@ impl Entity for Runtime {
 }
 
 impl Runtime {
-    /// A runtime for a plugin that has just been built.
+    /// A runtime for a plugin that has just been built, whose requests are
+    /// worked on in [`requests`].
+    ///
+    /// The pool is not an argument, so that nothing building a plugin can
+    /// hand it the window's: that would compile, and it is the bug this pool
+    /// is here to end.
     pub(super) fn new(
+        id: PluginId,
+        sandbox: Rc<RefCell<Sandbox>>,
+        failures: Rc<Cell<u32>>,
+        granted: Vec<String>,
+    ) -> Self {
+        Self::working_on(requests(), id, sandbox, failures, granted)
+    }
+
+    /// [`Runtime::new`], with its requests worked on in `pool` — a test's,
+    /// one it can watch. Private to this file for the reason `new` gives.
+    fn working_on(
+        pool: Arc<Background>,
         id: PluginId,
         sandbox: Rc<RefCell<Sandbox>>,
         failures: Rc<Cell<u32>>,
@@ -332,6 +485,12 @@ impl Runtime {
             overruns: 0,
             resuming: false,
             stopped: false,
+            pool,
+            queued: VecDeque::new(),
+            running: 0,
+            sounds: VecDeque::new(),
+            ringing: 0,
+            chimes: Arc::default(),
         }
     }
 
@@ -563,15 +722,83 @@ impl Runtime {
         // `pump`, and a guest that answers a refusal by asking again would
         // take the host's stack down with it. Off the foreground and back is
         // what makes the loop a loop rather than a recursion.
-        let working = ctx.background().spawn(async move {
-            match (refused, declined) {
-                (Some(sentence), _) => Answer::Refused(sentence),
-                (None, Some(why)) => Answer::Failed(why),
-                (None, None) => perform(request),
+        let work = match (refused, declined) {
+            (Some(sentence), _) => Work::Answer(Answer::Refused(sentence)),
+            (None, Some(why)) => Work::Answer(Answer::Failed(why)),
+            (None, None) => Work::Perform(request),
+        };
+        // A sound it may play takes its turn among the plugin's sounds and
+        // not behind its fetches. It holds a worker for a write and a spawn,
+        // and one queued behind the plugin's own fetches to a host that drops
+        // packets would ring fifteen seconds after the thing it was about.
+        // What stops a plugin ringing without end is [`SOUNDS_PER_SECOND`],
+        // counted where the sound is played, and what stops it asking without
+        // end is [`SOUNDS_AT_ONCE`].
+        if matches!(work, Work::Perform(Request::PlaySound { .. })) {
+            self.sounds.push_back((ticket, work));
+        } else {
+            self.queued.push_back((ticket, work));
+        }
+        self.run_queued(ctx);
+    }
+
+    /// Hands the pool as much of what is queued as this plugin may have
+    /// running, oldest first. See [`RUNNING_AT_ONCE`] and [`SOUNDS_AT_ONCE`].
+    ///
+    /// Called when something is queued and when something finishes, which
+    /// are the only two moments the answer can change — so nothing waits on
+    /// a clock, and a plugin with nothing queued costs nothing.
+    fn run_queued(&mut self, ctx: &mut ModelContext<Self>) {
+        // Nothing it asked for will be delivered once it has been given up
+        // on — `answer` returns before it reaches the guest — so doing the
+        // rest would be fetching for nobody.
+        if self.failures.get() >= GIVE_UP_AFTER {
+            self.queued.clear();
+            self.sounds.clear();
+            return;
+        }
+
+        while self.running < RUNNING_AT_ONCE {
+            let Some((ticket, work)) = self.queued.pop_front() else {
+                break;
+            };
+            self.running += 1;
+            self.hand_over(ticket, work, Budget::Requests, ctx);
+        }
+        while self.ringing < SOUNDS_AT_ONCE {
+            let Some((ticket, work)) = self.sounds.pop_front() else {
+                break;
+            };
+            self.ringing += 1;
+            self.hand_over(ticket, work, Budget::Sounds, ctx);
+        }
+    }
+
+    /// Puts one request on the pool, and delivers what it comes to.
+    ///
+    /// It holds one of the places `budget` names until it is answered, and
+    /// then the next is started.
+    fn hand_over(&mut self, ticket: u32, work: Work, budget: Budget, ctx: &mut ModelContext<Self>) {
+        let chimes = Arc::clone(&self.chimes);
+        let working = self.pool.spawn(async move {
+            match work {
+                Work::Answer(answer) => answer,
+                Work::Perform(sound @ Request::PlaySound { .. }) => ring(sound, &chimes),
+                Work::Perform(request) => perform(request),
             }
         });
         ctx.spawn(working, move |runtime, answer, ctx| {
+            // The next one is started after this one is delivered, so that a
+            // delivery which used up the plugin's last try starts nothing
+            // more. What the delivery itself asks for still goes behind what
+            // was already waiting: each queue is first come, first served,
+            // whoever frees the place.
+            match budget {
+                Budget::Requests => runtime.running -= 1,
+                Budget::Sounds => runtime.ringing -= 1,
+            }
             runtime.answer(ticket, answer, ctx);
+            runtime.run_queued(ctx);
         })
         .detach();
     }
@@ -974,6 +1201,28 @@ fn perform(request: Request) -> Answer {
     }
 }
 
+/// Plays a sound a plugin may play, unless it has played
+/// [`SOUNDS_PER_SECOND`] in the last second.
+///
+/// Counted here, on the pool, as the sound is about to be played — not when
+/// it was asked for. See [`Runtime::chimes`]. Past the limit it is answered
+/// rather than dropped, so that the guest is not left waiting on a ticket
+/// nobody will answer.
+fn ring(sound: Request, chimes: &Mutex<Chimes>) -> Answer {
+    let let_through = {
+        let mut chimes = chimes.lock().unwrap_or_else(PoisonError::into_inner);
+        // Read under the lock, so that two workers ringing at once hand it
+        // their instants in the order they are kept in.
+        chimes.let_through(Instant::now())
+    };
+    if !let_through {
+        return Answer::Failed(format!(
+            "a plugin may play {SOUNDS_PER_SECOND} sounds a second, and this one has"
+        ));
+    }
+    perform(sound)
+}
+
 /// Walks a directory of line-delimited JSON and hands back what it adds up to.
 ///
 /// Everything expensive happens here rather than on the other side of the
@@ -983,6 +1232,10 @@ fn perform(request: Request) -> Answer {
 /// is the totals. The first shape of this handed the *lines* over and was
 /// measured at ninety thousand instructions each inside the guest — forty
 /// seconds for a week, which no page size fixes.
+///
+/// **Within [`WALK_TIMEOUT`] of starting, or not at all.** Counted from when
+/// the walk starts rather than from when it was asked, because time spent
+/// queued behind the plugin's other requests is not the walk's.
 fn tally(
     root: &str,
     extension: &str,
@@ -996,14 +1249,44 @@ fn tally(
         return Answer::Failed(String::from("that is not a directory this can read"));
     };
 
+    let deadline = Instant::now() + WALK_TIMEOUT;
+    let Some(files) = walk(&resolved, extension, touched_since, deadline) else {
+        return out_of_time();
+    };
+    add_up(&files, containing, at_least, distinct_by, tables, deadline)
+}
+
+/// What a walk that ran past its deadline answers.
+///
+/// Nothing it had counted: a total that stopped part of the way through is a
+/// number that is quietly low, and a plugin drawing it would be drawing a
+/// week that had fewer turns in it than it did.
+fn out_of_time() -> Answer {
+    Answer::Failed(format!(
+        "the walk took longer than {}s and was given up on",
+        WALK_TIMEOUT.as_secs()
+    ))
+}
+
+/// The tables `files` add up to, or [`out_of_time`] once `deadline` passes.
+fn add_up(
+    files: &[PathBuf],
+    containing: &str,
+    at_least: &[Bound],
+    distinct_by: &[String],
+    tables: &[Table],
+    deadline: Instant,
+) -> Answer {
     let mut seen: HashSet<u64> = HashSet::new();
     let mut counters: Vec<HashMap<String, Tallied>> =
         tables.iter().map(|_| HashMap::new()).collect();
     let mut lines = 0;
 
-    for file in walk(&resolved, extension, touched_since) {
-        if let Err(why) = count(
-            &file,
+    // No look at the clock between files: `count` looks before it opens
+    // each, so one that cannot be opened is no exception.
+    for file in files {
+        match count(
+            file,
             containing,
             at_least,
             distinct_by,
@@ -1011,11 +1294,14 @@ fn tally(
             &mut seen,
             &mut counters,
             &mut lines,
+            deadline,
         ) {
+            Ok(()) => {}
+            Err(Stopped::OutOfTime) => return out_of_time(),
             // A file that cannot be read costs itself and not the walk: a
             // directory somebody else is writing into loses files while it is
             // being read, and that is not a reason to answer with nothing.
-            log::debug!("{}: {why}", file.display());
+            Err(Stopped::Unreadable(why)) => log::debug!("{}: {why}", file.display()),
         }
     }
 
@@ -1028,7 +1314,126 @@ fn tally(
     }
 }
 
-/// Folds one file into the running totals.
+/// How many lines of one file are read between two looks at the clock, at
+/// most. [`BYTES_PER_LOOK`] is the other half of when to look.
+///
+/// A look is cheap and a line skipped for want of its needle is cheaper, so
+/// not every one. A file of a million short lines is looked at a thousand
+/// times, which stops it near the deadline rather than at the end of the
+/// file.
+const LINES_PER_LOOK: u64 = 1024;
+
+/// How much of one file is read between two looks at the clock, give or take
+/// the line that crosses it.
+///
+/// Counting lines alone was not enough. A thousand lines just under
+/// [`MAX_LINE`] is sixteen gigabytes read, checked as UTF-8 and searched for
+/// the needle with no look at the clock in between, and from a share that
+/// reads at a hundred and fifty megabytes a second that held a worker nearly
+/// two minutes past the deadline. A megabyte is a few milliseconds of
+/// reading from a slow disk, and a look every few milliseconds costs a walk
+/// nothing it would notice. So what a walk reads past its deadline is at
+/// most a megabyte and one line.
+const BYTES_PER_LOOK: usize = 1 << 20;
+
+/// The most of one line a walk will hold.
+///
+/// A line longer than this is skipped, as a line that is not JSON is.
+/// Without a ceiling a line was read whole however long it was, and a file
+/// with no newline in it — a disk image in a granted directory — was the
+/// whole file read into memory, whatever the deadline said, until something
+/// killed Crook for it. Sixteen megabytes is sixteen times the most a plugin
+/// can be answered with, and a walk on each of the plugins' workers holding
+/// that much at once is sixty-four.
+const MAX_LINE: usize = 16 << 20;
+
+/// Why one file was not folded in whole.
+#[derive(Debug)]
+enum Stopped {
+    /// The walk's deadline passed while it was being read. See
+    /// [`out_of_time`].
+    OutOfTime,
+    /// It could not be read, which costs that file and not the walk.
+    ///
+    /// Never mistaken for the one above, whatever its kind: a file on a
+    /// network share whose read timed out is a file that could not be read,
+    /// and not a walk that ran out of time.
+    Unreadable(std::io::Error),
+}
+
+impl From<std::io::Error> for Stopped {
+    fn from(why: std::io::Error) -> Self {
+        Self::Unreadable(why)
+    }
+}
+
+/// What [`next_line`] found.
+#[derive(Debug, PartialEq, Eq)]
+enum Line {
+    /// A line, whole, in the buffer it was handed.
+    Whole,
+    /// A line longer than it may keep, read past to its end and not kept.
+    TooLong,
+    /// The end of the file.
+    End,
+}
+
+/// Reads the next line into `bytes`, keeping no more than `cap` of it.
+///
+/// A line longer than that is read past rather than held, a buffer at a
+/// time, and the clock is looked at between buffers: a line with no end is
+/// where a walk spends its time, so it is where the deadline has to reach.
+/// See [`MAX_LINE`].
+fn next_line(
+    reader: &mut impl std::io::BufRead,
+    bytes: &mut Vec<u8>,
+    cap: usize,
+    deadline: Instant,
+) -> Result<Line, Stopped> {
+    use std::io::{BufRead as _, Read as _};
+
+    bytes.clear();
+    let read = reader.by_ref().take(cap as u64).read_until(b'\n', bytes)?;
+    if read == 0 {
+        return Ok(Line::End);
+    }
+    if read < cap || bytes.last() == Some(&b'\n') {
+        return Ok(Line::Whole);
+    }
+
+    let mut past = false;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(Stopped::OutOfTime);
+        }
+        let buffer = match reader.fill_buf() {
+            Ok(buffer) => buffer,
+            Err(why) if why.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(why) => return Err(why.into()),
+        };
+        if buffer.is_empty() {
+            // A file that ends exactly at the ceiling, without a newline,
+            // was a line that fitted.
+            return Ok(if past { Line::TooLong } else { Line::Whole });
+        }
+        past = true;
+        if let Some(at) = buffer.iter().position(|byte| *byte == b'\n') {
+            reader.consume(at + 1);
+            return Ok(Line::TooLong);
+        }
+        let all = buffer.len();
+        reader.consume(all);
+    }
+}
+
+/// Folds one file into the running totals, or stops with
+/// [`Stopped::OutOfTime`] once `deadline` has passed.
+///
+/// **The clock is looked at before the file is opened.** A file that cannot
+/// be opened is skipped, and on a share that has gone away each open fails
+/// only once its own timeout has passed. Looked at after the open, a walk of
+/// such files never saw the clock at all: twenty thousand of them, each
+/// skipped minutes late, and then a total.
 #[allow(clippy::too_many_arguments)]
 fn count(
     path: &Path,
@@ -1039,17 +1444,63 @@ fn count(
     seen: &mut HashSet<u64>,
     counters: &mut [HashMap<String, Tallied>],
     lines: &mut u64,
-) -> std::io::Result<()> {
-    use std::io::BufRead as _;
-
+    deadline: Instant,
+) -> Result<(), Stopped> {
+    if Instant::now() >= deadline {
+        return Err(Stopped::OutOfTime);
+    }
     let file = fs::File::open(path)?;
-    let mut reader = std::io::BufReader::new(file);
+    fold(
+        &mut std::io::BufReader::new(file),
+        containing,
+        at_least,
+        distinct_by,
+        tables,
+        seen,
+        counters,
+        lines,
+        deadline,
+    )
+}
+
+/// [`count`], for a file it has opened, read from `reader` — which does not
+/// look at the clock before the first line, because `count` just has.
+#[allow(clippy::too_many_arguments)]
+fn fold(
+    reader: &mut impl std::io::BufRead,
+    containing: &str,
+    at_least: &[Bound],
+    distinct_by: &[String],
+    tables: &[Table],
+    seen: &mut HashSet<u64>,
+    counters: &mut [HashMap<String, Tallied>],
+    lines: &mut u64,
+    deadline: Instant,
+) -> Result<(), Stopped> {
     let mut bytes = Vec::new();
+    // What has been read since the clock was last looked at. See
+    // [`LINES_PER_LOOK`] and [`BYTES_PER_LOOK`].
+    let mut lines_unlooked: u64 = 0;
+    let mut bytes_unlooked: usize = 0;
 
     loop {
-        bytes.clear();
-        if reader.read_until(b'\n', &mut bytes)? == 0 {
-            return Ok(());
+        if lines_unlooked >= LINES_PER_LOOK || bytes_unlooked >= BYTES_PER_LOOK {
+            if Instant::now() >= deadline {
+                return Err(Stopped::OutOfTime);
+            }
+            lines_unlooked = 0;
+            bytes_unlooked = 0;
+        }
+        let line = next_line(reader, &mut bytes, MAX_LINE, deadline)?;
+        lines_unlooked += 1;
+        // A line too long to keep leaves [`MAX_LINE`] of itself here, which
+        // is past a look's worth, so the clock is looked at before the next
+        // line as well as between the buffers `next_line` read the rest in.
+        bytes_unlooked += bytes.len();
+        match line {
+            Line::End => return Ok(()),
+            Line::TooLong => continue,
+            Line::Whole => {}
         }
         // A line that is not UTF-8 is skipped like a line that is not JSON.
         // Read with `read_line`, it was an error that ended the whole file —
@@ -1164,8 +1615,14 @@ fn hash_of(identity: &str) -> u64 {
 ///
 /// Sorted, because a cursor is an ordinal into this list and a list that came
 /// back in a different order would be a page that skipped half a directory and
-/// read another half twice.
-fn walk(root: &Path, extension: &str, touched_since: i64) -> Vec<PathBuf> {
+/// read another half twice. `None` once `deadline` has passed, for the
+/// reason [`out_of_time`] gives.
+fn walk(
+    root: &Path,
+    extension: &str,
+    touched_since: i64,
+    deadline: Instant,
+) -> Option<Vec<PathBuf>> {
     let mut found = Vec::new();
     let mut looking = vec![root.to_path_buf()];
 
@@ -1176,6 +1633,12 @@ fn walk(root: &Path, extension: &str, touched_since: i64) -> Vec<PathBuf> {
         for entry in entries.flatten() {
             if found.len() >= FILES_PER_WALK {
                 break;
+            }
+            // `FILES_PER_WALK` bounds what is kept and not what is looked at:
+            // a tree of directories with no file in it that matches is all
+            // looking, and every entry of it a `stat`.
+            if Instant::now() >= deadline {
+                return None;
             }
             let path = entry.path();
             match entry.file_type() {
@@ -1195,7 +1658,7 @@ fn walk(root: &Path, extension: &str, touched_since: i64) -> Vec<PathBuf> {
     }
 
     found.sort();
-    found
+    Some(found)
 }
 
 /// Whether a file has been written to since an instant.

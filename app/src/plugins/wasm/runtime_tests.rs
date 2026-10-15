@@ -145,7 +145,8 @@ fn on_one_worker() -> (App, Arc<LocalQueue>, Arc<Background>, ModelHandle<Runtim
     let (sandbox, _) = Sandbox::open(&module, Fuel::default()).expect("the test module opens");
     let runtime = app.update(|ctx| {
         ctx.add_model(|_| {
-            Runtime::new(
+            Runtime::working_on(
+                Arc::new(Background::new(1)),
                 PluginId::parse("eugen/probe").expect("a literal that parses"),
                 Rc::new(RefCell::new(sandbox)),
                 Rc::new(Cell::new(0)),
@@ -231,21 +232,27 @@ fn allowed_to_ask_where() -> (App, Arc<LocalQueue>, ModelHandle<Runtime>) {
 fn runtime_allowed(granted: &[&str]) -> (App, Arc<LocalQueue>, ModelHandle<Runtime>) {
     let queue = LocalQueue::new();
     let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
+    let runtime = runtime_in(&mut app, granted, &Arc::new(Background::new(1)));
+    (app, queue, runtime)
+}
 
+/// One more such runtime in `app`, allowed `granted`, whose requests are
+/// worked on in `pool` — which is the plugins' pool, standing in for
+/// [`requests`] so that a test can watch it.
+fn runtime_in(app: &mut App, granted: &[&str], pool: &Arc<Background>) -> ModelHandle<Runtime> {
     let module = crate::plugins::wasm::tests::wasm_asking_where("eugen/probe", 0, 0, 0);
     let (sandbox, _) = Sandbox::open(&module, Fuel::default()).expect("the test module opens");
-    let runtime = app.update(|ctx| {
+    app.update(|ctx| {
         ctx.add_model(|_| {
-            Runtime::new(
+            Runtime::working_on(
+                pool.clone(),
                 PluginId::parse("eugen/probe").expect("a literal that parses"),
                 Rc::new(RefCell::new(sandbox)),
                 Rc::new(Cell::new(0)),
                 granted.iter().copied().map(String::from).collect(),
             )
         })
-    });
-
-    (app, queue, runtime)
+    })
 }
 
 /// Asks where the pane is once per ticket, as a guest's calls would, on
@@ -518,6 +525,504 @@ fn a_burst_of_questions_bigger_than_may_wait_is_served_whole() {
     );
 }
 
+/// How soon "at once" has to be, for a test on a runner that is busy.
+///
+/// What these tests tell apart is a task started now from one started when a
+/// fetch gives up, which is [`REQUEST_TIMEOUT`] — fifteen seconds. A frame
+/// is what a person would notice, and an idle worker answers inside one, but
+/// a test binary running every other test beside this one on a loaded runner
+/// cannot promise a frame; it can promise a second.
+const PROMPTLY: Duration = Duration::from_secs(1);
+
+/// A host on this machine that takes every connection and never says a
+/// word: a fetch to it waits out the whole of [`REQUEST_TIMEOUT`], which is a
+/// host that drops packets without needing the network to have one.
+///
+/// Dropped, it closes the listener and everything it accepted, and every
+/// fetch still waiting on it fails at once — which is what lets a pool
+/// holding them be dropped at the end of a test rather than fifteen seconds
+/// after it, and why every test makes its hosts after its pools: what is
+/// made last is dropped first.
+struct Silent {
+    listener: std::net::TcpListener,
+    held: Vec<std::net::TcpStream>,
+}
+
+impl Silent {
+    fn new() -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("a port on this machine to listen on");
+        listener
+            .set_nonblocking(true)
+            .expect("a listener that can be asked without waiting");
+        Self {
+            listener,
+            held: Vec::new(),
+        }
+    }
+
+    /// A fetch from it. The grant is the host, so `net:127.0.0.1` allows
+    /// every one of these whatever its port.
+    ///
+    /// Without [`fetch`]'s header, whose `…` is not a byte a header may
+    /// carry: that fetch fails as soon as it has connected, before it can
+    /// wait on anything, and a test of what a hanging fetch holds would pass
+    /// with nothing hanging.
+    fn fetch(&self) -> Request {
+        let port = self
+            .listener
+            .local_addr()
+            .expect("a bound listener has an address")
+            .port();
+        Request::Fetch {
+            method: Method::Get,
+            url: format!("https://127.0.0.1:{port}/usage"),
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+
+    /// Whether a fetch reaches it within `within`, holding the connection
+    /// open — and silent — if one does.
+    fn reached(&mut self, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        loop {
+            match self.listener.accept() {
+                Ok((connection, _)) => {
+                    self.held.push(connection);
+                    return true;
+                }
+                Err(why) if why.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(why) => panic!("the listener broke: {why}"),
+            }
+        }
+    }
+
+    /// Hangs up on every fetch it is holding, which fails each at once.
+    fn hang_up(&mut self) {
+        self.held.clear();
+    }
+}
+
+/// Asks for `requests` in turn, on nobody's behalf, as a tick would, with
+/// tickets counting up from `first`.
+fn ask_for(app: &mut App, runtime: &ModelHandle<Runtime>, first: u32, requests: Vec<Request>) {
+    app.update(|ctx| {
+        runtime.update(ctx, |runtime, ctx| {
+            for (ticket, request) in (first..).zip(requests) {
+                runtime.start(ticket, request, Gesture::None, ctx);
+            }
+        })
+    });
+}
+
+/// The tickets a runtime has queued, and how many of its requests are on
+/// the pool.
+fn queued_and_running(app: &App, runtime: &ModelHandle<Runtime>) -> (Vec<u32>, usize) {
+    runtime.read(app, |runtime, _| {
+        let queued = runtime.queued.iter().map(|(ticket, _)| *ticket).collect();
+        (queued, runtime.running)
+    })
+}
+
+/// Asserts that none of a runtime's requests has been answered: that the
+/// fetches a test set hanging are hanging.
+///
+/// Without it a test of what a hanging fetch holds passes just as well with
+/// fetches that fail at once and hold nothing. A tenth of a second is long
+/// enough for one that fails to have come back, and a hanging one takes
+/// [`REQUEST_TIMEOUT`].
+fn still_hanging(queue: &LocalQueue, app: &App, runtime: &ModelHandle<Runtime>, asked: usize) {
+    std::thread::sleep(Duration::from_millis(100));
+    queue.run_until_parked();
+    let (queued, running) = queued_and_running(app, runtime);
+    assert_eq!(
+        queued.len() + running,
+        asked,
+        "fetches were answered, so they were not hanging and nothing here waited behind them"
+    );
+}
+
+/// Runs what lands on the foreground until `done`, or for five seconds.
+fn until(queue: &LocalQueue, mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        queue.run_until_parked();
+        if done() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_plugin_whose_fetches_hang_leaves_the_windows_pool_to_the_window() {
+    // What was measured on a machine with six workers: as many fetches to a
+    // host that drops packets as there were workers, then one more task
+    // standing in for a settings save, and the save ran fourteen point eight
+    // seconds later. Every request a plugin made was a task on the window's
+    // own pool, and a fetch holds its worker for as long as it waits. Here
+    // the window has one worker, so a single fetch on it is enough to show
+    // it — and a save that waits behind none of them is the fix.
+    let queue = LocalQueue::new();
+    let window = Arc::new(Background::new(1));
+    let mut app = App::new(queue.foreground(), window.clone());
+    let plugins = Arc::new(Background::new(REQUEST_WORKERS));
+    let runtime = runtime_in(&mut app, &["net:127.0.0.1"], &plugins);
+    let mut silent = Silent::new();
+
+    ask_for(&mut app, &runtime, 1, vec![silent.fetch(); 8]);
+    assert!(
+        silent.reached(Duration::from_secs(5)),
+        "no fetch was started at all, so nothing here is hanging"
+    );
+
+    let (ran, was_run) = std::sync::mpsc::channel();
+    window
+        .spawn(async move {
+            let _ = ran.send(());
+        })
+        .detach();
+
+    assert!(
+        was_run.recv_timeout(PROMPTLY).is_ok(),
+        "a task on the window's pool waited behind a plugin's fetches"
+    );
+    still_hanging(&queue, &app, &runtime, 8);
+}
+
+#[test]
+fn one_plugins_hanging_fetches_leave_room_for_another_plugins_requests() {
+    // The plugins' pool is shared between them, so it is the same story one
+    // level down: a plugin that asks for more fetches than the pool has
+    // workers, to a host that never answers, used to hold every worker, and
+    // the next plugin's request waited fifteen seconds behind it. At most
+    // two of a plugin's requests are on the pool; the rest wait their turn
+    // in its own queue, not in front of everybody else's.
+    let queue = LocalQueue::new();
+    let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
+    let plugins = Arc::new(Background::new(REQUEST_WORKERS));
+    let greedy = runtime_in(&mut app, &["net:127.0.0.1"], &plugins);
+    let other = runtime_in(&mut app, &["net:127.0.0.1"], &plugins);
+    let mut hanging = Silent::new();
+    let mut asked = Silent::new();
+
+    ask_for(&mut app, &greedy, 1, vec![hanging.fetch(); 8]);
+    assert!(
+        hanging.reached(Duration::from_secs(5)),
+        "none of the greedy plugin's fetches was started"
+    );
+    ask_for(&mut app, &other, 1, vec![asked.fetch()]);
+
+    assert!(
+        asked.reached(PROMPTLY),
+        "another plugin's fetch waited behind the first one's"
+    );
+    still_hanging(&queue, &app, &greedy, 8);
+    assert_eq!(
+        queued_and_running(&app, &greedy),
+        ((3..9).collect(), RUNNING_AT_ONCE),
+        "the greedy plugin had more than its share of the pool"
+    );
+}
+
+#[test]
+fn a_plugins_queued_requests_are_each_started_in_the_order_asked_as_one_finishes() {
+    // What the budget must not do, which is the rule the deeds follow too: a
+    // request waiting is a ticket a guest is waiting on, so none is dropped,
+    // and they go in the order they were asked. Five fetches, each to a host
+    // of its own, so that which one a connection arrives at says which
+    // request was started.
+    let queue = LocalQueue::new();
+    let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
+    let plugins = Arc::new(Background::new(REQUEST_WORKERS));
+    let runtime = runtime_in(&mut app, &["net:127.0.0.1"], &plugins);
+    let mut hosts: Vec<Silent> = (0..5).map(|_| Silent::new()).collect();
+
+    ask_for(
+        &mut app,
+        &runtime,
+        1,
+        hosts.iter().map(Silent::fetch).collect(),
+    );
+    assert!(
+        hosts[0].reached(Duration::from_secs(5)),
+        "the first was not started"
+    );
+    assert!(
+        hosts[1].reached(Duration::from_secs(5)),
+        "the second was not started"
+    );
+    still_hanging(&queue, &app, &runtime, 5);
+    assert_eq!(
+        queued_and_running(&app, &runtime),
+        (vec![3, 4, 5], RUNNING_AT_ONCE),
+        "more than a plugin's share was started, or the rest were not kept"
+    );
+
+    // Each that is answered makes room for exactly the oldest still waiting.
+    for (finished, next) in [(0, 2), (1, 3), (2, 4)] {
+        hosts[finished].hang_up();
+        assert!(
+            until(&queue, || hosts[next].reached(Duration::ZERO)),
+            "fetch {} was not started once fetch {} was answered",
+            next + 1,
+            finished + 1
+        );
+        let (waiting, _) = queued_and_running(&app, &runtime);
+        assert_eq!(
+            waiting,
+            (next as u32 + 2..6).collect::<Vec<_>>(),
+            "something other than the oldest was started"
+        );
+    }
+
+    for host in &mut hosts {
+        host.hang_up();
+    }
+    assert!(
+        until(&queue, || queued_and_running(&app, &runtime)
+            == (Vec::new(), 0)),
+        "not every request was answered"
+    );
+}
+
+#[test]
+fn a_plugin_built_for_a_window_works_on_the_plugins_pool_and_not_the_windows() {
+    // Half of keeping a plugin's hanging fetches off the window's pool is
+    // which pool a built plugin is handed, and the window's would compile:
+    // it is the pool a model is built beside. So the runtime is built the
+    // way a plugin's is, and asked which it has.
+    let queue = LocalQueue::new();
+    let window = Arc::new(Background::new(1));
+    let mut app = App::new(queue.foreground(), window.clone());
+    let module = crate::plugins::wasm::tests::wasm_asking_where("eugen/probe", 0, 0, 0);
+    let (sandbox, _) = Sandbox::open(&module, Fuel::default()).expect("the test module opens");
+
+    let runtime = app.update(|ctx| {
+        ctx.add_model(|_| {
+            Runtime::new(
+                PluginId::parse("eugen/probe").expect("a literal that parses"),
+                Rc::new(RefCell::new(sandbox)),
+                Rc::new(Cell::new(0)),
+                Vec::new(),
+            )
+        })
+    });
+
+    runtime.read(&app, |runtime, _| {
+        assert!(
+            !Arc::ptr_eq(&runtime.pool, &window),
+            "a plugin's requests are worked on beside the window's saves"
+        );
+        assert!(
+            Arc::ptr_eq(&runtime.pool, &requests()),
+            "a plugin's requests are worked on somewhere other than the plugins' pool"
+        );
+    });
+}
+
+/// A sound that is not a wav, so that one let through fails before a
+/// player starts and a test that plays it makes no noise.
+fn quiet_sound() -> Request {
+    Request::PlaySound {
+        wav: b"not a wav".to_vec(),
+        volume: 0,
+    }
+}
+
+/// When each sound a runtime still counts against its limit was played.
+fn rung(app: &App, runtime: &ModelHandle<Runtime>) -> Vec<Instant> {
+    runtime.read(app, |runtime, _| {
+        runtime
+            .chimes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .played()
+    })
+}
+
+#[test]
+fn a_sound_past_what_a_plugin_may_play_in_a_second_is_answered_and_not_played() {
+    // A sound is a player started and a person interrupted, and nothing
+    // limited how many a plugin could ask for. Past the limit it is not
+    // dropped — the guest would wait on the ticket for the rest of the
+    // session — but answered with why, and never handed to a player.
+    let chimes = Mutex::new(Chimes::default());
+
+    for index in 0..SOUNDS_PER_SECOND + 2 {
+        let Answer::Failed(why) = ring(quiet_sound(), &chimes) else {
+            panic!("sound {index} was played, and it was not a wav");
+        };
+        assert_eq!(
+            why.contains("sounds a second"),
+            index >= SOUNDS_PER_SECOND,
+            "sound {index} was answered: {why}"
+        );
+    }
+}
+
+#[test]
+fn a_sound_is_counted_when_it_is_played_and_not_when_it_was_asked_for() {
+    // Counted when asked for, a sound waiting for a worker was a sound that
+    // had already been let through: a plugin asking four a second while the
+    // pool was busy for fifteen seconds had sixty played back to back when
+    // it came free. Here the pool's only worker is held while more than a
+    // second's worth are asked for, and let go.
+    let queue = LocalQueue::new();
+    let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
+    let plugins = Arc::new(Background::new(1));
+    let runtime = runtime_in(&mut app, &["sound.play"], &plugins);
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    plugins
+        .spawn(async move {
+            let _ = held.recv();
+        })
+        .detach();
+
+    ask_for(
+        &mut app,
+        &runtime,
+        1,
+        vec![quiet_sound(); SOUNDS_PER_SECOND + 2],
+    );
+    queue.run_until_parked();
+    assert_eq!(
+        rung(&app, &runtime),
+        Vec::new(),
+        "sounds were counted as played while nothing could play them"
+    );
+
+    let released = Instant::now();
+    release.send(()).expect("the worker is holding on");
+    // Each sound answered starts the next, a few milliseconds apart, so all
+    // of them have been through the limit well inside the second it counts.
+    assert!(
+        until(&queue, || sounds_waiting_and_ringing(&app, &runtime)
+            == (Vec::new(), 0)),
+        "not every sound was answered"
+    );
+
+    let played = rung(&app, &runtime);
+    assert_eq!(
+        played.len(),
+        SOUNDS_PER_SECOND,
+        "more than a second's worth was played once the pool came free"
+    );
+    assert!(
+        played.iter().all(|at| *at >= released),
+        "a sound was counted before the pool could play it"
+    );
+}
+
+/// The tickets of the sounds a runtime has waiting, and how many of its
+/// sounds are on the pool.
+fn sounds_waiting_and_ringing(app: &App, runtime: &ModelHandle<Runtime>) -> (Vec<u32>, usize) {
+    runtime.read(app, |runtime, _| {
+        let waiting = runtime.sounds.iter().map(|(ticket, _)| *ticket).collect();
+        (waiting, runtime.ringing)
+    })
+}
+
+#[test]
+fn a_plugin_asking_for_sounds_faster_than_they_are_answered_has_two_on_the_pool() {
+    // Handed to the pool as soon as each was asked for, a plugin's sounds had
+    // no bound but the sandbox's on one call, and every answer is a call. A
+    // plugin that asked for two from every answer, the "four a second" ones
+    // among them, had twice as many on the pool after every round, and the
+    // window's thread was handed their answers faster than it could deliver
+    // them. Here the pool's only worker is held while eight are asked for.
+    let queue = LocalQueue::new();
+    let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
+    let plugins = Arc::new(Background::new(1));
+    let runtime = runtime_in(&mut app, &["sound.play"], &plugins);
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    plugins
+        .spawn(async move {
+            let _ = held.recv();
+        })
+        .detach();
+
+    ask_for(&mut app, &runtime, 1, vec![quiet_sound(); 8]);
+    queue.run_until_parked();
+    assert_eq!(
+        sounds_waiting_and_ringing(&app, &runtime),
+        ((3..9).collect(), SOUNDS_AT_ONCE),
+        "more of its sounds than it may have at once were handed to the pool"
+    );
+
+    // One worker, first come first served: when this has run, the pool has
+    // played every sound it was handed before it, and answered none of the
+    // rest, which are still waiting for those answers to be delivered.
+    release.send(()).expect("the worker is holding on");
+    let (behind, through) = std::sync::mpsc::channel();
+    plugins
+        .spawn(async move {
+            let _ = behind.send(());
+        })
+        .detach();
+    through
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the pool came free");
+    assert_eq!(
+        rung(&app, &runtime).len(),
+        SOUNDS_AT_ONCE,
+        "the pool was handed more of the plugin's sounds than it may have at once"
+    );
+
+    // And none is dropped: each answer starts the oldest still waiting.
+    assert!(
+        until(&queue, || sounds_waiting_and_ringing(&app, &runtime)
+            == (Vec::new(), 0)),
+        "not every sound was answered"
+    );
+    assert_eq!(
+        runtime.read(&app, |runtime, _| runtime.failures.get()),
+        0,
+        "the sounds were answered by giving up on the plugin"
+    );
+}
+
+#[test]
+fn a_plugins_sound_is_played_while_its_fetches_hang() {
+    // A sound waiting its turn behind its plugin's own fetches to a host that
+    // drops packets rang fifteen seconds after what it was about. It is a
+    // write and a spawn, so it does not take a turn: it is played beside
+    // them.
+    let queue = LocalQueue::new();
+    let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
+    let plugins = Arc::new(Background::new(REQUEST_WORKERS));
+    let runtime = runtime_in(&mut app, &["net:127.0.0.1", "sound.play"], &plugins);
+    let mut silent = Silent::new();
+
+    ask_for(&mut app, &runtime, 1, vec![silent.fetch(); 4]);
+    assert!(
+        silent.reached(Duration::from_secs(5)),
+        "none of the plugin's fetches was started"
+    );
+    ask_for(&mut app, &runtime, 5, vec![quiet_sound()]);
+
+    let asked = Instant::now();
+    assert!(
+        until(&queue, || rung(&app, &runtime).len() == 1),
+        "the sound waited behind the fetches"
+    );
+    assert!(
+        asked.elapsed() < PROMPTLY,
+        "the sound took {:?} to be played",
+        asked.elapsed()
+    );
+    still_hanging(&queue, &app, &runtime, 4);
+}
+
 /// A directory of line-delimited JSON, written for one test.
 fn transcripts(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -735,6 +1240,243 @@ fn a_line_below_the_floor_is_not_counted() {
     };
 
     assert_eq!(lines, 1, "only the turn on the 5th is above the floor");
+}
+
+#[test]
+fn a_walk_past_its_deadline_says_it_gave_up_rather_than_answering_a_low_total() {
+    // A fetch has a socket's timeout to end it, and a walk had nothing: a
+    // granted directory holding a file of a hundred gigabytes was a worker
+    // held for as long as reading it took. What is past the deadline is not
+    // a total — a count that stopped part way is a week with fewer turns in
+    // it than it had — so the answer is that it gave up.
+    let root = transcripts("deadline");
+    let Request::Tally {
+        containing,
+        at_least,
+        distinct_by,
+        tables,
+        ..
+    } = tally_of(&root)
+    else {
+        panic!("that is a tally");
+    };
+    let later = Instant::now() + Duration::from_secs(60);
+
+    assert_eq!(
+        walk(&root, ".jsonl", 0, Instant::now()),
+        None,
+        "a walk out of time went on looking"
+    );
+    let files = walk(&root, ".jsonl", 0, later).expect("a minute is time enough for three files");
+
+    let Answer::Failed(why) = add_up(
+        &files,
+        &containing,
+        &at_least,
+        &distinct_by,
+        &tables,
+        Instant::now(),
+    ) else {
+        panic!("counting out of time answered with a total");
+    };
+    assert!(why.contains("given up"), "unhelpful answer: {why}");
+    // The last file alone, which is where a total that had stopped part way
+    // used to be handed over as though it were the whole: nothing came after
+    // it to notice the clock.
+    let last = &files[files.len() - 1..];
+    assert!(
+        matches!(
+            add_up(
+                last,
+                &containing,
+                &at_least,
+                &distinct_by,
+                &tables,
+                Instant::now()
+            ),
+            Answer::Failed(_)
+        ),
+        "the last file, read out of time, was answered with a total"
+    );
+    assert!(
+        matches!(
+            add_up(&files, &containing, &at_least, &distinct_by, &tables, later),
+            Answer::Counted { lines: 3, .. }
+        ),
+        "the same files did not add up in time"
+    );
+}
+
+/// What [`next_line`] makes of `text`, a line at a time, keeping at most
+/// `cap` of each: what it found, and the line when it was whole.
+fn lines_of(text: &[u8], cap: usize) -> Vec<(Line, Option<String>)> {
+    // A buffer smaller than a line, so that reading past one takes more
+    // than one look.
+    let mut reader = std::io::BufReader::with_capacity(4, text);
+    let later = Instant::now() + Duration::from_secs(60);
+    let mut bytes = Vec::new();
+    let mut found = Vec::new();
+    loop {
+        let line = next_line(&mut reader, &mut bytes, cap, later).expect("a slice can be read");
+        assert!(
+            bytes.len() <= cap,
+            "{} bytes of one line were held under a ceiling of {cap}",
+            bytes.len()
+        );
+        let whole = (line == Line::Whole).then(|| String::from_utf8_lossy(&bytes).into_owned());
+        let end = line == Line::End;
+        found.push((line, whole));
+        if end {
+            return found;
+        }
+    }
+}
+
+#[test]
+fn a_line_longer_than_a_walk_holds_is_read_past_and_the_next_one_is_read() {
+    // A line was read whole however long it was. One past the ceiling is
+    // skipped as a line that is not JSON is, and the line after it is read
+    // as though nothing had happened.
+    assert_eq!(
+        lines_of(b"short\nthis one is far too long\nnext\nlast", 8),
+        vec![
+            (Line::Whole, Some(String::from("short\n"))),
+            (Line::TooLong, None),
+            (Line::Whole, Some(String::from("next\n"))),
+            (Line::Whole, Some(String::from("last"))),
+            (Line::End, None),
+        ]
+    );
+    // Exactly as long as the ceiling, with or without its newline, fits.
+    assert_eq!(
+        lines_of(b"1234567\n12345678", 8),
+        vec![
+            (Line::Whole, Some(String::from("1234567\n"))),
+            (Line::Whole, Some(String::from("12345678"))),
+            (Line::End, None),
+        ]
+    );
+}
+
+#[test]
+fn a_line_with_no_end_is_given_up_on_at_the_deadline_and_not_held() {
+    // A disk image in a granted directory is a line with no end: read with
+    // nothing but `read_until`, it went into memory whole whatever the
+    // deadline said. Here a line a thousand times longer than the ceiling,
+    // with the deadline already gone. Not an endless one: without the look
+    // at the clock, an endless line was a test that never came back rather
+    // than one that failed.
+    use std::io::Read as _;
+
+    let mut long = std::io::BufReader::new(std::io::repeat(b'x').take(1 << 20));
+    let mut bytes = Vec::new();
+
+    let outcome = next_line(&mut long, &mut bytes, 1024, Instant::now());
+
+    assert!(
+        matches!(outcome, Err(Stopped::OutOfTime)),
+        "a line read past its deadline came to {outcome:?}"
+    );
+    assert!(bytes.len() <= 1024, "{} bytes of it were held", bytes.len());
+}
+
+/// `left` bytes of lines `length` long, each ending in a newline, made as
+/// they are read rather than held — and how many have been.
+struct LongLines {
+    length: u64,
+    left: u64,
+    made: u64,
+}
+
+impl std::io::Read for LongLines {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let room = buffer
+            .len()
+            .min(usize::try_from(self.left).unwrap_or(usize::MAX));
+        for byte in &mut buffer[..room] {
+            self.made += 1;
+            *byte = if self.made.is_multiple_of(self.length) {
+                b'\n'
+            } else {
+                b'x'
+            };
+        }
+        self.left -= room as u64;
+        Ok(room)
+    }
+}
+
+#[test]
+fn a_file_of_long_lines_is_given_up_on_a_line_past_the_deadline_and_not_a_thousand() {
+    // The clock was looked at every thousand and twenty-four lines and
+    // nowhere else, and a line may be sixteen megabytes: sixteen gigabytes
+    // read past the deadline before the walk noticed. Here sixty-four lines
+    // of a megabyte, fewer than a look's worth of lines, with the deadline
+    // gone before the first.
+    let line = BYTES_PER_LOOK as u64;
+    let mut reader = std::io::BufReader::new(LongLines {
+        length: line,
+        left: 64 * line,
+        made: 0,
+    });
+    let mut lines = 0;
+
+    let outcome = fold(
+        &mut reader,
+        "\"usage\"",
+        &[],
+        &[],
+        &[],
+        &mut HashSet::new(),
+        &mut [],
+        &mut lines,
+        Instant::now(),
+    );
+
+    assert!(
+        matches!(outcome, Err(Stopped::OutOfTime)),
+        "a file read past its deadline came to {outcome:?}"
+    );
+    let made = reader.get_ref().made;
+    assert!(
+        made <= 2 * line,
+        "{made} bytes were read past the deadline, which is more than a line"
+    );
+}
+
+#[test]
+fn files_that_cannot_be_opened_past_the_deadline_end_the_walk_and_are_not_skipped() {
+    // A file that cannot be opened costs itself and not the walk, and the
+    // clock was looked at only once a file was open. On a share that has
+    // gone away every open fails a timeout late, so a walk of them skipped
+    // file after file past its deadline and then answered a total.
+    let never_made = std::env::temp_dir().join(format!("crook-never-made-{}", std::process::id()));
+    let gone: Vec<PathBuf> = (0..5)
+        .map(|index| never_made.join(format!("{index}.jsonl")))
+        .collect();
+
+    assert!(
+        matches!(
+            add_up(&gone, "\"usage\"", &[], &[], &[], Instant::now()),
+            Answer::Failed(_)
+        ),
+        "files that could not be opened were skipped past the deadline"
+    );
+    // In time, they are skipped, as a file that cannot be read always was.
+    assert!(
+        matches!(
+            add_up(
+                &gone,
+                "\"usage\"",
+                &[],
+                &[],
+                &[],
+                Instant::now() + Duration::from_secs(60)
+            ),
+            Answer::Counted { lines: 0, .. }
+        ),
+        "files that could not be opened were not skipped in time"
+    );
 }
 
 #[test]
