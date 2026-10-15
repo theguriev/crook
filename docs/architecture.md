@@ -1339,7 +1339,18 @@ list is in — about every local branch, not only the checkouts' — marks a pro
 and offers `Remove N merged checkouts…`: the free checkouts narrowed to the proved ones, with
 the sweep's own safety — looked in first, never forced, the branches kept. On this repository
 it proves 14 of those eighteen in a second or two; the four it misses are stacked or were
-reworked, and are the ones it should miss.
+reworked, and are the ones it should miss. Every removal, sweep and Finish opens the menu again,
+and proving sixty branches again each time came to three seconds and more, so the menu keeps
+what it was told (`merged::Proofs`): per repository against the base and its tip, and per branch
+against its tip and its reflog's size and time — the reflog because a branch committed on and
+reset back to the very commit it was proved at holds work only that reflog remembers. One
+`for-each-ref` shows what moved, and only that is proved; a base that moved proves everything
+again. An unproved answer is kept only from a proof that was over inside one read's deadline,
+since one that took longer may have run out of time rather than evidence. What a proof also
+leans on — every other ref, which may be what holds a commit a branch moved off — is not
+watched, so a badge can go stale until a tip moves; nothing is deleted on it, because the
+deletion proves again from nothing. A pass the menu no longer wants, because it opened again or
+closed, stops between branches.
 
 **A branch is deleted only on a proof.** `git::worktree` said from the start that a removal
 never deletes the branch — "not as an option, not under `force`" — because a branch is the work

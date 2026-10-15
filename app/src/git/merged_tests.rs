@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -162,9 +163,10 @@ fn merged_within(
     commits: usize,
     deadline: Duration,
 ) -> HashMap<String, Proof> {
-    proofs(super::merged_within(
-        repository, base, branches, commits, deadline,
-    ))
+    proofs(
+        super::merged_within(repository, base, branches, commits, deadline, &|| true)
+            .expect("nothing stops a proof that is always going"),
+    )
 }
 
 fn proofs(landed: HashMap<String, Landed>) -> HashMap<String, Proof> {
@@ -1216,6 +1218,194 @@ fn a_look_for_moved_off_work_whose_deadline_is_spent_accounts_for_nothing() {
         );
         assert_eq!(look(Instant::now()), originals);
     }
+}
+
+// --- proving only what moved ----------------------------------------------------
+//
+// The worktree menu asks about every branch each time it opens, and opens again
+// after every removal. These count the gits a second look starts, because an
+// answer kept and an answer proved again are the same answer.
+
+/// Every git this thread has started since it last asked, each as its
+/// arguments.
+fn reads_since() -> Vec<String> {
+    super::super::run::started_here()
+}
+
+/// A repository with a branch squashed onto `main`, one fast-forwarded into
+/// it, and one with work `main` does not have.
+fn three_branches(scratch: &ScratchDir) -> PathBuf {
+    let repo = repository(scratch, "repo");
+    git(&repo, &["switch", "-c", "squashed"]);
+    commit(
+        &repo,
+        "squashed.txt",
+        "the squashed work\n",
+        "squashed work",
+    );
+    squash_onto_main(&repo, "squashed");
+    git(&repo, &["switch", "-c", "merged"]);
+    commit(&repo, "merged.txt", "the merged work\n", "merged work");
+    git(&repo, &["switch", "main"]);
+    git(&repo, &["merge", "--ff-only", "merged"]);
+    git(&repo, &["switch", "-c", "open"]);
+    commit(&repo, "open.txt", "the open work\n", "open work");
+    git(&repo, &["switch", "main"]);
+    repo
+}
+
+const THREE: [&str; 3] = ["merged", "open", "squashed"];
+
+/// [`merged_remembering`] of [`THREE`], going all the way.
+fn remembered(repo: &Path, proofs: &Mutex<Proofs>) -> HashMap<String, Landed> {
+    merged_remembering(repo, MAIN, &names(&THREE), proofs, &|| true)
+        .expect("nothing stops a proof that is always going")
+}
+
+/// Which of [`THREE`] the reads since the last ask named.
+fn asked_about(reads: &[String]) -> Vec<&'static str> {
+    THREE
+        .into_iter()
+        .filter(|branch| {
+            let reference = format!("refs/heads/{branch}");
+            reads
+                .iter()
+                .any(|read| read.split(' ').any(|word| word == reference))
+        })
+        .collect()
+}
+
+#[test]
+fn a_second_look_at_branches_that_have_not_moved_proves_nothing() {
+    if without_git("a_second_look_at_branches_that_have_not_moved_proves_nothing") {
+        return;
+    }
+    let scratch = ScratchDir::new("kept");
+    let repo = three_branches(&scratch);
+    let kept = Mutex::new(Proofs::default());
+
+    let first = remembered(&repo, &kept);
+    assert_eq!(
+        proofs(first.clone()),
+        HashMap::from([
+            ("merged".to_owned(), Proof::Ancestor),
+            (
+                "squashed".to_owned(),
+                Proof::Patch {
+                    commit: git(&repo, &["rev-parse", "main~1"])
+                }
+            ),
+        ])
+    );
+    assert_eq!(asked_about(&reads_since()), THREE);
+
+    let second = remembered(&repo, &kept);
+
+    assert_eq!(second, first);
+    let reads = reads_since();
+    assert_eq!(reads.len(), 1, "{reads:?}");
+    assert!(reads[0].starts_with("for-each-ref"), "{reads:?}");
+}
+
+#[test]
+fn a_branch_that_moved_is_the_only_one_proved_again() {
+    if without_git("a_branch_that_moved_is_the_only_one_proved_again") {
+        return;
+    }
+    let scratch = ScratchDir::new("one-moved");
+    let repo = three_branches(&scratch);
+    let kept = Mutex::new(Proofs::default());
+    let first = remembered(&repo, &kept);
+    reads_since();
+
+    git(&repo, &["switch", "open"]);
+    commit(
+        &repo,
+        "open.txt",
+        "the open work, and more\n",
+        "more open work",
+    );
+    git(&repo, &["switch", "main"]);
+    let second = remembered(&repo, &kept);
+
+    assert_eq!(asked_about(&reads_since()), ["open"]);
+    assert_eq!(second, first);
+    assert_eq!(second, super::merged(&repo, MAIN, &names(&THREE)));
+}
+
+#[test]
+fn a_base_that_moved_proves_every_branch_again() {
+    // A squash that lands is the base moving, and it is the moment the
+    // branches that were not proved before can be.
+    if without_git("a_base_that_moved_proves_every_branch_again") {
+        return;
+    }
+    let scratch = ScratchDir::new("base-moved-again");
+    let repo = three_branches(&scratch);
+    let kept = Mutex::new(Proofs::default());
+    remembered(&repo, &kept);
+    reads_since();
+
+    let open = squash_onto_main(&repo, "open");
+    let second = remembered(&repo, &kept);
+
+    assert_eq!(asked_about(&reads_since()), THREE);
+    assert_eq!(
+        proofs(second).get("open"),
+        Some(&Proof::Patch { commit: open })
+    );
+}
+
+#[test]
+fn a_branch_reset_to_the_very_commit_it_was_proved_at_is_proved_again() {
+    // Its tip is where it was, so a proof kept by tip alone would still say
+    // merged — about a branch whose reflog is now the last thing holding a
+    // commit somebody made on it and reset away. That is the branch a proof
+    // refuses, and so is the badge.
+    if without_git("a_branch_reset_to_the_very_commit_it_was_proved_at_is_proved_again") {
+        return;
+    }
+    let scratch = ScratchDir::new("reset-in-place");
+    let repo = three_branches(&scratch);
+    let kept = Mutex::new(Proofs::default());
+    assert!(remembered(&repo, &kept).contains_key("merged"));
+
+    git(&repo, &["switch", "merged"]);
+    commit(&repo, "abandoned.txt", "the abandoned work\n", "abandoned");
+    git(&repo, &["reset", "--hard", "HEAD~1"]);
+    git(&repo, &["switch", "main"]);
+    let second = remembered(&repo, &kept);
+
+    assert!(!second.contains_key("merged"), "proved {second:?}");
+}
+
+#[test]
+fn a_pass_nobody_wants_any_more_stops_between_branches_and_keeps_nothing() {
+    // Opening the menu again while a pass is proving sixty branches for the
+    // last opening would otherwise run that pass on, for seconds, for an
+    // answer the menu drops on arrival.
+    if without_git("a_pass_nobody_wants_any_more_stops_between_branches_and_keeps_nothing") {
+        return;
+    }
+    let scratch = ScratchDir::new("superseded");
+    let repo = three_branches(&scratch);
+    let kept = Mutex::new(Proofs::default());
+    let asked = std::cell::Cell::new(0);
+    let wanted_once = || {
+        asked.set(asked.get() + 1);
+        asked.get() == 1
+    };
+
+    let stopped = merged_remembering(&repo, MAIN, &names(&THREE), &kept, &wanted_once);
+
+    assert_eq!(stopped, None);
+    assert_eq!(asked_about(&reads_since()), ["merged"]);
+    remembered(&repo, &kept);
+    assert_eq!(
+        asked_about(&reads_since()),
+        THREE,
+        "a stopped pass kept an answer it never finished"
+    );
 }
 
 // --- which branch is the base ---------------------------------------------------

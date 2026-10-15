@@ -5152,6 +5152,8 @@ impl Workspace {
 
         let epoch = self.tab_menu.next_epoch();
         self.tab_menu.opening = self.tab_menu.opening.wrapping_add(1);
+        // The last opening's proof would be dropped on arrival.
+        self.tab_menu.stop_landed_pass();
         self.tab_menu.tab = Some(tab);
         self.tab_menu.pane_directory = Some(directory.clone());
         self.tab_menu.mode = WorktreeMode::Listing;
@@ -5266,11 +5268,17 @@ impl Workspace {
         let branches = self.tab_menu.branches.clone();
         let tab = self.tab_menu.tab;
         let opening = self.tab_menu.opening;
+        let proofs = self.tab_menu.proofs.clone();
+        let going = self.tab_menu.start_landed_pass();
 
         let reading = ctx.background().spawn(async move {
-            super::tab_menu::landed_branches(&directory, &worktrees, &branches)
+            super::tab_menu::landed_branches(&directory, &worktrees, &branches, &proofs, &going)
         });
         ctx.spawn(reading, move |workspace, landed, ctx| {
+            // A pass that stopped was superseded, and has nothing to say.
+            let Some(landed) = landed else {
+                return;
+            };
             if workspace.tab_menu.tab != tab || workspace.tab_menu.opening != opening {
                 return;
             }
@@ -5341,11 +5349,13 @@ impl Workspace {
                         .clone()
                         .unwrap_or_else(crate::agent::search_path),
                 );
-                self.tab_menu.landed = Some(super::tab_menu::landed_branches(
+                self.tab_menu.landed = super::tab_menu::landed_branches(
                     &directory,
                     &worktrees,
                     &self.tab_menu.branches,
-                ));
+                    &self.tab_menu.proofs,
+                    &|| true,
+                );
                 Contents::Ready(worktrees)
             }
             Err(problem) => Contents::Failed(problem.to_string()),
@@ -5438,6 +5448,7 @@ impl Workspace {
         }
 
         self.tab_menu.next_epoch();
+        self.tab_menu.stop_landed_pass();
         self.tab_menu.tab = None;
         self.tab_menu.mode = WorktreeMode::Listing;
         self.tab_menu.selected = None;
