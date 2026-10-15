@@ -482,9 +482,9 @@ impl Overridden {
 /// overwrites it. Either way the bytes on disk are the last snapshot asked
 /// for.
 ///
-/// The lock is per file, not per process: one of these belongs to the settings
-/// and another to the session, because they are two files and neither has to
-/// wait on the other.
+/// The lock is per file, not per process: one of these belongs to the settings,
+/// another to the session and another to the login entry, because they are
+/// separate targets and none has to wait on the others.
 #[derive(Debug, Default)]
 struct SaveOrder {
     /// How many writes have been asked for.
@@ -527,9 +527,19 @@ impl SaveOrder {
     /// later save because of it would turn one lost write into all of them.
     fn write_if_last<T>(&self, asked_at: u64, write: impl FnOnce() -> T) -> Option<T> {
         let _ordered = self.writing.lock().unwrap_or_else(PoisonError::into_inner);
-        let written = (self.asked_for.load(Ordering::Relaxed) == asked_at).then(write);
+        let written = self.is_last(asked_at).then(write);
         self.finished.fetch_add(1, Ordering::Relaxed);
         written
+    }
+
+    /// Whether nothing has been asked for since `asked_at`.
+    ///
+    /// What the answer [`Self::write_if_last`] brought back is weighed by
+    /// once it is home: a write that was the last when it ran has been
+    /// followed by another if this says no, and that one's answer is the
+    /// one that says what the target holds.
+    fn is_last(&self, asked_at: u64) -> bool {
+        self.asked_for.load(Ordering::Relaxed) == asked_at
     }
 
     /// Whether every write asked for has run or been overtaken.
@@ -786,12 +796,19 @@ pub struct Workspace {
     /// real one would leave a login item on the machine running the suite: a
     /// test's says `Ok` to everything until the test says otherwise.
     apply_login_item: fn(bool) -> Result<(), String>,
-    /// How many times Open at login has been switched, which is how the
-    /// system's answer to an earlier press is told from the last one's.
-    login_item_asked: u64,
+    /// The order the presses of Open at login reach the system in: each
+    /// press's write waits for the one before it, and one that a later press
+    /// has overtaken writes nothing, so the entry is the last press's. Its
+    /// count is also how the system's answer to an earlier press is told
+    /// from the last one's. See [`SaveOrder`] and [`Self::adopt_login_item`].
+    login_items: Arc<SaveOrder>,
     /// Why the system refused the last switch of Open at login, which the
     /// row says until it is switched again. See [`Self::adopt_login_item`].
     login_item_refused: Option<String>,
+    /// How many answers to a press of Open at login have come back, written
+    /// or overtaken, which is what a test waits on.
+    #[cfg(test)]
+    login_items_answered: u64,
     /// When the bell last made a sound; see [`Self::sound_the_bell`].
     bell_sounded: Option<Instant>,
     /// How many times it has, which is what a test can hear.
@@ -1243,8 +1260,10 @@ impl Workspace {
             } else {
                 crate::login_item::apply
             },
-            login_item_asked: 0,
+            login_items: Arc::default(),
             login_item_refused: None,
+            #[cfg(test)]
+            login_items_answered: 0,
             bell_sounded: None,
             #[cfg(test)]
             bells_sounded: 0,
@@ -4475,24 +4494,31 @@ impl Workspace {
         self.login_item_refused.as_deref()
     }
 
-    /// Takes the system's answer to the `asked`th switch of Open at login.
+    /// Takes the system's answer to the `asked`th switch of Open at login:
+    /// `None` for a press a later one overtook before it was written, which
+    /// wrote nothing and so has nothing to say.
     ///
     /// A refusal puts the switch back where it was, which is where the entry
     /// on disk still is, and saves that; the row says why until the next
-    /// press. An answer to an earlier press is the log's alone: the last
-    /// press asked again, and its own answer is the one that says what is
+    /// press. An answer to an earlier press is the log's alone: the presses
+    /// are written in order (see [`Self::login_items`]), so the last one's
+    /// write lands after it, and its own answer is the one that says what is
     /// on disk.
     fn adopt_login_item(
         &mut self,
         asked: u64,
-        applied: Result<(), String>,
+        applied: Option<Result<(), String>>,
         ctx: &mut ViewContext<Self>,
     ) {
-        let Err(why) = applied else {
+        #[cfg(test)]
+        {
+            self.login_items_answered += 1;
+        }
+        let Some(Err(why)) = applied else {
             return;
         };
         log::warn!("could not change the login item: {why}");
-        if asked != self.login_item_asked {
+        if !self.login_items.is_last(asked) {
             return;
         }
         let mut general = self.general();
@@ -8582,6 +8608,13 @@ impl Workspace {
         self.apply_login_item = apply;
     }
 
+    /// How many answers to a press of Open at login the window has taken,
+    /// for a test to wait on.
+    #[cfg(test)]
+    pub(super) fn login_items_answered(&self) -> u64 {
+        self.login_items_answered
+    }
+
     /// Records that a pane's shell rang the bell.
     ///
     /// A bell is a program saying "look at me", so it becomes the one status
@@ -11400,15 +11433,20 @@ impl Workspace {
                 let enabled = general.open_at_login;
                 self.set_general(general, ctx);
                 self.login_item_refused = None;
-                self.login_item_asked += 1;
-                let asked = self.login_item_asked;
                 // The setting is what the person asked for; the entry is the
                 // system's, written on the pool — Windows' is a process — and
                 // its answer handed back, so that a refusal puts the switch
                 // back rather than leaving the row claiming an entry that is
-                // not there.
+                // not there. In the order they were pressed: two presses are
+                // two tasks on a pool of several workers, and an "on" that
+                // lands after the "off" pressed after it would leave an entry
+                // the switch says is not there.
+                let asked = self.login_items.ask();
+                let order = self.login_items.clone();
                 let apply = self.apply_login_item;
-                let applying = ctx.background().spawn(async move { apply(enabled) });
+                let applying = ctx
+                    .background()
+                    .spawn(async move { order.write_if_last(asked, || apply(enabled)) });
                 ctx.spawn(applying, move |workspace, applied, ctx| {
                     workspace.adopt_login_item(asked, applied, ctx);
                 })

@@ -30606,21 +30606,129 @@ fn a_login_item_the_system_refuses_puts_the_switch_back_and_says_why() {
     );
 
     // Pressed again once the system allows it: the reason goes with the
-    // press, and the switch stays on.
+    // press, and the switch stays on once the system has answered.
     harness.workspace_update(|workspace, _| {
         workspace.apply_login_items_with(|_| Ok(()));
     });
+    let answered = login_items_answered(&harness);
     harness.dispatch_workspace_action(SettingsAction::ToggleOpenAtLogin.into());
-    harness.queue.run_until_parked();
+    harness.wait_for("the system to answer the second press", |harness| {
+        login_items_answered(harness) > answered
+    });
     assert!(on(&harness), "an entry the system took was switched off");
+    assert_eq!(login_item_refused(&harness), None);
+}
+
+/// How many answers to a press of Open at login the window has taken.
+fn login_items_answered(harness: &Harness) -> u64 {
+    harness.workspace.read(&harness.app, |workspace, _| {
+        workspace.login_items_answered()
+    })
+}
+
+/// Why the Open at login row says the system refused the last press.
+fn login_item_refused(harness: &Harness) -> Option<String> {
+    harness.workspace.read(&harness.app, |workspace, _| {
+        workspace.login_item_refused().map(str::to_owned)
+    })
+}
+
+#[test]
+fn the_login_entry_is_the_last_press_however_slowly_the_first_is_written() {
+    use std::sync::Condvar;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    // What reached the entry, in the order it landed.
+    static ENTRY: Mutex<Vec<bool>> = Mutex::new(Vec::new());
+    static LANDED: Condvar = Condvar::new();
+    static WRITING_ON: AtomicBool = AtomicBool::new(false);
+
+    let mut harness = Harness::new(1);
+    harness.workspace_update(|workspace, _| {
+        workspace.apply_login_items_with(|enabled| {
+            let mut entry = ENTRY.lock().unwrap_or_else(PoisonError::into_inner);
+            if enabled {
+                // Slow, the way `reg` is under a virus scanner: still being
+                // written when the next press comes, and landing after that
+                // press's write if anything lets that one go first.
+                WRITING_ON.store(true, Ordering::SeqCst);
+                entry = LANDED
+                    .wait_timeout_while(entry, Duration::from_millis(500), |entry| {
+                        !entry.contains(&false)
+                    })
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+            }
+            entry.push(enabled);
+            LANDED.notify_all();
+            Ok(())
+        });
+    });
+
+    harness.dispatch_workspace_action(SettingsAction::ToggleOpenAtLogin.into());
+    harness.wait_for("the first press to be written", |_| {
+        WRITING_ON.load(Ordering::SeqCst)
+    });
+    harness.dispatch_workspace_action(SettingsAction::ToggleOpenAtLogin.into());
+    harness.wait_for("both presses to be answered", |harness| {
+        login_items_answered(harness) == 2
+    });
+
+    assert!(!harness.workspace.read(&harness.app, |workspace, _| {
+        workspace.general().open_at_login
+    }));
     assert_eq!(
-        harness
-            .workspace
-            .read(&harness.app, |workspace, _| workspace
-                .login_item_refused()
-                .map(str::to_owned)),
-        None
+        *ENTRY.lock().unwrap_or_else(PoisonError::into_inner),
+        [true, false],
+        "the entry was left on under a switch that says off"
     );
+}
+
+#[test]
+fn a_refusal_of_an_earlier_press_does_not_undo_the_last_one() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    static WRITING_ON: AtomicBool = AtomicBool::new(false);
+    static PRESSED_AGAIN: AtomicBool = AtomicBool::new(false);
+
+    let mut harness = Harness::new(1);
+    harness.workspace_update(|workspace, _| {
+        workspace.apply_login_items_with(|enabled| {
+            if !enabled {
+                return Ok(());
+            }
+            // Refused, but only once the person has pressed again: the
+            // answer comes home after the press that made it old.
+            WRITING_ON.store(true, Ordering::SeqCst);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !PRESSED_AGAIN.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err("Read-only file system (os error 30)".to_owned())
+        });
+    });
+
+    harness.dispatch_workspace_action(SettingsAction::ToggleOpenAtLogin.into());
+    harness.wait_for("the first press to be written", |_| {
+        WRITING_ON.load(Ordering::SeqCst)
+    });
+    harness.dispatch_workspace_action(SettingsAction::ToggleOpenAtLogin.into());
+    PRESSED_AGAIN.store(true, Ordering::SeqCst);
+    harness.wait_for("both presses to be answered", |harness| {
+        login_items_answered(harness) == 2
+    });
+
+    // Off, as last pressed, and as the entry is: the off press was written
+    // after the refused on, and was taken.
+    assert!(
+        !harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.general().open_at_login
+        }),
+        "the earlier press's refusal switched the last press back"
+    );
+    assert_eq!(login_item_refused(&harness), None);
 }
 
 #[test]
