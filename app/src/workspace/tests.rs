@@ -38,7 +38,7 @@ use crate::tab::{
     AgentSession, AgentStatus, Attention, Direction, GroupId, Pane, PaneId, PullRequest,
     PullRequestCheck, Tab, TabAction, TabId,
 };
-use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
+use crate::terminal_font::{CELL_FONT_SIZE, CellFont, CellMetrics};
 use crate::theme::theme;
 use crate::window_controls::{Recorder, Request, WindowState};
 
@@ -20366,7 +20366,8 @@ mod shells {
         /// the same square with the same radius in the header above it. Sorted
         /// by where they are rather than by the order they were painted in:
         /// which is the copy square and which is the menu is a thing about the
-        /// picture.
+        /// picture. One plate is painted as several squares in one place —
+        /// the pane's ground, the block's wash, the tint — and is one control.
         fn block_controls(scene: &Scene, panel: RectF) -> Vec<RectF> {
             let mut controls: Vec<RectF> = visible_rects(scene)
                 .filter(|(rect, bounds)| {
@@ -20379,6 +20380,7 @@ mod shells {
                 .filter(|bounds| panel.contains_point(center(*bounds)))
                 .collect();
             controls.sort_by(|left, right| left.min_x().total_cmp(&right.min_x()));
+            controls.dedup();
             controls
         }
 
@@ -20773,6 +20775,288 @@ mod shells {
                 copied.trim_end(),
                 "the block's trailing blank rows came with it"
             );
+        }
+
+        /// A pane whose block 0 is a failed command long enough to fold across
+        /// the whole width, hovered: the frame, the pane's panel and the fill
+        /// of the pane's own ground. `None` on a machine with no shell these
+        /// tests speak.
+        ///
+        /// Failed, for the wash, and folded so that the rows of the command
+        /// line run to under the controls. Which of its rows those are is the
+        /// host prompt's business — a blank line before it moves the command
+        /// down one.
+        fn a_long_failed_command_hovered(
+            harness: &mut Harness,
+        ) -> Option<(Rc<Scene>, RectF, Fill)> {
+            let pane = marked_shell(harness)?;
+            harness.frame();
+            let long = "x".repeat(300);
+            if run(harness, pane, &format!("echo {long}; false")) == 0 {
+                return None;
+            }
+
+            let ground = harness
+                .workspace
+                .read(&harness.app, |workspace, app| {
+                    let (_, snapshot) = workspace.terminal(pane, app)?;
+                    Some(Fill::Solid(crate::workspace::terminal_element::color(
+                        snapshot.background,
+                    )))
+                })
+                .expect("the pane has a terminal");
+            let panel = panel_of_the_pane(harness);
+            let scene = hover_block(harness, pane, 0);
+            Some((scene, panel, ground))
+        }
+
+        /// The layer a block's text is drawn in: the one holding the most
+        /// `x`s inside `panel`.
+        fn layer_of_the_xs(layers: &[&crookui_core::scene::Layer], panel: RectF) -> usize {
+            (0..layers.len())
+                .max_by_key(|&index| {
+                    layers[index]
+                        .glyphs
+                        .iter()
+                        .filter(|glyph| {
+                            glyph.glyph_key.glyph_id == u32::from('x')
+                                && panel.contains_point(glyph.position)
+                        })
+                        .count()
+                })
+                .expect("the frame has layers")
+        }
+
+        /// A glyph's cell, from the baseline it was set on: a letter whose
+        /// baseline is below a plate still has its top half under it.
+        fn cell_of(glyph: &crookui_core::scene::Glyph, cell: CellMetrics) -> RectF {
+            RectF::new(
+                glyph.position - vec2f(0., cell.baseline),
+                vec2f(cell.width, cell.height),
+            )
+        }
+
+        /// The cell the panes are drawn in now, which the zoom chords change.
+        fn cell_now(harness: &Harness) -> CellMetrics {
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.cell_font().metrics())
+        }
+
+        /// Whether `part` is painted from the top of `control` down, across
+        /// the whole of its width and no lower than it: the ground under the
+        /// plates, or the control's own tint.
+        fn from_the_top_of(control: RectF, part: RectF) -> bool {
+            part.min_y() == control.min_y()
+                && part.min_x() <= control.min_x()
+                && part.max_x() >= control.max_x()
+                && part.max_y() <= control.max_y()
+        }
+
+        #[test]
+        fn a_block_s_controls_cover_the_command_line_they_are_drawn_over() {
+            // The controls sit on the prompt line, and their plates were a
+            // tint in the list's own layer — under its glyphs, since a layer
+            // draws its text after its rects. A command long enough to reach
+            // them showed through, letters and icons over each other. The
+            // plates are on the pane's own ground now, then the block's wash,
+            // and then each one's tint, above the text — the ground under both
+            // and the gap between them, where a sliver of a letter otherwise
+            // shows between two squares hiding the rest of its word.
+            //
+            // And at a size the rows are taller at: four steps up, 16.5 pt,
+            // where a row is 20 px and the first one reaches below the
+            // plates. Hidden only down to the last row edge they crossed,
+            // they hid the space above that row and none of its letters.
+            let mut harness = Harness::panel(1);
+            let Some((scene, panel, ground)) = a_long_failed_command_hovered(&mut harness) else {
+                return;
+            };
+            the_controls_cover_the_line_they_sit_on(&scene, panel, &ground, cell_now(&harness));
+
+            for _ in 0..4 {
+                assert!(
+                    harness.press_key("=", settings_chord()),
+                    "the zoom chord was not consumed"
+                );
+            }
+            let cell = cell_now(&harness);
+            assert_eq!(cell.height, 20., "four steps up is not 16.5 pt: {cell:?}");
+            let pane = harness.focused_pane_id().expect("the pane is focused");
+            let panel = panel_of_the_pane(&mut harness);
+            let scene = hover_block(&mut harness, pane, 0);
+            the_controls_cover_the_line_they_sit_on(&scene, panel, &ground, cell);
+        }
+
+        /// What `a_block_s_controls_cover_the_command_line_they_are_drawn_over`
+        /// asserts of one frame, drawn in cells of `cell`.
+        fn the_controls_cover_the_line_they_sit_on(
+            scene: &Scene,
+            panel: RectF,
+            ground: &Fill,
+            cell: CellMetrics,
+        ) {
+            let size = cell.font_size;
+            let red = theme().terminal.normal[1];
+            let controls = block_controls(scene, panel);
+            assert_eq!(controls.len(), 2, "the copy square and the dots");
+
+            let layers: Vec<_> = scene.layers().collect();
+            // What is asserted is the order the text and the plates are drawn
+            // in, and an overlap only where there is one.
+            let text = layer_of_the_xs(&layers, panel);
+            for &control in &controls {
+                let painted = layers
+                    .iter()
+                    .position(|layer| {
+                        layer.rects.iter().any(|rect| {
+                            from_the_top_of(control, rect.bounds) && rect.background == *ground
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("nothing opaque is under the control at {control:?}")
+                    });
+                assert!(
+                    text < painted,
+                    "the control at {control:?} is painted in layer {painted}, under the \
+                     block's text in layer {text}"
+                );
+                let over: Vec<_> = layers[painted..]
+                    .iter()
+                    .flat_map(|layer| layer.glyphs.iter())
+                    .filter(|glyph| cell_of(glyph, cell).intersection(control).is_some())
+                    .collect();
+                assert!(
+                    over.is_empty(),
+                    "text is drawn over the control at {control:?}: {over:?}"
+                );
+
+                let fills: Vec<(&Fill, RectF)> = layers[painted]
+                    .rects
+                    .iter()
+                    .filter(|rect| from_the_top_of(control, rect.bounds))
+                    .map(|rect| (&rect.background, rect.bounds))
+                    .collect();
+                let [(first, opaque), (wash, washed), (tint, tinted)] = fills.as_slice() else {
+                    panic!("the control at {control:?} is painted as {fills:?}");
+                };
+                assert_eq!(*first, ground, "the ground goes down first");
+                assert!(
+                    matches!(wash, Fill::Solid(color)
+                        if (color.r, color.g, color.b) == (red.r, red.g, red.b) && color.a < 255),
+                    "the failed block's wash is not over the ground: {wash:?}"
+                );
+                assert_eq!(washed, opaque, "the wash is not where the ground is");
+                assert!(
+                    opaque.min_x() <= controls[0].min_x() && opaque.max_x() >= controls[1].max_x(),
+                    "the ground at {opaque:?} is not under both controls and the gap between \
+                     them: {controls:?}"
+                );
+                assert_eq!(
+                    *tint,
+                    &Fill::Solid(theme().overlay_1),
+                    "the plate's own tint goes on top"
+                );
+                assert_eq!(*tinted, control, "the tint is not the whole plate");
+                let icon = layers.iter().position(|layer| {
+                    layer
+                        .icons
+                        .iter()
+                        .any(|icon| control.contains_point(center(icon.bounds)))
+                });
+                assert_eq!(icon, Some(painted), "the icon is not drawn on the plate");
+
+                // The letters of the line the icon is on, the row through the
+                // plate's middle, are under the ground wherever the plate
+                // covers them.
+                let middle = (control.min_y() + control.max_y()) / 2.;
+                let on_the_line: Vec<RectF> = layers[text]
+                    .glyphs
+                    .iter()
+                    .filter(|glyph| panel.contains_point(glyph.position))
+                    .map(|glyph| cell_of(glyph, cell))
+                    .filter(|line| line.min_y() <= middle && middle < line.max_y())
+                    .filter_map(|line| line.intersection(control))
+                    .collect();
+                if on_the_line.is_empty() {
+                    eprintln!(
+                        "at {size} pt this prompt prints nothing on the line the control at \
+                         {control:?} sits on"
+                    );
+                }
+                let shown: Vec<&RectF> = on_the_line
+                    .iter()
+                    .filter(|covered| {
+                        covered.min_y() < opaque.min_y() || covered.max_y() > opaque.max_y()
+                    })
+                    .collect();
+                assert!(
+                    shown.is_empty(),
+                    "at {size} pt the control at {control:?} hides what is under it from {} to {}, \
+                     and the letters of the line it sits on show through it at {shown:?}",
+                    opaque.min_y(),
+                    opaque.max_y()
+                );
+            }
+        }
+
+        #[test]
+        fn a_block_s_controls_leave_the_row_under_their_line_whole() {
+            // A plate is 26 px over 15 px rows, and on the block's top it
+            // reaches 6.5 px into the row after the line it sits on: the first
+            // line of output, or the command itself under a prompt that starts
+            // with a blank line. Made opaque all the way down, it cut the tops
+            // off the letters in that row. What it hides it hides by whole
+            // rows; the overhang is the tint alone, which they show through.
+            let mut harness = Harness::panel(1);
+            let Some((scene, panel, ground)) = a_long_failed_command_hovered(&mut harness) else {
+                return;
+            };
+            let controls = block_controls(&scene, panel);
+            assert_eq!(controls.len(), 2, "the copy square and the dots");
+
+            let layers: Vec<_> = scene.layers().collect();
+            let cell = cell_now(&harness);
+            let cells: Vec<RectF> = layers[layer_of_the_xs(&layers, panel)]
+                .glyphs
+                .iter()
+                .map(|glyph| cell_of(glyph, cell))
+                .collect();
+            // An edge more than a pixel inside a cell, top or bottom.
+            let slices =
+                |edge: f32, cell: &RectF| cell.min_y() + 1. < edge && edge < cell.max_y() - 1.;
+            for control in controls {
+                let opaque = layers
+                    .iter()
+                    .flat_map(|layer| layer.rects.iter())
+                    .find(|rect| from_the_top_of(control, rect.bounds) && rect.background == ground)
+                    .unwrap_or_else(|| panic!("nothing opaque is under the control at {control:?}"))
+                    .bounds;
+                let under: Vec<RectF> = cells
+                    .iter()
+                    .copied()
+                    .filter(|cell| cell.intersection(control).is_some())
+                    .collect();
+                // The row the plate's lower edge crosses, where the fold puts
+                // the command or its output on any prompt of one or two lines.
+                if !under.iter().any(|cell| cell.max_y() > control.max_y()) {
+                    eprintln!(
+                        "skipped: this prompt prints nothing under the lower edge of the control \
+                         at {control:?}"
+                    );
+                    return;
+                }
+                let cut: Vec<RectF> = under
+                    .into_iter()
+                    .filter(|cell| slices(opaque.min_y(), cell) || slices(opaque.max_y(), cell))
+                    .collect();
+                assert!(
+                    cut.is_empty(),
+                    "the control at {control:?} hides what is under it down to {}, through the \
+                     middle of the letters in {cut:?}",
+                    opaque.max_y()
+                );
+            }
         }
 
         /// Every plugin a release binary carries except the one that owns the
@@ -25434,6 +25718,45 @@ fn the_row_height_the_panel_scrolls_by_is_the_height_it_draws() {
     );
 }
 
+#[test]
+fn a_theme_card_s_divider_runs_across_the_card() {
+    // The rule over the miniature input field is the field's top edge, and it
+    // was drawn on a row as wide as the cursor in it: a two-pixel dash over the
+    // caret instead of a line between the output and the prompt.
+    let themes = Scratch::new();
+    let mut harness = Harness::new(1);
+    let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    harness.set_themes_directory(themes.path().to_owned());
+    harness.open_theme_panel();
+
+    let scene = harness.frame();
+    // The cards wholly on screen: one the list cuts off at the bottom has its
+    // divider below the cut.
+    let cards: Vec<RectF> = theme_cards(&scene)
+        .into_iter()
+        .filter(|card| (card.height() - super::theme_preview::PANEL_CARD.y()).abs() < 2.5)
+        .collect();
+    assert!(!cards.is_empty(), "the panel drew no whole card");
+    for card in cards {
+        let dividers: Vec<RectF> = visible_rects(&scene)
+            .filter(|(rect, _)| {
+                rect.border.top && !rect.border.left && !rect.border.bottom && !rect.border.right
+            })
+            .map(|(_, bounds)| bounds)
+            .filter(|bounds| card.contains_point(center(*bounds)))
+            .collect();
+        let [divider] = dividers.as_slice() else {
+            panic!("a card draws one divider, and {card:?} draws {dividers:?}");
+        };
+        // Inside the card's padding and its border on both sides, and no
+        // further in: the card pads its content by eight.
+        assert!(
+            divider.min_x() - card.min_x() < 12. && card.max_x() - divider.max_x() < 12.,
+            "the divider is {divider:?} in a card at {card:?}"
+        );
+    }
+}
+
 /// The tabs panel scrolling to the row a selection landed on.
 mod panel_autoscroll {
     use super::*;
@@ -29755,6 +30078,58 @@ fn a_palette_title_too_wide_for_a_narrow_card_ends_in_a_mark() {
 }
 
 #[test]
+fn a_palette_row_s_title_sits_on_the_line_its_keys_and_name_are_centred_on() {
+    // The title is the row's flexible child, and a flexible child was handed
+    // the row's whole height as its minimum: the line box stretched to it and
+    // the glyphs were set at its top, three pixels above the keycap and the
+    // action id beside them, which were centred.
+    let mut harness = Harness::new(1);
+    open_palette(&mut harness, "new agent");
+    let scene = harness.frame();
+    let band = palette_selected_row(&scene);
+
+    // Where the middle of each glyph's line box is. The stub shaper's face is
+    // eight tenths ascent and two descent, so the box is found from the
+    // baseline by the rule a line uses to put the baseline in it.
+    let middles = |size: f32| -> Vec<f32> {
+        let baseline = crookui_core::text_layout::default_compute_baseline_position(
+            size,
+            crookui_core::fonts::DEFAULT_UI_LINE_HEIGHT_RATIO,
+            size * 0.8,
+            size * 0.2,
+        );
+        let half = size * crookui_core::fonts::DEFAULT_UI_LINE_HEIGHT_RATIO / 2.;
+        scene
+            .layers()
+            .flat_map(|layer| layer.glyphs.iter())
+            .filter(|glyph| band.contains_point(glyph.position))
+            .filter(|glyph| glyph.glyph_key.font_size == size)
+            .map(|glyph| glyph.position.y() - baseline + half)
+            .collect()
+    };
+    let title = middles(12.);
+    let beside = middles(10.5);
+    assert!(
+        !title.is_empty() && !beside.is_empty(),
+        "the selected row has no title or nothing beside it"
+    );
+
+    let centre = band.min_y() + band.height() / 2.;
+    for middle in beside {
+        assert!(
+            (middle - centre).abs() < 1.,
+            "the keys and the name are centred on {middle}, the row on {centre}"
+        );
+    }
+    for middle in title {
+        assert!(
+            (middle - centre).abs() < 1.,
+            "the title is centred on {middle}, the row and what is beside it on {centre}"
+        );
+    }
+}
+
+#[test]
 fn typing_narrows_the_palette() {
     let mut harness = Harness::new(1);
     harness.press("p", palette_chord(), "");
@@ -30013,16 +30388,23 @@ fn drawn_line(scene: &Scene, text: &str) -> Option<Vector2F> {
 
 /// What the selected row is called.
 ///
-/// The topmost line inside the band, which is the title: a row's keys and its
-/// action name are set two pixels lower, in the secondary size, so they group
-/// as a line of their own.
+/// The band's text in the title's size. A row's keys and its action name are
+/// in the secondary size and centred on the title's line, so their baselines
+/// are a fraction of a pixel from its own and a line of the band's text can
+/// be the three of them run together, in either order.
 fn palette_selected_title(scene: &Scene) -> String {
     let band = palette_selected_row(scene);
-    text_lines(scene, |at| band.contains_point(at))
-        .into_iter()
-        .next()
-        .map(|(_, line)| line)
-        .unwrap_or_default()
+    lines_of(
+        scene
+            .layers()
+            .flat_map(|layer| layer.glyphs.iter())
+            .filter(|glyph| glyph.glyph_key.font_size == 12.),
+        |at| band.contains_point(at),
+    )
+    .into_iter()
+    .next()
+    .map(|(_, line)| line)
+    .unwrap_or_default()
 }
 
 /// The chord the shipped table binds `command` to, as a row's cap prints it.

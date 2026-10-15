@@ -291,7 +291,7 @@ impl CellFont {
             )
         };
 
-        let height = (font_size * DEFAULT_UI_LINE_HEIGHT_RATIO).ceil().max(1.);
+        let height = row_height(font_size);
         let baseline =
             default_compute_baseline_position(font_size, height / font_size, ascent, descent);
 
@@ -307,6 +307,18 @@ impl CellFont {
             cache: RefCell::new(HashMap::new()),
         }))
     }
+}
+
+/// The pitch of a row set at `font_size`: the line box UI text of that size
+/// has, rounded up to whole pixels.
+///
+/// Snapped to a thousandth of a pixel before it is rounded up. `1.2` has no
+/// exact f32, so a line box that is whole pixels — 15 at the default 12.5 —
+/// comes out a millionth over, and rounding *that* up would set every row a
+/// pixel looser than the line height it is meant to be.
+fn row_height(font_size: f32) -> f32 {
+    let line = font_size * DEFAULT_UI_LINE_HEIGHT_RATIO;
+    ((line * 1000.).round() / 1000.).ceil().max(1.)
 }
 
 /// The face selection at each index of [`Inner::faces`].
@@ -337,6 +349,19 @@ mod tests {
         let font = CellFont::headless(12.);
         assert_eq!(font.metrics().width, 6.);
         assert_eq!(font.metrics().height, 15.);
+    }
+
+    #[test]
+    fn a_size_whose_line_box_is_whole_pixels_is_not_rounded_up_a_pixel() {
+        // 1.2 is not exact in f32, so 12.5 × 1.2 comes out a millionth over
+        // 15 — and a row rounded up from that is a pixel looser than the line
+        // height everything else in the window is set at. The default size is
+        // one of those, so every pane in its default type was.
+        assert_eq!(CellFont::headless(CELL_FONT_SIZE).metrics().height, 15.);
+        assert_eq!(CellFont::headless(25.).metrics().height, 30.);
+        // And a fractional line box is still rounded up, which is what the
+        // rounding is for.
+        assert_eq!(CellFont::headless(13.5).metrics().height, 17.);
     }
 
     #[test]
