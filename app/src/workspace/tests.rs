@@ -7252,6 +7252,7 @@ fn the_cross_on_a_row_asks_about_removing_it_rather_than_opening_it() {
         .focused_pane_id()
         .expect("the split focused its pane");
     harness.dispatch_action(TabAction::ClosePane(opened));
+    wait_for_the_locks_to_come_off(&mut harness);
 
     // Back on the first tab's menu, with two checkouts in it now.
     let first = harness.tab_ids()[0];
@@ -8371,6 +8372,7 @@ fn new_task_leaves_a_menu_that_is_working_or_asking_alone() {
         .expect("the checkout opened a pane");
     harness.dispatch_action(TabAction::ClosePane(opened));
     harness.dispatch_action(TabAction::Select(tab));
+    wait_for_the_locks_to_come_off(&mut harness);
 
     // That checkout is free now, so the list offers to sweep it.
     harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
@@ -8515,6 +8517,7 @@ fn escape_takes_the_menu_down_and_enter_removes_the_checkout() {
         .focused_pane_id()
         .expect("the split focused its pane");
     harness.dispatch_action(TabAction::ClosePane(made));
+    wait_for_the_locks_to_come_off(&mut harness);
 
     harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
     harness.wait_for("both checkouts to be read", |harness| {
@@ -8593,7 +8596,7 @@ fn escape_takes_the_menu_down_and_enter_removes_the_checkout() {
 ///
 /// The pane it opened in is closed again, because a checkout a tab is working
 /// in is not free — which is the rule these tests set up rather than the one
-/// they are about.
+/// they are about — and this returns once the lock that pane held is off.
 fn spare_checkout(harness: &mut Harness, tab: TabId, store: &Path, made: &[PathBuf]) -> PathBuf {
     harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
     harness.wait_for("the repository to be read", |harness| {
@@ -8621,7 +8624,23 @@ fn spare_checkout(harness: &mut Harness, tab: TabId, store: &Path, made: &[PathB
 
     harness.dispatch_action(TabAction::ClosePane(opened));
     harness.dispatch_action(TabAction::Select(tab));
+    wait_for_the_locks_to_come_off(harness);
     path
+}
+
+/// Waits for the window to take off every lock it took, which closing the
+/// last pane in a checkout it made asks for on the background pool.
+///
+/// Before anything lists the worktrees again: `git worktree list` reads a
+/// checkout's lock file after asking whether there is one, and dies —
+/// "failed to read '.git/worktrees/…/locked': No such file or directory" —
+/// when the unlock deletes it in between. The menu then shows that failure
+/// instead of the checkouts, and a wait for them runs out: on a Windows
+/// runner, where the gap is wide enough to land in, a minute and a failure.
+fn wait_for_the_locks_to_come_off(harness: &mut Harness) {
+    harness.wait_for("the window to take its locks off", |harness| {
+        held_checkouts(harness).is_empty()
+    });
 }
 
 /// The worktree menu open over a scratch repository with one free checkout
@@ -10662,6 +10681,7 @@ fn nothing_offers_to_tidy_a_checkout_a_tab_is_working_in() {
     harness.dispatch_worktree(WorktreeAction::CloseMenu);
     harness.dispatch_action(TabAction::ClosePane(opened));
     harness.dispatch_action(TabAction::Select(tab));
+    wait_for_the_locks_to_come_off(&mut harness);
     harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
     harness.wait_for("both checkouts to be read again", |harness| {
         harness.worktrees_listed() == Some(2)
@@ -10879,13 +10899,15 @@ fn a_checkout_crook_makes_is_locked_until_the_last_pane_in_it_closes() {
     );
 
     harness.dispatch_action(TabAction::ClosePane(second));
-    harness.wait_for("the lock to go with the last pane", |_| {
-        lock_on(&repository, &checkout).is_none()
-    });
+    // The window's word first, and git's once that is in: a listing that
+    // runs while the unlock does can die on the lock file it is deleting.
+    wait_for_the_locks_to_come_off(&mut harness);
+    assert_eq!(
+        lock_on(&repository, &checkout),
+        None,
+        "the lock did not go with the last pane"
+    );
     assert!(checkout.is_dir(), "closing the pane took the checkout too");
-    harness.wait_for("the window to stop counting it as held", |harness| {
-        held_checkouts(harness).is_empty()
-    });
 }
 
 #[test]
@@ -11384,12 +11406,13 @@ fn a_pane_that_leaves_the_checkout_crook_made_takes_its_lock_off_with_it() {
     );
 
     moved(&mut harness, repository.clone());
-    harness.wait_for("the lock to go with the pane that left", |_| {
-        lock_on(&repository, &checkout).is_none()
-    });
-    harness.wait_for("the window to stop counting it as held", |harness| {
-        held_checkouts(harness).is_empty()
-    });
+    // The window's word first, and git's once that is in, as above.
+    wait_for_the_locks_to_come_off(&mut harness);
+    assert_eq!(
+        lock_on(&repository, &checkout),
+        None,
+        "the lock did not go with the pane that left"
+    );
     assert!(
         harness.pane_ids().contains(&pane),
         "the pane that left was closed"
@@ -11656,6 +11679,7 @@ fn enter_does_not_remove_a_checkout_git_has_already_refused() {
         .focused_pane_id()
         .expect("the split focused its pane");
     harness.dispatch_action(TabAction::ClosePane(made));
+    wait_for_the_locks_to_come_off(&mut harness);
 
     // The work git will refuse over: one file that is in the checkout and in
     // nothing else.
@@ -11747,6 +11771,7 @@ fn showing_a_checkout_opens_it_in_the_group_and_never_twice() {
         .expect("the new tab focused its pane");
     harness.dispatch_action(TabAction::ClosePane(made));
     assert_eq!(harness.tab_ids().len(), 1, "the tab did not close");
+    wait_for_the_locks_to_come_off(&mut harness);
 
     harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
     harness.wait_for("both checkouts to be read", |harness| {
@@ -22946,14 +22971,24 @@ mod shells {
             );
         }
 
-        /// How many washes of `fill` a frame painted inside `panel`.
-        fn washes(scene: &Scene, panel: RectF, fill: Fill) -> usize {
-            scene
+        /// How many cells a frame washed with `fill` inside `panel`.
+        ///
+        /// Cells rather than rects, because a match the pane wraps in the
+        /// middle of is one rect at the end of a row and another at the start
+        /// of the next — the same cells, in two pieces. The command line
+        /// follows the prompt of whoever runs the suite, and a directory and
+        /// branch just long enough to leave the query across the pane's
+        /// right edge made one match two washes.
+        fn washed_cells(scene: &Scene, panel: RectF, fill: Fill) -> usize {
+            let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+            let width: f32 = scene
                 .layers()
                 .flat_map(|layer| layer.rects.iter())
                 .filter(|rect| rect.background == fill)
                 .filter(|rect| panel.contains_point(rect.bounds.origin()))
-                .count()
+                .map(|rect| rect.bounds.width())
+                .sum();
+            (width / cell.width).round() as usize
         }
 
         #[test]
@@ -22978,19 +23013,30 @@ mod shells {
                     .with_alpha(crate::workspace::block_list::FIND_CURRENT_ALPHA),
             );
 
+            // A match is as many cells as the query has characters.
+            let one = "wqz".len();
+
             let scene = harness.frame();
             assert_eq!(2, matches(&harness, pane));
             assert_eq!(
-                2,
-                washes(&scene, panel, amber),
+                2 * one,
+                washed_cells(&scene, panel, amber),
                 "the command line's match and the output's"
             );
-            assert_eq!(1, washes(&scene, panel, accent), "the current one, once");
+            assert_eq!(
+                one,
+                washed_cells(&scene, panel, accent),
+                "the current one, once"
+            );
 
             step(&mut harness, pane, true);
             let scene = harness.frame();
-            assert_eq!(2, washes(&scene, panel, amber));
-            assert_eq!(1, washes(&scene, panel, accent), "still one current match");
+            assert_eq!(2 * one, washed_cells(&scene, panel, amber));
+            assert_eq!(
+                one,
+                washed_cells(&scene, panel, accent),
+                "still one current match"
+            );
         }
 
         /// The find bar, by its ground: the one `surface_raised` box with the

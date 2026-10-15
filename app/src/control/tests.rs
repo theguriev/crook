@@ -2657,7 +2657,14 @@ mod socket {
         served.update(|workspace, ctx| {
             workspace.apply(TabAction::ClosePane(worker), ctx);
         });
-        served.pump_until("the lock never went with the worker", |_| lock().is_none());
+        // The window's word first, and git's once that is in: `lock` lists
+        // the worktrees, and a listing that runs while the unlock does can die
+        // on the lock file it is deleting. The window lets go of a lock only
+        // once the unlock has answered.
+        served.pump_until("the window never let go of the lock", |served| {
+            served.read(|workspace, _| workspace.held_locks().is_empty())
+        });
+        assert_eq!(lock(), None, "the lock did not go with the worker");
         assert!(
             checkout.is_dir(),
             "closing the worker took the checkout too"

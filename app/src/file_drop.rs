@@ -394,14 +394,85 @@ mod tests {
         }
     }
 
-    /// What `shell` prints when `words` are the arguments of a command that
+    /// What a shell made of a line: what it printed, what it said on stderr,
+    /// and whether it exited cleanly.
+    #[cfg(unix)]
+    struct Printed {
+        stdout: String,
+        stderr: String,
+        success: bool,
+    }
+
+    #[cfg(unix)]
+    impl Printed {
+        /// Whether the shell failed without printing a thing — which is what
+        /// a shell that never got as far as the line looks like, and also
+        /// what one that could not parse it looks like.
+        fn failed_silently(&self) -> bool {
+            !self.success && self.stdout.is_empty()
+        }
+
+        /// Whether the shell said it could not parse the line: bash's
+        /// `syntax error` and `unexpected EOF`, zsh's `parse error` and
+        /// `unmatched`, fish's unbalanced quotes, PowerShell's `ParserError`.
+        /// Read generously, because a misreading taken for a shell that would
+        /// not start is a failure passed over.
+        fn could_not_parse(&self) -> bool {
+            let said = self.stderr.to_lowercase();
+            [
+                "syntax error",
+                "parse error",
+                "parsererror",
+                "unexpected",
+                "unmatched",
+                "unterminated",
+                "not balanced",
+                "missing the terminator",
+            ]
+            .iter()
+            .any(|sign| said.contains(sign))
+        }
+    }
+
+    /// What `shell` makes of `words` as the arguments of a command that
     /// prints each on a line of its own — `printf`, or PowerShell's
-    /// `Write-Output` — or `None` when it is not on this machine.
+    /// `Write-Output` — or `None` when it is not on this machine, or will not
+    /// run on it.
+    ///
+    /// A shell that fails without printing anything is given the line once
+    /// more: pwsh on a CI runner has failed to start that way, cold, and its
+    /// silence was read as a misreading of every name. One that fails so
+    /// twice, saying something other than that it could not parse the line,
+    /// and cannot print a plain word either, does not run here, and is passed
+    /// over. One that could not parse the line, or can print a plain word and
+    /// not these, misread them, and is handed back for the test to fail on,
+    /// with what it said.
+    #[cfg(unix)]
+    fn printed_by(shell: &str, words: &str) -> Option<Printed> {
+        let mut printed = run_printing(shell, words)?;
+        if printed.failed_silently() {
+            printed = run_printing(shell, words)?;
+        }
+        if printed.failed_silently()
+            && !printed.could_not_parse()
+            && run_printing(shell, "word").is_none_or(|plain| plain.stdout != "word\n")
+        {
+            eprintln!(
+                "skipped: {shell} runs nothing here; it said {:?}",
+                printed.stderr
+            );
+            return None;
+        }
+        Some(printed)
+    }
+
+    /// One run of `shell` printing `words`, as [`printed_by`] describes, or
+    /// `None` when it is not on this machine.
     ///
     /// bash is typed the line, as a person's bash is, rather than handed it
     /// with `-c`, so that it expands `!` from its history as it does there.
     #[cfg(unix)]
-    fn printed_by(shell: &str, words: &str) -> Option<String> {
+    fn run_printing(shell: &str, words: &str) -> Option<Printed> {
         use std::io::Write as _;
         use std::process::Stdio;
 
@@ -414,7 +485,7 @@ mod tests {
                     .env("HISTFILE", "")
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
+                    .stderr(Stdio::piped())
                     .spawn()
                     .ok()?;
                 bash.stdin
@@ -436,8 +507,13 @@ mod tests {
             _ => crate::process::command(shell)
                 .args(["-c", &printf])
                 .output(),
-        };
-        Some(String::from_utf8_lossy(&output.ok()?.stdout).into_owned())
+        }
+        .ok()?;
+        Some(Printed {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            success: output.status.success(),
+        })
     }
 
     #[cfg(unix)]
@@ -487,7 +563,7 @@ mod tests {
                         continue;
                     };
                     assert!(
-                        !printed.lines().any(|line| line == "PWNED"),
+                        !printed.stdout.lines().any(|line| line == "PWNED"),
                         "{shell} ran part of {name:?} spelled for {spelling} as {typed:?}"
                     );
                     // Every one of them reads a double-quoted string as itself
@@ -495,8 +571,10 @@ mod tests {
                     // doubled quotes are read as the name by PowerShell alone.
                     if spelling == "cmd" || shell == "pwsh" {
                         assert_eq!(
-                            printed, expected,
-                            "{shell} read {typed:?}, spelled for {spelling}, as something else"
+                            printed.stdout, expected,
+                            "{shell} read {typed:?}, spelled for {spelling}, as something else; \
+it said {:?}",
+                            printed.stderr
                         );
                     }
                 }
