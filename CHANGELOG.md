@@ -5,6 +5,34 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.27
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.26...v0.1.27)
+
+### Features
+
+- **input:** Hand ctrl-r, fzf's keys and Escape to the shell from an empty composer ([#525](https://github.com/theguriev/crook/pull/525))
+- **tabs:** Treat a pane whose shell is on another machine as remote ([#524](https://github.com/theguriev/crook/pull/524))
+
+### Performance
+
+- **terminal:** Decode inline pictures off the UI thread at the size they are drawn ([#521](https://github.com/theguriev/crook/pull/521))
+
+### Fixes
+
+- **theme:** Give Crook Dark and Midnight normal ANSI colours that read on their grid ([#519](https://github.com/theguriev/crook/pull/519))
+- **terminal:** Draw box lines and blocks from the cell so they join across rows ([#515](https://github.com/theguriev/crook/pull/515))
+- **plugins:** Stop one plugin's requests from taking the whole pool ([#522](https://github.com/theguriev/crook/pull/522))
+- **agent:** Recognise an agent started through npx, env or mise, and resume it the same way ([#517](https://github.com/theguriev/crook/pull/517))
+- **agent:** Let no subagent rename the tab or end the agent's turn ([#518](https://github.com/theguriev/crook/pull/518))
+- **terminal:** Keep pictures on their rows in output longer than the scrollback ([#523](https://github.com/theguriev/crook/pull/523))
+- **agent:** Get an agent's report out of tmux to the Crook pane it runs in ([#516](https://github.com/theguriev/crook/pull/516))
+- **agent:** Take back running when a Claude Code turn fails or Esc interrupts it ([#520](https://github.com/theguriev/crook/pull/520))
+
+### ❤️ Contributors
+
+- Eugen Guriev <gurievcreative@gmail.com>
+
 ## v0.1.26
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.25...v0.1.26)
