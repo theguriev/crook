@@ -130,12 +130,25 @@ pub struct Session {
     /// the tab that would have been selected, and the first tab is a better
     /// answer than no window.
     pub active: usize,
-    /// How big the window was, in logical pixels.
+    /// How big the window was, in logical pixels — when it was maximised or
+    /// fullscreen, how big it was before, which is the size it goes back to.
     ///
     /// `None` for a session written before there was a window to measure —
     /// which is what a `--snapshot` run leaves — and for a file that predates
-    /// this key.
+    /// this key. A file written before the window's state was kept beside it
+    /// may hold a maximised window's size here, which opens as an ordinary
+    /// window that size, as it always did.
     pub window: Option<[f32; 2]>,
+    /// Where the window's top-left corner was, in the desktop's own
+    /// coordinates — see [`Placement::position`].
+    ///
+    /// `None` where the desktop does not say, which is Wayland, and for a
+    /// file that predates this key; the desktop places that window.
+    pub window_position: Option<[i32; 2]>,
+    /// Whether the window filled the work area.
+    pub maximized: bool,
+    /// Whether the window had the whole screen.
+    pub fullscreen: bool,
     /// The groups those tabs were folded under, in the order they first
     /// appeared in the list.
     ///
@@ -145,6 +158,40 @@ pub struct Session {
     /// a second answer nothing stops from disagreeing with the first — and
     /// this one is a file a person can edit.
     pub groups: Vec<GroupSnapshot>,
+}
+
+/// Where the window is on the desktop and what it is doing, as the session
+/// file keeps it.
+///
+/// The window's facts beside the tabs, told by the windowing layer each time
+/// they change — see `Workspace::window_placed` — and written with the tabs.
+/// A type of its own, here, rather than the windowing layer's, because nothing
+/// in the workspace names that layer: a test and the headless snapshot have
+/// no window to be told about.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Placement {
+    /// The window's inner size in logical pixels when it is neither maximised
+    /// nor fullscreen.
+    pub size: [f32; 2],
+    /// Where its top-left corner is when it is neither, in the desktop's own
+    /// coordinates: pixels on Windows and X11, points on macOS. `None` where
+    /// the desktop does not say, which is Wayland.
+    pub position: Option<[i32; 2]>,
+    /// Whether it fills the work area.
+    pub maximized: bool,
+    /// Whether it has the whole screen.
+    pub fullscreen: bool,
+}
+
+impl Placement {
+    /// A window known only by the size of its frame: one that was never told
+    /// where it is, because nothing is behind it.
+    pub fn sized(size: [f32; 2]) -> Self {
+        Self {
+            size,
+            ..Self::default()
+        }
+    }
 }
 
 /// One group: what its heading said, and whether it was folded away.
@@ -293,11 +340,11 @@ impl Session {
             .then_some(size)
     }
 
-    /// Records what a strip is showing.
+    /// Records what a strip is showing, in a window placed as `window` says.
     ///
     /// The settings pane is left out, and with it any tab that held nothing
     /// else — see the module docs.
-    pub fn of(strip: &TabStrip, window: Option<[f32; 2]>) -> Self {
+    pub fn of(strip: &TabStrip, window: Option<Placement>) -> Self {
         let mut tabs = Vec::with_capacity(strip.len());
         let mut active = 0;
         // In first-appearance order, which for a contiguous run is list order.
@@ -341,7 +388,10 @@ impl Session {
         Self {
             tabs,
             active,
-            window,
+            window: window.map(|window| window.size),
+            window_position: window.and_then(|window| window.position),
+            maximized: window.is_some_and(|window| window.maximized),
+            fullscreen: window.is_some_and(|window| window.fullscreen),
             groups: group_snapshots,
         }
     }
@@ -500,6 +550,9 @@ impl Session {
             }
         }
         session.window = read_or_default(&document, "window", path);
+        session.window_position = read_or_default(&document, "window_position", path);
+        session.maximized = read_or_default(&document, "maximized", path);
+        session.fullscreen = read_or_default(&document, "fullscreen", path);
         session.groups = read_or_default(&document, "groups", path);
         session
     }

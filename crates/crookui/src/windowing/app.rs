@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crookui_core::event::{Event, MouseButton};
+use crookui_core::event::{Event, MouseButton, SystemTheme};
 use crookui_core::executor::{Foreground, Runnable};
 use crookui_core::geometry::{Vector2F, vec2f};
 use crookui_core::platform::FontDb;
@@ -38,14 +38,28 @@ use crate::rendering::init_wgpu_instance;
 use super::chrome::{RESIZE_GRAB, ResizeEdge, WindowChrome, WindowControls, edge_at};
 use super::dock;
 use super::event::InputState;
+use super::placement::WindowPlacement;
 use super::window::Window;
 
 /// How a window is opened.
 pub struct WindowOptions {
     /// The title the window manager shows.
     pub title: String,
-    /// The initial inner size, in logical pixels.
+    /// The initial inner size, in logical pixels — under `maximized` and
+    /// `fullscreen`, the size the window goes back to when it leaves them.
     pub size: Vector2F,
+    /// Where the window's top-left corner goes, in the desktop's own
+    /// coordinates — see [`WindowPlacement::position`] — or `None` for
+    /// wherever the desktop puts it.
+    ///
+    /// A position on none of the monitors there are now is moved onto one,
+    /// and Wayland, where no application chooses where its window goes,
+    /// never reads it.
+    pub position: Option<[i32; 2]>,
+    /// Whether the window opens maximised.
+    pub maximized: bool,
+    /// Whether the window opens fullscreen, on the monitor `position` is on.
+    pub fullscreen: bool,
     /// The smallest inner size the user may drag it to, in logical pixels.
     pub min_size: Vector2F,
     /// Who draws the title bar the window's controls sit in.
@@ -70,6 +84,9 @@ impl Default for WindowOptions {
         Self {
             title: "Crook".to_owned(),
             size: vec2f(1024., 640.),
+            position: None,
+            maximized: false,
+            fullscreen: false,
             min_size: vec2f(480., 192.),
             chrome: WindowChrome::default(),
             transparent: true,
@@ -81,7 +98,7 @@ impl Default for WindowOptions {
 /// What the window asks of the application above it.
 ///
 /// This is the whole seam between the platform layer and the application:
-/// seven methods, four of them with a default, no winit types, no wgpu types. A
+/// eight methods, five of them with a default, no winit types, no wgpu types. A
 /// headless test double implements it in a dozen lines.
 pub trait WindowDelegate: 'static {
     /// Lays out and paints the frame to draw.
@@ -145,6 +162,20 @@ pub trait WindowDelegate: 'static {
     /// next few keys may have been typed at whatever had the keyboard before.
     /// The default does nothing with that.
     fn focused(&mut self) {}
+
+    /// The window is somewhere else, another size, or maximised, restored or
+    /// made fullscreen: `placement` is where it is now, as a later launch
+    /// would open it with [`WindowOptions`].
+    ///
+    /// Told once as the window opens, then after a batch of events that moved
+    /// or resized it if that changed it, and once more as the event loop
+    /// stops if it changed without either — a desktop that maximises a window
+    /// may say so only with a resize. Never twice the same. The default keeps
+    /// nothing, which is right for a window that opens wherever the desktop
+    /// puts it.
+    fn placed(&mut self, placement: WindowPlacement) {
+        let _ = placement;
+    }
 
     /// Runs once, as the event loop stops, whatever stopped it.
     ///
@@ -416,8 +447,9 @@ const LONGEST_FRAME_RETRY: Duration = Duration::from_secs(1);
 
 impl ApplicationHandler<CrookEvent> for App {
     fn new_events(&mut self, _: &ActiveEventLoop, cause: StartCause) {
-        // The only timer this application sets is the one a failed frame asks
-        // for, so reaching it means it is time to try that frame again.
+        // A timer is set for a failed frame, and for a refused fullscreen in
+        // the window's first seconds, which `about_to_wait` asks again for.
+        // Reaching it with a frame waiting means trying that frame again.
         if matches!(cause, StartCause::ResumeTimeReached { .. })
             && self.frame_retry.is_some()
             && let Some(window) = self.window.as_mut()
@@ -431,6 +463,10 @@ impl ApplicationHandler<CrookEvent> for App {
         // refused one would leave a process that will not quit.
         #[cfg(target_os = "macos")]
         super::quit::set_asks(false);
+        // Before the delegate hears it is ending, which is its last chance to
+        // keep anything: a maximise the desktop reported only as a resize,
+        // with the state changing after it, is known only by looking again.
+        self.follow_placement();
         self.delegate.exiting();
     }
 
@@ -439,15 +475,32 @@ impl ApplicationHandler<CrookEvent> for App {
         // else may come for minutes, and the drop is over now.
         self.deliver_drop(None);
 
+        // Before the look below: a fullscreen given up on here changes what
+        // that look finds.
+        let now = Instant::now();
+        let fullscreen_look = self
+            .window
+            .as_mut()
+            .and_then(|window| window.keep_asking_for_fullscreen(now));
+
+        // Once the batch is over and not at each event in it, whose order
+        // can say a window is somewhere before it says why.
+        if let Some(placement) = self.window.as_mut().and_then(Window::settle_placement) {
+            self.delegate.placed(placement);
+        }
+
         // Every batch of events ends here, and a Quit that comes before the
         // next one is answered with what is written down now.
         #[cfg(target_os = "macos")]
         super::quit::set_asks(self.delegate.asks_before_quitting());
 
-        event_loop.set_control_flow(match self.frame_retry {
-            Some(delay) => ControlFlow::WaitUntil(Instant::now() + delay),
-            None => ControlFlow::Wait,
-        });
+        let frame_retry = self.frame_retry.map(|delay| now + delay);
+        event_loop.set_control_flow(
+            match [frame_retry, fullscreen_look].into_iter().flatten().min() {
+                Some(wake) => ControlFlow::WaitUntil(wake),
+                None => ControlFlow::Wait,
+            },
+        );
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -467,6 +520,7 @@ impl ApplicationHandler<CrookEvent> for App {
                 // desktop that will not say is taken as dark, which is what a
                 // terminal has always been.
                 let theme = window.system_theme();
+                let focused = window.has_focus();
 
                 // Before the delegate hears anything: the controls handle is
                 // what a header's drag, zoom or close reaches the real window
@@ -474,9 +528,19 @@ impl ApplicationHandler<CrookEvent> for App {
                 // delegate is called below.
                 self.controls.attach(window.handle());
                 self.window = Some(window);
-                if self.delegate.handle_event(Event::SystemTheme(theme)) {
+                if tell_the_opening(self.delegate.as_mut(), theme, focused) {
                     self.with_window(Window::request_redraw);
                 }
+
+                // Where the desktop actually put it, which for a window the
+                // application did not place is somewhere only the desktop
+                // knew until now. Told whether or not the look changed it,
+                // since the application has heard nothing of it yet.
+                let placement = self.with_window(|window| {
+                    window.follow_placement();
+                    window.placement()
+                });
+                self.delegate.placed(placement);
             }
             Err(error) => {
                 log::error!("could not open the window: {error:#}");
@@ -561,7 +625,10 @@ impl ApplicationHandler<CrookEvent> for App {
             // is how Windows minimises a window and the only way it says so.
             // See `InputState::resized`.
             WindowEvent::Resized(size) => {
-                self.with_window(Window::mark_resized);
+                self.with_window(|window| {
+                    window.mark_resized();
+                    window.placement_stirred();
+                });
                 if let Some(occluded) = self.input.resized(size)
                     && self.delegate.handle_event(occluded)
                 {
@@ -572,7 +639,15 @@ impl ApplicationHandler<CrookEvent> for App {
             // A scale change is a resize too, because the swapchain is sized in
             // physical pixels even when the logical size did not move.
             WindowEvent::ScaleFactorChanged { .. } => {
-                self.with_window(Window::mark_resized);
+                self.with_window(|window| {
+                    window.mark_resized();
+                    window.placement_stirred();
+                });
+                return;
+            }
+
+            WindowEvent::Moved(_) => {
+                self.with_window(Window::placement_stirred);
                 return;
             }
 
@@ -688,6 +763,14 @@ impl App {
         self.input
             .minimised(minimised)
             .is_some_and(|occluded| self.delegate.handle_event(occluded))
+    }
+
+    /// Tells the application where the window is, if that changed since it
+    /// was last told.
+    fn follow_placement(&mut self) {
+        if let Some(placement) = self.window.as_mut().and_then(Window::follow_placement) {
+            self.delegate.placed(placement);
+        }
     }
 
     /// Hands the application the drop that `next` ends, if one is arriving
@@ -849,6 +932,24 @@ impl App {
     }
 }
 
+/// Tells `delegate` what the window it is about to draw in is like, before
+/// any frame, and returns whether that needs a frame.
+///
+/// The desktop's theme, which winit only reports when it changes. And that
+/// the window does not have the keyboard, when it opens without it: X11 and
+/// macOS say so themselves as the window appears, but on Wayland the first
+/// word of focus is the keyboard arriving, and a window the compositor opened
+/// behind another — a script's `crook -e`, a rule that sends it to another
+/// workspace — was taken as in front, where nothing in it asks for attention,
+/// until somebody had been to it once. Nothing is said for a window that has
+/// the keyboard, which is what an application takes a window to have until
+/// told otherwise.
+fn tell_the_opening(delegate: &mut dyn WindowDelegate, theme: SystemTheme, focused: bool) -> bool {
+    let themed = delegate.handle_event(Event::SystemTheme(theme));
+    let unfocused = !focused && delegate.handle_event(Event::WindowFocused(false));
+    themed || unfocused
+}
+
 /// How long to wait before trying a failed frame again, given how long the
 /// wait before it was.
 fn next_frame_retry(previous: Option<Duration>) -> Duration {
@@ -861,6 +962,62 @@ fn next_frame_retry(previous: Option<Duration>) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A delegate that only writes down what it was told.
+    #[derive(Default)]
+    struct Told(Vec<Event>);
+
+    impl WindowDelegate for Told {
+        fn build_scene(&mut self, _: Vector2F, scale_factor: f32) -> Rc<Scene> {
+            Rc::new(Scene::new(scale_factor))
+        }
+
+        fn handle_event(&mut self, event: Event) -> bool {
+            self.0.push(event);
+            true
+        }
+
+        fn frame_drawn(&mut self) {}
+    }
+
+    /// Whether `told` holds a `WindowFocused` saying `focused`.
+    fn says_focused(told: &Told, focused: bool) -> bool {
+        told.0
+            .iter()
+            .any(|event| matches!(event, Event::WindowFocused(said) if *said == focused))
+    }
+
+    #[test]
+    fn a_window_that_opens_without_the_keyboard_says_so_before_its_first_frame() {
+        // Wayland's case: no word of focus comes until the keyboard does, so
+        // unless this says it, a window opened behind another is taken as in
+        // front and nothing in it asks for a look.
+        let mut told = Told::default();
+        assert!(tell_the_opening(&mut told, SystemTheme::Dark, false));
+        assert!(
+            says_focused(&told, false),
+            "the window opened without the keyboard and the application was not told: {:?}",
+            told.0
+        );
+        assert!(
+            matches!(told.0.first(), Some(Event::SystemTheme(SystemTheme::Dark))),
+            "the theme is still told first: {:?}",
+            told.0
+        );
+    }
+
+    #[test]
+    fn a_window_that_opens_with_the_keyboard_says_nothing_about_focus() {
+        // What an application takes a window to have until told otherwise,
+        // so saying it would only be a second thing to get wrong.
+        let mut told = Told::default();
+        tell_the_opening(&mut told, SystemTheme::Light, true);
+        assert!(!says_focused(&told, true) && !says_focused(&told, false));
+        assert!(matches!(
+            told.0.as_slice(),
+            [Event::SystemTheme(SystemTheme::Light)]
+        ));
+    }
 
     #[test]
     fn a_failing_frame_is_retried_sooner_at_first_and_then_less_and_less_often() {

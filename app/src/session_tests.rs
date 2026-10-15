@@ -365,7 +365,7 @@ fn test_a_session_survives_the_round_trip_through_a_file() {
 
     let mut strip = split(2);
     strip.apply(TabAction::New);
-    let session = Session::of(&strip, Some([1280., 800.]));
+    let session = Session::of(&strip, Some(Placement::sized([1280., 800.])));
     session.save_blocking(&path).expect("writable");
 
     let reread = Session::load(&path);
@@ -627,6 +627,97 @@ fn test_a_backup_directory_that_cannot_be_made_still_salvages() {
         directory.join(BACKUP_DIRECTORY).is_file(),
         "the thing in the way was not touched"
     );
+}
+
+#[test]
+fn test_where_the_window_was_and_what_it_was_doing_survive_the_round_trip() {
+    // A window maximised on a second monitor: the corner and the size are
+    // the ones it goes back to, and the flag is what puts it back over them.
+    let directory = scratch("placement");
+    let path = directory.join("session.json");
+    let placed = Placement {
+        size: [1100., 700.],
+        position: Some([2240, 120]),
+        maximized: true,
+        fullscreen: false,
+    };
+    let session = Session::of(&split(1), Some(placed));
+    session.save_blocking(&path).expect("writable");
+
+    let reread = Session::load(&path);
+    assert_eq!(reread, session);
+    assert_eq!(reread.window_size(), Some([1100., 700.]));
+    assert_eq!(reread.window_position, Some([2240, 120]));
+    assert!(reread.maximized && !reread.fullscreen);
+
+    // And fullscreen, on a desktop that says nothing about where a window is.
+    let fullscreen = Placement {
+        position: None,
+        maximized: false,
+        fullscreen: true,
+        ..placed
+    };
+    let session = Session::of(&split(1), Some(fullscreen));
+    session.save_blocking(&path).expect("writable");
+    let reread = Session::load(&path);
+    assert_eq!(reread.window_position, None);
+    assert!(reread.fullscreen && !reread.maximized);
+}
+
+#[test]
+fn test_a_file_written_before_the_window_s_place_was_kept_still_restores() {
+    // What every session file on disk looks like the day this build arrives:
+    // a size, and nothing about where or how. It comes back with its tabs and
+    // its size, and the desktop places an ordinary window.
+    let directory = scratch("before-placement");
+    let path = directory.join("session.json");
+    fs::write(
+        &path,
+        r#"{
+          "tabs": [{"name": "kept", "panes": [{"title": "kept", "flex": 1.0}]}],
+          "active": 0,
+          "window": [1280.0, 800.0],
+          "groups": []
+        }"#,
+    )
+    .expect("writable");
+
+    let session = Session::load(&path);
+    assert_eq!(session.window_size(), Some([1280., 800.]));
+    assert_eq!(session.window_position, None);
+    assert!(!session.maximized && !session.fullscreen);
+    assert!(
+        !directory.join(BACKUP_DIRECTORY).exists(),
+        "a file this build reads whole was taken for one it could not"
+    );
+    assert_eq!(
+        titles(&session.restore().expect("restored")),
+        [["kept".to_owned()]]
+    );
+}
+
+#[test]
+fn test_a_window_place_that_does_not_read_costs_that_and_not_the_rest() {
+    // A hand edit that wrote the corner as a string. The salvage reads the
+    // keys one at a time, and the state and the tabs beside it still read.
+    let directory = scratch("bad-placement");
+    let path = directory.join("session.json");
+    fs::write(
+        &path,
+        r#"{
+          "tabs": [{"name": "kept", "panes": [{"title": "kept", "flex": 1.0}]}],
+          "window": [1280.0, 800.0],
+          "window_position": "top left",
+          "maximized": true
+        }"#,
+    )
+    .expect("writable");
+
+    let session = Session::load(&path);
+    assert_eq!(session.window_position, None);
+    assert!(session.maximized, "a key that read on its own was lost");
+    assert_eq!(session.window_size(), Some([1280., 800.]));
+    assert!(!session.is_empty());
 }
 
 #[test]

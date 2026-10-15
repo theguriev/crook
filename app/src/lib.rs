@@ -117,7 +117,7 @@ use crook_plugin::ActionName;
 use crook_terminal::BlockId;
 use crookui::{
     CosmicFontDb, Platform, Proxy, WindowControls as PlatformWindow, WindowDelegate, WindowOptions,
-    render_scene_to_rgba,
+    WindowPlacement, render_scene_to_rgba,
 };
 use crookui_core::event::{Event, Keystroke, Modifiers, MouseButton};
 use crookui_core::executor::{Background, LocalQueue};
@@ -2322,7 +2322,7 @@ fn open_window(
 }
 
 /// How the window is opened: its name, what a Linux desktop calls it, its
-/// size and who draws its frame.
+/// size, where it goes and in what state, and who draws its frame.
 fn window_options(
     channel: Channel,
     overrides: &Overrides,
@@ -2331,7 +2331,10 @@ fn window_options(
     let defaults = WindowOptions::default();
     // The flag first, the session's size second, the default last: a
     // person asking for a window of a size is asking to look at that size,
-    // whatever the last window was.
+    // whatever the last window was — so not maximised or fullscreen either,
+    // which would cover it. Where it goes says nothing about how big it is,
+    // and comes back all the same.
+    let sized = overrides.size.is_none();
     WindowOptions {
         title: overrides.window_name(channel),
         app_id: overrides.app_id.clone().unwrap_or(defaults.app_id),
@@ -2344,6 +2347,9 @@ fn window_options(
                     .map(|[width, height]| vec2f(width, height))
             })
             .unwrap_or(WINDOW_SIZE),
+        position: session.and_then(|session| session.window_position),
+        maximized: sized && session.is_some_and(|session| session.maximized),
+        fullscreen: sized && session.is_some_and(|session| session.fullscreen),
         chrome: WINDOW_CHROME,
         ..defaults
     }
@@ -3490,9 +3496,10 @@ struct Shell {
     /// Where the workspace reads the window's size from.
     ///
     /// The size is an argument to `build_scene` and reaches nothing in the
-    /// view tree, so the delegate writes it down for the one thing that wants
-    /// it: the session file, which is what makes the next window open the size
-    /// this one was.
+    /// view tree, so the delegate writes it down for what lays itself out
+    /// against the whole window. The session file is told the window's size
+    /// apart, with where it is — see [`WindowDelegate::placed`] — because a
+    /// maximised window's frame is not the size it goes back to.
     window_size: Rc<std::cell::Cell<Vector2F>>,
     /// The window, for the header that is its title bar.
     window: WindowHandle,
@@ -4378,6 +4385,12 @@ impl WindowDelegate for Shell {
     /// that their grace period runs while git takes the locks off rather than
     /// after it.
     fn exiting(&mut self) {
+        // First, while the strip is still what the person closed: the
+        // window's last place, told a moment ago, is often a save not yet
+        // written, and the pool that would write it ends with the process.
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.finish_saving_the_session();
+        });
         let workspace = &self.workspace;
         let endings = self
             .app
@@ -4391,20 +4404,11 @@ impl WindowDelegate for Shell {
 
     fn build_scene(&mut self, size: Vector2F, scale_factor: f32) -> Rc<Scene> {
         // Written down rather than dispatched: it costs nothing, it invalidates
-        // nothing, and it is the only place the window's size is known. A size
-        // that changed is told to the workspace all the same, once, because
-        // the session file carries it and a resize moves no tab. The first
-        // frame counts: a tiling desktop opens the window at whatever size it
-        // likes, and the file should say that size rather than the one asked
-        // for.
-        let resized = self.window_size.get() != size;
+        // nothing, and it is the only place the frame's size is known. The
+        // session file is not saved from here: `placed` tells it the window's
+        // size when that changes, which is not the frame's while the window
+        // is maximised.
         self.window_size.set(size);
-        if resized {
-            let workspace = &self.workspace;
-            self.app.update(|ctx| {
-                workspace.update(ctx, |workspace, ctx| workspace.window_resized(ctx))
-            });
-        }
         self.sync_window_state();
 
         let window_id = self.window_id;
@@ -4489,6 +4493,24 @@ impl WindowDelegate for Shell {
         // `notify` is an effect, and effects only drain once the outermost
         // update has unwound.
         self.app.read(|ctx| ctx.has_window_invalidations(window_id))
+    }
+
+    /// The window opened, moved, was resized, maximised, restored or made
+    /// fullscreen: the session file keeps where it is, for the next window
+    /// to open there. Only the window that keeps the file writes it.
+    fn placed(&mut self, placement: WindowPlacement) {
+        let placement = crate::session::Placement {
+            size: [placement.size.x(), placement.size.y()],
+            position: placement.position,
+            maximized: placement.maximized,
+            fullscreen: placement.fullscreen,
+        };
+        let workspace = &self.workspace;
+        self.app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| {
+                workspace.window_placed(placement, ctx);
+            });
+        });
     }
 
     fn frame_drawn(&mut self) {
@@ -6227,6 +6249,37 @@ mod tests {
 
         assert!(parse(&["--app-id", ""]).is_err(), "an empty id is no id");
         assert!(parse(&["--app-id"]).is_err());
+    }
+
+    #[test]
+    fn the_window_opens_where_the_session_says_it_was_and_as_it_was() {
+        let session = crate::session::Session {
+            window: Some([1100., 700.]),
+            window_position: Some([2240, 120]),
+            maximized: true,
+            ..crate::session::Session::default()
+        };
+        let options = window_options(Channel::Stable, &Overrides::default(), Some(&session));
+        assert_eq!(options.size, vec2f(1100., 700.));
+        assert_eq!(options.position, Some([2240, 120]));
+        assert!(options.maximized && !options.fullscreen);
+
+        // A size asked for on the command line is a size to look at, which a
+        // maximised window would cover; where the window goes is still the
+        // session's.
+        let sized = window_options(
+            Channel::Stable,
+            &window_overrides(&["--size", "640x480"]),
+            Some(&session),
+        );
+        assert_eq!(sized.size, vec2f(640., 480.));
+        assert_eq!(sized.position, Some([2240, 120]));
+        assert!(!sized.maximized);
+
+        // And a window with no session to go by is the desktop's to place.
+        let fresh = window_options(Channel::Stable, &Overrides::default(), None);
+        assert_eq!(fresh.position, None);
+        assert!(!fresh.maximized && !fresh.fullscreen);
     }
 
     #[test]

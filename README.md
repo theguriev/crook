@@ -332,7 +332,11 @@ Twenty-two features, and the page that configures them:
   the agent's name is run through the same runner. OpenCode and aider have no line until you
   give them one: OpenCode's `--continue` reaches across a repository's worktrees, and aider's
   `--restore-chat-history` is left for you to choose. No output comes back, and no process
-  does.
+  does. The window itself comes back the size it was and where it was, maximised or
+  fullscreen if it was, on the monitor it was on — or on one still plugged in, if that one is
+  gone. Wayland does not tell an application where its window is, so there the compositor
+  places it as it always does. On X11 a window closed fullscreen comes back the size and in
+  the place it had before, but not fullscreen.
   **The first window you open keeps them.** Open Crook again while it is running, from the
   application menu or with a plain `crook`, and the second window opens fresh, with a line
   under its header that says another window keeps your tabs. It does not come back with a copy

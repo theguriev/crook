@@ -1,4 +1,5 @@
-//! One window: its winit handle, its GPU resources, and the frame it draws.
+//! One window: its winit handle, its GPU resources, the frame it draws, and
+//! where it is on the desktop.
 //!
 //! The GPU half sits behind an `Option` on purpose. A lost device is a normal
 //! event — a driver reset, a laptop switching GPUs, a Wayland compositor
@@ -14,6 +15,7 @@
 
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use crookui_core::event::SystemTheme;
@@ -22,6 +24,7 @@ use crookui_core::platform::FontDb;
 use crookui_core::scene::{PointerShape, Scene};
 use wgpu::wgt::WgpuHasDisplayHandle;
 use winit::event_loop::ActiveEventLoop;
+use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 
 use crate::rendering::{Error, Renderer, WindowResources, reset_wgpu_instance};
 
@@ -29,6 +32,11 @@ use super::event::system_theme;
 
 use super::WindowOptions;
 use super::chrome::with_chrome;
+use super::fullscreen_entered::FullscreenEntered;
+use super::placement::{
+    Following, FullscreenAsked, FullscreenStep, Monitor, Sighting, WindowPlacement,
+    fills_a_monitor, onto_a_monitor,
+};
 
 /// The wgpu half of a window, which can be thrown away and rebuilt.
 struct RenderingResources {
@@ -52,11 +60,33 @@ pub(super) struct Window {
 
     /// Set by a resize, cleared by the reconfigure it causes.
     surface_requires_reconfiguration: bool,
+
+    /// Where the window is on the desktop and what it is doing, as of the
+    /// last time it was looked at — see [`Self::settle_placement`].
+    following: Following,
+
+    /// Whether the desktop is X11, where winit cannot see a fullscreen it did
+    /// not ask for — see [`placement`](super::placement).
+    on_x11: bool,
+
+    /// The fullscreen asked for as the window opened, while macOS may still
+    /// refuse it — see [`FullscreenAsked`] — with AppKit's word on whether
+    /// the window has entered it, where its `NSWindow` could be reached.
+    fullscreen_asked: Option<(FullscreenAsked, Option<FullscreenEntered>)>,
 }
 
 impl Window {
     /// Creates the winit window and everything needed to draw into it.
     pub(super) fn new(event_loop: &ActiveEventLoop, options: &WindowOptions) -> Result<Self> {
+        // Checked against the monitors there are now rather than trusted: the
+        // one the window was on may have been unplugged since, and a window
+        // opened where nothing is shown is one nobody can reach to move.
+        let monitors: Vec<_> = event_loop.available_monitors().collect();
+        let landing = options.position.and_then(|position| {
+            let desktop: Vec<Monitor> = monitors.iter().map(desktop_monitor).collect();
+            onto_a_monitor(position, options.size, &desktop)
+        });
+
         let attributes = with_chrome(winit::window::Window::default_attributes(), options.chrome)
             .with_title(options.title.clone())
             .with_inner_size(winit::dpi::LogicalSize::new(
@@ -67,7 +97,12 @@ impl Window {
                 options.min_size.x() as f64,
                 options.min_size.y() as f64,
             ))
+            .with_maximized(options.maximized)
             .with_transparent(options.transparent);
+        let attributes = match landing {
+            Some((position, _)) => attributes.with_position(winit_position(position)),
+            None => attributes,
+        };
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let attributes = super::chrome::with_app_id(attributes, &options.app_id);
 
@@ -76,6 +111,36 @@ impl Window {
                 .create_window(attributes)
                 .context("failed to create the window")?,
         );
+
+        let on_x11 = matches!(
+            HasDisplayHandle::display_handle(event_loop).map(|display| display.as_raw()),
+            Ok(RawDisplayHandle::Xlib(_) | RawDisplayHandle::Xcb(_))
+        );
+
+        // Once the window exists rather than as one of its attributes, which
+        // is what makes leaving fullscreen go back to the size and the place
+        // asked for above: macOS opens a window asked to be fullscreen at the
+        // size of the screen and restores it to that, and Windows takes the
+        // keyboard from whatever has it. On the monitor the window was put on,
+        // or the one the desktop put it on. Never on X11, where winit goes on
+        // taking a window it made fullscreen as fullscreen after the window
+        // manager has ended it, and where no window is kept as fullscreen —
+        // see `placement` — so a fullscreen read there was written elsewhere.
+        let fullscreen = options.fullscreen && !on_x11;
+        // Only macOS refuses one this way; Windows enters it before
+        // `set_fullscreen` returns, and a Wayland compositor that refuses
+        // has said what it will do. Listened for before it is asked, so that
+        // AppKit's answer cannot come first.
+        let fullscreen_asked = (fullscreen && cfg!(target_os = "macos")).then(|| {
+            (
+                FullscreenAsked::new(Instant::now()),
+                FullscreenEntered::watch(&window),
+            )
+        });
+        if fullscreen {
+            let monitor = landing.and_then(|(_, index)| monitors.get(index).cloned());
+            window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(monitor)));
+        }
 
         // Without this the platform never starts a composition, and the keys
         // that would have begun one arrive as themselves — which is a window
@@ -103,6 +168,16 @@ impl Window {
             scene: None,
             surface_size,
             surface_requires_reconfiguration: false,
+            // What the window was asked to be, which is what it goes back to
+            // if the first look finds it maximised already.
+            following: Following::new(WindowPlacement {
+                position: landing.map(|(position, _)| position),
+                size: options.size,
+                maximized: options.maximized,
+                fullscreen,
+            }),
+            on_x11,
+            fullscreen_asked,
         })
     }
 
@@ -124,6 +199,77 @@ impl Window {
     /// Physical pixels per logical pixel.
     pub(super) fn scale_factor(&self) -> f32 {
         self.window.scale_factor() as f32
+    }
+
+    /// Whether the window has the desktop's keyboard focus, as the platform
+    /// knows it now.
+    pub(super) fn has_focus(&self) -> bool {
+        self.window.has_focus()
+    }
+
+    /// Where the window is on the desktop and what it is doing, as of the
+    /// last look.
+    pub(super) fn placement(&self) -> WindowPlacement {
+        self.following.placement()
+    }
+
+    /// Notes that the window said it moved, was resized or changed scale, for
+    /// [`Self::settle_placement`] to look at once the batch of events is over.
+    pub(super) fn placement_stirred(&mut self) {
+        self.following.stirred();
+    }
+
+    /// Ends a batch of events: looks at where the window is if anything in it
+    /// said it moved, and returns the placement to keep if that changed.
+    ///
+    /// Once a batch rather than on each event, both because an event can come
+    /// before the state that explains it — see [`placement`](super::placement)
+    /// — and because on X11 whether the window is maximised is a question to
+    /// the server.
+    pub(super) fn settle_placement(&mut self) -> Option<WindowPlacement> {
+        let Self {
+            window,
+            following,
+            on_x11,
+            fullscreen_asked,
+            ..
+        } = self;
+        following.settle(|| sighting(window, *on_x11, fullscreen_asked.is_some()))
+    }
+
+    /// Looks at where the window is whatever was said, and returns the
+    /// placement to keep if it changed since the last look: as the window
+    /// opens and as the event loop stops, with no batch to wait for.
+    pub(super) fn follow_placement(&mut self) -> Option<WindowPlacement> {
+        let seen = sighting(&self.window, self.on_x11, self.fullscreen_asked.is_some());
+        self.following.see(seen)
+    }
+
+    /// Asks again for the fullscreen asked for as the window opened, if macOS
+    /// refused it, and returns when to come back to it — `None` once there is
+    /// nothing more to do.
+    ///
+    /// For a few seconds after the window opens and only then, and only on
+    /// macOS: see [`FullscreenAsked`].
+    pub(super) fn keep_asking_for_fullscreen(&mut self, now: Instant) -> Option<Instant> {
+        let (asked, entered) = self.fullscreen_asked.as_mut()?;
+        let fullscreen = self.window.fullscreen().is_some();
+        let entered = entered.as_ref().is_some_and(FullscreenEntered::entered);
+        match asked.step(now, fullscreen, entered) {
+            FullscreenStep::Over => {
+                // Looked at again: it was taken as fullscreen for being asked
+                // to be, and from now on it is taken as it is.
+                self.fullscreen_asked = None;
+                self.following.stirred();
+                None
+            }
+            FullscreenStep::AskAgain(then) => {
+                self.window
+                    .set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+                Some(then)
+            }
+            FullscreenStep::LookAt(then) => Some(then),
+        }
     }
 
     /// Whether the desktop is set to light or to dark, as it stands.
@@ -322,4 +468,91 @@ impl Window {
 fn physical_size(window: &winit::window::Window) -> Vector2F {
     let size = window.inner_size();
     vec2f(size.width as f32, size.height as f32)
+}
+
+/// `window` as the platform reports it right now, on X11 if `on_x11`, and
+/// with a fullscreen that is still being asked for if `asking_for_fullscreen`.
+fn sighting(window: &winit::window::Window, on_x11: bool, asking_for_fullscreen: bool) -> Sighting {
+    let scale_factor = window.scale_factor();
+    Sighting {
+        position: window
+            .outer_position()
+            .ok()
+            .map(|position| desktop_position(position, scale_factor)),
+        size: physical_size(window) / scale_factor as f32,
+        maximized: window.is_maximized(),
+        // Not winit's word on X11, where it knows only the fullscreen it was
+        // asked for, and it never is there; covering a monitor is the guess
+        // that stands in for it. A refusal on its way to being asked again is
+        // not the window leaving fullscreen, and must not cost the session
+        // its fullscreen.
+        fullscreen: (!on_x11 && window.fullscreen().is_some()) || asking_for_fullscreen,
+        covers_a_monitor: on_x11 && fills_a_monitor_now(window),
+        minimized: window.is_minimized() == Some(true),
+    }
+}
+
+/// Whether `window`'s inside covers the whole of one monitor, which on X11 is
+/// the only sign that it may be fullscreen: see [`placement`](super::placement).
+fn fills_a_monitor_now(window: &winit::window::Window) -> bool {
+    let Ok(position) = window.inner_position() else {
+        return false;
+    };
+    let size = window.inner_size();
+    let monitors: Vec<Monitor> = window
+        .available_monitors()
+        .map(|monitor| desktop_monitor(&monitor))
+        .collect();
+    fills_a_monitor(
+        [position.x, position.y],
+        [
+            i32::try_from(size.width).unwrap_or(i32::MAX),
+            i32::try_from(size.height).unwrap_or(i32::MAX),
+        ],
+        &monitors,
+    )
+}
+
+/// A position winit reports, in the desktop's own coordinates: see
+/// [`placement`](super::placement) for why macOS's are points.
+fn desktop_position(position: winit::dpi::PhysicalPosition<i32>, scale_factor: f64) -> [i32; 2] {
+    if cfg!(target_os = "macos") {
+        let points = position.to_logical::<f64>(scale_factor);
+        [points.x.round() as i32, points.y.round() as i32]
+    } else {
+        [position.x, position.y]
+    }
+}
+
+/// A position in the desktop's own coordinates, as winit takes one.
+fn winit_position([x, y]: [i32; 2]) -> winit::dpi::Position {
+    if cfg!(target_os = "macos") {
+        winit::dpi::LogicalPosition::new(f64::from(x), f64::from(y)).into()
+    } else {
+        winit::dpi::PhysicalPosition::new(x, y).into()
+    }
+}
+
+/// A monitor, in the desktop's own coordinates.
+fn desktop_monitor(monitor: &winit::monitor::MonitorHandle) -> Monitor {
+    let scale = monitor.scale_factor();
+    let (origin, size) = (monitor.position(), monitor.size());
+    if cfg!(target_os = "macos") {
+        let origin = origin.to_logical::<f64>(scale);
+        let size = size.to_logical::<f64>(scale);
+        Monitor {
+            origin: [origin.x.round() as i32, origin.y.round() as i32],
+            size: [size.width.round() as i32, size.height.round() as i32],
+            scale: 1.,
+        }
+    } else {
+        Monitor {
+            origin: [origin.x, origin.y],
+            size: [
+                i32::try_from(size.width).unwrap_or(i32::MAX),
+                i32::try_from(size.height).unwrap_or(i32::MAX),
+            ],
+            scale,
+        }
+    }
 }

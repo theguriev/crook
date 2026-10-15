@@ -2009,8 +2009,12 @@ search box, the palette, a rename — is drawn as one without them there too: no
 accent ring. `Workspace::shows_a_caret` answers no while the window is behind, so the blink
 chain repaints nothing there. Only the drawing reads the bit: `Keys` and `has_keys` are decided
 exactly as before, so the window that comes back types where it left off.
-Starting out focused is also what opens a window with its caret on Wayland, which says nothing
-about focus until the keyboard first arrives.
+A window that opens without the keyboard is told so before its first frame: `crookui`'s
+`resumed` sends `WindowFocused(false)` when winit's `has_focus` says no, the way it sends the
+theme. X11 and macOS send that much themselves as the window appears, but Wayland says nothing
+until the keyboard first arrives, so a window a script opened behind another was taken as in
+front and asked nobody for a look until it had been visited once. The caret comes with the
+keyboard, which a window opened in front is given as it appears.
 
 **Out of sight is another bit, and only the breath reads it.** crookui folds three ways of
 hearing it into one `Event::WindowOccluded`, in `InputState`. winit's `WindowEvent::Occluded`
@@ -3176,8 +3180,8 @@ sits above every handler and touches none of them.
 **Persistence is in**, in `app/src/session.rs`, and it is exactly the shape this paragraph used
 to prescribe: snapshot types entirely separate from the live ones, holding a title, a directory,
 a share of a split and the name of the agent a pane ran, and nothing else — a
-`Vec<TabSnapshot>` plus an active index and a window size, `serde_json` to a file beside the
-settings.
+`Vec<TabSnapshot>` plus an active index and the window's size, place and state, `serde_json` to
+a file beside the settings.
 
 Three decisions in it are worth naming. It is written **on every change rather than on the way
 out**, because there is no reliable way out: a window closed by the window manager, a process
@@ -3226,6 +3230,41 @@ then, the second window takes the lock instead and writes its own tabs over what
 last left in the file. That is the one time a second window takes over: when the keeper merely
 closes, nobody has said which window's tabs should win. One file per window, all of them
 restored at the next launch, is the fuller answer.
+
+A sixth is where the window was. At first only its size came back, read off the frame, so a
+window kept maximised on a second monitor reopened as an ordinary window on the first, at the
+work area's size. `crookui` now follows a `WindowPlacement` — the corner of the window, the size
+it goes back to, and whether it is maximised or fullscreen — once at the end of each batch of
+events that moved or resized it and once more as the event loop stops, and tells the application
+through `WindowDelegate::placed` only when it changed. At the end of the batch and not at each
+event, because Windows sends the move of a maximise, with the frame already the work area's,
+before the resize that tells winit the window is maximised. The file keeps it as `window`,
+`window_position`, `maximized` and `fullscreen`, every one optional, so a file from before reads
+as it always did. A maximised or fullscreen window keeps the corner and size it had before,
+since those are what it goes back to, and a minimised one changes nothing: Windows reports it at
+(-32000, -32000). The corner is in the desktop's own coordinates — pixels on Windows and X11,
+points on macOS, where winit's physical pixels change with the screen under the window — and
+Wayland reports none. Before a window opens at a remembered corner, `placement::onto_a_monitor`
+checks it against the monitors there are now: it stays while enough of its top edge is on one to
+drag it by, and otherwise moves wholly onto the monitor it overlaps most, or the nearest, so a
+window whose monitor was unplugged comes back on screen. Fullscreen is asked for once the window
+exists rather than as an attribute, because macOS restores a window opened fullscreen to the
+size of the screen. macOS refuses fullscreen while it animates into a new Space — a window
+opened from a fullscreen VS Code — and winit asks again only for the attribute, so `crookui`
+asks again itself, every half second for the window's first four seconds
+(`placement::FullscreenAsked`). It stops sooner only on AppKit's word that the window has
+entered fullscreen, `NSWindowDidEnterFullScreenNotification` (`fullscreen_entered`): winit takes
+the window as fullscreen from the moment it asks, and one opened maximised is already as wide
+as its monitor, so neither says a refusal is not still to come. On X11 winit sees only the
+fullscreen it asked for, and goes on seeing one the window manager has ended, so there a window
+that covers a monitor exactly keeps the size it goes back to, as a fullscreen one does. A lone
+tiled window with no bar beside it covers a monitor too, so the guess is never kept as
+fullscreen — the session file is read on Wayland too, which would open that window over
+everything — and no window is asked to open fullscreen on X11: one closed fullscreen comes
+back as it was before. Only the keeper writes any
+of it, as with the tabs, and a save still on its way as the window closes is written then, on
+the main thread (`Workspace::finish_saving_the_session`), since the pool it would run on ends
+with the process.
 
 What is *not* remembered is the point: no scrollback, no output, no process. A window that
 redrew yesterday's output over a shell that had never run any of it would be lying about the
