@@ -3211,6 +3211,146 @@ mod socket {
         );
     }
 
+    /// With the hooks, the `✳` Claude Code goes back to after Esc takes
+    /// their running back on the row, but it is no report that the turn is
+    /// over: the same `✳` comes as a permission dialog opens, ahead of the
+    /// notification that asks. So a wait for idle is answered by the hooks'
+    /// idle and not by it, and a stream is told the running once, however
+    /// often the title takes it back and puts it back.
+    #[test]
+    fn the_star_over_a_hooks_running_answers_no_wait_and_tells_no_stream() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["claude"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+
+        let following = served.start(follow(Some(&token), Some(worker)));
+        served.pump_until("the stream never started", |served| served.following() == 1);
+        let asking = served.start(wait(&token, worker, Until::Idle, 120, false));
+        served.pump_until("the wait was never registered", |served| {
+            served.waiting() == 1
+        });
+
+        served.report(worker, AgentStatus::Running, None);
+        served.titled(worker, "\u{2733} Fix the flaky test");
+        assert_eq!(
+            served.session(worker, |session| session.status),
+            AgentStatus::Idle,
+            "the star did not take the running back"
+        );
+        assert_eq!(served.waiting(), 1, "the star answered a wait for idle");
+        served.titled(worker, "\u{25d0} Fix the flaky test");
+        served.titled(worker, "\u{2733} Fix the flaky test");
+        assert_eq!(served.waiting(), 1, "the second star answered it");
+
+        served.report(worker, AgentStatus::Idle, None);
+        assert_eq!(served.waiting(), 0, "the hooks' idle did not answer it");
+        let printed = served.finish(asking).expect("answered");
+        assert_eq!((printed.text.as_str(), printed.failure), ("idle", None));
+
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::ClosePane(worker), ctx);
+        });
+        let events = served.finish(following).expect("followed until it closed");
+        let pane_id = opened.pane_id;
+        let status = |status: &str| PaneEvent::Status {
+            pane_id,
+            status: status.to_owned(),
+            message: None,
+        };
+        assert_eq!(
+            events,
+            vec![
+                status("running"),
+                status("idle"),
+                PaneEvent::Closed { pane_id },
+            ]
+        );
+    }
+
+    /// A worker whose turn an API error ended is told a minute later, by
+    /// Claude Code's idle reminder, that it is waiting for input. That is no
+    /// question: a lead waiting for one is not answered by it, a stream is
+    /// not told it, and a lead waiting for the turn to end still hears what
+    /// went wrong when the time runs out.
+    #[test]
+    fn the_reminder_after_a_failure_answers_no_wait_and_tells_no_stream() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["claude"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+
+        let following = served.start(follow(Some(&token), Some(worker)));
+        served.pump_until("the stream never started", |served| served.following() == 1);
+        let asking = served.start(wait(&token, worker, Until::NeedsInput, 120, false));
+        served.pump_until("the wait was never registered", |served| {
+            served.waiting() == 1
+        });
+
+        served.report(worker, AgentStatus::Running, None);
+        served.report(
+            worker,
+            AgentStatus::Failed,
+            Some("You've hit your limit · resets 5pm"),
+        );
+        served.report(
+            worker,
+            AgentStatus::NeedsInput,
+            Some("Claude is waiting for your input"),
+        );
+        assert_eq!(served.waiting(), 1, "the reminder answered a wait");
+        let printed = served
+            .ask(wait(&token, worker, Until::Idle, 1, false))
+            .expect("answered, not refused");
+        assert_eq!(
+            (printed.text.as_str(), printed.failure.is_some()),
+            ("failed: You've hit your limit · resets 5pm", true)
+        );
+
+        served.report(worker, AgentStatus::Running, None);
+        served.report(
+            worker,
+            AgentStatus::NeedsInput,
+            Some("Claude needs your permission to use Bash"),
+        );
+        assert_eq!(served.waiting(), 0, "the question after it went unheard");
+        let printed = served.finish(asking).expect("answered");
+        assert_eq!(
+            printed.text,
+            "needs-input: Claude needs your permission to use Bash"
+        );
+
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::ClosePane(worker), ctx);
+        });
+        let events = served.finish(following).expect("followed until it closed");
+        let pane_id = opened.pane_id;
+        let status = |status: &str, message: Option<&str>| PaneEvent::Status {
+            pane_id,
+            status: status.to_owned(),
+            message: message.map(str::to_owned),
+        };
+        assert_eq!(
+            events,
+            vec![
+                status("running", None),
+                status("failed", Some("You've hit your limit · resets 5pm")),
+                status("running", None),
+                status(
+                    "needs-input",
+                    Some("Claude needs your permission to use Bash")
+                ),
+                PaneEvent::Closed { pane_id },
+            ]
+        );
+    }
+
     /// Codex and Gemini CLI say in their titles when they stop for an
     /// approval, which Claude Code's never does, so a worker of theirs with
     /// no hooks is heard asking as it asks, rather than when the wait runs

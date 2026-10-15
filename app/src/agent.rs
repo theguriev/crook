@@ -22,7 +22,8 @@
 //! `--agent-hooks claude` prints the hooks that make Claude Code say all of
 //! this by itself: running when a prompt is sent and while tools run,
 //! needing input when it stops to ask — with what it is asking, read out of
-//! the notification's own text — idle when it is done. What it prints
+//! the notification's own text — idle when it is done, and failed, with the
+//! error, when an API error ends the turn instead. What it prints
 //! is a fragment of Claude Code's own settings file, to be merged into it by
 //! the person whose file it is — Crook does not write a file it does not own,
 //! and that one it has never opened. It leads with the other way to the same
@@ -153,6 +154,10 @@ const MESSAGE_CHARS: usize = 200;
 /// whether it starts with it; an id of `-` reads it from the hook input:
 /// Copilot CLI's `sessionId`, or the `session_id` the other agents hand a
 /// hook.
+///
+/// A `failed` whose hook input is a subagent's is written nowhere, and is no
+/// error either: Claude Code runs `StopFailure` for a subagent too, and that
+/// failure is not the pane's — see `said_for_a_subagent`.
 pub fn report(
     status: &str,
     title: Option<&str>,
@@ -189,6 +194,9 @@ pub fn report(
     } else {
         None
     };
+    if status == AgentReport::Failed && input.as_deref().is_some_and(said_for_a_subagent) {
+        return Ok(());
+    }
     let title = match title {
         Some("-") => title_from_hook(input.as_deref().unwrap_or_default()),
         Some(text) => presentable(text),
@@ -505,28 +513,55 @@ fn title_from_hook(input: &str) -> Option<String> {
 /// closing tag.
 const SYSTEM_NOTIFICATION: &str = "<system_notification>";
 
-/// The message on standard input: a hook's `message`, else the tool a
-/// permission request names, else the input itself.
+/// Whether a hook's input is one Claude Code ran for a subagent: it puts the
+/// subagent's `agent_id` in the input of every hook it runs for one, and
+/// leaves it out for the main thread, a session started with `--agent`
+/// included.
+///
+/// [`report`] asks it of a failure and of nothing else. Claude Code runs
+/// `StopFailure` for a subagent whose turn an API error ended as it does for
+/// its own, and that failure is not the pane's: the agent that started the
+/// subagent is handed the error as a tool's result and works on. Said on the
+/// row it would turn it red, post a notice and tell a lead the worker had
+/// stopped while the worker carried on — and a background agent's, after the
+/// turn had ended, would leave the row red until the next prompt. A subagent
+/// at work is the pane at work, though, so its tools' `running` stands.
+fn said_for_a_subagent(input: &str) -> bool {
+    serde_json::from_str::<Value>(input).is_ok_and(|parsed| {
+        parsed
+            .get("agent_id")
+            .and_then(Value::as_str)
+            .is_some_and(|agent| !agent.trim().is_empty())
+    })
+}
+
+/// The message on standard input: a hook's `message`, else the error that
+/// ended a turn, else the tool a permission request names, else the input
+/// itself.
 ///
 /// Claude Code's Notification hook is handed a JSON object whose `message`
 /// is the notification's text — "Claude needs your permission to use Bash"
-/// — which is exactly what the row wants to say. Codex's PermissionRequest
-/// hook is handed the tool and its input and no text, so the row says
-/// which tool. Input that is not JSON is taken whole, so `echo "approve the
+/// — which is exactly what the row wants to say. Its StopFailure hook has no
+/// `message`: what it shows the person is `last_assistant_message`, the
+/// error as a sentence — "You've hit your limit · resets 5pm" — and `error`
+/// is the kind, `rate_limit` or `overloaded`, which is all that is left to
+/// say when the sentence is missing. Codex's PermissionRequest hook is
+/// handed the tool and its input and no text, so the row says which tool.
+/// Input that is not JSON is taken whole, so `echo "approve the
 /// deploy?" | crook --agent needs-input --message -` works from a script
-/// with no JSON to hand; JSON with neither field is not a message, and the
+/// with no JSON to hand; JSON with none of these is not a message, and the
 /// status goes without one rather than with a line of braces.
 fn message_from_hook(input: &str) -> Option<String> {
-    match serde_json::from_str::<Value>(input) {
-        Ok(parsed) => match parsed.get("message").and_then(Value::as_str) {
-            Some(message) => presentable_message(message),
-            None => parsed
-                .get("tool_name")
-                .and_then(Value::as_str)
-                .and_then(|tool| presentable_message(&format!("permission to use {tool}"))),
-        },
-        Err(_) => presentable_message(input),
-    }
+    let Ok(parsed) = serde_json::from_str::<Value>(input) else {
+        return presentable_message(input);
+    };
+    ["message", "last_assistant_message", "error"]
+        .into_iter()
+        .find_map(|field| presentable_message(parsed.get(field)?.as_str()?))
+        .or_else(|| {
+            let tool = parsed.get("tool_name")?.as_str()?;
+            presentable_message(&format!("permission to use {tool}"))
+        })
 }
 
 /// `text` as a row can print it, or `None` when nothing of it can be.
@@ -687,13 +722,38 @@ enum Fragment {
 }
 
 /// The Claude Code hooks: running on a prompt and around every tool,
-/// needing input on every notification, idle on stop.
+/// needing input on every notification, idle on stop, failed on a stop an
+/// API error forced.
 ///
 /// The prompt is the one moment the work has a name. Before a tool as well
 /// as after it: a permission prompt comes between the two, and only the
 /// second says it was answered. Every notification Claude Code sends is one
 /// that wants a person — a permission to give, a question to answer, a long
 /// idle at its prompt — and its text says which, so the row says it.
+///
+/// Not `PermissionRequest`, though Claude Code runs it as a permission
+/// dialog opens, six seconds before the notification that asks. It runs the
+/// same hook where there is no dialog and nobody to answer one — in `claude
+/// -p` with no prompt tool, and for a background agent — just before it
+/// refuses the tool, which would turn a worker's row amber over a question
+/// nobody was asked. And no hook says the dialog was answered until the
+/// tool is done, so a command the person allowed would wait out its whole
+/// run on an amber row. What the row needs at that moment it has without
+/// it: the `✳` Claude Code draws as the dialog opens takes the running back
+/// — see `Workspace::title_reported` — and the notification says the rest.
+///
+/// A turn an API error ends runs no `Stop`. It runs `StopFailure` instead,
+/// and its input carries the error as Claude Code showed it — a usage limit
+/// and when it resets, an overload, a login gone stale — which the row says
+/// beside `failed`. Failed rather than idle, a usage limit included: the
+/// work stopped short and a person has to do something about it, wait,
+/// log in or try again, and an idle would tell `crook pane wait --until
+/// idle` that it was done. A subagent's turn runs the same hook, with its
+/// `agent_id` in the input, and that failure is not the pane's: the agent
+/// that started it is handed the error and works on, so [`report`] says
+/// nothing for it — see [`said_for_a_subagent`]. A turn Esc interrupts runs
+/// neither, nor any hook at all; the title's `✳` is what says that one is
+/// over — see `Workspace::title_reported`.
 ///
 /// The hook after a tool is also where a pull request is noticed: handed the
 /// tool's input, it finds the address a `gh pr create` printed and sends it
@@ -707,6 +767,7 @@ const CLAUDE_EVENTS: &[(&str, &str)] = &[
     ("PostToolUse", "running --pull-request -"),
     ("Notification", "needs-input --message -"),
     ("Stop", "idle"),
+    ("StopFailure", "failed --message -"),
     ("SessionEnd", "idle"),
 ];
 
@@ -739,17 +800,18 @@ const CLAUDE_PLUGIN: &[&str] = &[
 ];
 
 /// The Codex CLI hooks: the same object as Claude Code's, in
-/// `~/.codex/hooks.json`, with the same event names but one.
+/// `~/.codex/hooks.json`, with most of the same event names.
 ///
 /// Codex has no `Notification`; what it has is `PermissionRequest`, run
 /// before an approval prompt, whose input names the tool and not a message
-/// — [`message_from_hook`] says "permission to use" the tool then. A
-/// question the model asks ends its turn, which is `Stop`. Its older
-/// `notify` setting runs a program with a JSON argument when a turn ends and
-/// nothing else, and is the legacy of these; the hooks say more. Its
-/// `PostToolUse` names the shell tool `Bash` and puts the command under
-/// `tool_input.command` as Claude Code's does, with the output the model saw
-/// as `tool_response`, so the same hook finds a pull request there.
+/// — [`message_from_hook`] says "permission to use" the tool then. Nor has
+/// it a `StopFailure`. A question the model asks ends its turn, which is
+/// `Stop`. Its older `notify` setting runs a program with a JSON argument
+/// when a turn ends and nothing else, and is the legacy of these; the hooks
+/// say more. Its `PostToolUse` names the shell tool `Bash` and puts the
+/// command under `tool_input.command` as Claude Code's does, with the output
+/// the model saw as `tool_response`, so the same hook finds a pull request
+/// there.
 const CODEX_EVENTS: &[(&str, &str)] = &[
     ("UserPromptSubmit", "running --title -"),
     ("PreToolUse", "running"),
@@ -1912,6 +1974,65 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_an_api_error_ended_is_said_in_the_words_claude_code_showed() {
+        // Claude Code 2.1's StopFailure input: the error's kind, which its
+        // matcher runs on, and the sentence it printed in the transcript.
+        assert_eq!(
+            Some("You've hit your limit · resets 5pm (Europe/Berlin)".to_owned()),
+            message_from_hook(
+                r#"{"hook_event_name": "StopFailure", "error": "rate_limit", "error_details": "429", "last_assistant_message": "You've hit your limit · resets 5pm (Europe/Berlin)"}"#
+            )
+        );
+        // With no sentence, which Claude Code leaves out when the error's
+        // message had no text, the kind is what there is.
+        assert_eq!(
+            Some("overloaded".to_owned()),
+            message_from_hook(r#"{"hook_event_name": "StopFailure", "error": "overloaded"}"#)
+        );
+        assert_eq!(
+            Some("overloaded".to_owned()),
+            message_from_hook(
+                r#"{"hook_event_name": "StopFailure", "error": "overloaded", "last_assistant_message": " "}"#
+            )
+        );
+        // A notification's own text still comes first.
+        assert_eq!(
+            Some("Claude is waiting for your input".to_owned()),
+            message_from_hook(
+                r#"{"message": "Claude is waiting for your input", "error": "unknown"}"#
+            )
+        );
+        // And Codex's PermissionRequest still names the tool.
+        assert_eq!(
+            Some("permission to use Bash".to_owned()),
+            message_from_hook(
+                r#"{"hook_event_name": "PermissionRequest", "tool_name": "Bash", "tool_input": {"command": "rm -rf build"}}"#
+            )
+        );
+    }
+
+    #[test]
+    fn a_hook_input_with_an_agent_id_is_a_subagents() {
+        // Claude Code 2.1's StopFailure for a Task subagent: `agent_id` and
+        // `agent_type` beside the error.
+        assert!(said_for_a_subagent(
+            r#"{"hook_event_name": "StopFailure", "agent_id": "a1b2c3", "agent_type": "general-purpose", "error": "overloaded", "last_assistant_message": "API Error: 529 Overloaded"}"#
+        ));
+        // The main thread's has no `agent_id`, and a session started with
+        // `--agent` has the type without the id: both are the pane's.
+        assert!(!said_for_a_subagent(
+            r#"{"hook_event_name": "StopFailure", "error": "rate_limit", "last_assistant_message": "You've hit your limit"}"#
+        ));
+        assert!(!said_for_a_subagent(
+            r#"{"hook_event_name": "StopFailure", "agent_type": "reviewer", "error": "overloaded"}"#
+        ));
+        assert!(!said_for_a_subagent(r#"{"agent_id": " "}"#));
+        assert!(!said_for_a_subagent(r#"{"agent_id": null}"#));
+        // A script's line is nobody's subagent.
+        assert!(!said_for_a_subagent("the tests need a database"));
+    }
+
+    #[test]
     fn a_message_is_one_line_and_never_a_novel() {
         let long = "y".repeat(MESSAGE_CHARS + 40);
         let message = presentable_message(&long).unwrap();
@@ -1981,6 +2102,7 @@ mod tests {
             "PostToolUse",
             "Notification",
             "Stop",
+            "StopFailure",
             "SessionEnd",
         ] {
             let command = hooks[event][0]["hooks"][0]["command"].as_str().unwrap();
@@ -1998,13 +2120,18 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
         }
         // The notification's text is what the agent is waiting for, and it
         // comes in on stdin: the hook pipes it through rather than needing
-        // a `jq` on the machine to pick it out.
-        assert!(
-            hooks["Notification"][0]["hooks"][0]["command"]
-                .as_str()
-                .unwrap()
-                .ends_with("needs-input --message - || exit 0")
-        );
+        // a `jq` on the machine to pick it out. So is the error a turn ended
+        // on, which runs no Stop: failed, since the work stopped short.
+        for (event, reports) in [
+            ("Notification", "needs-input --message - || exit 0"),
+            ("StopFailure", "failed --message - || exit 0"),
+        ] {
+            let command = hooks[event][0]["hooks"][0]["command"].as_str().unwrap();
+            assert!(command.ends_with(reports), "{event} runs {command}");
+        }
+        // Not PermissionRequest, which Claude Code runs where no dialog is
+        // drawn — `claude -p`, a background agent — as well as where one is.
+        assert!(hooks.get("PermissionRequest").is_none(), "{hooks:?}");
         assert!(
             hooks["UserPromptSubmit"][0]["hooks"][0]["command"]
                 .as_str()
@@ -2426,7 +2553,7 @@ process.stdout.write(JSON.stringify({ ran, asked }))
         let claude = hooks_text("claude", Path::new("/usr/bin/crook")).unwrap();
         let parsed: Value = serde_json::from_str(&claude.text).unwrap();
         let hooks = parsed["hooks"].as_object().unwrap();
-        assert_eq!(6, hooks.len(), "a hook was added or dropped: {hooks:?}");
+        assert_eq!(7, hooks.len(), "a hook was added or dropped: {hooks:?}");
     }
 
     #[test]

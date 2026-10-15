@@ -8598,6 +8598,15 @@ impl Workspace {
     ///
     /// The title and the body go on the row's one line together, the way
     /// Claude Code joins them itself for OSC 9, which has room for only one.
+    ///
+    /// None is taken over a failure the agent said, for the reason a hook's
+    /// `needs-input` is not ([`Self::failure_stands`]): with nothing run
+    /// since, it is the same stop. Claude Code sends its idle reminder down
+    /// its notification channel right after its Notification hook, so a
+    /// person who set that channel to `ghostty` — as Crook tells one without
+    /// the plugin to — would otherwise see "Claude Code: Claude is waiting
+    /// for your input" on the row in place of what went wrong, and the
+    /// failure they had already looked at asking for a look again.
     fn notified(
         &mut self,
         pane: PaneId,
@@ -8610,7 +8619,7 @@ impl Workspace {
             (Some(text), None) | (None, Some(text)) => text.to_owned(),
             (None, None) => return self.tabs.pane(pane).is_some(),
         };
-        if self.looking_at() == Some(pane) {
+        if self.looking_at() == Some(pane) || self.agent_failed(pane) {
             return true;
         }
         let was = self.shown_status(pane);
@@ -8629,14 +8638,28 @@ impl Workspace {
     /// it is the agent's own name for its work, which is what
     /// `derived_title` has always been. The message is written as said too,
     /// and it is the one field a report *clears*: it is what a stopped agent
-    /// is waiting for, so it lives exactly as long as the `NeedsInput` that
-    /// brought it, and a title-only report cannot leave a stale question on
-    /// the row. What is decided here is attention. A
-    /// change in a pane without the keyboard is something that happened
-    /// while nobody was looking, and it asks for a look — unless the change
-    /// is to running, which is an agent getting on with it and the one
+    /// is waiting for, or what stopped it, so it lives exactly as long as the
+    /// `NeedsInput` or the `Failed` that brought it, and a title-only report
+    /// cannot leave a stale question on the row. What is decided here is
+    /// attention. A change in a pane without the keyboard is something that
+    /// happened while nobody was looking, and it asks for a look — unless the
+    /// change is to running, which is an agent getting on with it and the one
     /// change nobody needs to see. Running also *takes back* the attention
-    /// a stop asked for, since the stop it announced is over.
+    /// a stop asked for, since the stop it announced is over. Nor does the
+    /// idle a title says between a hook's reports
+    /// ([`StatusSource::TitleBetweenHooks`]) ask for one, or post a desktop
+    /// notice: it may be a permission dialog opening six seconds ahead of the
+    /// notification that asks, and whatever the hooks say next is the change,
+    /// an idle included, measured from the running that idle stood in for.
+    ///
+    /// One report is not taken at all: a hook's `needs-input` over a failure
+    /// a hook said, with nothing run between. That is the same stop, seen
+    /// again, and the failure says more about it — Claude Code's "Claude is
+    /// waiting for your input", a minute after the turn an API error ended,
+    /// would otherwise take "You've hit your limit · resets 5pm" off the row,
+    /// answer a wait for a question nobody asked and leave a wait for idle
+    /// to print a reminder in place of the error. See
+    /// [`Self::failure_stands`].
     ///
     /// Every status a row shows is written here, whoever said it — a hook,
     /// the title's glyph, the shell ending a command — so this is also where
@@ -8651,24 +8674,31 @@ impl Workspace {
         source: StatusSource,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
+        if self.failure_stands(pane, status, source) {
+            return true;
+        }
+        let between = |source| matches!(source, StatusSource::TitleBetweenHooks(_));
         let looking = self.looking_at() == Some(pane);
-        let was = self.shown_status(pane);
+        let was = self.shown_before_a_report(pane);
         let said = self.said(pane);
         let reported = self.update_session(pane, ctx, |session| {
             if let Some(title) = title {
                 session.derived_title = Some(title);
             }
-            let changed = session.status != status;
+            let changed = session.status != status || between(session.source);
             session.status = status;
             session.source = source;
-            session.message = message.filter(|_| status == AgentStatus::NeedsInput);
+            session.message =
+                message.filter(|_| matches!(status, AgentStatus::NeedsInput | AgentStatus::Failed));
             if status == AgentStatus::Running {
                 session.attention = None;
-            } else if changed && !looking {
+            } else if changed && !looking && !between(source) {
                 session.attention = Some(Attention::StatusChange);
             }
         });
-        self.tell_the_desktop(pane, was, ctx);
+        if !between(source) {
+            self.tell_the_desktop(pane, was, ctx);
+        }
         self.tell_watches_the_status(pane, said);
         if status == AgentStatus::Running {
             self.start_breathing(ctx);
@@ -8683,11 +8713,22 @@ impl Workspace {
     ///
     /// `None` when nothing is: an agent reports running around every tool it
     /// calls, and copying its question each time for nobody is waste.
+    ///
+    /// The idle a title says between a hook's reports is read as the running
+    /// it stood in for, since that running is the last the watches were told:
+    /// the title saying the agent is at work again is no news to them, and a
+    /// stream that said `running` twice over it would be the noise
+    /// [`Self::tell_watches_the_status`] keeps out.
     fn said(&self, pane: PaneId) -> Option<(AgentStatus, Option<String>, bool)> {
         if self.watches.is_empty() {
             return None;
         }
         let session = self.tabs.pane(pane)?.session();
+        if matches!(session.source, StatusSource::TitleBetweenHooks(_))
+            && session.status == AgentStatus::Idle
+        {
+            return Some((AgentStatus::Running, None, false));
+        }
         Some((
             session.status,
             session.message.clone(),
@@ -8734,6 +8775,18 @@ impl Workspace {
     /// while the agent works, and each turn is the same running, as each
     /// blink of codex's question is the same question.
     ///
+    /// Only to them but for one moment none of their events marks: Esc.
+    /// Claude Code interrupts a turn without running a hook, and the running
+    /// its hooks said would stay on the row, breathing, until the next
+    /// prompt. What it does do is go back to `✳`, so an idle said outright
+    /// takes back a hook's running — never its question, which the person
+    /// still has to answer, nor a failure — as
+    /// [`StatusSource::TitleBetweenHooks`]. Quietly, because the same `✳`
+    /// is drawn the moment a permission dialog opens, six seconds ahead of
+    /// the notification that asks: no look is asked for, no notice posted and
+    /// no wait for idle answered, and the title at work again puts the
+    /// running back as it was.
+    ///
     /// Idle only ends a running or a question the title said. Claude Code
     /// draws `✳` from the moment it starts, before anybody has asked it
     /// anything, Gemini CLI `◇` and codex its bare folder, and that is the
@@ -8768,7 +8821,17 @@ impl Workspace {
             );
         let now = Instant::now();
         let source = match (status, session.source) {
-            (_, StatusSource::Agent(_)) => return,
+            (AgentStatus::Idle, StatusSource::Agent(_) | StatusSource::TitleBetweenHooks(_))
+                if said.outright && session.status == AgentStatus::Running =>
+            {
+                StatusSource::TitleBetweenHooks(now)
+            }
+            (AgentStatus::Running, StatusSource::TitleBetweenHooks(_))
+                if session.status == AgentStatus::Idle =>
+            {
+                StatusSource::TitleBetweenHooks(now)
+            }
+            (_, StatusSource::Agent(_) | StatusSource::TitleBetweenHooks(_)) => return,
             _ if titled_turn && session.status == status => return,
             (AgentStatus::Running | AgentStatus::NeedsInput, _) => StatusSource::Title(now),
             _ if titled_turn && session.status == AgentStatus::NeedsInput && !said.outright => {
@@ -8844,8 +8907,10 @@ impl Workspace {
     /// has the emulator's own settle, and an idle has nothing to take back —
     /// but for the one a question left when its title stopped asking
     /// ([`StatusSource::TitleStoppedAsking`]), which says the agent may still
-    /// be at work. Once the agent has gone it is not, and the idle is the
-    /// command's end like any other, which a wait for idle takes.
+    /// be at work, and the one a title said between a hook's reports
+    /// ([`StatusSource::TitleBetweenHooks`]), which says no more. Once the
+    /// agent has gone it is not at work, and the idle is the command's end
+    /// like any other, which a wait for idle takes.
     fn take_back_a_running_title(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
         let titled_turn = self.tabs.pane(pane).is_some_and(|open| {
             let session = open.session();
@@ -8854,7 +8919,7 @@ impl Workspace {
                     session.status,
                     AgentStatus::Running | AgentStatus::NeedsInput
                 ),
-                StatusSource::TitleStoppedAsking(_) => true,
+                StatusSource::TitleStoppedAsking(_) | StatusSource::TitleBetweenHooks(_) => true,
                 _ => false,
             }
         });
@@ -8874,6 +8939,57 @@ impl Workspace {
     /// What a pane's row shows for its status, while the pane is open.
     fn shown_status(&self, pane: PaneId) -> Option<AgentStatus> {
         self.tabs.pane(pane).map(Pane::status)
+    }
+
+    /// What a report to a pane is a change from, for the desktop's notice:
+    /// the row's status, but for the idle a title said between a hook's
+    /// reports ([`StatusSource::TitleBetweenHooks`]), which is read as the
+    /// running it stood in for, as [`Self::said`] reads it for the watches.
+    ///
+    /// A pane the person marked shows that idle as needing input, and the
+    /// question the hooks ask after it — the notification six seconds after
+    /// a permission dialog's `✳` — would otherwise be no change from it, and
+    /// the notice that names the tool would never be posted.
+    fn shown_before_a_report(&self, pane: PaneId) -> Option<AgentStatus> {
+        let open = self.tabs.pane(pane)?;
+        let session = open.session();
+        if matches!(session.source, StatusSource::TitleBetweenHooks(_))
+            && session.status == AgentStatus::Idle
+        {
+            return Some(AgentStatus::Running);
+        }
+        Some(open.status())
+    }
+
+    /// Whether a report of `status` from `source` leaves the failure a pane's
+    /// agent said where it is: a hook's `needs-input` over a hook's `failed`,
+    /// with nothing run between — a running would have taken the failure.
+    ///
+    /// Both are stops, and nothing new has happened between them: the agent
+    /// that failed is still stopped where it failed, and what stopped it is
+    /// what a person coming back needs to read. Claude Code says exactly this
+    /// a minute after a turn an API error ended — "Claude is waiting for your
+    /// input", its idle reminder — and an agent that means a new question
+    /// after a failure says `running` before it, as it would before any.
+    ///
+    /// A notification over that failure is the same stop by another road,
+    /// and is not taken either: see [`Self::notified`].
+    fn failure_stands(&self, pane: PaneId, status: AgentStatus, source: StatusSource) -> bool {
+        status == AgentStatus::NeedsInput
+            && matches!(source, StatusSource::Agent(_))
+            && self.agent_failed(pane)
+    }
+
+    /// Whether a pane's agent said it failed, through a hook or
+    /// `crook --agent`, and nothing has taken that back since: the agent
+    /// saying anything but `needs-input`, or the shell starting the next
+    /// command.
+    fn agent_failed(&self, pane: PaneId) -> bool {
+        self.tabs.pane(pane).is_some_and(|open| {
+            let session = open.session();
+            session.status == AgentStatus::Failed
+                && matches!(session.source, StatusSource::Agent(_))
+        })
     }
 
     /// Posts a desktop notification about a pane whose row just turned to
@@ -8904,7 +9020,7 @@ impl Workspace {
         let name = row_name(session, self.home());
         let (occasion, notice) = match now {
             AgentStatus::NeedsInput => (Occasion::NeedsInput, Notice::needs_input(&name, session)),
-            AgentStatus::Failed => (Occasion::Failed, Notice::failed(&name)),
+            AgentStatus::Failed => (Occasion::Failed, Notice::failed(&name, session)),
             AgentStatus::Idle | AgentStatus::Running => return,
         };
         self.notify(pane, occasion, notice, ctx);
@@ -12043,7 +12159,8 @@ fn agent_report(pane: &Pane) -> Option<Instant> {
         StatusSource::Agent(at)
         | StatusSource::Title(at)
         | StatusSource::TitleAtStart(at)
-        | StatusSource::TitleStoppedAsking(at) => Some(at),
+        | StatusSource::TitleStoppedAsking(at)
+        | StatusSource::TitleBetweenHooks(at) => Some(at),
         StatusSource::NoReport | StatusSource::CommandEnded(_) => None,
     }
 }

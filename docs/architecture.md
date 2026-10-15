@@ -1546,7 +1546,7 @@ so a program that has not asked is refused rather than handed a review a line at
 pane is the one in the tab whose agent has reported (`StatusSource::Agent`, or for one with no
 hooks its title: `Title`, `TitleAtStart` for what it wears before its first turn: Claude
 Code's `✳`, Gemini CLI's `◇`, codex's bare folder, and `TitleStoppedAsking` after a question its
-title asked), whose shell is not listening, and which works in the reviewed repository, else the
+title asked, or `TitleBetweenHooks` for the `✳` an Esc leaves under a hook's running), whose shell is not listening, and which works in the reviewed repository, else the
 focused one; a pane whose shell is listening is refused, because a review's quoted lines are
 commands there (bash
 5.3 turns bracketed paste on at its prompt, so the whole review would sit in its line editor one
@@ -1645,13 +1645,25 @@ and Copilot CLI, with the real binary under `sh -c` in a session of its own belo
 pty, and reads the report off the pty; and runs each once more below a shell with no terminal,
 where nothing may arrive and each still exits 0, and the printed ones again with the binary
 gone, where each exits 0 without a word.
-`--message "run rm -rf build?"` is what a `needs-input` is waiting for, cut to
+`--message "run rm -rf build?"` is what a `needs-input` is waiting for, or what went wrong
+beside a `failed`, cut to
 one line of 200 characters in the writer so the sequence never carries a novel; `--message -`
-reads it from standard input, the `message` of a hook's JSON when the input is one and the
-whole input otherwise. `crook --agent-hooks claude` prints the fragment of Claude Code's settings
-that makes it say all of this by itself — running on a prompt and around every tool, needing
-input on every notification with the notification's text piped in as the message, idle on
-stop. It is printed rather than installed:
+reads it from standard input, the `message` of a hook's JSON when the input is one — else the
+`last_assistant_message` or the `error` of a StopFailure, else the tool Codex's permission
+request names — and the whole input otherwise. `crook --agent-hooks claude` prints the fragment of
+Claude Code's settings that makes it say all of this by itself — running on a prompt and around
+every tool, needing input on every notification with the notification's text piped in as the
+message, idle on stop, failed with the error on a StopFailure, which an API error runs in place
+of Stop. A StopFailure a subagent's turn ran, whose input carries an `agent_id`, writes nothing:
+the agent that started it is handed the error and works on. Nor does a needs-input take the
+place of a hook's failed with nothing run between — Claude Code's idle reminder a minute after
+the failed turn would otherwise wipe the error off the row — and nor does the same reminder sent
+down its notification channel as well, an OSC 9, 777 or 99. Not PermissionRequest, which Claude
+Code also runs in `claude -p` and for a background agent, where no dialog is drawn. Esc runs no
+hook at all, so there the title's `✳` takes a hook's running back, quietly: Claude Code draws
+the same `✳` the moment a permission dialog opens, six seconds before the notification that
+asks, so that idle asks for no look, posts no notice and answers no wait
+(`StatusSource::TitleBetweenHooks`). It is printed rather than installed:
 Crook writes no file it does not own, and it has never opened that one. What it prints first is
 the way that needs no merging at all: the repository is a Claude Code plugin marketplace
 (`.claude-plugin/marketplace.json`) whose one plugin, `packaging/claude-code`, carries the same
@@ -1844,7 +1856,12 @@ an agent that says it is running is still running after it notifies. What it set
 `attention` — `Attention::Notification`, which carries the text, joined `title: body` since
 the row has one line for both — in a pane without the keyboard, exactly where a bell would:
 the row washes, counts as waiting, and prints the text on its second line in place of the
-table's, ahead of a `needs-input` message since it is the newer of the two. Whatever clears a
+table's, ahead of a `needs-input` message since it is the newer of the two. Over a `failed` the
+agent reported, with nothing since, it sets nothing at all (`Workspace::agent_failed`): Claude
+Code sends its idle reminder down its notification channel right after its Notification hook,
+and with the plugin installed and the channel left at `ghostty`, `kitty` or `iterm2`, that
+reminder would put "Claude Code: Claude is waiting for your input" on the row in place of what
+went wrong, and light a failure somebody had already looked at. Whatever clears a
 bell's attention clears it — a look, an agent reporting running — and the text goes with it; a
 bell after it keeps it, because Claude Code's `iterm2_with_bell` channel sends that pair. A
 burst with no report between is handed over as its last one, beside the bell's rule. In one

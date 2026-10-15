@@ -296,6 +296,22 @@ pub enum StatusSource {
     /// [`Self::CommandEnded`], which both take. See
     /// `Workspace::title_stopped_asking`.
     TitleStoppedAsking(Instant),
+    /// The program's terminal title said this status at this instant, in a
+    /// pane whose hooks report, at a moment none of their events marks.
+    ///
+    /// Claude Code runs no hook when Esc interrupts a turn, so the `✳` it
+    /// goes back to is the only word that the running its hooks said is
+    /// over, and an idle with this source is that. It is no report of idle,
+    /// though: Claude Code draws the same `✳` the moment it opens a
+    /// permission dialog, six seconds before the notification that asks. So
+    /// `crook pane wait --until idle` is not answered by it, `crook events
+    /// --follow` is not told it, it asks for no look and posts no notice, and
+    /// the hook's report after it is news even when that report is idle too.
+    /// A title at work again takes it back as a running with this source,
+    /// which the next `✳` takes back in turn: the emulator passes on only a
+    /// change, so a hook saying running once more under it is never heard.
+    /// See `Workspace::title_reported`.
+    TitleBetweenHooks(Instant),
 }
 
 /// The pull request a session's work belongs to.
@@ -425,10 +441,12 @@ pub struct AgentSession {
     /// The one thing [`Self::status`] cannot say: `needs-input` is a stop,
     /// and this is the question — "run `rm -rf build`?" — so a person
     /// reading the row knows whether to come now or later without switching
-    /// to the tab to find out. Written with the report that brought it and
-    /// only with a `NeedsInput`; any other status, including the idle the
-    /// shell's marks report when the command ends, takes it with it, because
-    /// a question the agent has stopped asking is not one to keep showing.
+    /// to the tab to find out. `failed` is a stop too, and this is what went
+    /// wrong — "You've hit your limit · resets 5pm" — which decides the same.
+    /// Written with the report that brought it and only with a `NeedsInput`
+    /// or a `Failed`; any other status, including the idle the shell's marks
+    /// report when the command ends, takes it with it, because a question
+    /// the agent has stopped asking is not one to keep showing.
     pub message: Option<String>,
     /// Where [`Self::status`] came from, and when.
     ///

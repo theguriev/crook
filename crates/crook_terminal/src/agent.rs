@@ -25,8 +25,10 @@
 //! what the agent calls the work it is doing. The message is the one thing
 //! an agent that has stopped to ask can add that the word cannot say — *what*
 //! it is asking, "run `rm -rf build`?" — and the tab keeps it only beside
-//! `needs-input`, since it is the answer to "waiting for what?" and nothing
-//! else is waiting. Nothing more than those: not a number, not a colour. A
+//! `needs-input`, where it answers "waiting for what?", and beside `failed`,
+//! where it answers "failed how?" — "You've hit your limit · resets 5pm".
+//! Those are the two stops, and nothing else waits on anybody. Nothing more
+//! than those: not a number, not a colour. A
 //! plugin can put a picture on a status; the status itself is a fact about
 //! the work.
 //!

@@ -27,9 +27,11 @@
 //! said what for. While it is waiting, line 2 — the `Expanded` description
 //! and the `Compact` subtitle — is the question rather than the directory or
 //! the branch, because "wants to run `rm -rf build`" is what decides whether
-//! a person comes now, and which branch the pane is on is not. The moment
-//! the agent goes back to work the message goes with it (see
-//! `AgentSession::message`), and the line says what the table says again.
+//! a person comes now, and which branch the pane is on is not. An agent that
+//! failed and said how has stopped too, and "You've hit your limit" takes
+//! the line for the same reason. The moment the agent goes back to work the
+//! message goes with it (see `AgentSession::message`), and the line says
+//! what the table says again.
 //! A notification a program sent while nobody was looking takes the same
 //! line for as long as nobody has — see `AgentSession::row_message`.
 
@@ -1023,7 +1025,8 @@ mod naming_tests {
     /// A question beats a place: while the agent is waiting and has said
     /// what for, that is the second line in both densities, and the title
     /// stays what it was. The directory comes back when the message goes,
-    /// which `AgentSession::message` ties to the status leaving `NeedsInput`.
+    /// which `AgentSession::message` ties to the status leaving `NeedsInput`
+    /// or `Failed`.
     #[test]
     fn what_the_agent_is_waiting_for_takes_the_second_line_while_it_waits() {
         let mut session = session("/Users/eugen/work/crook");

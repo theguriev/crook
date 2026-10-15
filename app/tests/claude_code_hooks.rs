@@ -75,6 +75,14 @@ const MESSAGE: &str = "Claude needs your permission to use Bash";
 /// The session `--session -` and `--session-start -` read out of [`INPUT`].
 const SESSION: &str = "test";
 
+/// What Claude Code 2.1 hands its StopFailure hook when an API error ends
+/// the main thread's turn: the error's kind, and the sentence it showed.
+const FAILURE: &str = r#"{"session_id": "test", "hook_event_name": "StopFailure", "error": "rate_limit", "last_assistant_message": "You've hit your limit · resets 5pm"}"#;
+
+/// The same, for a subagent's turn: the subagent's `agent_id` and
+/// `agent_type`, which Claude Code puts in every hook it runs for one.
+const SUBAGENT_FAILURE: &str = r#"{"session_id": "test", "hook_event_name": "StopFailure", "agent_id": "a1b2c3", "agent_type": "general-purpose", "error": "overloaded", "last_assistant_message": "API Error: 529 Overloaded"}"#;
+
 /// How long one hook is given before the test calls it a failure rather than
 /// hanging the suite.
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -325,14 +333,19 @@ fn perl_is_here() -> bool {
 /// than the hook: the agent's session, like the probe's, is started from the
 /// pty's process.
 fn run_as_a_hook(command: &str, agent: Agent) -> Ran {
-    run_as_a_hook_in(command, agent, Pane::Plain)
+    run_as_a_hook_in(command, agent, Pane::Plain, INPUT)
+}
+
+/// [`run_as_a_hook`], with `input` on stdin in place of [`INPUT`].
+fn run_as_a_hook_given(command: &str, agent: Agent, input: &str) -> Ran {
+    run_as_a_hook_in(command, agent, Pane::Plain, input)
 }
 
 /// [`run_as_a_hook`], with the agent where `place` says rather than always on
-/// the pty itself.
-fn run_as_a_hook_in(command: &str, agent: Agent, place: Pane) -> Ran {
+/// the pty itself, and `input` on stdin.
+fn run_as_a_hook_in(command: &str, agent: Agent, place: Pane, input: &str) -> Ran {
     let scratch = Scratch::new();
-    fs::write(scratch.0.join("input"), INPUT).expect("the input should be writable");
+    fs::write(scratch.0.join("input"), input).expect("the input should be writable");
     let (hook, under_the_agent) = match agent {
         Agent::OnThePane => (command, ""),
         Agent::Detached => (UNDER_A_DETACHED_AGENT, command),
@@ -465,7 +478,7 @@ fn assert_reaches_the_pane(event: &str, command: &str) {
 
 /// [`assert_reaches_the_pane`], with the agent where `place` says.
 fn assert_reaches_the_pane_from(event: &str, command: &str, place: Pane) {
-    let ran = run_as_a_hook_in(command, Agent::OnThePane, place);
+    let ran = run_as_a_hook_in(command, Agent::OnThePane, place, INPUT);
     assert_eq!(
         "detached\n", ran.probe,
         "{event}: a hook here has to be where Claude Code puts one, with no terminal of its own"
@@ -494,7 +507,7 @@ fn assert_reaches_nothing_from_a_detached_agent(event: &str, command: &str) {
 /// [`assert_reaches_nothing_from_a_detached_agent`], with the agent's own
 /// agent where `place` says.
 fn assert_reaches_nothing_from_a_detached_agent_in(event: &str, command: &str, place: Pane) {
-    let ran = run_as_a_hook_in(command, Agent::Detached, place);
+    let ran = run_as_a_hook_in(command, Agent::Detached, place, INPUT);
     assert_eq!(
         "detached\n", ran.probe,
         "{event}: the agent here has to have no terminal of its own, as under a Bash tool"
@@ -762,6 +775,7 @@ fn a_pane_of_a_crook_started_inside_tmux_reports_on_itself_and_not_to_that_tmux(
             tmux: &variable,
             pane: &pane,
         },
+        INPUT,
     );
     let report = expected_report(&command);
     assert!(
@@ -906,4 +920,53 @@ fn a_tmux_client_on_a_terminal_nobody_reads_holds_no_hook() {
             started.elapsed()
         );
     });
+}
+
+#[test]
+fn a_failure_reaches_the_pane_and_a_subagents_does_not() {
+    // Claude Code runs StopFailure for a subagent whose turn an API error
+    // ended as well as for its own, and the agent that started the subagent
+    // is handed the error and works on: the row has to stay as it is.
+    if !perl_is_here() {
+        return;
+    }
+    let shipped: Value = serde_json::from_str(PLUGIN_HOOKS).expect("hooks.json is JSON");
+    let command = shipped["hooks"]["StopFailure"][0]["hooks"][0]["command"]
+        .as_str()
+        .expect("the plugin hooks StopFailure");
+
+    let ran = run_as_a_hook_given(command, Agent::OnThePane, FAILURE);
+    let report = crook_terminal::agent::report(
+        AgentReport::Failed,
+        None,
+        Some("You've hit your limit · resets 5pm"),
+        None,
+    );
+    assert!(
+        ran.pane.contains(&report),
+        "the pane never got {report:?}; it got {:?}, and the hook said {:?}",
+        ran.pane,
+        ran.stderr
+    );
+    assert_eq!("0\n", ran.status, "{}", ran.stderr);
+
+    let ran = run_as_a_hook_given(command, Agent::OnThePane, SUBAGENT_FAILURE);
+    assert_eq!(
+        "detached\n", ran.probe,
+        "a hook here has to be where Claude Code puts one, with no terminal of its own"
+    );
+    assert!(
+        !ran.pane.contains("\x1b]6340;"),
+        "a subagent's failure was reported on the pane: {:?}",
+        ran.pane
+    );
+    assert_eq!(
+        ("0\n", "", ""),
+        (
+            ran.status.as_str(),
+            ran.stdout.as_str(),
+            ran.stderr.as_str()
+        ),
+        "a subagent's failure is no error to report"
+    );
 }

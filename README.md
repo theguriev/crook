@@ -456,11 +456,12 @@ Twenty-two features, and the page that configures them:
   in the pane, over the one channel it already has: `crook --agent running`, `needs-input`,
   `failed` or `idle`, with `--title` for what it calls its work, writes one escape sequence to
   its own terminal and exits. `needs-input --message "run rm -rf build?"` says what it is
-  waiting for, and the row prints that under the title until the agent gets on with it — so
-  you know whether to come now or later without switching to the tab; `--message -` reads it
-  from stdin, a hook's JSON `message` or the whole line. No socket and no pane id — the
-  terminal it has *is* the pane — so the command works from a hook, over `ssh` and inside a
-  container, and every other terminal drops the sequence unread. A hook with no terminal of its own —
+  waiting for, `failed --message` what went wrong, and the row prints that under the title
+  until the agent gets on with it — so you know whether to come now or later without
+  switching to the tab; `--message -` reads it from stdin, a hook's JSON `message` or the
+  whole line. No socket and no pane id — the terminal it has *is* the pane — so the command
+  works from a hook, over `ssh` and inside a container, and every other terminal drops the
+  sequence unread. A hook with no terminal of its own —
   every hook Claude Code runs — writes to the terminal of the program that ran it: the same
   pane. Inside tmux in a pane, which keeps a sequence it does not know to itself, it goes round
   tmux to the terminal of each tmux client attached to the agent's session — the pane among
@@ -479,7 +480,8 @@ Twenty-two features, and the page that configures them:
   are its own to send, and inside tmux they reach the row only as far as tmux passes them on,
   which takes the same option. Claude Code says all of it by itself — running when a prompt
   is sent and around every tool, needing input whenever it stops to ask, with the notification's
-  own text as the message, idle when it is done — once Crook's plugin is installed:
+  own text as the message, idle when it is done, failed with the error when an API error such
+  as a usage limit ends its turn — once Crook's plugin is installed:
   `claude plugin marketplace add theguriev/crook`, then `claude plugin install crook@crook`,
   with a Crook newer than 0.1.13. That is Claude Code writing its own settings, not anyone
   merging JSON; the plugin's hooks call `$CROOK_BIN`, do nothing in any other terminal unless
@@ -490,7 +492,8 @@ Twenty-two features, and the page that configures them:
   person who would rather merge them into `~/.claude/settings.json` by hand.
   With no hooks at all Claude Code still says half of it, in the glyph it puts in front of its
   own terminal title — `✳` at its prompt, a turning half circle while it works — which the row
-  reads as idle and running, wearing the title without the glyph; a hook's report outranks it.
+  reads as idle and running, wearing the title without the glyph; a hook's report outranks it,
+  but for the `✳` an Esc leaves, which no hook reports and which takes a hook's running back.
   `codex`, `gemini` and `copilot` print the same guarded hooks for Codex CLI, Gemini CLI and
   GitHub Copilot CLI in each one's own hooks file, `opencode` prints the plugin OpenCode loads
   instead, and `aider`, which has no hooks, gets a sentence saying what to do instead. A
@@ -582,6 +585,8 @@ Twenty-two features, and the page that configures them:
   `"preferredNotifChannel"` in `~/.claude/settings.json`, or in its `/config`, to `ghostty`,
   `kitty` or `iterm2` — whichever your other terminal is, since the setting holds in every
   terminal — and a stop to ask lights the row. `crook --agent-hooks claude` says so too.
+  A notification over a failure the agent reported is dropped, so the row keeps what went
+  wrong: with the plugin installed too, it is Claude Code's idle reminder, sent both ways.
   A status the agent never took back goes when the shell's own marks say the command ended,
   and a failure stays on the row until the next command starts. Looking at a tab clears the
   *attention* it asked for and nothing else: an agent waiting for an approval is still waiting
