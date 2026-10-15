@@ -142,10 +142,39 @@ enum Pane<'a> {
 
 /// The configuration every [`Tmux`] starts with. `/bin/sh` for the command a
 /// session is started on, whatever shell the person running the tests uses;
-/// and a pane that stays after its command ends, so what the command wrote
-/// last is drawn on the client before the server is killed, rather than lost
-/// with a window that closed first.
+/// and a pane that stays after its command ends, so a command that ends
+/// early leaves its pane on the client for the failure to show, rather than
+/// closing the window, and the client, under the reader. Not so that what the
+/// command printed last stays drawn: tmux feeds a line in at the bottom of a
+/// pane that died to say so, which scrolls the top line off the screen —
+/// see [`in_tmux`].
 const TMUX_CONFIG: &str = "set -g default-shell /bin/sh\nset -g remain-on-exit on\n";
+
+/// What a pane of tmux prints first, before it waits, so that its arriving on
+/// the pty says tmux's client has drawn the pane.
+const ON_SCREEN: &str = "crook-pane-on-screen";
+
+/// The tmux channel a pane waits on before it runs [`SCRIPT`], which the test
+/// signals once it has read [`ON_SCREEN`].
+const GO: &str = "crook-hook-go";
+
+/// What a pane of tmux runs: [`SCRIPT`], once the client has drawn the pane,
+/// and then nothing, until the server is killed.
+///
+/// Not [`SCRIPT`] the moment tmux starts it, because nothing then says the
+/// client is ready for it. tmux passes a report through only to a client that
+/// has drawn the pane and has no redraw pending, and drops it for good
+/// otherwise; text waits in the pane for the redraw. Under load the hook could
+/// finish before the client had drawn anything at all, and the pane got the
+/// done line but never the report. And not ending once the script has,
+/// because a pane whose command ended gets "Pane is dead" fed in at its
+/// bottom: a client that draws the pane only after that — which is what CI
+/// caught, a client whose first draw was the dead pane — shows the line the
+/// script ended on scrolled off the top, and the reader waits out its whole
+/// deadline for a line that was printed and will never be drawn.
+fn in_tmux() -> String {
+    format!("echo {ON_SCREEN}\ntmux wait-for {GO}\n{SCRIPT}\nexec sleep 600")
+}
 
 /// A tmux server of the test's own, killed when this is dropped: on a socket
 /// of its own, so neither a person's tmux nor another test's is touched, and
@@ -373,7 +402,7 @@ fn run_as_a_hook_in(command: &str, agent: Agent, place: Pane, input: &str) -> Ra
         // With no pane id for tmux to hand on, the way a server started
         // outside Crook has none: tmux says `TERM_PROGRAM=tmux` to its own
         // panes, and the hooks' guard lets them through on its `TMUX`.
-        Pane::Tmux(tmux) => tmux.client(&["new-session", SCRIPT]),
+        Pane::Tmux(tmux) => tmux.client(&["new-session", &in_tmux()]),
         Pane::NamingTmux { tmux, pane } => {
             environment.extend([("TMUX", tmux), ("TMUX_PANE", pane)]);
             script
@@ -391,7 +420,19 @@ fn run_as_a_hook_in(command: &str, agent: Agent, place: Pane, input: &str) -> Ra
     )
     .expect("a shell should start on a pty");
 
-    let pane = read_until(&reading(&mut pty), DONE);
+    let arriving = reading(&mut pty);
+    let pane = match place {
+        Pane::Tmux(tmux) => {
+            let drawn = read_until(&arriving, ON_SCREEN);
+            assert!(
+                drawn.contains(ON_SCREEN),
+                "tmux's client did not draw the pane in {DEADLINE:?}; it got {drawn:?}"
+            );
+            tmux.ask(&["wait-for", "-S", GO]);
+            drawn + &read_until(&arriving, DONE)
+        }
+        Pane::Plain | Pane::NamingTmux { .. } => read_until(&arriving, DONE),
+    };
     let _ = pty.kill();
     assert!(
         pane.contains(DONE),

@@ -3865,11 +3865,14 @@ its `hooks` should be\n{}",
             use std::os::unix::fs::PermissionsExt;
 
             let path = directory.join(name);
-            std::fs::write(&path, "#!/bin/sh\nprintf '%s\\n' \"$#\" \"$1\"\n")
-                .expect("the fake agent is written");
-            let mode = if runnable { 0o755 } else { 0o644 };
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
-                .expect("the fake agent's mode is set");
+            let script = "#!/bin/sh\nprintf '%s\\n' \"$#\" \"$1\"\n";
+            if runnable {
+                crate::process::write_program(&path, script);
+            } else {
+                std::fs::write(&path, script).expect("the fake agent is written");
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+                    .expect("the fake agent's mode is set");
+            }
         }
         #[cfg(not(unix))]
         {

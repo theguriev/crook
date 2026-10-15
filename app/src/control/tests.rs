@@ -1991,9 +1991,7 @@ mod socket {
                  exec cat\n",
                 gate = gate.display()
             );
-            fs::write(&program, script).expect("the shell is written");
-            fs::set_permissions(&program, fs::Permissions::from_mode(0o755))
-                .expect("the shell is runnable");
+            crate::process::write_program(&program, &script);
             Self { program, gate }
         }
 
@@ -2022,9 +2020,7 @@ mod socket {
                 home = home.display(),
                 real = real.display(),
             );
-            fs::write(&program, script).expect("the shell is written");
-            fs::set_permissions(&program, fs::Permissions::from_mode(0o755))
-                .expect("the shell is runnable");
+            crate::process::write_program(&program, &script);
             Some(Self { program, gate })
         }
 
@@ -2956,9 +2952,7 @@ mod socket {
                 reached = reached.display(),
                 gate = gate.display(),
             );
-            fs::write(&hook, script).expect("the hook is written");
-            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
-                .expect("the hook is runnable");
+            crate::process::write_program(&hook, &script);
             git(
                 &repository,
                 &["config", "core.hooksPath", &hooks.display().to_string()],

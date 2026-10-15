@@ -75,3 +75,54 @@ pub fn reap_at(mut child: std::process::Child, name: &'static str, level: log::L
         log::debug!("nothing could wait on {name}: {why}");
     }
 }
+
+/// Writes `contents` to `path` as a program, for a test that runs it at once.
+///
+/// Not `fs::write` and a `chmod`, because of the threads beside the test. A
+/// thread that forks while the file is still open for writing hands its child
+/// a copy of that descriptor, which the child holds until it execs, and until
+/// then Linux refuses to run the file: `ETXTBSY`, "Text file busy". The suite
+/// starts processes on every thread all the time, so a fake `gh` or hook
+/// written here and run a moment later failed now and then for no reason in
+/// the code under test. Renaming a finished file into place does not help,
+/// since it is the same file under a new name. So the bytes go to a staging
+/// file nothing runs, and a `cp` of their own copies them to `path`: the
+/// program is only ever open for writing in that process, which forks
+/// nothing, and is closed for good when it exits.
+#[cfg(all(test, unix))]
+pub(crate) fn write_program(path: &std::path::Path, contents: &str) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static STAGED: AtomicU64 = AtomicU64::new(0);
+    let staged = std::env::temp_dir().join(format!(
+        "crook-program-{}-{}",
+        std::process::id(),
+        STAGED.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&staged, contents).expect("the temporary directory is writable");
+    copy_in(&staged, path);
+    let _ = std::fs::remove_file(&staged);
+}
+
+/// Copies `staged` to `path` in a process of its own and makes the copy
+/// runnable: the half of [`write_program`] that keeps the program out of
+/// every descriptor this process holds.
+#[cfg(all(test, unix))]
+fn copy_in(staged: &std::path::Path, path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    // By its path: a test that empties this process's PATH for a moment would
+    // otherwise take `cp` away from every test writing a program meanwhile.
+    let copied = command("/bin/cp")
+        .arg(staged)
+        .arg(path)
+        .status()
+        .expect("cp can be started");
+    assert!(copied.success(), "cp could not write {}", path.display());
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .expect("the program can be made runnable");
+}
+
+#[cfg(all(test, unix))]
+#[path = "process_tests.rs"]
+mod tests;
