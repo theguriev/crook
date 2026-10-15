@@ -2105,12 +2105,27 @@ mod socket {
                 workspace.set_control_socket(socket, ctx);
                 workspace.start_terminals(ctx);
             });
-            Self {
+            let mut served = Self {
                 window,
                 control,
                 shell,
                 _root: root,
-            }
+            };
+            // The tabs behind the active one open their shells off the
+            // thread that draws, after it, and a shell in every pane is this
+            // window's promise: the tests ask as a pane in any of its tabs.
+            served.pump_until(
+                "a pane behind the active tab never got its shell",
+                |served| {
+                    served.read(|workspace, app| {
+                        workspace
+                            .tabs()
+                            .panes()
+                            .all(|(_, pane)| workspace.terminal(pane.id(), app).is_some())
+                    })
+                },
+            );
+            served
         }
 
         fn socket(&self) -> PathBuf {

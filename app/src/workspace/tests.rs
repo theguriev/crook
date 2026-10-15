@@ -17398,10 +17398,195 @@ mod shells {
         if one_shell(&mut harness).is_none() {
             return;
         }
+        // Opened off the thread that draws, after the active tab's. Waiting
+        // draws no frame, and no frame lays out a tab behind the active one,
+        // so the grid read below is still the one it opened at.
+        harness.wait_for(
+            "the pane behind the active tab never got its shell",
+            |harness| has_a_shell(harness, pane),
+        );
         assert_eq!(
             grid_opened(&harness, pane),
             Some(body),
             "the pane behind the active tab did not open at the body's grid"
+        );
+    }
+
+    /// What one spawn is made to cost in the restore tests: about what one
+    /// cost on a loaded machine with a restore's earlier shells starting up
+    /// beside it. See `TerminalModel::set_spawn_cost`.
+    pub(super) const RESTORED_SPAWN: Duration = Duration::from_millis(200);
+
+    /// Whether a pane has a shell running in it.
+    pub(super) fn has_a_shell(harness: &Harness, pane: PaneId) -> bool {
+        harness.workspace.read(&harness.app, |workspace, app| {
+            workspace.terminal(pane, app).is_some()
+        })
+    }
+
+    #[test]
+    fn a_restore_opens_the_active_tab_s_shells_at_once_and_the_rest_off_the_thread_that_draws() {
+        // Every shell of a restore was forked on the thread that draws, the
+        // tabs behind the active one too, and the parent waits for each child
+        // to exec: sixty tabs held the window for most of a second on a
+        // loaded machine. Each spawn here is made to cost what one cost
+        // there, so what is measured is what the thread that draws spends
+        // and not how fast this machine forks.
+        const TABS: usize = 10;
+        let mut harness = Harness::panel(TABS);
+        if !a_shell_these_tests_speak() {
+            return;
+        }
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_shell_spawn_cost(RESTORED_SPAWN, ctx);
+            workspace.expect_terminals(ctx);
+        });
+        harness.frame();
+
+        let started = std::time::Instant::now();
+        if !harness.start_terminals() {
+            return;
+        }
+        let took = started.elapsed();
+        // The one shell the next frame draws, and room beside it for a loaded
+        // machine's own fork. The nine behind it cost nine times that.
+        assert!(
+            took < RESTORED_SPAWN * 4,
+            "starting {TABS} tabs' shells held the thread that draws for {took:?}"
+        );
+
+        let active = harness.active_pane_ids();
+        let behind: Vec<PaneId> = harness
+            .pane_ids()
+            .into_iter()
+            .filter(|pane| !active.contains(pane))
+            .collect();
+        assert_eq!(behind.len(), TABS - 1);
+        assert!(
+            active.iter().all(|pane| has_a_shell(&harness, *pane)),
+            "the active tab had no shell for the frame after the restore"
+        );
+        assert!(
+            !behind.iter().any(|pane| has_a_shell(&harness, *pane)),
+            "a tab behind the active one opened its shell before the active tab's frame"
+        );
+
+        harness.wait_for(
+            "a tab behind the active one never got its shell",
+            |harness| behind.iter().all(|pane| has_a_shell(harness, *pane)),
+        );
+    }
+
+    #[test]
+    fn a_tab_whose_shell_is_still_opening_draws_its_ground_rather_than_a_notice() {
+        // Switched to in the moment between the restore and its shell
+        // arriving, a tab is one whose shell is coming, as the active tab's
+        // is for the frame before the shells start — not one that has none.
+        // The first tab behind the active one is the one whose shell the pool
+        // is already spawning, which a switch leaves to arrive; a tab still
+        // waiting its turn opens in place instead, see the test below.
+        let mut harness = Harness::panel(3);
+        if !a_shell_these_tests_speak() {
+            return;
+        }
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_shell_spawn_cost(RESTORED_SPAWN, ctx);
+            workspace.expect_terminals(ctx);
+        });
+        harness.frame();
+        if !harness.start_terminals() {
+            return;
+        }
+
+        let active = harness.active_id();
+        let behind = harness
+            .tab_ids()
+            .into_iter()
+            .find(|tab| *tab != active)
+            .expect("three tabs");
+        let pane = harness.panes_of(behind)[0];
+        harness.dispatch_action(TabAction::Select(behind));
+        assert!(
+            !has_a_shell(&harness, pane),
+            "switching to the tab opened a second shell for it on the thread that draws"
+        );
+        let shown = frame_text(&harness.frame());
+        assert!(
+            !shown.contains("no shell is running"),
+            "a shell on its way was drawn as one that is not coming: {shown:?}"
+        );
+
+        harness.wait_for("the tab switched to never got its shell", |harness| {
+            has_a_shell(harness, pane)
+        });
+    }
+
+    #[test]
+    fn a_tab_switched_to_before_its_shell_s_turn_opens_it_at_once_and_takes_what_is_typed() {
+        // A restore opens the tabs behind the active one a shell at a time,
+        // in strip order, so the last tab's turn comes after every other's.
+        // Until it came, its pane drew no composer and no grid, and what was
+        // typed into it the moment it was switched to reached nothing.
+        const TABS: usize = 6;
+        let mut harness = Harness::panel(TABS);
+        if !a_shell_these_tests_speak() {
+            return;
+        }
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_shell_spawn_cost(RESTORED_SPAWN, ctx);
+            workspace.expect_terminals(ctx);
+        });
+        harness.frame();
+        if !harness.start_terminals() {
+            return;
+        }
+
+        let active = harness.active_id();
+        let behind: Vec<_> = harness
+            .tab_ids()
+            .into_iter()
+            .filter(|tab| *tab != active)
+            .collect();
+        let (last, between) = behind.split_last().expect("tabs behind the active one");
+        // Past the first, whose shell the pool is already spawning: nothing
+        // has pumped the queue, so none of these can have arrived.
+        let waiting: Vec<PaneId> = between[1..]
+            .iter()
+            .flat_map(|tab| harness.panes_of(*tab))
+            .collect();
+        let pane = harness.panes_of(*last)[0];
+
+        harness.dispatch_action(TabAction::Select(*last));
+        assert!(
+            has_a_shell(&harness, pane),
+            "a tab switched to waited for its turn behind the tabs before it"
+        );
+        assert!(
+            !waiting.iter().any(|pane| has_a_shell(&harness, *pane)),
+            "switching to one tab started the shells of the tabs before it on the thread that draws"
+        );
+
+        // Typed straight away, into the frame the switch asked for. Either
+        // the composer has it or the pty echoed it: what matters is that it
+        // reached the pane rather than nothing.
+        harness.frame();
+        harness.type_text("echo crook-typed-at-once");
+        harness.wait_for(
+            "what was typed into the tab switched to never reached it",
+            |harness| {
+                harness.field_text(pane).contains("crook-typed-at-once")
+                    || harness.terminal_text(pane).contains("crook-typed-at-once")
+            },
+        );
+
+        harness.wait_for(
+            "a tab behind the active one never got its shell",
+            |harness| {
+                behind
+                    .iter()
+                    .flat_map(|tab| harness.panes_of(*tab))
+                    .all(|pane| has_a_shell(harness, pane))
+            },
         );
     }
 
@@ -26662,6 +26847,61 @@ mod restoring {
             !resume_is_offered(&harness),
             "a line that has been sent is still offered"
         );
+    }
+
+    #[test]
+    fn an_agent_in_a_tab_behind_the_active_one_keeps_its_line_until_its_shell_opens_and_takes_it() {
+        // The tabs behind the active one open their shells after the window
+        // has drawn, off the thread that draws. The restore's line is in the
+        // pane's composer before then, and the shell that arrives is the one
+        // it goes to.
+        let scratch = Scratch::new();
+        fs::write(
+            scratch.path().join("settings.json"),
+            r#"{"resume_lines": {"claude": "echo resumed-claude"}}"#,
+        )
+        .expect("writable scratch");
+        let mut session = remembered(&[(scratch.path(), None)]);
+        session
+            .tabs
+            .extend(remembered(&[(scratch.path(), Some("claude"))]).tabs);
+        session.active = 0;
+        let mut harness = restored(&session, scratch.settings());
+        let behind = harness.tab_ids()[1];
+        assert_ne!(behind, harness.active_id(), "the agent's tab is in front");
+        let agent = harness.panes_of(behind)[0];
+
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_shell_spawn_cost(super::shells::RESTORED_SPAWN, ctx);
+        });
+        if super::shells::marked_shell(&mut harness).is_none() {
+            return;
+        }
+        assert!(
+            !super::shells::has_a_shell(&harness, agent),
+            "the tab behind the active one opened its shell on the thread that draws"
+        );
+        assert_eq!(
+            harness.field_text(agent),
+            "echo resumed-claude",
+            "the line is not waiting in the composer of a pane whose shell is on its way"
+        );
+
+        super::shells::await_prompt(&mut harness, agent);
+        harness.run_command("crook/window/resume-agents");
+        harness.wait_for("the line never reached the shell that arrived", |harness| {
+            harness
+                .workspace
+                .read(&harness.app, |workspace, app| {
+                    Some(
+                        workspace
+                            .terminal_blocks(agent, app)?
+                            .iter()
+                            .any(|block| block.command.as_deref() == Some("echo resumed-claude")),
+                    )
+                })
+                .unwrap_or_default()
+        });
     }
 
     /// The agent a pane's session names, which is what the file is written
