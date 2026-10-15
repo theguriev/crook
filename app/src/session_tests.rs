@@ -1294,6 +1294,12 @@ fn an_agent_started_through_a_launcher_is_remembered_with_it_and_nothing_else_of
             &directory,
             Some("mise x --allow-read /srv/confined -- claude"),
         ),
+        // Another directory's agents, however env or npm was told it.
+        (&directory, Some("env -iC/srv/elsewhere claude")),
+        (
+            &directory,
+            Some("npx --workspace=packages/web @openai/codex"),
+        ),
     ]);
     Session::of(&strip, None)
         .save_blocking(&path)
@@ -1302,13 +1308,22 @@ fn an_agent_started_through_a_launcher_is_remembered_with_it_and_nothing_else_of
     let session = Session::load(&path);
     assert_eq!(
         written_agents(&session),
-        [Some("gemini"), Some("codex"), Some("claude"), None]
+        [
+            Some("gemini"),
+            Some("codex"),
+            Some("claude"),
+            None,
+            None,
+            None
+        ]
     );
     assert_eq!(
         written_launchers(&session),
         [
             Some("npx @google/gemini-cli"),
             Some("mise x node@22 -- codex"),
+            None,
+            None,
             None,
             None
         ]
@@ -1322,6 +1337,8 @@ fn an_agent_started_through_a_launcher_is_remembered_with_it_and_nothing_else_of
         "--quiet",
         "/srv/confined",
         "--allow-read",
+        "/srv/elsewhere",
+        "packages/web",
         "--model",
     ] {
         assert!(

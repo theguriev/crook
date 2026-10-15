@@ -2035,7 +2035,7 @@ from the moment it starts (Gemini CLI's `◇`, codex's folder with no spinner be
 a report only once the title has said running (until then it is `StatusSource::TitleAtStart`,
 which says an agent is there and nothing more), and nor is the idle a title's question ends in
 when what replaces it says nothing outright — codex's folder with its animations off, its spinner
-where the pane runs it through `npx` or `sh -c` — since the agent works on after an approval
+where the pane runs it through `sh -c` or an alias — since the agent works on after an approval
 (`StatusSource::TitleStoppedAsking`, until the end of its command makes it a `CommandEnded`,
 which counts) — `needs-input`, which a Gemini CLI or codex title says as well, `finished` or
 `exited`.
@@ -2983,10 +2983,13 @@ rebuilt from the line by `agent::launch_of` rather than copied, so a `VAR=value`
 usual place), `env`, `nohup` and the runner's own options never reach the file, and a hand edit
 that is not that shape comes back as the agent alone. Every assignment is dropped, a `PATH=` that
 found the agent too, so that agent is offered its bare line. A line that ran the agent in another
-directory (`env -C`, `mise x -C`) or some other way no kept line could repeat (`mise x` with a
-sandbox's `--deny-*` and `--allow-*`, with `-E`, or with an option `launch_of` does not know)
-names no agent at all, because any line it could be offered would resume another directory's
-conversation or run the agent unconfined. Aliases are not seen through: the shell reports the line as typed, and only
+directory (`env -C` in any spelling getopt takes, `mise x -C`, `npx --workspace`) or some other
+way no kept line could repeat (`mise x` with a sandbox's `--deny-*` and `--allow-*`, with `-E`,
+or with an option of `env`'s, a runner's or `mise`'s that `launch_of` does not know) is no
+launch, and the file keeps no agent for it, because any line it could be offered would resume
+another directory's conversation or run the agent unconfined. It is still the agent the pane
+runs, by `agent::program_of`, which is what its title is read with: codex's spinner counts only
+in a pane that runs codex. Aliases are not seen through: the shell reports the line as typed, and only
 that shell could expand it. The
 rule above still holds: nothing old is redrawn, and a new process starts only when a person
 presses Enter, or "Resume every agent" for every line nobody has touched.

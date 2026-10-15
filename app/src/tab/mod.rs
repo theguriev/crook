@@ -287,7 +287,7 @@ pub enum StatusSource {
     /// longer counted as waiting, but it is no report of idle: an approval
     /// is answered by the person and the agent gets on with the turn, and
     /// a title that says nothing more — codex's folder with its animations
-    /// off, its spinner where the pane runs it through `npx`, an alias or
+    /// off, its spinner where the pane runs it through `sh -c`, an alias or
     /// `ssh` — cannot tell that from a turn that ended. So `crook pane wait
     /// --until idle` is not answered by it, and `crook events --follow` is
     /// not told it, until the end of the agent's command turns it into a
@@ -609,6 +609,9 @@ impl AgentSession {
     ///
     /// What the session file remembers of a pane's process, and all it
     /// remembers but [`Self::launch`]'s launcher: see [`crate::session`].
+    /// So `None` for an agent run where its resume line could not follow
+    /// it — in another directory, in a sandbox — which the title is still
+    /// read for: see [`crate::agent::program_of`].
     pub fn agent(&self) -> Option<&str> {
         self.launch().map(|launch| launch.agent)
     }

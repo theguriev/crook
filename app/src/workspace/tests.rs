@@ -26950,7 +26950,7 @@ mod the_agent {
 
     #[test]
     fn why_this_status_says_when_the_title_stopped_asking_and_said_no_more() {
-        // Codex through `npx`, with no hooks: its question, then a spinner
+        // Codex through `sh -c`, with no hooks: its question, then a spinner
         // that is any build tool's in a pane that does not run codex. The
         // idle that ends the question is no report that the turn is over,
         // and the panel does not pass it off as one.
@@ -37427,6 +37427,43 @@ mod agent_titles {
             assert!(
                 matches!(source, StatusSource::Title(_)),
                 "{title}: {source:?}"
+            );
+        }
+    }
+
+    /// Codex run where no resume line could follow it — in another
+    /// directory, in a sandbox — is no launch the session file keeps, but it
+    /// is codex in the pane all the same, and its spinner says it is at
+    /// work.
+    #[test]
+    fn codex_run_where_no_resume_line_follows_is_codex_at_work_all_the_same() {
+        for command in [
+            "mise x -C /srv/elsewhere node@22 -- codex",
+            "mise x --deny-net -- codex",
+            "env -iC/srv/elsewhere codex",
+            "npx --workspace=web @openai/codex",
+        ] {
+            let mut harness = Harness::panel(1);
+            let pane = harness.active_pane_ids()[0];
+            report(
+                &mut harness,
+                TerminalUpdate::Running(pane, Some(command.to_owned())),
+            );
+            for (title, said) in [
+                ("proj", AgentStatus::Idle),
+                ("\u{280b} proj", AgentStatus::Running),
+                ("proj", AgentStatus::Idle),
+            ] {
+                titled(&mut harness, pane, title);
+                assert_eq!(
+                    status_and_source(&harness, pane).0,
+                    said,
+                    "{command}: {title}"
+                );
+            }
+            assert!(
+                matches!(status_and_source(&harness, pane).1, StatusSource::Title(_)),
+                "{command}"
             );
         }
     }

@@ -47,7 +47,10 @@
 //! the agent's conversation back. The program is read past what only runs
 //! it — `env`, `npx`, `mise x` — and [`launch_of`] keeps the package runner
 //! or version manager an agent was found through, because a resume line has
-//! to be run through it as well.
+//! to be run through it as well. The file keeps [`launch_of`]'s answer,
+//! which is none for a line that ran the agent in another directory or in
+//! some way a resume line would not repeat; [`program_of`] names that agent
+//! all the same, since it is the one the pane's title is read for.
 //!
 //! `--pull-request <url>` beside any status says which pull request the work
 //! is, and the row links to it. A flag on the report rather than a report of
@@ -850,19 +853,23 @@ wrapper script that runs `BINARY --agent running` first.",
 /// The program's file name: `claude "fix the login bug"` and
 /// `/opt/homebrew/bin/claude --model opus` are both `claude`. Nothing after
 /// it is ever handed on, because what comes after it is where a person
-/// types the prompt, and the answer to this is written into the session
-/// file. A word that names no agent this module knows — `cargo`, `vim`, a
-/// `claudette` — is `None`, so a file never holds the name of a program
-/// Crook would not know how to offer back.
+/// types the prompt. A word that names no agent this module knows —
+/// `cargo`, `vim`, a `claudette` — is `None`.
 ///
 /// The program is read past what only runs it — `env`, `npx`, `mise x` —
 /// the way [`launch_of`] reads it, so `npx @google/gemini-cli` is `gemini`.
+/// It is named for a line [`launch_of`] gives no launch for as well — one
+/// that ran it in another directory, `env -C`, or some way no line kept of
+/// it could repeat, `mise x --deny-all` — because it is what the pane is
+/// running now, and the pane's title is read by it: codex's spinner is
+/// codex's only in a pane that runs codex. What the session file keeps is
+/// [`launch_of`]'s answer, and never this one.
 ///
 /// The words as the shell reads them, quotes and all: `crook tab new` types
 /// every word of its command in single quotes, so a worker it opens runs
 /// `'codex' 'fix the flaky test'`, and that is `codex` as well.
 pub fn program_of(command: &str) -> Option<&'static str> {
-    launch_of(command).map(|launch| launch.agent)
+    read_line(command).map(|reading| reading.launch.agent)
 }
 
 /// How a command line starts a known agent: which one, and the words that
@@ -922,7 +929,10 @@ impl Launch {
 }
 
 /// How `command` starts a known agent, or `None` when it starts something
-/// else — see [`program_of`] for how the program is read.
+/// else or starts it in a way no line kept of it could start it again —
+/// see [`program_of`] for how the program is read. This is the answer the
+/// session file keeps, so a file never holds the name of a program Crook
+/// would not know how to offer back.
 ///
 /// Read past the words that only run the program. Some are dropped: `env`
 /// and its options, `NAME=value` assignments, `command`, `exec`, `time`,
@@ -945,19 +955,41 @@ impl Launch {
 /// program is ever kept.
 ///
 /// A line that ran the agent somewhere other than the pane's directory —
-/// `env -C`, `mise x -C` — or some way no line kept of it could run it
-/// again — `mise x` with a sandbox's `--deny-*` and `--allow-*`, with `-E`,
-/// or with an option this does not know — starts no known agent: every
-/// resume line it could be offered would resume another directory's
-/// conversation, or run the agent some other way (see `mise_tools`).
+/// `env -C`, `mise x -C`, `npx --workspace` — or some way no line kept of
+/// it could run it again — `mise x` with a sandbox's `--deny-*` and
+/// `--allow-*`, with `-E` — is no launch: every resume line it could be
+/// offered would resume another directory's conversation, or run the agent
+/// some other way. So is one given an option of `env`'s, a runner's or
+/// `mise`'s that this does not know, in any spelling — `env -iC/srv`, `env
+/// --chd=/srv` — since only the options known to change nothing are passed
+/// over (see `past_env_options`, `package_run` and `mise_exec`). The agent
+/// such a line runs is still [`program_of`]'s.
 ///
 /// An alias is not seen through. The shell reports the line as it was
 /// typed, and `cc` is a word only the shell that defined it can expand.
 /// Neither is a `PATH=`, above.
 pub fn launch_of(command: &str) -> Option<Launch> {
+    read_line(command)
+        .filter(|reading| reading.repeatable)
+        .map(|reading| reading.launch)
+}
+
+/// A command line's agent as [`launch_of`] and [`program_of`] read it.
+struct Reading {
+    /// The agent, and the launcher it was found through.
+    launch: Launch,
+    /// Whether the line ran it in the pane's directory, and in no way that
+    /// a line kept of it would leave out: whether it has a [`launch_of`].
+    repeatable: bool,
+}
+
+/// How `command` starts a known agent, or `None` when it starts something
+/// else: the reading behind [`launch_of`] and [`program_of`].
+fn read_line(command: &str) -> Option<Reading> {
     let words = words(command);
     let mut rest = words.as_slice();
     let mut kept: Vec<&str> = Vec::new();
+    let mut repeatable = true;
     loop {
         let (word, after) = rest.split_first()?;
         if is_assignment(word) {
@@ -968,17 +1000,9 @@ pub fn launch_of(command: &str) -> Option<Launch> {
         let second = after.first().map(String::as_str);
         rest = match (program, second) {
             ("env", _) => {
-                let program = past_options(after, &["-u", "--unset", "-C", "--chdir", "-S"]);
-                let options = &after[..after.len() - program.len()];
-                // The agent ran in a directory the pane is not in, and its
-                // conversation is that directory's.
-                if options
-                    .iter()
-                    .any(|option| option.starts_with("-C") || option.starts_with("--chdir"))
-                {
-                    return None;
-                }
-                program
+                let (command, unchanged) = past_env_options(after);
+                repeatable &= unchanged;
+                command
             }
             // Says what the name is, and runs nothing.
             ("command", Some("-v" | "-V")) => return None,
@@ -987,14 +1011,19 @@ pub fn launch_of(command: &str) -> Option<Launch> {
             ("time", _) => past_options(after, &["-f", "--format", "-o", "--output"]),
             ("nice", _) => past_options(after, &["-n", "--adjustment"]),
             ("mise", Some(verb @ ("x" | "exec"))) => {
-                let (tools, command) = mise_tools(&after[1..])?;
-                // A tool that would need quoting leaves `mise` out of the
-                // launcher altogether: the launcher is typed back as it is,
-                // into whatever shell the pane has.
-                if tools.iter().all(|tool| plain(tool)) {
-                    kept.extend(["mise", verb]);
-                    kept.extend(tools);
-                    kept.push("--");
+                let (tools, command) = mise_exec(&after[1..])?;
+                match tools {
+                    // A tool that would need quoting leaves `mise` out of
+                    // the launcher altogether: the launcher is typed back
+                    // as it is, into whatever shell the pane has.
+                    Some(tools) => {
+                        if tools.iter().all(|tool| plain(tool)) {
+                            kept.extend(["mise", verb]);
+                            kept.extend(tools);
+                            kept.push("--");
+                        }
+                    }
+                    None => repeatable = false,
                 }
                 command
             }
@@ -1002,14 +1031,16 @@ pub fn launch_of(command: &str) -> Option<Launch> {
                 kept.extend(["asdf", "exec"]);
                 &after[1..]
             }
-            ("npx" | "bunx" | "pnpx", _) => return package_run(kept, &[program], after),
+            ("npx" | "bunx" | "pnpx", _) => {
+                return package_run(kept, repeatable, &[program], after);
+            }
             ("bun", Some(verb @ "x")) | ("pnpm" | "yarn", Some(verb @ "dlx")) => {
-                return package_run(kept, &[program, verb], &after[1..]);
+                return package_run(kept, repeatable, &[program, verb], &after[1..]);
             }
             // The one runner that reads the options after the package as
             // its own, unless a `--` comes first.
             ("npm", Some(verb @ ("exec" | "x"))) => {
-                return package_run(kept, &[program, verb, "--"], &after[1..]);
+                return package_run(kept, repeatable, &[program, verb, "--"], &after[1..]);
             }
             _ => {
                 let agent = AGENTS.iter().find(|agent| agent.name == program)?;
@@ -1017,9 +1048,12 @@ pub fn launch_of(command: &str) -> Option<Launch> {
                     kept.push(agent.name);
                     kept.join(" ")
                 });
-                return Some(Launch {
-                    agent: agent.name,
-                    launcher,
+                return Some(Reading {
+                    launch: Launch {
+                        agent: agent.name,
+                        launcher,
+                    },
+                    repeatable,
                 });
             }
         };
@@ -1034,11 +1068,36 @@ pub fn launch_of(command: &str) -> Option<Launch> {
 /// package as it was asked for — `@google/gemini-cli@0.9.0` stays that
 /// version — unless the request needs quoting, when it is the package by its
 /// name alone.
+///
+/// `repeatable` is what the words before the runner left the line. The
+/// runner's options passed over are the ones that say whether it asks
+/// before an install, how much it prints, whether it goes to the network
+/// for the package and which registry it fetches it from — none of which
+/// changes what runs or where. Any other leaves the line no launch, though
+/// it still names its agent: npm's `--workspace` and `--workspaces` run the
+/// package in a workspace's directory, which the pane is not in, and an
+/// option this does not know may do the same. Such an option is taken to
+/// have no value but one after its `=`, so a value in the word after it is
+/// taken for the package, which is no agent's.
 fn package_run<'w>(
     mut kept: Vec<&'w str>,
+    mut repeatable: bool,
     runner: &[&'w str],
     words: &'w [String],
-) -> Option<Launch> {
+) -> Option<Reading> {
+    /// The runners' options that change nothing about what they run.
+    const PASSED_OVER: &[&str] = &[
+        "-y",
+        "--yes",
+        "--no",
+        "-q",
+        "--quiet",
+        "--silent",
+        "--verbose",
+        "--prefer-offline",
+        "--prefer-online",
+        "--offline",
+    ];
     let mut asked = None;
     let mut rest = words;
     let target = loop {
@@ -1053,8 +1112,12 @@ fn package_run<'w>(
             let (package, after) = rest.split_first()?;
             asked = Some(package.as_str());
             rest = after;
+        } else if word == "--registry" {
+            rest = rest.get(1..)?;
         } else if !word.starts_with('-') {
             break word;
+        } else if !(PASSED_OVER.contains(&word.as_str()) || word.starts_with("--registry=")) {
+            repeatable = false;
         }
     };
     let (agent, asked) = match asked {
@@ -1071,9 +1134,12 @@ fn package_run<'w>(
     };
     kept.extend(runner);
     kept.push(if plain(asked) { asked } else { agent.package? });
-    Some(Launch {
-        agent: agent.name,
-        launcher: Some(kept.join(" ")),
+    Some(Reading {
+        launch: Launch {
+            agent: agent.name,
+            launcher: Some(kept.join(" ")),
+        },
+        repeatable,
     })
 }
 
@@ -1091,19 +1157,21 @@ fn package_name(asked: &str) -> &str {
 
 /// The tools `mise x` was given and the command after its `--`, or `None`
 /// for a `mise x` with no `--`, which runs no command of its own, and for
-/// one given an option that changes where or how that command runs.
+/// one given `-c`, a command of its own, which `mise` refuses beside a
+/// `--`.
 ///
 /// Only the tools are kept. The options passed over are the ones that say
 /// how much `mise` prints, whether it asks before an install and how many
 /// it runs at once, and how it prepares one — none of which changes what
-/// the command is or where it runs. Any other is the line of no agent:
-/// `-C` runs it in a directory the pane is not in, whose conversation a
-/// resume line in the pane's would never reach; `-E` loads another
-/// environment's config; a sandbox's `--deny-*` and `--allow-*` confine it,
-/// and a resume line without them would not; `-c` is a command of its own.
-/// So is an option this does not know, since its value would otherwise be
-/// taken for a tool and written into the file.
-fn mise_tools(words: &[String]) -> Option<(Vec<&str>, &[String])> {
+/// the command is or where it runs. Any other leaves no tools, the line of
+/// no launch: `-C` runs the command in a directory the pane is not in,
+/// whose conversation a resume line in the pane's would never reach; `-E`
+/// loads another environment's config; a sandbox's `--deny-*` and
+/// `--allow-*` confine it, and a resume line without them would not. So
+/// does any of them in a cluster, `-qC/srv`, and an option this does not
+/// know, since its value would otherwise be taken for a tool and written
+/// into the file.
+fn mise_exec(words: &[String]) -> Option<(Option<Vec<&str>>, &[String])> {
     /// `mise x`'s options that change nothing about the command it runs.
     const PASSED_OVER: &[&str] = &[
         "-q",
@@ -1117,22 +1185,94 @@ fn mise_tools(words: &[String]) -> Option<(Vec<&str>, &[String])> {
         "--raw",
         "--locked",
     ];
+    /// Its short options that take a value, in the rest of their word or
+    /// the next.
+    const VALUED: &str = "CEcj";
     let end = words.iter().position(|word| word == "--")?;
-    let mut tools = Vec::new();
+    let mut tools = Some(Vec::new());
     let mut options = words[..end].iter().map(String::as_str);
     while let Some(word) = options.next() {
+        let short = word
+            .strip_prefix('-')
+            .filter(|letters| !letters.starts_with('-'));
+        if word == "--command"
+            || word.starts_with("--command=")
+            || short.and_then(|letters| letters.chars().find(|letter| VALUED.contains(*letter)))
+                == Some('c')
+        {
+            return None;
+        }
         if word == "-j" || word == "--jobs" {
             options.next()?;
         } else if !word.starts_with('-') {
-            tools.push(word);
+            if let Some(tools) = &mut tools {
+                tools.push(word);
+            }
         } else if !(PASSED_OVER.contains(&word)
             || word.starts_with("--jobs=")
             || (word.len() > 1 && word[1..].chars().all(|letter| letter == 'v')))
         {
-            return None;
+            tools = None;
         }
     }
     Some((tools, &words[end + 1..]))
+}
+
+/// `words` past `env`'s own options, and whether every one of them changes
+/// nothing about where or how the command after them runs.
+///
+/// Those are `-i`, `-0`, `-v` and `-u NAME`, alone or in a cluster, a bare
+/// `-`, and `--ignore-environment`, `--null`, `--debug` and `--unset`,
+/// spelled out. Anything else does, or may: `-C` and `--chdir` run the
+/// command in another directory, in every spelling getopt takes — `-iC/srv`,
+/// `--chd=/srv` — and `-S`, `-a` and BSD's `-P` change what runs or where
+/// it is found. The words those take a value from are passed over with
+/// them, so the program after them is still the one read.
+fn past_env_options(words: &[String]) -> (&[String], bool) {
+    // The options that take a value in the next word when they end theirs:
+    // short, and long by any prefix of the name, which getopt takes for the
+    // whole of it when no other option shares the prefix — and none does
+    // with these.
+    const VALUED_SHORT: &str = "uCSaP";
+    const VALUED_LONG: &[&str] = &["unset", "chdir", "split-string", "argv0"];
+    let mut rest = words;
+    let mut unchanged = true;
+    while let Some((word, after)) = rest.split_first() {
+        if word == "--" {
+            return (after, unchanged);
+        }
+        let Some(option) = word.strip_prefix('-') else {
+            break;
+        };
+        rest = after;
+        let takes_next = match option.strip_prefix('-') {
+            Some(long) => {
+                let (name, value) = match long.split_once('=') {
+                    Some((name, value)) => (name, Some(value)),
+                    None => (long, None),
+                };
+                unchanged &= match name {
+                    "ignore-environment" | "null" | "debug" => value.is_none(),
+                    "unset" => true,
+                    _ => false,
+                };
+                value.is_none()
+                    && !name.is_empty()
+                    && VALUED_LONG.iter().any(|valued| valued.starts_with(name))
+            }
+            None => {
+                let valued = option.find(|letter| VALUED_SHORT.contains(letter));
+                let flags = &option[..valued.unwrap_or(option.len())];
+                unchanged &= flags.chars().all(|letter| "i0v".contains(letter))
+                    && valued.is_none_or(|at| option[at..].starts_with('u'));
+                valued.is_some_and(|at| at + 1 == option.len())
+            }
+        };
+        if takes_next {
+            rest = rest.get(1..).unwrap_or_default();
+        }
+    }
+    (rest, unchanged)
 }
 
 /// `words` past a wrapper's own options: every word up to the first that
@@ -2592,6 +2732,12 @@ its `hooks` should be\n{}",
             "mise x claude",
             "mise install claude",
             "mise x node@22 -- npm test",
+            // A command of mise's own, which it refuses beside a `--`, and
+            // a `-j` with no number.
+            "mise x -c true -- claude",
+            "mise x -qc true -- claude",
+            "mise x --command=true -- claude",
+            "mise x -j -- claude",
             "asdf install nodejs",
             "'' claude",
         ] {
@@ -2604,32 +2750,61 @@ its `hooks` should be\n{}",
         // Every line a restore could offer for these resumes another
         // directory's conversation, runs the agent unconfined, or carries a
         // value of an option as a tool into the file: better no line.
-        for command in [
-            // A directory the pane is not in.
-            "env -C /work/repo claude",
-            "env -C/work/repo claude",
-            "env --chdir /work/repo claude",
-            "env --chdir=/work/repo claude",
-            "mise x -C /work/repo node@22 -- codex",
-            "mise x --cd /work/repo -- claude",
-            "mise x --cd=/work/repo -- claude",
+        for (command, agent) in [
+            // A directory the pane is not in, in every spelling env's
+            // getopt takes for one.
+            ("env -C /work/repo claude", "claude"),
+            ("env -C/work/repo claude", "claude"),
+            ("env --chdir /work/repo claude", "claude"),
+            ("env --chdir=/work/repo claude", "claude"),
+            ("env -iC/work/repo claude", "claude"),
+            ("env -vC /work/repo claude", "claude"),
+            ("env -i -u TERM -C /work/repo claude", "claude"),
+            ("env --ch=/work/repo claude", "claude"),
+            ("env --chd /work/repo claude", "claude"),
+            ("mise x -C /work/repo node@22 -- codex", "codex"),
+            ("mise x -qC/work/repo -- codex", "codex"),
+            ("mise x --cd /work/repo -- claude", "claude"),
+            ("mise x --cd=/work/repo -- claude", "claude"),
+            // A workspace's directory, which npm runs a package in.
+            (
+                "npx --workspace=packages/app @anthropic-ai/claude-code",
+                "claude",
+            ),
+            ("npx --workspaces @google/gemini-cli", "gemini"),
+            ("npx -ws @google/gemini-cli", "gemini"),
+            ("npx --ws @openai/codex", "codex"),
+            ("npm exec --workspace=web -- @google/gemini-cli", "gemini"),
+            ("npx -y --workspace=web @openai/codex", "codex"),
+            ("env FOO=1 npx --workspace=web @openai/codex", "codex"),
             // A sandbox a resume line would leave behind.
-            "mise x --allow-read /srv node@22 -- claude",
-            "mise x --deny-all --allow-read /home/me/project --allow-net api.anthropic.com -- claude",
-            "mise x --allow-env ANTHROPIC_API_KEY -- codex",
-            "mise x --allow-write=/tmp -- claude",
-            "mise x --deny-net -- claude",
-            // Another environment's config, and a command of mise's own.
-            "mise x -E staging node@22 -- claude",
-            "mise x --env=staging -- claude",
-            "mise x -c true -- claude",
+            ("mise x --allow-read /srv node@22 -- claude", "claude"),
+            (
+                "mise x --deny-all --allow-read /home/me/project --allow-net api.anthropic.com -- claude",
+                "claude",
+            ),
+            ("mise x --allow-env ANTHROPIC_API_KEY -- codex", "codex"),
+            ("mise x --allow-write=/tmp -- claude", "claude"),
+            ("mise x --deny-net -- claude", "claude"),
+            // Another environment's config, a runtime of the runner's
+            // choosing, and what env runs or finds some other way.
+            ("mise x -E staging node@22 -- claude", "claude"),
+            ("mise x --env=staging -- claude", "claude"),
+            ("bunx --bun @google/gemini-cli", "gemini"),
+            ("env -a agent claude", "claude"),
+            ("env -P /opt/agents claude", "claude"),
             // Options this does not know, with or without a value.
-            "mise x --output json -- claude",
-            "mise x --some-new-flag node@22 -- claude",
-            "mise x -j -- claude",
-            "mise x - -- claude",
+            ("mise x --some-new-flag node@22 -- claude", "claude"),
+            ("mise x - -- claude", "claude"),
+            ("npx --some-new-flag @anthropic-ai/claude-code", "claude"),
+            ("pnpm dlx --dir=packages/app @openai/codex", "codex"),
+            ("bunx --cwd=packages/app @openai/codex", "codex"),
+            ("env --block-signal claude", "claude"),
         ] {
             assert_eq!(None, launch_of(command), "{command:?}");
+            // The agent is running all the same, and its title says what
+            // it is doing: codex's spinner is read only where codex is.
+            assert_eq!(Some(agent), program_of(command), "{command:?}");
         }
     }
 
@@ -2668,6 +2843,11 @@ its `hooks` should be\n{}",
                 "npx --registry=https://me:token@npm.example @google/gemini-cli",
                 "npx @google/gemini-cli",
             ),
+            (
+                "npx --prefer-offline --registry https://npm.example --no @google/gemini-cli",
+                "npx @google/gemini-cli",
+            ),
+            ("yarn dlx -q opencode-ai", "yarn dlx opencode-ai"),
             // An assignment is where an API key goes.
             (
                 "GEMINI_API_KEY=secret npx @google/gemini-cli",
@@ -2735,6 +2915,7 @@ its `hooks` should be\n{}",
             "claude",
             "/opt/homebrew/bin/claude --model opus",
             "env ANTHROPIC_API_KEY=secret claude",
+            "env -iv -uTERM --unset LANG --debug - claude",
             "nohup nice -n 5 claude",
             "exec claude",
         ] {
