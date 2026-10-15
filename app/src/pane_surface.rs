@@ -70,7 +70,7 @@
 
 use std::time::{Duration, Instant};
 
-use crook_terminal::{BlockState, Snapshot};
+use crook_terminal::{BlockState, LiveBlock, Snapshot};
 
 /// How long a command runs before the composer goes away and its block takes
 /// the space.
@@ -201,11 +201,14 @@ pub fn is_long_running(snapshot: &Snapshot, now: Instant) -> bool {
 /// What a repaint has to be scheduled after: a `sleep 5` submitted into a
 /// quiet shell produces no further output, so nothing else would ever come
 /// along to draw the frame in which the composer goes away.
-pub fn until_long_running(snapshot: &Snapshot, now: Instant) -> Option<Duration> {
-    if !snapshot.live_block.state.is_running() {
+///
+/// Of the open block alone rather than of a snapshot, because the model asks
+/// it of every publication, and a pane off screen is published without one.
+pub fn until_long_running(live_block: &LiveBlock, now: Instant) -> Option<Duration> {
+    if !live_block.state.is_running() {
         return None;
     }
-    let started = snapshot.live_block.started_at?;
+    let started = live_block.started_at?;
     // Zero would say "redraw immediately" for a block that has *already*
     // crossed the threshold, which is a repaint loop rather than a schedule.
     LONG_RUNNING

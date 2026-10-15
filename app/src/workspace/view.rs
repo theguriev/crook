@@ -3767,9 +3767,7 @@ impl Workspace {
                 .map(Matches::over_grid)
                 .unwrap_or_default();
         }
-        let (Some(history), Some((_, snapshot))) =
-            (self.terminal_blocks(pane, app), self.terminal(pane, app))
-        else {
+        let Some((snapshot, history)) = self.terminal_with_blocks(pane, app) else {
             return Matches::default();
         };
         find.matches(&history, &snapshot)
@@ -4150,9 +4148,7 @@ impl Workspace {
             return;
         };
         let block = start.block;
-        let (Some(history), Some((_, snapshot))) =
-            (self.terminal_blocks(pane, app), self.terminal(pane, app))
-        else {
+        let Some((snapshot, history)) = self.terminal_with_blocks(pane, app) else {
             return;
         };
         let index = match history.iter().position(|finished| finished.id == block) {
@@ -7911,6 +7907,14 @@ impl Workspace {
         self.block_menu.is_open()
     }
 
+    /// How many snapshots of a pane's grid have been built, for a test
+    /// counting the ones a pane nobody can see does not build. `None` for a
+    /// pane with no shell.
+    #[cfg(test)]
+    pub(super) fn snapshots_built(&self, pane: PaneId, app: &AppContext) -> Option<u64> {
+        Some(self.terminals.as_ref(app).handle(pane)?.snapshots_built())
+    }
+
     /// The commands that have finished in a pane, oldest first.
     pub(crate) fn terminal_blocks(
         &self,
@@ -7918,6 +7922,23 @@ impl Workspace {
         app: &AppContext,
     ) -> Option<Arc<BlockHistory>> {
         self.terminals.as_ref(app).blocks(pane)
+    }
+
+    /// The grid a pane is showing and the commands that have finished in it,
+    /// for a caller that needs the two to agree: see
+    /// [`TerminalHandle::snapshot_with_blocks`] for why they are read in that
+    /// order.
+    pub(crate) fn terminal_with_blocks(
+        &self,
+        pane: PaneId,
+        app: &AppContext,
+    ) -> Option<(Arc<Snapshot>, Arc<BlockHistory>)> {
+        Some(
+            self.terminals
+                .as_ref(app)
+                .handle(pane)?
+                .snapshot_with_blocks(),
+        )
     }
 
     /// The system clipboard every field copies to and pastes from.
@@ -8122,8 +8143,7 @@ impl Workspace {
         to: &str,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
-        let model = self.terminals.as_ref(ctx);
-        let (Some(blocks), Some(snapshot)) = (model.blocks(pane), model.snapshot(pane)) else {
+        let Some((snapshot, blocks)) = self.terminal_with_blocks(pane, ctx) else {
             return false;
         };
         let cells = if Self::grid_surface(&snapshot) {
@@ -9296,7 +9316,16 @@ impl Workspace {
                 }
                 // A full-screen program starting or ending under a find bar
                 // takes the bar down, and the keyboard back to the composer.
-                if let Some((_, snapshot)) = self.terminal(*pane, ctx) {
+                // Only under an open one, over a pane on screen: the snapshot
+                // of a pane off screen is built when it is asked for, and
+                // asked for here by every repaint, it would be built for every
+                // publication again, on this thread. A bar stays open on a
+                // tab switched away from, and the frame that brings its pane
+                // back asks the same question of the snapshot it draws.
+                if self.pane_is_on_screen(*pane)
+                    && self.find(*pane).is_some_and(PaneFind::is_open)
+                    && let Some((_, snapshot)) = self.terminal(*pane, ctx)
+                {
                     self.close_find_over_another_screen(*pane, &snapshot);
                 }
                 // A grid's find answers the grid as it was; what it printed
@@ -9544,6 +9573,9 @@ impl Workspace {
     /// follows, so there is no path — a tab switch, a split, a zoom, a close,
     /// a restore, a plugin switched off under the section it was showing —
     /// that can leave it saying a pane is hidden while the frame draws it.
+    /// The render asks it too, for every pane, and hands the answer to the
+    /// model, whose readers build no snapshot for a pane it says is hidden:
+    /// see [`TerminalModel::draw_only`].
     pub(super) fn pane_is_on_screen(&self, pane: PaneId) -> bool {
         self.showing_section().is_none()
             && self
@@ -12110,6 +12142,17 @@ impl View for Workspace {
     }
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
+        // Which panes this frame draws, said to the shells behind them before
+        // anything below asks one for its grid: a pane off screen stops
+        // building snapshots nothing draws, and one coming back has its
+        // snapshot built by this frame, from what it printed while it was
+        // away. Said here because the render is where the answer is — see
+        // `pane_is_on_screen` — so no tab switch, split, zoom or section can
+        // move a pane without the frame that shows the move saying so.
+        self.terminals
+            .as_ref(app)
+            .draw_only(|pane| self.pane_is_on_screen(pane));
+
         // The panel is the full height of the window and the header starts
         // beside it, not above it. That is what puts the panel's first row in
         // the window's top-left corner — where a client-decorated macOS window

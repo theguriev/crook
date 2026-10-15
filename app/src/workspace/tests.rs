@@ -1542,6 +1542,16 @@ impl Harness {
         });
     }
 
+    /// How many snapshots of a pane's grid have been built. Asked without
+    /// building one, which asking for its text would.
+    fn snapshots_built(&self, pane: PaneId) -> u64 {
+        self.workspace
+            .read(&self.app, |workspace, app| {
+                workspace.snapshots_built(pane, app)
+            })
+            .expect("the pane has a shell")
+    }
+
     /// What a pane's shell is showing.
     fn terminal_text(&self, pane: PaneId) -> String {
         self.workspace
@@ -25976,6 +25986,129 @@ mod the_frame_budget {
             pane_shows(&scene, "10000"),
             "the tab came back without the last thing it printed: {:?}",
             frame_text(&scene)
+        );
+    }
+
+    #[test]
+    fn a_tab_nobody_can_see_builds_no_snapshot_until_the_frame_that_shows_it() {
+        // A snapshot is every cell of the grid resolved and compared, and a
+        // tab printing behind the active one built one per publication, up to
+        // the repaint ceiling, for no frame at all. The first frame back
+        // builds it, from what the shell printed meanwhile. Waited on through
+        // the title written after the last line, which reaches the row with
+        // no snapshot built: reading the grid's text to wait for the line
+        // would build the very snapshots being counted.
+        let Some((mut harness, hidden)) = a_shell_behind_the_active_tab() else {
+            return;
+        };
+        hold(&mut harness, hidden, TITLED);
+        // A render after the shells opened, which is what tells the model
+        // the tab behind is not drawn.
+        harness.render_again();
+        let built = harness.snapshots_built(hidden);
+
+        harness.type_into(hidden, "\n");
+        harness.wait_drawing("the row never showed the title", |harness| {
+            harness
+                .presenter
+                .scene()
+                .is_some_and(|scene| strip_text(scene).contains("crook-behind"))
+        });
+        harness.settle_drawing(QUIET);
+        assert_eq!(
+            harness.snapshots_built(hidden) - built,
+            0,
+            "snapshots were built of a grid nobody can see"
+        );
+
+        // With the window behind another one, as when a script switches
+        // tabs over the control socket while a person is elsewhere: a switch
+        // in a focused window sends the pane a focus report, which builds a
+        // snapshot on its way through the shell's lock, and the frame would
+        // find one ready instead of building its own.
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+        harness.dispatch_action(TabAction::FocusPane(hidden));
+        assert_eq!(
+            harness.snapshots_built(hidden) - built,
+            0,
+            "something before the frame built the snapshot it draws"
+        );
+        let scene = harness.frame();
+        assert!(
+            pane_shows(&scene, "10000"),
+            "the tab came back without the last thing it printed: {:?}",
+            frame_text(&scene)
+        );
+        assert_eq!(
+            harness.snapshots_built(hidden) - built,
+            1,
+            "the frame that brought the tab back did not build what it drew"
+        );
+    }
+
+    #[test]
+    fn a_find_bar_left_open_behind_the_active_tab_builds_no_snapshot() {
+        // A bar stays open over a pane whose tab is switched away from, so
+        // that coming back finds the search where it was left. The repaint
+        // asks whether a full-screen program took the screen from under it,
+        // and asked of the snapshot of a pane nobody can see, that built one
+        // per publication, on the thread that draws. The frame that brings
+        // the pane back asks the same of the snapshot it draws.
+        let Some((mut harness, hidden)) = a_shell_behind_the_active_tab() else {
+            return;
+        };
+        let shown = harness.panes_of(harness.active_id())[0];
+        harness.dispatch_action(TabAction::FocusPane(hidden));
+        harness.dispatch_workspace_action(WorkspaceAction::Find {
+            pane: hidden,
+            action: crate::workspace::action::FindAction::Open,
+        });
+        harness.frame();
+        harness.dispatch_action(TabAction::FocusPane(shown));
+        let find_is_open = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .find(hidden)
+                    .is_some_and(crate::pane_find::PaneFind::is_open)
+            })
+        };
+        assert!(find_is_open(&harness), "the bar went with the tab switch");
+
+        hold(&mut harness, hidden, TITLED);
+        harness.render_again();
+        let built = harness.snapshots_built(hidden);
+        harness.type_into(hidden, "\n");
+        harness.wait_drawing("the row never showed the title", |harness| {
+            harness
+                .presenter
+                .scene()
+                .is_some_and(|scene| strip_text(scene).contains("crook-behind"))
+        });
+        harness.settle_drawing(QUIET);
+        assert_eq!(
+            harness.snapshots_built(hidden) - built,
+            0,
+            "snapshots were built of a grid nobody can see, for the bar over it"
+        );
+
+        // A full-screen program taking the screen while nobody looks: the
+        // bar is about the screen it was opened over, and the frame that
+        // shows the pane again takes it down.
+        harness.type_into(hidden, "\n");
+        harness.type_into(hidden, "printf '\\033[?1049h'; read line\n");
+        harness.wait_drawing("the pane never went to the alternate screen", |harness| {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace
+                    .terminal(hidden, app)
+                    .is_some_and(|(_, snapshot)| snapshot.alt_screen)
+            })
+        });
+        harness.settle_drawing(QUIET);
+        harness.dispatch_action(TabAction::FocusPane(hidden));
+        harness.frame();
+        assert!(
+            !find_is_open(&harness),
+            "the bar stayed open over a screen it was not opened over"
         );
     }
 

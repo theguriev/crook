@@ -76,10 +76,11 @@ pub fn read(
     let number = asked.pane;
     let no_blocks = |why: &str| Refusal::new(code::NO_BLOCKS, format!("pane {number} {why}"));
 
-    let (Some(history), Some((_, snapshot))) = (
-        workspace.terminal_blocks(pane, app),
-        workspace.terminal(pane, app),
-    ) else {
+    // Together, so that `running` and the list are of the same moment: a
+    // worker behind the active tab has its picture built when it is asked
+    // for, and a list read before it could be missing the command it shows
+    // as ended.
+    let Some((snapshot, history)) = workspace.terminal_with_blocks(pane, app) else {
         return Err(no_blocks(
             "has no shell running, and so no finished command",
         ));

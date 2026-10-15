@@ -310,7 +310,7 @@ fn session() -> Option<Arc<Shared>> {
     let snapshot = terminal.snapshot();
     Some(Arc::new(Shared {
         terminal: Mutex::new(terminal),
-        latest: Mutex::new(snapshot),
+        latest: Mutex::new(Latest::new(snapshot)),
         blocks: Mutex::new(Arc::default()),
         unpublished: Mutex::new(Vec::new()),
         events: Mutex::new(Vec::new()),
@@ -320,6 +320,8 @@ fn session() -> Option<Arc<Shared>> {
         scroll_remainder: AtomicU32::new(0.0f32.to_bits()),
         publish: Mutex::new(PublishState::new()),
         drives: std::sync::atomic::AtomicUsize::new(0),
+        on_screen: AtomicBool::new(true),
+        built: AtomicU64::new(0),
     }))
 }
 
@@ -551,6 +553,168 @@ fn a_finished_command_is_handed_over_only_once_its_block_can_be_read() {
     assert_ne!(BlockState::Executing, shared.snapshot().live_block.state);
 }
 
+/// A pty that hands out `bytes` in the kilobyte reads a real one does, and
+/// then closes.
+struct Scripted {
+    bytes: Vec<u8>,
+    at: usize,
+}
+
+impl io::Read for Scripted {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let rest = &self.bytes[self.at..];
+        let read = rest.len().min(1024).min(buffer.len());
+        buffer[..read].copy_from_slice(&rest[..read]);
+        self.at += read;
+        Ok(read)
+    }
+}
+
+#[test]
+fn a_pane_nobody_draws_builds_no_snapshot_however_much_it_prints() {
+    // A snapshot is every cell of the viewport resolved through the palette
+    // and compared with the last one, and a pane behind the active tab built
+    // one per publication, up to the repaint ceiling, that no frame drew.
+    // What the main thread does need of it still goes over with every
+    // publication: the block list, the open block, and the events.
+    let Some(shared) = session() else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    shared.on_screen.store(false, Ordering::Relaxed);
+    let handle = TerminalHandle(shared.clone());
+    let built = handle.snapshots_built();
+
+    let mut bytes = b"\x1b]133;A\x07$ \x1b]133;B\x07make\r\n\x1b]133;C\x07".to_vec();
+    let mut line = 0;
+    while bytes.len() < 1024 * 1024 {
+        bytes.extend_from_slice(format!("line {line} of a long build log\r\n").as_bytes());
+        line += 1;
+    }
+    bytes.extend_from_slice(b"\x07\x1b]133;D;2\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    let flusher = Arc::new(Flusher::default());
+    read_loop(
+        &Arc::downgrade(&shared),
+        &flusher,
+        Scripted { bytes, at: 0 },
+    );
+
+    assert!(
+        shared.publish_state().count > 0,
+        "nothing was published, so nothing was tested"
+    );
+    assert_eq!(
+        handle.snapshots_built(),
+        built,
+        "snapshots were built of a grid nothing draws"
+    );
+    let events = shared.take_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, TerminalEvent::Bell)),
+        "the bell was not handed over: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, TerminalEvent::CommandFinished { .. })),
+        "the command's end was not handed over: {events:?}"
+    );
+    let blocks = shared.blocks();
+    let [block] = &blocks.iter().collect::<Vec<_>>()[..] else {
+        panic!("one finished block, published with the end");
+    };
+    assert_eq!(Some(2), block.exit);
+    assert_eq!(
+        BlockState::AtPrompt,
+        shared.glance().0.state,
+        "the open block was not published"
+    );
+}
+
+#[test]
+fn a_pane_nobody_draws_shows_what_it_printed_the_moment_it_is_asked() {
+    // Find, copy, the control socket and the frame that brings the pane back
+    // all ask the handle, and a publication off screen built nothing for
+    // them: the answer is built now, from what the shell has printed.
+    let Some(shared) = session() else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    shared.on_screen.store(false, Ordering::Relaxed);
+    let handle = TerminalHandle(shared.clone());
+    shared.feed(b"printed where nobody could see it");
+    shared.publish();
+    let built = handle.snapshots_built();
+
+    let snapshot = handle.snapshot();
+    assert!(
+        snapshot
+            .text()
+            .contains("printed where nobody could see it"),
+        "the pane showed what it showed before: {:?}",
+        snapshot.text()
+    );
+    assert_eq!(handle.snapshots_built(), built + 1);
+    assert!(
+        Arc::ptr_eq(&snapshot, &handle.snapshot()),
+        "asked again with nothing printed, the same snapshot comes back"
+    );
+    assert_eq!(handle.snapshots_built(), built + 1, "and nothing is built");
+}
+
+#[test]
+fn a_snapshot_built_when_asked_comes_with_the_blocks_it_shows() {
+    // Built from what the emulator holds when it is asked, which can be
+    // newer than the last publication: a command that ended since is drawn
+    // with the shell back at its prompt, so its block has to be in the list
+    // beside it, or the command is in neither and gone from the pane until
+    // the shell next prints.
+    let Some(shared) = session() else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    shared.on_screen.store(false, Ordering::Relaxed);
+    shared.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07work\r\n\x1b]133;C\x07the answer\r\n");
+    shared.publish();
+    shared.feed(b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+
+    let snapshot = shared.snapshot();
+    assert_eq!(BlockState::AtPrompt, snapshot.live_block.state);
+    assert_eq!(
+        shared.blocks().len(),
+        1,
+        "the snapshot was drawn at the prompt beside a list without the command"
+    );
+}
+
+#[test]
+fn a_pane_nobody_draws_is_read_with_the_blocks_its_picture_shows() {
+    // `crook pane blocks` says whether a command is running from the picture
+    // and which have ended from the list, and a worker behind the active tab
+    // has its picture built when it is asked for: newer than the list its
+    // last publication left, by whatever ended since. A list read before the
+    // picture would have the command in neither, and answer for a worker that
+    // had just finished that it is at rest with nothing run.
+    let Some(shared) = session() else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    shared.on_screen.store(false, Ordering::Relaxed);
+    let handle = TerminalHandle(shared.clone());
+    shared.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07work\r\n\x1b]133;C\x07the answer\r\n");
+    shared.publish();
+    shared.feed(b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+
+    let (snapshot, blocks) = handle.snapshot_with_blocks();
+    assert_eq!(BlockState::AtPrompt, snapshot.live_block.state);
+    let [block] = &blocks.iter().collect::<Vec<_>>()[..] else {
+        panic!("the command that ended is in neither the picture nor the list");
+    };
+    assert_eq!(Some(0), block.exit);
+}
+
 /// Every update a model handed on, in the order it handed them.
 struct Heard(Vec<TerminalUpdate>);
 
@@ -568,6 +732,8 @@ struct Batches {
     _model: ModelHandle<TerminalModel>,
     heard: ModelHandle<Heard>,
     shared: Arc<Shared>,
+    /// The pane, as what the workspace hears names it.
+    pane: PaneId,
 }
 
 impl Batches {
@@ -575,6 +741,7 @@ impl Batches {
     /// decides what its first prompt is. `None` where no pty can be opened.
     fn new(marks: bool) -> Option<Self> {
         let shared = session()?;
+        let (live_block, moved) = shared.glance();
         let (queue, mut app) = app();
         let model = app.update(|ctx| ctx.add_model(TerminalModel::new));
         let heard = app.update(|ctx| {
@@ -601,7 +768,8 @@ impl Batches {
                         shared: shared.clone(),
                         _integration: integration,
                         long_running_timer: false,
-                        snapshot: shared.snapshot(),
+                        live_block,
+                        moved,
                         title: None,
                         directory: None,
                         running: None,
@@ -620,6 +788,7 @@ impl Batches {
             _model: model,
             heard,
             shared,
+            pane,
         })
     }
 
@@ -713,6 +882,92 @@ fn a_first_prompt_without_marks_is_handed_over_before_the_title_beside_it() {
     };
     let frame = "\x1b]0;\u{25d0} Fix the flaky test\x07Claude Code\r\n";
     assert_eq!(batches.batch(&[frame]), ["prompted", "title"]);
+}
+
+impl Batches {
+    /// Hands `reads` over as one batch, and answers everything the workspace
+    /// heard of it.
+    fn everything(&mut self, reads: &[&str]) -> Vec<TerminalUpdate> {
+        for read in reads {
+            self.shared.feed(read.as_bytes());
+        }
+        self.shared.publish();
+        self.queue.run_until_parked();
+        self.app.update(|ctx| {
+            self.heard
+                .update(ctx, |heard, _| std::mem::take(&mut heard.0))
+        })
+    }
+
+    /// Takes the pane off screen, as a frame that does not draw it says.
+    fn hide(&self) {
+        self.shared.on_screen.store(false, Ordering::Relaxed);
+    }
+
+    /// How many snapshots have been built for the pane.
+    fn built(&self) -> u64 {
+        TerminalHandle(self.shared.clone()).snapshots_built()
+    }
+}
+
+#[test]
+fn a_pane_nobody_draws_is_still_heard_running_and_repainted_with_no_snapshot_built() {
+    // The row of a tab behind the active one says what its pane is running,
+    // and the frame that brings the pane back is asked for by a repaint, so
+    // both still come of every publication — off the open block, which is
+    // published without the snapshot nothing would draw.
+    let Some(mut batches) = Batches::new(true) else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    batches.hide();
+    let built = batches.built();
+    let pane = batches.pane;
+
+    let heard = batches.everything(&[PROMPT]);
+    assert!(
+        heard.contains(&TerminalUpdate::Prompted(pane)),
+        "the first prompt was not heard: {heard:?}"
+    );
+    let heard = batches.everything(&[STARTED, "the first of its output\r\n"]);
+    assert!(
+        heard.contains(&TerminalUpdate::Running(pane, Some("claude".to_owned()))),
+        "the command was not heard running: {heard:?}"
+    );
+    assert!(
+        heard.contains(&TerminalUpdate::Repainted(pane)),
+        "the frame that would bring the pane back was never asked for: {heard:?}"
+    );
+    assert_eq!(
+        batches.built(),
+        built,
+        "a snapshot was built of a grid nothing draws"
+    );
+}
+
+#[test]
+fn a_shell_with_no_marks_is_heard_at_its_first_prompt_where_nobody_can_see_it() {
+    // The one thing the model needs a grid's text for: a shell that marks
+    // nothing has come to its prompt once it has printed anything at all. A
+    // pane off screen is published with no snapshot, and the one that text
+    // is read from is built for it.
+    let Some(mut batches) = Batches::new(false) else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    batches.hide();
+    let pane = batches.pane;
+
+    let heard = batches.everything(&["   "]);
+    assert!(
+        !heard.contains(&TerminalUpdate::Prompted(pane)),
+        "blanks were heard as a prompt: {heard:?}"
+    );
+    let heard = batches.everything(&["$ "]);
+    assert!(
+        heard.contains(&TerminalUpdate::Prompted(pane)),
+        "the prompt of a shell nobody can see was never heard: {heard:?}"
+    );
 }
 
 impl Batches {
@@ -914,11 +1169,11 @@ fn assert_the_terminal_is_held_until_the_snapshot_is_published(
     // The terminal is clean, so the snapshot a writer builds is this very `Arc`
     // again, and one more count on it is the writer holding a snapshot it has
     // built and not yet installed — under the terminal's lock either way.
-    let installed = Arc::strong_count(&*slot);
+    let installed = Arc::strong_count(&slot.snapshot);
     let writer = thread::spawn(write);
 
     let deadline = Instant::now() + REPLY_TIMEOUT;
-    while Arc::strong_count(&*slot) == installed {
+    while Arc::strong_count(&slot.snapshot) == installed {
         assert!(
             Instant::now() < deadline,
             "the writer never built a snapshot"

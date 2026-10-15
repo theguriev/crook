@@ -122,7 +122,7 @@ fn a_line_no_shell_has_answered_never_takes_the_composer_away() {
     let surface = of(&snapshot(sent.clone(), false), now);
     assert!(surface.composer, "the field went with the unanswered line");
     assert_eq!(surface.surface, Surface::Blocks);
-    assert_eq!(until_long_running(&snapshot(sent, false), now), None);
+    assert_eq!(until_long_running(&sent, now), None);
 }
 
 #[test]
@@ -130,17 +130,17 @@ fn the_repaint_that_hides_the_composer_is_scheduled_from_the_start_of_the_comman
     let now = Instant::now();
 
     assert_eq!(
-        until_long_running(&snapshot(LiveBlock::default(), false), now),
+        until_long_running(&LiveBlock::default(), now),
         None,
         "nothing is running, so nothing has to be redrawn"
     );
 
-    let waiting = until_long_running(&snapshot(running(Duration::ZERO, now), false), now)
+    let waiting = until_long_running(&running(Duration::ZERO, now), now)
         .expect("a command that just started is on its way to long-running");
     assert!(waiting <= LONG_RUNNING && waiting > Duration::ZERO);
 
     assert_eq!(
-        until_long_running(&snapshot(running(LONG_RUNNING, now), false), now),
+        until_long_running(&running(LONG_RUNNING, now), now),
         None,
         "already long-running: the frame that hides the composer has been drawn"
     );
