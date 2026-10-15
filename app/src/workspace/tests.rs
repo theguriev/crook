@@ -30732,6 +30732,121 @@ fn a_refusal_of_an_earlier_press_does_not_undo_the_last_one() {
 }
 
 #[test]
+fn a_refused_press_leaves_the_switch_on_what_the_entry_holds() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    static WRITING_FIRST: AtomicBool = AtomicBool::new(false);
+    static PRESSED_THIRD: AtomicBool = AtomicBool::new(false);
+
+    let mut harness = Harness::new(1);
+    harness.workspace_update(|workspace, _| {
+        workspace.apply_login_items_with(|enabled| {
+            if WRITES.fetch_add(1, Ordering::SeqCst) > 0 {
+                // The third press: refused, the way `reg` is when a scanner
+                // holds the key for a moment.
+                return Err(format!("could not switch to {enabled}: Access is denied."));
+            }
+            // The first press, on: slow, and taken. The second press, off,
+            // is asked while this is written, and the third before it is
+            // done, which leaves the second overtaken and never written.
+            WRITING_FIRST.store(true, Ordering::SeqCst);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !PRESSED_THIRD.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok(())
+        });
+    });
+
+    harness.dispatch_workspace_action(SettingsAction::ToggleOpenAtLogin.into());
+    harness.wait_for("the first press to be written", |_| {
+        WRITING_FIRST.load(Ordering::SeqCst)
+    });
+    harness.dispatch_workspace_action(SettingsAction::ToggleOpenAtLogin.into());
+    harness.dispatch_workspace_action(SettingsAction::ToggleOpenAtLogin.into());
+    PRESSED_THIRD.store(true, Ordering::SeqCst);
+    harness.wait_for("all three presses to be answered", |harness| {
+        login_items_answered(harness) == 3
+    });
+
+    assert_eq!(
+        WRITES.load(Ordering::SeqCst),
+        2,
+        "the overtaken off press was written after all"
+    );
+    // The entry is on, from the first press: the off press never reached it
+    // and the refused on left it alone. So the switch is on, and the row says
+    // why the last press did not land.
+    assert!(
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.general().open_at_login
+        }),
+        "the switch says off while the entry opens Crook at every login"
+    );
+    assert!(
+        login_item_refused(&harness).is_some_and(|why| why.starts_with("Could not be switched on")),
+        "the row does not say the last press was refused: {:?}",
+        login_item_refused(&harness)
+    );
+}
+
+#[test]
+fn a_refused_press_counts_the_entry_the_window_opened_with() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    static WRITING_OFF: AtomicBool = AtomicBool::new(false);
+    static PRESSED_AGAIN: AtomicBool = AtomicBool::new(false);
+
+    // On when the window opens, so the entry is in place from an earlier
+    // launch, naming a binary that has since been moved.
+    let scratch = Scratch::new();
+    let mut settings = scratch.settings();
+    let mut general = settings.general();
+    general.open_at_login = true;
+    settings.set_general(general);
+    let mut harness = Harness::with_settings(1, settings);
+    harness.workspace_update(|workspace, _| {
+        workspace.apply_login_items_with(|enabled| {
+            if enabled {
+                return Err("/opt/crook/crook is not there any more. Restart Crook, \
+                            then switch this on again."
+                    .to_owned());
+            }
+            // Off: refused, but only once the person has pressed on again,
+            // so its answer is the log's alone.
+            WRITING_OFF.store(true, Ordering::SeqCst);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !PRESSED_AGAIN.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err("Read-only file system (os error 30)".to_owned())
+        });
+    });
+
+    harness.dispatch_workspace_action(SettingsAction::ToggleOpenAtLogin.into());
+    harness.wait_for("the off press to be written", |_| {
+        WRITING_OFF.load(Ordering::SeqCst)
+    });
+    harness.dispatch_workspace_action(SettingsAction::ToggleOpenAtLogin.into());
+    PRESSED_AGAIN.store(true, Ordering::SeqCst);
+    harness.wait_for("both presses to be answered", |harness| {
+        login_items_answered(harness) == 2
+    });
+
+    // Nothing this window asked for was taken, so the entry is the one it
+    // opened with, and the switch says so.
+    assert!(
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.general().open_at_login
+        }),
+        "the switch says off while the entry the window opened with is still there"
+    );
+}
+
+#[test]
 fn making_crook_the_default_terminal_is_offered_only_while_it_is_not() {
     // The answer is the system's and a test never asks it, so it is handed in
     // the way the pool hands it in.

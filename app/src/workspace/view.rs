@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -552,6 +552,66 @@ impl SaveOrder {
     }
 }
 
+/// The presses of Open at login on their way to the login entry, and what the
+/// entry holds once they have landed.
+///
+/// What the entry holds is not always the press before the last one. A press
+/// that a later one overtook writes nothing, and a press the system refused
+/// leaves the entry as it was, so after on, off and on in quick succession the
+/// entry can still hold the first on while the last is refused. A refusal
+/// therefore puts the switch on [`Self::holds()`] rather than back one press.
+/// See [`Workspace::adopt_login_item`].
+#[derive(Debug)]
+struct LoginEntry {
+    /// The order the writes reach the system in: each waits for the one
+    /// before it, and one a later press has overtaken writes nothing.
+    writes: SaveOrder,
+    /// Whether the entry is in place: what the settings said when the window
+    /// opened, which is the last this window knows of it, and after that the
+    /// value of every write the system took. Each is set under
+    /// [`SaveOrder::writing`], so they arrive here in the order they landed
+    /// on disk.
+    holds: AtomicBool,
+}
+
+impl LoginEntry {
+    /// An entry that `holds` what the settings say the window opened with.
+    fn new(holds: bool) -> Self {
+        Self {
+            writes: SaveOrder::default(),
+            holds: AtomicBool::new(holds),
+        }
+    }
+
+    /// Asks `apply` to switch the entry to `enabled` unless a later press has
+    /// been asked for since `asked_at`, and remembers `enabled` if the system
+    /// took it. `None` for a press that was overtaken.
+    ///
+    /// Blocking, like [`SaveOrder::write_if_last`]: this belongs on the
+    /// background pool.
+    fn write_if_last(
+        &self,
+        asked_at: u64,
+        enabled: bool,
+        apply: fn(bool) -> Result<(), String>,
+    ) -> Option<Result<(), String>> {
+        self.writes.write_if_last(asked_at, || {
+            let applied = apply(enabled);
+            if applied.is_ok() {
+                // Relaxed is enough: this is read on the window's thread once
+                // the answer is home, and the answer is handed over after it.
+                self.holds.store(enabled, Ordering::Relaxed);
+            }
+            applied
+        })
+    }
+
+    /// Whether the entry is in place, as of the last write the system took.
+    fn holds(&self) -> bool {
+        self.holds.load(Ordering::Relaxed)
+    }
+}
+
 /// The read of PRIMARY on its way for a middle press, and where its answer
 /// goes. See [`Workspace::paste_primary`].
 struct PrimaryPaste {
@@ -796,12 +856,11 @@ pub struct Workspace {
     /// real one would leave a login item on the machine running the suite: a
     /// test's says `Ok` to everything until the test says otherwise.
     apply_login_item: fn(bool) -> Result<(), String>,
-    /// The order the presses of Open at login reach the system in: each
-    /// press's write waits for the one before it, and one that a later press
-    /// has overtaken writes nothing, so the entry is the last press's. Its
-    /// count is also how the system's answer to an earlier press is told
-    /// from the last one's. See [`SaveOrder`] and [`Self::adopt_login_item`].
-    login_items: Arc<SaveOrder>,
+    /// The presses of Open at login on their way to the system, in the order
+    /// they were pressed, and what the entry holds once they have landed.
+    /// Its count is also how the system's answer to an earlier press is told
+    /// from the last one's. See [`LoginEntry`] and [`Self::adopt_login_item`].
+    login_entry: Arc<LoginEntry>,
     /// Why the system refused the last switch of Open at login, which the
     /// row says until it is switched again. See [`Self::adopt_login_item`].
     login_item_refused: Option<String>,
@@ -1224,6 +1283,7 @@ impl Workspace {
         // knowable: what a plugin asks for depends on the plugin having
         // loaded, and one that was switched off asks for nothing.
         keybindings.set_plugin_rules(host.suggested_rules());
+        let open_at_login = settings.general().open_at_login;
         let mut workspace = Self {
             tabs: TabStrip::new(),
             section: None,
@@ -1260,7 +1320,7 @@ impl Workspace {
             } else {
                 crate::login_item::apply
             },
-            login_items: Arc::default(),
+            login_entry: Arc::new(LoginEntry::new(open_at_login)),
             login_item_refused: None,
             #[cfg(test)]
             login_items_answered: 0,
@@ -4498,12 +4558,16 @@ impl Workspace {
     /// `None` for a press a later one overtook before it was written, which
     /// wrote nothing and so has nothing to say.
     ///
-    /// A refusal puts the switch back where it was, which is where the entry
-    /// on disk still is, and saves that; the row says why until the next
-    /// press. An answer to an earlier press is the log's alone: the presses
-    /// are written in order (see [`Self::login_items`]), so the last one's
-    /// write lands after it, and its own answer is the one that says what is
-    /// on disk.
+    /// A refusal of the last press puts the switch on what the entry on disk
+    /// holds, and saves that; the row says why until the next press. That is
+    /// not always where the switch was one press ago: the press before may
+    /// have been overtaken and never written, or refused too, and then the
+    /// entry holds whatever the last write the system took left there — see
+    /// [`LoginEntry`]. When that is what the refused press asked for, the
+    /// switch stays where it was pressed and the row still says why the
+    /// press itself did not land. An answer to an earlier press is the log's
+    /// alone: the presses are written in order, so the last one's write lands
+    /// after it, and its own answer is the one that says what is on disk.
     fn adopt_login_item(
         &mut self,
         asked: u64,
@@ -4518,12 +4582,12 @@ impl Workspace {
             return;
         };
         log::warn!("could not change the login item: {why}");
-        if !self.login_items.is_last(asked) {
+        if !self.login_entry.writes.is_last(asked) {
             return;
         }
         let mut general = self.general();
         let enabled = general.open_at_login;
-        general.open_at_login = !enabled;
+        general.open_at_login = self.login_entry.holds();
         self.set_general(general, ctx);
         self.login_item_refused = Some(match enabled {
             true => format!("Could not be switched on: {why}"),
@@ -11436,17 +11500,17 @@ impl Workspace {
                 // The setting is what the person asked for; the entry is the
                 // system's, written on the pool — Windows' is a process — and
                 // its answer handed back, so that a refusal puts the switch
-                // back rather than leaving the row claiming an entry that is
-                // not there. In the order they were pressed: two presses are
-                // two tasks on a pool of several workers, and an "on" that
-                // lands after the "off" pressed after it would leave an entry
-                // the switch says is not there.
-                let asked = self.login_items.ask();
-                let order = self.login_items.clone();
+                // on what the entry holds rather than leaving the row
+                // claiming an entry that is not there. In the order they were
+                // pressed: two presses are two tasks on a pool of several
+                // workers, and an "on" that lands after the "off" pressed
+                // after it would leave an entry the switch says is not there.
+                let asked = self.login_entry.writes.ask();
+                let entry = self.login_entry.clone();
                 let apply = self.apply_login_item;
                 let applying = ctx
                     .background()
-                    .spawn(async move { order.write_if_last(asked, || apply(enabled)) });
+                    .spawn(async move { entry.write_if_last(asked, enabled, apply) });
                 ctx.spawn(applying, move |workspace, applied, ctx| {
                     workspace.adopt_login_item(asked, applied, ctx);
                 })
