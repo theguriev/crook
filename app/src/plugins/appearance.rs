@@ -134,10 +134,15 @@ fn appearance(workspace: &Workspace) -> Vec<Category> {
     );
 
     // Beside "Bring the tabs back": the other half of what happens when the
-    // day starts.
+    // day starts. Under it, while the system refuses the last switch, why:
+    // the switch has gone back to what is on disk, and says so.
     let login = widgets::row(
         Words::new("Open at login")
-            .with_description("Open Crook when you log in to this computer.")
+            .with_description(
+                workspace
+                    .login_item_refused()
+                    .unwrap_or("Open Crook when you log in to this computer."),
+            )
             .with_keywords(&["startup", "login", "boot", "autostart", "launch", "start"]),
         true,
         widgets::switch(

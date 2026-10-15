@@ -88,10 +88,13 @@
 //!
 //! The same table is what the worktree creator offers to start in a new
 //! checkout: which of these agents are installed — [`found_on`], a look in
-//! each directory of `PATH` for the program, which runs nothing — and the
-//! line that starts one on a prompt, [`launch_line`], with the prompt quoted
-//! by the host rather than pasted in. That line is typed into the new pane's
-//! composer and left there, unsent, unless the person pressed Start.
+//! each directory of `PATH`, and in the ones the agents' own installers put
+//! them in, for the program, which runs nothing — and the line that starts
+//! one on a prompt, [`launch_line`], with the prompt quoted by the host
+//! rather than pasted in. An agent found only where its installer put it is
+//! started by its path, which a shell finds whatever its `PATH` says. That
+//! line is typed into the new pane's composer and left there, unsent,
+//! unless the person pressed Start.
 
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
@@ -1668,40 +1671,178 @@ pub fn program(name: &str) -> Option<&'static str> {
 ///
 /// It reads the disk, so it belongs on the background pool with the other
 /// reads the worktree menu makes when it opens — never on the frame.
-pub fn found_on(directories: &[PathBuf]) -> Vec<&'static str> {
+///
+/// Looked for by name first: an agent a pane's shell finds by its name is
+/// typed by its name, as it always was, and one found only in an
+/// installer's directory is typed by its path.
+pub fn found_on(search: &SearchPath) -> Vec<Installed> {
     AGENTS
         .iter()
-        .map(|agent| agent.name)
-        .filter(|name| {
-            directories
+        .filter_map(|agent| {
+            let name = agent.name;
+            if search
+                .by_name
                 .iter()
                 .any(|directory| runnable(directory, name))
+            {
+                return Some(Installed {
+                    agent: name,
+                    path: None,
+                });
+            }
+            let directory = search
+                .installers
+                .iter()
+                .find(|directory| runnable(directory, name))?;
+            // Typed as it is, so only a path every shell reads as one word;
+            // any other is left to the installer's own line in a startup
+            // file, which is what puts its directory on a shell's `PATH`.
+            let path = directory
+                .join(name)
+                .to_str()
+                .filter(|path| plain(path))
+                .map(str::to_owned);
+            Some(Installed { agent: name, path })
         })
         .collect()
 }
 
+/// Where a window looks for the agents it offers to start, in two halves
+/// that differ in how the line that starts one names it. See
+/// [`search_path`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchPath {
+    /// Directories a pane's shell finds a program in by its name: the
+    /// window's own `PATH`, and the few every login shell has.
+    pub by_name: Vec<PathBuf>,
+    /// Directories an agent's own installer puts it in, which only that
+    /// installer's line in a startup file puts on a shell's `PATH` — and not
+    /// always all of them: nvm puts its default node there and no other, and
+    /// mise its shims only when asked to. See [`installer_directories`].
+    pub installers: Vec<PathBuf>,
+}
+
+/// An agent [`found_on`] found installed, and how the line that starts it
+/// names its program.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Installed {
+    /// The agent, by its name in the table: `opencode`.
+    pub agent: &'static str,
+    /// The program's path, where the agent was found only in one of
+    /// [`SearchPath::installers`]; `None` for one a pane's shell finds by
+    /// its name, and for a path a shell would not read as one word.
+    pub path: Option<String>,
+}
+
+impl Installed {
+    /// The line that starts this agent on `prompt`: [`launch_line`], with
+    /// the program named by its path where it was found only by one.
+    ///
+    /// Its path rather than its name, because the pane's shell may not have
+    /// the directory it was found in. Nothing else changes: the line is still
+    /// read as this agent's — [`program_of`] reads a program by its file
+    /// name — and the prompt is quoted as it always was. So is what the
+    /// session file keeps: [`launch_of`] keeps no path, and the line a
+    /// restart offers to resume this agent names it alone, which the same
+    /// shell may not find.
+    pub fn launch_line(&self, prompt: &str) -> Option<String> {
+        let line = launch_line(self.agent, prompt)?;
+        Some(match (&self.path, line.strip_prefix(self.agent)) {
+            (Some(path), Some(rest)) => format!("{path}{rest}"),
+            _ => line,
+        })
+    }
+}
+
 /// Where a running window looks for the agents: `PATH`, then the
-/// directories their installers put them in.
+/// directories every login shell has, then the ones the agents' own
+/// installers put them in.
 ///
-/// The second half is for macOS, where an application started from the
+/// The second is for macOS, where an application started from the
 /// Dock or the Finder has launchd's `PATH` — `/usr/bin:/bin:/usr/sbin:/sbin`
 /// — and every agent is somewhere else: Homebrew's prefix, `/usr/local/bin`,
 /// or `~/.local/bin`, which is where Claude Code's own installer puts it. The
 /// pane's login shell has those on its `PATH`, which is the one the line
 /// runs under; the window's own does not. Elsewhere they are usually on
 /// `PATH` already, and a directory that is not there is simply not looked in.
-pub fn search_path() -> Vec<PathBuf> {
-    let mut directories: Vec<PathBuf> = std::env::var_os("PATH")
+///
+/// The third is for the same window, on Linux as well as macOS: a desktop
+/// session's `PATH` is read from the files a login reads, and an installer
+/// that puts its directory on `PATH` in `.bashrc` or `.zshrc` is not in it.
+/// See [`installer_directories`]. Not the login shell's own `PATH`, read
+/// by starting one: that runs the person's startup files, which can start
+/// tmux, `exec` another shell or wait on a prompt, and a look that runs
+/// nothing cannot hang on any of them.
+pub fn search_path() -> SearchPath {
+    let mut by_name: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect())
         .unwrap_or_default();
+    let mut installers = Vec::new();
     if cfg!(unix) {
         if let Some(home) = dirs::home_dir() {
-            directories.push(home.join(".local").join("bin"));
+            by_name.push(home.join(".local").join("bin"));
+            installers = installer_directories(&home);
         }
-        directories.push(PathBuf::from("/opt/homebrew/bin"));
-        directories.push(PathBuf::from("/usr/local/bin"));
+        by_name.push(PathBuf::from("/opt/homebrew/bin"));
+        by_name.push(PathBuf::from("/usr/local/bin"));
     }
+    SearchPath {
+        by_name,
+        installers,
+    }
+}
+
+/// The directories under `home` that agents' own installers put them in:
+/// OpenCode's, Bun's, Volta's, npm's global prefix as npm's own docs set it
+/// up for an account with no root, Cargo's, mise's shims, and the `bin` of
+/// every Node nvm has installed, the newest first.
+///
+/// The newest first because it is the likeliest to be nvm's default, which
+/// is the one the pane's shell has; an agent installed under an older one
+/// is found there all the same, and typed by its path. Reads nvm's
+/// directory, so it is called on the pool with the rest of the look.
+pub fn installer_directories(home: &Path) -> Vec<PathBuf> {
+    let under_home = |directory: &str| {
+        directory
+            .split('/')
+            .fold(home.to_path_buf(), |path, part| path.join(part))
+    };
+    let mut directories: Vec<PathBuf> = [
+        ".opencode/bin",
+        ".bun/bin",
+        ".volta/bin",
+        ".npm-global/bin",
+        ".cargo/bin",
+        ".local/share/mise/shims",
+    ]
+    .into_iter()
+    .map(under_home)
+    .collect();
+
+    let mut nodes: Vec<(Vec<u64>, PathBuf)> = std::fs::read_dir(under_home(".nvm/versions/node"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|node| (node_version(&node.file_name()), node.path().join("bin")))
+        .collect();
+    nodes.sort_by(|one, other| other.0.cmp(&one.0));
+    directories.extend(nodes.into_iter().map(|(_, bin)| bin));
     directories
+}
+
+/// The numbers of the version nvm names a Node's directory by: `v22.3.0`
+/// is 22, 3 and 0, so that v22 sorts after v9 as it does not by its
+/// letters. A name that is no version has none, and is looked in last.
+fn node_version(name: &std::ffi::OsStr) -> Vec<u64> {
+    name.to_str()
+        .and_then(|name| name.strip_prefix('v'))
+        .map(|version| {
+            version
+                .split('.')
+                .map_while(|number| number.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Whether `directory` holds `name` as a program a shell would run.
@@ -3900,14 +4041,163 @@ its `hooks` should be\n{}",
         fake_agent(&second, "cursor", true);
 
         let directories = [first.clone(), scratch.0.join("not-there"), second.clone()];
-        assert_eq!(found_on(&directories), ["claude", "opencode"]);
+        assert_eq!(names_on(&directories), ["claude", "opencode"]);
         // In the table's order rather than the directories'.
         assert_eq!(
-            found_on(&[second.clone(), first.clone()]),
+            names_on(&[second.clone(), first.clone()]),
             ["claude", "opencode"]
         );
-        assert!(found_on(&[]).is_empty());
-        assert!(found_on(&[scratch.0.join("not-there")]).is_empty());
+        assert!(names_on(&[]).is_empty());
+        assert!(names_on(&[scratch.0.join("not-there")]).is_empty());
+        // And the same where only an installer put them.
+        let installers = SearchPath {
+            by_name: Vec::new(),
+            installers: directories.to_vec(),
+        };
+        let found: Vec<_> = found_on(&installers)
+            .into_iter()
+            .map(|installed| installed.agent)
+            .collect();
+        assert_eq!(found, ["claude", "opencode"]);
+    }
+
+    /// The names of the agents found in `directories`, each a directory a
+    /// pane's shell finds a program in by its name.
+    fn names_on(directories: &[PathBuf]) -> Vec<&'static str> {
+        let search = SearchPath {
+            by_name: directories.to_vec(),
+            installers: Vec::new(),
+        };
+        found_on(&search)
+            .into_iter()
+            .map(|installed| {
+                assert_eq!(installed.path, None, "{installed:?} is on PATH");
+                installed.agent
+            })
+            .collect()
+    }
+
+    /// The agent `agent` as it is found only in `directory`, where its
+    /// installer put it: typed by its path.
+    #[cfg(unix)]
+    fn installed_in(directory: &Path, agent: &'static str) -> Installed {
+        Installed {
+            agent,
+            path: Some(directory.join(agent).display().to_string()),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agents_are_found_in_every_directory_their_installers_put_them_in() {
+        // On no `PATH` the window has, which is a window the Dock or a
+        // launcher started: only the installer's own line in a startup file
+        // puts these on a shell's.
+        for (directory, agent) in [
+            (".opencode/bin", "opencode"),
+            (".bun/bin", "gemini"),
+            (".local/share/mise/shims", "codex"),
+            (".volta/bin", "copilot"),
+            (".npm-global/bin", "claude"),
+            (".cargo/bin", "aider"),
+            (".nvm/versions/node/v22.3.0/bin", "codex"),
+        ] {
+            let scratch = Scratch::new("installer");
+            let home = scratch.dir("home");
+            let put = home.join(directory);
+            std::fs::create_dir_all(&put).expect("the installer's directory");
+            fake_agent(&put, agent, true);
+
+            let search = SearchPath {
+                by_name: Vec::new(),
+                installers: installer_directories(&home),
+            };
+            assert_eq!(
+                found_on(&search),
+                [installed_in(&put, agent)],
+                "{agent} in ~/{directory} was not found"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_newest_node_nvm_has_is_looked_in_first() {
+        // By the version's numbers: by its letters, v9 is newer than v22.
+        let scratch = Scratch::new("nvm");
+        let home = scratch.dir("home");
+        let node = home.join(".nvm").join("versions").join("node");
+        for version in ["v9.11.2", "v22.3.0", "v18.20.4", "v22.10.1"] {
+            let bin = node.join(version).join("bin");
+            std::fs::create_dir_all(&bin).expect("a node's bin");
+            fake_agent(&bin, "codex", true);
+        }
+
+        let search = SearchPath {
+            by_name: Vec::new(),
+            installers: installer_directories(&home),
+        };
+        assert_eq!(
+            found_on(&search),
+            [installed_in(&node.join("v22.10.1").join("bin"), "codex")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_only_an_installer_put_there_is_started_by_its_path() {
+        // On `PATH`, the name is what the pane's shell finds, as it always
+        // was. Found only in an installer's directory, the pane's shell may
+        // not have that directory — nvm puts only its default node there, and
+        // mise its shims only when asked — so the line names the program
+        // where it was found.
+        let scratch = Scratch::new("reach");
+        let on_path = scratch.dir("on-path");
+        let installer = scratch.dir("installer");
+        fake_agent(&on_path, "claude", true);
+        fake_agent(&installer, "claude", true);
+        fake_agent(&installer, "opencode", true);
+
+        let found = found_on(&SearchPath {
+            by_name: vec![on_path],
+            installers: vec![installer.clone()],
+        });
+        let opencode = installer.join("opencode").display().to_string();
+        assert_eq!(
+            found,
+            [
+                Installed {
+                    agent: "claude",
+                    path: None
+                },
+                installed_in(&installer, "opencode"),
+            ]
+        );
+        assert_eq!(
+            found[0].launch_line("fix it").as_deref(),
+            Some("claude 'fix it'")
+        );
+        assert_eq!(
+            found[1].launch_line("fix it"),
+            Some(format!("{opencode} --prompt 'fix it'"))
+        );
+        assert_eq!(found[1].launch_line(""), Some(opencode));
+
+        // A path a shell would read as more than one word is not typed:
+        // the name is, which that installer's line in a startup file puts on
+        // the shell's `PATH`.
+        let spaced = scratch.dir("with space");
+        fake_agent(&spaced, "aider", true);
+        assert_eq!(
+            found_on(&SearchPath {
+                by_name: Vec::new(),
+                installers: vec![spaced],
+            }),
+            [Installed {
+                agent: "aider",
+                path: None
+            }]
+        );
     }
 
     #[test]

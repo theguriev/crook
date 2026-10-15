@@ -898,8 +898,9 @@ Twenty-two features, and the page that configures them:
   `main` or `master`) one arrow below it, and every other local branch after that. Then it
   opens a tab in it — folded into a group with the tab that asked for it. Under all that it
   offers **an agent to start there**: the coding agents it finds installed (`claude`, `codex`,
-  `gemini`, `copilot`, `opencode`, `aider` — looked for on `PATH`, never run to ask), with
-  `Shell only` first and picked, which makes exactly the worktree it always made. Pick one and a
+  `gemini`, `copilot`, `opencode`, `aider` — looked for on `PATH` and where their own installers
+  put them, never run to ask), with `Shell only` first and picked, which makes exactly the
+  worktree it always made. Pick one and a
   prompt field appears; the branch is named after the prompt as you type it
   (`worktree/fix-the-login-bug`) until you type a name of your own. Create, or Enter from either
   field, opens the tab with the agent's line — `claude 'fix the login bug'`, the prompt quoted

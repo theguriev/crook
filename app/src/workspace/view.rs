@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -482,9 +482,9 @@ impl Overridden {
 /// overwrites it. Either way the bytes on disk are the last snapshot asked
 /// for.
 ///
-/// The lock is per file, not per process: one of these belongs to the settings
-/// and another to the session, because they are two files and neither has to
-/// wait on the other.
+/// The lock is per file, not per process: one of these belongs to the settings,
+/// another to the session and another to the login entry, because they are
+/// separate targets and none has to wait on the others.
 #[derive(Debug, Default)]
 struct SaveOrder {
     /// How many writes have been asked for.
@@ -527,9 +527,19 @@ impl SaveOrder {
     /// later save because of it would turn one lost write into all of them.
     fn write_if_last<T>(&self, asked_at: u64, write: impl FnOnce() -> T) -> Option<T> {
         let _ordered = self.writing.lock().unwrap_or_else(PoisonError::into_inner);
-        let written = (self.asked_for.load(Ordering::Relaxed) == asked_at).then(write);
+        let written = self.is_last(asked_at).then(write);
         self.finished.fetch_add(1, Ordering::Relaxed);
         written
+    }
+
+    /// Whether nothing has been asked for since `asked_at`.
+    ///
+    /// What the answer [`Self::write_if_last`] brought back is weighed by
+    /// once it is home: a write that was the last when it ran has been
+    /// followed by another if this says no, and that one's answer is the
+    /// one that says what the target holds.
+    fn is_last(&self, asked_at: u64) -> bool {
+        self.asked_for.load(Ordering::Relaxed) == asked_at
     }
 
     /// Whether every write asked for has run or been overtaken.
@@ -539,6 +549,66 @@ impl SaveOrder {
     /// from before the edit, and adopting it would take the edit back.
     fn is_settled(&self) -> bool {
         self.asked_for.load(Ordering::Relaxed) == self.finished.load(Ordering::Relaxed)
+    }
+}
+
+/// The presses of Open at login on their way to the login entry, and what the
+/// entry holds once they have landed.
+///
+/// What the entry holds is not always the press before the last one. A press
+/// that a later one overtook writes nothing, and a press the system refused
+/// leaves the entry as it was, so after on, off and on in quick succession the
+/// entry can still hold the first on while the last is refused. A refusal
+/// therefore puts the switch on [`Self::holds()`] rather than back one press.
+/// See [`Workspace::adopt_login_item`].
+#[derive(Debug)]
+struct LoginEntry {
+    /// The order the writes reach the system in: each waits for the one
+    /// before it, and one a later press has overtaken writes nothing.
+    writes: SaveOrder,
+    /// Whether the entry is in place: what the settings said when the window
+    /// opened, which is the last this window knows of it, and after that the
+    /// value of every write the system took. Each is set under
+    /// [`SaveOrder::writing`], so they arrive here in the order they landed
+    /// on disk.
+    holds: AtomicBool,
+}
+
+impl LoginEntry {
+    /// An entry that `holds` what the settings say the window opened with.
+    fn new(holds: bool) -> Self {
+        Self {
+            writes: SaveOrder::default(),
+            holds: AtomicBool::new(holds),
+        }
+    }
+
+    /// Asks `apply` to switch the entry to `enabled` unless a later press has
+    /// been asked for since `asked_at`, and remembers `enabled` if the system
+    /// took it. `None` for a press that was overtaken.
+    ///
+    /// Blocking, like [`SaveOrder::write_if_last`]: this belongs on the
+    /// background pool.
+    fn write_if_last(
+        &self,
+        asked_at: u64,
+        enabled: bool,
+        apply: fn(bool) -> Result<(), String>,
+    ) -> Option<Result<(), String>> {
+        self.writes.write_if_last(asked_at, || {
+            let applied = apply(enabled);
+            if applied.is_ok() {
+                // Relaxed is enough: this is read on the window's thread once
+                // the answer is home, and the answer is handed over after it.
+                self.holds.store(enabled, Ordering::Relaxed);
+            }
+            applied
+        })
+    }
+
+    /// Whether the entry is in place, as of the last write the system took.
+    fn holds(&self) -> bool {
+        self.holds.load(Ordering::Relaxed)
     }
 }
 
@@ -779,6 +849,25 @@ pub struct Workspace {
     /// the settings were shown; `None` where that cannot be asked or made so,
     /// and until it has been. See [`crate::default_terminal`].
     default_terminal: Option<bool>,
+    /// What puts Crook's login entry in place or takes it out:
+    /// [`crate::login_item::apply`], everywhere but a test.
+    ///
+    /// A field for the reason [`Self::path_editor`] is one, and because the
+    /// real one would leave a login item on the machine running the suite: a
+    /// test's says `Ok` to everything until the test says otherwise.
+    apply_login_item: fn(bool) -> Result<(), String>,
+    /// The presses of Open at login on their way to the system, in the order
+    /// they were pressed, and what the entry holds once they have landed.
+    /// Its count is also how the system's answer to an earlier press is told
+    /// from the last one's. See [`LoginEntry`] and [`Self::adopt_login_item`].
+    login_entry: Arc<LoginEntry>,
+    /// Why the system refused the last switch of Open at login, which the
+    /// row says until it is switched again. See [`Self::adopt_login_item`].
+    login_item_refused: Option<String>,
+    /// How many answers to a press of Open at login have come back, written
+    /// or overtaken, which is what a test waits on.
+    #[cfg(test)]
+    login_items_answered: u64,
     /// When the bell last made a sound; see [`Self::sound_the_bell`].
     bell_sounded: Option<Instant>,
     /// How many times it has, which is what a test can hear.
@@ -1026,7 +1115,7 @@ pub struct Workspace {
     /// Where the worktree creator looks for the agents it offers, in place of
     /// [`crate::agent::search_path`]. For a test, which must find the agent it
     /// wrote and not whichever ones the machine running it has.
-    agent_directories: Option<Vec<PathBuf>>,
+    agent_directories: Option<crate::agent::SearchPath>,
     /// The locks this window took on the checkouts it made, until it takes
     /// them off. See [`HeldLocks`].
     held: HeldLocks,
@@ -1221,6 +1310,7 @@ impl Workspace {
         // knowable: what a plugin asks for depends on the plugin having
         // loaded, and one that was switched off asks for nothing.
         keybindings.set_plugin_rules(host.suggested_rules());
+        let open_at_login = settings.general().open_at_login;
         let mut workspace = Self {
             tabs: TabStrip::new(),
             section: None,
@@ -1252,6 +1342,15 @@ impl Workspace {
             recording: std::cell::RefCell::new(None),
             watching_keybindings: false,
             default_terminal: None,
+            apply_login_item: if cfg!(test) {
+                |_| Ok(())
+            } else {
+                crate::login_item::apply
+            },
+            login_entry: Arc::new(LoginEntry::new(open_at_login)),
+            login_item_refused: None,
+            #[cfg(test)]
+            login_items_answered: 0,
             bell_sounded: None,
             #[cfg(test)]
             bells_sounded: 0,
@@ -1923,7 +2022,11 @@ impl Workspace {
     /// The agents the creator offers, as their command names, in its order.
     /// For a test.
     pub fn worktree_agents(&self) -> Vec<&'static str> {
-        self.tab_menu.agents.clone()
+        self.tab_menu
+            .agents
+            .iter()
+            .map(|installed| installed.agent)
+            .collect()
     }
 
     /// Which of them is picked while the creator is up — `None` for "Shell
@@ -3546,7 +3649,7 @@ impl Workspace {
 
     /// Makes the worktree creator look for agents in these directories and
     /// nowhere else. A test's, for the reason the one above is.
-    pub fn set_agent_directories(&mut self, directories: Vec<PathBuf>) {
+    pub fn set_agent_directories(&mut self, directories: crate::agent::SearchPath) {
         self.agent_directories = Some(directories);
     }
 
@@ -4515,6 +4618,54 @@ impl Workspace {
             self.default_terminal = answer;
             ctx.notify();
         }
+    }
+
+    /// Why the system refused the last switch of Open at login, while the
+    /// row says so.
+    pub fn login_item_refused(&self) -> Option<&str> {
+        self.login_item_refused.as_deref()
+    }
+
+    /// Takes the system's answer to the `asked`th switch of Open at login:
+    /// `None` for a press a later one overtook before it was written, which
+    /// wrote nothing and so has nothing to say.
+    ///
+    /// A refusal of the last press puts the switch on what the entry on disk
+    /// holds, and saves that; the row says why until the next press. That is
+    /// not always where the switch was one press ago: the press before may
+    /// have been overtaken and never written, or refused too, and then the
+    /// entry holds whatever the last write the system took left there — see
+    /// [`LoginEntry`]. When that is what the refused press asked for, the
+    /// switch stays where it was pressed and the row still says why the
+    /// press itself did not land. An answer to an earlier press is the log's
+    /// alone: the presses are written in order, so the last one's write lands
+    /// after it, and its own answer is the one that says what is on disk.
+    fn adopt_login_item(
+        &mut self,
+        asked: u64,
+        applied: Option<Result<(), String>>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        #[cfg(test)]
+        {
+            self.login_items_answered += 1;
+        }
+        let Some(Err(why)) = applied else {
+            return;
+        };
+        log::warn!("could not change the login item: {why}");
+        if !self.login_entry.writes.is_last(asked) {
+            return;
+        }
+        let mut general = self.general();
+        let enabled = general.open_at_login;
+        general.open_at_login = self.login_entry.holds();
+        self.set_general(general, ctx);
+        self.login_item_refused = Some(match enabled {
+            true => format!("Could not be switched on: {why}"),
+            false => format!("Could not be switched off: {why}"),
+        });
+        ctx.notify();
     }
 
     /// Records that the window is another size, which the session file
@@ -6502,14 +6653,14 @@ impl Workspace {
         // Made now, from what the creator says now, rather than when the
         // checkout lands: the fields are cleared by the next creator, and a
         // line made later could be made from somebody else's prompt.
-        let launch = self.tab_menu.picked_agent().and_then(|agent| {
+        let launch = self.tab_menu.picked().and_then(|installed| {
             let prompt = match self.worktree_prompt() {
                 Some(prompt) if self.tab_menu.asks_for_a_prompt() => {
                     prompt.editor().text().to_owned()
                 }
                 _ => String::new(),
             };
-            crate::agent::launch_line(agent, &prompt)
+            installed.launch_line(&prompt)
         });
 
         self.tab_menu.working = true;
@@ -8867,6 +9018,21 @@ impl Workspace {
     #[cfg(test)]
     pub(crate) fn set_gh(&mut self, program: String) {
         self.gh = program;
+    }
+
+    /// Puts the login entry in place with `apply` rather than
+    /// [`crate::login_item::apply`], for a test that says what the system
+    /// answered.
+    #[cfg(test)]
+    pub(super) fn apply_login_items_with(&mut self, apply: fn(bool) -> Result<(), String>) {
+        self.apply_login_item = apply;
+    }
+
+    /// How many answers to a press of Open at login the window has taken,
+    /// for a test to wait on.
+    #[cfg(test)]
+    pub(super) fn login_items_answered(&self) -> u64 {
+        self.login_items_answered
     }
 
     /// Records that a pane's shell rang the bell.
@@ -11758,19 +11924,25 @@ impl Workspace {
                 general.open_at_login = !general.open_at_login;
                 let enabled = general.open_at_login;
                 self.set_general(general, ctx);
+                self.login_item_refused = None;
                 // The setting is what the person asked for; the entry is the
                 // system's, written on the pool — Windows' is a process — and
-                // never from a test, which must not leave a login item on the
-                // machine running the suite.
-                if !cfg!(test) {
-                    ctx.background()
-                        .spawn(async move {
-                            if let Err(why) = crate::login_item::apply(enabled) {
-                                log::warn!("could not change the login item: {why}");
-                            }
-                        })
-                        .detach();
-                }
+                // its answer handed back, so that a refusal puts the switch
+                // on what the entry holds rather than leaving the row
+                // claiming an entry that is not there. In the order they were
+                // pressed: two presses are two tasks on a pool of several
+                // workers, and an "on" that lands after the "off" pressed
+                // after it would leave an entry the switch says is not there.
+                let asked = self.login_entry.writes.ask();
+                let entry = self.login_entry.clone();
+                let apply = self.apply_login_item;
+                let applying = ctx
+                    .background()
+                    .spawn(async move { entry.write_if_last(asked, enabled, apply) });
+                ctx.spawn(applying, move |workspace, applied, ctx| {
+                    workspace.adopt_login_item(asked, applied, ctx);
+                })
+                .detach();
             }
             SettingsAction::MakeDefaultTerminal => {
                 if self.default_terminal != Some(false) {

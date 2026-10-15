@@ -1237,15 +1237,19 @@ file keeps its groups on its tabs: a second list of the same tabs is a second an
 disagree with the first. Under the places to start from it lists the coding agents it found —
 the table `crook --agent-hooks` already knows, each looked for as an executable file on `PATH`
 (and, for a window the Dock started with launchd's four directories, in Homebrew's prefix,
-`/usr/local/bin` and `~/.local/bin`), on the background pool with the repository's reads,
-never by running one — with "Shell only" first and picked. Picking an agent brings up a prompt
-field, and the branch is named after the prompt as it is typed — `worktree/fix-the-login-bug`,
-ASCII words cut to forty characters, the suggestion when there are none — for as long as the
-name field still says what the creator put in it. When the checkout has opened in its tab, the
-agent's line goes into that tab's composer: `claude 'fix the login bug'`, `gemini -i '…'`, the
-prompt put on one line, stripped of leading dashes the agent would read as its own options, and
-quoted by the host with the same function that quotes a plugin's typed argument, so a `$(…)`,
-a backtick or a quote in a pasted prompt arrives at the agent as characters. That quoting is
+`/usr/local/bin` and `~/.local/bin`, then in the directories the agents' own installers use —
+`~/.opencode/bin`, `~/.bun/bin`, `~/.volta/bin`, `~/.npm-global/bin`, `~/.cargo/bin`, mise's
+shims and every Node nvm has, the newest first — where one found only there is typed by its
+path, since the pane's shell may not have that directory either), on the background pool with
+the repository's reads, never by running one — with "Shell only" first and picked. Picking an
+agent brings up a prompt field, and the branch is named after the prompt as it is typed —
+`worktree/fix-the-login-bug`, ASCII words cut to forty characters, the suggestion when there
+are none — for as long as the name field still says what the creator put in it. When the
+checkout has opened in its tab, the agent's line goes into that tab's composer:
+`claude 'fix the login bug'`, `gemini -i '…'`, the prompt put on one line, stripped of leading
+dashes the agent would read as its own options, and quoted by the host with the same function
+that quotes a plugin's typed argument, so a `$(…)`, a backtick or a quote in a pasted prompt
+arrives at the agent as characters. That quoting is
 trusted only in the shells it has been proven in — sh, dash, bash, zsh and fish — and nowhere
 on Windows yet, where a PowerShell single-quoted string also ends at a curly quote and an
 npm-installed agent is a `.cmd` file that cmd.exe reads again; there the line is the agent's

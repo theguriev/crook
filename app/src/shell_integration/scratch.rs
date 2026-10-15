@@ -370,9 +370,10 @@ impl Drop for Session {
     }
 }
 
-/// The absolute path of the binary this process is, for [`BIN_VARIABLE`]
-/// and for the window New window starts — see [`crate::new_window`];
-/// `None` when it has none that is text.
+/// The absolute path of the binary this process is, for [`BIN_VARIABLE`],
+/// for the window New window starts — see [`crate::new_window`] — and for
+/// the entry that opens Crook at login — see [`crate::login_item`]; `None`
+/// when it has none that is text.
 ///
 /// Read once, at the first pane, rather than at each: on Linux the path of a
 /// binary an upgrade has replaced while it runs reads back as
