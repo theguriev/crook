@@ -495,6 +495,439 @@ fn a_combining_mark_is_drawn_over_the_character_it_belongs_to() {
     assert_eq!(painted[2].glyph_key.glyph_id, u32::from('!'));
 }
 
+/// The rectangles in the scene filled with `ink`, in paint order.
+fn inked(scene: &Scene, ink: Rgb) -> Vec<RectF> {
+    rects(scene)
+        .into_iter()
+        .filter(|rect| rect.background == Fill::Solid(color(ink)))
+        .map(|rect| rect.bounds)
+        .collect()
+}
+
+#[test]
+fn a_column_of_vertical_lines_is_one_unbroken_line_down_the_grid() {
+    // The sides of Claude Code's input box, Gemini's trust box and Copilot's
+    // scrollbar. A font's `│` stops short of a row this tall, so drawn from
+    // the font a column of them is a dashed line with a gap at every row.
+    let scene = painted(&snapshot(&["│", "│", "│"], 1));
+    let height = font().metrics().height;
+
+    assert!(glyphs(&scene).is_empty(), "a line is not a glyph");
+    let mut strokes = inked(&scene, INK);
+    assert!(!strokes.is_empty(), "the line is drawn");
+    strokes.sort_by(|above, below| above.min_y().total_cmp(&below.min_y()));
+    let mut reached = 0.;
+    for stroke in &strokes {
+        assert!(
+            stroke.min_y() <= reached,
+            "a gap from {reached} down to {stroke:?}"
+        );
+        reached = stroke.max_y().max(reached);
+        assert_eq!(
+            (stroke.min_x(), stroke.width()),
+            (strokes[0].min_x(), strokes[0].width()),
+            "in one place and at one weight all the way down"
+        );
+    }
+    assert_eq!(reached, 3. * height, "from the top row to the bottom one");
+}
+
+#[test]
+fn full_blocks_fill_their_cells_to_every_edge_and_each_other() {
+    // Claude Code's mascot and every progress bar. Their areas adding up to
+    // the box around them is what says there is no gap between two of them,
+    // and no overlap either.
+    let scene = painted(&snapshot(&["██", "██"], 2));
+    let metrics = font().metrics();
+
+    assert!(glyphs(&scene).is_empty(), "a block is not a glyph");
+    let blocks = inked(&scene, INK);
+    assert_eq!(blocks.len(), 4, "one rectangle a cell");
+    let right = blocks.iter().map(|block| block.max_x()).fold(0., f32::max);
+    let bottom = blocks.iter().map(|block| block.max_y()).fold(0., f32::max);
+    assert!(
+        blocks
+            .iter()
+            .all(|block| block.origin().x() >= 0. && block.origin().y() >= 0.)
+    );
+    assert!(
+        (right - 2. * metrics.width).abs() < 1.,
+        "to the right edge of the grid, rounded to a device pixel"
+    );
+    assert_eq!(bottom, 2. * metrics.height, "and to its bottom edge");
+    let area: f32 = blocks
+        .iter()
+        .map(|block| block.width() * block.height())
+        .sum();
+    assert_eq!(area, right * bottom);
+}
+
+#[test]
+fn a_corner_is_two_half_lines_that_meet_in_the_middle_of_the_cell() {
+    let scene = painted(&snapshot(&["┌"], 1));
+    let metrics = font().metrics();
+
+    assert!(glyphs(&scene).is_empty(), "a corner is not a glyph");
+    let strokes = inked(&scene, INK);
+    assert_eq!(strokes.len(), 2, "an arm right and an arm down");
+    let right = strokes
+        .iter()
+        .find(|stroke| stroke.width() > stroke.height())
+        .expect("a horizontal arm");
+    let down = strokes
+        .iter()
+        .find(|stroke| stroke.height() > stroke.width())
+        .expect("a vertical arm");
+
+    assert!(
+        (right.max_x() - metrics.width).abs() < 1.,
+        "out to the right edge"
+    );
+    assert_eq!(down.max_y(), metrics.height, "and down to the bottom one");
+    assert!(
+        right.min_x() > 0. && down.min_y() > 0.,
+        "and to neither of the others"
+    );
+    assert_eq!(
+        (right.min_x(), right.min_y()),
+        (down.min_x(), down.min_y()),
+        "from the one corner, so the outside of the turn is square"
+    );
+    assert!(
+        ((down.min_x() + down.max_x()) / 2. - metrics.width / 2.).abs() < 1.
+            && ((right.min_y() + right.max_y()) / 2. - metrics.height / 2.).abs() < 1.,
+        "which is the middle of the cell"
+    );
+}
+
+#[test]
+fn text_beside_a_line_is_still_drawn_from_the_font() {
+    let font = font();
+    let metrics = font.metrics();
+    let painted = glyphs(&painted(&snapshot(&["a│b"], 3)));
+
+    let ids: Vec<_> = painted
+        .iter()
+        .map(|glyph| glyph.glyph_key.glyph_id)
+        .collect();
+    assert_eq!(ids, [u32::from('a'), u32::from('b')]);
+    assert_eq!(
+        painted[1].position,
+        vec2f(2. * metrics.width, metrics.baseline),
+        "at its own column, past the line"
+    );
+}
+
+#[test]
+fn a_line_under_a_block_cursor_is_drawn_over_it_in_the_ground_colour() {
+    // A glyph under a filled cursor is drawn over it inverted, because glyphs
+    // are drawn after every rectangle. A line is rectangles, and drawn only
+    // with its row it would vanish into the cursor painted after the rows.
+    let mut grid = snapshot(&["─"], 1);
+    grid.cursor = Some(Cursor {
+        row: 0,
+        column: 0,
+        shape: CursorShape::Block,
+        color: HIGHLIGHT,
+    });
+
+    let painted = rects(&painted(&grid));
+    let cursor = painted
+        .iter()
+        .position(|rect| rect.background == Fill::Solid(color(HIGHLIGHT)))
+        .expect("the cursor is drawn");
+    let over = &painted[cursor + 1..];
+    assert!(!over.is_empty(), "the line is drawn again over the cursor");
+    assert!(
+        over.iter()
+            .all(|rect| rect.background == Fill::Solid(color(GROUND))),
+        "in the ground colour, as an inverted glyph would be"
+    );
+    let metrics = font().metrics();
+    let (left, right) = over.iter().fold((f32::MAX, 0_f32), |(left, right), rect| {
+        (
+            left.min(rect.bounds.min_x()),
+            right.max(rect.bounds.max_x()),
+        )
+    });
+    assert!(
+        left == 0. && (right - metrics.width).abs() < 1.,
+        "across the whole cell"
+    );
+}
+
+#[test]
+fn a_shade_under_an_outline_beam_or_underline_cursor_is_drawn_once() {
+    // Those hide next to nothing of the cell, so a second drawing of a
+    // translucent shade would land on the first and darken that one cell:
+    // `▒` under an unfocused pane's cursor would come out nearly `▓`. Counted
+    // by their opacity, in whatever colour: a second drawing in another one
+    // would darken the cell all the same.
+    let half = |fill: &Fill| matches!(fill, Fill::Solid(color) if color.a == 127);
+    for (shape, owns_caret) in [
+        (CursorShape::Block, false),
+        (CursorShape::Beam, true),
+        (CursorShape::Underline, true),
+    ] {
+        let mut grid = snapshot(&["▒▒"], 2);
+        grid.cursor = Some(Cursor {
+            row: 0,
+            column: 0,
+            shape,
+            color: HIGHLIGHT,
+        });
+
+        let shades: Vec<_> = rects(&paint(&grid, None, owns_caret))
+            .into_iter()
+            .filter(|rect| half(&rect.background))
+            .map(|rect| rect.bounds.min_x())
+            .collect();
+        assert!(
+            shades.len() == 2 && shades[0] == 0. && shades[1] > 0.,
+            "{shape:?}, focused: {owns_caret}: each cell's shade drawn once, \
+             at {shades:?}"
+        );
+    }
+}
+
+#[test]
+fn a_cursor_somebody_else_placed_has_its_character_drawn_again_only_when_filled() {
+    // `paint_cursor_at` is all the block list draws at its open block's
+    // cursor, which no grid test reaches: the cursor, then the line or block
+    // under it again. An unfocused pane's outline asks for no second drawing,
+    // even where the program asked for a filled block, and nor does a beam or
+    // an underline. Counted by opacity, as in the grid's test above.
+    let half = |fill: &Fill| matches!(fill, Fill::Solid(color) if color.a == 127);
+    let cell = snapshot(&["▒"], 1).cells[0];
+    let metrics = font().metrics();
+    for (shape, owns_caret, drawn) in [
+        (CursorShape::Block, true, true),
+        (CursorShape::Block, false, false),
+        (CursorShape::Beam, true, false),
+        (CursorShape::Underline, true, false),
+    ] {
+        let cursor = Cursor {
+            row: 0,
+            column: 0,
+            shape,
+            color: HIGHLIGHT,
+        };
+        let mut scene = Scene::new(1.);
+        scene.start_layer(ClipBounds::None);
+        paint_cursor_at(
+            &cursor,
+            Some(&cell),
+            owns_caret,
+            Vector2F::zero(),
+            metrics,
+            &mut scene,
+        );
+        scene.stop_layer();
+
+        let painted = rects(&scene);
+        let shades = painted.iter().filter(|rect| half(&rect.background)).count();
+        assert_eq!(
+            shades,
+            usize::from(drawn),
+            "{shape:?}, focused: {owns_caret}: the shade drawn again {shades} times"
+        );
+        if drawn {
+            assert_eq!(
+                painted.last().map(|rect| rect.background),
+                Some(Fill::Solid(color(INK).with_alpha(127))),
+                "over the cursor, in the cell's own colour"
+            );
+        }
+    }
+}
+
+/// What colour each device pixel of a `width` by `height` box ends up, filled
+/// the way the renderer fills a rectangle: each edge moved to the nearest
+/// 1/256 of a pixel, which is where the rasterizer puts it, and then a pixel
+/// takes the colour of the last solid rectangle in the scene that holds its
+/// centre, a centre on a top or left edge counting as inside and one on a
+/// bottom or right edge as outside. `None` is a pixel nothing covers.
+fn rasterized(scene: &Scene, width: usize, height: usize) -> Vec<Vec<Option<Color>>> {
+    let scale = scene.scale_factor();
+    let place = |device: f32| (device * 256.).round() / 256.;
+    let mut pixels = vec![vec![None; width]; height];
+    for rect in rects(scene) {
+        let Fill::Solid(fill) = rect.background else {
+            continue;
+        };
+        // As the renderer has it: the origin and the size scaled, and the far
+        // edges where the one ends up past the other.
+        let (left, top) = (rect.bounds.min_x() * scale, rect.bounds.min_y() * scale);
+        let right = place(left + rect.bounds.width() * scale);
+        let bottom = place(top + rect.bounds.height() * scale);
+        let (left, top) = (place(left), place(top));
+        for (y, row) in pixels.iter_mut().enumerate() {
+            let centre = y as f32 + 0.5;
+            if centre < top || centre >= bottom {
+                continue;
+            }
+            for (x, pixel) in row.iter_mut().enumerate() {
+                let centre = x as f32 + 0.5;
+                if centre >= left && centre < right {
+                    *pixel = Some(fill);
+                }
+            }
+        }
+    }
+    pixels
+}
+
+/// Paints `snapshot` at its natural size in `font`, at `scale`.
+fn painted_at(snapshot: &Snapshot, font: &CellFont, scale: f32) -> Scene {
+    let metrics = font.metrics();
+    let mut scene = Scene::new(scale);
+    scene.start_layer(ClipBounds::None);
+    paint_grid(
+        snapshot,
+        font,
+        Vector2F::zero(),
+        vec2f(
+            snapshot.columns as f32 * metrics.width,
+            snapshot.rows as f32 * metrics.height,
+        ),
+        true,
+        &Washes::default(),
+        &mut scene,
+    );
+    scene.stop_layer();
+    scene
+}
+
+#[test]
+fn a_line_on_coloured_cells_has_no_gap_where_a_row_ends_on_a_half_pixel() {
+    // At 150% with the font zoomed to 13.5, a row is seventeen pixels, which
+    // is twenty-five and a half device pixels: every other row boundary is a
+    // pixel centre. The renderer gives that pixel to the row below, whose
+    // background is painted after the row above's line, so a line that gave
+    // it to the row above would have a gap there in the background's colour.
+    let font = CellFont::headless(13.5);
+    let metrics = font.metrics();
+    let scale = 1.5;
+    assert_eq!(metrics.height * scale, 25.5, "a row ends on a half pixel");
+    let mut grid = snapshot(&["│", "│", "│"], 1);
+    for cell in &mut grid.cells {
+        cell.background = HIGHLIGHT;
+    }
+
+    let scene = painted_at(&grid, &font, scale);
+    let (width, height) = (
+        (metrics.width * scale).ceil() as usize,
+        (3. * metrics.height * scale).ceil() as usize,
+    );
+    let line = inked(&scene, INK)[0];
+    let column = (line.min_x() * scale).round() as usize;
+    let down: Vec<_> = rasterized(&scene, width, height)
+        .into_iter()
+        .map(|row| row[column])
+        .collect();
+
+    let grid_rows = down.iter().take_while(|pixel| pixel.is_some()).count();
+    assert_eq!(
+        grid_rows, 76,
+        "the line stops where the grid does, at 76.5: {down:?}"
+    );
+    let gaps: Vec<usize> = (0..grid_rows)
+        .filter(|&y| down[y] != Some(color(INK)))
+        .collect();
+    assert!(
+        gaps.is_empty(),
+        "the line is broken at device rows {gaps:?}"
+    );
+}
+
+#[test]
+fn a_half_block_capping_a_coloured_run_leaves_no_pixel_between_them() {
+    // A run of coloured cells capped with `▌` in the same colour: a pill, a
+    // tab, a meter. A run that ends on a pixel centre leaves that pixel out,
+    // so the cap has to start on it or a hairline is left between them. At 15
+    // a cell is seven and a half pixels wide, and three of them end on a
+    // centre exactly. At 16.2 a cell is 8.1, the width a 0.6 em font has at
+    // 13.5, and thirty of them at 1.5x end a hair past one, at 364.5000305,
+    // which is on it to the rasterizer.
+    for (font_size, scale, run, exactly) in [(15., 1., 3, true), (16.2, 1.5, 30, false)] {
+        let font = CellFont::headless(font_size);
+        let metrics = font.metrics();
+        let end = run as f32 * metrics.width * scale;
+        assert!(
+            (end.fract() - 0.5).abs() < 1. / 512. && (end.fract() == 0.5) == exactly,
+            "{font_size} at {scale}x: the run ends at {end}"
+        );
+        let line = " ".repeat(run) + "▌";
+        let mut grid = snapshot(&[line.as_str()], run + 1);
+        for cell in &mut grid.cells[..run] {
+            cell.background = HIGHLIGHT;
+        }
+        grid.cells[run].foreground = HIGHLIGHT;
+
+        let scene = painted_at(&grid, &font, scale);
+        let pixels = rasterized(
+            &scene,
+            ((run + 1) as f32 * metrics.width * scale) as usize,
+            (metrics.height * scale) as usize,
+        );
+        let across = &pixels[pixels.len() / 2];
+        let pill: Vec<usize> = (0..across.len())
+            .filter(|&x| across[x] == Some(color(HIGHLIGHT)))
+            .collect();
+        assert_eq!(pill.first(), Some(&0), "{font_size} at {scale}x");
+        assert_eq!(
+            pill.len(),
+            pill.last().map_or(0, |last| last + 1),
+            "{font_size} at {scale}x: one unbroken run of the colour, cap and \
+             all: {pill:?}"
+        );
+        assert!(
+            pill.len() as f32 > end + 1.,
+            "{font_size} at {scale}x: the cap is part of it: {pill:?}"
+        );
+    }
+}
+
+#[test]
+fn a_finished_block_s_row_draws_its_lines_the_way_the_grid_does() {
+    // The list hands a harvested row to the same `paint_glyphs`, so the box
+    // a program left on screen when it exited stays unbroken too.
+    let font = font();
+    let cells = snapshot(&["╭─╮"], 3).cells;
+    let mut scene = Scene::new(1.);
+    paint_glyphs(
+        &cells,
+        &RowMarks::Block(&[]),
+        0.,
+        0.,
+        &font,
+        Ink {
+            ground: GROUND,
+            inverted: None,
+        },
+        &mut scene,
+    );
+
+    assert!(glyphs(&scene).is_empty(), "nothing in the row is a glyph");
+    let corners: Vec<_> = rects(&scene)
+        .into_iter()
+        .filter(|rect| rect.background == Fill::None)
+        .map(|rect| rect.bounds)
+        .collect();
+    assert_eq!(corners.len(), 2, "two rounded corners");
+    let line = inked(&scene, INK);
+    let left = line
+        .iter()
+        .map(|stroke| stroke.min_x())
+        .fold(f32::MAX, f32::min);
+    let right = line.iter().map(|stroke| stroke.max_x()).fold(0., f32::max);
+    assert_eq!(
+        (left, right),
+        (corners[0].max_x(), corners[1].min_x()),
+        "the line between them runs from the one corner to the other"
+    );
+}
+
 /// The rectangles the highlight put in the scene, left to right and top to
 /// bottom, as (origin, size) pairs.
 fn selection_rects(scene: &Scene) -> Vec<(Vector2F, Vector2F)> {

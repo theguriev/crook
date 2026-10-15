@@ -27,6 +27,7 @@ mod action;
 mod block_list;
 pub(crate) mod block_menu;
 mod body;
+mod box_drawing;
 mod changes_panel;
 mod closed;
 mod closing;

@@ -482,6 +482,14 @@ column. `CosmicGlyphs::fallback_glyph` now asks cosmic-text's own fallback about
 character at a time and gets back the face that covers it, which is the same answer shaping
 gives a tab title.
 
+And not everything on a grid is text, even when it is a character. A font's `│` and `█` are
+drawn at the font's own height, and a row is 1.2 times the font size, so in most families a
+column of them had a gap at every row — every box an agent draws its interface in was a
+dashed outline. The lines and blocks of U+2500 to U+259F, and braille, are therefore not
+glyphs at all: `app/src/workspace/box_drawing.rs` draws them as rectangles from the cell's
+own edges, snapped to device pixels so one row's line ends exactly where the next one's
+begins, which is what every terminal that draws them well does.
+
 ### Icons, in the same atlas
 
 The chrome's marks are [Lucide](https://lucide.dev) — the set `lucide-react` publishes — and

@@ -1426,6 +1426,7 @@ impl BlockList {
         {
             terminal_element::paint_cursor_at(
                 cursor,
+                self.snapshot.cell(cursor.row, cursor.column),
                 self.output.draws_focus(),
                 row + vec2f(cursor.column as f32 * metrics.width, 0.),
                 metrics,
