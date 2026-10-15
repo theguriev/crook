@@ -2034,14 +2034,13 @@ fn a_hook_that_backgrounds_something_does_not_hold_add_past_its_deadline() {
     // would return when the `sleep` did and not before.
     let marker = scratch.spot("the-hook-ran");
     let hook = repo.join(".git/hooks/post-checkout");
-    write(
+    crate::process::write_program(
         &hook,
         &format!(
             "#!/bin/sh\ntouch '{}'\nsleep 5 &\nexit 0\n",
             marker.display()
         ),
     );
-    executable(&hook);
 
     // Five seconds of `sleep` against a call that should come back in about
     // one leaves no doubt about which of the two ended it, and five is as long
@@ -2098,7 +2097,7 @@ fn a_hook_that_backgrounds_something_does_not_hold_add_past_its_deadline() {
     );
 }
 
-/// Makes `path` runnable, for the hook the test above installs.
+/// Makes `path` runnable, for a file that is copied and never run.
 #[cfg(unix)]
 fn executable(path: &Path) {
     use std::os::unix::fs::PermissionsExt as _;

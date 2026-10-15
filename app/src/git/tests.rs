@@ -1090,16 +1090,12 @@ fn relay(scratch: &ScratchDir, name: &str) -> (String, PathBuf) {
 /// behind and then runs `then`.
 #[cfg(unix)]
 fn marked(scratch: &ScratchDir, name: &str, then: &str) -> (String, PathBuf) {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let ran = scratch.path().join(format!("{name}.ran"));
     let program = scratch.path().join(name);
-    write(
+    crate::process::write_program(
         &program,
         &format!("#!/bin/sh\ntouch '{}'\n{then}\n", ran.display()),
     );
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-        .expect("the scratch directory is writable");
     (program.display().to_string(), ran)
 }
 

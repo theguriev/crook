@@ -843,21 +843,19 @@ fn a_repository_s_own_diff_programs_are_never_run() {
     if without_git("a_repository_s_own_diff_programs_are_never_run") {
         return;
     }
-    use std::os::unix::fs::PermissionsExt as _;
-
     let scratch = ScratchDir::new("external");
     let repo = task(&scratch);
     let marker = scratch.path.join("ran");
     let program = scratch.path.join("program.sh");
-    std::fs::write(
+    // Written so that it could run if anything tried: a program a fork kept
+    // from running would pass this test whatever the column did.
+    crate::process::write_program(
         &program,
-        format!(
+        &format!(
             "#!/bin/sh\ntouch '{}'\ncat \"$1\" 2>/dev/null\n",
             marker.display()
         ),
-    )
-    .expect("writable");
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    );
     let program = program.display().to_string();
     git(&repo, &["config", "diff.external", &program]);
     git(&repo, &["config", "diff.shout.textconv", &program]);
