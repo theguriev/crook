@@ -827,6 +827,9 @@ pub enum SettingsAction {
     SetTabKey(crate::settings::TabKey),
     /// "Option as Meta": which Option key a program on a Mac reads as Meta.
     SetOptionAsMeta(crate::settings::OptionAsMeta),
+    /// "Motion": whether running marks breathe and the caret blinks, or the
+    /// window keeps still, or does as the desktop says.
+    SetMotion(crate::settings::Motion),
     /// "Show the tabs panel": whether the column of tabs is drawn at all.
     ///
     /// Here beside the other switches on the general options because that is

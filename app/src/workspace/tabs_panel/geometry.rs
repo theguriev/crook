@@ -1,4 +1,5 @@
-//! Where the panel's rows ended up, so that one of them can be scrolled to.
+//! Where the panel's rows ended up, so that one of them can be scrolled to,
+//! and so that a running mark scrolled out of sight is not breathed for.
 //!
 //! A [`Scrollable`](crookui_core::elements::Scrollable) can be told to scroll
 //! to an offset. What it cannot be asked is "where is the row for pane 7?" —
@@ -30,7 +31,7 @@ use crookui_core::geometry::{Point, Vector2F};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 use std::collections::HashMap;
 
-use crate::tab::PaneId;
+use crate::tab::{GroupId, PaneId};
 
 /// Where one row was drawn, in content coordinates.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -39,6 +40,14 @@ pub(crate) struct RowBox {
     pub(crate) top: f32,
     /// How tall it is.
     pub(crate) height: f32,
+}
+
+impl RowBox {
+    /// Whether any of it is inside a viewport scrolled to `offset` and
+    /// `viewport` tall.
+    pub(crate) fn shows_in(self, offset: f32, viewport: f32) -> bool {
+        self.top < offset + viewport && self.top + self.height > offset
+    }
 }
 
 /// Where every row of the panel was drawn.
@@ -55,6 +64,13 @@ struct Inner {
     content_top: f32,
     /// The rows, keyed by the pane each stands for.
     rows: HashMap<PaneId, RowBox>,
+    /// The groups' headings, keyed by the group each names.
+    ///
+    /// Kept beside the rows because a heading carries a mark of its own —
+    /// the worst of its members', folded or not — and a folded group's
+    /// members have no row at all, so the heading is the only place their
+    /// running mark is drawn. See `Workspace::a_running_mark_shows`.
+    headings: HashMap<GroupId, RowBox>,
 }
 
 impl RowGeometry {
@@ -73,19 +89,46 @@ impl RowGeometry {
         let mut inner = self.0.borrow_mut();
         inner.content_top = content_top;
         inner.rows.clear();
+        inner.headings.clear();
     }
 
-    /// Records one row, given where it was painted in window coordinates.
-    pub(crate) fn record(&self, pane: PaneId, window_top: f32, height: f32) {
+    /// Records one row or heading, given where it was painted in window
+    /// coordinates.
+    fn record(&self, what: Tracks, window_top: f32, height: f32) {
         let mut inner = self.0.borrow_mut();
-        let top = window_top - inner.content_top;
-        inner.rows.insert(pane, RowBox { top, height });
+        let row = RowBox {
+            top: window_top - inner.content_top,
+            height,
+        };
+        match what {
+            Tracks::Row(pane) => inner.rows.insert(pane, row),
+            Tracks::Heading(group) => inner.headings.insert(group, row),
+        };
     }
 
     /// Where a row is, if it was drawn on the last frame.
     pub(crate) fn get(&self, pane: PaneId) -> Option<RowBox> {
         self.0.borrow().rows.get(&pane).copied()
     }
+
+    /// Every group heading the last frame drew, and where.
+    pub(crate) fn headings(&self) -> Vec<(GroupId, RowBox)> {
+        let inner = self.0.borrow();
+        inner
+            .headings
+            .iter()
+            .map(|(group, row)| (*group, *row))
+            .collect()
+    }
+}
+
+/// What a [`Tracked`] box stands for.
+#[derive(Copy, Clone)]
+enum Tracks {
+    /// A pane's row.
+    Row(PaneId),
+    /// A group's heading.
+    Heading(GroupId),
 }
 
 /// The offset a viewport has to be scrolled to for `row` to be inside it, or
@@ -123,7 +166,7 @@ pub(crate) fn scroll_for(row: RowBox, offset: f32, viewport: f32) -> Option<f32>
 /// reports its own box to anything: the outermost element is the only one that
 /// knows the whole row's extent.
 pub(crate) struct Tracked {
-    pane: PaneId,
+    what: Tracks,
     geometry: RowGeometry,
     child: Box<dyn Element>,
     size: Option<Vector2F>,
@@ -133,8 +176,17 @@ pub(crate) struct Tracked {
 impl Tracked {
     /// Records `child`'s box into `geometry` under `pane`.
     pub(crate) fn new(pane: PaneId, geometry: RowGeometry, child: Box<dyn Element>) -> Self {
+        Self::tracking(Tracks::Row(pane), geometry, child)
+    }
+
+    /// Records `child`'s box into `geometry` as `group`'s heading.
+    pub(crate) fn heading(group: GroupId, geometry: RowGeometry, child: Box<dyn Element>) -> Self {
+        Self::tracking(Tracks::Heading(group), geometry, child)
+    }
+
+    fn tracking(what: Tracks, geometry: RowGeometry, child: Box<dyn Element>) -> Self {
         Self {
-            pane,
+            what,
             geometry,
             child,
             size: None,
@@ -158,7 +210,7 @@ impl Element for Tracked {
     fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
         self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
         self.geometry
-            .record(self.pane, origin.y(), self.size.map_or(0., |size| size.y()));
+            .record(self.what, origin.y(), self.size.map_or(0., |size| size.y()));
         self.child.paint(origin, ctx, app);
     }
 
@@ -285,7 +337,7 @@ mod tests {
         let pane = PaneId::next();
 
         geometry.begin(120.);
-        geometry.record(pane, 200., 44.);
+        geometry.record(Tracks::Row(pane), 200., 44.);
 
         assert_eq!(geometry.get(pane), Some(row(80., 44.)));
     }
@@ -298,14 +350,57 @@ mod tests {
         let (kept, closed) = (PaneId::next(), PaneId::next());
 
         geometry.begin(0.);
-        geometry.record(kept, 0., 44.);
-        geometry.record(closed, 44., 44.);
+        geometry.record(Tracks::Row(kept), 0., 44.);
+        geometry.record(Tracks::Row(closed), 44., 44.);
         assert!(geometry.get(closed).is_some());
 
         geometry.begin(0.);
-        geometry.record(kept, 0., 44.);
+        geometry.record(Tracks::Row(kept), 0., 44.);
 
         assert!(geometry.get(kept).is_some());
         assert_eq!(geometry.get(closed), None);
+    }
+
+    #[test]
+    fn a_heading_is_kept_beside_the_rows_and_forgotten_with_them() {
+        // A folded group's members have no row, so its heading is the one
+        // place their mark is drawn — and a group that has gone has none.
+        let geometry = RowGeometry::new();
+        let (pane, group) = (PaneId::next(), GroupId::next());
+
+        geometry.begin(100.);
+        geometry.record(Tracks::Heading(group), 100., 40.);
+        geometry.record(Tracks::Row(pane), 140., 44.);
+        assert_eq!(geometry.headings(), vec![(group, row(0., 40.))]);
+        assert_eq!(
+            geometry.get(pane),
+            Some(row(40., 44.)),
+            "a heading is not a row"
+        );
+
+        geometry.begin(100.);
+        assert!(geometry.headings().is_empty());
+    }
+
+    #[test]
+    fn a_box_shows_in_a_viewport_it_reaches_into_by_any_amount() {
+        assert!(row(40., 30.).shows_in(0., 200.));
+        assert!(row(190., 30.).shows_in(0., 200.), "its top edge is in view");
+        assert!(
+            row(0., 30.).shows_in(20., 200.),
+            "its bottom edge is in view"
+        );
+        assert!(
+            !row(200., 30.).shows_in(0., 200.),
+            "it starts where the view ends"
+        );
+        assert!(
+            !row(0., 30.).shows_in(30., 200.),
+            "it ends where the view starts"
+        );
+        assert!(
+            !row(0., 30.).shows_in(0., 0.),
+            "a viewport nothing has measured"
+        );
     }
 }

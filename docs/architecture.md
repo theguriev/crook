@@ -2008,6 +2008,37 @@ exactly as before, so the window that comes back types where it left off.
 Starting out focused is also what opens a window with its caret on Wayland, which says nothing
 about focus until the keyboard first arrives.
 
+**Out of sight is another bit, and only the breath reads it.** crookui folds three ways of
+hearing it into one `Event::WindowOccluded`, in `InputState`. winit's `WindowEvent::Occluded`
+says a window is covered or minimised on macOS, but on X11 only that it is covered, and only
+with no compositor running, which reports every window in view. Windows sends none, and a
+window resized to nothing is the minimised one there (`InputState::resized`). X11 says nothing
+of a minimised window, which its window manager unmaps, and the server sends no visibility
+event for a window that stops being viewable. So crookui asks X11, and only X11: winit's
+`is_minimized` reads `_NET_WM_STATE_HIDDEN`, and that is a round trip to the server. It is
+asked when the focus moves and before each frame while the window lacks the keyboard or was
+minimised when last asked (`InputState::may_be_minimised`), and an `Occluded(false)` overrides
+the answer, since a window manager may map the window it restores before it takes the property
+off. macOS and Windows already say it, and are not asked (`Window::is_minimised`): AppKit
+tells winit that a window it restores is in view while `isMiniaturized` may still say yes.
+A covered window on Windows or under an X11 compositor goes unremarked. The breath chain ends
+while the window cannot be seen and starts again when it can, because X11 and Windows draw
+every frame asked of a hidden window. Wayland holds those frames back by itself. The breath
+does not read the focus, on purpose: a window behind another but beside it is where a working
+agent is watched from. Within a window in sight, a breath repaints only while a running mark is inside
+the panel's viewport, on a row or on a group heading — the panel's `RowGeometry` keeps where
+both were drawn — since a frame is the whole window and its cost grows with every tab.
+
+**And the window can be asked to keep still.** The Appearance page's *Motion* resolves, with
+the desktop's own reduce motion switch for *System* (`crate::motion`, asked on the pool when the
+window opens and when the settings are shown), to whether anything moves on its own. Kept still,
+a running mark is drawn at frame zero of its breath and every caret is solid — the caret's half
+is a thread-local beside the clipboard's PRIMARY switch, `text_input::let_carets_blink`, since a
+caret is drawn by a dozen fields a plugin may own — and neither chain runs: each ends on its next
+tick, and allowing motion again starts them. A caret also rests, lit, `CARET_REST` after its
+field was last used, and the blink chain repaints once more as it does, since its last frame may
+have been the dark half.
+
 **The strip answers.** A waiting row is washed in the amber its dot shows, faintly, because a
 dot is nine pixels and a person scanning a long list wants the row to say it. A group folded
 away carries the worst of the rows it hides on its heading — the same wash when any member is

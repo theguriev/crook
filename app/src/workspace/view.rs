@@ -805,6 +805,13 @@ pub struct Workspace {
     /// caret — on Wayland, which sends no word of focus until the keyboard
     /// arrives, a window that assumed the opposite would open without one.
     window_focused: bool,
+    /// Whether nothing of the window can be seen — minimised, or under other
+    /// windows — as of the last thing the window said about it.
+    ///
+    /// In view until told otherwise, for the reason [`Self::window_focused`]
+    /// is focused: a desktop that never says leaves the window drawing as it
+    /// always did. See [`Self::set_window_occluded`].
+    window_occluded: bool,
     /// The pane that had the keyboard when the window last went behind
     /// something else, until the window comes back.
     ///
@@ -832,6 +839,23 @@ pub struct Workspace {
     /// How many frames that chain has drawn. See
     /// [`crate::plugins::tabs::status_mark`].
     breath: usize,
+    /// Whether the caret may blink at all.
+    ///
+    /// Off until the window on a desktop says otherwise — see
+    /// [`Self::start_caret_blink`] — for the reason [`Self::marks_breathe`]
+    /// is: a test and a snapshot want a frame rather than a heartbeat.
+    carets_blink: bool,
+    /// Whether the chain that blinks the caret is running, so that motion
+    /// allowed again does not start a second one beside it.
+    blinking: bool,
+    /// Whether the blink chain's last repaint was for a caret still
+    /// blinking, which may have drawn it in the dark half of its blink. See
+    /// [`Self::blink_repaints`].
+    caret_settling: bool,
+    /// Whether the desktop asks for less motion, as last asked: what
+    /// [`Motion::System`](crate::settings::Motion::System) does as. No until
+    /// it has answered, and where it cannot be asked. See [`crate::motion`].
+    desktop_reduces_motion: bool,
     interactions: HashMap<PaneId, PaneInteraction>,
     /// What the mouse is doing to each tab's chrome in the panel.
     ///
@@ -1140,6 +1164,9 @@ impl Workspace {
         terminals.update(ctx, |model, _| model.set_shell_login(login_shell));
         // Before the first selection can end, which is a frame away.
         crate::clipboard::use_primary(settings.general().middle_click_paste);
+        // Before the first caret is drawn. The desktop has not been asked
+        // yet, so "System" moves until it answers otherwise.
+        crate::text_input::let_carets_blink(!settings.general().motion.is_reduced(false));
 
         // Last, and before anything is placed on the workspace: every plugin
         // builds here, and one that owns a model or a view makes it with this
@@ -1231,12 +1258,17 @@ impl Workspace {
             window_size: Rc::new(std::cell::Cell::new(Vector2F::zero())),
             system_is_dark: true,
             window_focused: true,
+            window_occluded: false,
             looked_at_when_left: None,
             notifier: Rc::new(Silent),
             notified: Cooldown::default(),
             marks_breathe: false,
             breathing: false,
             breath: 0,
+            carets_blink: false,
+            blinking: false,
+            caret_settling: false,
+            desktop_reduces_motion: false,
             interactions: HashMap::new(),
             tab_chrome: HashMap::new(),
             group_chrome: HashMap::new(),
@@ -1460,6 +1492,42 @@ impl Workspace {
     /// thing the window said.
     pub fn is_window_focused(&self) -> bool {
         self.window_focused
+    }
+
+    /// Takes the desktop's answer to whether it asks for less motion: `None`
+    /// is a desktop that could not be asked, which asks for nothing.
+    pub(crate) fn adopt_desktop_motion(
+        &mut self,
+        answer: Option<bool>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let was_still = self.motion_is_reduced();
+        self.desktop_reduces_motion = answer.unwrap_or(false);
+        if self.motion_is_reduced() != was_still {
+            self.apply_motion(ctx);
+            ctx.notify();
+        }
+    }
+
+    /// Records that nothing of the window can be seen any more, or that
+    /// some of it can again.
+    ///
+    /// Only the breath reads it. Its chain ends while the window is out of
+    /// sight, since X11 and Windows draw every frame asked of a window
+    /// nobody can see, and starts again here when it comes back. Unlike
+    /// the focus, which the breath ignores on purpose: a window behind
+    /// another but beside it is where a working agent is watched from.
+    pub fn set_window_occluded(&mut self, occluded: bool, ctx: &mut ViewContext<Self>) {
+        if self.window_occluded == occluded {
+            return;
+        }
+        self.window_occluded = occluded;
+        if !occluded {
+            self.start_breathing(ctx);
+            // The desktop shows the frame it hid, which has the breath where
+            // it was when the window went.
+            ctx.notify();
+        }
     }
 
     /// Hands the workspace the notifier its desktop notifications go to.
@@ -4406,6 +4474,10 @@ impl Workspace {
         // and another terminal may have taken it since.
         if self.settings_are_showing() {
             self.ask_default_terminal(ctx);
+            // And whether the desktop asks for less motion, for the same
+            // reason: it may have been switched since, and a person who just
+            // did is likely to come here to see whether Crook heard.
+            self.ask_the_desktop_about_motion(ctx);
         }
         // Back to the tabs: a find bar over a grid there has not searched what
         // it printed while the section covered it.
@@ -5479,7 +5551,14 @@ impl Workspace {
     }
 
     /// How far into its breath a running agent's mark is, in frames.
+    ///
+    /// Frame zero, the full colour, while the window keeps still — whatever
+    /// the count says, so that a mark is still from the very frame the
+    /// setting changed rather than from the chain's next tick.
     pub fn breath(&self) -> usize {
+        if self.motion_is_reduced() {
+            return 0;
+        }
         self.breath
     }
 
@@ -5497,51 +5576,113 @@ impl Workspace {
         self.start_breathing(ctx);
     }
 
-    /// Starts the running marks breathing, unless they already are or no
-    /// agent is running.
+    /// Starts the running marks breathing, unless they already are or there
+    /// is no breath to draw.
     ///
-    /// Called whenever a pane turns to running. The chain runs for as long as
-    /// one does and then ends, the way the pirate's bite ends with the wait it
-    /// was drawn for — so a window whose agents have all stopped, or never
-    /// started, has no tick at all.
+    /// Called whenever a pane turns to running, the window comes back into
+    /// sight, or motion is allowed again. The chain runs for as long as
+    /// [`Self::breath_goes_on`] says and then ends, the way the pirate's bite
+    /// ends with the wait it was drawn for — so a window whose agents have
+    /// all stopped, or never started, has no tick at all.
     fn start_breathing(&mut self, ctx: &mut ViewContext<Self>) {
-        if !self.marks_breathe || self.breathing || !self.an_agent_is_running() {
+        if self.breathing || !self.breath_goes_on() {
             return;
         }
         self.breathing = true;
         self.keep_breathing(ctx);
     }
 
-    /// Waits out one frame of the breath and draws the next, while an agent
-    /// is running.
+    /// Whether there is a breath to move: the window on a desktop let the
+    /// marks breathe, an agent is running, and the window can be seen and
+    /// has not been asked to keep still.
+    fn breath_goes_on(&self) -> bool {
+        self.marks_breathe
+            && !self.window_occluded
+            && !self.motion_is_reduced()
+            && self.an_agent_is_running()
+    }
+
+    /// Waits out one frame of the breath and draws the next, while there is
+    /// a breath to move.
     ///
     /// The bite's shape and the bite's argument for not being counted in
     /// `PARKED_WORKERS`: one chain at most, parking a worker for one
     /// [`BREATH_FRAME`](crate::plugins::tabs::BREATH_FRAME) at a time. It
-    /// repaints only while the tab list is the thing in the sidebar — a
-    /// hidden panel or a settings page has no mark on it to move — and keeps
-    /// counting either way, which costs nothing and means the list it comes
-    /// back to is mid-breath rather than restarting it.
+    /// repaints only while a running mark is where the panel shows it — see
+    /// [`Self::breath_shows`] — and keeps counting either way, which costs
+    /// nothing and means the list it comes back to is mid-breath rather than
+    /// restarting it.
     fn keep_breathing(&self, ctx: &mut ViewContext<Self>) {
         let waiting = ctx
             .background()
             .spawn(async { std::thread::sleep(crate::plugins::tabs::BREATH_FRAME) });
 
         ctx.spawn(waiting, |workspace, (), ctx| {
-            if workspace.an_agent_is_running() {
+            if workspace.breath_goes_on() {
                 workspace.breath = workspace.breath.wrapping_add(1);
-                if workspace.panel_search_is_showing() {
+                if workspace.breath_shows() {
                     ctx.notify();
                 }
                 workspace.keep_breathing(ctx);
                 return;
             }
-            // Over. Back to the full colour for whatever agent starts next,
-            // and no repaint: no mark is drawn running any more.
+            // Over: no agent runs, or nobody can see the window, or it was
+            // asked to keep still. Back to the full colour for whatever
+            // breath starts next, and no repaint: no mark is drawn running
+            // any more, or none moving, or none anybody would see.
             workspace.breathing = false;
             workspace.breath = 0;
         })
         .detach();
+    }
+
+    /// Whether the next frame of the breath is worth drawing: a running
+    /// mark is where a person could see it move.
+    ///
+    /// In a window in sight, with the tab list the thing in the sidebar — a
+    /// hidden panel or a settings page has no mark on it to move — and with
+    /// a running mark inside the list's viewport. Scrolled out of it, the
+    /// frame would draw the same panel again, and a frame is the whole
+    /// window: the cost grows with every tab in it, for a mark nobody sees.
+    pub(super) fn breath_shows(&self) -> bool {
+        !self.window_occluded && self.panel_search_is_showing() && self.a_running_mark_shows()
+    }
+
+    /// Whether a running mark was drawn inside the list's viewport on the
+    /// last frame: on a row whose agent is running, or on a group's heading
+    /// that carries the mark for the worst of its members — the one place a
+    /// folded group's running member has a mark at all.
+    ///
+    /// Asked of where the last frame put the rows, which is right for the
+    /// same reason it is for a scroll to a row: rows do not move without a
+    /// frame, and a scroll is one.
+    fn a_running_mark_shows(&self) -> bool {
+        let (offset, viewport) = {
+            let scroll = self.panel_scroll.lock();
+            (scroll.offset(), scroll.viewport())
+        };
+        let rows = &self.panel_rows;
+        let shows = |row: tabs_panel::geometry::RowBox| row.shows_in(offset, viewport);
+
+        self.tabs.panes().any(|(_, pane)| {
+            pane.status() == AgentStatus::Running && rows.get(pane.id()).is_some_and(shows)
+        }) || rows.headings().into_iter().any(|(group, heading)| {
+            shows(heading)
+                && crate::plugins::tabs::group_rollup(self, group)
+                    .is_some_and(|rollup| rollup.status == AgentStatus::Running)
+        })
+    }
+
+    /// Whether the chain that moves the breath is running.
+    #[cfg(test)]
+    pub(super) fn is_breathing(&self) -> bool {
+        self.breathing
+    }
+
+    /// Whether the chain that blinks the caret is running.
+    #[cfg(test)]
+    pub(super) fn is_blinking(&self) -> bool {
+        self.blinking
     }
 
     /// Whether any pane in the window shows a running agent.
@@ -7334,6 +7475,7 @@ impl Workspace {
             return;
         }
 
+        let was_still = self.motion_is_reduced();
         self.settings.set_general(general);
         // The shells already running keep the startup they were given; there is
         // no way to read a file into a shell that has drawn its prompt. This
@@ -7341,8 +7483,51 @@ impl Workspace {
         self.terminals
             .update(ctx, |model, _| model.set_shell_login(general.login_shell));
         crate::clipboard::use_primary(general.middle_click_paste);
+        if self.motion_is_reduced() != was_still {
+            self.apply_motion(ctx);
+        }
         self.save_settings(ctx);
         ctx.notify();
+    }
+
+    /// Whether nothing in the window moves on its own: the "Motion" setting,
+    /// with the desktop's word for [`Motion::System`](crate::settings::Motion::System).
+    fn motion_is_reduced(&self) -> bool {
+        self.general()
+            .motion
+            .is_reduced(self.desktop_reduces_motion)
+    }
+
+    /// Puts whether the window keeps still in force, after it changed.
+    ///
+    /// Every caret holds still or blinks from the next frame, which the
+    /// caller asks for. A chain that moved something now kept still ends
+    /// itself on its next tick, so there is nothing here to cancel; a chain
+    /// for something allowed to move again is started, if the window on a
+    /// desktop had asked for one.
+    fn apply_motion(&mut self, ctx: &mut ViewContext<Self>) {
+        let still = self.motion_is_reduced();
+        crate::text_input::let_carets_blink(!still);
+        if !still {
+            self.start_breathing(ctx);
+            self.start_blinking(ctx);
+        }
+    }
+
+    /// Asks the desktop, on the pool, whether it asks for less motion. See
+    /// [`crate::motion`]. Never from a test, whose answer would be the
+    /// machine's running the suite.
+    pub fn ask_the_desktop_about_motion(&self, ctx: &mut ViewContext<Self>) {
+        if cfg!(test) {
+            return;
+        }
+        let asking = ctx
+            .background()
+            .spawn(async move { crate::motion::desktop_reduces_motion() });
+        ctx.spawn(asking, |workspace, answer, ctx| {
+            workspace.adopt_desktop_motion(answer, ctx);
+        })
+        .detach();
     }
 
     /// Writes the keybindings file an edit asked for, on the background pool.
@@ -7733,22 +7918,37 @@ impl Workspace {
     /// [`crate::PARKED_WORKERS`] for the list — and, like the others, it is
     /// deliberately not started by a test or by the headless snapshot, both of
     /// which want a frame rather than a heartbeat.
-    pub fn start_caret_blink(&self, ctx: &mut ViewContext<Self>) {
+    pub fn start_caret_blink(&mut self, ctx: &mut ViewContext<Self>) {
+        self.carets_blink = true;
+        self.start_blinking(ctx);
+    }
+
+    /// Starts the blink chain, unless it is already running, the window has
+    /// not asked for one, or the window keeps still.
+    fn start_blinking(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self.carets_blink || self.blinking || self.motion_is_reduced() {
+            return;
+        }
+        self.blinking = true;
         self.blink_caret(ctx);
     }
 
-    /// Waits out one half of the blink and repaints if a caret is on screen.
+    /// Waits out one half of the blink and repaints if a caret is on screen,
+    /// for as long as the window does not keep still.
     fn blink_caret(&self, ctx: &mut ViewContext<Self>) {
         let waiting = ctx
             .background()
             .spawn(async { std::thread::sleep(CARET_PHASE) });
 
         ctx.spawn(waiting, |workspace, (), ctx| {
-            // Only when something would actually be drawn differently. A window
-            // whose focused pane is running vim has no caret of its own, and
-            // repainting it twice a second for nobody is exactly the kind of
-            // idle tick the rest of this application does not have.
-            if workspace.shows_a_caret(ctx) {
+            // Asked to keep still: no timer at all, rather than one that
+            // wakes twice a second to repaint nothing. Motion allowed again
+            // starts the chain afresh — see `apply_motion`.
+            if workspace.motion_is_reduced() {
+                workspace.blinking = false;
+                return;
+            }
+            if workspace.blink_repaints(ctx) {
                 ctx.notify();
             }
             workspace.blink_caret(ctx);
@@ -7756,8 +7956,31 @@ impl Workspace {
         .detach();
     }
 
+    /// Whether this tick of the blink repaints the window, as it decides it.
+    ///
+    /// Only when something would actually be drawn differently. A window
+    /// whose focused pane is running vim has no caret of its own, and
+    /// repainting it twice a second for nobody is exactly the kind of idle
+    /// tick the rest of this application does not have.
+    ///
+    /// And once more after a caret stops blinking — at rest, or the keys
+    /// gone somewhere with none — because the frame the last tick drew may
+    /// have been its dark half, and with nothing else to repaint the window
+    /// a caret at rest would rest out of sight.
+    pub(super) fn blink_repaints(&mut self, app: &AppContext) -> bool {
+        let blinking = self.shows_a_caret(app);
+        let settling = std::mem::replace(&mut self.caret_settling, blinking);
+        blinking || settling
+    }
+
     /// Whether any field on screen is drawing a caret that blinks.
     pub(super) fn shows_a_caret(&self, app: &AppContext) -> bool {
+        // Every caret is solid while the window keeps still, and so is one
+        // left alone for long enough: none of them blinks, whichever field
+        // it is in. See `text_input::a_caret_blinks`.
+        if !crate::text_input::a_caret_blinks() {
+            return false;
+        }
         // Nothing blinks in a window behind another. Nothing in it draws a
         // caret at all — not a pane's composer, see `body::contents`, nor a
         // field with the keys, see `TextField::with_window_focused` — and
@@ -11433,6 +11656,11 @@ impl Workspace {
             SettingsAction::SetOptionAsMeta(option_as_meta) => {
                 let mut general = self.general();
                 general.option_as_meta = option_as_meta;
+                self.set_general(general, ctx);
+            }
+            SettingsAction::SetMotion(motion) => {
+                let mut general = self.general();
+                general.motion = motion;
                 self.set_general(general, ctx);
             }
             SettingsAction::ToggleLoginShell => {

@@ -47,6 +47,21 @@ pub(super) struct InputState {
     /// The files of a drop that is still arriving, one `DroppedFile` at a
     /// time. See [`Self::finish_drop`].
     dropped: Vec<PathBuf>,
+    /// Whether the desktop last said every pixel of the window is hidden.
+    covered: bool,
+    /// Whether the window's last size had no room in it, which is how
+    /// Windows minimises one. See [`Self::resized`].
+    shrunk: bool,
+    /// Whether the desktop said the window is minimised the last time it was
+    /// asked, which is the only way X11 says it, and has not said since that
+    /// some of it is in view. See [`Self::minimised`].
+    minimised: bool,
+    /// Whether the window last heard that it has the keyboard, which a
+    /// minimised window never has. See [`Self::may_be_minimised`].
+    focused: bool,
+    /// What the application was last told about the three together: out of
+    /// sight while any of them holds. See [`Self::occlusion`].
+    occluded: bool,
 }
 
 #[derive(Debug)]
@@ -59,8 +74,8 @@ struct Click {
 
 impl InputState {
     /// Converts one winit window event, or `None` when it is not input or one
-    /// of the two things the desktop says about the window — its theme and
-    /// whether it has the focus.
+    /// of the things the desktop says about the window — its theme, whether
+    /// it has the focus, and whether it can be seen.
     ///
     /// A dropped file is input, and is `None` here all the same: it is one
     /// file of a drop that may have more, and what crosses the line is the
@@ -145,7 +160,24 @@ impl InputState {
             // Not input, strictly, but it crosses the line the way the theme
             // does: it is the desktop saying something about the window, and
             // only winit knows how each desktop says it.
-            WindowEvent::Focused(focused) => Some(Event::WindowFocused(*focused)),
+            WindowEvent::Focused(focused) => {
+                self.focused = *focused;
+                Some(Event::WindowFocused(*focused))
+            }
+
+            // The window went out of sight or came back, which the desktop
+            // says the way it says the rest. Folded in with the other ways a
+            // window goes out of sight rather than passed on as it is: see
+            // `occlusion`. And some of it in view is the desktop's own word
+            // that it is not minimised, newer than the last answer asked of
+            // it: see `minimised`.
+            WindowEvent::Occluded(covered) => {
+                self.covered = *covered;
+                if !covered {
+                    self.minimised = false;
+                }
+                self.occlusion()
+            }
 
             // An input method is composing. These arrive *instead of* the key
             // presses that belong to the composition, which is why a field
@@ -217,6 +249,72 @@ impl InputState {
         Some(Event::FilesDropped {
             paths: std::mem::take(&mut self.dropped),
         })
+    }
+
+    /// Notes the window's new size, and says so as [`Event::WindowOccluded`]
+    /// when it has just shrunk to nothing or grown out of it.
+    ///
+    /// Windows sends no `Occluded` — winit reports it on X11 and macOS only
+    /// — and minimising a window there resizes it to nothing, the one size no
+    /// window anybody can see has. So a window with no room in it is out of
+    /// sight on any desktop, and on Windows it is the only word there is.
+    pub(super) fn resized(&mut self, size: winit::dpi::PhysicalSize<u32>) -> Option<Event> {
+        self.shrunk = size.width == 0 || size.height == 0;
+        self.occlusion()
+    }
+
+    /// Notes what the desktop answered when asked whether the window is
+    /// minimised, and says so as [`Event::WindowOccluded`] when that has just
+    /// changed whether it can be seen.
+    ///
+    /// X11 never says it unasked. Its window manager unmaps the window it
+    /// minimises, and the server sends no `VisibilityNotify` — the one thing
+    /// winit makes `Occluded` of there — for a window that stops being
+    /// viewable, nor does a minimised window change size. So it is asked:
+    /// winit reads `_NET_WM_STATE_HIDDEN` for it. `None` is a desktop that
+    /// is not asked or cannot say — Wayland never can — and leaves the
+    /// window in sight.
+    ///
+    /// An answer stands until the desktop says some of the window is in
+    /// view, which overrides it. Both desktops that send `Occluded` send
+    /// `Occluded(false)` only for a window on screen — X11's
+    /// `VisibilityNotify` comes only for a viewable window, and macOS counts
+    /// a minimised one occluded — and an answer can lag a restore: a window
+    /// manager may map the window it brings back before it takes
+    /// `_NET_WM_STATE_HIDDEN` off. Should the desktop be wrong, it costs a
+    /// frame, since the next one drawn without the keyboard asks again.
+    pub(super) fn minimised(&mut self, minimised: Option<bool>) -> Option<Event> {
+        self.minimised = minimised.unwrap_or(false);
+        self.occlusion()
+    }
+
+    /// Whether the window could be minimised as things stand, and so whether
+    /// a frame about to be drawn should ask [`Self::minimised`] first. The
+    /// focus moving asks whatever this says.
+    ///
+    /// While it does not have the keyboard, since a minimised window never
+    /// does and the window manager may hide it a moment after taking the
+    /// keyboard away; and while it was minimised when last asked, since a
+    /// frame asked for may be the first sign that it came back. Not while it
+    /// has the keyboard: on X11 the question is a round trip to the server,
+    /// and a window being typed into would pay it on every frame.
+    pub(super) fn may_be_minimised(&self) -> bool {
+        !self.focused || self.minimised
+    }
+
+    /// [`Event::WindowOccluded`], when whether the window can be seen has
+    /// just changed.
+    ///
+    /// Out of sight while any way of hiding it holds, so that a window
+    /// still under others is not said to be back because it was restored
+    /// to a size, nor one still minimised because the desktop said the
+    /// windows over it had gone. Only a change is said, since the desktop
+    /// repeats itself: X11 sends `Occluded(true)` again for each window
+    /// that moves over one already covered.
+    fn occlusion(&mut self) -> Option<Event> {
+        let occluded = self.covered || self.shrunk || self.minimised;
+        (occluded != std::mem::replace(&mut self.occluded, occluded))
+            .then_some(Event::WindowOccluded(occluded))
     }
 
     /// Forgets every button it believes is held.
@@ -513,7 +611,7 @@ fn named_key_name(key: NamedKey) -> String {
 
 #[cfg(test)]
 mod tests {
-    use winit::dpi::PhysicalPosition;
+    use winit::dpi::{PhysicalPosition, PhysicalSize};
 
     use super::*;
 
@@ -599,6 +697,167 @@ mod tests {
             input.convert(&WindowEvent::Focused(true), 1.),
             Some(Event::WindowFocused(true))
         ));
+    }
+
+    #[test]
+    fn the_window_going_out_of_sight_and_back_crosses_the_line_once_each_way() {
+        let mut input = InputState::default();
+
+        assert!(matches!(
+            input.convert(&WindowEvent::Occluded(true), 1.),
+            Some(Event::WindowOccluded(true))
+        ));
+        // X11 says it again for each window that moves over one already
+        // covered, and the application has already been told.
+        assert!(input.convert(&WindowEvent::Occluded(true), 1.).is_none());
+        assert!(matches!(
+            input.convert(&WindowEvent::Occluded(false), 1.),
+            Some(Event::WindowOccluded(false))
+        ));
+    }
+
+    #[test]
+    fn a_window_shrunk_to_nothing_is_out_of_sight_until_it_has_room_again() {
+        // How Windows minimises a window, and the only word of it winit
+        // passes on: there is no `Occluded` there.
+        let mut input = InputState::default();
+
+        assert!(input.resized(PhysicalSize::new(800, 600)).is_none());
+        assert!(matches!(
+            input.resized(PhysicalSize::new(0, 0)),
+            Some(Event::WindowOccluded(true))
+        ));
+        assert!(matches!(
+            input.resized(PhysicalSize::new(800, 600)),
+            Some(Event::WindowOccluded(false))
+        ));
+        assert!(input.resized(PhysicalSize::new(900, 600)).is_none());
+    }
+
+    #[test]
+    fn a_window_is_in_sight_only_once_neither_way_of_hiding_it_holds() {
+        let mut input = InputState::default();
+
+        assert!(matches!(
+            input.convert(&WindowEvent::Occluded(true), 1.),
+            Some(Event::WindowOccluded(true))
+        ));
+        assert!(input.resized(PhysicalSize::new(0, 0)).is_none());
+        // Room again, under the same windows as before.
+        assert!(
+            input.resized(PhysicalSize::new(800, 600)).is_none(),
+            "a window still covered was said to be in sight"
+        );
+        assert!(matches!(
+            input.convert(&WindowEvent::Occluded(false), 1.),
+            Some(Event::WindowOccluded(false))
+        ));
+    }
+
+    #[test]
+    fn a_window_the_desktop_says_is_minimised_when_asked_is_out_of_sight_until_it_is_not() {
+        // X11, which minimises a window by unmapping it and says nothing
+        // of it unasked.
+        let mut input = InputState::default();
+
+        assert!(input.minimised(Some(false)).is_none());
+        assert!(matches!(
+            input.minimised(Some(true)),
+            Some(Event::WindowOccluded(true))
+        ));
+        // Asked again on every frame while it may still be, and the
+        // application has already been told.
+        assert!(input.minimised(Some(true)).is_none());
+        assert!(matches!(
+            input.minimised(Some(false)),
+            Some(Event::WindowOccluded(false))
+        ));
+    }
+
+    #[test]
+    fn a_desktop_that_cannot_say_whether_the_window_is_minimised_leaves_it_in_sight() {
+        // Wayland, whose answer is always `None`.
+        let mut input = InputState::default();
+
+        assert!(input.minimised(None).is_none());
+        assert!(matches!(
+            input.convert(&WindowEvent::Occluded(true), 1.),
+            Some(Event::WindowOccluded(true))
+        ));
+        assert!(
+            input.minimised(None).is_none(),
+            "no answer was taken for the window coming back"
+        );
+    }
+
+    #[test]
+    fn a_minimised_window_restored_under_other_windows_stays_out_of_sight() {
+        let mut input = InputState::default();
+
+        assert!(matches!(
+            input.minimised(Some(true)),
+            Some(Event::WindowOccluded(true))
+        ));
+        assert!(input.convert(&WindowEvent::Occluded(true), 1.).is_none());
+        assert!(
+            input.minimised(Some(false)).is_none(),
+            "a window still covered was said to be in sight"
+        );
+        assert!(matches!(
+            input.convert(&WindowEvent::Occluded(false), 1.),
+            Some(Event::WindowOccluded(false))
+        ));
+    }
+
+    #[test]
+    fn the_desktop_saying_the_window_is_in_view_overrides_an_answer_that_it_is_minimised() {
+        // An X11 window manager mapping the window it restores before it
+        // takes `_NET_WM_STATE_HIDDEN` off: the answer asked last still says
+        // minimised, and nothing else is sure to ask again.
+        let mut input = InputState::default();
+
+        assert!(matches!(
+            input.minimised(Some(true)),
+            Some(Event::WindowOccluded(true))
+        ));
+        assert!(
+            matches!(
+                input.convert(&WindowEvent::Occluded(false), 1.),
+                Some(Event::WindowOccluded(false))
+            ),
+            "a window the desktop says is in view was held out of sight"
+        );
+
+        // Should the desktop be wrong, the next answer still counts.
+        assert!(matches!(
+            input.minimised(Some(true)),
+            Some(Event::WindowOccluded(true))
+        ));
+    }
+
+    #[test]
+    fn whether_the_window_is_minimised_is_asked_only_while_it_could_be() {
+        let mut input = InputState::default();
+
+        // Nothing heard of the keyboard yet, so nothing ruled out.
+        assert!(input.may_be_minimised());
+
+        input.convert(&WindowEvent::Focused(true), 1.);
+        assert!(
+            !input.may_be_minimised(),
+            "a window with the keyboard would ask on every frame typed into it"
+        );
+
+        input.convert(&WindowEvent::Focused(false), 1.);
+        assert!(input.may_be_minimised());
+
+        // Minimised, then given the keyboard by a restore whose own word
+        // of it has not been asked for yet: still asked.
+        input.minimised(Some(true));
+        input.convert(&WindowEvent::Focused(true), 1.);
+        assert!(input.may_be_minimised());
+        input.minimised(Some(false));
+        assert!(!input.may_be_minimised());
     }
 
     #[test]
