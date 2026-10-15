@@ -1114,7 +1114,7 @@ impl Workspace {
         // the model checks before it notifies. A branch that changed is also
         // what a pull request's link goes with.
         ctx.observe(&git, |workspace, _, ctx| {
-            workspace.forget_moved_pull_requests();
+            workspace.forget_moved_pull_requests(ctx);
             ctx.notify();
         });
         // And the end of every cycle, changed or not, is when the Changes
@@ -8196,19 +8196,6 @@ impl Workspace {
         });
     }
 
-    /// Reports the agent's progress into one session, and repaints the chip
-    /// that shows it. Returns whether the pane is still open.
-    ///
-    /// A closure rather than a returned `&mut AgentSession`, because the
-    /// repaint has to be part of the same call: a caller that renamed a
-    /// session and did not notify would leave the old title on screen with
-    /// nothing reporting an error, until some unrelated click happened to
-    /// rebuild the frame.
-    ///
-    /// Addressed by [`PaneId`], because a session belongs to a pane. Taking a
-    /// [`TabId`] would mean writing into whichever pane of that tab happens to
-    /// be focused when the agent reports — a race between a person clicking
-    /// and a background task finishing.
     /// Renames a tab, or takes the rename back.
     ///
     /// `None` puts back the name the tab was opened with, which is where a
@@ -8245,6 +8232,36 @@ impl Workspace {
         }
     }
 
+    /// Reports the agent's progress into one session, and repaints the chip
+    /// that shows it. Returns whether the pane is still open.
+    ///
+    /// A closure rather than a returned `&mut AgentSession`, because the
+    /// repaint has to be part of the same call: a caller that renamed a
+    /// session and did not notify would leave the old title on screen with
+    /// nothing reporting an error, until some unrelated click happened to
+    /// rebuild the frame.
+    ///
+    /// Addressed by [`PaneId`], because a session belongs to a pane. Taking a
+    /// [`TabId`] would mean writing into whichever pane of that tab happens to
+    /// be focused when the agent reports — a race between a person clicking
+    /// and a background task finishing.
+    ///
+    /// **A report that changed nothing asks for no frame**, and follows
+    /// nothing either: it returns before the git lookup, the Changes column
+    /// and the notify, every one of which is about a session that moved. A
+    /// working agent sends a great many of them. Claude Code turns the glyph
+    /// in front of its title about once a second while it works, in a tab
+    /// that never had the keyboard — one `crook tab new` opened — and each
+    /// turn is the same name and the same running; its hooks say running
+    /// again around every tool it calls. Each was a rebuild of the whole
+    /// window of its own, for a row that looked exactly as it did. What
+    /// counts as a change is [`AgentSession::says_the_same_as`]'s to say.
+    ///
+    /// The report's own rebuild is all that goes. Both reports come only
+    /// while an agent runs, and while one runs `Self::keep_breathing`
+    /// redraws the window every breath for as long as the tab list is
+    /// showing; the window goes quiet for an agent at work behind it only
+    /// with the list hidden or a settings page up.
     pub fn update_session(
         &mut self,
         id: PaneId,
@@ -8255,8 +8272,12 @@ impl Workspace {
             return false;
         };
 
-        let was_working = super::finish::at_work(pane.session()).is_some();
+        let before = pane.session().clone();
         report(pane.session_mut());
+        if pane.session().says_the_same_as(&before) {
+            return true;
+        }
+        let was_working = super::finish::at_work(&before).is_some();
         let stopped = was_working && super::finish::at_work(pane.session()).is_none();
         // A report can move the session somewhere else, and the git facts a
         // row shows are looked up by directory — which is what makes the branch
@@ -8311,7 +8332,7 @@ impl Workspace {
     /// it. What counts as leaving is [`PullRequest::is_left_for`]'s: another
     /// branch, another repository or none — not a rebase, and not a detached
     /// `HEAD` in the same repository.
-    fn forget_moved_pull_requests(&mut self) {
+    fn forget_moved_pull_requests(&mut self, ctx: &mut ViewContext<Self>) {
         let moved: Vec<PaneId> = self
             .tabs
             .panes()
@@ -8327,6 +8348,12 @@ impl Workspace {
             })
             .map(|(_, pane)| pane.id())
             .collect();
+        // Its own repaint, since a directory said again is a report that
+        // changed nothing and repaints nothing, and the pull request that
+        // goes may be another pane's.
+        if !moved.is_empty() {
+            ctx.notify();
+        }
         for pane in moved {
             if let Some(pane) = self.tabs.pane_mut(pane) {
                 pane.session_mut().pull_request = None;
@@ -9210,6 +9237,10 @@ impl Workspace {
                     // on the row moves unless the status does — codex writes
                     // a frame of its spinner ten times a second.
                     Some(None) => self.tabs.pane(*pane).is_some(),
+                    // Claude Code's glyph turns in front of the same name
+                    // about once a second while it works, and the same name
+                    // is a report that changed nothing: `update_session`
+                    // asks for no frame for it.
                     Some(Some(name)) => {
                         let name = Some(name.to_owned()).filter(|name| !name.is_empty());
                         self.update_session(*pane, ctx, |session| session.derived_title = name)
@@ -9240,7 +9271,7 @@ impl Workspace {
                     // Into a directory another pane already shows, the git
                     // model has nothing new to read and says nothing; the
                     // branch a pull request goes with is asked here instead.
-                    self.forget_moved_pull_requests();
+                    self.forget_moved_pull_requests(ctx);
                 }
                 reported
             }
@@ -9259,7 +9290,7 @@ impl Workspace {
                 // `PaneSnapshot::remote_host`.
                 if reported {
                     self.save_session(ctx);
-                    self.forget_moved_pull_requests();
+                    self.forget_moved_pull_requests(ctx);
                 }
                 reported
             }

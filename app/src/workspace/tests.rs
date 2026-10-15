@@ -25308,6 +25308,160 @@ mod the_frame_budget {
         harness.show_tabs();
         assert!(repaint_asks_for_a_frame(&mut harness, pane));
     }
+
+    /// Hands the window what the model's subscription hands it, and draws the
+    /// frame that asked for, if it asked for one.
+    fn heard(harness: &mut Harness, update: &TerminalUpdate) {
+        harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(update, ctx));
+        harness.draw_if_asked();
+    }
+
+    /// Claude Code's title while it works on `name`, at one turn of the glyph
+    /// in front of it.
+    fn claude_at_work(pane: PaneId, name: &str, turn: usize) -> TerminalUpdate {
+        let glyph = if turn.is_multiple_of(2) {
+            '\u{25d0}'
+        } else {
+            '\u{25d1}'
+        };
+        TerminalUpdate::Title(pane, Some(format!("{glyph} {name}")))
+    }
+
+    #[test]
+    fn a_spinner_turning_in_a_title_nobody_can_see_draws_nothing() {
+        // Claude Code turns the glyph in front of its title every 960 ms
+        // while it works, in a tab that never had the keyboard: one
+        // `crook tab new` opened, where it is never told the keyboard left.
+        // Each turn is the same name and the same running, and each was a
+        // rebuild of the whole window, for a row that looked as it did.
+        //
+        // The turns alone: this harness never lets the marks breathe. The app
+        // does, and with the tab list up the breath redraws the window every
+        // 80 ms while an agent runs whatever the title says — what goes here
+        // is each turn's own rebuild. The test after this one is the window
+        // going quiet, which takes the list hidden as well.
+        let mut harness = Harness::new(2);
+        let hidden = pane_behind(&harness);
+        heard(&mut harness, &claude_at_work(hidden, "Fixing the build", 0));
+        assert_eq!(harness.pane_title(hidden), "Fixing the build");
+        let renders = harness.workspace_renders();
+        let frames = harness.frames_built();
+
+        for turn in 1..=20 {
+            heard(
+                &mut harness,
+                &claude_at_work(hidden, "Fixing the build", turn),
+            );
+        }
+
+        assert_eq!(
+            harness.workspace_renders() - renders,
+            0,
+            "the window was rebuilt for a glyph turning in a title nobody can see"
+        );
+        assert_eq!(harness.frames_built() - frames, 0);
+    }
+
+    /// How many frames into its breath the running marks are.
+    fn breath(harness: &Harness) -> usize {
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.breath())
+    }
+
+    #[test]
+    fn with_the_tab_list_hidden_an_agent_at_work_behind_draws_nothing_while_its_mark_breathes() {
+        // The app as it ships lets the marks breathe, and the breath counts
+        // on whether or not it draws: with no tab list there is no mark to
+        // move, so neither the breath nor the glyph turning asks for a frame.
+        // Each turn waits for a breath, so that a breath that drew would be
+        // counted here.
+        let mut harness = Harness::new(2);
+        harness.run_command("crook/window/toggle-panel");
+        assert!(!harness.general().show_tabs_panel);
+        harness.workspace_update(Workspace::let_marks_breathe);
+        let hidden = pane_behind(&harness);
+        heard(&mut harness, &claude_at_work(hidden, "Fixing the build", 0));
+        let status = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().pane(hidden).map(Pane::status)
+        });
+        assert_eq!(status, Some(AgentStatus::Running));
+        harness.draw_if_asked();
+        let renders = harness.workspace_renders();
+        let frames = harness.frames_built();
+
+        for turn in 1..=5 {
+            heard(
+                &mut harness,
+                &claude_at_work(hidden, "Fixing the build", turn),
+            );
+            let was = breath(&harness);
+            harness.wait_drawing("the running mark stopped breathing", |harness| {
+                breath(harness) > was
+            });
+        }
+
+        assert_eq!(
+            harness.workspace_renders() - renders,
+            0,
+            "the window was rebuilt for an agent at work behind a hidden tab list"
+        );
+        assert_eq!(harness.frames_built() - frames, 0);
+    }
+
+    #[test]
+    fn a_title_naming_new_work_where_nobody_can_see_is_still_one_frame_for_its_row() {
+        // The row is on screen even when the pane is not, and its name is
+        // what changed: the frame that says so is the one frame there is.
+        let mut harness = Harness::new(2);
+        let hidden = pane_behind(&harness);
+        heard(&mut harness, &claude_at_work(hidden, "Fixing the build", 0));
+        heard(&mut harness, &claude_at_work(hidden, "Fixing the build", 1));
+        let renders = harness.workspace_renders();
+
+        heard(
+            &mut harness,
+            &claude_at_work(hidden, "Running the tests", 0),
+        );
+
+        assert_eq!(harness.workspace_renders() - renders, 1);
+        assert!(
+            strip_text(&harness.frame()).contains("Running the tests"),
+            "the row did not take the new name"
+        );
+    }
+
+    #[test]
+    fn a_hook_saying_running_again_where_nobody_can_see_draws_nothing_until_it_asks() {
+        // Claude Code's hooks say running around every tool it calls, and
+        // after the first each says what the row already shows. A question is
+        // a change, and the frame that shows it is drawn.
+        let mut harness = Harness::new(2);
+        let hidden = pane_behind(&harness);
+        let said = |status, message: Option<&str>| TerminalUpdate::Agent {
+            pane: hidden,
+            status,
+            title: None,
+            message: message.map(str::to_owned),
+        };
+        heard(&mut harness, &said(AgentStatus::Running, None));
+        let renders = harness.workspace_renders();
+
+        for _ in 0..20 {
+            heard(&mut harness, &said(AgentStatus::Running, None));
+        }
+        assert_eq!(
+            harness.workspace_renders() - renders,
+            0,
+            "the window was rebuilt for a running the row already showed"
+        );
+
+        heard(
+            &mut harness,
+            &said(AgentStatus::NeedsInput, Some("Run the tests?")),
+        );
+        assert_eq!(harness.workspace_renders() - renders, 1);
+    }
 }
 
 #[test]
