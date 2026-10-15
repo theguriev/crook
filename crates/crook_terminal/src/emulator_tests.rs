@@ -1650,7 +1650,7 @@ fn test_a_report_too_long_for_the_parser_says_where_it_was_cut() {
     // Written through `report` and read back through the real parser.
     let arrived = |title: Option<&str>, message: Option<&str>| {
         let mut emulator = emulator();
-        let sequence = crate::agent::report(AgentReport::NeedsInput, title, message);
+        let sequence = crate::agent::report(AgentReport::NeedsInput, title, message, None);
         emulator.advance(sequence.as_bytes());
         match emulator.take_events().as_slice() {
             [TerminalEvent::Agent(reported)] => (reported.title.clone(), reported.message.clone()),
@@ -1694,6 +1694,441 @@ fn test_a_report_too_long_for_the_parser_says_where_it_was_cut() {
     // And a title with no message after it has the whole of the room.
     let (title, _) = arrived(Some(&commands(30)), None);
     assert_eq!(title, Some(format!("{}\u{2026}", commands(14))));
+}
+
+/// The parent and the subagent of Copilot CLI's capture: the session the
+/// person's prompt started, and the one its `task` tool started under it.
+const PARENT: &str = "02b41d89-9282-40c8-9cce-0d1c098e8bad";
+const SUBAGENT: &str = "f2368c19-368c-461e-8976-2cfa5d93311c";
+
+/// The report `status`, with `title` and `message` unless they are empty,
+/// said by `session`, as the bytes the wire carries: the title's pieces, an
+/// empty one, the message's, another empty one and the session.
+fn said_by(session: &str, status: &str, title: &str, message: &str) -> Vec<u8> {
+    let mut pieces = vec!["6340", status];
+    pieces.extend(Some(title).filter(|title| !title.is_empty()));
+    pieces.push("");
+    pieces.extend(Some(message).filter(|message| !message.is_empty()));
+    pieces.extend(["", session]);
+    format!("\x1b]{}\x07", pieces.join(";")).into_bytes()
+}
+
+/// [`said_by`] from a session that says it starts with this report: the
+/// same, with another empty piece and `start` after the session.
+fn started_by(session: &str, status: &str, title: &str) -> Vec<u8> {
+    let mut bytes = said_by(session, status, title, "");
+    bytes.pop();
+    bytes.extend(b";;start\x07");
+    bytes
+}
+
+/// A report the row hears, with neither a title nor a message.
+fn bare(status: AgentReport) -> TerminalEvent {
+    TerminalEvent::Agent(Reported {
+        status,
+        title: None,
+        message: None,
+    })
+}
+
+#[test]
+fn test_a_second_session_neither_renames_the_work_nor_ends_it() {
+    // Copilot CLI's subagent says its own prompt as a title and stops 14 ms
+    // before the parent goes on. Taken, the tab was named after a prompt the
+    // agent wrote to itself, and `pane wait --until idle` woke mid-turn.
+    let mut emulator = emulator();
+    emulator.advance(&said_by(PARENT, "running", "please delegate the file", ""));
+    assert_eq!(
+        vec![TerminalEvent::Agent(Reported {
+            status: AgentReport::Running,
+            title: Some("please delegate the file".to_owned()),
+            message: None,
+        })],
+        emulator.take_events()
+    );
+
+    emulator.advance(&said_by(SUBAGENT, "running", "run the subtask", ""));
+    emulator.advance(&said_by(SUBAGENT, "running", "", ""));
+    emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
+    assert!(emulator.take_events().is_empty());
+    assert_eq!(AgentReport::Running, emulator.agent());
+
+    emulator.advance(&said_by(PARENT, "running", "", ""));
+    assert!(emulator.take_events().is_empty());
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    assert_eq!(vec![bare(AgentReport::Idle)], emulator.take_events());
+}
+
+#[test]
+fn test_a_second_session_still_stops_for_a_person_and_goes_on_after() {
+    // A subagent's question is the agent's question: it is waiting on a
+    // person all the same. Its title stays its own, and its `running` once
+    // answered is what takes the question off the row.
+    let mut emulator = emulator();
+    emulator.advance(&said_by(PARENT, "running", "please delegate the file", ""));
+    emulator.take_events();
+
+    emulator.advance(&said_by(
+        SUBAGENT,
+        "needs-input",
+        "run the subtask",
+        "touch made-by-sub.txt?",
+    ));
+    assert_eq!(
+        vec![TerminalEvent::Agent(Reported {
+            status: AgentReport::NeedsInput,
+            title: None,
+            message: Some("touch made-by-sub.txt?".to_owned()),
+        })],
+        emulator.take_events()
+    );
+
+    emulator.advance(&said_by(SUBAGENT, "running", "", ""));
+    assert_eq!(vec![bare(AgentReport::Running)], emulator.take_events());
+    emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
+    assert!(emulator.take_events().is_empty());
+}
+
+#[test]
+fn test_a_second_sessions_end_in_the_same_read_keeps_the_first_sessions_report() {
+    // Dropped as it is read rather than after: the watcher keeps the last
+    // report of a read, and a subagent's idle behind the parent's prompt in
+    // one read would otherwise have put the prompt's title out with it.
+    let mut emulator = emulator();
+    let mut read = said_by(PARENT, "running", "please delegate the file", "");
+    read.extend(said_by(SUBAGENT, "idle", "", ""));
+    emulator.advance(&read);
+    assert_eq!(
+        vec![TerminalEvent::Agent(Reported {
+            status: AgentReport::Running,
+            title: Some("please delegate the file".to_owned()),
+            message: None,
+        })],
+        emulator.take_events()
+    );
+}
+
+#[test]
+fn test_once_the_first_session_stops_the_next_one_to_speak_is_the_panes() {
+    // `/clear` in Copilot CLI goes on in a session with a new id, in the
+    // same process: a pane that held on to the first one for good would
+    // take every later turn for a subagent's.
+    let mut emulator = emulator();
+    emulator.advance(&said_by(PARENT, "running", "first", ""));
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    emulator.take_events();
+
+    emulator.advance(&said_by(SUBAGENT, "running", "second", ""));
+    assert_eq!(
+        vec![TerminalEvent::Agent(Reported {
+            status: AgentReport::Running,
+            title: Some("second".to_owned()),
+            message: None,
+        })],
+        emulator.take_events()
+    );
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    assert!(emulator.take_events().is_empty());
+    emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
+    assert_eq!(vec![bare(AgentReport::Idle)], emulator.take_events());
+}
+
+#[test]
+fn test_a_question_while_nobody_holds_the_pane_does_not_take_it() {
+    // An agent at rest can still ask for a look, and its next turn can be
+    // in another session: a question that took the pane would have held it
+    // against that turn, which would never have been heard to end.
+    let mut emulator = emulator();
+    emulator.advance(&said_by(PARENT, "running", "first", ""));
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    emulator.advance(&said_by(PARENT, "needs-input", "", "still there?"));
+    emulator.take_events();
+
+    emulator.advance(&said_by(SUBAGENT, "running", "second", ""));
+    emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
+    assert_eq!(
+        vec![
+            TerminalEvent::Agent(Reported {
+                status: AgentReport::Running,
+                title: Some("second".to_owned()),
+                message: None,
+            }),
+            bare(AgentReport::Idle),
+        ],
+        emulator.take_events()
+    );
+}
+
+#[test]
+fn test_the_command_ending_lets_the_next_agent_have_the_pane() {
+    // An agent interrupted mid-turn never says it stopped, and the next one
+    // started in the pane is in a session of its own.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07copilot\r\n\x1b]133;C\x07");
+    emulator.advance(&said_by(PARENT, "running", "first", ""));
+    emulator.advance(b"\x1b]133;D;130\x07");
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07copilot\r\n\x1b]133;C\x07");
+    emulator.take_events();
+
+    emulator.advance(&said_by(SUBAGENT, "running", "second", ""));
+    emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
+    assert_eq!(
+        vec![
+            TerminalEvent::Agent(Reported {
+                status: AgentReport::Running,
+                title: Some("second".to_owned()),
+                message: None,
+            }),
+            bare(AgentReport::Idle),
+        ],
+        emulator.take_events()
+    );
+}
+
+#[test]
+fn test_a_report_too_long_for_the_parser_keeps_its_session() {
+    // Counted before the title and the message, the session is never what
+    // the parser drops: dropped, a subagent's end would be a report that
+    // names no session, which the pane takes.
+    let commands = (1..=40)
+        .map(|at| format!("step {at}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    let said = |status, session| {
+        crate::agent::report(
+            status,
+            Some(&commands),
+            Some(&commands),
+            Some(crate::agent::Session::Of(session)),
+        )
+    };
+    let mut emulator = emulator();
+    emulator.advance(said(AgentReport::Running, PARENT).as_bytes());
+    emulator.take_events();
+
+    emulator.advance(said(AgentReport::Idle, SUBAGENT).as_bytes());
+    assert!(emulator.take_events().is_empty());
+    assert_eq!(AgentReport::Running, emulator.agent());
+    emulator.advance(said(AgentReport::Idle, PARENT).as_bytes());
+    assert_eq!(AgentReport::Idle, emulator.agent());
+}
+
+#[test]
+fn test_a_session_that_starts_takes_the_pane_from_one_interrupted_mid_turn() {
+    // Copilot CLI says no `agentStop` for a turn interrupted with Esc, and
+    // `/new` goes on in a new session in the same process; the old one's
+    // `sessionEnd` comes only when the process ends. Captured with Copilot
+    // 1.0.89: the new session's prompt, then its `sessionStart` 13 ms later
+    // with the same prompt, and its turn. Without the start, the new
+    // session's title was dropped and its end never heard.
+    const NEW: &str = "2d22d2e4-3653-46a8-a109-0a468850805d";
+    let mut emulator = emulator();
+    emulator.advance(&said_by(PARENT, "running", "first prompt", ""));
+    emulator.take_events();
+
+    emulator.advance(&said_by(NEW, "running", "second prompt", ""));
+    assert!(emulator.take_events().is_empty());
+    emulator.advance(&started_by(NEW, "running", "second prompt"));
+    assert_eq!(
+        vec![TerminalEvent::Agent(Reported {
+            status: AgentReport::Running,
+            title: Some("second prompt".to_owned()),
+            message: None,
+        })],
+        emulator.take_events()
+    );
+
+    // And now the new session is the pane's: a subagent of it is still not.
+    emulator.advance(&said_by(SUBAGENT, "running", "run the subtask", ""));
+    emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
+    assert!(emulator.take_events().is_empty());
+    emulator.advance(&said_by(NEW, "idle", "", ""));
+    assert_eq!(vec![bare(AgentReport::Idle)], emulator.take_events());
+
+    // The interrupted session's own end, when Copilot exits, is an idle on
+    // a pane already idle.
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    assert!(emulator.take_events().is_empty());
+    assert_eq!(AgentReport::Idle, emulator.agent());
+}
+
+#[test]
+fn test_a_start_too_long_for_the_parser_is_still_a_start() {
+    // Counted with the session, before the title and the message: a start
+    // the parser dropped would leave the pane to the session before it.
+    let commands = (1..=40)
+        .map(|at| format!("step {at}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    let mut emulator = emulator();
+    emulator.advance(&said_by(PARENT, "running", "first prompt", ""));
+    emulator.advance(
+        crate::agent::report(
+            AgentReport::Running,
+            Some(&commands),
+            Some(&commands),
+            Some(crate::agent::Session::Starts(SUBAGENT)),
+        )
+        .as_bytes(),
+    );
+    emulator.take_events();
+
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    assert!(emulator.take_events().is_empty());
+    emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
+    assert_eq!(vec![bare(AgentReport::Idle)], emulator.take_events());
+}
+
+#[test]
+fn test_a_report_that_names_no_session_is_the_panes_whoever_holds_it() {
+    // A person's `crook --agent`, a script's, a hook printed before the
+    // session was: nothing says it is a subagent's, so it is taken.
+    let mut emulator = emulator();
+    emulator.advance(&said_by(PARENT, "running", "first", ""));
+    emulator.take_events();
+
+    emulator.advance(b"\x1b]6340;running;by hand\x07");
+    emulator.advance(b"\x1b]6340;idle\x07");
+    assert_eq!(
+        vec![
+            TerminalEvent::Agent(Reported {
+                status: AgentReport::Running,
+                title: Some("by hand".to_owned()),
+                message: None,
+            }),
+            bare(AgentReport::Idle),
+        ],
+        emulator.take_events()
+    );
+}
+
+/// A report the row hears, with a title and no message.
+fn reported_as(status: AgentReport, title: &str) -> TerminalEvent {
+    TerminalEvent::Agent(Reported {
+        status,
+        title: Some(title.to_owned()),
+        message: None,
+    })
+}
+
+#[test]
+fn test_going_back_to_a_session_that_started_hands_it_the_pane_again() {
+    // Copilot CLI 1.0.89, captured: a turn in X, `/new`, a turn in Y
+    // interrupted with Esc, `/resume` back to X and a turn there. Copilot
+    // runs one `sessionStart` a session in the life of the process, so X's
+    // second turn says none: with Y still held, it named nothing, and its
+    // end and its `sessionEnd` ended nothing until Copilot exited.
+    const X: &str = "7012fd8e-0a41-4017-be87-cd232acb7815";
+    const Y: &str = "cb833d78-8356-4371-96a0-4b7345037f4d";
+    let mut emulator = emulator();
+    emulator.advance(&said_by(X, "running", "prompt in X", ""));
+    emulator.advance(&started_by(X, "running", "prompt in X"));
+    emulator.advance(&said_by(X, "running", "", ""));
+    emulator.advance(&said_by(X, "running", "", ""));
+    emulator.advance(&said_by(X, "idle", "", ""));
+    emulator.advance(&said_by(Y, "running", "SLOW prompt in Y", ""));
+    emulator.advance(&started_by(Y, "running", "SLOW prompt in Y"));
+    assert_eq!(
+        vec![
+            reported_as(AgentReport::Running, "prompt in X"),
+            reported_as(AgentReport::Running, "prompt in X"),
+            bare(AgentReport::Idle),
+            reported_as(AgentReport::Running, "SLOW prompt in Y"),
+        ],
+        emulator.take_events()
+    );
+
+    emulator.advance(&said_by(X, "running", "prompt back in X", ""));
+    emulator.advance(&said_by(X, "running", "", ""));
+    emulator.advance(&said_by(X, "running", "", ""));
+    emulator.advance(&said_by(X, "idle", "", ""));
+    assert_eq!(
+        vec![
+            reported_as(AgentReport::Running, "prompt back in X"),
+            bare(AgentReport::Idle),
+        ],
+        emulator.take_events()
+    );
+    emulator.advance(&said_by(X, "idle", "", ""));
+    assert!(emulator.take_events().is_empty());
+    assert_eq!(AgentReport::Idle, emulator.agent());
+}
+
+#[test]
+fn test_a_background_subagent_neither_names_the_tab_nor_ends_the_next_turn() {
+    // Copilot CLI 1.0.89's `task` in the background, captured: the parent's
+    // `agentStop` comes before the subagent's first prompt, the person's
+    // next prompt while the subagent is still at work, and a second
+    // subagent's last tool call after the parent's next stop. Before a start
+    // counted for this, the first subagent took the empty pane: the tab was
+    // named `run the subtask`, the person's prompt was taken for a
+    // subagent's, and the subagent's end ended the person's turn. The
+    // parent's two notifications before its last stop are left out.
+    const PARENT: &str = "d18598d1-12c4-4b6b-bf3c-fc6ad20c1278";
+    const FIRST: &str = "45ff89d7-b5a1-4029-8019-4b41544dc53b";
+    const SECOND: &str = "661cbcbf-4b4d-4e7b-9f58-51e3a5eabf03";
+    let mut emulator = emulator();
+    emulator.advance(&said_by(PARENT, "running", "please delegate the file", ""));
+    emulator.advance(&started_by(PARENT, "running", "please delegate the file"));
+    emulator.advance(&said_by(PARENT, "running", "", ""));
+    emulator.advance(&said_by(PARENT, "running", "", ""));
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    emulator.take_events();
+
+    emulator.advance(&said_by(FIRST, "running", "run the subtask", ""));
+    emulator.advance(&said_by(FIRST, "running", "", ""));
+    assert!(emulator.take_events().is_empty());
+    assert_eq!(AgentReport::Idle, emulator.agent());
+
+    emulator.advance(&said_by(PARENT, "running", "another thing", ""));
+    emulator.advance(&said_by(FIRST, "running", "", ""));
+    emulator.advance(&said_by(FIRST, "idle", "", ""));
+    emulator.advance(&said_by(PARENT, "running", "", ""));
+    emulator.advance(&said_by(PARENT, "running", "", ""));
+    emulator.advance(&said_by(SECOND, "running", "run the subtask", ""));
+    emulator.advance(&said_by(SECOND, "running", "", ""));
+    assert_eq!(
+        vec![reported_as(AgentReport::Running, "another thing")],
+        emulator.take_events()
+    );
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    emulator.advance(&said_by(SECOND, "running", "", ""));
+    emulator.advance(&said_by(SECOND, "idle", "", ""));
+    assert_eq!(vec![bare(AgentReport::Idle)], emulator.take_events());
+
+    // The subagent's end comes back to the parent as a prompt Copilot
+    // wrote, which `crook --agent` sends with no title.
+    emulator.advance(&said_by(PARENT, "running", "", ""));
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    assert_eq!(
+        vec![bare(AgentReport::Running), bare(AgentReport::Idle)],
+        emulator.take_events()
+    );
+}
+
+#[test]
+fn test_the_command_ending_forgets_the_sessions_that_started() {
+    // The next program in the pane is not the agent whose sessions started,
+    // and one that never says a session starts — a script naming its own —
+    // is held to the first rule again.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07copilot\r\n\x1b]133;C\x07");
+    emulator.advance(&started_by(PARENT, "running", "first"));
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    emulator.advance(b"\x1b]133;D;0\x07");
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07./deploy\r\n\x1b]133;C\x07");
+    emulator.take_events();
+
+    emulator.advance(&said_by(SUBAGENT, "running", "deploy", ""));
+    emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
+    assert_eq!(
+        vec![
+            reported_as(AgentReport::Running, "deploy"),
+            bare(AgentReport::Idle)
+        ],
+        emulator.take_events()
+    );
 }
 
 /// What `bytes` ask a fresh emulator for: the one notification they carry,

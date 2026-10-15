@@ -79,6 +79,18 @@ when the pane's branch changes. The Claude Code and Codex hooks below already re
 address `gh pr create` prints, so an agent running under them need not; under the others,
 report it yourself.
 
+`--session` says which of your sessions the report is from, for an agent that hands work to
+subagents in sessions of their own. The pane takes a title or a stop only from the session that
+holds it — the first to say `running`, until it says `idle` or `failed` or its command ends —
+so a subagent's prompt does not rename the tab and its end does not end your turn; another
+session's `needs-input` still counts. `--session-start` names a session that starts with the
+report, one a person began or resumed and never a subagent's, and hands it the pane whichever
+session held it. The pane remembers such a session until your command ends: its `running`
+takes the pane back, and once one has started, a session that never did names nothing and,
+with nobody holding the pane, counts only for its `needs-input` and the `running` after it.
+`-` for either reads the id out of a hook's input on standard input, which is what the Copilot
+CLI hooks below pass.
+
 The report is one escape sequence (`OSC 6340`) written to the terminal the command runs in,
 not to standard output, so it works from a hook whose output belongs to someone else. A
 command with no terminal of its own, such as a hook Claude Code starts in a session of its

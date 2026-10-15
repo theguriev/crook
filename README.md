@@ -477,9 +477,25 @@ Twenty-two features, and the page that configures them:
   reads as idle and running, wearing the title without the glyph; a hook's report outranks it.
   `codex`, `gemini` and `copilot` print the same guarded hooks for Codex CLI, Gemini CLI and
   GitHub Copilot CLI in each one's own hooks file, `opencode` prints the plugin OpenCode loads
-  instead, and `aider`, which has no hooks, gets a sentence saying what to do instead. Copilot
-  CLI refuses the tool call a hook failed over, so no hook ever fails: outside Crook, with no
-  terminal to report to, or with the binary gone, each one exits 0. Outside Crook means where
+  instead, and `aider`, which has no hooks, gets a sentence saying what to do instead. A
+  subagent works in a session of its own, and Copilot CLI runs its hooks for one as for the
+  session you are talking to, so its hooks pass `--session -`: the pane takes a title or a stop
+  only from the session whose turn it is, until that one stops, another takes the pane or its
+  command ends. Its `sessionStart` hook, which no subagent runs, passes `--session-start -`. It
+  runs once a session in the life of the process, so the pane remembers every session that
+  started until Copilot exits. After a turn interrupted with Esc, the next turn takes the pane
+  whether it is in a session `/new` began, one `/resume` brought back from disk, or one this
+  Copilot has already run. Every session that never started is a subagent's, including a
+  background one still working after the agent stopped. A subagent's prompt no longer renames the
+  tab, and its end no longer wakes a `crook pane wait --until idle` partway through the turn; its
+  questions still light the row. Nor does the `<system_notification>` prompt Copilot writes when
+  a background subagent finishes rename the tab. The OpenCode plugin
+  leaves its subagents out itself, but for their questions — asking OpenCode about a session it
+  did not see made, such as a subagent's that `task` resumes by its id — takes no title from
+  text OpenCode wrote itself, and sends its reports one after another, each only when it says
+  something new. Copilot CLI refuses the tool call a hook failed over, so no hook ever fails:
+  outside Crook, with no terminal to report to, or with the binary gone, each one exits 0.
+  Outside Crook means where
   neither `TERM_PROGRAM=Crook` nor `CROOK_PANE_ID` reaches, and `ssh` and `docker exec` carry
   neither, so an agent on the far side of either reports nothing through these command hooks,
   the Claude Code plugin's included, until two things hold there. `TERM_PROGRAM` is passed

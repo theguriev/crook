@@ -166,7 +166,9 @@ pub enum TerminalEvent {
     /// Reported on change only, so a program that says `running` on every
     /// tool call costs one event when it starts and nothing after. A title
     /// or a message is a change on its own: the same `needs-input` twice
-    /// with a different question is two questions.
+    /// with a different question is two questions. A subagent's report is
+    /// weighed before it gets here, and arrives without its title or not at
+    /// all — see "Whose report it is" in [`crate::agent`].
     Agent(Reported),
     /// The command a running or waiting agent was ended, and took its report
     /// with it: the status is [`AgentReport::Idle`] again, with no title and
@@ -255,6 +257,11 @@ struct OscWatcher {
     mark: Option<ShellMark>,
     completions: Option<u64>,
     agent: Option<Reported>,
+    /// Which session's titles and stops the pane takes, kept here rather
+    /// than on the emulator because a report is weighed as it is read: one
+    /// the pane does not take must not replace one earlier in the same read
+    /// that it does.
+    sessions: agent::Sessions,
     pull_request: Option<String>,
     /// Keeps a kitty notification that is arriving in chunks.
     notifications: notify::Reader,
@@ -352,9 +359,11 @@ impl Perform for OscWatcher {
             // program said — up to a mark or a notification, which it has to
             // be handed over ahead of or behind.
             _ => {
-                if let Some(reported) = agent::parse(params) {
-                    self.agent = Some(reported);
-                    self.notified_last = false;
+                if let Some((reported, session)) = agent::parse(params) {
+                    if let Some(reported) = self.sessions.admit(reported, session) {
+                        self.agent = Some(reported);
+                        self.notified_last = false;
+                    }
                 } else if let Some(url) = agent::parse_pull_request(params) {
                     self.pull_request = Some(url);
                 }
@@ -1610,7 +1619,15 @@ impl Emulator {
     /// outlives its command on purpose — it is the one status worth seeing
     /// after the fact — and goes when the *next* command starts, because new
     /// work is the thing that answers it.
+    ///
+    /// `D` also lets go of the session the pane held, whatever the status,
+    /// and forgets the sessions that said they start: an agent interrupted
+    /// mid-turn never said it stopped, and the next one started here reports
+    /// from sessions of its own.
     fn settle_agent(&mut self, mark: ShellMark) {
+        if matches!(mark, ShellMark::CommandFinished(_)) {
+            self.osc_watcher.sessions.release();
+        }
         let over = matches!(
             (mark, self.agent),
             (
