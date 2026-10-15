@@ -1696,9 +1696,20 @@ was taken for a subagent's until Copilot exited. Its `sessionStart` hook is the 
 no subagent — once a session, on its first prompt, 13 ms after that prompt's
 `userPromptSubmitted` in the 1.0.89 capture, with the prompt as `initialPrompt` — so the printed
 hook reports `running --title - --session-start -`, and the title the prompt's own report lost
-comes back with it. The prompt Copilot hands the parent when a background subagent finishes,
-`<system_notification>` and a line saying which, is reported with no title. The writer counts
-the session's pieces, its start's and the cut before the
+comes back with it. Once a session in the life of the process is all it says, though: `/resume`
+back to a session the process has already run says no second start, and with the turn before
+it interrupted in another session, every turn of the one resumed was again taken for a
+subagent's. So `Sessions` remembers the sessions that started until the command ends, at most
+64 of them, and a remembered session's `running` takes the pane back from whichever holds it.
+And it takes every other session, once one has started, for a subagent's even with nobody
+holding the pane: Copilot's `task` can run a subagent in the background, the parent's
+`agentStop` can come before the subagent's first prompt, and the first to say `running` on an
+empty pane was then the subagent, which named the tab and held the pane against the person's
+next prompt. In such a pane a subagent names nothing, and with the agent at rest only its question
+is taken, and the `running` that answers it, which holds the pane for it until it stops. A pane
+where no session has started keeps the first rule. The prompt Copilot hands the parent when a
+background subagent finishes, `<system_notification>` and a line saying which, is reported
+with no title. The writer counts the session's pieces, its start's and the cut before the
 message first, so `vte`'s sixteen never drop them. A Crook older than the field reads the
 session into the message, which the row shows only beside `needs-input`. OpenCode's subagents
 need none of this on the wire: its plugin keeps the ids `session.created` gives a `parentID` —

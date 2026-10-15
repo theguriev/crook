@@ -1891,6 +1891,135 @@ fn test_a_report_that_names_no_session_is_the_panes_whoever_holds_it() {
     );
 }
 
+/// A report the row hears, with a title and no message.
+fn reported_as(status: AgentReport, title: &str) -> TerminalEvent {
+    TerminalEvent::Agent(Reported {
+        status,
+        title: Some(title.to_owned()),
+        message: None,
+    })
+}
+
+#[test]
+fn test_going_back_to_a_session_that_started_hands_it_the_pane_again() {
+    // Copilot CLI 1.0.89, captured: a turn in X, `/new`, a turn in Y
+    // interrupted with Esc, `/resume` back to X and a turn there. Copilot
+    // runs one `sessionStart` a session in the life of the process, so X's
+    // second turn says none: with Y still held, it named nothing, and its
+    // end and its `sessionEnd` ended nothing until Copilot exited.
+    const X: &str = "7012fd8e-0a41-4017-be87-cd232acb7815";
+    const Y: &str = "cb833d78-8356-4371-96a0-4b7345037f4d";
+    let mut emulator = emulator();
+    emulator.advance(&said_by(X, "running", "prompt in X", ""));
+    emulator.advance(&started_by(X, "running", "prompt in X"));
+    emulator.advance(&said_by(X, "running", "", ""));
+    emulator.advance(&said_by(X, "running", "", ""));
+    emulator.advance(&said_by(X, "idle", "", ""));
+    emulator.advance(&said_by(Y, "running", "SLOW prompt in Y", ""));
+    emulator.advance(&started_by(Y, "running", "SLOW prompt in Y"));
+    assert_eq!(
+        vec![
+            reported_as(AgentReport::Running, "prompt in X"),
+            reported_as(AgentReport::Running, "prompt in X"),
+            bare(AgentReport::Idle),
+            reported_as(AgentReport::Running, "SLOW prompt in Y"),
+        ],
+        emulator.take_events()
+    );
+
+    emulator.advance(&said_by(X, "running", "prompt back in X", ""));
+    emulator.advance(&said_by(X, "running", "", ""));
+    emulator.advance(&said_by(X, "running", "", ""));
+    emulator.advance(&said_by(X, "idle", "", ""));
+    assert_eq!(
+        vec![
+            reported_as(AgentReport::Running, "prompt back in X"),
+            bare(AgentReport::Idle),
+        ],
+        emulator.take_events()
+    );
+    emulator.advance(&said_by(X, "idle", "", ""));
+    assert!(emulator.take_events().is_empty());
+    assert_eq!(AgentReport::Idle, emulator.agent());
+}
+
+#[test]
+fn test_a_background_subagent_neither_names_the_tab_nor_ends_the_next_turn() {
+    // Copilot CLI 1.0.89's `task` in the background, captured: the parent's
+    // `agentStop` comes before the subagent's first prompt, the person's
+    // next prompt while the subagent is still at work, and a second
+    // subagent's last tool call after the parent's next stop. Before a start
+    // counted for this, the first subagent took the empty pane: the tab was
+    // named `run the subtask`, the person's prompt was taken for a
+    // subagent's, and the subagent's end ended the person's turn. The
+    // parent's two notifications before its last stop are left out.
+    const PARENT: &str = "d18598d1-12c4-4b6b-bf3c-fc6ad20c1278";
+    const FIRST: &str = "45ff89d7-b5a1-4029-8019-4b41544dc53b";
+    const SECOND: &str = "661cbcbf-4b4d-4e7b-9f58-51e3a5eabf03";
+    let mut emulator = emulator();
+    emulator.advance(&said_by(PARENT, "running", "please delegate the file", ""));
+    emulator.advance(&started_by(PARENT, "running", "please delegate the file"));
+    emulator.advance(&said_by(PARENT, "running", "", ""));
+    emulator.advance(&said_by(PARENT, "running", "", ""));
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    emulator.take_events();
+
+    emulator.advance(&said_by(FIRST, "running", "run the subtask", ""));
+    emulator.advance(&said_by(FIRST, "running", "", ""));
+    assert!(emulator.take_events().is_empty());
+    assert_eq!(AgentReport::Idle, emulator.agent());
+
+    emulator.advance(&said_by(PARENT, "running", "another thing", ""));
+    emulator.advance(&said_by(FIRST, "running", "", ""));
+    emulator.advance(&said_by(FIRST, "idle", "", ""));
+    emulator.advance(&said_by(PARENT, "running", "", ""));
+    emulator.advance(&said_by(PARENT, "running", "", ""));
+    emulator.advance(&said_by(SECOND, "running", "run the subtask", ""));
+    emulator.advance(&said_by(SECOND, "running", "", ""));
+    assert_eq!(
+        vec![reported_as(AgentReport::Running, "another thing")],
+        emulator.take_events()
+    );
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    emulator.advance(&said_by(SECOND, "running", "", ""));
+    emulator.advance(&said_by(SECOND, "idle", "", ""));
+    assert_eq!(vec![bare(AgentReport::Idle)], emulator.take_events());
+
+    // The subagent's end comes back to the parent as a prompt Copilot
+    // wrote, which `crook --agent` sends with no title.
+    emulator.advance(&said_by(PARENT, "running", "", ""));
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    assert_eq!(
+        vec![bare(AgentReport::Running), bare(AgentReport::Idle)],
+        emulator.take_events()
+    );
+}
+
+#[test]
+fn test_the_command_ending_forgets_the_sessions_that_started() {
+    // The next program in the pane is not the agent whose sessions started,
+    // and one that never says a session starts — a script naming its own —
+    // is held to the first rule again.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07copilot\r\n\x1b]133;C\x07");
+    emulator.advance(&started_by(PARENT, "running", "first"));
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    emulator.advance(b"\x1b]133;D;0\x07");
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07./deploy\r\n\x1b]133;C\x07");
+    emulator.take_events();
+
+    emulator.advance(&said_by(SUBAGENT, "running", "deploy", ""));
+    emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
+    assert_eq!(
+        vec![
+            reported_as(AgentReport::Running, "deploy"),
+            bare(AgentReport::Idle)
+        ],
+        emulator.take_events()
+    );
+}
+
 /// What `bytes` ask a fresh emulator for: the one notification they carry,
 /// or `None` when they carry none — and nothing else either.
 fn notified(bytes: &[u8]) -> Option<Notification> {

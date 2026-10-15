@@ -1356,9 +1356,10 @@ impl Emulator {
     /// after the fact — and goes when the *next* command starts, because new
     /// work is the thing that answers it.
     ///
-    /// `D` also lets go of the session the pane held, whatever the status:
-    /// an agent interrupted mid-turn never said it stopped, and the next one
-    /// started here reports from a session of its own.
+    /// `D` also lets go of the session the pane held, whatever the status,
+    /// and forgets the sessions that said they start: an agent interrupted
+    /// mid-turn never said it stopped, and the next one started here reports
+    /// from sessions of its own.
     fn settle_agent(&mut self, mark: ShellMark) {
         if matches!(mark, ShellMark::CommandFinished(_)) {
             self.osc_watcher.sessions.release();

@@ -79,13 +79,13 @@
 //!
 //! So a report can say which session it is from, and the pane takes a title
 //! and a stop — idle or failed — only from the session it holds: the first
-//! to say `running` while nobody held it, or the last to say it starts,
-//! until that session stops, another starts or the command the agent was
-//! ends. Another session's question is still taken,
-//! without its title, since it waits on a person all the same; so is its
-//! `running`, which is how it says the question was answered. A report that
-//! names no session is taken whoever holds the pane, because nothing says it
-//! is a subagent's. `Sessions` is the rule.
+//! to say `running` while nobody held it, or the last to say it starts or
+//! go on after it started, until that session stops, another takes the
+//! pane or the command the agent was ends. Another session's question is
+//! still taken, without its title, since it waits on a person all the same;
+//! so is its `running`, which is how it says the question was answered. A
+//! report that names no session is taken whoever holds the pane, because
+//! nothing says it is a subagent's. `Sessions` is the rule.
 //!
 //! Let go when the session stops rather than held for the life of the
 //! agent, because one agent can go on in a new session — Copilot's `/clear`
@@ -103,10 +103,34 @@
 //! every turn of the new one was taken for a subagent's, its prompt naming
 //! nothing and its end ending nothing until the agent exited. Copilot says
 //! a session starts, with the prompt that started it, on the first prompt
-//! of every session a person begins or resumes — a few milliseconds after
-//! that prompt's own report — and never for a subagent's, so that report is
-//! the one the pane goes over on, and it brings back the title the prompt's
-//! own report lost.
+//! the process sees in it, whether the person began it or resumed it from
+//! disk — a few milliseconds after that prompt's own report — and never for
+//! a subagent's, so that report is the one the pane goes over on, and it
+//! brings back the title the prompt's own report lost.
+//!
+//! Once a session in the life of the process, though: `/resume` back to a
+//! session the process has already run says no start a second time, as
+//! 1.0.89 does whether that session's last turn ended or was interrupted.
+//! So the pane remembers each session that said it starts, until the
+//! command the agent was ends, and a remembered session's `running` takes
+//! the pane back from whichever holds it. Without that, a person who went
+//! back to such a session after interrupting a turn in another had every
+//! turn of it taken for a subagent's, as before there were starts.
+//!
+//! And once a session has said it starts, every session that never did is
+//! a subagent's, even with nobody holding the pane. Copilot's `task` tool
+//! can run a subagent in the background, and the parent's `agentStop` can
+//! come before the subagent's first prompt: the first to say `running` while
+//! nobody held the pane was then the subagent, which named the tab after its
+//! prompt and, when the person's next prompt came, held the pane against it
+//! and ended that turn with its own end. So in a pane where a session has
+//! started, a subagent never names the work, and with the agent at rest its
+//! `running` and its stop are not the pane's either: the agent is waiting
+//! for a prompt whatever its subagents are doing. Its question still is, and
+//! the `running` that says the question was answered holds the pane for it
+//! until it stops, so the row does not go on asking. A pane where no session
+//! has said it starts — an agent that never says so, or a script — keeps
+//! the first rule.
 //!
 //! # How long the fields may be
 //!
@@ -275,7 +299,9 @@ pub enum Session<Id> {
     Of(Id),
     /// Said by the session with this id as it starts: one a person began or
     /// resumed, never a subagent's, and the pane's from this report on,
-    /// whichever session held it.
+    /// whichever session held it. Said once a session in the life of the
+    /// agent, so the pane remembers it as the agent's own until the command
+    /// the agent was ends.
     Starts(Id),
 }
 
@@ -480,10 +506,27 @@ fn session_of(pieces: &[&[u8]]) -> Option<String> {
 #[derive(Debug, Default)]
 pub(crate) struct Sessions {
     /// The session the pane holds: the first to say it is running while
-    /// nobody held it, or the last to say it starts, until it stops, another
-    /// starts or the command the agent was ends.
+    /// nobody held it, the last to say it starts or to go on after it
+    /// started, or a subagent going on after its question while the agent
+    /// was at rest — until it stops, another takes the pane or the command
+    /// the agent was ends.
     held: Option<String>,
+    /// The sessions that have said they start since the command the agent
+    /// was began, the oldest first and at most [`STARTED`] of them: the
+    /// agent's own, which no subagent's is.
+    started: Vec<String>,
+    /// The session whose question is the last report the pane took, while
+    /// it still is.
+    asking: Option<String>,
 }
+
+/// The most sessions a pane remembers saying they start.
+///
+/// A person begins or resumes a handful in one agent's life, and a forged
+/// report can say as many as it likes: this many ids, of at most
+/// [`SESSION_BYTES`] each, is all it can make a pane keep. The oldest goes
+/// first, since the session a person goes back to is likelier a recent one.
+const STARTED: usize = 64;
 
 impl Sessions {
     /// `reported` as the pane takes it from `session`, or `None` when the
@@ -492,7 +535,11 @@ impl Sessions {
     /// Another session's title is the prompt an agent wrote to its
     /// subagent, and its stop is the subagent's, with the agent still at
     /// work; its question and its going on after one are the agent's own.
-    /// A session that starts is no subagent's, and holds the pane from here.
+    /// A session that starts is no subagent's, and holds the pane from
+    /// here, and again each time it goes on. Once one has started, a
+    /// session that never did is a subagent's whether or not anybody holds
+    /// the pane, and names nothing; with nobody holding it, all that is
+    /// taken of one is its question and the going on after it.
     pub(crate) fn admit(
         &mut self,
         mut reported: Reported,
@@ -504,9 +551,17 @@ impl Sessions {
         let starts = said.starts();
         let (Session::Of(session) | Session::Starts(session)) = said;
         if starts {
+            self.remember(&session);
+        }
+        let own = self.started.contains(&session);
+        let stopped = matches!(reported.status, AgentReport::Idle | AgentReport::Failed);
+        let running = reported.status == AgentReport::Running;
+        // The agent's own session going on is its turn, whoever holds the
+        // pane: Copilot's `/resume` back to a session it has run says no
+        // second start, and the one held may be a turn interrupted with Esc.
+        if starts || (own && running) {
             self.held = Some(session.clone());
         }
-        let stopped = matches!(reported.status, AgentReport::Idle | AgentReport::Failed);
         match &self.held {
             Some(held) if *held != session => {
                 if stopped {
@@ -516,15 +571,45 @@ impl Sessions {
             }
             Some(_) if stopped => self.held = None,
             Some(_) => {}
-            None if reported.status == AgentReport::Running => self.held = Some(session),
+            None if self.started.is_empty() => {
+                if running {
+                    self.held = Some(session.clone());
+                }
+            }
+            // A subagent with the agent at rest, which a background one runs
+            // on after: the agent is waiting for a prompt all the same.
+            None if !own => {
+                let answered = running && self.asking.as_ref() == Some(&session);
+                if answered {
+                    self.held = Some(session.clone());
+                } else if reported.status != AgentReport::NeedsInput {
+                    return None;
+                }
+            }
             None => {}
         }
+        if !own && !self.started.is_empty() {
+            reported.title = None;
+        }
+        self.asking = (reported.status == AgentReport::NeedsInput).then_some(session);
         Some(reported)
     }
 
-    /// Lets go of the session held, for whichever reports next.
+    /// Notes `session` as one that said it starts, the agent's own.
+    fn remember(&mut self, session: &str) {
+        if self.started.iter().any(|started| started == session) {
+            return;
+        }
+        if self.started.len() == STARTED {
+            self.started.remove(0);
+        }
+        self.started.push(session.to_owned());
+    }
+
+    /// Lets go of the session held and forgets every one that started, for
+    /// whichever agent reports next.
     pub(crate) fn release(&mut self) {
-        self.held = None;
+        *self = Self::default();
     }
 }
 
@@ -1040,6 +1125,174 @@ mod tests {
             heard(&taken)
         );
     }
+
+    #[test]
+    fn a_session_that_started_takes_the_pane_back_when_it_goes_on() {
+        // Copilot CLI 1.0.89, captured: a turn in A, `/new`, a turn in B
+        // interrupted with Esc, then `/resume` back to A. Copilot runs one
+        // `sessionStart` a session in the life of the process, so A's second
+        // turn says no start, and with B still held it named nothing and its
+        // end ended nothing until Copilot exited.
+        use AgentReport::{Idle, Running};
+        use Session::{Of, Starts};
+        let taken = admitted(&[
+            (Running, Some("first prompt"), Some(Of("a"))),
+            (Running, Some("first prompt"), Some(Starts("a"))),
+            (Running, None, Some(Of("a"))),
+            (Idle, None, Some(Of("a"))),
+            (Running, Some("SLOW second prompt"), Some(Of("b"))),
+            (Running, Some("SLOW second prompt"), Some(Starts("b"))),
+            (Running, Some("third prompt"), Some(Of("a"))),
+            (Running, None, Some(Of("a"))),
+            (Idle, None, Some(Of("a"))),
+        ]);
+        assert_eq!(
+            vec![
+                (Running, Some("first prompt")),
+                (Running, Some("first prompt")),
+                (Running, None),
+                (Idle, None),
+                // B's prompt is a session that has not started yet, with the
+                // agent at rest: its start, a moment later, is what counts.
+                (Running, Some("SLOW second prompt")),
+                (Running, Some("third prompt")),
+                (Running, None),
+                (Idle, None),
+            ],
+            heard(&taken)
+        );
+    }
+
+    #[test]
+    fn once_a_session_has_started_a_subagent_never_takes_the_pane_at_rest() {
+        // Copilot CLI 1.0.89's background `task`, captured: the parent's
+        // `agentStop` comes before the subagent's first prompt, so the
+        // subagent was the first to run with nobody holding the pane. It
+        // named the tab, held the pane against the person's next prompt and
+        // ended that turn with its own end.
+        use AgentReport::{Idle, Running};
+        use Session::{Of, Starts};
+        let taken = admitted(&[
+            (
+                Running,
+                Some("please delegate the file"),
+                Some(Of("parent")),
+            ),
+            (
+                Running,
+                Some("please delegate the file"),
+                Some(Starts("parent")),
+            ),
+            (Idle, None, Some(Of("parent"))),
+            (Running, Some("run the subtask"), Some(Of("first"))),
+            (Running, None, Some(Of("first"))),
+            (Running, Some("another thing"), Some(Of("parent"))),
+            (Running, None, Some(Of("first"))),
+            (Idle, None, Some(Of("first"))),
+            (Running, Some("run the subtask"), Some(Of("second"))),
+            (Idle, None, Some(Of("parent"))),
+            (Running, None, Some(Of("second"))),
+            (Idle, None, Some(Of("second"))),
+            (Running, None, Some(Of("parent"))),
+            (Idle, None, Some(Of("parent"))),
+        ]);
+        assert_eq!(
+            vec![
+                (Running, Some("please delegate the file")),
+                (Running, Some("please delegate the file")),
+                (Idle, None),
+                (Running, Some("another thing")),
+                (Running, None),
+                (Running, None),
+                (Idle, None),
+                (Running, None),
+                (Idle, None),
+            ],
+            heard(&taken)
+        );
+    }
+
+    #[test]
+    fn a_subagent_at_rest_still_asks_and_holds_the_pane_once_answered() {
+        // Its question waits on a person whether or not the agent is at
+        // work, and the `running` that answers it is what takes it off the
+        // row; then its end is the pane's. Another subagent's `running` is
+        // no answer to it.
+        use AgentReport::{Idle, NeedsInput, Running};
+        use Session::{Of, Starts};
+        let taken = admitted(&[
+            (Running, Some("delegate"), Some(Starts("parent"))),
+            (Idle, None, Some(Of("parent"))),
+            (NeedsInput, Some("run the subtask"), Some(Of("child"))),
+            (Running, None, Some(Of("other"))),
+            (Running, None, Some(Of("child"))),
+            (Running, Some("more"), Some(Of("child"))),
+            (Idle, None, Some(Of("other"))),
+            (Idle, None, Some(Of("child"))),
+            (Running, None, Some(Of("child"))),
+            (Running, Some("next"), Some(Of("parent"))),
+        ]);
+        assert_eq!(
+            vec![
+                (Running, Some("delegate")),
+                (Idle, None),
+                (NeedsInput, None),
+                (Running, None),
+                (Running, None),
+                (Idle, None),
+                (Running, Some("next")),
+            ],
+            heard(&taken)
+        );
+    }
+
+    #[test]
+    fn a_pane_remembers_the_latest_starts_and_forgets_them_when_released() {
+        use AgentReport::{Idle, Running};
+        use Session::{Of, Starts};
+        let ids: Vec<String> = (0..=STARTED).map(|at| format!("s{at}")).collect();
+        let mut sessions = Sessions::default();
+        let mut admit = |status, title: Option<&str>, session: Session<&str>| {
+            let reported = Reported {
+                status,
+                title: title.map(str::to_owned),
+                message: None,
+            };
+            sessions
+                .admit(reported, Some(session.map(str::to_owned)))
+                .map(|taken| (taken.status, taken.title))
+        };
+        for id in &ids {
+            admit(Running, None, Starts(id.as_str()));
+        }
+        admit(Idle, None, Of(ids[STARTED].as_str()));
+        // The oldest is forgotten, and is a subagent's like any session that
+        // never said it starts; the next oldest is still the agent's own.
+        assert_eq!(None, admit(Running, Some("old"), Of(ids[0].as_str())));
+        assert_eq!(
+            Some((Running, Some("next".to_owned()))),
+            admit(Running, Some("next"), Of(ids[1].as_str()))
+        );
+        assert_eq!(STARTED, sessions.started.len());
+
+        // Released, by the end of the command the agent was, the pane is as
+        // it was before any session started.
+        sessions.release();
+        assert_eq!(
+            Some((Running, Some("a script".to_owned()))),
+            sessions
+                .admit(
+                    Reported {
+                        status: Running,
+                        title: Some("a script".to_owned()),
+                        message: None,
+                    },
+                    Some(Of("script".to_owned())),
+                )
+                .map(|taken| (taken.status, taken.title))
+        );
+    }
+
     /// What a pull request sequence reads as, through the same split `vte`
     /// makes.
     fn pull_request_read(sequence: &str) -> Option<String> {

@@ -763,12 +763,17 @@ const GEMINI_EVENTS: &[(&str, &str)] = &[
 /// working. Named, the pane takes neither — see [`crook_terminal::agent`].
 ///
 /// `sessionStart` is the one Copilot runs only for a session a person
-/// began or resumed, never a subagent's: on its first prompt, a few
-/// milliseconds after that prompt's `userPromptSubmitted`, with the prompt
-/// as `initialPrompt`. So it hands the pane to its session, which a turn
-/// interrupted with Esc — no `agentStop` — and then `/new` or `/resume`
-/// would otherwise leave held by the session before, and names the work
-/// again, since the prompt's own report lost its title to that session.
+/// began or resumed, never a subagent's: on the first prompt the process
+/// sees in it, a few milliseconds after that prompt's `userPromptSubmitted`,
+/// with the prompt as `initialPrompt`. So it hands the pane to its session,
+/// which a turn interrupted with Esc — no `agentStop` — and then `/new` or
+/// `/resume` would otherwise leave held by the session before, and names
+/// the work again, since the prompt's own report lost its title to that
+/// session. It runs once a session in the life of the process, and
+/// `/resume` back to a session already run says none; the pane remembers
+/// the sessions that started instead, so a turn in one takes the pane back
+/// — and knows every other session for a subagent's, a background one
+/// that goes on after the agent stopped included.
 const COPILOT_EVENTS: &[(&str, &str)] = &[
     ("sessionStart", "running --title - --session-start -"),
     ("userPromptSubmitted", "running --title - --session -"),
