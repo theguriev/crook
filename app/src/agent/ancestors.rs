@@ -29,6 +29,10 @@
 //! `/dev` whose number that is. A process whose session was started by one
 //! with no terminal — `cron`, a CI runner, a detached service — finds
 //! nothing, and the report fails the way it always did.
+//!
+//! The same reading answers one question for `tmux`: whether a terminal tmux
+//! names is the one a report from here goes to, which is what tells a process
+//! in tmux's pane from one that only inherited tmux's variables.
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -60,6 +64,17 @@ pub(super) fn terminal() -> Option<io::Result<File>> {
     let session = process(std::process::id())?.session;
     let device = session_terminal(session, std::os::unix::process::parent_id(), process)?;
     Some(OpenOptions::new().write(true).open(node(device)?))
+}
+
+/// Whether `path` is the terminal a report from this process goes to: its own
+/// controlling terminal, or the one [`terminal`] finds when it has none.
+pub(super) fn is_the_terminal(path: &Path) -> bool {
+    let Some(own) = process(std::process::id()) else {
+        return false;
+    };
+    own.terminal
+        .or_else(|| session_terminal(own.session, std::os::unix::process::parent_id(), process))
+        .is_some_and(|device| is_device(path, device))
 }
 
 /// The terminal device of the first process from `pid` up that either has

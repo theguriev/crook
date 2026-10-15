@@ -15,6 +15,9 @@
 //! no terminal of its own either — Claude Code starts each one in a session
 //! of its own — and then the pane is the terminal of the program that ran
 //! it, which `ancestors` finds one or two processes up on macOS and Linux.
+//! Inside tmux the terminal it has is one of tmux's panes, and tmux keeps an
+//! OSC it does not know to itself; there `tmux` asks tmux for the terminals
+//! of its clients, the Crook pane among them, and the report goes there.
 //!
 //! `--agent-hooks claude` prints the hooks that make Claude Code say all of
 //! this by itself: running when a prompt is sent and while tools run,
@@ -31,8 +34,10 @@
 //! its binary — behind a guard that makes it nothing outside Crook, which
 //! includes the far side of `ssh` and the inside of a container until
 //! `TERM_PROGRAM` is passed on there and a `crook` is on that side's `PATH`
-//! or in its `CROOK_BIN`, and exits 0 whatever the report did,
-//! because a hook that fails can fail its agent;
+//! or in its `CROOK_BIN`, but lets it through inside any tmux, since only
+//! tmux can name the terminals its clients are on and the report goes to
+//! each of them, where one that is not Crook drops it unread — and exits 0
+//! whatever the report did, because a hook that fails can fail its agent;
 //! the tests here hold the plugin's files to what is printed and to
 //! [`SKILL`]. `codex`, `gemini` and `copilot` print the same commands under
 //! each one's own event names, which is how those three read their hooks
@@ -98,6 +103,8 @@ use serde_json::{Value, json};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod ancestors;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod tmux;
 
 /// The longest title a prompt is cut down to, in characters.
 ///
@@ -204,22 +211,28 @@ pub fn report(
         Some(said.map(|_| id))
     });
 
+    let written = sequence(
+        status,
+        title.as_deref(),
+        message.as_deref(),
+        pull_request.as_deref(),
+        session
+            .as_ref()
+            .map(|said| said.as_ref().map(String::as_str)),
+    );
+    // Inside tmux the terminal this has is one of tmux's panes, and tmux keeps
+    // the sequence to itself; see `tmux`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let written = match tmux::route() {
+        None => written,
+        Some(tmux::Route::Clients(clients)) if tmux::tell(&clients, &written) => return Ok(()),
+        Some(_) => tmux::passthrough(&written),
+    };
     let mut terminal = terminal().context(
         "`--agent` writes to the terminal this was run in, and there is none: run it from a pane, or from a hook of a program in one",
     )?;
     terminal
-        .write_all(
-            sequence(
-                status,
-                title.as_deref(),
-                message.as_deref(),
-                pull_request.as_deref(),
-                session
-                    .as_ref()
-                    .map(|said| said.as_ref().map(String::as_str)),
-            )
-            .as_bytes(),
-        )
+        .write_all(written.as_bytes())
         .and_then(|()| terminal.flush())
         .context("could not write to the terminal")
 }
@@ -1775,8 +1788,15 @@ fn hooks_object(events: &[(&str, &str)]) -> serde_json::Map<String, Value> {
 /// written so that a report can never be what stops an agent.
 ///
 /// Nothing at all outside Crook — `TERM_PROGRAM` is Crook in a pane, and
-/// under tmux, which says `tmux`, `CROOK_PANE_ID` is still there — because
-/// an agent's hooks go with it into every other terminal. The binary is the
+/// under a tmux started in one, which says `tmux`, `CROOK_PANE_ID` is still
+/// there — because an agent's hooks go with it into every other terminal.
+/// Except inside tmux, where neither says anything: a tmux server started
+/// anywhere else — another terminal, a login, a service that restores
+/// sessions — hands its panes neither variable, whichever terminal its
+/// client is attached from. Only tmux can name the terminals its clients
+/// are on, so the hook runs inside any tmux, and `crook --agent` asks tmux
+/// for them and writes the report to each without knowing which is Crook's:
+/// any other terminal drops it unread, as everywhere else. The binary is the
 /// one the pane names in `CROOK_BIN`, else a `crook` on `PATH` — for a pane
 /// that names none, or whose binary has since moved — else there is none and
 /// the hook does nothing. Never a path written into the agent's settings:
@@ -1811,7 +1831,7 @@ fn hooks_object(events: &[(&str, &str)]) -> serde_json::Map<String, Value> {
 fn hook_command(arguments: &str) -> String {
     use crate::shell_integration::{BIN_VARIABLE, PANE_ID_VARIABLE, TERM_PROGRAM};
     format!(
-        "[ \"$TERM_PROGRAM\" = {TERM_PROGRAM} ] || [ -n \"${PANE_ID_VARIABLE}\" ] || exit 0; \
+        "[ \"$TERM_PROGRAM\" = {TERM_PROGRAM} ] || [ -n \"${PANE_ID_VARIABLE}\" ] || [ -n \"$TMUX\" ] || exit 0; \
 crook=${BIN_VARIABLE}; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \
 \"$crook\" --agent {arguments} || exit 0"
     )
@@ -1966,7 +1986,7 @@ mod tests {
             let command = hooks[event][0]["hooks"][0]["command"].as_str().unwrap();
             assert!(
                 command.starts_with(
-                    "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || exit 0; \
+                    "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || [ -n \"$TMUX\" ] || exit 0; \
 crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent "
                 ),
                 "{event} runs {command}"
@@ -2169,8 +2189,8 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
             .join(" ");
         for sentence in [
             format!(
-                "The command hooks ({}) do nothing where neither TERM_PROGRAM=Crook nor \
-{PANE_ID_VARIABLE} is set",
+                "The command hooks ({}) do nothing where none of TERM_PROGRAM=Crook, \
+{PANE_ID_VARIABLE} and tmux's TMUX is set",
                 guarded.join(", ")
             ),
             "the OpenCode plugin and aider's command name the binary by its path and have no \
@@ -2860,6 +2880,7 @@ its `hooks` should be\n{}",
                 )
             };
             let reported = Some(format!("--agent {arguments} {input}"));
+            let path = on_path.to_str().unwrap();
 
             // Another terminal: Claude Code runs the hook and it does nothing
             // at all — no binary started, not a byte written, exit 0, since a
@@ -2882,7 +2903,7 @@ its `hooks` should be\n{}",
                 "{event} in a pane"
             );
             // tmux in a pane says TERM_PROGRAM=tmux; the pane's id is still
-            // there.
+            // there when the pane started tmux's server.
             assert_eq!(
                 (true, String::new(), String::new(), reported.clone()),
                 run(&[
@@ -2892,9 +2913,36 @@ its `hooks` should be\n{}",
                 ]),
                 "{event} in tmux in a pane"
             );
+            // A server started anywhere else hands its panes neither, and
+            // its client may be in a pane all the same: `crook` asks tmux
+            // where its clients are.
+            let tmux = "/tmp/tmux-1000/default,4321,0";
+            for inside in [
+                &[
+                    ("TERM_PROGRAM", "tmux"),
+                    ("TMUX", tmux),
+                    ("CROOK_BIN", binary),
+                ][..],
+                &[("TERM_PROGRAM", "tmux"), ("TMUX", tmux), ("PATH", path)][..],
+            ] {
+                assert_eq!(
+                    (true, String::new(), String::new(), reported.clone()),
+                    run(inside),
+                    "{event} in a tmux started outside Crook, with {inside:?}"
+                );
+            }
+            // And nothing for a TMUX that names no server.
+            assert_eq!(
+                (true, String::new(), String::new(), None),
+                run(&[
+                    ("TERM_PROGRAM", "tmux"),
+                    ("TMUX", ""),
+                    ("CROOK_BIN", binary)
+                ]),
+                "{event} with an empty TMUX"
+            );
             // A Crook from before CROOK_BIN, or a binary an upgrade has moved
             // from under a running one: the `crook` on PATH.
-            let path = on_path.to_str().unwrap();
             for stale in [
                 &[("TERM_PROGRAM", "Crook"), ("PATH", path)][..],
                 &[

@@ -1628,7 +1628,17 @@ takes the terminal from its whole session; the next terminal up is the outer age
 a nested `claude -p` would call idle mid tool call, or the terminal Crook was started from. It
 is a fallback and never a second route: with a terminal of its own the process writes there,
 and a process whose session was started by one with no terminal — `cron`, a CI runner — fails
-the way it always did. A test that hands a hook a stand-in binary, one that never opens a
+the way it always did. The one exception is tmux, which reads everything its panes write and
+keeps an OSC it does not know to itself (`app/src/agent/tmux.rs`). With `TMUX` set, the process
+asks `tmux` once, under a second, for the pane's terminal and the clients attached to its
+session; when that terminal is the process's own — by the same device numbers, so a pane of a
+Crook started from inside tmux, which only inherited the variable, is not taken for it — the
+report goes to each client's terminal that is not in control mode, side by side and 200 ms for
+all of them, and any that is not Crook drops it unread. tmux's DCS passthrough is the way only
+where tmux cannot be asked, names no such client, or none took the report in time, whatever
+its `allow-passthrough`: tmux throws a passthrough away with the rest of a client's pending
+output when that client falls behind (`client_discarded`), and the redraw that follows never
+brings it back. A test that hands a hook a stand-in binary, one that never opens a
 terminal, passes while every real report fails, so `app/tests/claude_code_hooks.rs` runs each
 of the plugin's commands, and each one `--agent-hooks` prints for Claude Code, Codex, Gemini CLI
 and Copilot CLI, with the real binary under `sh -c` in a session of its own below a process on a
@@ -1651,12 +1661,15 @@ and the plugin's are the same commands. A hook runs in whatever `PATH` its agent
 with, and a path written into the file goes stale — a moved Crook.app, a deleted build — while
 the file stays, so each calls `"$CROOK_BIN"`, the binary its pane names, and `crook` on `PATH`
 when a pane names none or the one it names has gone. Each is behind a guard that exits 0 unless
-`TERM_PROGRAM` is Crook or `CROOK_PANE_ID` is set, since a UserPromptSubmit hook that fails is a
-notice on every prompt and one that prints is text the model reads. For the same reason each
-command exits 0 after the report too, whatever the report did: a Crook too old to reach the
-pane from a hook is a line of stderr in Claude Code's debug log, not a notice on every prompt
-and tool call — and GitHub Copilot CLI denies the tool call a `preToolUse` hook failed over, so
-a hook that passed a failed report on would refuse every tool of a `copilot -p` with no terminal.
+`TERM_PROGRAM` is Crook, `CROOK_PANE_ID` is set or `TMUX` is, since a UserPromptSubmit hook that
+fails is a notice on every prompt and one that prints is text the model reads. `TMUX` is there
+because a tmux server started anywhere but a Crook pane hands its panes neither of the other
+two, whichever terminal its client is attached from, and only tmux can name the terminals its
+clients are on. For the guard's reason each command exits 0 after the report too, whatever the
+report did: a Crook too old to reach the pane from a hook is a line of stderr in Claude Code's
+debug log, not a notice on every prompt and tool call — and GitHub Copilot CLI denies the tool
+call a `preToolUse` hook failed over, so a hook that passed a failed report on would refuse
+every tool of a `copilot -p` with no terminal.
 The guard and the lookup are where the hooks fall short of the sequence: `ssh` and
 `docker exec` carry neither variable, nor the `CROOK_BIN` a pane sets, which is a path on the
 pane's machine anyway, so an agent on the far side of either reports nothing through them until
