@@ -7252,6 +7252,7 @@ fn the_cross_on_a_row_asks_about_removing_it_rather_than_opening_it() {
         .focused_pane_id()
         .expect("the split focused its pane");
     harness.dispatch_action(TabAction::ClosePane(opened));
+    wait_for_the_locks_to_come_off(&mut harness);
 
     // Back on the first tab's menu, with two checkouts in it now.
     let first = harness.tab_ids()[0];
@@ -8516,6 +8517,7 @@ fn escape_takes_the_menu_down_and_enter_removes_the_checkout() {
         .focused_pane_id()
         .expect("the split focused its pane");
     harness.dispatch_action(TabAction::ClosePane(made));
+    wait_for_the_locks_to_come_off(&mut harness);
 
     harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
     harness.wait_for("both checkouts to be read", |harness| {
@@ -10679,6 +10681,7 @@ fn nothing_offers_to_tidy_a_checkout_a_tab_is_working_in() {
     harness.dispatch_worktree(WorktreeAction::CloseMenu);
     harness.dispatch_action(TabAction::ClosePane(opened));
     harness.dispatch_action(TabAction::Select(tab));
+    wait_for_the_locks_to_come_off(&mut harness);
     harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
     harness.wait_for("both checkouts to be read again", |harness| {
         harness.worktrees_listed() == Some(2)
@@ -11673,6 +11676,7 @@ fn enter_does_not_remove_a_checkout_git_has_already_refused() {
         .focused_pane_id()
         .expect("the split focused its pane");
     harness.dispatch_action(TabAction::ClosePane(made));
+    wait_for_the_locks_to_come_off(&mut harness);
 
     // The work git will refuse over: one file that is in the checkout and in
     // nothing else.
@@ -11764,6 +11768,7 @@ fn showing_a_checkout_opens_it_in_the_group_and_never_twice() {
         .expect("the new tab focused its pane");
     harness.dispatch_action(TabAction::ClosePane(made));
     assert_eq!(harness.tab_ids().len(), 1, "the tab did not close");
+    wait_for_the_locks_to_come_off(&mut harness);
 
     harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
     harness.wait_for("both checkouts to be read", |harness| {
