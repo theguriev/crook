@@ -2016,6 +2016,11 @@ THE INPUT FIELD:
 /// `Workspace::keep_breathing` — is the same again: one chain, a frame of
 /// `plugins::tabs::BREATH_FRAME` at a time, and only while an agent runs.
 ///
+/// A restore's shells are not counted either. The panes behind the active
+/// tab are opened on this pool, but as a queue the terminal model drains one
+/// task at a time — see `TerminalModel::start` — and each task holds its
+/// worker for one fork and the wait on its exec, not for a timer.
+///
 /// The control socket parks nothing here either. Its listener blocks in
 /// `accept` for as long as nobody connects, which is a thread's job and not a
 /// worker's — the pty reader's argument — so it and each connection it

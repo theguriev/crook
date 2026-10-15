@@ -903,7 +903,7 @@ printed is copied out of the grid into a block the moment the first prompt mark 
 later resize cannot reflow it. So the window's shells open *after* its first frame rather than
 before: the frame lays every pane out, a pane with no terminal yet records the grid it holds
 (`PaneMeasurer` in `app/src/workspace/body.rs`, into `terminal_model::Measured`), and
-`TerminalModel::open` starts the pty at that. `Workspace::expect_terminals` is said before the
+the pty starts at that, read by `TerminalModel::launch`. `Workspace::expect_terminals` is said before the
 frame so that the pane draws its ground rather than a notice for that one frame, and
 `start_terminals` runs from the window's `frame_drawn`. A pane no layout will see before its
 shell opens — one in a tab behind the active one, or one a split just made, whose layout comes
@@ -918,7 +918,8 @@ before any frame at all.
 before it left for a plugin: work off the UI thread, delivered on it, and a word to the window
 only when something it draws could have changed. A changed grid is not a `notify` but a
 `TerminalUpdate::Repainted`, which the workspace weighs (below); the model's own `notify` is
-kept for the one-offs, a palette change and a shell that opened or failed to open. Each
+kept for the one-offs, a palette change and a shell that opened in place or failed to open — one
+opened behind the active tab arrives as a `Repainted` too. Each
 terminal gets an OS thread of its own rather than a background-pool worker, because a pty read
 blocks for as long as the shell is quiet and the pool is sized for exactly the chains that park
 on timers — five of them, counted one by one in `PARKED_WORKERS`, and a pane is not one.
@@ -979,6 +980,21 @@ keeps a kill from signalling a process id the system has handed out again. Those
 with the process, so the window's delegate ends every shell as the event loop stops and waits
 for all of them at once, a second at most: macOS's Quit ends the process there, without
 dropping the model whose `Drop` would do the same.
+
+**Nor does the UI thread start a shell nobody is about to see.** `portable-pty` sets a child up
+in a `pre_exec`, so std forks and the parent waits until the child has exec'd: a millisecond on
+an idle machine, and up to a quarter of a second each while a restore's earlier shells are
+starting beside it. A restore of sixty tabs started every one in place and held the window for
+most of a second after its first frame. `TerminalModel::start` starts only the active tab's
+shells in place, for the frame after it, and queues the rest for the background pool — one at
+a time in the strip's order, each arrival sending the next, so a restore holds one worker
+however many tabs it brings back. The integration's files, the spawn and the reader and writer
+threads are made on the worker, and the session comes home through `ctx.spawn` as a
+`Repainted`, a frame only if its pane is on screen. Until then the pane's shell is on its way
+(`is_opening`), drawn as its ground; a pane that closes meanwhile has its shell ended by
+whichever side holds it (`Opening`), and a window that goes while one is being spawned waits
+for it with the rest. A new tab or a split still starts in place: one shell, with a frame
+waiting to draw it.
 
 **On macOS the writer never lets unread input wrap the kernel's ring.** XNU keeps a child's
 unread input in a ring of 1024 bytes, and when the child turns canonical mode on, the kernel

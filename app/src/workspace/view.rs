@@ -6105,15 +6105,17 @@ impl Workspace {
         block_text(&Blocks::list(&history, &snapshot), block, from, filter)
     }
 
-    /// Whether a pane's shell has gone: it has exited, or it never opened.
+    /// Whether a pane's shell has gone: it has exited, or it never opened
+    /// and is not on its way.
     ///
     /// For the command line's `--run`, which has nothing left to type into
     /// once this is true.
     pub fn shell_is_gone(&self, pane: PaneId, app: &AppContext) -> bool {
-        self.terminals
-            .as_ref(app)
-            .handle(pane)
-            .is_none_or(|handle| handle.has_exited())
+        let terminals = self.terminals.as_ref(app);
+        !terminals.is_opening(pane)
+            && terminals
+                .handle(pane)
+                .is_none_or(|handle| handle.has_exited())
     }
 
     /// Every finished block of a pane as a report: the command line, then
@@ -7520,6 +7522,15 @@ impl Workspace {
         self.terminals.as_ref(app).is_expected()
     }
 
+    /// Whether a pane's shell is coming: every pane's, before
+    /// [`Self::start_terminals`], and afterwards a pane's whose shell is still
+    /// being opened behind the active tab's. See
+    /// [`TerminalModel::is_opening`].
+    pub fn terminal_coming(&self, pane: PaneId, app: &AppContext) -> bool {
+        let terminals = self.terminals.as_ref(app);
+        terminals.is_expected() || terminals.is_opening(pane)
+    }
+
     /// Where a pane with no terminal writes the grid it measured, for the
     /// shell that opens in it later.
     pub(super) fn pane_measure(&self, app: &AppContext) -> crate::terminal_model::Measured {
@@ -7538,9 +7549,20 @@ impl Workspace {
         // The frame measured the active tab's panes; the tabs behind it are
         // worked out from what it measured, before their shells open.
         self.estimate_unmeasured_panes(ctx);
-        let panes = self.open_panes();
+        // The active tab's shells here, for the frame after this one to draw,
+        // and the rest off this thread behind them: forking sixty in place
+        // held the window for most of a second. See `TerminalModel::start`.
+        let active: Vec<PaneId> = self
+            .tabs
+            .active()
+            .map(|tab| tab.panes().iter().map(Pane::id).collect())
+            .unwrap_or_default();
+        let (shown, behind): (Vec<_>, Vec<_>) = self
+            .open_panes()
+            .into_iter()
+            .partition(|(pane, _)| active.contains(pane));
         self.terminals
-            .update(ctx, |model, ctx| model.start(&panes, ctx));
+            .update(ctx, |model, ctx| model.start(&shown, &behind, ctx));
     }
 
     /// Ends the shell in every pane, for a window whose event loop is
@@ -7605,6 +7627,14 @@ impl Workspace {
     ) {
         self.terminals
             .update(ctx, |model, _| model.set_environment(environment));
+    }
+
+    /// Makes every shell opened from now on take `cost` longer to spawn. For
+    /// tests: see [`TerminalModel::set_spawn_cost`].
+    #[cfg(test)]
+    pub fn set_shell_spawn_cost(&self, cost: Duration, ctx: &mut ViewContext<Self>) {
+        self.terminals
+            .update(ctx, |model, _| model.set_spawn_cost(cost));
     }
 
     /// Says where this window answers questions, for every shell opened from
