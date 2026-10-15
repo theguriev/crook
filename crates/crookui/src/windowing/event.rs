@@ -53,7 +53,8 @@ pub(super) struct InputState {
     /// Windows minimises one. See [`Self::resized`].
     shrunk: bool,
     /// Whether the desktop said the window is minimised the last time it was
-    /// asked, which is the only way X11 says it. See [`Self::minimised`].
+    /// asked, which is the only way X11 says it, and has not said since that
+    /// some of it is in view. See [`Self::minimised`].
     minimised: bool,
     /// Whether the window last heard that it has the keyboard, which a
     /// minimised window never has. See [`Self::may_be_minimised`].
@@ -165,11 +166,16 @@ impl InputState {
             }
 
             // The window went out of sight or came back, which the desktop
-            // says the way it says the rest. Folded in with the other way a
+            // says the way it says the rest. Folded in with the other ways a
             // window goes out of sight rather than passed on as it is: see
-            // `occlusion`.
+            // `occlusion`. And some of it in view is the desktop's own word
+            // that it is not minimised, newer than the last answer asked of
+            // it: see `minimised`.
             WindowEvent::Occluded(covered) => {
                 self.covered = *covered;
+                if !covered {
+                    self.minimised = false;
+                }
                 self.occlusion()
             }
 
@@ -266,7 +272,17 @@ impl InputState {
     /// winit makes `Occluded` of there — for a window that stops being
     /// viewable, nor does a minimised window change size. So it is asked:
     /// winit reads `_NET_WM_STATE_HIDDEN` for it. `None` is a desktop that
-    /// cannot say — Wayland never can — and leaves the window in sight.
+    /// is not asked or cannot say — Wayland never can — and leaves the
+    /// window in sight.
+    ///
+    /// An answer stands until the desktop says some of the window is in
+    /// view, which overrides it. Both desktops that send `Occluded` send
+    /// `Occluded(false)` only for a window on screen — X11's
+    /// `VisibilityNotify` comes only for a viewable window, and macOS counts
+    /// a minimised one occluded — and an answer can lag a restore: a window
+    /// manager may map the window it brings back before it takes
+    /// `_NET_WM_STATE_HIDDEN` off. Should the desktop be wrong, it costs a
+    /// frame, since the next one drawn without the keyboard asks again.
     pub(super) fn minimised(&mut self, minimised: Option<bool>) -> Option<Event> {
         self.minimised = minimised.unwrap_or(false);
         self.occlusion()
@@ -274,8 +290,7 @@ impl InputState {
 
     /// Whether the window could be minimised as things stand, and so whether
     /// a frame about to be drawn should ask [`Self::minimised`] first. The
-    /// focus moving and the desktop saying the window was covered or
-    /// uncovered ask whatever this says.
+    /// focus moving asks whatever this says.
     ///
     /// While it does not have the keyboard, since a minimised window never
     /// does and the window manager may hide it a moment after taking the
@@ -791,6 +806,32 @@ mod tests {
         assert!(matches!(
             input.convert(&WindowEvent::Occluded(false), 1.),
             Some(Event::WindowOccluded(false))
+        ));
+    }
+
+    #[test]
+    fn the_desktop_saying_the_window_is_in_view_overrides_an_answer_that_it_is_minimised() {
+        // An X11 window manager mapping the window it restores before it
+        // takes `_NET_WM_STATE_HIDDEN` off: the answer asked last still says
+        // minimised, and nothing else is sure to ask again.
+        let mut input = InputState::default();
+
+        assert!(matches!(
+            input.minimised(Some(true)),
+            Some(Event::WindowOccluded(true))
+        ));
+        assert!(
+            matches!(
+                input.convert(&WindowEvent::Occluded(false), 1.),
+                Some(Event::WindowOccluded(false))
+            ),
+            "a window the desktop says is in view was held out of sight"
+        );
+
+        // Should the desktop be wrong, the next answer still counts.
+        assert!(matches!(
+            input.minimised(Some(true)),
+            Some(Event::WindowOccluded(true))
         ));
     }
 

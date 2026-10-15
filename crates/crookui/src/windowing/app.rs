@@ -624,17 +624,6 @@ impl ApplicationHandler<CrookEvent> for App {
                 }
             }
 
-            // So is the desktop saying the window was covered or uncovered.
-            // Asked before that word is folded in, so that a window coming
-            // back is not held out of sight by an answer from while it was
-            // minimised: macOS says both, and the window it restores may get
-            // neither the keyboard nor a frame to ask at.
-            WindowEvent::Occluded(_) => {
-                if self.ask_whether_minimised() {
-                    self.with_window(Window::request_redraw);
-                }
-            }
-
             _ => {}
         }
 
@@ -691,8 +680,9 @@ impl App {
     /// whether the application wants a frame for it.
     ///
     /// Asked rather than heard, because X11 never says: see
-    /// [`InputState::minimised`]. Elsewhere the answer agrees with what the
-    /// desktop already said by itself, or is `None`.
+    /// [`InputState::minimised`]. Elsewhere the answer is `None`, since the
+    /// rest either say it by themselves or cannot: see
+    /// [`Window::is_minimised`].
     fn ask_whether_minimised(&mut self) -> bool {
         let minimised = self.with_window(|window| window.is_minimised());
         self.input

@@ -185,12 +185,24 @@ impl Window {
     }
 
     /// Whether the desktop says the window is minimised, or `None` where it
-    /// cannot say, which on Wayland is always.
+    /// cannot say, which on Wayland is always, or is not asked, which on
+    /// macOS and Windows is always.
+    ///
+    /// Those two say it by themselves — macOS as an `Occluded`, Windows as a
+    /// size with no room in it — so their answer adds nothing but the chance
+    /// of being late. On macOS it can be: winit hands on AppKit's word that
+    /// a window it restores is in view from inside the restore, before
+    /// `isVisible` says yes, and `isMiniaturized` asked then, or at a focus
+    /// that arrives before the restore is done, may still say yes and hold a
+    /// window in plain sight out of it.
     ///
     /// On X11 this is a round trip to the server, for the window manager's
     /// `_NET_WM_STATE_HIDDEN`; see `InputState::may_be_minimised` for when
     /// it is asked.
     pub(super) fn is_minimised(&self) -> Option<bool> {
+        if cfg!(any(target_os = "macos", target_os = "windows")) {
+            return None;
+        }
         self.window.is_minimized()
     }
 

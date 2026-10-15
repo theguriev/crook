@@ -1918,10 +1918,13 @@ says a window is covered or minimised on macOS, but on X11 only that it is cover
 with no compositor running, which reports every window in view. Windows sends none, and a
 window resized to nothing is the minimised one there (`InputState::resized`). X11 says nothing
 of a minimised window, which its window manager unmaps, and the server sends no visibility
-event for a window that stops being viewable. So crookui asks: winit's `is_minimized` reads
-`_NET_WM_STATE_HIDDEN`, and that is a round trip to the server. It is asked when the focus
-moves, when the desktop says the window was covered or uncovered, and before each frame while
-the window lacks the keyboard or was minimised when last asked (`InputState::may_be_minimised`).
+event for a window that stops being viewable. So crookui asks X11, and only X11: winit's
+`is_minimized` reads `_NET_WM_STATE_HIDDEN`, and that is a round trip to the server. It is
+asked when the focus moves and before each frame while the window lacks the keyboard or was
+minimised when last asked (`InputState::may_be_minimised`), and an `Occluded(false)` overrides
+the answer, since a window manager may map the window it restores before it takes the property
+off. macOS and Windows already say it, and are not asked (`Window::is_minimised`): AppKit
+tells winit that a window it restores is in view while `isMiniaturized` may still say yes.
 A covered window on Windows or under an X11 compositor goes unremarked. The breath chain ends
 while the window cannot be seen and starts again when it can, because X11 and Windows draw
 every frame asked of a hidden window. Wayland holds those frames back by itself. The breath
