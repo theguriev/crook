@@ -1030,10 +1030,9 @@ fn stored(block: &Block) -> Item<'_> {
 /// **It stops being still once the scrollback is full.** From then on every
 /// new line drops the oldest one, the line the numbering counts from is a
 /// different line, and a grid selection slides one row up the text per line
-/// printed. Nothing here can compensate: the count of lines that have been
-/// dropped is not something the emulator underneath keeps, and the same limit
-/// is why a block's own anchor clamps at the oldest line
-/// (`crook_terminal::blocks`). It takes a command printing past the whole
+/// printed. Nothing here can compensate: the emulator underneath counts the
+/// lines it drops, for its own anchors (`crook_terminal::blocks`), but no
+/// snapshot hands the count out. It takes a command printing past the whole
 /// scrollback — ten thousand lines by default — *while* a selection is being
 /// held on the grid, which is the one case in this module that is known to be
 /// wrong rather than merely unimplemented.

@@ -70,12 +70,16 @@ as text plus run-length style runs, not as `SnapshotCell`s: a cell is twelve byt
 thousand rows of two hundred columns would be 24 MB per pane, for ever, with nothing evicting
 it.
 
-Dropping the history at every harvest is what keeps a block's anchor exact. Alacritty's
-history is capped, evicts from the top without counting, and reflows on resize, so an
-absolute line number is stable across neither. After a harvest the history can only hold lines
-the *open* block pushed off the screen — so it can only saturate when the open block is longer
-than the whole scrollback, at which point "this block starts above the oldest line we have" is
-not an approximation, it is the truth.
+Dropping the history at every harvest is what keeps a block's anchor on a line the grid still
+has. Alacritty's history is capped, evicts from the top without counting, and reflows on
+resize, so an absolute line number is stable across neither. Crook does the evicting itself:
+alacritty is given a few hundred lines of room past the scrollback, and after every slice of
+output the emulator cuts the history back to its length and counts what it cut
+(`BlockTracker::trim_history`), so an anchor follows its line past a full history — which is
+what keeps a picture on its rows through a training run's ten-thousandth line. After a harvest
+the history can only hold lines the *open* block pushed off the screen — so it can only
+saturate when the open block is longer than the whole scrollback, at which point "this block
+starts above the oldest line we have" is not an approximation, it is the truth.
 
 The **screen** above the new block is erased at the same moment, and for the same reason: what
 is left in the grid is then exactly the open block and nothing else. Two answers depend on
@@ -254,9 +258,10 @@ copy chord would be an interrupt spent on nothing.
 
 **What is knowingly not stable:** a grid selection held while the scrollback is *full*. Rows are
 numbered from the oldest line the history holds, and a full history drops that line for every
-new one, so the selection slides one row up the text per line printed. Counting the dropped
-lines is not something the emulator underneath can answer. It takes a command printing past a
-whole scrollback — ten thousand lines by default — while a selection is being held on the grid.
+new one, so the selection slides one row up the text per line printed. The emulator counts the
+dropped lines for its own anchors, but hands no count out for a selection to follow. It takes a
+command printing past a whole scrollback — ten thousand lines by default — while a selection is
+being held on the grid.
 
 **A word** is one UAX #29 word-bound segment of the folded line under the pointer, from
 `editor::text::word_range_at` — the same function the composer uses, so double-clicking a path

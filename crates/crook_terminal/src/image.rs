@@ -29,14 +29,24 @@
 //! [`crate::LiveBlock::images`]), so on the grid they move through the
 //! scrollback with the text around them.
 //!
-//! Until the scrollback is full. A picture's row is kept by counting the
-//! lines that scroll into the history under it, and a full history stops
-//! counting: each line scrolled in evicts one, and its size stays put. From
-//! then on the open block's pictures are forgotten, the ones it had and the
-//! ones printed into it after, and it keeps the blank rows they took — see
-//! `BlockTracker::settle_pictures`, in `blocks.rs`. With shell integration
-//! that takes one command printing more than the whole scrollback; without
+//! A picture's row is kept by counting the lines that scroll into the
+//! history under it, past a full history too: the emulator holds the history
+//! at its length itself and counts what it cuts off, where alacritty would
+//! evict without counting — see `BlockTracker::trim_history`, in `blocks.rs`.
+//! A picture goes when its first row leaves the history, rather than be drawn
+//! over the oldest row there is, and the open block keeps the blank rows it
+//! covered that are still there. The open block's pictures all go if a full
+//! history ever scrolls by more lines at once than the count can follow: more
+//! than a couple of hundred in one synchronized update, or packed closer than
+//! one a byte by escapes that scroll several. With shell integration a full
+//! history takes one command printing more than the whole scrollback; without
 //! it the session is one block, and it takes the session doing so.
+//!
+//! A picture printed over every cell of an earlier one replaces it, as text
+//! printed over text does, so a plot redrawn in place keeps one picture and
+//! not one a frame. What the open block's pictures weigh together is
+//! bounded, as the files they arrived as and never less than `PICTURE_FLOOR`
+//! apiece, and the oldest go past it: see `MAX_IMAGE_BYTES`, in `blocks.rs`.
 //!
 //! # The bytes came from anything that can print
 //!

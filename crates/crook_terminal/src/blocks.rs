@@ -39,23 +39,40 @@
 //!
 //! A mark knows the cell it landed on, and a cell drifts: every line that
 //! scrolls off the screen moves it up one. [`Anchor`] corrects for that by
-//! remembering `history_size()` at capture and subtracting the difference,
-//! which is exact for as long as the history keeps growing — and stops being
-//! exact the moment the history is full, because alacritty then evicts from
-//! the top without counting.
+//! counting the lines that have scrolled into the history since it was
+//! taken. Alacritty's `history_size()` counts them only until the history is
+//! full: from then on every line scrolled in evicts one off the top and the
+//! size stays put. So the history is never left to fill. Alacritty is given
+//! [`HISTORY_HEADROOM`] lines more than the scrollback, and
+//! [`BlockTracker::trim_history`] cuts the history back to the scrollback
+//! after every slice of output and counts what it cut. The size and that
+//! count together are what an anchor follows, and they are exact for as long
+//! as no slice scrolls more lines than the headroom holds — which takes more
+//! than one line a byte, since the emulator feeds no slice longer than the
+//! room left. When one does, every anchor is off by the lines nothing counted,
+//! and the open block's pictures go. Under a full-screen program the shell's
+//! history can be neither read nor cut back, so the emulator feeds a switch
+//! of screens apart from the output before it, and the history is cut back
+//! on both sides of the switch. What can still move it out of sight is
+//! [`BlockTracker::rows_changed`]'s.
 //!
-//! Harvesting is what keeps that from mattering. When a block closes its rows
-//! are copied out, the grid's history is dropped and the screen above the new
-//! block is erased, so the grid holds the open block and nothing else. The
-//! history can therefore only fill up when the open block itself is longer
-//! than the whole scrollback — at which point "this block starts above the
-//! oldest line we have" is not an approximation, it is the truth — and a
-//! column change, which reflows every stored line number into meaninglessness,
-//! can be answered by looking for the first line with anything on it. See
-//! [`BlockTracker::reflowed`]. A picture's anchor has no such answer, and a
-//! picture drawn over the wrong rows covers text, so the open block's are
-//! dropped once its history is full: see [`BlockTracker::settle_pictures`].
+//! A line that has left the history is gone, and an anchor on it reads as the
+//! oldest line there is. For a block's first row that is the truth — "this
+//! block starts above the oldest line we have" — and for a picture it is a
+//! lie, so a picture whose first row has gone goes too: see
+//! [`BlockTracker::settle_pictures`].
+//!
+//! Harvesting keeps the rest of the arithmetic honest. When a block closes its
+//! rows are copied out, the grid's history is dropped and the screen above
+//! the new block is erased, so the grid holds the open block and nothing
+//! else. The history can therefore only fill up when the open block itself
+//! is longer than the whole scrollback, and a column change, which reflows
+//! every stored line number into meaninglessness, can be answered by looking
+//! for the first line with anything on it. See [`BlockTracker::reflowed`]. A
+//! picture's anchor has no such answer, and a picture drawn over the wrong
+//! rows covers text, so a reflow drops the open block's.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -93,14 +110,38 @@ const MAX_SCRAPED_COMMAND: usize = 4096;
 /// Past that the prompt-end mark is stale rather than the command long.
 const MAX_SCRAPED_LINES: i32 = 32;
 
-/// The most pictures the open block keeps; past it the oldest go first.
-const MAX_OPEN_IMAGES: usize = 64;
+/// The most pictures may weigh, as the files they arrived as and never less
+/// than [`PICTURE_FLOOR`] apiece: the finished blocks' together, and the open
+/// block's together. Past it the oldest go first. The finished blocks that
+/// lose theirs keep their text, so that a session that `imgcat`s all
+/// afternoon holds the pictures a person is still likely to scroll back to
+/// and not every one since lunch; the open block loses the ones printed
+/// first, which are the furthest up.
+pub(crate) const MAX_IMAGE_BYTES: usize = 256 << 20;
 
-/// The most the finished blocks' pictures may weigh together, as the files
-/// they arrived as. Past it the oldest blocks lose theirs — and keep their
-/// text — so that a session that `imgcat`s all afternoon holds the pictures
-/// a person is still likely to scroll back to and not every one since lunch.
-const MAX_IMAGE_BYTES: usize = 256 << 20;
+/// The least a picture weighs against [`MAX_IMAGE_BYTES`], however small its
+/// file.
+///
+/// What a picture costs beyond its file does not shrink with it: its
+/// placement, its anchor, and the copy of both every snapshot of the open
+/// block makes. A PNG's header is all this crate reads of one, and a stream
+/// of 24-byte headers would otherwise fit eleven million pictures under the
+/// budget, every one of them copied into every frame. At this weight it fits
+/// sixteen thousand, more than a folder of icons holds, and a photo weighs
+/// what its file does.
+pub(crate) const PICTURE_FLOOR: usize = 16 << 10;
+
+/// How many lines past the scrollback alacritty's history may grow before
+/// alacritty starts evicting from it on its own, uncounted.
+///
+/// [`BlockTracker::trim_history`] cuts the history back to the scrollback
+/// after every slice of output and counts what it cut, which is what keeps an
+/// [`Anchor`] exact once the history is full; this is the room a slice
+/// scrolls into before then. It costs this many rows of cells more than the
+/// scrollback while the history is full, and is kept under the thousand spare
+/// rows alacritty holds on to, so the rows a trim cuts are kept for the lines
+/// after it rather than freed and allocated again.
+pub(crate) const HISTORY_HEADROOM: usize = 256;
 
 /// Identifies one block for as long as the session lives.
 ///
@@ -315,9 +356,9 @@ pub struct LiveBlock {
     /// `block_list::inline_start`, which is the caller this exists for.
     pub prompt_end: Option<PromptEnd>,
     /// The pictures printed in it, at viewport rows the way
-    /// [`Self::top_row`] is. None on the alternate screen, and none once the
-    /// history is full, when nothing says which rows they are over any more:
-    /// see [`crate::image`].
+    /// [`Self::top_row`] is, oldest first. None on the alternate screen, and
+    /// none whose first row has scrolled out of the history: see
+    /// [`crate::image`].
     pub images: Vec<ImagePlacement>,
 }
 
@@ -549,17 +590,22 @@ const TABLE: [[Transition; Signal::COUNT]; BlockState::COUNT] = {
 /// Alacritty numbers line 0 at the top of the live screen and counts history
 /// negatively, so a stored line moves up by one for every line that scrolls
 /// off — and it rotates selections for you but not anchors. The correction is
-/// the change in `history_size()` since the anchor was read.
+/// how many lines have scrolled into the history since the anchor was read:
+/// see [`scrolled`].
+///
+/// Every reading takes the lines [`BlockTracker::trim_history`] has cut off
+/// the history so far, which is the half of that count alacritty does not
+/// keep.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Anchor {
-    /// A cell, and the history size when it was read.
+    /// A cell, and how far the grid had scrolled when it was read.
     At {
         /// Grid line at capture.
         line: i32,
         /// Column at capture.
         column: usize,
-        /// `history_size()` at capture.
-        history: usize,
+        /// [`scrolled`] at capture.
+        scrolled: u64,
     },
     /// The oldest line the grid still holds. What a block anchors to when it
     /// never saw a mark: the first block of a session, and the single block a
@@ -578,22 +624,42 @@ impl Anchor {
     /// prints the newline that scrolls it in. Reporting that row as the
     /// current bottom instead would make an empty block look like it already
     /// held the last row of its predecessor.
-    fn line<T>(self, term: &Term<T>) -> i32 {
-        let grid = term.grid();
-        let oldest = -(grid.history_size() as i64);
-        let line = match self {
-            Self::At { line, history, .. } => {
-                let drift = grid.history_size() as i64 - history as i64;
-                i64::from(line) - drift
-            }
-            Self::Top => oldest,
-        };
+    fn line<T>(self, term: &Term<T>, trimmed: u64) -> i32 {
+        let oldest = -(term.grid().history_size() as i64);
+        let line = self.unclamped(term, trimmed).unwrap_or(oldest);
         line.max(oldest) as i32
+    }
+
+    /// The grid line the anchor names now, before [`Self::line`] clamps it to
+    /// one the history still holds: above the oldest line once it has scrolled
+    /// out. `None` for [`Self::Top`], which names whichever line is oldest.
+    fn unclamped<T>(self, term: &Term<T>, trimmed: u64) -> Option<i64> {
+        self.counted()
+            .map(|line| line - scrolled(term, trimmed) as i64)
+    }
+
+    /// The line the anchor names, numbered so that it stays put as the grid
+    /// scrolls: the line it names now, plus how far the grid has scrolled
+    /// ([`scrolled`]). Two anchors' compare as the lines they name do, however
+    /// far apart they were taken. `None` for [`Self::Top`].
+    fn counted(self) -> Option<i64> {
+        match self {
+            Self::At { line, scrolled, .. } => Some(i64::from(line) + scrolled as i64),
+            Self::Top => None,
+        }
+    }
+
+    /// Whether the line the anchor names has scrolled out of the history,
+    /// which [`Self::line`] would read as the oldest line there is.
+    fn scrolled_out<T>(self, term: &Term<T>, trimmed: u64) -> bool {
+        let oldest = -(term.grid().history_size() as i64);
+        self.unclamped(term, trimmed)
+            .is_some_and(|line| line < oldest)
     }
 
     /// The cell the anchor names, clamped to one the grid actually has so it
     /// can be handed to `Term`.
-    fn point<T>(self, term: &Term<T>) -> Point {
+    fn point<T>(self, term: &Term<T>, trimmed: u64) -> Point {
         let grid = term.grid();
         let newest = grid.screen_lines() as i32 - 1;
         let column = match self {
@@ -601,7 +667,7 @@ impl Anchor {
             Self::Top => 0,
         };
         Point::new(
-            Line(self.line(term).min(newest)),
+            Line(self.line(term, trimmed).min(newest)),
             Column(column.min(grid.columns().saturating_sub(1))),
         )
     }
@@ -614,14 +680,14 @@ impl Anchor {
     /// rather than storing one past the end of the row, so the cell that is
     /// really next is the first of the row below, and an anchor on the cursor
     /// would name the cell the prompt's own last character is in.
-    fn at_input<T>(term: &Term<T>) -> Self {
+    fn at_input<T>(term: &Term<T>, trimmed: u64) -> Self {
         let cursor = &term.grid().cursor;
         let (line, column) = if cursor.input_needs_wrap {
             (cursor.point.line.0 + 1, 0)
         } else {
             (cursor.point.line.0, cursor.point.column.0)
         };
-        Self::at(line, column, term)
+        Self::at(line, column, term, trimmed)
     }
 
     /// The cell the anchor names, as a grid line and an *unclamped* column.
@@ -631,22 +697,198 @@ impl Anchor {
     /// reported rather than read, and clamping it would turn "the row is full,
     /// the next character goes below" into "the next character goes on top of
     /// the last one".
-    fn cell<T>(self, term: &Term<T>) -> (i32, usize) {
+    fn cell<T>(self, term: &Term<T>, trimmed: u64) -> (i32, usize) {
         let column = match self {
             Self::At { column, .. } => column,
             Self::Top => 0,
         };
-        (self.line(term), column)
+        (self.line(term, trimmed), column)
     }
 
-    /// An anchor on a named cell, read against the history the grid has now.
-    fn at<T>(line: i32, column: usize, term: &Term<T>) -> Self {
+    /// An anchor on a named cell, read against how far the grid has scrolled
+    /// now.
+    fn at<T>(line: i32, column: usize, term: &Term<T>, trimmed: u64) -> Self {
         Self::At {
             line,
             column,
-            history: term.grid().history_size(),
+            scrolled: scrolled(term, trimmed),
         }
     }
+}
+
+/// How many lines have scrolled into the history, less any taken back out:
+/// the ones it holds, which alacritty counts, and the ones `trimmed` off its
+/// old end, which it does not.
+///
+/// An anchor's line moves up by one for every one this goes up, and down by
+/// one for every one it goes down, which a taller screen does by pulling lines
+/// back out of the history. Erasing the history takes it down by the whole
+/// history at once, and the anchors measured across that are found again or
+/// carried across rather than followed: see [`BlockTracker::history_cleared`]
+/// and [`BlockTracker::clear`].
+fn scrolled<T>(term: &Term<T>, trimmed: u64) -> u64 {
+    term.grid().history_size() as u64 + trimmed
+}
+
+/// The open block's pictures, oldest first, and what they weigh together.
+///
+/// Each is anchored to the cell its top-left corner is on so it scrolls with
+/// the rows it covers; the placement's own row means nothing until it is read
+/// against the anchor.
+#[derive(Debug, Default)]
+struct Pictures {
+    /// Each picture under the number it was added with, which only goes up:
+    /// oldest first, and found again by its number however many have gone
+    /// before or after it.
+    placed: BTreeMap<u64, (Anchor, ImagePlacement)>,
+    /// Every picture in [`Self::placed`] by the cell its top-left corner is
+    /// on: see [`Self::start`].
+    ///
+    /// What [`Self::place`] finds the pictures a new one may cover in: see
+    /// [`Self::cornered_in`]. A picture then costs a look at the few whose
+    /// corners are on its own cells, rather than at all the open block
+    /// holds, which a stream can make thousands, in whatever order the
+    /// stream printed them.
+    starts: BTreeSet<(i64, usize, u64)>,
+    /// The number the next picture is added with.
+    next: u64,
+    /// What [`Self::placed`] weighs, kept rather than summed: every picture
+    /// added is weighed against it, and a stream can add thousands.
+    weight: usize,
+}
+
+impl Pictures {
+    /// Adds a picture, and lets the oldest go while they weigh more than
+    /// [`MAX_IMAGE_BYTES`] together. A picture's file is at most a sixteenth
+    /// of that, so the one added stays.
+    fn push(&mut self, anchor: Anchor, placement: ImagePlacement) {
+        let number = self.next;
+        self.next += 1;
+        if let Some(start) = Self::start(number, anchor, &placement) {
+            self.starts.insert(start);
+        }
+        self.weight += weight_of(&placement);
+        self.placed.insert(number, (anchor, placement));
+        while self.weight > MAX_IMAGE_BYTES {
+            let Some(oldest) = self.placed.keys().next().copied() else {
+                break;
+            };
+            self.remove(oldest);
+        }
+    }
+
+    /// Adds a picture as [`Self::push`] does, and first lets go of the ones
+    /// it covers every cell of.
+    ///
+    /// A picture printed over another replaces it, the way text printed over
+    /// text does, and the way iTerm2 treats the cells a picture takes. Kept,
+    /// the older one would be drawn under the newer, seen only through its
+    /// transparent pixels — and a plot redrawn in place, frame over frame,
+    /// would pile up a picture for every frame on the same cells, each of them
+    /// drawn every time the pane is. One covered only in part stays, since the
+    /// rest of it still shows.
+    fn place(&mut self, anchor: Anchor, placement: ImagePlacement) {
+        let covered: Vec<u64> = self
+            .cornered_in(anchor, &placement)
+            .filter(|number| {
+                self.placed
+                    .get(number)
+                    .is_some_and(|(older, under)| covers((anchor, &placement), (*older, under)))
+            })
+            .collect();
+        for number in covered {
+            self.remove(number);
+        }
+        self.push(anchor, placement);
+    }
+
+    /// The numbers of the pictures whose top-left corner is on a cell that
+    /// `placement`, printed at `anchor`, takes. Every picture takes a cell
+    /// at least ([`crate::image::cells`]), so these are the only ones it can
+    /// cover.
+    fn cornered_in(&self, anchor: Anchor, placement: &ImagePlacement) -> impl Iterator<Item = u64> {
+        let (left, right) = (placement.column, placement.column + placement.columns);
+        let rows = placement.rows as i64;
+        anchor.counted().into_iter().flat_map(move |top| {
+            (top..top + rows).flat_map(move |line| {
+                self.starts
+                    .range((line, left, 0)..(line, right, 0))
+                    .map(|&(_, _, number)| number)
+            })
+        })
+    }
+
+    /// Lets the picture added with `number` go.
+    fn remove(&mut self, number: u64) {
+        if let Some((anchor, placement)) = self.placed.remove(&number) {
+            self.weight -= weight_of(&placement);
+            if let Some(start) = Self::start(number, anchor, &placement) {
+                self.starts.remove(&start);
+            }
+        }
+    }
+
+    /// Where [`Self::starts`] files a picture: by the line its first row is
+    /// on ([`Anchor::counted`]), then the column its first column is on, and
+    /// then its number. `None` for one anchored to [`Anchor::Top`], which
+    /// [`covers`] nothing and is covered by nothing.
+    fn start(number: u64, anchor: Anchor, placement: &ImagePlacement) -> Option<(i64, usize, u64)> {
+        anchor
+            .counted()
+            .map(|line| (line, placement.column, number))
+    }
+
+    /// Keeps the pictures `keep` says to, and lets the rest go.
+    fn retain(&mut self, mut keep: impl FnMut(Anchor, &ImagePlacement) -> bool) {
+        let (starts, weight) = (&mut self.starts, &mut self.weight);
+        self.placed.retain(|number, (anchor, placement)| {
+            let kept = keep(*anchor, placement);
+            if !kept {
+                *weight -= weight_of(placement);
+                if let Some(start) = Self::start(*number, *anchor, placement) {
+                    starts.remove(&start);
+                }
+            }
+            kept
+        });
+    }
+
+    /// Lets every picture go.
+    fn clear(&mut self) {
+        self.placed.clear();
+        self.starts.clear();
+        self.weight = 0;
+    }
+
+    /// Hands every picture over, oldest first, and keeps none.
+    fn take(&mut self) -> impl Iterator<Item = (Anchor, ImagePlacement)> + use<> {
+        let placed = std::mem::take(&mut self.placed);
+        self.clear();
+        placed.into_values()
+    }
+
+    /// The pictures, oldest first.
+    fn iter(&self) -> impl Iterator<Item = &(Anchor, ImagePlacement)> {
+        self.placed.values()
+    }
+
+    /// Whether there are none.
+    fn is_empty(&self) -> bool {
+        self.placed.is_empty()
+    }
+}
+
+/// Whether the picture `over` covers every cell of the picture `under`, each
+/// with the anchor it was printed at.
+fn covers(over: (Anchor, &ImagePlacement), under: (Anchor, &ImagePlacement)) -> bool {
+    let ((at, over), (under_at, under)) = (over, under);
+    let (Some(top), Some(under_top)) = (at.counted(), under_at.counted()) else {
+        return false;
+    };
+    under_top >= top
+        && under_top + under.rows as i64 <= top + over.rows as i64
+        && under.column >= over.column
+        && under.column + under.columns <= over.column + over.columns
 }
 
 /// The open block: everything known about it before it is harvested.
@@ -670,10 +912,8 @@ struct OpenBlock {
     /// The host the shell named with [`Self::working_directory`].
     working_host: Option<String>,
     started_at: Option<Instant>,
-    /// The pictures printed in it, each anchored to the cell its top-left
-    /// corner is on so it scrolls with the rows it covers. The placement's
-    /// own row means nothing until it is read against the anchor.
-    images: Vec<(Anchor, ImagePlacement)>,
+    /// The pictures printed in it.
+    pictures: Pictures,
     /// Whether a column change has reflowed the grid since its prompt was
     /// drawn, so that the next prompt start may say where it begins. Read
     /// only at the prompt, by [`Transition::Redraw`], and cleared by the
@@ -711,6 +951,19 @@ pub(crate) struct BlockTracker {
     reflow_owed: bool,
     /// What the finished blocks' pictures weigh. See [`MAX_IMAGE_BYTES`].
     image_bytes: usize,
+    /// How many lines [`Self::trim_history`] has cut off the old end of the
+    /// history, which every [`Anchor`] reading takes: alacritty counts the
+    /// lines its history holds, and not the ones that left it.
+    trimmed: u64,
+    /// Whether [`Self::trim_history`] has cut lines off since
+    /// [`Self::settle_pictures`] last looked, which is the one way a
+    /// picture's first row can leave the history without the picture going
+    /// with it.
+    trimmed_since_settle: bool,
+    /// Whether the shell's history, out of sight under a full-screen
+    /// program, may have gone past the end of the headroom: see
+    /// [`Self::update_switched_screens`].
+    history_unsure: bool,
 }
 
 impl BlockTracker {
@@ -729,7 +982,7 @@ impl BlockTracker {
                 working_directory: None,
                 working_host: None,
                 started_at: None,
-                images: Vec::new(),
+                pictures: Pictures::default(),
                 reflowed: false,
                 prompt: None,
             },
@@ -738,6 +991,9 @@ impl BlockTracker {
             cleared_at: 0,
             reflow_owed: false,
             image_bytes: 0,
+            trimmed: 0,
+            trimmed_since_settle: false,
+            history_unsure: false,
             last_ignored: None,
         }
     }
@@ -764,6 +1020,13 @@ impl BlockTracker {
         self.last_ignored
     }
 
+    /// Tests: how many pictures the open block holds, under a full-screen
+    /// program too, where [`Self::live`] shows none of them.
+    #[cfg(test)]
+    pub(crate) fn open_pictures(&self) -> usize {
+        self.open.pictures.iter().count()
+    }
+
     /// The open block, resolved against the viewport.
     pub(crate) fn live<T>(&self, term: &Term<T>) -> LiveBlock {
         let grid = term.grid();
@@ -775,7 +1038,7 @@ impl BlockTracker {
             (0, grid.screen_lines() as i32 - 1)
         } else {
             (
-                self.open.top.line(term) + display_offset,
+                self.open.top.line(term, self.trimmed) + display_offset,
                 last_content_line(term) + display_offset,
             )
         };
@@ -790,7 +1053,7 @@ impl BlockTracker {
             .command_start
             .filter(|_| !alt_screen)
             .map(|anchor| {
-                let (line, column) = anchor.cell(term);
+                let (line, column) = anchor.cell(term, self.trimmed);
                 PromptEnd {
                     row: line + display_offset,
                     column,
@@ -801,10 +1064,10 @@ impl BlockTracker {
             Vec::new()
         } else {
             self.open
-                .images
+                .pictures
                 .iter()
                 .map(|(anchor, placement)| ImagePlacement {
-                    row: anchor.line(term) + display_offset,
+                    row: anchor.line(term, self.trimmed) + display_offset,
                     ..placement.clone()
                 })
                 .collect()
@@ -847,15 +1110,18 @@ impl BlockTracker {
         if !self.at_prompt() || term.mode().contains(TermMode::ALT_SCREEN) {
             return false;
         }
-        let input = Anchor::at_input(term);
+        let trimmed = self.trimmed;
+        let input = Anchor::at_input(term, trimmed);
         self.open
             .command_start
-            .is_some_and(|end| end.cell(term) == input.cell(term))
-            && is_blank_cell(term, input.cell(term))
+            .is_some_and(|end| end.cell(term, trimmed) == input.cell(term, trimmed))
+            && is_blank_cell(term, input.cell(term, trimmed))
     }
 
     /// Records a picture printed with its top-left corner on grid `line` at
-    /// `column`, into the open block.
+    /// `column`, into the open block, which lets go of the pictures it covers
+    /// every cell of, and of the oldest of the rest once they weigh more than
+    /// [`MAX_IMAGE_BYTES`].
     pub(crate) fn image<T>(
         &mut self,
         line: i32,
@@ -863,12 +1129,8 @@ impl BlockTracker {
         placement: ImagePlacement,
         term: &Term<T>,
     ) {
-        if self.open.images.len() == MAX_OPEN_IMAGES {
-            self.open.images.remove(0);
-        }
-        self.open
-            .images
-            .push((Anchor::at(line, column, term), placement));
+        let anchor = Anchor::at(line, column, term, self.trimmed);
+        self.open.pictures.place(anchor, placement);
     }
 
     /// Applies an OSC 133 mark that has just been parsed, with the grid
@@ -987,7 +1249,7 @@ impl BlockTracker {
             .find(|line| !is_blank_line(term, *line))
             .unwrap_or_else(|| last_content_line(term) + 1);
 
-        self.open.top = Anchor::at(line, 0, term);
+        self.open.top = Anchor::at(line, 0, term, self.trimmed);
         self.open.command_start = None;
         // And where its output began, for the same reason: a reflow moved
         // every line the anchor was measured against, so the row it names is
@@ -999,7 +1261,7 @@ impl BlockTracker {
         // And its pictures, whose rows moved with the rest and cannot be
         // found again: a picture drawn over the wrong text is worse than the
         // gap it leaves.
-        self.open.images.clear();
+        self.open.pictures.clear();
         self.open.reflowed = true;
     }
 
@@ -1023,10 +1285,10 @@ impl BlockTracker {
         let line = term.grid().cursor.point.line;
         term.grid_mut().reset_region::<Color, _>(..line);
         term.clear_screen(ClearMode::Saved);
-        self.open.top = Anchor::at(line.0, 0, term);
+        self.open.top = Anchor::at(line.0, 0, term, self.trimmed);
         self.open.command_start = None;
         self.open.prompt = None;
-        self.open.images.clear();
+        self.open.pictures.clear();
         self.open.reflowed = false;
     }
 
@@ -1060,7 +1322,7 @@ impl BlockTracker {
         let grid = term.grid();
         let last = Column(grid.columns().saturating_sub(1));
         let mut head = String::new();
-        for line in self.open.top.line(term)..grid.cursor.point.line.0 {
+        for line in self.open.top.line(term, self.trimmed)..grid.cursor.point.line.0 {
             let row = &grid[Line(line)];
             if !row[last].flags.contains(Flags::WRAPLINE) {
                 return false;
@@ -1081,8 +1343,8 @@ impl BlockTracker {
     /// with a blank line on are blank in both.
     fn prompt_text<T>(&self, end: Anchor, term: &Term<T>) -> String {
         let grid = term.grid();
-        let (end_line, end_column) = end.cell(term);
-        let first = (self.open.top.line(term)..end_line)
+        let (end_line, end_column) = end.cell(term, self.trimmed);
+        let first = (self.open.top.line(term, self.trimmed)..end_line)
             .find(|line| !is_blank_line(term, *line))
             .unwrap_or(end_line);
         let mut text = String::new();
@@ -1176,28 +1438,39 @@ impl BlockTracker {
         }
         // `Top` is the oldest line whatever the history holds, so it needs no
         // carrying: it is the top of the screen once the history is gone.
-        let top = matches!(self.open.top, Anchor::At { .. }).then(|| self.open.top.line(term));
-        let command_start = self.open.command_start.map(|anchor| anchor.cell(term));
-        let output_start = self.open.output_start.map(|anchor| anchor.line(term));
-        let images: Vec<_> = std::mem::take(&mut self.open.images)
-            .into_iter()
-            .map(|(anchor, placement)| (anchor.cell(term), placement))
+        let trimmed = self.trimmed;
+        let top =
+            matches!(self.open.top, Anchor::At { .. }).then(|| self.open.top.line(term, trimmed));
+        let command_start = self
+            .open
+            .command_start
+            .map(|anchor| anchor.cell(term, trimmed));
+        let output_start = self
+            .open
+            .output_start
+            .map(|anchor| anchor.line(term, trimmed));
+        let pictures: Vec<_> = self
+            .open
+            .pictures
+            .take()
+            .map(|(anchor, placement)| (anchor.cell(term, trimmed), placement))
             .collect();
 
         term.clear_screen(ClearMode::Saved);
 
         if let Some(line) = top {
-            self.open.top = Anchor::at(line.max(0), 0, term);
+            self.open.top = Anchor::at(line.max(0), 0, term, trimmed);
         }
         self.open.command_start = command_start
             .filter(|(line, _)| *line >= 0)
-            .map(|(line, column)| Anchor::at(line, column, term));
-        self.open.output_start = output_start.map(|line| Anchor::at(line.max(0), 0, term));
-        self.open.images = images
-            .into_iter()
-            .filter(|((line, _), _)| *line >= 0)
-            .map(|((line, column), placement)| (Anchor::at(line, column, term), placement))
-            .collect();
+            .map(|(line, column)| Anchor::at(line, column, term, trimmed));
+        self.open.output_start = output_start.map(|line| Anchor::at(line.max(0), 0, term, trimmed));
+        for ((line, column), placement) in pictures {
+            if line >= 0 {
+                let anchor = Anchor::at(line, column, term, trimmed);
+                self.open.pictures.push(anchor, placement);
+            }
+        }
         dropped
     }
 
@@ -1209,53 +1482,123 @@ impl BlockTracker {
         }
     }
 
-    /// Forgets the open block's pictures once the history is
-    /// `scrollback_lines` long, because from then on nothing can say which
-    /// rows they are over.
+    /// Holds the history at `scrollback_lines`, cutting off its old end
+    /// whatever was scrolled in past that and counting it, so that an
+    /// [`Anchor`] follows its row past a full history.
     ///
-    /// An [`Anchor`] follows its row by how much the history has grown, and
-    /// a full history does not grow: every line scrolled into it evicts one
-    /// off the top, uncounted, and the anchor stays on the screen row it
-    /// named while the text moves on. A picture drawn there covers whatever
-    /// scrolled under it — and output prints a picture at the foot of the
-    /// screen, so that is the row the prompt comes to, and what is typed at
-    /// it.
-    /// Without the picture the block shows the blank rows it was printed
-    /// over, which is what a reflow leaves too, and for the same reason.
+    /// Left to itself, alacritty evicts from a full history without counting,
+    /// and its size stops moving: an anchor then stays on the screen row it
+    /// named while the text moves on, and a picture drawn there covers
+    /// whatever scrolled under it — output prints a picture at the foot of
+    /// the screen, so that is the row the prompt comes to, and what is typed
+    /// at it. So alacritty is given [`HISTORY_HEADROOM`] lines more, and this
+    /// takes them back after every slice of output, which leaves alacritty
+    /// nothing to evict.
     ///
-    /// A history that has only just reached its length is still counted
-    /// exactly, but nothing tells it from one that has gone past, so its
-    /// pictures go as well. Not on the alternate screen, where the grid
-    /// `Term` hands out is the program's, which has no history. The shell's
-    /// is out of sight there, and the one thing that moves it, a shorter
-    /// screen, is [`Self::shortened`]'s.
+    /// Unless a slice scrolled the history to the end of the headroom. Then
+    /// lines may have gone that nothing counted, every anchor would be off by
+    /// as many, and the open block's pictures go, leaving the blank rows
+    /// they were printed over, as a reflow does. A history that has only just
+    /// reached the end is still exact, but nothing tells it from one that
+    /// went past, so its pictures go as well. The block's own first row and
+    /// the boundaries near it are off by as many, but nothing above a block's
+    /// first row is kept but the blank rows of a screen it opened on, so on a
+    /// screen shorter than the headroom that row has left the history by then
+    /// and reads as the oldest line either way.
+    ///
+    /// Not on the alternate screen, where the grid `Term` hands out is the
+    /// program's, which has no history. The shell's is out of reach there,
+    /// so the emulator feeds a switch of screens apart from the output before
+    /// it, and this cuts the shell's history back right before its screen
+    /// goes and right after it is back. Nothing the program prints scrolls
+    /// it in between, but for a resize and a synchronized update that
+    /// switches screens itself: those are [`Self::rows_changed`]'s.
+    ///
+    /// Called after every slice of output fed, and after anything else that
+    /// can scroll the grid: a resize, a synchronized update let go of.
+    pub(crate) fn trim_history<T>(&mut self, term: &mut Term<T>, scrollback_lines: usize) {
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        self.history_unsure = false;
+        let history = term.grid().history_size();
+        let limit = scrollback_lines.saturating_add(HISTORY_HEADROOM);
+        if history >= limit {
+            self.open.pictures.clear();
+        }
+        if history > scrollback_lines {
+            let grid = term.grid_mut();
+            grid.update_history(scrollback_lines);
+            grid.update_history(limit);
+            self.trimmed += (history - scrollback_lines) as u64;
+            self.trimmed_since_settle = true;
+        }
+    }
+
+    /// Forgets the open block's pictures whose first row has left the
+    /// history.
+    ///
+    /// An anchor on a line that is gone reads as the oldest line there is,
+    /// and a picture drawn there covers whatever is on that line now: its own
+    /// lower rows, and then the text that followed it. Without the picture
+    /// the block shows the rows it covered that are still there, blank, which
+    /// is what a reflow leaves too.
+    ///
+    /// A line leaves the history only off its old end, which is
+    /// [`Self::trim_history`] cutting it, so nothing is looked at until a
+    /// trim has happened. Not on the alternate screen, where the grid `Term`
+    /// hands out is not the one the anchors are measured against.
     ///
     /// Called after anything that can scroll the grid, before anything that
     /// reads the anchors: [`Self::live`] for a frame, and a mark, which may
     /// harvest the block with its pictures at the rows their anchors name.
-    pub(crate) fn settle_pictures<T>(&mut self, term: &Term<T>, scrollback_lines: usize) {
-        if !term.mode().contains(TermMode::ALT_SCREEN)
-            && term.grid().history_size() >= scrollback_lines
-        {
-            self.open.images.clear();
+    pub(crate) fn settle_pictures<T>(&mut self, term: &Term<T>) {
+        if !self.trimmed_since_settle || term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        self.trimmed_since_settle = false;
+        let trimmed = self.trimmed;
+        self.open
+            .pictures
+            .retain(|anchor, _| !anchor.scrolled_out(term, trimmed));
+    }
+
+    /// Forgets the open block's pictures when the screen has just changed
+    /// height under a full-screen program, and the shell's history may have
+    /// gone past the end of the headroom there, uncounted.
+    ///
+    /// `Term` resizes the shell's grid under the program's as well. A
+    /// shorter one pushes its top rows into its history, where nothing can
+    /// trim them: the history `Term` hands out is the program's. A screen
+    /// shorter by more rows than [`HISTORY_HEADROOM`] pushes them past its
+    /// end, uncounted, the way [`Self::trim_history`] describes. A taller one
+    /// pulls rows back out, which the anchors count, and which also hides a
+    /// history that had gone past the end: it is short of the end again by
+    /// the time the shell's screen is back, and [`Self::trim_history`] sees
+    /// nothing wrong. So a shorter screen takes the pictures whatever it
+    /// lost, as a column change does, and a taller one takes them when an
+    /// update may have scrolled the shell's history out of sight: see
+    /// [`Self::update_switched_screens`].
+    pub(crate) fn rows_changed<T>(&mut self, term: &Term<T>, shorter: bool) {
+        if term.mode().contains(TermMode::ALT_SCREEN) && (shorter || self.history_unsure) {
+            self.open.pictures.clear();
         }
     }
 
-    /// Forgets the open block's pictures when the screen has just lost rows
-    /// under a full-screen program.
+    /// Notes a synchronized update let go of that switched screens.
     ///
-    /// `Term` resizes the shell's grid under the program's as well, and a
-    /// shorter one pushes its top rows into its history, past the history's
-    /// length uncounted, the way [`Self::settle_pictures`] describes. Nothing
-    /// can see it happen: the history `Term` hands out is the program's. Nor
-    /// can anything see it afterwards, because a taller screen before the
-    /// program exits pulls rows back out, and the shell's history is under
-    /// its length again by the time it is on show. So the pictures go
-    /// whether or not the history filled, as they do on a column change.
-    /// Rows pulled back out are counted, so a taller screen needs nothing.
-    pub(crate) fn shortened<T>(&mut self, term: &Term<T>) {
+    /// An update reaches the grid all at once, so it can scroll the shell's
+    /// screen by any number of lines on its way to a program's, or put the
+    /// shell's up, scroll it and take it down again, and nothing can cut the
+    /// shell's history back in between. Past the end of the headroom, the
+    /// lines alacritty evicts go uncounted. A history left there shows it
+    /// once the shell's screen is back, unless a taller screen has pulled
+    /// lines back out of it first: see [`Self::rows_changed`]. Until
+    /// [`Self::trim_history`] next reads it, the shell's history is taken to
+    /// be one that may have.
+    pub(crate) fn update_switched_screens<T>(&mut self, term: &Term<T>) {
         if term.mode().contains(TermMode::ALT_SCREEN) {
-            self.open.images.clear();
+            self.history_unsure = true;
         }
     }
 
@@ -1305,7 +1648,7 @@ impl BlockTracker {
             // prompt again has printed its start before this, and one drawing
             // only the last line of it prints no start at all.
             Transition::Record => {
-                let end = Anchor::at_input(term);
+                let end = Anchor::at_input(term, self.trimmed);
                 // Only where a redraw reads it. Elsewhere the block's top
                 // can be the oldest line there is, and its first line a
                 // screenful of output.
@@ -1371,7 +1714,8 @@ impl BlockTracker {
                 // ignored by the table anyway — and a state entered by any
                 // other signal records nothing.
                 if state == BlockState::Executing && self.open.output_start.is_none() {
-                    self.open.output_start = Some(Anchor::at(cursor_line(term) + 1, 0, term));
+                    let line = cursor_line(term) + 1;
+                    self.open.output_start = Some(Anchor::at(line, 0, term, self.trimmed));
                 }
                 self.open.state = state;
             }
@@ -1419,7 +1763,8 @@ impl BlockTracker {
         term: &Term<T>,
         palette: &Palette,
     ) {
-        let top = self.open.top.line(term);
+        let trimmed = self.trimmed;
+        let top = self.open.top.line(term, trimmed);
         // The alternate screen is not scrollback. A full-screen program redraws
         // its frames in place and nothing there ever scrolled, so a block that
         // is being closed while one is up — the shell was killed under `vim` —
@@ -1436,7 +1781,7 @@ impl BlockTracker {
         // [`BlockRows::of_line`].
         let mut output_from = None;
         if rows.is_blank()
-            && self.open.images.is_empty()
+            && self.open.pictures.is_empty()
             && let Some(command) = &self.open.command
         {
             rows = harvest::BlockRows::of_line(term.columns(), command, palette);
@@ -1449,7 +1794,7 @@ impl BlockTracker {
         // on screen around nothing.
         // A picture on rows with no text is not blank.
         let worth_keeping =
-            self.open.command.is_some() || !rows.is_blank() || !self.open.images.is_empty();
+            self.open.command.is_some() || !rows.is_blank() || !self.open.pictures.is_empty();
         if worth_keeping {
             // Where the output starts, as a row of the block rather than a
             // line of the grid: the two differ by exactly the block's top, and
@@ -1459,16 +1804,18 @@ impl BlockTracker {
             // and an empty answer is a truer one than the last row.
             let output_from = output_from.unwrap_or_else(|| {
                 self.open.output_start.and_then(|anchor| {
-                    let from = usize::try_from(anchor.line(term) - top).ok()?;
+                    let from = usize::try_from(anchor.line(term, trimmed) - top).ok()?;
                     (from <= rows.rows()).then_some(from)
                 })
             });
             // As rows of the block, the way the output's start is, and only
             // the ones whose top is a row the block kept.
-            let images: Vec<ImagePlacement> = std::mem::take(&mut self.open.images)
-                .into_iter()
+            let images: Vec<ImagePlacement> = self
+                .open
+                .pictures
+                .take()
                 .filter_map(|(anchor, placement)| {
-                    let row = anchor.line(term) - top;
+                    let row = anchor.line(term, trimmed) - top;
                     (row >= 0 && (row as usize) < rows.rows())
                         .then_some(ImagePlacement { row, ..placement })
                 })
@@ -1516,12 +1863,13 @@ impl BlockTracker {
     /// Opens the next block where the last one ended, and drops the history
     /// the harvest just took a copy of.
     ///
-    /// Dropping it is what keeps [`Anchor`] exact: the history then holds only
-    /// what the open block has pushed off the screen, so it can fill up — the
-    /// one thing that makes the arithmetic lossy — only when that block is
-    /// longer than the entire scrollback. It also returns the emulator's own
-    /// viewport to the live output, which costs nothing once a block list owns
-    /// the scrolling: the rows a reader scrolled back to are in the store.
+    /// Dropping it means the history then holds only what the open block has
+    /// pushed off the screen, so it fills up — where [`Self::trim_history`]
+    /// starts cutting lines off, and a block's first row starts to be one the
+    /// history no longer has — only when that block is longer than the entire
+    /// scrollback. It also returns the emulator's own viewport to the live
+    /// output, which costs nothing once a block list owns the scrolling: the
+    /// rows a reader scrolled back to are in the store.
     fn reopen<T: EventListener>(
         &mut self,
         state: BlockState,
@@ -1561,14 +1909,14 @@ impl BlockTracker {
         self.open = OpenBlock {
             id: BlockId(self.next_id),
             state,
-            top: Anchor::at(top, 0, term),
+            top: Anchor::at(top, 0, term, self.trimmed),
             command_start: None,
             output_start: None,
             command: None,
             working_directory: whereabouts.map(|at| at.directory.to_path_buf()),
             working_host: whereabouts.and_then(|at| at.host).map(str::to_owned),
             started_at: None,
-            images: Vec::new(),
+            pictures: Pictures::default(),
             reflowed: false,
             prompt: None,
         };
@@ -1583,7 +1931,7 @@ impl BlockTracker {
     /// application did not submit the line itself, as it cannot for anything
     /// typed inside `ssh`, a container or a full-screen editor's shell.
     fn scrape_command<T>(&self, term: &Term<T>) -> Option<String> {
-        let start = self.open.command_start?.point(term);
+        let start = self.open.command_start?.point(term, self.trimmed);
         let cursor = term.grid().cursor.point;
 
         // `C` lands after the shell echoed the newline, so the cell before the
@@ -1620,12 +1968,15 @@ impl BlockTracker {
     }
 }
 
-/// What `images` weigh, as the files they arrived as.
+/// What `images` weigh, as the files they arrived as: see [`weight_of`].
 fn weight(images: &[ImagePlacement]) -> usize {
-    images
-        .iter()
-        .map(|placement| placement.image.png().len())
-        .sum()
+    images.iter().map(weight_of).sum()
+}
+
+/// What one picture weighs against [`MAX_IMAGE_BYTES`]: its file, and never
+/// less than [`PICTURE_FLOOR`].
+fn weight_of(placement: &ImagePlacement) -> usize {
+    placement.image.png().len().max(PICTURE_FLOOR)
 }
 
 /// The last grid line with anything on it, given where the cursor is.

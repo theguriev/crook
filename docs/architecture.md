@@ -1073,9 +1073,11 @@ advance per cell. A second cell painter would be a second set of bugs.
 emulator's history *and* blanks the screen above the block that opens next, so the grid holds
 the open block and nothing else. Three answers depend on that one invariant:
 
-- the open block's anchor stays exact, because the history can now only fill up when the open
-  block is longer than the whole scrollback — at which point "this block starts above the
-  oldest line we have" is not an approximation but the truth;
+- the open block's anchor names a line the grid still has, because the history can now only
+  fill up when the open block is longer than the whole scrollback — at which point "this block
+  starts above the oldest line we have" is not an approximation but the truth. Past that the
+  emulator cuts the history back itself and counts what it cut, so the anchors of the pictures
+  in it still follow their lines (`BlockTracker::trim_history`);
 - a column change, which reflows every stored line number into meaninglessness, is answered by
   looking for the first line in the grid with anything on it;
 - rows *below* the cursor when a command ends — what a progress display that redraws with
@@ -2293,8 +2295,9 @@ interrupt spent on nothing.
 history holds, and that line only stays the same line while the scrollback is still filling.
 Once it is full — ten thousand lines by default — every new line drops the oldest, and a
 selection held on the grid slides one row up the text per line printed. The count of dropped
-lines is not something alacritty keeps and cannot be recovered from what it exposes; the same
-limit is why a block's own anchor clamps at the oldest line rather than tracking further back.
+lines is not something alacritty keeps. The emulator keeps one for its own anchors — it cuts a
+full history back itself, see `BlockTracker::trim_history` — but no snapshot hands it out, so a
+grid selection cannot follow it yet.
 `selection::grid_first_row` says so, and a test pins the behaviour so that it changes on
 purpose.
 

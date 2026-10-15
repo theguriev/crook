@@ -1879,3 +1879,95 @@ fn test_clearing_under_a_full_screen_program_leaves_its_screen_and_the_block_alo
 
     assert_eq!(run(false), run(true));
 }
+
+/// A picture stretched over `columns` by `rows` cells with its corner on
+/// `line` at `column`, read where nothing had scrolled: what the open block
+/// is handed.
+fn picture_at(
+    line: i32,
+    column: usize,
+    (columns, rows): (usize, usize),
+) -> (Anchor, ImagePlacement) {
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    png.extend_from_slice(&[0, 0, 0, 8, 0, 0, 0, 8, 8, 6, 0, 0, 0]);
+    let image = crate::image::InlineImage::new(png).expect("a PNG header");
+    let anchor = Anchor::At {
+        line,
+        column,
+        scrolled: 0,
+    };
+    let placement = ImagePlacement {
+        image: std::sync::Arc::new(image),
+        row: 0,
+        column,
+        columns,
+        rows,
+        stretch: true,
+    };
+    (anchor, placement)
+}
+
+#[test]
+fn test_a_picture_looks_only_at_the_pictures_cornered_on_its_cells_in_any_order() {
+    // A picture printed above an older one, and then a stream of a cell
+    // apiece, ten to a line. However the stream is ordered, a new picture
+    // looks at the few whose corners are on its own cells, and not at the
+    // thousand the block holds.
+    let mut pictures = Pictures::default();
+    for (line, column) in [(5, 0), (0, 0)] {
+        let (anchor, placement) = picture_at(line, column, (1, 1));
+        pictures.place(anchor, placement);
+    }
+    for n in 0..1000 {
+        let (anchor, placement) = picture_at(10 + n / 10, (n % 10) as usize, (1, 1));
+        pictures.place(anchor, placement);
+    }
+
+    let (anchor, placement) = picture_at(200, 0, (1, 1));
+    assert_eq!(pictures.cornered_in(anchor, &placement).count(), 0);
+    let (anchor, placement) = picture_at(50, 3, (2, 2));
+    assert_eq!(pictures.cornered_in(anchor, &placement).count(), 4);
+    pictures.place(anchor, placement);
+    assert_eq!(pictures.iter().count(), 2 + 1000 - 4 + 1);
+}
+
+#[test]
+fn test_a_picture_let_go_of_leaves_the_index_with_it() {
+    // Every way a picture goes: the oldest past the weight, one covered,
+    // the ones a settle lets go of, and all of them at a harvest. A picture
+    // left in the index after it went is one every later picture on its
+    // cells looks up again, for as long as the block is open.
+    let indexed = |pictures: &Pictures| {
+        let starts: Vec<u64> = pictures
+            .starts
+            .iter()
+            .map(|&(_, _, number)| number)
+            .collect();
+        let mut placed: Vec<u64> = pictures.placed.keys().copied().collect();
+        placed.sort_unstable_by_key(|number| {
+            let (anchor, placement) = &pictures.placed[number];
+            Pictures::start(*number, *anchor, placement)
+        });
+        starts == placed
+    };
+    let held = MAX_IMAGE_BYTES / PICTURE_FLOOR;
+    let mut pictures = Pictures::default();
+    for n in 0..held as i32 + 8 {
+        let (anchor, placement) = picture_at(n / 10, (n % 10) as usize, (1, 1));
+        pictures.place(anchor, placement);
+    }
+    assert_eq!(pictures.iter().count(), held);
+    assert!(indexed(&pictures));
+
+    let (anchor, placement) = picture_at(100, 0, (10, 1));
+    pictures.place(anchor, placement);
+    assert_eq!(pictures.iter().count(), held - 9);
+    assert!(indexed(&pictures));
+
+    pictures.retain(|anchor, _| anchor.counted() >= Some(1000));
+    assert!(pictures.iter().count() < held / 2);
+    assert!(indexed(&pictures));
+
+    assert!(pictures.take().count() > 0);
+    assert!(pictures.is_empty() && pictures.starts.is_empty());
+}
