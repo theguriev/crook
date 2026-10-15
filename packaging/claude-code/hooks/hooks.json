@@ -1,5 +1,5 @@
 {
-  "description": "Tell the Crook tab Claude Code runs in what it is doing: running when a prompt is sent and around every tool, needs-input with the notification's text whenever it stops to ask, idle when it is done, and the pull request a `gh pr create` opened. Each command does nothing unless it runs in a Crook pane or inside tmux, with the crook binary reachable ($CROOK_BIN, else crook on PATH); inside tmux, crook writes the report to the terminal of each of tmux's clients, and one that is not Crook drops it unread. Each exits 0 even when the report fails, so a Crook that cannot be reached is a line in Claude Code's debug log rather than a notice on every prompt and tool call.",
+  "description": "Tell the Crook tab Claude Code runs in what it is doing: running when a prompt is sent and around every tool, needs-input with the notification's text whenever it stops to ask, idle when it is done, failed with the error when an API error ends the turn instead, and the pull request a `gh pr create` opened. Each command does nothing unless it runs in a Crook pane or inside tmux, with the crook binary reachable ($CROOK_BIN, else crook on PATH); inside tmux, crook writes the report to the terminal of each of tmux's clients, and one that is not Crook drops it unread. Each exits 0 even when the report fails, so a Crook that cannot be reached is a line in Claude Code's debug log rather than a notice on every prompt and tool call.",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -47,6 +47,16 @@
           {
             "type": "command",
             "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || [ -n \"$TMUX\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent idle || exit 0"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || [ -n \"$TMUX\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent failed --message - || exit 0"
           }
         ]
       }

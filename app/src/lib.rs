@@ -1779,20 +1779,21 @@ OPTIONS:
                        Tell the pane this is run in what the program in it is
                        doing: `idle`, `running`, `needs-input` or `failed`,
                        what it calls its work, with `needs-input` what it is
-                       waiting for, and the https address of the pull request
-                       it opened, which the row links to. Written to the
-                       terminal, so it works from a hook, over ssh and in a
-                       container; `--title -` takes the prompt out of a Claude
-                       Code hook\'s input on stdin, `--message -` the
-                       notification\'s text, and `--pull-request -` the address
-                       a `gh pr create` printed. `--session` names the agent\'s
-                       session the report is from, and `-` reads the hook\'s:
-                       the pane takes a title or a stop only from the session
-                       that holds it, so a subagent\'s prompt does not rename
-                       the tab and its end does not end the agent\'s turn.
-                       `--session-start` names one that starts with the
-                       report, never a subagent\'s, and hands it the pane
-                       whichever session held it
+                       waiting for and with `failed` what went wrong, and the
+                       https address of the pull request it opened, which the
+                       row links to. Written to the terminal, so it works from
+                       a hook, over ssh and in a container; `--title -` takes
+                       the prompt out of a Claude Code hook\'s input on stdin,
+                       `--message -` the notification\'s text or the error\'s,
+                       and `--pull-request -` the address a `gh pr create`
+                       printed. `--session` names the agent\'s session the
+                       report is from, and `-` reads the hook\'s: the pane takes
+                       a title or a stop only from the session that holds it,
+                       so a subagent\'s prompt does not rename the tab and its
+                       end does not end the agent\'s turn. `--session-start`
+                       names one that starts with the report, never a
+                       subagent\'s, and hands it the pane whichever session held
+                       it
     --agent-hooks <AGENT>
                        Print the hooks that make an agent say all of that by
                        itself, to merge into its settings: `claude` (Claude

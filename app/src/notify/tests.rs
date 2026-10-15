@@ -80,6 +80,26 @@ fn with_no_question_the_body_says_what_turned_the_row_amber() {
     let mut ended = session(AgentStatus::Idle, None, changed());
     ended.source = StatusSource::CommandEnded(Instant::now());
     assert_eq!(body(&ended), "Its command ended");
+
+    // The `✳` that took a hook's running back says only that the agent
+    // stopped working, never that it is done.
+    let mut between = session(AgentStatus::Idle, None, changed());
+    between.source = StatusSource::TitleBetweenHooks(Instant::now());
+    assert_eq!(body(&between), "No longer working");
+}
+
+#[test]
+fn a_failure_says_what_went_wrong_when_the_agent_said() {
+    let body = |message| Notice::failed("a", &session(AgentStatus::Failed, message, None)).body;
+
+    assert_eq!(
+        body(Some("You've hit your limit\n· resets 5pm")),
+        "You've hit your limit · resets 5pm"
+    );
+    assert_eq!(body(None), "Stopped: something went wrong");
+    assert_eq!(body(Some(" \n ")), "Stopped: something went wrong");
+    let long = "x".repeat(400);
+    assert_eq!(body(Some(&long)).chars().count(), MESSAGE_CHARS);
 }
 
 #[test]

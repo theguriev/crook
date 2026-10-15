@@ -173,6 +173,11 @@ impl Notice {
                 // arm, and "done" is the one thing this source is careful
                 // not to say.
                 StatusSource::TitleStoppedAsking(_) => "No longer asking".to_owned(),
+                // Never posted for its change either — not even on a row a
+                // mark shows amber — and all it says is that the agent
+                // stopped working: after Esc, or at a dialog whose
+                // notification has not come yet.
+                StatusSource::TitleBetweenHooks(_) => "No longer working".to_owned(),
                 StatusSource::Agent(_)
                 | StatusSource::Title(_)
                 | StatusSource::TitleAtStart(_)
@@ -185,11 +190,22 @@ impl Notice {
         }
     }
 
-    /// A pane named `name` whose agent said it failed.
-    pub fn failed(name: &str) -> Self {
+    /// A pane named `name` whose agent said it failed, with `session` as it
+    /// stands now.
+    ///
+    /// The body is what the agent said went wrong, cut short, when it said
+    /// — Claude Code's "You've hit your limit · resets 5pm" is the difference
+    /// between coming back now and coming back tonight — and otherwise a
+    /// sentence that says only that something did.
+    pub fn failed(name: &str, session: &AgentSession) -> Self {
+        let said = session
+            .message
+            .as_deref()
+            .map(cut)
+            .filter(|message| !message.is_empty());
         Self {
             title: title(name),
-            body: "Stopped: something went wrong".to_owned(),
+            body: said.unwrap_or_else(|| "Stopped: something went wrong".to_owned()),
         }
     }
 

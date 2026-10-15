@@ -286,7 +286,8 @@ pub struct Waited {
     /// closed.
     #[serde(default)]
     pub status: Option<String>,
-    /// What the agent is waiting for, while it waits.
+    /// What the agent is waiting for, while it waits, or what went wrong,
+    /// while it says it failed.
     #[serde(default)]
     pub message: Option<String>,
     /// For `finished`: the status the command exited with, when the shell
@@ -378,7 +379,8 @@ pub enum PaneEvent {
         pane_id: u64,
         /// One of the four words `crook --agent` takes.
         status: String,
-        /// What it is waiting for, while it waits.
+        /// What it is waiting for, while it waits, or what went wrong, while
+        /// it says it failed.
         #[serde(default)]
         message: Option<String>,
     },
@@ -589,7 +591,8 @@ pub struct PaneEntry {
     /// What the agent in it last said: `idle`, `running`, `needs-input` or
     /// `failed` — the four words `crook --agent` takes.
     pub status: String,
-    /// What the agent said it is waiting for, while it waits.
+    /// What the agent said it is waiting for, while it waits, or what it
+    /// said went wrong, while it says it failed.
     #[serde(default)]
     pub message: Option<String>,
     /// Where the pane is working, as its shell last reported it — on this

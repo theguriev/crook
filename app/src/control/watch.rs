@@ -710,7 +710,10 @@ pub fn wait(
 /// Nor the idle a title leaves when it stops asking and says no more, which
 /// is as often an approval the agent works on after as a turn that ended,
 /// until the end of its command makes it one: see
-/// [`StatusSource::TitleStoppedAsking`].
+/// [`StatusSource::TitleStoppedAsking`]. Nor the `✳` that takes back a hook's
+/// running, which is as often a permission dialog opening ahead of the
+/// notification that asks as a turn Esc ended: see
+/// [`StatusSource::TitleBetweenHooks`].
 pub fn is_idle(session: &AgentSession) -> bool {
     session.status == AgentStatus::Idle
         && !matches!(
@@ -718,6 +721,7 @@ pub fn is_idle(session: &AgentSession) -> bool {
             StatusSource::NoReport
                 | StatusSource::TitleAtStart(_)
                 | StatusSource::TitleStoppedAsking(_)
+                | StatusSource::TitleBetweenHooks(_)
         )
 }
 

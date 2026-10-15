@@ -107,6 +107,16 @@ pub(super) fn lines(session: &AgentSession, now: Instant) -> Vec<String> {
              whether it is at work.",
             since(at, now)
         ),
+        StatusSource::TitleBetweenHooks(at) if session.status == AgentStatus::Idle => format!(
+            "Status: {status} — the agent's title stopped saying it was at work {}, and its \
+             hooks have not said since whether the turn is over.",
+            since(at, now)
+        ),
+        StatusSource::TitleBetweenHooks(at) => format!(
+            "Status: {status} — the agent's title said it was at work again {}, after its \
+             hooks' last report.",
+            since(at, now)
+        ),
         StatusSource::CommandEnded(at) => format!(
             "Status: {status} — the command ended {} and took the agent's last report back.",
             since(at, now)
@@ -127,7 +137,10 @@ pub(super) fn lines(session: &AgentSession, now: Instant) -> Vec<String> {
         lines.push(format!("The agent calls its work “{title}”."));
     }
     if let Some(message) = &session.message {
-        lines.push(format!("It asks: {message}"));
+        lines.push(match session.status {
+            AgentStatus::Failed => format!("What went wrong: {message}"),
+            _ => format!("It asks: {message}"),
+        });
     }
 
     match &session.attention {

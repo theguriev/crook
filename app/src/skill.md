@@ -45,7 +45,7 @@ The dot on a tab's row is written by the program in the pane:
 ```sh
 crook --agent running --title "port the tab bar"
 crook --agent needs-input --message "wants to run rm -rf build"
-crook --agent failed
+crook --agent failed --message "the tests need a database this machine does not have"
 crook --agent idle
 ```
 
@@ -54,17 +54,20 @@ crook --agent idle
 - `needs-input` — you have stopped for a person: a permission, a question, a prompt nobody
   has answered. The row is washed amber, the header counts it among the tabs waiting, and
   cmd-j (ctrl-shift-j off macOS) takes the person to it.
-- `failed` — the work failed. The row keeps that until the next command starts.
+- `failed` — the work failed. The row keeps that until the next command starts. A
+  `needs-input` straight after it, with no `running` between, leaves the failure standing: it
+  is the same stop. Report `running` first if you have a new question.
 - `idle` — the work is done.
 
 `--title` names the work and becomes the tab's title. Keep it short: a row is one line and
 cuts a title at about sixty characters.
 
-`--message` says what you are waiting for, and only means something beside `needs-input`:
-while you wait, the row's second line is that sentence rather than the directory or the
-branch, since what you are asking is what decides whether the person comes now. It goes the
-moment you report anything else. `--message -` reads it from standard input, for a hook
-that is handed a notification's text there.
+`--message` says what you are waiting for beside `needs-input`, or what went wrong beside
+`failed`, and means nothing beside the other two: while you are stopped, the row's second line
+is that sentence rather than the directory or the branch, since what you are asking, or what
+stopped you, is what decides whether the person comes now. It goes the moment you report
+anything else. `--message -` reads it from standard input, for a hook that is handed a
+notification's text, or an error's, there.
 
 `--pull-request` says which pull request your work is, beside any status, once you have
 opened one:
@@ -106,10 +109,11 @@ configuration is the person's to change, so tell them rather than changing it. A
 taken back goes when the shell's own marks say the command ended.
 
 Claude Code reports all of this by itself once Crook's plugin is installed: running when a
-prompt is sent and around every tool, needing input on every notification, idle on stop, and
-the pull request after a `gh pr create`. It carries this file too, and its hooks do nothing
-outside Crook. A person installs it with two commands, which change their Claude Code
-settings, so give them to the person rather than running them:
+prompt is sent and around every tool, needing input on every notification, idle on stop, failed
+with the error when an API error such as a usage limit ends its turn, and the pull request after
+a `gh pr create`. It carries this file too, and its hooks do nothing outside Crook. A person
+installs it with two commands, which change their Claude Code settings, so give them to the
+person rather than running them:
 
 ```sh
 claude plugin marketplace add theguriev/crook
@@ -218,7 +222,9 @@ got to:
 
 - `idle` — its agent said the work is done, or the command it was running ended without its
   saying so. The idle a new tab starts in, before its agent has said anything, does not count,
-  and nor does the `✳` Claude Code's title shows before its first turn.
+  and nor does the `✳` Claude Code's title shows before its first turn. Nor does a worker that
+  failed — Claude Code at its usage limit, say — which never becomes `idle`: when the time runs
+  out the wait prints `failed`, with what went wrong.
 - `needs-input` — its agent stopped for a person; printed with what it is asking.
 - `finished` — its command has ended, printed with the exit status: `finished: exit 0`. Only in
   a shell with command marks.

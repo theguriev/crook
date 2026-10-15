@@ -27146,8 +27146,8 @@ mod the_agent {
     #[test]
     fn what_the_agent_is_waiting_for_lives_as_long_as_the_wait() {
         // The message comes with `needs-input` and goes with whatever
-        // follows it — running, idle from the shell's own `D`, failed — and
-        // a second `needs-input` without one is a wait with nothing said.
+        // follows it — running, idle from the shell's own `D` — and a
+        // second `needs-input` without one is a wait with nothing said.
         let mut harness = Harness::new(1);
         let pane = harness.focused_pane_id().expect("the window has a pane");
 
@@ -27185,15 +27185,51 @@ mod the_agent {
         report(&mut harness, pane, AgentStatus::Idle, None);
         assert_eq!(None, message_of(&harness, pane));
 
-        // A message on any other status is not "waiting for", and is not kept.
+        // A message on running or idle is not "waiting for", and is not kept.
+        for status in [AgentStatus::Running, AgentStatus::Idle] {
+            report_waiting_for(&mut harness, pane, status, None, Some("all done"));
+            assert_eq!(None, message_of(&harness, pane), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn what_went_wrong_lives_as_long_as_the_failure() {
+        // The other stop: a failure says what stopped it — Claude Code's
+        // StopFailure hook hands over the error it showed — and the row
+        // says it in place of the branch until the agent gets on with it,
+        // as it says a question.
+        let mut harness = Harness::seeded();
+        let pane = harness.pane_ids()[0];
+        harness.set_options(TabOptions {
+            density: Density::Compact,
+            primary_info: PrimaryInfo::Command,
+            subtitle: Subtitle::Branch,
+            ..harness.options()
+        });
+
         report_waiting_for(
             &mut harness,
             pane,
             AgentStatus::Failed,
             None,
-            Some("the build broke"),
+            Some("You've hit your limit"),
         );
+        assert_eq!(
+            Some("You've hit your limit".to_owned()),
+            message_of(&harness, pane)
+        );
+        let failed = strip_text(&harness.frame());
+        assert!(failed.contains("You've hit your limit"), "{failed}");
+        assert!(
+            !failed.contains(BRANCH),
+            "the branch stayed beside what went wrong: {failed}"
+        );
+
+        report(&mut harness, pane, AgentStatus::Running, None);
         assert_eq!(None, message_of(&harness, pane));
+        let after = strip_text(&harness.frame());
+        assert!(!after.contains("You've hit your limit"), "{after}");
+        assert!(after.contains(BRANCH), "{after}");
     }
 
     #[test]
@@ -27590,6 +27626,63 @@ mod the_agent {
     }
 
     #[test]
+    fn why_this_status_says_when_the_title_took_back_a_running_the_hooks_said() {
+        // Claude Code with the hooks, after Esc, which runs none of them:
+        // its `✳` takes the running back, and the panel says that it is the
+        // title and not the hooks, and that the hooks have not said the turn
+        // is over.
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        report(&mut harness, away, AgentStatus::Running, None);
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &TerminalUpdate::Title(away, Some("\u{2733} Fix the flaky test".to_owned())),
+                ctx,
+            );
+        });
+
+        let text = explanation_of(&mut harness, tabs[0], away);
+        assert!(text.contains("Status: idle"), "{text}");
+        assert!(
+            text.contains("title stopped saying it was at work just now"),
+            "{text}"
+        );
+        assert!(
+            text.contains("hooks have not said since whether the turn is over"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("status changed"),
+            "the title's idle between the hooks' reports asked for a look: {text}"
+        );
+    }
+
+    #[test]
+    fn why_this_status_says_what_went_wrong() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        report_waiting_for(
+            &mut harness,
+            away,
+            AgentStatus::Failed,
+            None,
+            Some("You've hit your limit · resets 5pm"),
+        );
+
+        let text = explanation_of(&mut harness, tabs[0], away);
+        assert!(
+            text.contains("What went wrong: You've hit your limit · resets 5pm"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("It asks"),
+            "a failure was read out as a question: {text}"
+        );
+    }
+
+    #[test]
     fn opening_the_worktree_list_takes_the_explanation_down() {
         // The two hang off the same corner, so opening one is closing the
         // other — and opening the menu afresh starts with neither.
@@ -27927,6 +28020,74 @@ mod the_agent {
         assert!(text.contains("notification"), "{text}");
         assert!(text.contains("tests passed"), "{text}");
         assert!(!text.contains("bell"), "{text}");
+    }
+
+    /// Claude Code sends its idle reminder down two roads: its Notification
+    /// hook, and then its notification channel — an OSC 777 once that is
+    /// `ghostty`, as Crook tells a person without the plugin to set it, and
+    /// a setting the plugin leaves where it was. A minute after a turn an
+    /// API error ended, the hook's needs-input leaves the failure standing,
+    /// and the OSC is the same stop seen once more: the row goes on saying
+    /// what went wrong, and a failure somebody has looked at is not lit
+    /// again. Once the agent works, a notification is news again.
+    #[test]
+    fn a_reminder_by_notification_after_a_hooks_failure_leaves_what_went_wrong() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        let limit = "You've hit your limit · resets 5pm";
+        let reminder = "Claude is waiting for your input";
+        let shown = |harness: &Harness| {
+            let (status, asks, _) = session_of(harness, away);
+            (status, asks)
+        };
+
+        report(&mut harness, away, AgentStatus::Running, None);
+        report_waiting_for(&mut harness, away, AgentStatus::Failed, None, Some(limit));
+        report_waiting_for(
+            &mut harness,
+            away,
+            AgentStatus::NeedsInput,
+            None,
+            Some(reminder),
+        );
+        notify(&mut harness, away, Some("Claude Code"), Some(reminder));
+
+        assert_eq!(
+            Some(limit.to_owned()),
+            row_message_of(&harness, away),
+            "the reminder took what went wrong off the row"
+        );
+        assert_eq!(
+            (AgentStatus::Failed, true),
+            shown(&harness),
+            "the failure no longer asks for the look it asked for"
+        );
+        let strip = strip_text(&harness.frame());
+        assert!(strip.contains("You've hit your limit"), "{strip}");
+        assert!(!strip.contains("Claude is waiting"), "{strip}");
+
+        harness.dispatch_action(TabAction::Select(tabs[0]));
+        harness.dispatch_action(TabAction::Select(tabs[1]));
+        notify(&mut harness, away, Some("Claude Code"), Some(reminder));
+        assert_eq!(
+            (AgentStatus::Failed, false),
+            shown(&harness),
+            "the reminder lit a failure somebody had already seen"
+        );
+        assert_eq!(Some(limit.to_owned()), row_message_of(&harness, away));
+
+        report(&mut harness, away, AgentStatus::Running, None);
+        notify(
+            &mut harness,
+            away,
+            Some("Claude Code"),
+            Some("Claude needs your permission to use Bash"),
+        );
+        assert_eq!(
+            Some("Claude Code: Claude needs your permission to use Bash".to_owned()),
+            row_message_of(&harness, away)
+        );
     }
 }
 
@@ -28319,6 +28480,124 @@ mod desktop_notifications {
                 body: "Stopped: something went wrong".to_owned(),
             }]
         );
+    }
+
+    #[test]
+    fn a_failure_that_says_what_went_wrong_posts_it() {
+        // An unattended agent at its usage limit: what went wrong is when to
+        // come back.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        name(&mut harness, pane, "bisect");
+        switch(&mut harness, Occasion::Failed);
+        report(&mut harness, pane, AgentStatus::Running, None);
+        leave(&mut harness);
+
+        report(
+            &mut harness,
+            pane,
+            AgentStatus::Failed,
+            Some("You've hit your limit · resets 5pm"),
+        );
+
+        assert_eq!(
+            posted.all(),
+            [Notice {
+                title: "Crook — bisect".to_owned(),
+                body: "You've hit your limit · resets 5pm".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn the_star_a_permission_dialog_opens_with_posts_nothing_ahead_of_its_question() {
+        // Claude Code draws `✳` as the dialog opens, and the notification
+        // that asks comes six seconds later. The banner waits for the
+        // question rather than saying the agent is done.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        report(&mut harness, pane, AgentStatus::Running, None);
+        leave(&mut harness);
+
+        apply(
+            &mut harness,
+            TerminalUpdate::Title(pane, Some("\u{2733} Fix the flaky test".to_owned())),
+        );
+        assert_eq!(posted.count(), 0, "{:?}", posted.all());
+
+        report(
+            &mut harness,
+            pane,
+            AgentStatus::NeedsInput,
+            Some("Claude needs your permission to use Bash"),
+        );
+        let bodies: Vec<String> = posted.all().into_iter().map(|notice| notice.body).collect();
+        assert_eq!(bodies, ["Claude needs your permission to use Bash"]);
+    }
+
+    #[test]
+    fn the_star_on_a_marked_row_posts_nothing_and_the_question_after_it_does() {
+        // A row the person marked to come back to shows an idle as amber,
+        // so the `✳` a permission dialog opens with turns it amber. That is
+        // still no news, and the question six seconds later still is: it is
+        // measured from the running the `✳` stood in for, not from the
+        // amber the mark gave it.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        report(&mut harness, pane, AgentStatus::Running, None);
+        harness.workspace_update(|workspace, ctx| {
+            workspace.update_session(pane, ctx, |session| session.marked = true);
+        });
+        leave(&mut harness);
+
+        apply(
+            &mut harness,
+            TerminalUpdate::Title(pane, Some("\u{2733} Fix the flaky test".to_owned())),
+        );
+        assert_eq!(posted.count(), 0, "{:?}", posted.all());
+
+        report(
+            &mut harness,
+            pane,
+            AgentStatus::NeedsInput,
+            Some("Claude needs your permission to use Bash"),
+        );
+        let bodies: Vec<String> = posted.all().into_iter().map(|notice| notice.body).collect();
+        assert_eq!(bodies, ["Claude needs your permission to use Bash"]);
+    }
+
+    #[test]
+    fn the_reminder_a_minute_after_a_failure_posts_nothing() {
+        // Claude Code says "Claude is waiting for your input" a minute
+        // after any turn, the one an API error ended included. The failure
+        // was posted, with what went wrong; the reminder is the same stop,
+        // and no news after the person has come and gone again either.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        name(&mut harness, pane, "bisect");
+        switch(&mut harness, Occasion::Failed);
+        report(&mut harness, pane, AgentStatus::Running, None);
+        leave(&mut harness);
+
+        report(
+            &mut harness,
+            pane,
+            AgentStatus::Failed,
+            Some("You've hit your limit · resets 5pm"),
+        );
+        // Coming back ends the pane's quiet, so whatever it says next would
+        // be posted, however soon.
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+        leave(&mut harness);
+        report(
+            &mut harness,
+            pane,
+            AgentStatus::NeedsInput,
+            Some("Claude is waiting for your input"),
+        );
+
+        let bodies: Vec<String> = posted.all().into_iter().map(|notice| notice.body).collect();
+        assert_eq!(bodies, ["You've hit your limit · resets 5pm"]);
     }
 
     #[test]
@@ -37807,7 +38086,8 @@ mod agent_titles {
     }
 
     /// The hooks know a question from a finished turn, and the glyph does
-    /// not: a pane that has heard from them listens to nothing else.
+    /// not: a pane that has heard from them takes nothing from the title
+    /// that the hooks say themselves.
     #[test]
     fn a_hooks_report_outranks_the_title() {
         let mut harness = Harness::panel(1);
@@ -37825,6 +38105,253 @@ mod agent_titles {
         titled(&mut harness, pane, "\u{25d0} Fix the tab directory");
 
         assert_eq!(status_and_source(&harness, pane).0, AgentStatus::NeedsInput);
+    }
+
+    /// What a pane's agent says through its hooks, the way the model hands
+    /// over the OSC its `crook --agent` wrote.
+    fn hooked(harness: &mut Harness, pane: PaneId, status: AgentStatus, message: Option<&str>) {
+        report(
+            harness,
+            TerminalUpdate::Agent {
+                pane,
+                status,
+                title: None,
+                message: message.map(str::to_owned),
+            },
+        );
+    }
+
+    /// What a pane's row makes of its agent: the status, whether the row
+    /// asks for a look, and whether `crook pane wait --until idle` would take
+    /// it for the end of the turn.
+    fn as_watched(harness: &Harness, pane: PaneId) -> (AgentStatus, bool, bool) {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            let session = workspace
+                .tabs()
+                .pane(pane)
+                .expect("the pane is open")
+                .session();
+            (
+                session.status,
+                session.attention.is_some(),
+                crate::control::watch::is_idle(session),
+            )
+        })
+    }
+
+    /// Esc runs none of Claude Code's hooks, so the running they said would
+    /// breathe on the row until the next prompt. The `✳` it goes back to is
+    /// the one word that the turn is over, and it takes the running back;
+    /// the next prompt's running is heard as ever.
+    #[test]
+    fn the_star_esc_leaves_takes_back_the_running_the_hooks_said() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+
+        hooked(&mut harness, pane, AgentStatus::Running, None);
+        titled(&mut harness, pane, "\u{25d0} Fix the flaky test");
+        assert_eq!(status_and_source(&harness, pane).0, AgentStatus::Running);
+        titled(&mut harness, pane, "\u{2733} Fix the flaky test");
+        assert_eq!(
+            status_and_source(&harness, pane).0,
+            AgentStatus::Idle,
+            "the row went on saying running after the turn was interrupted"
+        );
+
+        report(
+            &mut harness,
+            TerminalUpdate::Agent {
+                pane,
+                status: AgentStatus::Running,
+                title: Some("and the next one".to_owned()),
+                message: None,
+            },
+        );
+        let (status, source) = status_and_source(&harness, pane);
+        assert_eq!(status, AgentStatus::Running);
+        assert!(matches!(source, StatusSource::Agent(_)), "{source:?}");
+    }
+
+    /// Claude Code draws the same `✳` the moment a permission dialog opens,
+    /// six seconds before the notification that asks, so the `✳` comes
+    /// first. The idle it leaves asks for no look and answers no wait for
+    /// idle, and what the hooks say next is news: the question, and the idle
+    /// of a turn that did end, alike.
+    #[test]
+    fn the_star_over_a_hooks_running_says_nothing_the_hooks_have_not() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+
+        hooked(&mut harness, away, AgentStatus::Running, None);
+        titled(&mut harness, away, "\u{2733} Fix the flaky test");
+        assert_eq!(
+            (AgentStatus::Idle, false, false),
+            as_watched(&harness, away),
+            "the star was taken for the end of the turn"
+        );
+        hooked(
+            &mut harness,
+            away,
+            AgentStatus::NeedsInput,
+            Some("Claude needs your permission to use Bash"),
+        );
+        assert_eq!(
+            (AgentStatus::NeedsInput, true, false),
+            as_watched(&harness, away)
+        );
+
+        hooked(&mut harness, away, AgentStatus::Running, None);
+        titled(&mut harness, away, "\u{25d0} Fix the flaky test");
+        titled(&mut harness, away, "\u{2733} Fix the flaky test");
+        assert_eq!(
+            (AgentStatus::Idle, false, false),
+            as_watched(&harness, away)
+        );
+        hooked(&mut harness, away, AgentStatus::Idle, None);
+        assert_eq!(
+            (AgentStatus::Idle, true, true),
+            as_watched(&harness, away),
+            "the hooks' idle after the star's was taken for no change"
+        );
+    }
+
+    /// The `✳` ends a running and nothing else: a question the hooks asked
+    /// is the person's to answer, and Claude Code shows `✳` all the while it
+    /// waits; a failure stands until the next turn, with what went wrong.
+    #[test]
+    fn the_star_leaves_a_hooks_question_and_a_hooks_failure_standing() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+        let said = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                let session = workspace
+                    .tabs()
+                    .pane(pane)
+                    .expect("the pane is open")
+                    .session();
+                (session.status, session.message.clone())
+            })
+        };
+
+        hooked(
+            &mut harness,
+            pane,
+            AgentStatus::NeedsInput,
+            Some("Claude needs your permission to use Bash"),
+        );
+        titled(&mut harness, pane, "\u{2733} Fix the flaky test");
+        assert_eq!(
+            (
+                AgentStatus::NeedsInput,
+                Some("Claude needs your permission to use Bash".to_owned())
+            ),
+            said(&harness)
+        );
+
+        hooked(
+            &mut harness,
+            pane,
+            AgentStatus::Failed,
+            Some("You've hit your limit · resets 5pm"),
+        );
+        titled(&mut harness, pane, "\u{25d0} Fix the flaky test");
+        titled(&mut harness, pane, "\u{2733} Fix the flaky test");
+        assert_eq!(
+            (
+                AgentStatus::Failed,
+                Some("You've hit your limit · resets 5pm".to_owned())
+            ),
+            said(&harness)
+        );
+    }
+
+    /// Claude Code's idle reminder, "Claude is waiting for your input",
+    /// comes a minute after any turn, the one an API error ended included.
+    /// It is the same stop the failure was, and the failure says more: the
+    /// row keeps it, with what went wrong, until the agent works again —
+    /// after which a question is a question.
+    #[test]
+    fn a_hooks_reminder_after_its_failure_leaves_the_failure_standing() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        let said = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                let session = workspace
+                    .tabs()
+                    .pane(away)
+                    .expect("the pane is open")
+                    .session();
+                (session.status, session.message.clone())
+            })
+        };
+
+        hooked(&mut harness, away, AgentStatus::Running, None);
+        hooked(
+            &mut harness,
+            away,
+            AgentStatus::Failed,
+            Some("You've hit your limit · resets 5pm"),
+        );
+        hooked(
+            &mut harness,
+            away,
+            AgentStatus::NeedsInput,
+            Some("Claude is waiting for your input"),
+        );
+        assert_eq!(
+            (
+                AgentStatus::Failed,
+                Some("You've hit your limit · resets 5pm".to_owned())
+            ),
+            said(&harness),
+            "the reminder took the failure off the row"
+        );
+
+        hooked(&mut harness, away, AgentStatus::Running, None);
+        hooked(
+            &mut harness,
+            away,
+            AgentStatus::NeedsInput,
+            Some("Claude needs your permission to use Bash"),
+        );
+        assert_eq!(
+            (
+                AgentStatus::NeedsInput,
+                Some("Claude needs your permission to use Bash".to_owned())
+            ),
+            said(&harness)
+        );
+    }
+
+    /// The title at work again — a dialog answered, or one of the person's
+    /// own closed — puts back the running the `✳` took, and the next `✳`
+    /// takes it back as quietly. The emulator passes on only a change, so
+    /// the hooks saying running again under it are never heard, and a
+    /// running the title had put back as its own would make that `✳` the end
+    /// of a turn: a look asked for, and every wait for idle answered.
+    #[test]
+    fn the_title_at_work_again_puts_back_the_running_the_star_took() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+
+        hooked(&mut harness, away, AgentStatus::Running, None);
+        titled(&mut harness, away, "\u{2733} Fix the flaky test");
+        assert_eq!(AgentStatus::Idle, as_watched(&harness, away).0);
+        titled(&mut harness, away, "\u{25d0} Fix the flaky test");
+        assert_eq!(
+            (AgentStatus::Running, false, false),
+            as_watched(&harness, away)
+        );
+        titled(&mut harness, away, "\u{25d1} Fix the flaky test");
+        titled(&mut harness, away, "\u{2733} Fix the flaky test");
+        assert_eq!(
+            (AgentStatus::Idle, false, false),
+            as_watched(&harness, away),
+            "the second star was taken for the end of the turn"
+        );
     }
 
     /// Claude Code draws `✳` from the moment it starts, before anybody has
