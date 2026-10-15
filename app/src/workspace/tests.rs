@@ -10009,6 +10009,10 @@ impl Drop for Undeletable {
 /// Commits a `.gitignore` of `build/` on what `repository` has checked out,
 /// so that a checkout made from it afterwards holds a build git removes
 /// without being forced.
+///
+/// Unix only, like the tests that call it: an item the Windows build never
+/// uses is an error under the CI's `-D warnings` there.
+#[cfg(unix)]
 fn ignoring_builds(repository: &Path) {
     fs::write(repository.join(".gitignore"), "build/\n").expect("the repository is there");
     git_in(repository, &["add", ".gitignore"]);
@@ -10020,6 +10024,7 @@ fn ignoring_builds(repository: &Path) {
 
 /// Presses Show the folder under the list's sentence, and answers what that
 /// asked the platform to open.
+#[cfg(unix)]
 fn show_the_folder(harness: &mut Harness) -> Vec<String> {
     crate::browser::record_opens();
     let scene = harness.frame();
