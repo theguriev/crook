@@ -2434,10 +2434,22 @@ disagree, because they are the same range.
    `show-mode-in-prompt` all redraw the prompt for, or a Meta prefix waiting for its key when
    a resize redraws it. Not on `C`, which an older copy of `crook.bash`, or another
    terminal's integration, reports for a `bind -x` widget like fzf's `ctrl-t` while it puts a
-   line on the prompt. And not on a `D` whose prompt has a line on it: what was typed while the
-   command ran went to the shell, and is its line until that one finishes too. So a search
-   given up over an empty line keeps the keyboard with the shell until the next Enter, and in
-   fish, which ends an empty line with no `D`, until the next command.
+   line on the prompt. And not on a `D` the shell has a line for: what was typed while the
+   command ran went to the shell, which draws it on the next prompt only after the prompt
+   itself, in a write of its own — so the read the prompt arrives in shows an empty line, and
+   the cells cannot say. `Terminal::write` tells the emulator what it sent instead, and while
+   the line editor has the keyboard and the shell is away from its prompt the emulator counts
+   it: a prompt for each line ended with an Enter, which the shell will run, and one for the
+   start of a line after them, which it will keep. Each prompt after a `D` takes one of them
+   and keeps the keyboard. `ctrl-c`, `ctrl-\` and `ctrl-z` throw the count away with the
+   input the line discipline drops for them, and keys typed to a program that asked for the
+   alternate screen, bracketed pastes, the mouse, focus reports or kitty's keyboard — none of
+   which a shell leaves on while a command runs — are that program's, and not counted. A
+   command that read what was typed without asking for any of those, a `read` or a password
+   prompt, leaves the keyboard with the shell a line longer than it needed, which is the
+   side to be wrong on. So a search given up over an empty line keeps the keyboard with the
+   shell until the next Enter, and in fish, which ends an empty line with no `D`, until the
+   next command.
    With a line in the field none of this happens, since the shell's own line is empty and a
    search started from it would end with two lines and one Enter, nor with a completion the
    shell offered standing in it, which is not an empty field to anyone looking; and a shell

@@ -2194,12 +2194,91 @@ fn test_a_finished_line_gives_the_keyboard_back_at_the_prompt_after_it() {
     assert!(emulator.snapshot().line_editor);
 }
 
+/// bash finishing a command: the `D`, then the directory and the title, then
+/// the prompt — each in a read of its own, as a pty hands them over.
+const BASH_FINISHED: [&[u8]; 4] = [
+    b"\x1b]133;D;0\x07",
+    b"\x1b]7;file:///home/me\x07",
+    b"\x1b]0;me@host:~\x07",
+    b"\x1b[?2004h\x1b]133;A\x07$ \x1b]133;B\x07",
+];
+
+/// Each of `reads`, one [`Emulator::advance`] apiece.
+fn advance_each(emulator: &mut Emulator, reads: &[&[u8]]) {
+    for read in reads {
+        emulator.advance(read);
+    }
+}
+
+/// Types `text` a key at a time, the way a pane sends it.
+fn type_keys(emulator: &mut Emulator, text: &[u8]) {
+    for key in text {
+        emulator.typed(&[*key]);
+    }
+}
+
+/// An emulator whose line editor was handed the keyboard for a search, and
+/// whose shell is running the line the search found, `sleep 1`.
+fn running_what_a_search_found() -> Emulator {
+    let mut emulator = searching();
+    type_keys(&mut emulator, b"sle\r");
+    advance_each(
+        &mut emulator,
+        &[
+            b"\r\x1b]133;A\x07$ \x1b]133;B\x07sleep 1\r\n\x1b[?2004l\r",
+            b"\x1b]133;C\x07",
+        ],
+    );
+    emulator
+}
+
 #[test]
 fn test_a_line_typed_while_a_command_ran_keeps_the_keyboard_with_the_shell() {
     // A line found with a search runs with the keyboard still the line
-    // editor's, so what is typed meanwhile goes to the shell, which puts it
-    // on the next line. bash's bytes: the echo of the typing, then the `D`,
-    // then the prompt with the typing on it.
+    // editor's, so what is typed meanwhile goes to the shell, which reads it
+    // once it is back. bash's own reads: the echo of the typing while the
+    // command runs, the `D`, the prompt — and only then, in a read of its
+    // own, the line drawn on the prompt.
+    let mut emulator = running_what_a_search_found();
+    type_keys(&mut emulator, b"echo typed");
+    emulator.advance(b"echo typed");
+    advance_each(&mut emulator, &BASH_FINISHED);
+    assert!(
+        emulator.snapshot().line_editor,
+        "the field came back at a prompt bash is about to draw `echo typed` on"
+    );
+    emulator.advance(b"echo typed");
+    assert!(emulator.snapshot().line_editor, "`echo typed` is bash's");
+
+    // That line's own `D` is the one that gives it back: an Enter is typing
+    // at the prompt, and nothing ahead of it.
+    type_keys(&mut emulator, b"\r");
+    advance_each(
+        &mut emulator,
+        &[b"\r\n\x1b[?2004l\r", b"\x1b]133;C\x07", b"typed\r\n"],
+    );
+    advance_each(&mut emulator, &BASH_FINISHED);
+    assert!(!emulator.snapshot().line_editor);
+
+    // The same with `ctrl-a` typed last, which leaves the cursor on the `B`
+    // and the line after it.
+    let mut emulator = running_what_a_search_found();
+    type_keys(&mut emulator, b"ls\x01");
+    emulator.advance(b"ls^A");
+    advance_each(&mut emulator, &BASH_FINISHED);
+    assert!(
+        emulator.snapshot().line_editor,
+        "bash is about to draw `ls`"
+    );
+    emulator.advance(b"ls\r\x1b[2C");
+    assert!(emulator.snapshot().line_editor, "`ls` is bash's");
+}
+
+#[test]
+fn test_a_prompt_drawn_with_a_line_on_it_keeps_the_keyboard_typed_or_not() {
+    // A line on the prompt that nothing here was told was typed — one typed
+    // in the moment between an Enter and the `C`, which reads as typing at
+    // the prompt — keeps the keyboard when it is drawn with the prompt.
     let mut emulator = searching();
     emulator.advance(b"\r\x1b]133;A\x07$ \x1b]133;B\x07sleep 1\r\n\x1b]133;C\x07");
     emulator.advance(b"echo typed\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07echo typed");
@@ -2207,15 +2286,133 @@ fn test_a_line_typed_while_a_command_ran_keeps_the_keyboard_with_the_shell() {
         emulator.snapshot().line_editor,
         "the field came back over `echo typed`, which bash holds"
     );
-    // The same with `ctrl-a` typed last: the cursor on the `B` and the line
-    // after it.
     emulator.advance(b"\r\n\x1b]133;C\x07typed\r\n\x1b]133;D;0\x07");
     emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\x1b[2C");
     assert!(emulator.snapshot().line_editor, "`ls` is bash's");
+}
 
-    // That line's own `D` is the one that gives it back.
-    emulator.advance(b"\x1b[C\x1b[C\r\n\x1b]133;C\x07notes.txt\r\n\x1b]133;D;0\x07");
-    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+#[test]
+fn test_each_line_typed_ahead_keeps_the_keyboard_for_its_own_prompt() {
+    // Three lines typed while a command ran, the first two with their Enter:
+    // bash runs one at each of the next two prompts, and keeps the third on
+    // the line of the prompt after them. bash's own reads.
+    let mut emulator = running_what_a_search_found();
+    type_keys(&mut emulator, b"echo one\recho two\recho x");
+    emulator.advance(b"echo one\r\necho two\r\necho x");
+    for (line, output) in [(&b"echo one"[..], &b"one"[..]), (b"echo two", b"two")] {
+        advance_each(&mut emulator, &BASH_FINISHED);
+        assert!(
+            emulator.snapshot().line_editor,
+            "bash is about to run `{}`",
+            String::from_utf8_lossy(line)
+        );
+        emulator.advance(line);
+        advance_each(
+            &mut emulator,
+            &[b"\r\n\x1b[?2004l\r", b"\x1b]133;C\x07", output, b"\r\n"],
+        );
+    }
+    advance_each(&mut emulator, &BASH_FINISHED);
+    assert!(
+        emulator.snapshot().line_editor,
+        "bash is about to draw `echo x`"
+    );
+    emulator.advance(b"echo x");
+
+    type_keys(&mut emulator, b"\r");
+    advance_each(
+        &mut emulator,
+        &[b"\r\n\x1b[?2004l\r", b"\x1b]133;C\x07", b"x\r\n"],
+    );
+    advance_each(&mut emulator, &BASH_FINISHED);
+    assert!(!emulator.snapshot().line_editor);
+}
+
+#[test]
+fn test_an_interrupt_throws_away_what_was_typed_ahead() {
+    // `ctrl-c` while the command runs: the line discipline throws away what
+    // was waiting with it, and bash's next prompt is empty. bash's own reads.
+    let mut emulator = running_what_a_search_found();
+    type_keys(&mut emulator, b"echo typed\x03");
+    advance_each(&mut emulator, &[b"echo typed", b"^C", b"\r\n"]);
+    advance_each(
+        &mut emulator,
+        &[
+            b"\x1b]133;D;130\x07",
+            b"\x1b]7;file:///home/me\x07",
+            b"\x1b]0;me@host:~\x07",
+            b"\x1b[?2004h\x1b]133;A\x07$ \x1b]133;B\x07",
+        ],
+    );
+    assert!(!emulator.snapshot().line_editor);
+
+    // Only what was waiting: what is typed after it is the next line's.
+    let mut emulator = running_what_a_search_found();
+    type_keys(&mut emulator, b"echo typed\x03pwd");
+    advance_each(&mut emulator, &[b"echo typed", b"^Cpwd", b"\r\n"]);
+    advance_each(&mut emulator, &BASH_FINISHED);
+    assert!(
+        emulator.snapshot().line_editor,
+        "bash is about to draw `pwd`"
+    );
+}
+
+#[test]
+fn test_what_a_program_reading_its_own_keys_was_typed_is_not_the_shells() {
+    for (what, starts, typed, ends) in [
+        (
+            "vim, on the alternate screen",
+            &b"\x1b[?1049h"[..],
+            &b"ihello\x1b:wq\r"[..],
+            &b"\x1b[?1049l"[..],
+        ),
+        (
+            "a REPL that asked for bracketed pastes",
+            b"\x1b[?2004h>>> ",
+            b"exit()\r",
+            b"exit()\r\n\x1b[?2004l",
+        ),
+        (
+            "a program that asked for focus reports",
+            b"\x1b[?1004h> ",
+            b"q",
+            b"\x1b[?1004l",
+        ),
+        (
+            "a program that asked for the mouse",
+            b"\x1b[?1000h> ",
+            b"q",
+            b"\x1b[?1000l",
+        ),
+        (
+            "a program that asked for kitty's keyboard",
+            b"\x1b[>1u> ",
+            b"q",
+            b"\x1b[<u",
+        ),
+    ] {
+        let mut emulator = running_what_a_search_found();
+        emulator.advance(starts);
+        type_keys(&mut emulator, typed);
+        emulator.advance(ends);
+        advance_each(&mut emulator, &BASH_FINISHED);
+        assert!(
+            !emulator.snapshot().line_editor,
+            "{what}: what was typed was taken for the shell's next line"
+        );
+    }
+
+    // One that asks for none of it has what is typed counted, which is a line
+    // with the keyboard where it was: `read` took `yes`, and an Enter at the
+    // empty prompt is the line that gives it back.
+    let mut emulator = running_what_a_search_found();
+    type_keys(&mut emulator, b"yes\r");
+    emulator.advance(b"yes\r\n");
+    advance_each(&mut emulator, &BASH_FINISHED);
+    assert!(emulator.snapshot().line_editor);
+    type_keys(&mut emulator, b"\r");
+    emulator.advance(b"\r\n\x1b[?2004l\r\x1b]133;D\x07");
+    emulator.advance(b"\x1b[?2004h\x1b]133;A\x07$ \x1b]133;B\x07");
     assert!(!emulator.snapshot().line_editor);
 }
 

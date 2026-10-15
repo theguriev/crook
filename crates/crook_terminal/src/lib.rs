@@ -327,14 +327,19 @@ impl Terminal {
     /// the child; one of kind [`WouldBlock`](io::ErrorKind::WouldBlock) means
     /// these bytes were refused, whole, behind a backlog the child has not
     /// read, and what was queued before them is still on its way.
+    ///
+    /// The emulator is told what was sent, which it needs to know while the
+    /// shell's line editor has the keyboard: see [`Emulator::typed`].
     pub fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
         match &mut self.input {
             Input::Direct(writer) => {
                 writer.write_all(bytes)?;
-                writer.flush()
+                writer.flush()?;
             }
-            Input::Queued(outbox) => outbox.input(bytes),
+            Input::Queued(outbox) => outbox.input(bytes)?,
         }
+        self.emulator.typed(bytes);
+        Ok(())
     }
 
     /// Runs a command line: writes the line followed by the carriage return

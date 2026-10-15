@@ -482,6 +482,45 @@ struct View {
     history: usize,
 }
 
+/// What was typed ahead of a shell away from its prompt, counted the way it
+/// will read it back: one prompt for each line ended with an Enter, which it
+/// runs, and one for the start of a line after them, which it keeps. See
+/// [`Emulator::hand_keys_to_line_editor`].
+#[derive(Clone, Copy, Debug, Default)]
+struct TypedAhead {
+    lines: u32,
+    unfinished: bool,
+}
+
+impl TypedAhead {
+    fn add(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            match byte {
+                // The interrupt, quit and suspend characters a pty starts out
+                // with, `ctrl-c`, `ctrl-\` and `ctrl-z`. Its line discipline
+                // acts on one instead of queueing it, and throws away what was
+                // waiting to be read: the shell is given none of it.
+                0x03 | 0x1c | 0x1a => *self = Self::default(),
+                b'\r' | b'\n' => {
+                    self.lines = self.lines.saturating_add(1);
+                    self.unfinished = false;
+                }
+                _ => self.unfinished = true,
+            }
+        }
+    }
+
+    /// Takes what the prompt the shell has just drawn is for, answering
+    /// whether there was anything.
+    fn take_line(&mut self) -> bool {
+        if self.lines > 0 {
+            self.lines -= 1;
+            return true;
+        }
+        std::mem::take(&mut self.unfinished)
+    }
+}
+
 /// A terminal grid being driven by a stream of bytes.
 pub struct Emulator {
     term: Term<EventProxy>,
@@ -516,6 +555,9 @@ pub struct Emulator {
     /// at yet: the one moment the keyboard can come back. See
     /// [`Self::hand_keys_to_line_editor`].
     line_finished: bool,
+    /// What was typed while the line editor had the keyboard and the shell
+    /// was away from its prompt. See [`Self::typed`].
+    typed_ahead: TypedAhead,
     snapshot: Arc<Snapshot>,
     /// Whether something has happened since the cached snapshot was built.
     ///
@@ -568,6 +610,7 @@ impl Emulator {
             mirrored: false,
             line_editor: false,
             line_finished: false,
+            typed_ahead: TypedAhead::default(),
             snapshot,
             dirty: false,
         }
@@ -859,9 +902,17 @@ impl Emulator {
     ///   another terminal's integration on a host Crook did not start the
     ///   shell on, reports the widget starting as a command.
     ///
-    /// And the prompt after the `D` with something on it is the line editor's
-    /// still: what was typed while the command ran went to the shell, which
-    /// puts it on the next line. The keyboard waits for that line's `D`.
+    /// And what was typed while the command ran is the line editor's still.
+    /// It went to the shell, which reads it once it is back at its prompt and
+    /// draws it on the line there — after the prompt, in a write of its own,
+    /// so the read the prompt arrives in has an empty line on it. The prompt's
+    /// cells cannot say, and so [`Self::typed`] counts what is sent instead:
+    /// each line ended with an Enter is one the shell will run and finish with
+    /// a `D` of its own, and the start of one is a line it will keep. The
+    /// prompt after each `D` takes one of them, and keeps the keyboard. A
+    /// command that read what was typed itself — `read`, a password prompt —
+    /// leaves one behind, and the keyboard with the shell a line longer than
+    /// it needed: the side to be wrong on.
     ///
     /// So zsh's `ctrl-g` and fish's Escape, which give a search up over an
     /// empty line and draw no mark at all, and bash's `ctrl-g`, which draws
@@ -879,15 +930,52 @@ impl Emulator {
         self.line_finished = false;
         if !self.line_editor {
             self.line_editor = true;
+            self.typed_ahead = TypedAhead::default();
             self.dirty = true;
         }
         true
     }
 
+    /// Records what went to the child as though typed — a key, a paste, a
+    /// line — for [`Self::hand_keys_to_line_editor`] to count: typed while the
+    /// line editor has the keyboard and the shell is away from its prompt, it
+    /// is the shell's to read when it is back. [`crate::Terminal::write`]
+    /// calls this for everything it sends, and that includes the mouse's and
+    /// the focus's reports: those go only to a program that asked for them,
+    /// which is one whose keys are not counted.
+    ///
+    /// Not while the program in front says it reads the keyboard itself, by
+    /// asking for the alternate screen, bracketed pastes, the mouse, focus
+    /// reports or kitty's keyboard. A shell has none of them on while it runs
+    /// a command, so a program that has one on asked for it, and what is
+    /// typed into `vim`, a REPL or Claude Code is theirs: counted, it would
+    /// keep the keyboard from the shell's empty prompt after every one of
+    /// them run from a history search. A program that reads the keyboard and
+    /// asks for none of them has what is typed counted, and costs the line
+    /// that [`Self::hand_keys_to_line_editor`] says a `read` does.
+    pub fn typed(&mut self, bytes: &[u8]) {
+        if self.line_editor && !self.blocks.at_prompt() && !self.reads_its_own_keys() {
+            self.typed_ahead.add(bytes);
+        }
+    }
+
+    /// Whether the program in front has asked for something only a program
+    /// reading the keyboard itself asks for. See [`Self::typed`].
+    fn reads_its_own_keys(&self) -> bool {
+        self.term.mode().intersects(
+            TermMode::ALT_SCREEN
+                | TermMode::BRACKETED_PASTE
+                | TermMode::MOUSE_MODE
+                | TermMode::FOCUS_IN_OUT
+                | TermMode::KITTY_KEYBOARD_PROTOCOL,
+        )
+    }
+
     /// Gives the keyboard back from the line editor once the shell has
-    /// finished a line and drawn an empty prompt after it, at the end of a
-    /// read: the `D` comes before the prompt, and the prompt before whatever
-    /// the shell puts on its line. See [`Self::hand_keys_to_line_editor`].
+    /// finished a line and drawn the prompt after it with nothing on it, at
+    /// the end of a read — unless something typed while the shell was away is
+    /// what it will put on that line next. See
+    /// [`Self::hand_keys_to_line_editor`].
     fn give_keys_back(&mut self, line_finished: bool) {
         if !self.line_editor {
             return;
@@ -898,6 +986,12 @@ impl Emulator {
             return;
         }
         self.line_finished = false;
+        if self.typed_ahead.take_line() {
+            return;
+        }
+        // And the cells, for a line on the prompt that nothing counted — typed
+        // in the moment between an Enter and the shell's `C`, which reads as
+        // typing at the prompt — when it is drawn in the read the prompt is.
         if self.blocks.at_an_empty_prompt(&self.term) {
             self.line_editor = false;
         }

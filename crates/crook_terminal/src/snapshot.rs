@@ -530,9 +530,9 @@ pub struct Snapshot {
     /// prompt's row and under it, so a pane that composes its command lines
     /// in a field of its own puts the field away until this is false again.
     /// The line editor gives the keyboard back when it finishes a line, with
-    /// `D`, and draws the next prompt with nothing on it: see
-    /// [`crate::Emulator::hand_keys_to_line_editor`] for why that and not a
-    /// prompt drawn again or a `C`.
+    /// `D`, and draws the next prompt with nothing on it and nothing typed
+    /// ahead for it: see [`crate::Emulator::hand_keys_to_line_editor`] for
+    /// why that and not a prompt drawn again or a `C`.
     pub line_editor: bool,
 }
 
