@@ -127,13 +127,13 @@ jobs:
         shell: bash
         run: cargo fmt --all --check
 
+      # No `cargo check` after it. Clippy is the compiler with more lints, run
+      # over the same targets with the same features, so a check that passes
+      # it has nothing left to find, and running it cost 11 to 30 seconds a
+      # leg.
       - name: cargo clippy
         shell: bash
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
-
-      - name: cargo check
-        shell: bash
-        run: cargo check --locked --workspace --all-targets
 
       # The test binaries, built in a step of their own so that the save at
       # the end can tell a build that finished from one that did not. The

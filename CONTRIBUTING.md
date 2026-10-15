@@ -2,7 +2,7 @@
 
 ## Before you push
 
-**These five commands are the gate**, and they are run here, before you push. `Crook CI` runs
+**These four commands are the gate**, and they are run here, before you push. `Crook CI` runs
 them again on every pull request to `main`, on macOS, Linux and Windows, but it is the second
 look and not the first: it answers after the push what these answer before it, and a push to
 a branch with no pull request to `main` starts nothing at all. Run them, in this order:
@@ -12,7 +12,6 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo check --locked --workspace --all-targets
 cargo test --locked --workspace
 RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::redundant_explicit_links" \
   cargo doc --locked --no-deps --workspace --document-private-items
@@ -26,7 +25,10 @@ link that drifts from the first the moment either one moves. `.clippy.toml` also
 Windows it flashes a console window unless the spawner sets `CREATE_NO_WINDOW` — invisible on
 macOS and Linux, and a shipping-blocker for a terminal. Use `crook::process::Command`.
 
-There is a sixth check, which compiles the workspace with the feature set a shipped build uses:
+There is no `cargo check` among them. Clippy is the compiler with more lints, run over the same
+targets with the same features, so a check after it has nothing left to find.
+
+There is a fifth check, which compiles the workspace with the feature set a shipped build uses:
 
 ```sh
 ./script/bundle --check-only
@@ -34,7 +36,7 @@ There is a sixth check, which compiles the workspace with the feature set a ship
 
 Run it if you touch a `Cargo.toml`, a feature gate, or anything under `#[cfg(...)]`.
 
-And a seventh, for the half of `crook_plugin_api` a host build never compiles: the
+And a sixth, for the half of `crook_plugin_api` a host build never compiles: the
 `#[link_section]` arms of `icon!` and `preview!` are gated on wasm32, and they are what a plugin
 author builds against.
 
@@ -47,7 +49,7 @@ Run it if you touch `crates/crook_plugin_api`.
 
 ## The workflow
 
-The same five checks run on macOS, Linux and Windows as `Crook CI`, followed by the wasm32
+The same four checks run on macOS, Linux and Windows as `Crook CI`, followed by the wasm32
 check, beside `--check-only` on all three and the Linux release binary, built in Debian 11 and
 held to glibc 2.31. They start by themselves in two places:
 
@@ -72,7 +74,7 @@ gh workflow run "Crook CI" --ref <branch>
 
 or the Run workflow button on the Actions tab. The three platforms are what make it worth
 having, since `crook::process::Command`, the path handling and the release feature set are the
-things five local commands on one machine cannot cover.
+things four local commands on one machine cannot cover.
 
 If `cargo metadata --locked` fails, `Cargo.lock` is out of date with a manifest. Run
 `cargo check` and commit the updated lockfile.

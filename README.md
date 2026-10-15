@@ -1319,7 +1319,7 @@ To produce a release binary:
 ./script/bundle --check-only   # type-check with release flags, build nothing
 ```
 
-`--check-only` is the sixth check, and what the workflow runs on all three platforms on every
+`--check-only` is the fifth check, and what the workflow runs on all three platforms on every
 pull request to `main` and every push to it. It compiles the workspace with the exact profile
 and feature set a shipped build uses, which catches the class of bug where a release-only
 feature combination does not compile — cheaply, and without producing artifacts.
@@ -1378,10 +1378,10 @@ included, depends on the published `crook_plugin_api` rather than carrying a cop
 
 ## Checks
 
-Whatever you touch, the gate is the five commands at the top of
+Whatever you touch, the gate is the four commands at the top of
 [`CONTRIBUTING.md`](CONTRIBUTING.md#before-you-push), run in that order before you push, and
 two more beside them for a change to a manifest, a feature gate or the plugin API. `Crook CI`
-runs all seven again on macOS, Linux and Windows, by itself on every pull request to `main`
+runs all six again on macOS, Linux and Windows, by itself on every pull request to `main`
 and every push to `main`. A branch with no pull request to `main`, which includes one whose
 pull request is stacked on another branch, starts nothing;
 `gh workflow run "Crook CI" --ref <branch>` asks for it.
