@@ -79,6 +79,23 @@ things four local commands on one machine cannot cover.
 If `cargo metadata --locked` fails, `Cargo.lock` is out of date with a manifest. Run
 `cargo check` and commit the updated lockfile.
 
+## A dev build has line tables and nothing more
+
+`cargo build` and `cargo test` give every crate line tables: a backtrace names the file and line
+of every frame, and a debugger shows no locals. It is what `Crook CI` has always built, and it
+makes `crook-dev` 174 MB where full debug information made it 514, as it does every test binary
+that links the app. For a debugger session,
+
+```sh
+CARGO_PROFILE_DEV_DEBUG=true cargo build -p crook --bin crook-dev
+```
+
+gives the workspace's own crates their variables and types back. It rebuilds only them, once,
+and the two builds then sit side by side in `target/`. Dependencies are compiled at
+`opt-level = 3`, where most of their locals are optimized out whatever the debug information
+says; `--config 'profile.dev.package."*".debug=true'` gives them theirs too, and rebuilds every
+one.
+
 ## Commit titles are what the release notes say
 
 Every commit title is a [Conventional Commit](https://www.conventionalcommits.org/en/v1.0.0/):

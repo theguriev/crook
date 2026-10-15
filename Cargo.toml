@@ -167,9 +167,23 @@ winit = "0.30"
 # The renderer is unusably slow in a fully unoptimized build, but compiling the
 # workspace at opt-level 3 costs a minute per touch. Optimize dependencies only.
 opt-level = 0
+# Line tables, which put a file and line on every frame of a backtrace, and
+# none of the variables and types, which were most of every binary: crook-dev
+# was 514 MB, 455 of them debug information, and every test binary that links
+# the app carries as much. With line tables it is 174 MB. CI has built this
+# way all along, through RUSTFLAGS, so the test suite already passes on it.
+# `CARGO_PROFILE_DEV_DEBUG=true` gives the workspace's own crates the rest back
+# for a debugger session, at the cost of rebuilding them once.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
+# Said again here, where it is not inherited from above but set, so that
+# `CARGO_PROFILE_DEV_DEBUG=true` does not rebuild every dependency as well. At
+# opt-level 3 a debugger mostly shows a dependency's locals as optimized out
+# anyway; `--config 'profile.dev.package."*".debug=true'` is there for the
+# rare session that needs them.
+debug = "line-tables-only"
 
 # Not for speed: an unoptimized build of this crate crashes on Windows. The
 # `wasmi` generics it instantiates — `Caller::get_export` for the host's data
