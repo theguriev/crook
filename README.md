@@ -496,8 +496,10 @@ Twenty-two features, and the page that configures them:
   but for the `✳` an Esc leaves, which no hook reports and which takes a hook's running back.
   `codex`, `gemini` and `copilot` print the same guarded hooks for Codex CLI, Gemini CLI and
   GitHub Copilot CLI in each one's own hooks file, `opencode` prints the plugin OpenCode loads
-  instead, and `aider`, which has no hooks, gets a sentence saying what to do instead. A
-  subagent works in a session of its own, and Copilot CLI runs its hooks for one as for the
+  instead, and `aider`, which has no hooks, gets a sentence saying what to do instead. Codex
+  runs the hooks merged into its file only once you trust them: it asks on its next start, or in
+  its `/hooks`, and asks again whenever a hook's command changes.
+  A subagent works in a session of its own, and Copilot CLI runs its hooks for one as for the
   session you are talking to, so its hooks pass `--session -`: the pane takes a title or a stop
   only from the session whose turn it is, until that one stops, another takes the pane or its
   command ends. Its `sessionStart` hook, which no subagent runs, passes `--session-start -`. It
