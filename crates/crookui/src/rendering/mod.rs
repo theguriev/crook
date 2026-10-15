@@ -12,9 +12,10 @@
 //! Everything is an instanced unit quad. Rounded corners, gradients and borders
 //! are fragment-shader SDF math over `[0,1]²`; glyphs are the same quad
 //! sampling an atlas, and so are pictures, resampled on the CPU to the size
-//! they are drawn at and kept in atlases of their own. There is no
-//! tessellation, no path rasterizer and no depth buffer — z order is layer
-//! order, painter's algorithm.
+//! they are drawn at and kept in atlases of their own — or, one too big for
+//! an atlas row, uploaded as it is to a texture of its own and stretched by
+//! the sampler. There is no tessellation, no path rasterizer and no depth
+//! buffer — z order is layer order, painter's algorithm.
 //!
 //! # Where things live
 //!

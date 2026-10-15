@@ -11,6 +11,17 @@
 //! next card shows six more, so the image atlases are dropped as a set once
 //! there are too many of them, and the glyphs never feel it.
 //!
+//! A picture drawn wider or taller than an atlas row takes none: it gets a
+//! texture of its own, at the pixels it was handed — the size it is drawn at,
+//! for a picture decoded to it — so a screenshot across a Retina pane is as
+//! sharp as its pixels rather than stretched up from an atlas's 1022. Pixels
+//! of another size are stretched to the quad by the sampler rather than
+//! resampled here: at that size they are a screenful, and here is the thread
+//! that draws. So are pixels bigger than an atlas drawn within a row, since a
+//! resample costs what its source weighs. Such a texture is a whole texture
+//! to give back, which a region of an atlas never is, so it is kept exactly
+//! while it is drawn.
+//!
 //! Ported from Warp's `crates/warpui/src/rendering/glyph_cache.rs` (MIT). Warp
 //! parameterizes the cache over four `dyn Fn` callbacks so one implementation
 //! can serve both its Metal and its wgpu renderer. Crook has one renderer, so
@@ -18,7 +29,7 @@
 
 use anyhow::Result;
 use crookui_core::fonts::{Canvas, GlyphKey, RasterBounds, RasterFormat, SubpixelAlignment};
-use crookui_core::geometry::Vector2F;
+use crookui_core::geometry::{RectF, Vector2F};
 use crookui_core::icons::{self, IconKey, Mark};
 use crookui_core::image::{Bitmap, ImageId, resample};
 use crookui_core::platform::FontDb;
@@ -41,33 +52,79 @@ const ATLAS_SIZE: u32 = 1024;
 /// pictures on screen are never the ones being thrown away.
 const IMAGE_ATLASES: usize = 8;
 
-/// The longest side an image region may have, in device pixels.
+/// The longest side an image atlas region may have, in device pixels.
 ///
 /// Two short of the atlas edge rather than one: the shelf allocator places a
 /// row only while its height is strictly less than what is left below the
 /// row's top, and a region that is the whole atlas tall would be refused twice
-/// and burn a texture id on the way.
+/// and burn a texture id on the way. A picture drawn longer than this gets a
+/// texture of its own instead — see [`image_region`].
 pub const MAX_IMAGE_SIDE: u32 = ATLAS_SIZE - 2;
 
-/// The atlas region a picture drawn at `drawn` device pixels is resampled to.
-///
-/// `drawn` itself, unless a side is longer than an atlas row can hold, in
-/// which case both sides shrink by the same factor and the sampler stretches
-/// the region back up when the quad is drawn — the one case where a picture's
-/// quad and its region differ in size. A side that rounds to nothing stays
-/// nothing, so the caller can see the picture is not drawn at all.
-pub fn image_region(drawn: (u32, u32)) -> (u32, u32) {
-    let (width, height) = drawn;
-    let longest = width.max(height);
-    if longest <= MAX_IMAGE_SIDE {
-        return drawn;
+/// Where a picture is uploaded, and the size it is resampled to there.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ImageRegion {
+    /// A region of a shared image atlas, `(width, height)`.
+    Atlas(u32, u32),
+    /// A texture of the picture's own, `(width, height)`.
+    Own(u32, u32),
+}
+
+impl ImageRegion {
+    /// The width and height the pixels are resampled to.
+    pub fn size(self) -> (u32, u32) {
+        match self {
+            Self::Atlas(width, height) | Self::Own(width, height) => (width, height),
+        }
     }
-    let factor = MAX_IMAGE_SIDE as f32 / longest as f32;
+}
+
+/// Where a picture of `pixels` drawn at `drawn` device pixels goes, and at
+/// what size.
+///
+/// An atlas region of `drawn` itself while both sides fit an atlas row and
+/// the pixels fit an atlas: they are resampled to it, a few megabytes made
+/// out of a few at most, and the sampler reads them one to one. Otherwise a
+/// texture of the picture's own at `pixels` — which is `drawn` for a picture
+/// decoded at the size it is drawn — and when the two differ the sampler
+/// stretches the texture to the quad, or shrinks it. Resampled here instead,
+/// a picture handed over at another size than it is drawn — its old pixels,
+/// while it is decoded again at a new one, or pixels kept short of a size
+/// that would be made up — would be a screenful resampled on the thread that
+/// draws at every new size, with a font step a new size for every picture in
+/// view. And a resample costs what its source weighs, not what it makes, so
+/// pixels bigger than an atlas are not resampled into one either: a
+/// 4000-pixel square zoomed back out to 1000 was sixteen million pixels
+/// averaged on the thread that draws, for the frame or two before its decode
+/// at the new size lands. Drawn from a texture of its own — the one the frame
+/// before gave it, when that frame drew it past a row — it costs no resample
+/// and no upload; shrunk by the sampler, which has no mipmaps, it aliases
+/// until then.
+///
+/// Only pixels longer on a side than `max_texture_side`, the most a texture
+/// may be on this device, are resampled: both sides shrink by the same
+/// factor. A side of `drawn` that is nothing stays nothing, so the caller
+/// can see the picture is not drawn at all.
+pub fn image_region(drawn: (u32, u32), pixels: (u32, u32), max_texture_side: u32) -> ImageRegion {
+    let (width, height) = drawn;
+    if width.max(height) <= MAX_IMAGE_SIDE && pixels.0.max(pixels.1) <= ATLAS_SIZE {
+        return ImageRegion::Atlas(width, height);
+    }
+    let (width, height) = if width == 0 || height == 0 {
+        drawn
+    } else {
+        pixels
+    };
+    let longest = width.max(height);
+    if longest <= max_texture_side {
+        return ImageRegion::Own(width, height);
+    }
+    let factor = max_texture_side as f32 / longest as f32;
     let side = |pixels| match pixels {
         0 => 0,
-        _ => ((pixels as f32 * factor).round() as u32).clamp(1, MAX_IMAGE_SIDE),
+        _ => ((pixels as f32 * factor).round() as u32).clamp(1, max_texture_side),
     };
-    (side(width), side(height))
+    ImageRegion::Own(side(width), side(height))
 }
 
 /// Everything the renderer needs to draw one cached glyph.
@@ -108,16 +165,27 @@ pub struct IconTextureOffset {
 
 /// Where one cached picture landed.
 ///
-/// The region's pixel size is the size the picture was resampled to, which is
-/// the size it is drawn at except past [`MAX_IMAGE_SIDE`]; the renderer sizes
-/// the quad by what it asked for, not by this.
+/// The region's pixel size is the size the picture was uploaded at: the size
+/// it is drawn at in an atlas, and in a texture of its own the pixels it was
+/// handed (see [`image_region`]). The renderer sizes the quad by what it
+/// asked for, not by this, and stretches the region when the two differ.
 #[derive(Copy, Clone, Debug)]
 pub struct ImageTextureOffset {
-    /// Which image atlas holds it.
-    pub texture_id: TextureId,
+    /// Which texture holds it.
+    pub texture: ImageTexture,
 
-    /// Where in that atlas, in both UV and pixel space.
+    /// Where in that texture, in both UV and pixel space.
     pub allocated_region: atlas::AllocatedRegion,
+}
+
+/// The texture a picture was placed in.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ImageTexture {
+    /// An image atlas, shared with other pictures: see
+    /// [`GlyphCache::image_texture`].
+    Atlas(TextureId),
+    /// A texture of the picture's own: see [`GlyphCache::own_texture`].
+    Own(ImageCacheKey),
 }
 
 /// A permanent map from glyph reference to atlas region, and a bounded one
@@ -127,7 +195,9 @@ pub struct ImageTextureOffset {
 /// configuration to invalidate on, so the only thing that grows that part of
 /// the cache is a genuinely new glyph at a genuinely new size. Pictures keep
 /// a set of atlases of their own — never the glyphs' — that
-/// [`Self::sweep_images`] empties whole once it has grown past its budget.
+/// [`Self::sweep_images`] empties whole once it has grown past its budget,
+/// and the textures of the pictures too big for an atlas, which it lets go
+/// one by one as they stop being drawn.
 pub struct GlyphCache {
     textures: Vec<AtlasTexture>,
     cache: FxHashMap<GlyphCacheKey, Option<GlyphTextureOffset>>,
@@ -137,6 +207,15 @@ pub struct GlyphCache {
     images: FxHashMap<ImageCacheKey, Option<ImageTextureOffset>>,
     image_textures: Vec<AtlasTexture>,
     image_atlas: atlas::Manager,
+    own_textures: FxHashMap<ImageCacheKey, OwnTexture>,
+}
+
+/// A picture's own texture, and whether a frame has drawn it since the last
+/// sweep.
+struct OwnTexture {
+    texture: AtlasTexture,
+    region: atlas::AllocatedRegion,
+    drawn: bool,
 }
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
@@ -171,9 +250,11 @@ struct IconCacheKey {
 ///
 /// Device pixels, as an icon's key is, and for the same reason. The bitmap's
 /// identity rather than its bytes, because two pictures of the same size are
-/// two pictures, and an id is minted once per decode and never reused.
+/// two pictures, and an id is minted once per decode and never reused. It is
+/// also the name of a picture's own texture, which holds that one picture at
+/// that one size.
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
-struct ImageCacheKey {
+pub struct ImageCacheKey {
     id: ImageId,
     width: u32,
     height: u32,
@@ -190,6 +271,7 @@ impl GlyphCache {
             images: FxHashMap::default(),
             image_textures: Vec::new(),
             image_atlas: atlas::Manager::new(ATLAS_SIZE),
+            own_textures: FxHashMap::default(),
         }
     }
 
@@ -205,6 +287,11 @@ impl GlyphCache {
     /// them apart by construction.
     pub fn image_texture(&self, texture_id: TextureId) -> Option<&AtlasTexture> {
         self.image_textures.get(texture_id.as_index())
+    }
+
+    /// The texture of a picture's own that `key` names, while it is kept.
+    pub fn own_texture(&self, key: ImageCacheKey) -> Option<&AtlasTexture> {
+        self.own_textures.get(&key).map(|own| &own.texture)
     }
 
     /// Where to find `glyph_key`, rasterizing and uploading it on a miss.
@@ -309,23 +396,37 @@ impl GlyphCache {
     ///
     /// `Ok(None)` means the picture is drawn at no size at all and should be
     /// skipped, the way an icon squeezed to nothing is. The region is
-    /// [`image_region`] of `drawn` — the drawn size itself, short of the atlas
-    /// ceiling — and the pixels are resampled to it on the CPU before upload,
-    /// so the sampler reads them one to one. A picture already that size is
-    /// uploaded as it is.
+    /// [`image_region`] of `drawn` and the bitmap's own size — the drawn size
+    /// in an atlas, the bitmap's in a texture of its own — and the pixels are
+    /// resampled on the CPU only when they are not that size, which in a
+    /// texture of its own takes a bitmap longer than the GPU's largest
+    /// texture. A picture already the drawn size is uploaded as it is, which
+    /// is what a caller that decoded it at the size it draws it at is spared.
     pub fn get_image(
         &mut self,
         bitmap: &Bitmap,
         drawn: (u32, u32),
         atlas: &AtlasContext<'_>,
     ) -> Result<Option<ImageTextureOffset>> {
-        let (width, height) = image_region(drawn);
+        let region = image_region(
+            drawn,
+            bitmap.size(),
+            atlas.device.limits().max_texture_dimension_2d,
+        );
+        let (width, height) = region.size();
         let cache_key = ImageCacheKey {
             id: bitmap.id(),
             width,
             height,
         };
 
+        if let Some(own) = self.own_textures.get_mut(&cache_key) {
+            own.drawn = true;
+            return Ok(Some(ImageTextureOffset {
+                texture: ImageTexture::Own(cache_key),
+                allocated_region: own.region,
+            }));
+        }
         if let Some(cached) = self.images.get(&cache_key) {
             return Ok(*cached);
         }
@@ -343,6 +444,32 @@ impl GlyphCache {
             resampled.canvas()
         };
 
+        if let ImageRegion::Own(..) = region {
+            let mut texture = AtlasTexture::sized(width, height, atlas);
+            let allocated_region = atlas::AllocatedRegion {
+                uv_region: RectF::new(Vector2F::zero(), Vector2F::splat(1.)),
+                pixel_region: atlas::PixelRect {
+                    x: 0,
+                    y: 0,
+                    width,
+                    height,
+                },
+            };
+            texture.insert(allocated_region, canvas, atlas.queue);
+            self.own_textures.insert(
+                cache_key,
+                OwnTexture {
+                    texture,
+                    region: allocated_region,
+                    drawn: true,
+                },
+            );
+            return Ok(Some(ImageTextureOffset {
+                texture: ImageTexture::Own(cache_key),
+                allocated_region,
+            }));
+        }
+
         let offset = place(
             &mut self.image_textures,
             &mut self.image_atlas,
@@ -351,7 +478,7 @@ impl GlyphCache {
         )?;
 
         let placed = ImageTextureOffset {
-            texture_id: offset.texture_id,
+            texture: ImageTexture::Atlas(offset.texture_id),
             allocated_region: offset.allocated_region,
         };
         self.images.insert(cache_key, Some(placed));
@@ -359,14 +486,20 @@ impl GlyphCache {
         Ok(Some(placed))
     }
 
-    /// Drops every image atlas, and every entry into one, once there are more
-    /// than `IMAGE_ATLASES` of them. Glyphs and icons are untouched.
+    /// Lets go of every picture's own texture that the frame before did not
+    /// draw, and drops every image atlas, and every entry into one, once there
+    /// are more than `IMAGE_ATLASES` of them. Glyphs and icons are untouched.
     ///
-    /// Whole rather than one at a time because the allocator never frees: a
-    /// region cannot be given back, so the only way to reclaim an atlas is to
-    /// start it over. Run at the top of a frame, before any layer is walked,
-    /// so a picture placed for this frame is never the one dropped in it.
+    /// An own texture one at a time, because it is a whole texture and can be:
+    /// it is a screenful of pixels, and one scrolled out of view is worth less
+    /// than the one upload it takes to bring it back. The atlases whole,
+    /// because the allocator never frees: a region cannot be given back, so
+    /// the only way to reclaim an atlas is to start it over. Run at the top of
+    /// a frame, before any layer is walked, so a picture placed for this frame
+    /// is never the one dropped in it.
     pub fn sweep_images(&mut self) {
+        self.own_textures
+            .retain(|_, own| std::mem::take(&mut own.drawn));
         if self.image_textures.len() <= IMAGE_ATLASES {
             return;
         }
@@ -604,12 +737,15 @@ mod tests {
             (12, 12),
             "resampled to the drawn size, not uploaded at its own"
         );
+        let ImageTexture::Atlas(texture_id) = first.texture else {
+            panic!("a picture this small shares an atlas: {first:?}");
+        };
         assert!(
-            cache.image_texture(first.texture_id).is_some(),
+            cache.image_texture(texture_id).is_some(),
             "the region is in an image atlas"
         );
         assert!(
-            cache.texture(first.texture_id).is_none(),
+            cache.texture(texture_id).is_none(),
             "and no glyph atlas was opened for it"
         );
 
@@ -648,19 +784,36 @@ mod tests {
     }
 
     #[test]
-    fn a_picture_past_the_atlas_ceiling_is_placed_at_the_ceiling() {
-        assert_eq!(image_region((1120, 700)), (1022, 639));
-        assert_eq!(image_region((2044, 1022)), (1022, 511));
-        assert_eq!(image_region((1022, 1022)), (1022, 1022));
+    fn a_picture_past_an_atlas_row_is_given_a_texture_of_its_own_at_its_drawn_size() {
+        // A 1120-pixel picture drawn 560 logical pixels wide on a 2x
+        // display, and a 2000-pixel screenshot drawn 1000 wide on one: both
+        // used to be squeezed to the 1022 an atlas row takes and stretched
+        // back up, soft.
+        let own = |drawn| image_region(drawn, drawn, 8192);
+        assert_eq!(own((1120, 700)), ImageRegion::Own(1120, 700));
+        assert_eq!(own((2000, 1000)), ImageRegion::Own(2000, 1000));
         assert_eq!(
-            image_region((3000, 1)),
-            (1022, 1),
+            own((1022, 1022)),
+            ImageRegion::Atlas(1022, 1022),
+            "one that fits a row still shares an atlas"
+        );
+        assert_eq!(own((40, 20)), ImageRegion::Atlas(40, 20));
+
+        // Only a window wider than the GPU's largest texture is stretched.
+        assert_eq!(own((16384, 4096)), ImageRegion::Own(8192, 2048));
+        assert_eq!(
+            own((30000, 1)),
+            ImageRegion::Own(8192, 1),
             "a side never rounds away"
         );
-        assert_eq!(image_region((3000, 0)), (1022, 0), "unless it was nothing");
+        assert_eq!(
+            image_region((30000, 0), (30000, 4), 8192),
+            ImageRegion::Own(8192, 0),
+            "unless it was drawn as nothing"
+        );
 
         let Some((resources, layout, sampler)) = device() else {
-            log::warn!("skipping the image ceiling test: no usable GPU adapter");
+            log::warn!("skipping the own texture test: no usable GPU adapter");
             return;
         };
         let atlas = AtlasContext {
@@ -670,16 +823,215 @@ mod tests {
             sampler: &sampler,
         };
 
-        // A 560-logical preview on a 2x display: wider than an atlas, and
-        // still placed, at the widest an atlas row takes.
         let mut cache = GlyphCache::new();
+        let screenshot = picture(2000, 1000);
         let placed = cache
-            .get_image(&picture(2, 2), (1120, 700), &atlas)
+            .get_image(&screenshot, (2000, 1000), &atlas)
             .unwrap()
-            .expect("a picture past the ceiling is still drawn");
+            .expect("a picture drawn at a size has pixels");
 
-        assert_eq!(placed.allocated_region.pixel_region.width, 1022);
-        assert_eq!(placed.allocated_region.pixel_region.height, 639);
+        assert_eq!(
+            (
+                placed.allocated_region.pixel_region.width,
+                placed.allocated_region.pixel_region.height
+            ),
+            (2000, 1000),
+            "uploaded at the size it is drawn, not at the 1022 of an atlas row"
+        );
+        let ImageTexture::Own(key) = placed.texture else {
+            panic!("placed in an atlas: {placed:?}");
+        };
+        assert!(cache.own_texture(key).is_some());
+        assert!(
+            cache.image_texture(TextureId::initial()).is_none(),
+            "and no atlas was opened for it"
+        );
+        assert_eq!(
+            placed.allocated_region.uv_region,
+            RectF::new(Vector2F::zero(), Vector2F::splat(1.)),
+            "the whole of its texture, which is the whole of the picture"
+        );
+
+        let again = cache
+            .get_image(&screenshot, (2000, 1000), &atlas)
+            .unwrap()
+            .expect("a picture drawn at a size has pixels");
+        assert_eq!(again.texture, placed.texture, "and it is uploaded once");
+    }
+
+    #[test]
+    fn pixels_handed_over_at_another_size_past_an_atlas_row_are_stretched_and_not_resampled() {
+        // A picture is decoded again when a font step changes the size it is
+        // drawn at, and drawn from its old pixels until then. Resampled to
+        // the new size here, a screenshot across a Retina pane was hundreds
+        // of milliseconds on the thread that draws, at every step, for every
+        // picture in view. Past an atlas row the pixels go up as they are
+        // and the sampler stretches them, either way.
+        assert_eq!(
+            image_region((3024, 1890), (2800, 1750), 8192),
+            ImageRegion::Own(2800, 1750),
+            "grown a step"
+        );
+        assert_eq!(
+            image_region((2600, 1625), (2800, 1750), 8192),
+            ImageRegion::Own(2800, 1750),
+            "shrunk a step"
+        );
+        assert_eq!(
+            image_region((1120, 700), (1024, 640), 8192),
+            ImageRegion::Own(1024, 640),
+            "a 1024-pixel preview on a card 560 logical pixels wide at 2x"
+        );
+        assert_eq!(
+            image_region((9000, 4500), (12000, 6000), 8192),
+            ImageRegion::Own(8192, 4096),
+            "and past the GPU's largest texture they are shrunk to it"
+        );
+
+        let Some((resources, layout, sampler)) = device() else {
+            log::warn!("skipping the stretched texture test: no usable GPU adapter");
+            return;
+        };
+        let atlas = AtlasContext {
+            device: &resources.device,
+            queue: &resources.queue,
+            bind_group_layout: &layout,
+            sampler: &sampler,
+        };
+
+        let mut cache = GlyphCache::new();
+        let pixels = picture(1200, 600);
+        let mut textures = Vec::new();
+        for drawn in [(1200, 600), (1296, 648), (1104, 552)] {
+            let placed = cache
+                .get_image(&pixels, drawn, &atlas)
+                .unwrap()
+                .expect("a picture drawn at a size has pixels");
+            let region = placed.allocated_region.pixel_region;
+            assert_eq!(
+                (region.width, region.height),
+                (1200, 600),
+                "drawn at {drawn:?}, uploaded at its own pixels"
+            );
+            textures.push(placed.texture);
+        }
+        assert!(
+            textures.iter().all(|texture| *texture == textures[0]),
+            "one upload stretched to every size, not one resample a size: {textures:?}"
+        );
+    }
+
+    #[test]
+    fn pixels_bigger_than_an_atlas_drawn_within_a_row_are_shrunk_by_the_sampler_and_not_resampled()
+    {
+        // A picture zoomed in until it was decoded at 4000 pixels square, and
+        // the font put back: drawn at 1000 until the decode at that size
+        // lands, from the 4000-pixel square. Resampled into an atlas row, that
+        // was sixteen million pixels averaged on the thread that draws, since
+        // a resample costs what its source weighs; and three screenshots
+        // dragged from a 2x display to a 1x one were three of them at once.
+        assert_eq!(
+            image_region((1000, 1000), (4000, 4000), 8192),
+            ImageRegion::Own(4000, 4000)
+        );
+        assert_eq!(
+            image_region((800, 500), (2800, 1750), 8192),
+            ImageRegion::Own(2800, 1750)
+        );
+        assert_eq!(
+            image_region((560, 350), (1024, 640), 8192),
+            ImageRegion::Atlas(560, 350),
+            "a preview no bigger than an atlas, drawn small, is still resampled into one"
+        );
+
+        let Some((resources, layout, sampler)) = device() else {
+            log::warn!("skipping the shrunk texture test: no usable GPU adapter");
+            return;
+        };
+        let atlas = AtlasContext {
+            device: &resources.device,
+            queue: &resources.queue,
+            bind_group_layout: &layout,
+            sampler: &sampler,
+        };
+
+        let mut cache = GlyphCache::new();
+        let pixels = picture(1200, 600);
+        cache.sweep_images();
+        let zoomed = cache
+            .get_image(&pixels, (1200, 600), &atlas)
+            .unwrap()
+            .expect("a picture drawn at a size has pixels");
+
+        // The next frame draws it within an atlas row.
+        cache.sweep_images();
+        let put_back = cache
+            .get_image(&pixels, (600, 300), &atlas)
+            .unwrap()
+            .expect("a picture drawn at a size has pixels");
+        assert_eq!(
+            put_back.texture, zoomed.texture,
+            "drawn from the texture the frame before gave it, uploaded once"
+        );
+        let region = put_back.allocated_region.pixel_region;
+        assert_eq!((region.width, region.height), (1200, 600));
+        assert!(
+            cache.image_texture(TextureId::initial()).is_none(),
+            "resampled into an atlas row"
+        );
+    }
+
+    #[test]
+    fn a_picture_with_a_texture_of_its_own_keeps_it_exactly_while_it_is_drawn() {
+        let Some((resources, layout, sampler)) = device() else {
+            log::warn!("skipping the own texture sweep test: no usable GPU adapter");
+            return;
+        };
+        let atlas = AtlasContext {
+            device: &resources.device,
+            queue: &resources.queue,
+            bind_group_layout: &layout,
+            sampler: &sampler,
+        };
+
+        let mut cache = GlyphCache::new();
+        let shown = picture(2, 2);
+        let scrolled_away = picture(2, 2);
+        let place = |cache: &mut GlyphCache, bitmap: &Bitmap| {
+            let placed = cache
+                .get_image(bitmap, (1500, 900), &atlas)
+                .unwrap()
+                .expect("a picture drawn at a size has pixels");
+            let ImageTexture::Own(key) = placed.texture else {
+                panic!("placed in an atlas: {placed:?}");
+            };
+            key
+        };
+
+        // Frame one draws both.
+        cache.sweep_images();
+        let kept = place(&mut cache, &shown);
+        let let_go = place(&mut cache, &scrolled_away);
+
+        // Frame two draws one of them.
+        cache.sweep_images();
+        assert!(cache.own_texture(kept).is_some());
+        assert!(
+            cache.own_texture(let_go).is_some(),
+            "both were drawn in the frame before"
+        );
+        place(&mut cache, &shown);
+
+        // Frame three lets the other go.
+        cache.sweep_images();
+        assert!(
+            cache.own_texture(kept).is_some(),
+            "a picture still drawn keeps its texture"
+        );
+        assert!(
+            cache.own_texture(let_go).is_none(),
+            "a screenful of pixels nobody drew in the last frame is given back"
+        );
     }
 
     #[test]
@@ -710,12 +1062,14 @@ mod tests {
         // 600 square: two do not share a row, and a second row has no room
         // under the first, so every one opens an atlas of its own.
         let pictures: Vec<_> = (0..IMAGE_ATLASES + 1).map(|_| picture(2, 2)).collect();
-        for (index, bitmap) in pictures.iter().enumerate() {
+        let mut expected = TextureId::initial();
+        for bitmap in &pictures {
             let placed = cache
                 .get_image(bitmap, (600, 600), &atlas)
                 .unwrap()
                 .expect("a picture drawn at a size has pixels");
-            assert_eq!(placed.texture_id.as_index(), index);
+            assert_eq!(placed.texture, ImageTexture::Atlas(expected));
+            expected = expected.next();
         }
 
         cache.sweep_images();
@@ -729,8 +1083,8 @@ mod tests {
             .unwrap()
             .expect("a picture drawn at a size has pixels");
         assert_eq!(
-            again.texture_id,
-            TextureId::initial(),
+            again.texture,
+            ImageTexture::Atlas(TextureId::initial()),
             "and the next picture starts the set over"
         );
         cache.sweep_images();

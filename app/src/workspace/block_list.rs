@@ -1499,6 +1499,7 @@ impl BlockList {
             vec2f(at.left, at.rows_top - skip as f32 * metrics.height),
             within,
             metrics,
+            self.snapshot.foreground,
             ctx.scene,
         );
     }

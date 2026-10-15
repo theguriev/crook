@@ -17,6 +17,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::fonts::{Canvas, RasterFormat};
+use crate::geometry::Vector2F;
 
 /// The identity of one decoded picture, for the renderer's cache to key on.
 ///
@@ -126,6 +127,22 @@ impl fmt::Debug for Bitmap {
             .field("size", &format_args!("{width}×{height}"))
             .finish()
     }
+}
+
+/// The device pixels a picture drawn `size` logical pixels big covers at
+/// `scale_factor`: the size the renderer draws it at.
+///
+/// One function for both sides of that, because they have to agree to the
+/// pixel. A caller that decodes a picture at this size hands the renderer a
+/// bitmap it uploads as it is and draws one to one; one a pixel off would be
+/// resampled again on the thread that draws, or stretched a pixel's worth by
+/// the sampler, at every new size.
+pub fn device_size(size: Vector2F, scale_factor: f32) -> (u32, u32) {
+    let size = size * scale_factor;
+    (
+        size.x().round().max(0.) as u32,
+        size.y().round().max(0.) as u32,
+    )
 }
 
 /// `bitmap` at another size: area-averaged when shrinking, bilinear when
@@ -258,6 +275,7 @@ fn straight(texel: [f32; 4]) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::vec2f;
 
     fn pixel(bitmap: &Bitmap, x: u32, y: u32) -> [u8; 4] {
         let canvas = bitmap.canvas();
@@ -415,5 +433,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_device_size_is_the_logical_one_scaled_and_rounded_to_whole_pixels() {
+        assert_eq!(device_size(vec2f(1000., 500.), 2.), (2000, 1000));
+        assert_eq!(device_size(vec2f(40.4, 20.6), 1.), (40, 21));
+        assert_eq!(device_size(vec2f(10., 5.), 1.5), (15, 8));
+        assert_eq!(
+            device_size(vec2f(-3., 4.), 1.),
+            (0, 4),
+            "a side drawn at less than nothing is nothing"
+        );
     }
 }

@@ -1099,8 +1099,11 @@ lines — a whole session, without the integration — nothing tells which rows 
 over any more, and the block keeps the blank rows rather than draw the picture over the wrong
 ones. It is sized the way iTerm2 sizes it: by `width` and `height` in cells, pixels or a share of
 the pane, fitted with its shape kept unless `preserveAspectRatio=0`, and never wider or taller
-than the pane. PNG only, at most 16 MB and 4096 pixels a side; and not on the alternate screen,
-which a full-screen program redraws cell by cell at will — so yazi's previewer and an `imgcat`
+than the pane. It is decoded away from the thread that draws the window, at no more pixels
+than it covers — so a screen of large pictures holds nothing up, and one across a Retina pane
+is as sharp as its file — and for the moment that takes, a faint frame shows where it goes. PNG
+only, at most 16 MB and 4096 pixels a side; and not on the alternate screen, which a
+full-screen program redraws cell by cell at will — so yazi's previewer and an `imgcat`
 inside tmux, both of which draw from there, show none. A `clear` or a `reset`, a resize that
 reflows the rows under it, or a shorter pane under a full-screen program takes a picture away.
 Kitty's graphics protocol is not read yet. The list of what is absent — and what adding each item

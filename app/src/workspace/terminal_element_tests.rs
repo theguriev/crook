@@ -83,6 +83,16 @@ fn painted_selected(snapshot: &Snapshot, selected: (BlockId, Region)) -> Scene {
 
 /// Paints a snapshot at its natural size.
 fn paint(snapshot: &Snapshot, selected: Option<(BlockId, Region)>, owns_caret: bool) -> Scene {
+    paint_scaled(snapshot, selected, owns_caret, 1.)
+}
+
+/// [`paint`], on a display with `scale_factor` device pixels to a logical one.
+fn paint_scaled(
+    snapshot: &Snapshot,
+    selected: Option<(BlockId, Region)>,
+    owns_caret: bool,
+    scale_factor: f32,
+) -> Scene {
     let font = font();
     let metrics = font.metrics();
     let size = vec2f(
@@ -90,7 +100,7 @@ fn paint(snapshot: &Snapshot, selected: Option<(BlockId, Region)>, owns_caret: b
         snapshot.rows as f32 * metrics.height,
     );
 
-    let mut scene = Scene::new(1.);
+    let mut scene = Scene::new(scale_factor);
     scene.start_layer(ClipBounds::None);
     paint_grid(
         snapshot,
@@ -1520,6 +1530,22 @@ fn row_saying(snapshot: &Snapshot, prefix: &str) -> usize {
         .unwrap_or_else(|| panic!("no row says {prefix:?}:\n{}", snapshot.text()))
 }
 
+/// How long a picture's decode is given to land: long, because what is
+/// being looked for is one that never does — see [`crate::inline_image`].
+const LANDING: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// [`painted`], on the frame a picture's decode asks for once it lands: the
+/// frame before meets the pictures and hands them to the pool, and this one
+/// draws them.
+fn painted_with_pictures(snapshot: &Snapshot) -> Scene {
+    painted(snapshot);
+    assert!(
+        crate::inline_image::settle(LANDING),
+        "a picture was never decoded"
+    );
+    painted(snapshot)
+}
+
 /// Every picture a frame draws, with the clip of the layer it is drawn in.
 fn pictures(scene: &Scene) -> Vec<(RectF, Option<RectF>)> {
     scene
@@ -1548,7 +1574,7 @@ fn a_picture_printed_into_the_grid_is_drawn_over_the_rows_it_took() {
 
     let metrics = font().metrics();
     let row = row_saying(&snapshot, "ABOVE") + 1;
-    let drawn = pictures(&painted(&snapshot));
+    let drawn = pictures(&painted_with_pictures(&snapshot));
     assert_eq!(drawn.len(), 1, "the picture is drawn, once: {drawn:?}");
     let (bounds, clip) = drawn[0];
     assert_eq!(
@@ -1570,12 +1596,75 @@ fn a_picture_printed_into_the_grid_is_drawn_over_the_rows_it_took() {
 }
 
 #[test]
+fn a_picture_still_being_decoded_is_a_faint_frame_around_the_room_it_will_take() {
+    // The frame that first meets a picture does not decode it — a screen of
+    // them decoded where the window is drawn was a window that stopped
+    // answering. It draws where the picture goes, which the header already
+    // said, and the frame the decode asks for draws the picture there.
+    let mut emulator = grid_with_a_picture("width=4;height=2;");
+    let snapshot = emulator.snapshot();
+    let metrics = font().metrics();
+    let row = row_saying(&snapshot, "ABOVE") + 1;
+    let side = (4. * metrics.width).min(2. * metrics.height);
+    let room = RectF::new(vec2f(0., row as f32 * metrics.height), vec2f(side, side));
+
+    let first = painted(&snapshot);
+    assert!(
+        pictures(&first).is_empty(),
+        "the frame that met the picture decoded it"
+    );
+    let framed: Vec<RectF> = rects(&first)
+        .into_iter()
+        .filter(|rect| rect.border.width > 0.)
+        .map(|rect| rect.bounds)
+        .collect();
+    assert_eq!(framed, [room], "the room it will take, framed");
+
+    assert!(crate::inline_image::settle(LANDING));
+    let drawn: Vec<RectF> = pictures(&painted(&snapshot))
+        .into_iter()
+        .map(|(bounds, _)| bounds)
+        .collect();
+    assert_eq!(drawn, [room], "and then the picture, in that room");
+}
+
+#[test]
+fn a_picture_on_a_display_of_twice_the_scale_is_decoded_at_the_pixels_it_covers() {
+    // Fitted into its cells, it covers twice their logical size in device
+    // pixels on a Retina display, and that is the size it is decoded at: the
+    // renderer uploads it as it is, with nothing left to resample on the
+    // thread that draws. Decoded at its own size it was kept at that, for a
+    // 4096-pixel picture in two cells sixty-four megabytes of thumbnail.
+    let mut emulator = grid_with_a_picture("width=4;height=2;");
+    let snapshot = emulator.snapshot();
+    let metrics = font().metrics();
+    let side = (4. * metrics.width).min(2. * metrics.height);
+
+    paint_scaled(&snapshot, None, true, 2.);
+    assert!(crate::inline_image::settle(LANDING));
+    let scene = paint_scaled(&snapshot, None, true, 2.);
+    let images: Vec<_> = scene
+        .layers()
+        .flat_map(|layer| layer.images.iter())
+        .collect();
+
+    assert_eq!(images.len(), 1, "{images:?}");
+    let pixels = (side * 2.).round() as u32;
+    assert_eq!(images[0].bitmap.size(), (pixels, pixels));
+    assert_eq!(
+        images[0].bitmap.size(),
+        device_size(images[0].bounds.size(), 2.),
+        "the size the renderer resamples to, to the pixel"
+    );
+}
+
+#[test]
 fn a_picture_asked_to_be_stretched_fills_its_cells_on_the_grid() {
     let mut emulator = grid_with_a_picture("width=4;height=2;preserveAspectRatio=0;");
     let snapshot = emulator.snapshot();
 
     let metrics = font().metrics();
-    let drawn = pictures(&painted(&snapshot));
+    let drawn = pictures(&painted_with_pictures(&snapshot));
     assert_eq!(drawn.len(), 1, "{drawn:?}");
     assert_eq!(
         drawn[0].0.size(),
@@ -1595,7 +1684,7 @@ fn a_picture_on_the_grid_moves_with_its_rows_when_the_scrollback_is_scrolled() {
     let snapshot = emulator.snapshot();
     let row = row_saying(&snapshot, "ABOVE") + 1;
     assert_eq!(row, live + 2, "the viewport moved");
-    let drawn = pictures(&painted(&snapshot));
+    let drawn = pictures(&painted_with_pictures(&snapshot));
     assert_eq!(drawn.len(), 1, "{drawn:?}");
     assert_eq!(
         drawn[0].0.origin().y(),
@@ -1608,7 +1697,7 @@ fn a_picture_on_the_grid_moves_with_its_rows_when_the_scrollback_is_scrolled() {
     let snapshot = emulator.snapshot();
     assert!(!snapshot.text().contains("ABOVE"), "{}", snapshot.text());
     assert!(
-        pictures(&painted(&snapshot)).is_empty(),
+        pictures(&painted_with_pictures(&snapshot)).is_empty(),
         "a picture scrolled out of the grid is not drawn"
     );
 }
@@ -1621,11 +1710,11 @@ fn a_full_screen_program_does_not_show_the_pictures_of_the_screen_under_it() {
     emulator.advance(b"\x1b[?1049h");
     let snapshot = emulator.snapshot();
     assert!(snapshot.alt_screen);
-    assert!(pictures(&painted(&snapshot)).is_empty());
+    assert!(pictures(&painted_with_pictures(&snapshot)).is_empty());
 
     emulator.advance(b"\x1b[?1049l");
     assert_eq!(
-        pictures(&painted(&emulator.snapshot())).len(),
+        pictures(&painted_with_pictures(&emulator.snapshot())).len(),
         1,
         "and it is back when the program leaves"
     );
@@ -1646,7 +1735,7 @@ fn a_picture_past_a_full_scrollback_is_not_drawn_over_the_rows_after_it() {
         pane_surface::Surface::Grid
     );
     let below = row_saying(&snapshot, "BELOW");
-    let drawn = pictures(&painted(&snapshot));
+    let drawn = pictures(&painted_with_pictures(&snapshot));
     let metrics = font().metrics();
     assert!(
         drawn

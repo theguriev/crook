@@ -124,8 +124,9 @@ use crookui_core::AppContext;
 use crookui_core::element::{Element, SizeConstraint};
 use crookui_core::event::{DispatchedEvent, Event, Modifiers, MouseButton};
 use crookui_core::geometry::{Color, Point, RectF, Vector2F, vec2f};
+use crookui_core::image::device_size;
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
-use crookui_core::scene::{ClipBounds, PointerShape, Scene};
+use crookui_core::scene::{Border, ClipBounds, PointerShape, Scene};
 
 use crate::browser;
 use crate::clipboard::Clipboard;
@@ -163,6 +164,14 @@ const STRIKEOUT_HEIGHT_RATIO: f32 = 0.28;
 
 /// How wide the beam cursor and the hollow block's outline are drawn.
 const CURSOR_STROKE: f32 = 2.;
+
+/// How much of the program's ink the frame around a picture still being
+/// decoded is drawn in, out of 255.
+///
+/// Enough to say a picture is coming to somebody looking at the rows it took,
+/// and little enough to pass for the blank rows they are for the moment it
+/// lasts.
+const WAITING_PICTURE_ALPHA: u8 = 40;
 
 /// The most wheel notches one scroll event is reported as.
 ///
@@ -1244,6 +1253,7 @@ fn paint_grid(
             vec2f(columns as f32 * metrics.width, rows as f32 * metrics.height),
         ),
         metrics,
+        snapshot.foreground,
         scene,
     );
 
@@ -1387,14 +1397,21 @@ pub(super) fn paint_composition(
 ///
 /// A picture with no part inside `within` is passed over before it is
 /// decoded, which is what keeps the pictures of a long session from being
-/// decoded to draw the few on screen — see [`crate::inline_image`].
+/// decoded to draw the few on screen. One that is in view and has not been
+/// decoded yet is drawn as a faint frame in `ink` around the room it will
+/// take, and the frame its decode asks for draws the picture there — see
+/// [`crate::inline_image`]. Where it goes is known before any of that: the
+/// header said how big it is.
 pub(super) fn paint_images(
     images: &[ImagePlacement],
     origin: Vector2F,
     within: RectF,
     metrics: CellMetrics,
+    ink: Rgb,
     scene: &mut Scene,
 ) {
+    use crate::inline_image::{self, Shown};
+
     let mut started = false;
     for placement in images {
         let cells = RectF::new(
@@ -1410,16 +1427,22 @@ pub(super) fn paint_images(
         if cells.intersection(within).is_none() {
             continue;
         }
-        let Some(bitmap) = crate::inline_image::bitmap(&placement.image) else {
-            continue;
-        };
         let drawn = if placement.stretch {
             cells.size()
         } else {
-            let (width, height) = bitmap.size();
+            let (width, height) = placement.image.size();
             let scale = (cells.width() / width as f32).min(cells.height() / height as f32);
             vec2f(width as f32 * scale, height as f32 * scale)
         };
+        let bounds = RectF::new(cells.origin(), drawn);
+        let shown = inline_image::shown(
+            &placement.image,
+            device_size(drawn, scene.scale_factor()),
+            scene.frame(),
+        );
+        if let Shown::Nothing = shown {
+            continue;
+        }
         // A layer of their own, because a layer draws its pictures under its
         // glyphs and these go over the rows' — and only once one is drawn, so
         // a screen with none in view costs no layer.
@@ -1427,7 +1450,17 @@ pub(super) fn paint_images(
             scene.start_layer(ClipBounds::BoundedByActiveLayerAnd(within));
             started = true;
         }
-        scene.draw_image(bitmap, RectF::new(cells.origin(), drawn));
+        match shown {
+            Shown::Picture(bitmap) => {
+                scene.draw_image(bitmap, bounds);
+            }
+            Shown::Waiting => {
+                scene.draw_rect_without_hit_recording(bounds).with_border(
+                    Border::all(1.).with_border_color(color(ink).with_alpha(WAITING_PICTURE_ALPHA)),
+                );
+            }
+            Shown::Nothing => {}
+        }
     }
     if started {
         scene.stop_layer();

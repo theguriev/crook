@@ -138,6 +138,24 @@ pub fn decode_preview(png: &[u8]) -> Result<Bitmap, String> {
     Ok(resample(&bitmap, fitted_width.max(1), fitted_height.max(1)))
 }
 
+/// Decodes a PNG and resamples it to `size`, the device pixels it is drawn
+/// at.
+///
+/// For a picture a program printed, which is drawn into whatever cells it
+/// was given: a 4096-pixel square in two cells is sixty-four megabytes
+/// decoded and a few kilobytes drawn, and only the second is worth keeping.
+/// Grown as readily as shrunk, so that the renderer, which resamples what it
+/// is handed to the drawn size within an atlas row, finds nothing left to do
+/// on the thread that draws; how far to grow one is the caller's to cap. A
+/// picture already that size is returned as it decoded.
+pub fn decode_at(png: &[u8], limits: Limits, size: (u32, u32)) -> Result<Bitmap, String> {
+    let bitmap = decode(png, limits)?;
+    if bitmap.size() == size {
+        return Ok(bitmap);
+    }
+    Ok(resample(&bitmap, size.0, size.1))
+}
+
 /// `pixels` as RGBA, whatever the decoder produced.
 ///
 /// The transformations asked for above leave four possible outputs, all

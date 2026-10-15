@@ -128,6 +128,10 @@ impl LocalQueue {
 }
 
 /// A pool of worker threads for work that must not block a frame.
+///
+/// Dropping one joins its workers, so a thread-local must not own one: on
+/// Windows its destructor runs under the loader lock, which a worker has to
+/// take to exit, and the join never returns.
 pub struct Background {
     shared: Arc<BackgroundShared>,
     workers: Vec<JoinHandle<()>>,

@@ -16,9 +16,10 @@ use crate::presenter::{EventContext, LayoutContext, PaintContext};
 /// a title, and a screenshot captured on a 2x display is half its pixel count
 /// across. So the caller names the *logical* size, the renderer multiplies it
 /// by the scale factor exactly once like every other primitive, and the
-/// pixels are resampled to that device size on the CPU. Layout never sees the
-/// scale factor and never sees the pixel count — the same tree lays out the
-/// same way on every display.
+/// pixels are fitted to that device size: resampled on the CPU within an
+/// atlas row, stretched by the GPU past one (see [`crate::scene::Image`]).
+/// Layout never sees the scale factor and never sees the pixel count — the
+/// same tree lays out the same way on every display.
 ///
 /// Given less room than that, the picture shrinks to fit, keeping its aspect;
 /// it never grows past its logical size, so a wide column does not blow a
