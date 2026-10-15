@@ -4498,22 +4498,18 @@ fn checking_with_no_gh_to_be_found_says_so_on_the_card() {
 #[cfg(unix)]
 #[test]
 fn checking_asks_gh_once_and_the_card_shows_what_it_said_until_the_next_press() {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let scratch = Scratch::new();
     let gh = scratch.path().join("gh");
     let answer = scratch.path().join("answer.json");
     let asked = scratch.path().join("asked");
-    fs::write(
+    crate::process::write_program(
         &gh,
-        format!(
+        &format!(
             "#!/bin/sh\necho x >> '{}'\ncat '{}'\n",
             asked.display(),
             answer.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     fs::write(
         &answer,
         r#"{"state":"OPEN","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}"#,
@@ -7859,13 +7855,7 @@ fn a_window_with_an_agent(scratch: &Scratch) -> Option<(Harness, PathBuf, PathBu
     let agents = scratch.path().join("agents");
     fs::create_dir_all(&agents).ok()?;
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let claude = agents.join("claude");
-        fs::write(&claude, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").ok()?;
-        fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).ok()?;
-    }
+    crate::process::write_program(&agents.join("claude"), "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
     #[cfg(not(unix))]
     fs::write(agents.join("claude.cmd"), "@echo %*\r\n").ok()?;
 
@@ -11128,17 +11118,11 @@ fn slow_post_checkout(repository: &Path, started: &Path) {
     // Forward slashes, which the sh Git for Windows runs its hooks with reads
     // as readily as any other.
     let forward = |path: &Path| path.to_string_lossy().replace('\\', "/");
-    fs::write(
-        &hook,
-        format!("#!/bin/sh\n: > '{}'\nsleep 2\n", forward(started)),
-    )
-    .expect("the hook is writable");
+    let script = format!("#!/bin/sh\n: > '{}'\nsleep 2\n", forward(started));
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
-            .expect("the hook can be made executable");
-    }
+    crate::process::write_program(&hook, &script);
+    #[cfg(not(unix))]
+    fs::write(&hook, script).expect("the hook is writable");
 
     // Named in the repository's own config, so that a hooks directory set for
     // the whole machine does not pass this one by.

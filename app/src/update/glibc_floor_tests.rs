@@ -233,19 +233,12 @@ fn readelf_is_run_in_the_c_locale_whatever_language_the_caller_reads() {
     let bin = scratch("readelf");
     std::fs::write(bin.join("listing.C"), V0_1_13).expect("a scratch listing");
     std::fs::write(bin.join("listing.ru"), in_russian(V0_1_13)).expect("a scratch listing");
-    let readelf = bin.join("readelf");
-    std::fs::write(
-        &readelf,
+    crate::process::write_program(
+        &bin.join("readelf"),
         "#!/bin/sh\n\
          if [ \"${LC_ALL-}\" = C ]; then exec cat \"${0%/*}/listing.C\"; fi\n\
          exec cat \"${0%/*}/listing.ru\"\n",
-    )
-    .expect("a scratch readelf");
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&readelf, std::fs::Permissions::from_mode(0o755))
-            .expect("the scratch readelf can be made runnable");
-    }
+    );
     let path = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     )))

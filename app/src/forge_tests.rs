@@ -278,20 +278,15 @@ mod with_a_fake_gh {
 
     /// [`fake_gh`], under another name.
     fn fake_named(scratch: &ScratchDir, name: &str, body: &str) -> String {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let gh = scratch.path().join(name);
         let asked = scratch.path().join("asked");
-        std::fs::write(
+        crate::process::write_program(
             &gh,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n{body}\n",
                 asked.display()
             ),
-        )
-        .expect("the scratch directory is writable");
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))
-            .expect("the script can be made executable");
+        );
         gh.to_string_lossy().into_owned()
     }
 

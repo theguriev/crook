@@ -313,8 +313,25 @@ fn write(path: &Path, contents: &str) {
     std::fs::write(path, contents).expect("the scratch directory is writable");
 }
 
+/// Writes `contents` to `path` as a program the script runs.
+///
+/// Copied into place by a `cp` of its own rather than written here, for the
+/// reason the library's tests write theirs with `process::write_program`: a
+/// child that another test's thread forks while this process holds the file
+/// open for writing keeps a copy of that descriptor until it execs, and until
+/// then the file will not run — "Text file busy".
 fn executable(path: &Path, contents: &str) {
-    write(path, contents);
+    let mut staged = path.as_os_str().to_owned();
+    staged.push(".staged");
+    let staged = PathBuf::from(staged);
+    write(&staged, contents);
+    let copied = command("/bin/cp")
+        .arg(&staged)
+        .arg(path)
+        .status()
+        .expect("cp can be started");
+    assert!(copied.success(), "cp could not write {}", path.display());
+    let _ = std::fs::remove_file(&staged);
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
         .expect("a scratch file can be made runnable");
 }
