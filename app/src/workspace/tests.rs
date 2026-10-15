@@ -8371,6 +8371,7 @@ fn new_task_leaves_a_menu_that_is_working_or_asking_alone() {
         .expect("the checkout opened a pane");
     harness.dispatch_action(TabAction::ClosePane(opened));
     harness.dispatch_action(TabAction::Select(tab));
+    wait_for_the_locks_to_come_off(&mut harness);
 
     // That checkout is free now, so the list offers to sweep it.
     harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
@@ -8593,7 +8594,7 @@ fn escape_takes_the_menu_down_and_enter_removes_the_checkout() {
 ///
 /// The pane it opened in is closed again, because a checkout a tab is working
 /// in is not free — which is the rule these tests set up rather than the one
-/// they are about.
+/// they are about — and this returns once the lock that pane held is off.
 fn spare_checkout(harness: &mut Harness, tab: TabId, store: &Path, made: &[PathBuf]) -> PathBuf {
     harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
     harness.wait_for("the repository to be read", |harness| {
@@ -8621,7 +8622,23 @@ fn spare_checkout(harness: &mut Harness, tab: TabId, store: &Path, made: &[PathB
 
     harness.dispatch_action(TabAction::ClosePane(opened));
     harness.dispatch_action(TabAction::Select(tab));
+    wait_for_the_locks_to_come_off(harness);
     path
+}
+
+/// Waits for the window to take off every lock it took, which closing the
+/// last pane in a checkout it made asks for on the background pool.
+///
+/// Before anything lists the worktrees again: `git worktree list` reads a
+/// checkout's lock file after asking whether there is one, and dies —
+/// "failed to read '.git/worktrees/…/locked': No such file or directory" —
+/// when the unlock deletes it in between. The menu then shows that failure
+/// instead of the checkouts, and a wait for them runs out: on a Windows
+/// runner, where the gap is wide enough to land in, a minute and a failure.
+fn wait_for_the_locks_to_come_off(harness: &mut Harness) {
+    harness.wait_for("the window to take its locks off", |harness| {
+        held_checkouts(harness).is_empty()
+    });
 }
 
 /// The worktree menu open over a scratch repository with one free checkout
