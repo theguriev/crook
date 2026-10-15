@@ -2930,6 +2930,41 @@ its `hooks` should be\n{}",
         );
     }
 
+    /// Waits, for a minute at most, until the script just written at `path`
+    /// can be run.
+    ///
+    /// The other tests in this process start processes all the while, and a
+    /// child forked while the script was still open for writing holds a copy
+    /// of that descriptor until it execs. Until it does, the kernel will not
+    /// run the file — `ETXTBSY`, "Text file busy" — and a hook's `|| exit 0`
+    /// turns that into a line on stderr and no report: a failure about how
+    /// loaded the machine was, not about the hooks. Once the script has run
+    /// once, nothing holds it open for writing, and nothing can again.
+    #[cfg(unix)]
+    fn wait_until_it_runs(path: &Path) {
+        use std::process::Stdio;
+        use std::time::{Duration, Instant};
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let ran = crate::process::command(&path.to_string_lossy())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            match ran {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("{} would not run: {error}", path.display()),
+                Ok(_) => return,
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_plugin_hooks_run_crook_inside_crook_and_nothing_anywhere_else() {
@@ -2962,6 +2997,7 @@ its `hooks` should be\n{}",
         ] {
             std::fs::write(path, script).unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            wait_until_it_runs(path);
         }
         let binary = binary.to_str().unwrap();
         let broken = broken.to_str().unwrap();
