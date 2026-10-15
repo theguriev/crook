@@ -1433,6 +1433,10 @@ impl Workspace {
         let before = self.looking_at();
         self.window_focused = focused;
         self.report_focus(before, ctx);
+        // The rows' counts are for somebody looking at them, and a window
+        // behind another has nobody: the gather waits longer while it is.
+        self.git
+            .update(ctx, |model, _| model.set_window_focused(focused));
         // An input method's composition is the keyboard's, and the keyboard
         // has just gone or come back: what was being composed before belongs
         // to nothing now. A word committed on the way out still arrives, as a
@@ -5159,6 +5163,8 @@ impl Workspace {
 
         let epoch = self.tab_menu.next_epoch();
         self.tab_menu.opening = self.tab_menu.opening.wrapping_add(1);
+        // The last opening's proof would be dropped on arrival.
+        self.tab_menu.stop_landed_pass();
         self.tab_menu.tab = Some(tab);
         self.tab_menu.pane_directory = Some(directory.clone());
         self.tab_menu.mode = WorktreeMode::Listing;
@@ -5273,11 +5279,17 @@ impl Workspace {
         let branches = self.tab_menu.branches.clone();
         let tab = self.tab_menu.tab;
         let opening = self.tab_menu.opening;
+        let proofs = self.tab_menu.proofs.clone();
+        let going = self.tab_menu.start_landed_pass();
 
         let reading = ctx.background().spawn(async move {
-            super::tab_menu::landed_branches(&directory, &worktrees, &branches)
+            super::tab_menu::landed_branches(&directory, &worktrees, &branches, &proofs, &going)
         });
         ctx.spawn(reading, move |workspace, landed, ctx| {
+            // A pass that stopped was superseded, and has nothing to say.
+            let Some(landed) = landed else {
+                return;
+            };
             if workspace.tab_menu.tab != tab || workspace.tab_menu.opening != opening {
                 return;
             }
@@ -5348,11 +5360,13 @@ impl Workspace {
                         .clone()
                         .unwrap_or_else(crate::agent::search_path),
                 );
-                self.tab_menu.landed = Some(super::tab_menu::landed_branches(
+                self.tab_menu.landed = super::tab_menu::landed_branches(
                     &directory,
                     &worktrees,
                     &self.tab_menu.branches,
-                ));
+                    &self.tab_menu.proofs,
+                    &|| true,
+                );
                 Contents::Ready(worktrees)
             }
             Err(problem) => Contents::Failed(problem.to_string()),
@@ -5445,6 +5459,7 @@ impl Workspace {
         }
 
         self.tab_menu.next_epoch();
+        self.tab_menu.stop_landed_pass();
         self.tab_menu.tab = None;
         self.tab_menu.mode = WorktreeMode::Listing;
         self.tab_menu.selected = None;
@@ -11017,15 +11032,50 @@ impl Workspace {
         }
     }
 
-    /// Tells the git model which directories the strip is showing.
+    /// Tells the git model which directories the strip is showing, and which
+    /// of them are on screen.
     fn sync_git(&mut self, ctx: &mut ViewContext<Self>) {
         let directories: Vec<PathBuf> = self
             .tabs
             .panes()
             .filter_map(|(_, pane)| pane.session().working_directory.clone())
             .collect();
-        self.git
-            .update(ctx, |model, ctx| model.track(directories, ctx));
+        let in_sight = self.directories_in_sight();
+        self.git.update(ctx, |model, ctx| {
+            model.track(directories, ctx);
+            model.set_in_sight(in_sight);
+        });
+    }
+
+    /// The directories of the panes a person can see the facts of: the
+    /// active tab's, and every pane whose row in the tab list was inside the
+    /// list's viewport on the last frame.
+    ///
+    /// As of the last change to the strip, which is when this is asked: a
+    /// scroll of the list does not ask it again. It only decides which rows a
+    /// cycle reads first, and a row scrolled into view is read by the same
+    /// cycle a moment later.
+    fn directories_in_sight(&self) -> Vec<PathBuf> {
+        let mut panes: Vec<&Pane> = self
+            .tabs
+            .active()
+            .map(|tab| tab.panes().iter().collect())
+            .unwrap_or_default();
+        // Drawn exactly when `render` builds the tab list; otherwise its rows
+        // are where some earlier frame left them.
+        if self.showing_section().is_none() && self.tabs_panel_is_showing() {
+            let scroll = self.panel_scroll.lock();
+            let (top, bottom) = (scroll.offset(), scroll.offset() + scroll.viewport());
+            panes.extend(self.tabs.panes().map(|(_, pane)| pane).filter(|pane| {
+                self.panel_rows
+                    .get(pane.id())
+                    .is_some_and(|row| row.top < bottom && row.top + row.height > top)
+            }));
+        }
+        panes
+            .into_iter()
+            .filter_map(|pane| pane.session().working_directory.clone())
+            .collect()
     }
 
     /// Opens a shell for every pane that has none, and ends the ones whose

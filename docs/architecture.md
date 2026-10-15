@@ -1339,7 +1339,22 @@ list is in — about every local branch, not only the checkouts' — marks a pro
 and offers `Remove N merged checkouts…`: the free checkouts narrowed to the proved ones, with
 the sweep's own safety — looked in first, never forced, the branches kept. On this repository
 it proves 14 of those eighteen in a second or two; the four it misses are stacked or were
-reworked, and are the ones it should miss.
+reworked, and are the ones it should miss. Every removal, sweep and Finish opens the menu again,
+and proving sixty branches again each time came to three seconds and more, so the menu keeps
+what it was told (`merged::Proofs`): per repository against the base and its tip, and per branch
+against its tip and its reflog's size and time — the reflog because a branch committed on and
+reset back to the very commit it was proved at holds work only that reflog remembers. One
+`for-each-ref` shows what moved, and only that is proved; a base that moved proves everything
+again. An unproved answer is kept only from a proof none of whose reads ran out of time — killed
+at its deadline, or not started because the deadline it shared was spent — since such a proof
+may have run out of time rather than evidence; `git::run` counts those per thread, and the proof
+runs every read on its own. How long the proof took is not the sign: one over a few hundred
+branches outlasts any read's deadline without a read running out. What a proof also leans on —
+every other ref, which may be what holds a commit a branch moved off — is not watched, so a
+badge can go stale until a tip moves; nothing is deleted on it, because the deletion proves
+again from nothing. A pass the menu no longer wants, because it opened again or closed, stops
+before the next branch's reads, the next pass over history, or the next branch's look for work
+it moved off.
 
 **A branch is deleted only on a proof.** `git::worktree` said from the start that a removal
 never deletes the branch — "not as an option, not under `force`" — because a branch is the work
@@ -1420,16 +1435,39 @@ adds `since main`. The row leaves the base's name out because its metadata line 
 170 pixels with the branch, and the chip is never cut — the branch gives way to it, as it always
 did; the card, when a narrow window narrows it, gives up the base's name before the numbers.
 The base is `merged.rs`'s, found once per repository — by the common git directory, so every
-worktree of one shares it — and carried from cycle to cycle with the gather's ticket, so a
-refresh adds at most two subprocesses for each directory a pane sits in, and none while nothing
-shows the chip. Only the base is shared: the gather runs per directory, not per checkout, so
-two panes in different directories of one checkout each pay for the count, as they already did
-for the diff. A lookup that found no base is kept only for the branch that asked, because a
-repository made a minute ago has no `main` until its first commit, and one no gather has asked
-about for a whole cycle is forgotten. The base itself — a local `main` against `origin/main`
+worktree of one shares it — and carried from cycle to cycle with the gather's ticket, and none
+of it runs while nothing shows the chip. A lookup that found no base is kept only for the
+branch that asked, because a repository made a minute ago has no `main` until its first commit,
+and one no gather has asked about for a whole cycle is forgotten. The base itself — a local `main` against `origin/main`
 as much as against `main` — a detached `HEAD`, an unborn branch and a repository with no base
 keep the plain count, and so does the plugin API's `Where`, whose `added` and `removed` are
 still what is not committed yet.
+
+**A cycle reads only what can have changed.** The three reads each go through the whole
+working tree, and what made that dear was not the counting: a read takes no lock, so it never
+refreshes the index, and a checkout `git worktree add` has just made is every file written in
+the second its index was — *racily clean*, which git settles by hashing each such file on
+every read. On Crook's own checkout of 450 files that was a quarter of a second per read on a
+busy machine, against six milliseconds once the index had been refreshed. So the ticket also
+carries, per working tree, what the last cycle read and from what — `HEAD`'s commit and the
+base's, from one `rev-parse`, and a stamp of the tree (`app/src/git/stamp.rs`): the index's
+size and times and every tracked file's, from one `ls-files` and an `lstat` apiece, with the
+inode and change time on Unix, never a byte of any file. The count of commits is read again only
+when either commit moved; the diff against `HEAD` when `HEAD` moved or the stamp differs; the
+lines since the base when anything did. An edit nobody has `git add`ed moves no commit and leaves
+the index alone, which is why the stamp covers every file and not just the index. A stamp taken
+while anything it covers is younger than three seconds vouches for nothing — a file system keeps
+times to a grain, two seconds on FAT, and a file written twice inside one, the same length both
+times, looks unchanged — and neither does one over a submodule, whose dirt does not show on its
+directory; both are simply read again. In a sparse checkout the stamp covers only the files
+checked out, as the diffs do — the ones left out are passed over, and a sparse index is listed
+without being expanded — so a monorepo's millions of paths are not listed and stat'ed every
+cycle for a checkout of a few thousand. A working tree is read once a cycle however many panes
+sit in it. The wait after a cycle is fifteen seconds or three times what the cycle took,
+whichever is longer, so that sixty checkouts cannot keep git busy for most of every minute; it
+is four times that while the window is behind another, and coming back to it cuts the wait to
+what a focused window would have had. The directories whose rows are on screen — the active
+tab's, and the rows inside the tab list's viewport — are gathered and shown before the rest.
 
 **A removal takes its empty directories with it.** `git worktree remove` deletes the checkout
 and nothing above it, so the store kept a directory per repository after its last checkout

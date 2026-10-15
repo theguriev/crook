@@ -243,23 +243,69 @@ pub fn base_name(base: &str) -> &str {
 /// branch left the base, which a poll does not fetch; and every failure git
 /// can have, none of which a row should render.
 pub fn since_base_blocking(work_tree: &Path, base: &str) -> Option<SinceBase> {
+    let commits = commits_since(work_tree, base).filter(|commits| *commits > 0)?;
+    Some(SinceBase {
+        base: base_name(base).to_owned(),
+        commits,
+        diff: lines_since(work_tree, base)?,
+    })
+}
+
+/// The first of [`since_base_blocking`]'s two questions: how many commits
+/// `HEAD` has that `base` cannot reach. Zero is an answer, `None` is git not
+/// giving one.
+///
+/// Apart, because the two depend on different things. This one is a fact
+/// about two commits and nothing else, so a gather that finds neither has
+/// moved can keep the last answer — see [`super::Readings`] — while the lines
+/// read the working tree and cannot be kept on that alone.
+pub(super) fn commits_since(work_tree: &Path, base: &str) -> Option<u32> {
     let range = format!("{base}..HEAD");
-    let commits: u32 = read(work_tree, &["rev-list", "--count", &range, "--"])?
+    read(work_tree, &["rev-list", "--count", &range, "--"])?
         .trim()
         .parse()
-        .ok()?;
-    if commits == 0 {
-        return None;
-    }
+        .ok()
+}
+
+/// The second: every line between where `HEAD` left `base` and the working
+/// tree.
+pub(super) fn lines_since(work_tree: &Path, base: &str) -> Option<DiffStats> {
     let stat = read(
         work_tree,
         &["diff", "--shortstat", "--merge-base", base, "--"],
     )?;
-    Some(SinceBase {
-        base: base_name(base).to_owned(),
-        commits,
-        diff: DiffStats::parse_shortstat(&stat),
-    })
+    Some(DiffStats::parse_shortstat(&stat))
+}
+
+/// The commits the counts are counted from: `HEAD`'s, and `base`'s when
+/// there is one, as full object ids.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Tips {
+    /// What `HEAD` resolves to.
+    pub(super) head: String,
+    /// The base, as the ref it was asked by and the commit it resolved to.
+    pub(super) base: Option<(String, String)>,
+}
+
+/// Where `HEAD` and `base` are, in one `rev-parse`.
+///
+/// **Blocking**: one subprocess. `None` when either does not resolve — a
+/// branch with no commit yet, a base a prune took away — and then nothing
+/// can be kept from one gather to the next, since nothing says what it was
+/// counted from.
+pub(super) fn tips(work_tree: &Path, base: Option<&str>) -> Option<Tips> {
+    let mut args = vec!["rev-parse", "HEAD"];
+    args.extend(base);
+    // Revisions, and not paths that happen to share a name with one.
+    args.push("--");
+    let answer = read(work_tree, &args)?;
+    let mut lines = answer.lines();
+    let head = lines.next()?.to_owned();
+    let base = match base {
+        Some(base) => Some((base.to_owned(), lines.next()?.to_owned())),
+        None => None,
+    };
+    Some(Tips { head, base })
 }
 
 /// What git printed for `args`, when it succeeded.
@@ -268,7 +314,7 @@ fn read(work_tree: &Path, args: &[&str]) -> Option<String> {
     let finished = run(work_tree, &args, Intent::Poll).ok()?;
     if !finished.success {
         log::debug!(
-            "no count since the base for {}: {}",
+            "no answer to git {args:?} for {}: {}",
             work_tree.display(),
             finished
                 .stderr

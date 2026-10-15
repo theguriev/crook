@@ -222,6 +222,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crookui_core::elements::{
     MouseStateHandle, Padding, Paragraph, ScrollStateHandle, Scrollable, Shrinkable, WINDOW_INSET,
@@ -229,7 +231,7 @@ use crookui_core::elements::{
 use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::prelude::*;
 
-use crate::git::merged::{Landed, Proof};
+use crate::git::merged::{Landed, Proof, Proofs};
 use crate::git::worktree::{Local, Worktree};
 use crate::tab::TabId;
 use crate::theme::theme;
@@ -621,6 +623,24 @@ pub(super) struct TabMenuState {
     /// deleting those is what the proof is kept for — see
     /// [`deletable_branches`].
     pub(super) landed: Option<HashMap<String, Landed>>,
+    /// What the proofs behind [`Self::landed`] found, in every repository the
+    /// menu has been opened on, kept from one opening to the next so that an
+    /// opening proves only the branches that moved since.
+    ///
+    /// Never cleared: it is about repositories, not about a menu, and what
+    /// it keeps for a branch that is gone goes the next time its repository
+    /// is asked about. Shared with the pass that reads and fills it, which
+    /// runs on the pool.
+    pub(super) proofs: Arc<Mutex<Proofs>>,
+    /// Which pass of the proof is the one wanted, counted up by each that
+    /// starts and by the menu opening again or closing.
+    ///
+    /// A pass compares it with the count it started at between branches and
+    /// before each pass over history, and stops at the first that is not its
+    /// own: its answer would be dropped on arrival, and proving sixty
+    /// branches for nobody holds a worker of the pool every other read here
+    /// shares.
+    pub(super) landed_pass: Arc<AtomicU64>,
     /// Where Crook keeps checkouts it made.
     pub(super) store: Option<PathBuf>,
     /// What a tidy-up would take, while one is being asked about.
@@ -706,6 +726,20 @@ impl TabMenuState {
     /// Whether the menu is up.
     pub(super) fn is_open(&self) -> bool {
         self.tab.is_some()
+    }
+
+    /// Starts a pass of the proof, as the only one wanted: the answer is
+    /// whether it still is. Every pass before it stops at its next branch or
+    /// pass over history.
+    pub(super) fn start_landed_pass(&self) -> impl Fn() -> bool + Send + 'static {
+        let pass = self.landed_pass.clone();
+        let this = pass.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        move || pass.load(Ordering::Relaxed) == this
+    }
+
+    /// Stops whatever pass of the proof is running.
+    pub(super) fn stop_landed_pass(&self) {
+        self.landed_pass.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Whether the face on screen is waiting on git, which is when the
@@ -1258,13 +1292,19 @@ pub(super) fn has_landed(state: &TabMenuState, worktree: &Worktree) -> bool {
 /// gives, and the base's own name, which
 /// [`is_base`](crate::git::merged::is_base) explains. A detached checkout
 /// has no branch to prove.
+///
+/// Only the branches that moved since `proofs` last saw them are proved —
+/// see [`merged_remembering`](crate::git::merged::merged_remembering) — and
+/// `None` is a pass `going` stopped, which has nothing to say.
 pub(super) fn landed_branches(
     directory: &Path,
     worktrees: &[Worktree],
     branches: &[String],
-) -> HashMap<String, Landed> {
+    proofs: &Mutex<Proofs>,
+    going: &dyn Fn() -> bool,
+) -> Option<HashMap<String, Landed>> {
     let Some(base) = crate::git::merged::base_of(directory) else {
-        return HashMap::new();
+        return Some(HashMap::new());
     };
     let main = worktrees
         .iter()
@@ -1284,9 +1324,9 @@ pub(super) fn landed_branches(
     asked.sort();
     asked.dedup();
     if asked.is_empty() {
-        return HashMap::new();
+        return Some(HashMap::new());
     }
-    crate::git::merged::merged(directory, &base, &asked)
+    crate::git::merged::merged_remembering(directory, &base, &asked, proofs, going)
 }
 
 /// One worktree.

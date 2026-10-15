@@ -87,13 +87,28 @@
 //! proof *of*: the branch, the base, and the one commit that was the branch's
 //! tip when it was proved. A branch that has moved since is a different
 //! question, which the proof never answered.
+//!
+//! # Proving only what moved
+//!
+//! The worktree menu asks about every local branch each time it opens, and
+//! every removal, sweep and Finish opens it again: seconds of git apiece on a
+//! repository with sixty branches, for an answer that had not changed. So the
+//! menu keeps what it was told in [`Proofs`], and [`merged_remembering`] proves
+//! again only the branches that have moved since — and a menu opened again
+//! while a pass is still running stops that pass at its next branch or pass
+//! over history rather than leaving it to finish for nobody, see
+//! [`merged_while`]. The deletion never asks the kept answers: it proves
+//! again, from nothing, right before it deletes.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-use std::path::Path;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant, SystemTime};
 
-use super::run::{Intent, READ_TIMEOUT, pipe, read_within, run, run_fed};
+use super::run::{
+    Intent, READ_TIMEOUT, out_of_time_here, pipe, ran_out_of_time, read_within, run, run_fed,
+};
 
 /// How many of the base's commits the pass reads, newest first.
 ///
@@ -311,19 +326,49 @@ pub fn is_base(branch: &str, base: &str) -> bool {
 /// sides of the comparison to the directory it ran in, and two diffs that
 /// agree about a subdirectory prove nothing about the rest.
 pub fn merged(repository: &Path, base: &str, branches: &[String]) -> HashMap<String, Landed> {
-    merged_within(repository, base, branches, PASS_COMMITS, PASS_DEADLINE)
+    merged_while(repository, base, branches, &|| true).unwrap_or_default()
 }
 
-/// [`merged`], with the pass bounded by `commits` and `deadline` rather than
-/// the constants — which is how the tests reach a bound without building a
-/// history a thousand commits long.
+/// [`merged`], for a caller that can stop wanting the answer part way.
+///
+/// `going` is asked before the reads of each branch, before each pass over
+/// history, and before each branch's look for work it moved off, and the
+/// first time it says no the proof stops there and answers `None`: a menu
+/// opened again, or closed, while a pass was proving sixty branches for it
+/// would otherwise have that pass run on for seconds for nobody, on the pool
+/// every other read shares. Those are the only points a proof stops at, so
+/// what runs on once nobody wants it is at most what lies between two of
+/// them: one branch's reads; one pass over history, with the reads that find
+/// where it starts; or one branch's look for the work it moved off, a few
+/// reads for each commit it moved off — and every read of the look shares
+/// its one [`PASS_DEADLINE`].
+pub fn merged_while(
+    repository: &Path,
+    base: &str,
+    branches: &[String],
+    going: &dyn Fn() -> bool,
+) -> Option<HashMap<String, Landed>> {
+    merged_within(
+        repository,
+        base,
+        branches,
+        PASS_COMMITS,
+        PASS_DEADLINE,
+        going,
+    )
+}
+
+/// [`merged_while`], with the pass bounded by `commits` and `deadline` rather
+/// than the constants — which is how the tests reach a bound without building
+/// a history a thousand commits long.
 fn merged_within(
     repository: &Path,
     base: &str,
     branches: &[String],
     commits: usize,
     deadline: Duration,
-) -> HashMap<String, Landed> {
+    going: &dyn Fn() -> bool,
+) -> Option<HashMap<String, Landed>> {
     // Every branch a proof has reached, with its reflog, which is asked last
     // whether the branch moved off work on the way that is now lost.
     let mut proved = Vec::new();
@@ -332,6 +377,9 @@ fn merged_within(
     let mut pending = Vec::new();
 
     for branch in branches {
+        if !going() {
+            return None;
+        }
         // In full, so that a tag or a file named like the branch is not what
         // git goes and reads.
         let reference = format!("refs/heads/{branch}");
@@ -363,7 +411,10 @@ fn merged_within(
         }
     }
     if pending.is_empty() {
-        return nothing_dropped(repository, base, proved, commits, deadline);
+        return nothing_dropped(repository, base, proved, commits, deadline, going);
+    }
+    if !going() {
+        return None;
     }
 
     let forks: Vec<&str> = pending
@@ -383,6 +434,9 @@ fn merged_within(
         let Some(candidates) = patches.get(&patch) else {
             continue;
         };
+        if !going() {
+            return None;
+        }
         // The pass reads back to the oldest fork of all of them, so for a
         // branch that left the base later it also reads commits from before
         // that — and one of those can never be this branch's squash. A change
@@ -406,7 +460,10 @@ fn merged_within(
         }
     }
 
-    let mut landed = nothing_dropped(repository, base, proved, commits, deadline);
+    let mut landed = nothing_dropped(repository, base, proved, commits, deadline, going)?;
+    if !going() {
+        return None;
+    }
     let subjects = {
         let commits: Vec<&str> = landed
             .values()
@@ -422,7 +479,224 @@ fn merged_within(
             landed.subject = subjects.get(commit).cloned();
         }
     }
-    landed
+    Some(landed)
+}
+
+/// What [`merged_remembering`] has proved, in every repository it has been
+/// asked about, kept so that it can answer again without proving again.
+///
+/// A proof is about commits, so it holds for as long as they stand still. It
+/// is kept per repository — by its common git directory, which every worktree
+/// of it shares — against the base and the commit the base's tip was; and per
+/// branch against the commit its tip was and its reflog as it stood. The
+/// reflog is what tells a branch somebody committed on and then reset back to
+/// the very commit it was proved at — work only that reflog remembers, which
+/// [`dropped`] counts and a proof refuses — from one that never moved. A base
+/// that moved proves every branch again; a branch that moved, or whose reflog
+/// was written, proves that branch again; everything else is answered from
+/// here.
+///
+/// What a proof also leans on, and this does not watch, is every other ref: a
+/// commit a branch moved off still counts as held while another branch or a
+/// tag has it, and deleting that one unproves the branch without moving
+/// anything kept here. Until a tip moves, the badge says what it said. Nothing
+/// is deleted on the strength of that, because
+/// [`super::worktree::delete_branch`] proves again, from nothing, right before
+/// `git branch -D`.
+///
+/// A repository whose refs are in a reftable has no reflog file to look at,
+/// and is proved afresh every time, as it always was.
+#[derive(Default)]
+pub struct Proofs {
+    /// By common git directory.
+    repositories: HashMap<PathBuf, Kept>,
+}
+
+/// One repository's proofs.
+struct Kept {
+    /// The base, as a ref, and the commit its tip was.
+    base: (String, String),
+    /// Every branch asked about since the base was last there, by short name.
+    branches: HashMap<String, Answer>,
+}
+
+/// One branch's answer, and what it was an answer about.
+#[derive(Clone)]
+struct Answer {
+    /// Where the branch's tip was.
+    tip: String,
+    /// Its reflog as it stood: see [`reflog_stamp`].
+    reflog: Option<(u64, SystemTime)>,
+    /// What the proof found. `None` is unproved.
+    landed: Option<Landed>,
+}
+
+/// [`merged_while`], answered from `proofs` for every branch that has not
+/// moved since it was last proved there, and remembering what it proves.
+///
+/// **Blocking**: one `for-each-ref` for where the base and every branch are,
+/// a `stat` of each branch's reflog, and the proof of the ones that moved.
+/// Background executor only.
+///
+/// A branch left unproved is remembered only when no read of the proof that
+/// left it so ran out of time — killed at its deadline, or never started
+/// because the deadline it shared was spent; see [`out_of_time_here`]. Such a
+/// proof may have run out of time rather than out of evidence, on a machine
+/// busy building, say, and its unproved branches are asked about again next
+/// time. One that only took long, over a repository with hundreds of
+/// branches, is remembered like any other: it is how long the proof is, not
+/// how long it took, that a read's deadline is about.
+///
+/// `None`, with nothing remembered of it, when `going` stopped the proof.
+pub fn merged_remembering(
+    repository: &Path,
+    base: &str,
+    branches: &[String],
+    proofs: &Mutex<Proofs>,
+    going: &dyn Fn() -> bool,
+) -> Option<HashMap<String, Landed>> {
+    remembering_within(
+        repository,
+        base,
+        branches,
+        proofs,
+        PASS_COMMITS,
+        PASS_DEADLINE,
+        going,
+    )
+}
+
+/// [`merged_remembering`], with the passes bounded by `commits` and
+/// `deadline` as [`merged_within`]'s are — which is how the tests reach a
+/// proof that ran out of time without waiting one out.
+fn remembering_within(
+    repository: &Path,
+    base: &str,
+    branches: &[String],
+    proofs: &Mutex<Proofs>,
+    commits: usize,
+    deadline: Duration,
+    going: &dyn Fn() -> bool,
+) -> Option<HashMap<String, Landed>> {
+    let Some((common, tips)) = tips_of(repository, base) else {
+        return merged_within(repository, base, branches, commits, deadline, going);
+    };
+    let Some(base_tip) = tips.get(base) else {
+        return merged_within(repository, base, branches, commits, deadline, going);
+    };
+    let base_now = (base.to_owned(), base_tip.clone());
+    let now: HashMap<&str, _> = branches
+        .iter()
+        .filter_map(|branch| {
+            let tip = tips.get(&format!("refs/heads/{branch}"))?;
+            Some((branch.as_str(), (tip, reflog_stamp(&common, branch))))
+        })
+        .collect();
+
+    let known: HashMap<String, Answer> = proofs
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .repositories
+        .get(&common)
+        .filter(|kept| kept.base == base_now)
+        .map(|kept| kept.branches.clone())
+        .unwrap_or_default();
+    let mut landed = HashMap::new();
+    let mut moved = Vec::new();
+    // In the order asked, which is the order a stopped pass got through.
+    for branch in branches {
+        let Some((tip, reflog)) = now.get(branch.as_str()) else {
+            continue;
+        };
+        match known.get(branch) {
+            Some(answer) if answer.tip == **tip && answer.reflog == *reflog => {
+                if let Some(proof) = &answer.landed {
+                    landed.insert(branch.clone(), proof.clone());
+                }
+            }
+            _ => moved.push(branch.clone()),
+        }
+    }
+    if moved.is_empty() {
+        return Some(landed);
+    }
+
+    let out_of_time = out_of_time_here();
+    let proved = merged_within(repository, base, &moved, commits, deadline, going)?;
+    let answered = out_of_time_here() == out_of_time;
+
+    let mut proofs = proofs.lock().unwrap_or_else(PoisonError::into_inner);
+    let kept = proofs.repositories.entry(common).or_insert_with(|| Kept {
+        base: base_now.clone(),
+        branches: HashMap::new(),
+    });
+    if kept.base != base_now {
+        kept.base = base_now;
+        kept.branches.clear();
+    }
+    kept.branches
+        .retain(|branch, _| tips.contains_key(&format!("refs/heads/{branch}")));
+    for branch in &moved {
+        let (tip, reflog) = &now[branch.as_str()];
+        let landed = proved.get(branch);
+        // A proof is kept when it is about the tip that was listed: one that
+        // moved again while it was being proved is proved again next time.
+        let kept_as_it_is = match landed {
+            Some(proof) => proof.tip() == tip.as_str(),
+            None => answered,
+        };
+        if kept_as_it_is {
+            let answer = Answer {
+                tip: (*tip).clone(),
+                reflog: *reflog,
+                landed: landed.cloned(),
+            };
+            kept.branches.insert(branch.clone(), answer);
+        } else {
+            kept.branches.remove(branch);
+        }
+    }
+    drop(proofs);
+
+    landed.extend(proved);
+    Some(landed)
+}
+
+/// The repository's common git directory, and where every local branch and
+/// `base` are, by full ref name: one `for-each-ref`.
+///
+/// `None` when there is nothing to keep proofs against — a directory that is
+/// not in a repository, one whose refs are in a reftable, a git that could
+/// not be asked.
+fn tips_of(repository: &Path, base: &str) -> Option<(PathBuf, HashMap<String, String>)> {
+    let common = super::discover(repository)?.common_dir;
+    if common.join("reftable").is_dir() {
+        return None;
+    }
+    let listed = answer(
+        repository,
+        &[
+            "for-each-ref",
+            "--format=%(objectname) %(refname)",
+            "refs/heads",
+            base,
+        ],
+    )?;
+    let tips = listed
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .map(|(tip, reference)| (reference.to_owned(), tip.to_owned()))
+        .collect();
+    Some((common, tips))
+}
+
+/// How big `branch`'s reflog is and when it was last written, which every
+/// move of the branch changes — a reset to the commit it was already at
+/// included — and so does `gc` expiring an entry. `None` for a branch with no
+/// reflog, which is an answer to keep like any other.
+fn reflog_stamp(common: &Path, branch: &str) -> Option<(u64, SystemTime)> {
+    let metadata = std::fs::metadata(common.join("logs/refs/heads").join(branch)).ok()?;
+    Some((metadata.len(), metadata.modified().ok()?))
 }
 
 /// The commits `branch` was moved off that nothing else holds and whose
@@ -504,20 +778,27 @@ pub fn dropped(
 /// and commits it is for. A deadline spent before a branch's commits are
 /// settled leaves it unproved, and a git that could not be asked takes every
 /// proof away.
+///
+/// `None` when `going` stopped it: it is asked first, before the pass over
+/// the base, and before each branch's look — see [`merged_while`].
 fn nothing_dropped(
     repository: &Path,
     base: &str,
     proved: Vec<(Landed, Vec<Entry>)>,
     commits: usize,
     deadline: Duration,
-) -> HashMap<String, Landed> {
+    going: &dyn Fn() -> bool,
+) -> Option<HashMap<String, Landed>> {
+    if !going() {
+        return None;
+    }
     let made: Vec<&str> = proved
         .iter()
         .flat_map(|(_, reflog)| made_on(reflog))
         .collect();
     let tips: Vec<&str> = proved.iter().map(|(landed, _)| landed.tip()).collect();
     let Some(nowhere) = unheld(repository, Some(base), &made, &tips) else {
-        return HashMap::new();
+        return Some(HashMap::new());
     };
     let moved_off: Vec<Vec<String>> = proved
         .iter()
@@ -530,6 +811,9 @@ fn nothing_dropped(
         })
         .collect();
 
+    if !going() {
+        return None;
+    }
     let until = Instant::now() + deadline;
     // Where the oldest commit each branch moved off left the base, so that
     // one pass back to the oldest of those serves every branch.
@@ -546,15 +830,15 @@ fn nothing_dropped(
         held_on(repository, &[base], needed.as_deref(), commits, left(until))
     };
 
-    proved
-        .into_iter()
-        .zip(moved_off)
-        .filter(|((landed, reflog), moved_off)| {
-            if moved_off.is_empty() {
-                return true;
-            }
-            if moved_off.len() > MOST_DROPPED {
-                return false;
+    let mut kept = HashMap::new();
+    for ((landed, reflog), moved_off) in proved.into_iter().zip(moved_off) {
+        let nothing_lost = if moved_off.is_empty() {
+            true
+        } else if moved_off.len() > MOST_DROPPED {
+            false
+        } else {
+            if !going() {
+                return None;
             }
             let on_tip = match landed.proof() {
                 Proof::Ancestor => HashMap::new(),
@@ -573,22 +857,37 @@ fn nothing_dropped(
             unaccounted(
                 repository,
                 Some(base),
-                reflog,
-                moved_off,
+                &reflog,
+                &moved_off,
                 &held,
                 true,
                 until,
             )
             .is_empty()
-        })
-        .map(|((landed, _), _)| (landed.branch.clone(), landed))
-        .collect()
+        };
+        if nothing_lost {
+            kept.insert(landed.branch.clone(), landed);
+        }
+    }
+    Some(kept)
 }
 
 /// What is left of a deadline that ends at `until`, for the next pass that
 /// shares it: nothing, once it is over, which a pass answers with nothing.
 fn left(until: Instant) -> Duration {
     until.saturating_duration_since(Instant::now())
+}
+
+/// Whether `timeout` is spent, which a read handed it answers with nothing
+/// rather than start a git only to have it killed. A read so skipped ran out
+/// of time as much as one killed at its deadline, and is counted as one —
+/// see [`out_of_time_here`].
+fn spent(timeout: Duration) -> bool {
+    let spent = timeout.is_zero();
+    if spent {
+        ran_out_of_time();
+    }
+    spent
 }
 
 /// The commits [`unaccounted`] looks for a change among, by the patch-id of
@@ -809,7 +1108,7 @@ fn held_on(
     commits: usize,
     deadline: Duration,
 ) -> HashMap<String, Vec<String>> {
-    if deadline.is_zero() {
+    if spent(deadline) {
         return HashMap::new();
     }
     patches_on(repository, heads, since, commits, deadline, Hunks::Bare)
@@ -827,7 +1126,7 @@ fn own_patches(
     hunks: Hunks,
     timeout: Duration,
 ) -> HashMap<String, String> {
-    if commits.is_empty() || timeout.is_zero() {
+    if commits.is_empty() || spent(timeout) {
         return HashMap::new();
     }
     let mut log = vec![
@@ -862,7 +1161,7 @@ fn own_patches(
 /// see [`unaccounted`]. The commits go in on stdin, for [`unheld`]'s reason.
 /// Empty when git could not be asked or `timeout` is spent.
 fn authors(repository: &Path, commits: &[&str], timeout: Duration) -> HashMap<String, String> {
-    if commits.is_empty() || timeout.is_zero() {
+    if commits.is_empty() || spent(timeout) {
         return HashMap::new();
     }
     let input: String = commits.iter().map(|commit| format!("{commit}\n")).collect();
@@ -1000,7 +1299,7 @@ fn answer(repository: &Path, args: &[&str]) -> Option<String> {
 /// [`answer`], within `timeout`: nothing once that is spent, rather than a
 /// git started only to be killed.
 fn answer_within(repository: &Path, args: &[&str], timeout: Duration) -> Option<String> {
-    if timeout.is_zero() {
+    if spent(timeout) {
         return None;
     }
     let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
@@ -1222,7 +1521,7 @@ fn patch_since(
     hunks: Hunks,
     timeout: Duration,
 ) -> Option<String> {
-    if timeout.is_zero() {
+    if spent(timeout) {
         return None;
     }
     let mut diff = vec!["-c", "diff.relative=false", "diff"];
