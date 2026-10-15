@@ -1122,21 +1122,24 @@ A program can also print a **picture**, with iTerm2's inline images — OSC 1337
 `MultipartFile` pieces — which `imgcat`, `viu` and `chafa -f iterm` speak. It is drawn over the
 rows it pushed the cursor past: in the block it was printed in, or over the grid while the pane
 draws one — for an `ssh` session without Crook's shell integration, or a REPL or a training run
-whose output has gone past a screenful — where it moves with its rows through the scrollback.
-Until the scrollback is full, that is: once one block has printed more than its ten thousand
-lines — a whole session, without the integration — nothing tells which rows a picture in it is
-over any more, and the block keeps the blank rows rather than draw the picture over the wrong
-ones. It is sized the way iTerm2 sizes it: by `width` and `height` in cells, pixels or a share of
-the pane, fitted with its shape kept unless `preserveAspectRatio=0`, and never wider or taller
-than the pane. It is decoded away from the thread that draws the window, at no more pixels
-than it covers — so a screen of large pictures holds nothing up, and one across a Retina pane
-is as sharp as its file — and for the moment that takes, a faint frame shows where it goes. PNG
-only, at most 16 MB and 4096 pixels a side; and not on the alternate screen, which a
-full-screen program redraws cell by cell at will — so yazi's previewer and an `imgcat`
-inside tmux, both of which draw from there, show none. A `clear` or a `reset`, a resize that
-reflows the rows under it, or a shorter pane under a full-screen program takes a picture away.
-Kitty's graphics protocol is not read yet. The list of what is absent — and what adding each item
-would touch — is the last section of the architecture doc.
+whose output has gone past a screenful — where it moves with its rows through the scrollback,
+past the ten thousand lines a pane keeps as well. It goes once its first row has scrolled out of
+them, and the block keeps the blank rows rather than draw it over the oldest line; and every
+picture in the block goes if a program scrolls a full scrollback by hundreds of lines at once, in
+one synchronized update, which is more than Crook can follow. A picture printed over every cell
+of an earlier one replaces it, so a plot redrawn in place is one picture rather than one a frame.
+The block being printed keeps 256 MB of pictures, counting each as at least 16 KB — sixteen
+thousand icons — and lets its oldest go past that. It is sized the way iTerm2 sizes it: by
+`width` and `height` in cells, pixels or a share of the pane, fitted with its shape kept unless
+`preserveAspectRatio=0`, and never wider or taller than the pane. It is decoded away from the
+thread that draws the window, at no more pixels than it covers — so a screen of large pictures
+holds nothing up, and one across a Retina pane is as sharp as its file — and for the moment that
+takes, a faint frame shows where it goes. PNG only, at most 16 MB and 4096 pixels a side; and not
+on the alternate screen, which a full-screen program redraws cell by cell at will — so yazi's
+previewer and an `imgcat` inside tmux, both of which draw from there, show none. A `clear` or a
+`reset`, a resize that reflows the rows under it, or a shorter pane under a full-screen program
+takes a picture away. Kitty's graphics protocol is not read yet. The list of what is absent — and
+what adding each item would touch — is the last section of the architecture doc.
 
 ## Which files your shell reads
 

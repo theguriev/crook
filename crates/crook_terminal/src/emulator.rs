@@ -42,7 +42,9 @@ use alacritty_terminal::vte::{Params, Parser, Perform};
 use parking_lot::Mutex;
 
 use crate::agent::{self, AgentReport, Reported};
-use crate::blocks::{Block, BlockId, BlockTracker, IgnoreReason, LiveBlock, Whereabouts};
+use crate::blocks::{
+    Block, BlockId, BlockTracker, HISTORY_HEADROOM, IgnoreReason, LiveBlock, Whereabouts,
+};
 use crate::harvest::{self, BlockRows};
 use crate::image::{self, ImagePlacement};
 use crate::input::{InputModes, KeyboardModes};
@@ -250,6 +252,9 @@ impl EventListener for EventProxy {
 /// It also stops where an agent report and a notification meet, because each is
 /// kept as the last of its kind and the two are read against each other: one
 /// slot for the report cannot say which side of the notification it was on.
+/// And on a switch of screens, which is a CSI rather than an OSC, because the
+/// shell's history has to be cut back right before the shell's screen goes
+/// and right after it is back: see [`Emulator::switch_screens`].
 #[derive(Default)]
 struct OscWatcher {
     /// The last OSC 7 in the chunk: the host it named and the directory.
@@ -281,6 +286,9 @@ struct OscWatcher {
     /// Whether the program asked which terminal this is, with XTVERSION —
     /// `CSI > q`, which is where the watcher stops.
     version_asked: bool,
+    /// Whether the program switched screens — `CSI ? 1049 h` or `l`, the one
+    /// switch alacritty makes — which is where the watcher stops.
+    screen_switched: bool,
     /// Keeps an iTerm2 picture that is arriving in pieces.
     images: image::Reader,
     /// A picture to place at the cursor, which is where the watcher stops.
@@ -310,6 +318,10 @@ impl Perform for OscWatcher {
             // empty one parses as.
             ('q', [b'>']) if first.is_none_or(|param| param == [0]) => {
                 self.version_asked = true;
+            }
+            // Among other modes, maybe: `Term` sets each one in turn.
+            ('h' | 'l', [b'?']) if params.iter().any(|param| param.first() == Some(&1049)) => {
+                self.screen_switched = true;
             }
             _ => {}
         }
@@ -388,12 +400,16 @@ impl Perform for OscWatcher {
     ///
     /// And on a title longer than [`agent::TITLE_BYTES`], so that the grid's
     /// own copy of it can be cut before the rest of the read pushes it.
+    ///
+    /// And on a switch of screens, so that [`Emulator::switch_screens`] can
+    /// feed it apart from the output before it.
     fn terminated(&self) -> bool {
         self.mark.is_some()
             || self.image.is_some()
             || (self.agent.is_some() && self.notification.is_some())
             || self.version_asked
             || self.long_title.is_some()
+            || self.screen_switched
     }
 }
 
@@ -577,10 +593,15 @@ pub struct Emulator {
     proxy: EventProxy,
     palette: Palette,
     size: TerminalSize,
-    /// The most history the grid keeps. A history this long no longer grows
-    /// by the lines that scroll into it, which is where [`Self::keep_view`]
-    /// stops being able to count them.
+    /// The most history the grid keeps between feeds. Alacritty is allowed
+    /// [`HISTORY_HEADROOM`] lines more while one is under way, which the
+    /// blocks cut back off after every slice: see [`Self::feed`]. A history
+    /// this long no longer grows by the lines that scroll into it, which is
+    /// where [`Self::keep_view`] stops being able to count them.
     scrollback_lines: usize,
+    /// Whether the synchronized update `parser` is holding switches screens,
+    /// which the watcher saw go by: see [`Self::switch_screens`].
+    switch_held: bool,
     title: Option<String>,
     working_directory: Option<PathBuf>,
     /// The host the last OSC 7 named, beside [`Self::working_directory`]:
@@ -624,7 +645,10 @@ impl Emulator {
     pub fn new(size: TerminalSize, scrollback_lines: usize, palette: Palette) -> Self {
         let proxy = EventProxy::default();
         let config = Config {
-            scrolling_history: scrollback_lines,
+            // Room past the scrollback for a slice of output to scroll into,
+            // which the blocks cut back off and count, so that nothing
+            // alacritty evicts from a full history goes uncounted.
+            scrolling_history: scrollback_lines.saturating_add(HISTORY_HEADROOM),
             // Off in alacritty's default config, which means `Term` would
             // refuse the mode-setting escapes and never answer the query a
             // program uses to find out whether the protocol is available. The
@@ -650,6 +674,7 @@ impl Emulator {
             palette,
             size,
             scrollback_lines,
+            switch_held: false,
             title: None,
             working_directory: None,
             working_host: None,
@@ -709,7 +734,11 @@ impl Emulator {
                 .osc_parser
                 .advance_until_terminated(&mut self.osc_watcher, rest);
             let (piece, remaining) = rest.split_at(consumed);
-            self.parser.advance(&mut self.term, piece);
+            if std::mem::take(&mut self.osc_watcher.screen_switched) {
+                self.switch_screens(piece);
+            } else {
+                self.feed(piece);
+            }
             // Before anything else reads the anchor: a piece that took a
             // full-screen program down is the moment a reflow made under it
             // can be done on the screen it was for.
@@ -757,7 +786,7 @@ impl Emulator {
             // After everything in the piece that scrolled, the update a long
             // title ended included, and before the mark, which may harvest
             // the pictures at the rows their anchors name.
-            self.settle_pictures();
+            self.settle_history();
             if let Some(mark) = self.osc_watcher.mark.take() {
                 // A directory too, and for the same reason: bash and zsh print
                 // `D`, the directory and the next `A` back to back, and the
@@ -832,7 +861,7 @@ impl Emulator {
         if cursor.input_needs_wrap
             || (cursor.point.column.0 > 0 && cursor.point.column.0 + columns > grid_columns)
         {
-            self.parser.advance(&mut self.term, b"\r\n");
+            self.feed(b"\r\n");
         }
         let at = self.term.grid().cursor.point;
         let (line, column) = (at.line.0, at.column.0);
@@ -859,17 +888,109 @@ impl Emulator {
         } else {
             moves.extend_from_slice(format!("\x1b[{}G", column + columns + 1).as_bytes());
         }
-        self.parser.advance(&mut self.term, &moves);
-        // The rows it took may be the ones that filled the history, and the
-        // picture is then already past where its anchor can follow it.
-        self.settle_pictures();
+        self.feed(&moves);
+        // The rows it took scrolled the grid, which can take a first row out
+        // of a full history: another picture's, or one as tall as the screen
+        // printed at its foot.
+        self.settle_history();
     }
 
-    /// Forgets the open block's pictures if the history is full: see
+    /// Feeds `bytes` to the grid, in slices too short to scroll the history
+    /// to the end of its headroom a line at a time, and holds the history at
+    /// its length after each: see [`BlockTracker::trim_history`].
+    ///
+    /// A byte scrolls one line at most, unless it ends a sequence that
+    /// scrolls several — a scroll by a count, an erase that pushes the screen
+    /// up, a synchronized update let go of — so a slice a byte shorter than
+    /// the room left cannot reach the end with newlines, however many it
+    /// holds. The history is at its length after every slice, so the room is
+    /// the whole headroom when it is full, and the whole feed when it is far
+    /// from it.
+    fn feed(&mut self, bytes: &[u8]) {
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let (slice, after) = rest.split_at(self.history_room().min(rest.len()));
+            let held = self.updating();
+            self.parser.advance(&mut self.term, slice);
+            if held {
+                self.update_let_go();
+            }
+            self.blocks
+                .trim_history(&mut self.term, self.scrollback_lines);
+            rest = after;
+        }
+    }
+
+    /// Feeds a piece the watcher stopped on a switch of screens at, cutting
+    /// the shell's history back before the switch's last byte goes in and
+    /// after it has.
+    ///
+    /// The bytes before that one may scroll the shell's screen, and the trim
+    /// after them is the last chance to count what they scrolled before the
+    /// shell's history is out of reach. The trim after it is the first chance
+    /// once the history is back in reach, before anything scrolls it. So no
+    /// slice scrolls the shell's history while it cannot be read, and under a
+    /// program it is no longer than [`Self::history_room`] takes it to be.
+    ///
+    /// Inside a synchronized update the switch is held with the rest of the
+    /// update, and reaches the grid only when it is let go of: see
+    /// [`Self::update_let_go`]. It is noted as held before its last byte goes
+    /// in, because that byte can be what lets go of the update: one that
+    /// would fill `vte`'s buffer to its limit ends the update instead, inside
+    /// the very feed that carries it.
+    fn switch_screens(&mut self, piece: &[u8]) {
+        if let Some((last, before)) = piece.split_last() {
+            self.feed(before);
+            self.switch_held |= self.updating();
+            self.feed(std::slice::from_ref(last));
+        }
+    }
+
+    /// Whether a synchronized update is being held, to reach the grid when it
+    /// is let go of.
+    fn updating(&self) -> bool {
+        self.parser.sync_timeout().sync_timeout().is_some()
+    }
+
+    /// Called after anything that may have let go of a synchronized update:
+    /// one that switched screens may have scrolled the shell's history out of
+    /// sight, where nothing could cut it back. See
+    /// [`BlockTracker::update_switched_screens`].
+    fn update_let_go(&mut self) {
+        if self.switch_held {
+            self.blocks.update_switched_screens(&self.term);
+            self.switch_held = self.updating();
+        }
+    }
+
+    /// How long the next slice [`Self::feed`] feeds may be: a byte shorter
+    /// than the lines the history has room for before alacritty evicts on its
+    /// own, and a byte at least.
+    ///
+    /// On the alternate screen the shell's history cannot be read. It was
+    /// held at its length right before the shell's screen went, and the
+    /// program's output does not scroll it, so the headroom is the room
+    /// until a slice brings the shell's screen back — which that slice ends
+    /// on: see [`Self::switch_screens`]. A full reset scrolls it from empty.
+    /// What else can move it under a program — a resize, an update let go of
+    /// that switched screens — is [`BlockTracker::rows_changed`]'s.
+    fn history_room(&self) -> usize {
+        let history = if self.term.mode().contains(TermMode::ALT_SCREEN) {
+            self.scrollback_lines
+        } else {
+            self.term.grid().history_size()
+        };
+        let limit = self.scrollback_lines.saturating_add(HISTORY_HEADROOM);
+        limit.saturating_sub(history).saturating_sub(1).max(1)
+    }
+
+    /// Holds the history at its length, and forgets the open block's pictures
+    /// whose first rows have left it: see [`BlockTracker::trim_history`] and
     /// [`BlockTracker::settle_pictures`].
-    fn settle_pictures(&mut self) {
+    fn settle_history(&mut self) {
         self.blocks
-            .settle_pictures(&self.term, self.scrollback_lines);
+            .trim_history(&mut self.term, self.scrollback_lines);
+        self.blocks.settle_pictures(&self.term);
     }
 
     /// Feeds one item of a stream that another emulator is also being fed,
@@ -1176,8 +1297,9 @@ impl Emulator {
     /// [`crate::Terminal::resize`] does both.
     pub fn resize(&mut self, size: TerminalSize) {
         let columns_changed = size.columns != self.size.columns;
+        let rows_changed = size.rows != self.size.rows;
         let shortened = size.rows < self.size.rows;
-        let geometry_changed = columns_changed || size.rows != self.size.rows;
+        let geometry_changed = columns_changed || rows_changed;
         self.size = size;
         if !geometry_changed {
             return;
@@ -1192,13 +1314,13 @@ impl Emulator {
         if columns_changed {
             self.blocks.reflowed(&self.term);
         }
-        // A shorter screen pushes its top rows into the history, and into a
-        // full one without counting them: the shell's as well under a
+        // A shorter screen pushes its top rows into the history, and a
+        // taller one pulls them back out: the shell's as well under a
         // full-screen program, where its history cannot be read.
-        if shortened {
-            self.blocks.shortened(&self.term);
+        if rows_changed {
+            self.blocks.rows_changed(&self.term, shortened);
         }
-        self.settle_pictures();
+        self.settle_history();
         self.dirty = true;
         self.drain();
     }
@@ -1227,6 +1349,13 @@ impl Emulator {
     /// How many lines of scrollback sit above the viewport.
     pub fn history_len(&self) -> usize {
         self.term.grid().history_size()
+    }
+
+    /// Tests: how many pictures the open block holds, under a full-screen
+    /// program too, where a [`Snapshot`]'s live block shows none of them.
+    #[cfg(test)]
+    pub(crate) fn open_pictures(&self) -> usize {
+        self.blocks.open_pictures()
     }
 
     /// Copies lines out of the grid, addressed from the oldest line of the
@@ -1404,7 +1533,8 @@ impl Emulator {
         // any other.
         let view = self.view();
         self.parser.stop_sync(&mut self.term);
-        self.settle_pictures();
+        self.update_let_go();
+        self.settle_history();
         self.keep_view(view);
         self.dirty = true;
         self.drain();
@@ -1688,6 +1818,7 @@ impl Emulator {
                 return None;
             }
             self.parser.stop_sync(&mut self.term);
+            self.update_let_go();
         }
         let exited = self.hand_over_term_events();
         if let Some(title) = &self.title {

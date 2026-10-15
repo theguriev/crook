@@ -1721,27 +1721,31 @@ fn a_full_screen_program_does_not_show_the_pictures_of_the_screen_under_it() {
 }
 
 #[test]
-fn a_picture_past_a_full_scrollback_is_not_drawn_over_the_rows_after_it() {
+fn a_picture_past_a_full_scrollback_is_drawn_over_its_own_rows() {
     // A session longer than its scrollback — ten thousand lines in a pane,
-    // ten here — has a history that no longer grows, and nothing then says
-    // which rows a picture printed into it is over: told where the cursor
-    // was, the grid would draw it over `BELOW` and, at the bottom of the
-    // screen, over the prompt and what is typed at it. It leaves the blank
-    // rows it took instead.
+    // ten here — has a history that no longer grows by the lines scrolled
+    // into it. The emulator counts them anyway, so the picture is drawn
+    // under the line printed before it, and not where the cursor was when it
+    // was printed: told that, the grid would draw it over `BELOW` and, at the
+    // bottom of the screen, over the prompt and what is typed at it.
     let mut emulator = grid_with_a_picture_after(30, 10, "width=4;height=2;");
     let snapshot = emulator.snapshot();
     assert_eq!(
         pane_surface::of(&snapshot, std::time::Instant::now()).surface,
         pane_surface::Surface::Grid
     );
+    let row = row_saying(&snapshot, "ABOVE") + 1;
     let below = row_saying(&snapshot, "BELOW");
     let drawn = pictures(&painted_with_pictures(&snapshot));
     let metrics = font().metrics();
+    assert_eq!(drawn.len(), 1, "{drawn:?}");
+    assert_eq!(
+        drawn[0].0.origin().y(),
+        row as f32 * metrics.height,
+        "the picture is under the line printed before it"
+    );
     assert!(
-        drawn
-            .iter()
-            .all(|(bounds, _)| bounds.max_y() <= below as f32 * metrics.height),
+        drawn[0].0.max_y() <= below as f32 * metrics.height,
         "nothing over BELOW, on row {below}: {drawn:?}"
     );
-    assert!(drawn.is_empty(), "{drawn:?}");
 }
