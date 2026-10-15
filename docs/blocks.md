@@ -326,10 +326,14 @@ There is no box. A block has no border, no corner radius and no fill in its rest
 * **The controls** — two 26 px squares at the top-right of the *hovered* block, the outer one
   12 px in from the pane's right edge so it clears the thumb. They follow the block into view
   rather than sitting on its top edge, because a block taller than the pane is the one most
-  worth acting on and its top edge is usually above the window. They land on the prompt line,
-  so each square is opaque — the pane's ground, the block's wash, then its tint — and painted a
-  layer above the block's text: a command long enough to reach them would otherwise show
-  through, its letters under the icons.
+  worth acting on and its top edge is usually above the window. On the block's top they sit on
+  its first line (the prompt line, or the blank line some prompts start with), and they are
+  opaque there, painted a layer above the block's text: the pane's ground and the block's wash
+  under both squares and the gap between them, then each square's tint. A command long enough
+  to reach them would otherwise show through, its letters under the icons. A square is taller
+  than a row, and the few pixels of it that reach into the next row are the tint alone, so that
+  row's letters show through rather than losing their tops. Over the output of a block whose
+  top has scrolled away, the squares are opaque all the way down.
 
   The first is **copy**. Clicking it puts exactly that block's command and output on the
   clipboard: no neighbour's text, no trailing blank rows, no space injected after a wide

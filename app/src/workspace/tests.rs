@@ -20752,24 +20752,23 @@ mod shells {
             );
         }
 
-        #[test]
-        fn a_block_s_controls_cover_the_command_line_they_are_drawn_over() {
-            // The controls sit on the prompt line, and their plates were a
-            // tint in the list's own layer — under its glyphs, since a layer
-            // draws its text after its rects. A command long enough to reach
-            // them showed through, letters and icons over each other. Each
-            // plate is the pane's own ground now, then the block's wash, then
-            // the tint, above the text.
-            let mut harness = Harness::panel(1);
-            let Some(pane) = marked_shell(&mut harness) else {
-                return;
-            };
+        /// A pane whose block 0 is a failed command long enough to fold across
+        /// the whole width, hovered: the frame, the pane's panel and the fill
+        /// of the pane's own ground. `None` on a machine with no shell these
+        /// tests speak.
+        ///
+        /// Failed, for the wash, and folded so that the rows of the command
+        /// line run to under the controls. Which of its rows those are is the
+        /// host prompt's business — a blank line before it moves the command
+        /// down one.
+        fn a_long_failed_command_hovered(
+            harness: &mut Harness,
+        ) -> Option<(Rc<Scene>, RectF, Fill)> {
+            let pane = marked_shell(harness)?;
             harness.frame();
-            // Failed, for the wash, and long enough to fold: the rows of the
-            // command line run the whole width, to under the controls.
             let long = "x".repeat(300);
-            if run(&mut harness, pane, &format!("echo {long}; false")) == 0 {
-                return;
+            if run(harness, pane, &format!("echo {long}; false")) == 0 {
+                return None;
             }
 
             let ground = harness
@@ -20781,19 +20780,15 @@ mod shells {
                     )))
                 })
                 .expect("the pane has a terminal");
-            let red = theme().terminal.normal[1];
-            let panel = panel_of_the_pane(&mut harness);
-            let scene = hover_block(&mut harness, pane, 0);
-            let controls = block_controls(&scene, panel);
-            assert_eq!(controls.len(), 2, "the copy square and the dots");
+            let panel = panel_of_the_pane(harness);
+            let scene = hover_block(harness, pane, 0);
+            Some((scene, panel, ground))
+        }
 
-            let layers: Vec<_> = scene.layers().collect();
-            // The layer the block's text is drawn in: the one holding the
-            // three hundred folded `x`s. Which rows reach the controls is the
-            // host prompt's business — a blank line before it moves the
-            // command down one — so what is asserted is the order the two are
-            // drawn in, and an overlap only where there is one.
-            let text = (0..layers.len())
+        /// The layer a block's text is drawn in: the one holding the most
+        /// `x`s inside `panel`.
+        fn layer_of_the_xs(layers: &[&crookui_core::scene::Layer], panel: RectF) -> usize {
+            (0..layers.len())
                 .max_by_key(|&index| {
                     layers[index]
                         .glyphs
@@ -20804,24 +20799,58 @@ mod shells {
                         })
                         .count()
                 })
-                .expect("the frame has layers");
-            // A glyph's cell, from the baseline it was set on: a letter whose
-            // baseline is below a plate still has its top half under it.
+                .expect("the frame has layers")
+        }
+
+        /// A glyph's cell, from the baseline it was set on: a letter whose
+        /// baseline is below a plate still has its top half under it.
+        fn cell_of(glyph: &crookui_core::scene::Glyph) -> RectF {
             let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
-            let cell_of = |glyph: &crookui_core::scene::Glyph| {
-                RectF::new(
-                    glyph.position - vec2f(0., cell.baseline),
-                    vec2f(cell.width, cell.height),
-                )
+            RectF::new(
+                glyph.position - vec2f(0., cell.baseline),
+                vec2f(cell.width, cell.height),
+            )
+        }
+
+        /// Whether `part` is painted from the top of `control` down, across
+        /// the whole of its width and no lower than it: the ground under the
+        /// plates, or the control's own tint.
+        fn from_the_top_of(control: RectF, part: RectF) -> bool {
+            part.min_y() == control.min_y()
+                && part.min_x() <= control.min_x()
+                && part.max_x() >= control.max_x()
+                && part.max_y() <= control.max_y()
+        }
+
+        #[test]
+        fn a_block_s_controls_cover_the_command_line_they_are_drawn_over() {
+            // The controls sit on the prompt line, and their plates were a
+            // tint in the list's own layer — under its glyphs, since a layer
+            // draws its text after its rects. A command long enough to reach
+            // them showed through, letters and icons over each other. The
+            // plates are on the pane's own ground now, then the block's wash,
+            // and then each one's tint, above the text — the ground under both
+            // and the gap between them, where a sliver of a letter otherwise
+            // shows between two squares hiding the rest of its word.
+            let mut harness = Harness::panel(1);
+            let Some((scene, panel, ground)) = a_long_failed_command_hovered(&mut harness) else {
+                return;
             };
-            for control in controls {
+            let red = theme().terminal.normal[1];
+            let controls = block_controls(&scene, panel);
+            assert_eq!(controls.len(), 2, "the copy square and the dots");
+
+            let layers: Vec<_> = scene.layers().collect();
+            // What is asserted is the order the text and the plates are drawn
+            // in, and an overlap only where there is one.
+            let text = layer_of_the_xs(&layers, panel);
+            for &control in &controls {
                 let painted = layers
                     .iter()
                     .position(|layer| {
-                        layer
-                            .rects
-                            .iter()
-                            .any(|rect| rect.bounds == control && rect.background == ground)
+                        layer.rects.iter().any(|rect| {
+                            from_the_top_of(control, rect.bounds) && rect.background == ground
+                        })
                     })
                     .unwrap_or_else(|| {
                         panic!("nothing opaque is under the control at {control:?}")
@@ -20841,13 +20870,13 @@ mod shells {
                     "text is drawn over the control at {control:?}: {over:?}"
                 );
 
-                let fills: Vec<&Fill> = layers[painted]
+                let fills: Vec<(&Fill, RectF)> = layers[painted]
                     .rects
                     .iter()
-                    .filter(|rect| rect.bounds == control)
-                    .map(|rect| &rect.background)
+                    .filter(|rect| from_the_top_of(control, rect.bounds))
+                    .map(|rect| (&rect.background, rect.bounds))
                     .collect();
-                let [first, wash, tint] = fills.as_slice() else {
+                let [(first, opaque), (wash, washed), (tint, tinted)] = fills.as_slice() else {
                     panic!("the control at {control:?} is painted as {fills:?}");
                 };
                 assert_eq!(*first, &ground, "the ground goes down first");
@@ -20856,11 +20885,18 @@ mod shells {
                         if (color.r, color.g, color.b) == (red.r, red.g, red.b) && color.a < 255),
                     "the failed block's wash is not over the ground: {wash:?}"
                 );
+                assert_eq!(washed, opaque, "the wash is not where the ground is");
+                assert!(
+                    opaque.min_x() <= controls[0].min_x() && opaque.max_x() >= controls[1].max_x(),
+                    "the ground at {opaque:?} is not under both controls and the gap between \
+                     them: {controls:?}"
+                );
                 assert_eq!(
                     *tint,
                     &Fill::Solid(theme().overlay_1),
                     "the plate's own tint goes on top"
                 );
+                assert_eq!(*tinted, control, "the tint is not the whole plate");
                 let icon = layers.iter().position(|layer| {
                     layer
                         .icons
@@ -20868,6 +20904,64 @@ mod shells {
                         .any(|icon| control.contains_point(center(icon.bounds)))
                 });
                 assert_eq!(icon, Some(painted), "the icon is not drawn on the plate");
+            }
+        }
+
+        #[test]
+        fn a_block_s_controls_leave_the_row_under_their_line_whole() {
+            // A plate is 26 px over 15 px rows, and on the block's top it
+            // reaches 6.5 px into the row after the line it sits on: the first
+            // line of output, or the command itself under a prompt that starts
+            // with a blank line. Made opaque all the way down, it cut the tops
+            // off the letters in that row. What it hides it hides by whole
+            // rows; the overhang is the tint alone, which they show through.
+            let mut harness = Harness::panel(1);
+            let Some((scene, panel, ground)) = a_long_failed_command_hovered(&mut harness) else {
+                return;
+            };
+            let controls = block_controls(&scene, panel);
+            assert_eq!(controls.len(), 2, "the copy square and the dots");
+
+            let layers: Vec<_> = scene.layers().collect();
+            let cells: Vec<RectF> = layers[layer_of_the_xs(&layers, panel)]
+                .glyphs
+                .iter()
+                .map(cell_of)
+                .collect();
+            // An edge more than a pixel inside a cell, top or bottom.
+            let slices =
+                |edge: f32, cell: &RectF| cell.min_y() + 1. < edge && edge < cell.max_y() - 1.;
+            for control in controls {
+                let opaque = layers
+                    .iter()
+                    .flat_map(|layer| layer.rects.iter())
+                    .find(|rect| from_the_top_of(control, rect.bounds) && rect.background == ground)
+                    .unwrap_or_else(|| panic!("nothing opaque is under the control at {control:?}"))
+                    .bounds;
+                let under: Vec<RectF> = cells
+                    .iter()
+                    .copied()
+                    .filter(|cell| cell.intersection(control).is_some())
+                    .collect();
+                // The row the plate's lower edge crosses, where the fold puts
+                // the command or its output on any prompt of one or two lines.
+                if !under.iter().any(|cell| cell.max_y() > control.max_y()) {
+                    eprintln!(
+                        "skipped: this prompt prints nothing under the lower edge of the control \
+                         at {control:?}"
+                    );
+                    return;
+                }
+                let cut: Vec<RectF> = under
+                    .into_iter()
+                    .filter(|cell| slices(opaque.min_y(), cell) || slices(opaque.max_y(), cell))
+                    .collect();
+                assert!(
+                    cut.is_empty(),
+                    "the control at {control:?} hides what is under it down to {}, through the \
+                     middle of the letters in {cut:?}",
+                    opaque.max_y()
+                );
             }
         }
 

@@ -143,9 +143,10 @@ const CONTROL_GAP: f32 = 4.;
 
 /// How far below a block's top edge the controls sit.
 ///
-/// Warp's `overflow_offset`. Below the divider rather than on it, and above
-/// the first row, so the control lands on the block's prompt line and never on
-/// its output.
+/// Warp's `overflow_offset`. Below the divider rather than on it, and starting
+/// above the first row, so the control sits on the block's first line.
+/// It is taller than a row, so its lower edge reaches a few pixels into the
+/// row after that one, where it is only a tint: see `BlockList::opaque_part`.
 pub(super) const CONTROL_OFFSET: f32 = 12.;
 
 /// How round the control's plate is.
@@ -621,6 +622,34 @@ impl BlockList {
         RectF::new(
             origin + vec2f(size.x() - from_right - CONTROL_SIZE, top),
             vec2f(CONTROL_SIZE, CONTROL_SIZE),
+        )
+    }
+
+    /// The part of `plates`, the band a block's controls are drawn across,
+    /// that hides the text under it.
+    ///
+    /// On the block's own top the plates start in the space above the first
+    /// row and are taller than that row, so their lower edge reaches a few
+    /// pixels into the row after it: 6.5 of the 15 at the default size. That
+    /// row is the first line of output, or the command itself under a prompt
+    /// that starts with a blank line. An opaque edge across it would cut the
+    /// tops off its letters, so the plates hide what is under them only down
+    /// to the last row edge they cross, and below that they are their tint
+    /// alone, which those letters show through. Over the output of a block
+    /// whose top has scrolled away, or of one with no command and so no space
+    /// above its first row, they start inside a row and there is no line they
+    /// belong to; they hide all of what is under them there.
+    fn opaque_part(&self, origin: Vector2F, item: Visible, plates: RectF) -> RectF {
+        let height = self.font.metrics().height;
+        // The same sum `paint_item` sets the rows by.
+        let rows_top = origin.y() + item.top + self.padding_top(item.index) * height;
+        if plates.min_y() > rows_top || plates.max_y() <= rows_top || height <= 0. {
+            return plates;
+        }
+        let rows = ((plates.max_y() - rows_top) / height).floor();
+        RectF::from_points(
+            plates.origin(),
+            vec2f(plates.max_x(), rows_top + rows * height),
         )
     }
 
@@ -1553,9 +1582,12 @@ impl BlockList {
         ctx.scene.start_layer(ClipBounds::ActiveLayer);
         ctx.scene.set_active_layer_click_through();
 
-        // Each plate is the pane's ground, then the block's washes in the order
-        // `paint_item` lays them down — or the plate would be a hole cut in a
-        // failed or a selected block — and then its own tint.
+        // Under the plates, the pane's ground, then the block's washes in the
+        // order `paint_item` lays them down — or the plates would be holes cut
+        // in a failed or a selected block. Once, under both plates and the
+        // gap between them: a gap left open shows a sliver of the letter under
+        // it, between two squares that hide the rest of its word. They stop
+        // where `opaque_part` says; each plate's tint is the whole square.
         let ground = color(self.snapshot.background);
         let washes = [
             (self.verdict(item.index) == Verdict::Failed)
@@ -1563,6 +1595,39 @@ impl BlockList {
             (self.block(item.index).map(|block| block.id) == self.view.selected())
                 .then(|| theme().accent.with_alpha(SELECT_WASH_ALPHA)),
         ];
+        let round = Radius::Pixels(CONTROL_RADIUS);
+        let span = self
+            .controls()
+            .iter()
+            .map(|control| self.control_at(origin, item, *control))
+            .reduce(|span, plate| {
+                RectF::from_points(
+                    vec2f(
+                        span.min_x().min(plate.min_x()),
+                        span.min_y().min(plate.min_y()),
+                    ),
+                    vec2f(
+                        span.max_x().max(plate.max_x()),
+                        span.max_y().max(plate.max_y()),
+                    ),
+                )
+            });
+        if let Some(span) = span {
+            let opaque = self.opaque_part(origin, item, span);
+            // Square along a cut, which is a row's edge rather than a plate's.
+            let corners = if opaque == span {
+                CornerRadius::with_all(round)
+            } else {
+                CornerRadius::with_top(round)
+            };
+            for fill in std::iter::once(ground).chain(washes.into_iter().flatten()) {
+                ctx.scene
+                    .draw_rect_without_hit_recording(opaque)
+                    .with_background(fill)
+                    .with_corner_radius(corners);
+            }
+        }
+
         for control in self.controls().iter().copied() {
             let bounds = self.control_at(origin, item, control);
             // The dots stay lit while their menu is up, because they are what
@@ -1573,15 +1638,10 @@ impl BlockList {
             } else {
                 theme().overlay_1
             };
-            let fills = std::iter::once(ground)
-                .chain(washes.into_iter().flatten())
-                .chain(std::iter::once(tint));
-            for fill in fills {
-                ctx.scene
-                    .draw_rect_without_hit_recording(bounds)
-                    .with_background(fill)
-                    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CONTROL_RADIUS)));
-            }
+            ctx.scene
+                .draw_rect_without_hit_recording(bounds)
+                .with_background(tint)
+                .with_corner_radius(CornerRadius::with_all(round));
 
             let inset = (CONTROL_SIZE - CONTROL_ICON_SIZE) / 2.;
             ctx.scene.draw_icon(
