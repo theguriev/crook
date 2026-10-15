@@ -884,7 +884,8 @@ pub struct MenuItem {
 /// What is work — a fetch, a file, a walk, a listing — is done two of one
 /// plugin's at a time. The rest wait their turn in the order they were asked,
 /// so a plugin whose fetches hang waits on itself and on nobody else. A sound
-/// does not wait its turn: it is played as soon as it is asked for.
+/// does not wait behind that work: sounds take turns of their own, two at a
+/// time.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request {
     /// Reach the network. Needs [`Capability::Network`] naming the host in the

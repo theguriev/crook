@@ -903,8 +903,66 @@ fn a_sound_is_counted_when_it_is_played_and_not_when_it_was_asked_for() {
 
     let released = Instant::now();
     release.send(()).expect("the worker is holding on");
-    // One worker, first come first served: when this has run, every sound
-    // asked for before it has been through the limit.
+    // Each sound answered starts the next, a few milliseconds apart, so all
+    // of them have been through the limit well inside the second it counts.
+    assert!(
+        until(&queue, || sounds_waiting_and_ringing(&app, &runtime)
+            == (Vec::new(), 0)),
+        "not every sound was answered"
+    );
+
+    let played = rung(&app, &runtime);
+    assert_eq!(
+        played.len(),
+        SOUNDS_PER_SECOND,
+        "more than a second's worth was played once the pool came free"
+    );
+    assert!(
+        played.iter().all(|at| *at >= released),
+        "a sound was counted before the pool could play it"
+    );
+}
+
+/// The tickets of the sounds a runtime has waiting, and how many of its
+/// sounds are on the pool.
+fn sounds_waiting_and_ringing(app: &App, runtime: &ModelHandle<Runtime>) -> (Vec<u32>, usize) {
+    runtime.read(app, |runtime, _| {
+        let waiting = runtime.sounds.iter().map(|(ticket, _)| *ticket).collect();
+        (waiting, runtime.ringing)
+    })
+}
+
+#[test]
+fn a_plugin_asking_for_sounds_faster_than_they_are_answered_has_two_on_the_pool() {
+    // Handed to the pool as soon as each was asked for, a plugin's sounds had
+    // no bound but the sandbox's on one call, and every answer is a call. A
+    // plugin that asked for two from every answer, the "four a second" ones
+    // among them, had twice as many on the pool after every round, and the
+    // window's thread was handed their answers faster than it could deliver
+    // them. Here the pool's only worker is held while eight are asked for.
+    let queue = LocalQueue::new();
+    let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
+    let plugins = Arc::new(Background::new(1));
+    let runtime = runtime_in(&mut app, &["sound.play"], &plugins);
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    plugins
+        .spawn(async move {
+            let _ = held.recv();
+        })
+        .detach();
+
+    ask_for(&mut app, &runtime, 1, vec![quiet_sound(); 8]);
+    queue.run_until_parked();
+    assert_eq!(
+        sounds_waiting_and_ringing(&app, &runtime),
+        ((3..9).collect(), SOUNDS_AT_ONCE),
+        "more of its sounds than it may have at once were handed to the pool"
+    );
+
+    // One worker, first come first served: when this has run, the pool has
+    // played every sound it was handed before it, and answered none of the
+    // rest, which are still waiting for those answers to be delivered.
+    release.send(()).expect("the worker is holding on");
     let (behind, through) = std::sync::mpsc::channel();
     plugins
         .spawn(async move {
@@ -914,16 +972,22 @@ fn a_sound_is_counted_when_it_is_played_and_not_when_it_was_asked_for() {
     through
         .recv_timeout(Duration::from_secs(5))
         .expect("the pool came free");
-
-    let played = rung(&app, &runtime);
     assert_eq!(
-        played.len(),
-        SOUNDS_PER_SECOND,
-        "more than a second's worth was played the moment the pool came free"
+        rung(&app, &runtime).len(),
+        SOUNDS_AT_ONCE,
+        "the pool was handed more of the plugin's sounds than it may have at once"
     );
+
+    // And none is dropped: each answer starts the oldest still waiting.
     assert!(
-        played.iter().all(|at| *at >= released),
-        "a sound was counted before the pool could play it"
+        until(&queue, || sounds_waiting_and_ringing(&app, &runtime)
+            == (Vec::new(), 0)),
+        "not every sound was answered"
+    );
+    assert_eq!(
+        runtime.read(&app, |runtime, _| runtime.failures.get()),
+        0,
+        "the sounds were answered by giving up on the plugin"
     );
 }
 
@@ -1298,22 +1362,121 @@ fn a_line_longer_than_a_walk_holds_is_read_past_and_the_next_one_is_read() {
 fn a_line_with_no_end_is_given_up_on_at_the_deadline_and_not_held() {
     // A disk image in a granted directory is a line with no end: read with
     // nothing but `read_until`, it went into memory whole whatever the
-    // deadline said. An endless one here, so that only the clock can stop it.
-    let mut endless = std::io::BufReader::new(std::io::repeat(b'x'));
+    // deadline said. Here a line a thousand times longer than the ceiling,
+    // with the deadline already gone. Not an endless one: without the look
+    // at the clock, an endless line was a test that never came back rather
+    // than one that failed.
+    use std::io::Read as _;
+
+    let mut long = std::io::BufReader::new(std::io::repeat(b'x').take(1 << 20));
     let mut bytes = Vec::new();
 
-    let outcome = next_line(
-        &mut endless,
-        &mut bytes,
-        1024,
-        Instant::now() + Duration::from_millis(50),
+    let outcome = next_line(&mut long, &mut bytes, 1024, Instant::now());
+
+    assert!(
+        matches!(outcome, Err(Stopped::OutOfTime)),
+        "a line read past its deadline came to {outcome:?}"
+    );
+    assert!(bytes.len() <= 1024, "{} bytes of it were held", bytes.len());
+}
+
+/// `left` bytes of lines `length` long, each ending in a newline, made as
+/// they are read rather than held — and how many have been.
+struct LongLines {
+    length: u64,
+    left: u64,
+    made: u64,
+}
+
+impl std::io::Read for LongLines {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let room = buffer
+            .len()
+            .min(usize::try_from(self.left).unwrap_or(usize::MAX));
+        for byte in &mut buffer[..room] {
+            self.made += 1;
+            *byte = if self.made.is_multiple_of(self.length) {
+                b'\n'
+            } else {
+                b'x'
+            };
+        }
+        self.left -= room as u64;
+        Ok(room)
+    }
+}
+
+#[test]
+fn a_file_of_long_lines_is_given_up_on_a_line_past_the_deadline_and_not_a_thousand() {
+    // The clock was looked at every thousand and twenty-four lines and
+    // nowhere else, and a line may be sixteen megabytes: sixteen gigabytes
+    // read past the deadline before the walk noticed. Here sixty-four lines
+    // of a megabyte, fewer than a look's worth of lines, with the deadline
+    // gone before the first.
+    let line = BYTES_PER_LOOK as u64;
+    let mut reader = std::io::BufReader::new(LongLines {
+        length: line,
+        left: 64 * line,
+        made: 0,
+    });
+    let mut lines = 0;
+
+    let outcome = fold(
+        &mut reader,
+        "\"usage\"",
+        &[],
+        &[],
+        &[],
+        &mut HashSet::new(),
+        &mut [],
+        &mut lines,
+        Instant::now(),
     );
 
     assert!(
         matches!(outcome, Err(Stopped::OutOfTime)),
-        "a line with no end came to {outcome:?}"
+        "a file read past its deadline came to {outcome:?}"
     );
-    assert!(bytes.len() <= 1024, "{} bytes of it were held", bytes.len());
+    let made = reader.get_ref().made;
+    assert!(
+        made <= 2 * line,
+        "{made} bytes were read past the deadline, which is more than a line"
+    );
+}
+
+#[test]
+fn files_that_cannot_be_opened_past_the_deadline_end_the_walk_and_are_not_skipped() {
+    // A file that cannot be opened costs itself and not the walk, and the
+    // clock was looked at only once a file was open. On a share that has
+    // gone away every open fails a timeout late, so a walk of them skipped
+    // file after file past its deadline and then answered a total.
+    let never_made = std::env::temp_dir().join(format!("crook-never-made-{}", std::process::id()));
+    let gone: Vec<PathBuf> = (0..5)
+        .map(|index| never_made.join(format!("{index}.jsonl")))
+        .collect();
+
+    assert!(
+        matches!(
+            add_up(&gone, "\"usage\"", &[], &[], &[], Instant::now()),
+            Answer::Failed(_)
+        ),
+        "files that could not be opened were skipped past the deadline"
+    );
+    // In time, they are skipped, as a file that cannot be read always was.
+    assert!(
+        matches!(
+            add_up(
+                &gone,
+                "\"usage\"",
+                &[],
+                &[],
+                &[],
+                Instant::now() + Duration::from_secs(60)
+            ),
+            Answer::Counted { lines: 0, .. }
+        ),
+        "files that could not be opened were not skipped in time"
+    );
 }
 
 #[test]
