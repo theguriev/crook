@@ -178,7 +178,11 @@
 //! repository's reads when the menu opens — never a program started to ask,
 //! and never anything on the frame. One found only where its installer put
 //! it is started by its path, since the pane's shell may not have that
-//! directory on its `PATH`; see [`crate::agent::search_path`]. A shell
+//! directory on its `PATH`; see [`crate::agent::search_path`]. Only the
+//! start: the session file remembers the agent by its name, as it does every
+//! program (see [`crate::agent::launch_of`]), so the resume line a restart
+//! offers names it alone, and such a shell answers that with "command not
+//! found". A path kept in the file would be a program the file chose. A shell
 //! the host's quoting is not proven in gets the agent's bare name and no
 //! prompt field, rather than a line that means something else there.
 //!

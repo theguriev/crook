@@ -1724,7 +1724,10 @@ impl Installed {
     /// Its path rather than its name, because the pane's shell may not have
     /// the directory it was found in. Nothing else changes: the line is still
     /// read as this agent's — [`program_of`] reads a program by its file
-    /// name — and the prompt is quoted as it always was.
+    /// name — and the prompt is quoted as it always was. So is what the
+    /// session file keeps: [`launch_of`] keeps no path, and the line a
+    /// restart offers to resume this agent names it alone, which the same
+    /// shell may not find.
     pub fn launch_line(&self, prompt: &str) -> Option<String> {
         let line = launch_line(self.agent, prompt)?;
         Some(match (&self.path, line.strip_prefix(self.agent)) {
