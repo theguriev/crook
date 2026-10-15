@@ -106,7 +106,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use super::run::{Intent, READ_TIMEOUT, pipe, read_within, run, run_fed};
+use super::run::{
+    Intent, READ_TIMEOUT, out_of_time_here, pipe, ran_out_of_time, read_within, run, run_fed,
+};
 
 /// How many of the base's commits the pass reads, newest first.
 ///
@@ -528,13 +530,14 @@ struct Answer {
 /// a `stat` of each branch's reflog, and the proof of the ones that moved.
 /// Background executor only.
 ///
-/// A branch left unproved is remembered only when the proof that left it so
-/// was over inside one read's deadline: every read in a proof runs under
-/// [`READ_TIMEOUT`] or a share of one, so a proof that took less than that
-/// cannot have had a read cut off, and its unproved branches are ones git
-/// answered about. One that took longer may have run out of time rather than
-/// out of evidence — on a machine busy building, say — and its unproved
-/// branches are asked about again next time.
+/// A branch left unproved is remembered only when no read of the proof that
+/// left it so ran out of time — killed at its deadline, or never started
+/// because the deadline it shared was spent; see [`out_of_time_here`]. Such a
+/// proof may have run out of time rather than out of evidence, on a machine
+/// busy building, say, and its unproved branches are asked about again next
+/// time. One that only took long, over a repository with hundreds of
+/// branches, is remembered like any other: it is how long the proof is, not
+/// how long it took, that a read's deadline is about.
 ///
 /// `None`, with nothing remembered of it, when `going` stopped the proof.
 pub fn merged_remembering(
@@ -544,11 +547,34 @@ pub fn merged_remembering(
     proofs: &Mutex<Proofs>,
     going: &dyn Fn() -> bool,
 ) -> Option<HashMap<String, Landed>> {
+    remembering_within(
+        repository,
+        base,
+        branches,
+        proofs,
+        PASS_COMMITS,
+        PASS_DEADLINE,
+        going,
+    )
+}
+
+/// [`merged_remembering`], with the passes bounded by `commits` and
+/// `deadline` as [`merged_within`]'s are — which is how the tests reach a
+/// proof that ran out of time without waiting one out.
+fn remembering_within(
+    repository: &Path,
+    base: &str,
+    branches: &[String],
+    proofs: &Mutex<Proofs>,
+    commits: usize,
+    deadline: Duration,
+    going: &dyn Fn() -> bool,
+) -> Option<HashMap<String, Landed>> {
     let Some((common, tips)) = tips_of(repository, base) else {
-        return merged_while(repository, base, branches, going);
+        return merged_within(repository, base, branches, commits, deadline, going);
     };
     let Some(base_tip) = tips.get(base) else {
-        return merged_while(repository, base, branches, going);
+        return merged_within(repository, base, branches, commits, deadline, going);
     };
     let base_now = (base.to_owned(), base_tip.clone());
     let now: HashMap<&str, _> = branches
@@ -587,9 +613,9 @@ pub fn merged_remembering(
         return Some(landed);
     }
 
-    let started = Instant::now();
-    let proved = merged_while(repository, base, &moved, going)?;
-    let answered = started.elapsed() < READ_TIMEOUT;
+    let out_of_time = out_of_time_here();
+    let proved = merged_within(repository, base, &moved, commits, deadline, going)?;
+    let answered = out_of_time_here() == out_of_time;
 
     let mut proofs = proofs.lock().unwrap_or_else(PoisonError::into_inner);
     let kept = proofs.repositories.entry(common).or_insert_with(|| Kept {
@@ -831,6 +857,18 @@ fn left(until: Instant) -> Duration {
     until.saturating_duration_since(Instant::now())
 }
 
+/// Whether `timeout` is spent, which a read handed it answers with nothing
+/// rather than start a git only to have it killed. A read so skipped ran out
+/// of time as much as one killed at its deadline, and is counted as one —
+/// see [`out_of_time_here`].
+fn spent(timeout: Duration) -> bool {
+    let spent = timeout.is_zero();
+    if spent {
+        ran_out_of_time();
+    }
+    spent
+}
+
 /// The commits [`unaccounted`] looks for a change among, by the patch-id of
 /// what each changed on its own, [`Hunks::Bare`].
 struct Held<'a> {
@@ -1049,7 +1087,7 @@ fn held_on(
     commits: usize,
     deadline: Duration,
 ) -> HashMap<String, Vec<String>> {
-    if deadline.is_zero() {
+    if spent(deadline) {
         return HashMap::new();
     }
     patches_on(repository, heads, since, commits, deadline, Hunks::Bare)
@@ -1067,7 +1105,7 @@ fn own_patches(
     hunks: Hunks,
     timeout: Duration,
 ) -> HashMap<String, String> {
-    if commits.is_empty() || timeout.is_zero() {
+    if commits.is_empty() || spent(timeout) {
         return HashMap::new();
     }
     let mut log = vec![
@@ -1102,7 +1140,7 @@ fn own_patches(
 /// see [`unaccounted`]. The commits go in on stdin, for [`unheld`]'s reason.
 /// Empty when git could not be asked or `timeout` is spent.
 fn authors(repository: &Path, commits: &[&str], timeout: Duration) -> HashMap<String, String> {
-    if commits.is_empty() || timeout.is_zero() {
+    if commits.is_empty() || spent(timeout) {
         return HashMap::new();
     }
     let input: String = commits.iter().map(|commit| format!("{commit}\n")).collect();
@@ -1240,7 +1278,7 @@ fn answer(repository: &Path, args: &[&str]) -> Option<String> {
 /// [`answer`], within `timeout`: nothing once that is spent, rather than a
 /// git started only to be killed.
 fn answer_within(repository: &Path, args: &[&str], timeout: Duration) -> Option<String> {
-    if timeout.is_zero() {
+    if spent(timeout) {
         return None;
     }
     let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
@@ -1462,7 +1500,7 @@ fn patch_since(
     hunks: Hunks,
     timeout: Duration,
 ) -> Option<String> {
-    if timeout.is_zero() {
+    if spent(timeout) {
         return None;
     }
     let mut diff = vec!["-c", "diff.relative=false", "diff"];

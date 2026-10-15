@@ -1408,6 +1408,76 @@ fn a_pass_nobody_wants_any_more_stops_between_branches_and_keeps_nothing() {
     );
 }
 
+/// A repository where each of `branches` made two commits, was rebased onto a
+/// `main` that had moved on since, and was fast-forwarded into it: proved by
+/// ancestry, and moved off the two commits it made, which only their copies
+/// on `main` account for — so that proving it takes the look for that work.
+fn rebased_and_forwarded(scratch: &ScratchDir, branches: &[&str]) -> PathBuf {
+    let repo = repository(scratch, "repo");
+    for branch in branches {
+        git(&repo, &["switch", "-c", branch, "main"]);
+        commit(&repo, &format!("{branch}-1.txt"), "one half\n", "one half");
+        commit(
+            &repo,
+            &format!("{branch}-2.txt"),
+            "the other\n",
+            "the other",
+        );
+    }
+    git(&repo, &["switch", "main"]);
+    commit(&repo, "later.txt", "main moves on\n", "later");
+    for branch in branches {
+        git(&repo, &["switch", branch]);
+        git(&repo, &["rebase", "main"]);
+        git(&repo, &["switch", "main"]);
+        git(&repo, &["merge", "--ff-only", branch]);
+    }
+    repo
+}
+
+#[test]
+fn a_proof_that_ran_out_of_time_keeps_no_unproved_answer() {
+    // A proof cut short leaves a branch unproved for want of time, not of
+    // evidence. Kept, that answer would stand until the branch moved: a
+    // merged checkout with no badge at every opening, on a machine that was
+    // busy once. Asked about again, it is proved the first time the proof
+    // has its time — and how long a proof took is no sign of that, since one
+    // over three hundred branches takes longer than any read's deadline
+    // without a read running out.
+    if without_git("a_proof_that_ran_out_of_time_keeps_no_unproved_answer") {
+        return;
+    }
+    let scratch = ScratchDir::new("ran-out");
+    let repo = rebased_and_forwarded(&scratch, &["forwarded"]);
+    let branches = names(&["forwarded"]);
+    let kept = Mutex::new(Proofs::default());
+
+    let rushed = remembering_within(
+        &repo,
+        MAIN,
+        &branches,
+        &kept,
+        PASS_COMMITS,
+        Duration::ZERO,
+        &|| true,
+    )
+    .expect("nothing stops a proof that is always going");
+    assert_eq!(rushed.get("forwarded"), None, "proved with no time to look");
+    reads_since();
+
+    let given_time = merged_remembering(&repo, MAIN, &branches, &kept, &|| true)
+        .expect("nothing stops a proof that is always going");
+
+    let reads = reads_since();
+    assert!(
+        reads
+            .iter()
+            .any(|read| read.split(' ').any(|word| word == "refs/heads/forwarded")),
+        "the branch was not asked about again: {reads:?}"
+    );
+    assert_eq!(proofs(given_time).get("forwarded"), Some(&Proof::Ancestor));
+}
+
 // --- which branch is the base ---------------------------------------------------
 
 #[test]

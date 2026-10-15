@@ -67,6 +67,42 @@ pub(super) enum Failure {
 /// part of it spawns git through here.
 static GIT_MISSING: AtomicBool = AtomicBool::new(false);
 
+thread_local! {
+    /// See [`out_of_time_here`].
+    static OUT_OF_TIME: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many calls on the calling thread have run out of time so far: git
+/// killed at its deadline, an answer still held open at it, and every read
+/// a caller left unstarted because the deadline it was to share was already
+/// spent — see [`ran_out_of_time`].
+///
+/// For a caller that keeps an answer made of many reads, and has to know
+/// whether any of them was cut short: an answer git did not give for want of
+/// time is one to ask for again, where an answer git gave is one to keep —
+/// see [`super::merged::merged_remembering`]. Only a difference between two
+/// readings means anything. Per thread, because every call here waits for
+/// git on the thread that made it, so the calls one caller made are exactly
+/// the ones its thread counted in between.
+pub(super) fn out_of_time_here() -> u64 {
+    OUT_OF_TIME.with(std::cell::Cell::get)
+}
+
+/// Counts one more call on the calling thread as having run out of time.
+///
+/// Every [`Failure::TimedOut`] here is counted already. This is for a read a
+/// caller does not start at all, because what is left of the deadline it
+/// shares with others is nothing: it is cut short just the same.
+pub(super) fn ran_out_of_time() {
+    OUT_OF_TIME.with(|count| count.set(count.get().wrapping_add(1)));
+}
+
+/// [`Failure::TimedOut`], counted — see [`out_of_time_here`].
+fn timed_out(after: Duration) -> Failure {
+    ran_out_of_time();
+    Failure::TimedOut { after }
+}
+
 /// How long a read may take before git is killed.
 ///
 /// A timeout is not a performance budget; it is the thing that stops a wedged
@@ -381,7 +417,7 @@ fn run_with(
             directory.display(),
             timeout.as_secs()
         );
-        return Err(Failure::TimedOut { after: timeout });
+        return Err(timed_out(timeout));
     }
 
     Ok(Finished {
@@ -462,9 +498,7 @@ pub(super) fn run_capped(directory: &Path, args: &[&OsStr], cap: usize) -> Resul
             directory.display(),
             READ_TIMEOUT.as_secs()
         );
-        return Err(Failure::TimedOut {
-            after: READ_TIMEOUT,
-        });
+        return Err(timed_out(READ_TIMEOUT));
     };
     let cut = stdout.len() > cap;
     stdout.truncate(cap);
@@ -692,7 +726,7 @@ pub(super) fn pipe(
             directory.display(),
             timeout.as_secs()
         );
-        return Err(Failure::TimedOut { after: timeout });
+        return Err(timed_out(timeout));
     };
 
     Ok(Finished {
@@ -810,7 +844,7 @@ fn wait_for(
                 "git did not finish within {}s and was killed",
                 timeout.as_secs()
             );
-            return Err(Failure::TimedOut { after: timeout });
+            return Err(timed_out(timeout));
         }
 
         let interval = if started.elapsed() < EAGER_POLLING {

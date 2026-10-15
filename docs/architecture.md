@@ -1345,12 +1345,15 @@ what it was told (`merged::Proofs`): per repository against the base and its tip
 against its tip and its reflog's size and time — the reflog because a branch committed on and
 reset back to the very commit it was proved at holds work only that reflog remembers. One
 `for-each-ref` shows what moved, and only that is proved; a base that moved proves everything
-again. An unproved answer is kept only from a proof that was over inside one read's deadline,
-since one that took longer may have run out of time rather than evidence. What a proof also
-leans on — every other ref, which may be what holds a commit a branch moved off — is not
-watched, so a badge can go stale until a tip moves; nothing is deleted on it, because the
-deletion proves again from nothing. A pass the menu no longer wants, because it opened again or
-closed, stops between branches.
+again. An unproved answer is kept only from a proof none of whose reads ran out of time — killed
+at its deadline, or not started because the deadline it shared was spent — since such a proof
+may have run out of time rather than evidence; `git::run` counts those per thread, and the proof
+runs every read on its own. How long the proof took is not the sign: one over a few hundred
+branches outlasts any read's deadline without a read running out. What a proof also leans on —
+every other ref, which may be what holds a commit a branch moved off — is not watched, so a
+badge can go stale until a tip moves; nothing is deleted on it, because the deletion proves
+again from nothing. A pass the menu no longer wants, because it opened again or closed, stops
+between branches.
 
 **A branch is deleted only on a proof.** `git::worktree` said from the start that a removal
 never deletes the branch — "not as an option, not under `force`" — because a branch is the work

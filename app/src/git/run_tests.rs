@@ -30,6 +30,7 @@ fn a_process_that_outlives_its_deadline_is_killed_and_reaped() {
 
     let started = std::time::Instant::now();
     let timeout = Duration::from_millis(50);
+    let out_of_time = out_of_time_here();
     let outcome = wait_for(&mut child, started + timeout, timeout);
 
     match outcome {
@@ -37,6 +38,9 @@ fn a_process_that_outlives_its_deadline_is_killed_and_reaped() {
         other => panic!("expected TimedOut, got {other:?}"),
     }
     assert!(started.elapsed() < Duration::from_secs(5));
+    // And counted, for a caller that keeps answers only when none of the
+    // reads behind them was cut short.
+    assert_eq!(out_of_time_here(), out_of_time + 1);
     // Killed *and* waited for. A process that is never reaped stays a zombie,
     // and a process id somebody else reaps can be handed out again to a
     // stranger — which is what makes a later kill dangerous rather than
@@ -57,10 +61,12 @@ fn a_process_that_finishes_in_time_is_not_killed() {
         .expect("true is on PATH");
 
     let timeout = Duration::from_secs(30);
+    let out_of_time = out_of_time_here();
     let status =
         wait_for(&mut child, Instant::now() + timeout, timeout).expect("it exits immediately");
 
     assert!(status.success());
+    assert_eq!(out_of_time_here(), out_of_time);
 }
 
 #[test]
