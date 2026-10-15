@@ -1307,6 +1307,71 @@ fn a_submodule_is_never_vouched_for() {
     assert_eq!(stamp::stamp(&repo, &repo.join(".git")), None);
 }
 
+#[test]
+fn a_sparse_checkout_is_stamped_by_the_files_it_has_checked_out() {
+    // A sparse checkout is how a monorepo too big to check out is worked in,
+    // and its index still lists every file the repository has. The diffs pass
+    // over the ones left out; a stamp that went through them would cost the
+    // whole tree every cycle, and listing a sparse index the plain way expands
+    // it to every file first, which git itself calls slow.
+    if without_git("a_sparse_checkout_is_stamped_by_the_files_it_has_checked_out") {
+        return;
+    }
+    settle_at_once();
+    let scratch = ScratchDir::new("sparse");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    commit(&repo, "inside/kept.txt", "kept\n", "inside");
+    commit(&repo, "outside/left.txt", "left out\n", "outside");
+    git(
+        &repo,
+        &[
+            "sparse-checkout",
+            "set",
+            "--cone",
+            "--sparse-index",
+            "inside",
+        ],
+    );
+    assert!(
+        !repo.join("outside").exists(),
+        "the sparse checkout checked out what it was to leave out"
+    );
+    let (mut readings, mut bases) = (Readings::default(), Bases::default());
+
+    gather_remembering(&repo, &mut bases, &mut readings);
+    readings.forget_unvisited();
+    let listings: Vec<String> = run::started_here()
+        .into_iter()
+        .filter(|read| read.starts_with("ls-files"))
+        .collect();
+    assert_eq!(listings, ["ls-files -z -t --sparse"]);
+
+    gather_remembering(&repo, &mut bases, &mut readings);
+    readings.forget_unvisited();
+    assert_eq!(reads_since(), vec!["rev-parse", "ls-files"]);
+
+    // What is checked out is still watched.
+    write(&repo.join("inside/kept.txt"), "kept, and edited\n");
+    let edited = gather_remembering(&repo, &mut bases, &mut readings);
+    assert_eq!(reads_since(), vec!["rev-parse", "ls-files", "diff HEAD"]);
+    assert_eq!(edited, gather(&repo, &mut Bases::default()));
+    assert_eq!(edited.diff.map(|diff| diff.lines_added), Some(1));
+}
+
+#[test]
+fn what_a_sparse_checkout_leaves_out_is_not_stamped() {
+    // `S` is skip-worktree, which the diffs never look at — a file, or with
+    // `--sparse` a whole directory a sparse index keeps as one entry. `H` is
+    // an ordinary file and `M` one in the middle of a merge, both read.
+    let listed = b"H kept.txt\0S left/out.txt\0S left/\0M both.txt\0";
+    assert_eq!(
+        stamp::checked_out(listed),
+        Some(vec![&b"kept.txt"[..], &b"both.txt"[..]])
+    );
+    // Untagged is not the listing asked for, and vouches for nothing.
+    assert_eq!(stamp::checked_out(b"kept.txt\0"), None);
+}
+
 // --- what a repository's configuration may run ---------------------------------
 //
 // A read is git run on nobody's say-so: the row's counts, every fifteen seconds

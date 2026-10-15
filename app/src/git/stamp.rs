@@ -22,6 +22,18 @@
 //! and the diffs read after the first still stand. A stamp costs a list of
 //! paths out of the index and an `lstat` apiece, and never a byte of any file.
 //!
+//! In a sparse checkout the paths are only the ones checked out. Its index
+//! lists every file of the repository, and the diffs pass over the ones it
+//! marks *skip-worktree* — the files left out — without looking at them; a
+//! stamp that went through those would cost what the whole tree costs, a
+//! monorepo's millions of paths printed and as many `lstat`s finding nothing,
+//! every cycle, for a checkout of a few thousand files. So it passes over them
+//! too. A file somebody writes where a left-out one would be is one git stops
+//! skipping as soon as it reads the index, and the list then has it like any
+//! other. A *sparse index*, which keeps a left-out directory as one entry, is
+//! listed without being expanded to every file in it: git calls that a slow
+//! operation, and the diffs do not do it either.
+//!
 //! Two things a stamp cannot vouch for, and it says so by not being made:
 //!
 //! - **A file written moments ago.** A file system keeps its times to some
@@ -63,7 +75,8 @@ pub(super) struct Stamp(u64);
 /// one cannot vouch for it: something in it is younger than [`SETTLING`],
 /// it has a submodule, or git could not list what it tracks.
 ///
-/// **Blocking**: one `git ls-files`, and an `lstat` for every file it names.
+/// **Blocking**: one `git ls-files`, and an `lstat` for every file it names as
+/// checked out.
 pub(super) fn stamp(work_tree: &Path, git_dir: &Path) -> Option<Stamp> {
     // Before anything is looked at: a file written after this has a time this
     // late or later, and is what the age below is measured against.
@@ -78,14 +91,20 @@ pub(super) fn stamp(work_tree: &Path, git_dir: &Path) -> Option<Stamp> {
     let index = std::fs::symlink_metadata(git_dir.join("index")).ok();
     stamp.note(index.as_ref())?;
 
-    let args = [OsStr::new("ls-files"), OsStr::new("-z")];
+    // `-t` tags each path with what the index says of it, which is how the
+    // files a sparse checkout leaves out are told from the rest.
+    let mut args = vec![OsStr::new("ls-files"), OsStr::new("-z"), OsStr::new("-t")];
+    // `--sparse` lists a sparse index's left-out directories as they are,
+    // rather than expanding each into every file in it. Only where there has
+    // been a sparse checkout, which the file of its patterns says: a git older
+    // than 2.35 refuses the flag, and the stamp with it.
+    if git_dir.join("info").join("sparse-checkout").is_file() {
+        args.push(OsStr::new("--sparse"));
+    }
     let listed = run(work_tree, &args, Intent::Poll)
         .ok()
         .filter(|finished| finished.success)?;
-    for path in listed.stdout.split(|byte| *byte == 0) {
-        if path.is_empty() {
-            continue;
-        }
+    for path in checked_out(&listed.stdout)? {
         let path = path_from(path)?;
         let metadata = std::fs::symlink_metadata(work_tree.join(&path)).ok();
         if metadata.as_ref().is_some_and(Metadata::is_dir) {
@@ -139,6 +158,23 @@ impl Stamping {
         }
         Some(())
     }
+}
+
+/// The paths `ls-files -z -t` listed as checked out: every one but those
+/// tagged `S`, *skip-worktree*, which a sparse checkout leaves out and the
+/// diffs never look at. That includes a sparse index's left-out directory,
+/// which `--sparse` lists as one entry so tagged. `None` for a listing that
+/// is not tag, space, path.
+pub(super) fn checked_out(listed: &[u8]) -> Option<Vec<&[u8]>> {
+    let mut paths = Vec::new();
+    for entry in listed.split(|byte| *byte == 0) {
+        match entry {
+            [] | [b'S', b' ', ..] => {}
+            [_, b' ', path @ ..] if !path.is_empty() => paths.push(path),
+            _ => return None,
+        }
+    }
+    Some(paths)
 }
 
 /// A path as `ls-files -z` printed it: any bytes on Unix, where a path is

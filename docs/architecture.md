@@ -1446,7 +1446,10 @@ the index alone, which is why the stamp covers every file and not just the index
 while anything it covers is younger than three seconds vouches for nothing — a file system keeps
 times to a grain, two seconds on FAT, and a file written twice inside one, the same length both
 times, looks unchanged — and neither does one over a submodule, whose dirt does not show on its
-directory; both are simply read again. A working tree is read once a cycle however many panes
+directory; both are simply read again. In a sparse checkout the stamp covers only the files
+checked out, as the diffs do — the ones left out are passed over, and a sparse index is listed
+without being expanded — so a monorepo's millions of paths are not listed and stat'ed every
+cycle for a checkout of a few thousand. A working tree is read once a cycle however many panes
 sit in it. The wait after a cycle is fifteen seconds or three times what the cycle took,
 whichever is longer, so that sixty checkouts cannot keep git busy for most of every minute; it
 is four times that while the window is behind another, and coming back to it cuts the wait to

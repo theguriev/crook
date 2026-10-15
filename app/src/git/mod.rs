@@ -248,10 +248,10 @@ pub fn gather(dir: &Path, bases: &mut Bases) -> GitFacts {
 ///
 /// **Blocking**, as `gather` is. What it costs when nothing has changed is one
 /// `rev-parse` for where `HEAD` and the base are and one `ls-files` for the
-/// [`stamp`](stamp::Stamp) — a list and an `lstat` per tracked file, and not
-/// a byte of any of them — in place of up to three reads that each go through
-/// the whole working tree. What each count depends on is what decides whether
-/// it is read again:
+/// [`stamp`](stamp::Stamp) — a list and an `lstat` per tracked file checked
+/// out, and not a byte of any of them — in place of up to three reads that
+/// each go through the whole working tree. What each count depends on is what
+/// decides whether it is read again:
 ///
 /// | count | read again when |
 /// |---|---|
@@ -262,9 +262,9 @@ pub fn gather(dir: &Path, bases: &mut Bases) -> GitFacts {
 /// The second is a fact about two commits and nothing else. The other two
 /// read the working tree, and an edit that `git add` has not seen moves no
 /// commit and leaves the index as it was — so it is the stamp, which is about
-/// every tracked file, that keeps them, and a stamp that could not vouch for
-/// the tree keeps neither. The stamp is taken before either is read, so a file
-/// written while they are being read is one the next stamp sees.
+/// every tracked file checked out, that keeps them, and a stamp that could not
+/// vouch for the tree keeps neither. The stamp is taken before either is read,
+/// so a file written while they are being read is one the next stamp sees.
 ///
 /// A working tree is read once per cycle — which is what ends at
 /// [`Readings::forget_unvisited`] — however many of the directories the cycle
