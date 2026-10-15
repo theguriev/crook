@@ -51,6 +51,16 @@
 //! chord key is held and forgotten when it comes up, so a file a command has
 //! since written, or removed, is looked for again the next time.
 //!
+//! # A path printed on another machine is no link
+//!
+//! A path names a file on the machine that printed it, and on the far side of
+//! an `ssh` that is not this one. Relative, absolute or under `~`, every form
+//! read here opens this machine's file at the same path, or none — never the
+//! one the command meant, and on a server laid out like this laptop, the
+//! laptop's copy of it, which looks right. So [`PathsOn::AnotherMachine`]
+//! makes no path a link at all, and nothing is looked for on this disk on its
+//! behalf. A URL there is still one.
+//!
 //! [`CellFlags::WRAPLINE`]: crook_terminal::CellFlags::WRAPLINE
 
 use std::cell::RefCell;
@@ -99,6 +109,21 @@ pub struct FileLink {
     pub line: Option<u32>,
     /// The column printed after the line, if one was.
     pub column: Option<u32>,
+}
+
+/// Which machine the paths in a command's output name files on — which is the
+/// machine the command ran on — and, on this one, where it ran.
+///
+/// What [`find`] is told beside the rows, so that a path printed on the far
+/// side of an `ssh` is not read as one here: see the module docs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PathsOn {
+    /// This machine. A relative path is read against the directory the
+    /// command ran in, and is no link when its shell never said one; `~/` and
+    /// absolute paths need none.
+    ThisMachine(Option<PathBuf>),
+    /// Another machine, which no path printed there is a link to.
+    AnotherMachine,
 }
 
 /// The cells of one row a link occupies, in the coordinates of the surface
@@ -622,15 +647,16 @@ pub fn file_url(path: &Path) -> String {
 /// margin: the blank it leaves there ends the link, so a URL with such a
 /// character exactly at the fold is found only up to it.
 ///
-/// A URL is looked for first, and a path where there is none — read against
-/// `directory`, the one the command that printed it ran in. A relative path
-/// with no directory to read it against is not a link: a shell that never
-/// said where it is cannot say where its output's paths are either.
+/// A URL is looked for first, and a path where there is none — when `paths`
+/// says it is on this machine, read against the directory the command that
+/// printed it ran in. A relative path with no directory to read it against is
+/// not a link: a shell that never said where it is cannot say where its
+/// output's paths are either.
 pub fn find(
     rows: &Rows<'_>,
     row: usize,
     column: usize,
-    directory: Option<&Path>,
+    paths: &PathsOn,
     place: impl Fn(usize) -> LinkRow,
 ) -> Option<LinkSpan> {
     let columns = rows.columns();
@@ -679,10 +705,13 @@ pub fn find(
             LinkTarget::Url(url.uri.replace(SPACER, "")),
         ),
         None => {
+            let PathsOn::ThisMachine(directory) = paths else {
+                return None;
+            };
             let printed = crook_terminal::path::at(&text, at)?;
             let path = resolve(
                 &printed.path.replace(SPACER, ""),
-                directory,
+                directory.as_deref(),
                 std::env::home_dir,
             )?;
             (
@@ -781,7 +810,13 @@ mod tests {
 
     /// The link under a cell of the grid, tagged with viewport rows.
     fn link_at(snapshot: &Snapshot, row: usize, column: usize) -> Option<LinkSpan> {
-        find(&rows(snapshot), row, column, None, LinkRow::Viewport)
+        find(
+            &rows(snapshot),
+            row,
+            column,
+            &PathsOn::ThisMachine(None),
+            LinkRow::Viewport,
+        )
     }
 
     /// A URL as a link's target.
@@ -976,9 +1011,9 @@ mod tests {
     #[test]
     fn a_path_a_compiler_printed_is_read_against_the_directory_its_command_ran_in() {
         let snapshot = grid("--> src/main.rs:42:5");
-        let project = project();
-        let link = find(&rows(&snapshot), 0, 8, Some(&project), LinkRow::Viewport)
-            .expect("the path is a link");
+        let here = PathsOn::ThisMachine(Some(project()));
+        let link =
+            find(&rows(&snapshot), 0, 8, &here, LinkRow::Viewport).expect("the path is a link");
 
         assert_eq!(
             link.target,
@@ -988,7 +1023,7 @@ mod tests {
         // opens at.
         assert_eq!(link.cells, vec![cells(0, 4, 16)]);
         assert_eq!(
-            find(&rows(&snapshot), 0, 1, Some(&project), LinkRow::Viewport),
+            find(&rows(&snapshot), 0, 1, &here, LinkRow::Viewport),
             None,
             "the arrow before it"
         );
@@ -999,6 +1034,56 @@ mod tests {
         // A shell that never said where it is: the path could be anywhere.
         let snapshot = grid("src/main.rs:42");
         assert_eq!(link_at(&snapshot, 0, 3), None);
+    }
+
+    /// Output from the far side of an `ssh`: the paths in it are that
+    /// machine's, in every form, and only the URL is a link here.
+    #[test]
+    fn no_path_printed_on_another_machine_is_a_link_but_a_url_is() {
+        let snapshot =
+            grid("~/notes.md\r\n/srv/app/main.py:3\r\nsrc/main.rs:42\r\nhttps://x.test/a\r\n");
+        let at = |paths: &PathsOn, row, column| {
+            find(&rows(&snapshot), row, column, paths, LinkRow::Viewport).map(|link| link.target)
+        };
+        let file = |path: PathBuf, line| {
+            LinkTarget::File(FileLink {
+                path,
+                line,
+                column: None,
+            })
+        };
+
+        // The same rows from a command that ran here, so that what turns the
+        // paths away below is the machine and nothing else.
+        let here = PathsOn::ThisMachine(Some(project()));
+        assert_eq!(
+            at(&here, 0, 3),
+            std::env::home_dir().map(|home| file(home.join("notes.md"), None)),
+            "a path under ~"
+        );
+        // Not compared whole: a path with no drive is not absolute on
+        // Windows, which reads it against the directory instead. Either way
+        // it is a link here.
+        assert!(at(&here, 1, 3).is_some(), "an absolute path");
+        assert_eq!(
+            at(&here, 2, 3),
+            Some(file(project().join("src/main.rs"), Some(42))),
+            "a relative path"
+        );
+
+        let elsewhere = PathsOn::AnotherMachine;
+        for (row, form) in [
+            (0, "a path under ~"),
+            (1, "an absolute path"),
+            (2, "a relative path"),
+        ] {
+            assert_eq!(
+                at(&elsewhere, row, 3),
+                None,
+                "{form} printed on another machine opens this machine's file"
+            );
+        }
+        assert_eq!(at(&elsewhere, 3, 10), Some(url("https://x.test/a")));
     }
 
     #[test]
@@ -1026,9 +1111,9 @@ mod tests {
     #[test]
     fn a_url_is_still_a_url_however_much_it_looks_like_a_path() {
         let snapshot = grid("https://x.test/a.rs");
-        let project = project();
-        let link = find(&rows(&snapshot), 0, 15, Some(&project), LinkRow::Viewport)
-            .expect("the URL is a link");
+        let here = PathsOn::ThisMachine(Some(project()));
+        let link =
+            find(&rows(&snapshot), 0, 15, &here, LinkRow::Viewport).expect("the URL is a link");
         assert_eq!(link.target, url("https://x.test/a.rs"));
     }
 
@@ -1037,20 +1122,14 @@ mod tests {
         // Twenty-six cells into twenty columns: the emulator folds it.
         let snapshot = grid("app/src/workspace/view.rs:3");
         assert!(rows(&snapshot).wraps(0), "the emulator folded it");
-        let project = project();
+        let here = PathsOn::ThisMachine(Some(project()));
         let whole = LinkSpan {
             cells: vec![cells(0, 0, 20), cells(1, 0, 7)],
             target: LinkTarget::File(file("app/src/workspace/view.rs", Some(3), None)),
         };
         for (row, column) in [(0, 4), (1, 2)] {
             assert_eq!(
-                find(
-                    &rows(&snapshot),
-                    row,
-                    column,
-                    Some(&project),
-                    LinkRow::Viewport
-                ),
+                find(&rows(&snapshot), row, column, &here, LinkRow::Viewport),
                 Some(whole.clone()),
                 "from row {row}"
             );
@@ -1060,9 +1139,9 @@ mod tests {
     #[test]
     fn a_path_with_wide_characters_in_it_names_the_file_without_the_spacers() {
         let snapshot = grid("docs/\u{6771}\u{4eac}.md");
-        let project = project();
-        let link = find(&rows(&snapshot), 0, 6, Some(&project), LinkRow::Viewport)
-            .expect("the path is a link");
+        let here = PathsOn::ThisMachine(Some(project()));
+        let link =
+            find(&rows(&snapshot), 0, 6, &here, LinkRow::Viewport).expect("the path is a link");
         assert_eq!(
             link.target,
             LinkTarget::File(file("docs/\u{6771}\u{4eac}.md", None, None))

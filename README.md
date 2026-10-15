@@ -620,7 +620,8 @@ Twenty-two features, and the page that configures them:
   key goes down — so `and/or` in a sentence never underlines. A program (a file marked
   executable, an `.exe`, an `.app`, a `.jar`, a script Windows runs by its name such as `.sh` or
   `.py`, or a link to any of them) is opened only in the editor, never by the system's handler,
-  which would run it.
+  which would run it. A path printed on the far side of an `ssh` is no link at all: it names a
+  file on that machine, and this one's at the same path is not it.
 - **Find across every command in the output.** `cmd-f` (`ctrl-shift-f` off macOS) opens a bar
   over the top-right of a pane and searches the blocks, not the screenful — every finished
   command and the open one at once. Each match is highlighted where it is, the current one in
@@ -715,13 +716,14 @@ Twenty-two features, and the page that configures them:
   leads with that machine's name, muted, and shows no branch and no diff counts; the Changes
   column says where the pane is instead of reading; the worktree menu is not offered on it; a
   plugin asking where the pane is is told nowhere; a tab or a split opened from it starts where
-  a new tab starts; and a command run there offers no branch in its block's menu, and the
-  relative paths it printed are not links. The session file remembers the machine, so the pane
-  comes back as a new shell here rather than one started in this machine's copy of the far
-  side's directory. The name is the one the system gives, read once as the shell starts, not
-  `$HOST` or `$HOSTNAME`, which a startup file can set to anything. The shell is on this machine
-  when the name is this machine's own, `localhost`, a loopback address or none at all, which is
-  what every shell Crook starts sends. Settings → Shell says which shell a pane starts
+  a new tab starts; and a command run there offers no branch in its block's menu, and no path
+  it printed is a link — relative, absolute or under `~`, each names a file over there — though
+  its URLs still are. The session file remembers the machine, so the pane comes back as a new
+  shell here rather than one started in this machine's copy of the far side's directory. The
+  name is the one the system gives, read once as the shell starts, not `$HOST` or `$HOSTNAME`,
+  which a startup file can set to anything. The shell is on this machine when the name is this
+  machine's own, `localhost`, a loopback address or none at all, which is what every shell
+  Crook starts sends. Settings → Shell says which shell a pane starts
   and whether it gets the marks, which is where to look when the output is one long block;
   `crook --shell <path>` starts another shell in every pane, for trying one out. Marks or no
   marks, every shell Crook starts has `TERM_PROGRAM=Crook` and `CROOK_PANE_ID` set to the

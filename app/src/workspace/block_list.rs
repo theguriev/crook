@@ -54,7 +54,6 @@
 //! jump-to-bottom button; see `docs/blocks.md`.
 
 use std::ops::Range;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -74,7 +73,7 @@ use crate::clipboard::Clipboard;
 use crate::pane_blocks::{Control, PaneBlocks, ScrollCause};
 use crate::pane_composition::PaneComposition;
 use crate::pane_find::Matches;
-use crate::pane_link::{self, LinkRow, LinkSpan, PaneLink};
+use crate::pane_link::{self, LinkRow, LinkSpan, PaneLink, PathsOn};
 use crate::pane_selection::PaneSelection;
 use crate::pane_surface;
 use crate::selection::{Anchor, Blocks, Cells, Filter, Item, Region, Selection};
@@ -206,10 +205,10 @@ pub struct BlockList {
     /// the move that finds one and the frame that underlines it are different
     /// frames. `None` for a list nothing can be clicked in.
     links: Option<PaneLink>,
-    /// Where the pane's shell last said it was, which a relative path in the
-    /// open block is read against. A finished block keeps its own. See
+    /// Where the pane's shell last said it was, which a path in the open
+    /// block is read against. A finished block keeps its own. See
     /// [`Self::with_links`].
-    directory: Option<PathBuf>,
+    paths: PathsOn,
     /// The find matches to highlight.
     ///
     /// Each one already the cells it covers, so there is nothing to resolve,
@@ -281,7 +280,7 @@ impl BlockList {
             finds: Matches::default(),
             find_current: None,
             links: None,
-            directory: None,
+            paths: PathsOn::ThisMachine(None),
             menu: None,
             menu_available: false,
             size: None,
@@ -717,14 +716,14 @@ impl BlockList {
     /// Makes the URLs and the paths in this pane's output clickable, through
     /// the link state the workspace keeps for it.
     ///
-    /// `directory` is where the pane's shell last said it was, which is where
+    /// `paths` is where the pane's shell last said it was, which is where
     /// the command still running in the open block was started. A finished
-    /// block was filed under the directory it ran in when it opened, and a
-    /// path it printed is read against that one — the shell has often `cd`ed
-    /// somewhere else since.
-    pub fn with_links(mut self, links: PaneLink, directory: Option<PathBuf>) -> Self {
+    /// block was filed under the machine and the directory it ran in when it
+    /// opened, and a path it printed is read against those — the shell has
+    /// often `cd`ed somewhere else since, or `ssh`ed in or out.
+    pub fn with_links(mut self, links: PaneLink, paths: PathsOn) -> Self {
         self.links = Some(links);
-        self.directory = directory;
+        self.paths = paths;
         self
     }
 
@@ -792,18 +791,17 @@ impl BlockList {
         }
         let (column, _) = terminal_element::column_at(local.x() - GUTTER, metrics.width, columns);
 
-        // A block that ran on another machine printed paths there, and
-        // read against this machine's copy of its directory, a relative one
-        // would open some other file or none: it is read as the live block
-        // of a pane over there is, against no directory at all.
-        let directory = match self.block(item.index) {
-            Some(block) => block
-                .working_directory
-                .as_deref()
-                .filter(|_| crate::tab::on_this_machine(block.working_host.as_deref())),
-            None => self.directory.as_deref(),
-        };
-        pane_link::find(&self.rows_of(item.index), row, column, directory, |row| {
+        // A block that ran on another machine printed that machine's paths,
+        // which no reading of them here opens: see `pane_link`.
+        let filed = self.block(item.index).map(|block| {
+            if crate::tab::on_this_machine(block.working_host.as_deref()) {
+                PathsOn::ThisMachine(block.working_directory.clone())
+            } else {
+                PathsOn::AnotherMachine
+            }
+        });
+        let paths = filed.as_ref().unwrap_or(&self.paths);
+        pane_link::find(&self.rows_of(item.index), row, column, paths, |row| {
             LinkRow::Block {
                 index: item.index,
                 row,

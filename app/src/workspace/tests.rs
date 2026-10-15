@@ -38730,6 +38730,42 @@ mod remote_panes {
     }
 
     #[test]
+    fn the_output_of_a_pane_on_another_machine_names_no_file_here() {
+        // What the pane's grid and the command still running in it read the
+        // paths they print against. A pane over there has no directory here,
+        // and was read as a shell that never said one: no relative path was
+        // a link, but `~/…` was read against this machine's home and an
+        // absolute path as it is, which opened this machine's files.
+        use crate::pane_link::PathsOn;
+        use crate::workspace::body::pane_paths;
+
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        let checkout = PathBuf::from(DIRECTORY);
+        let paths = |harness: &Harness| {
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| pane_paths(workspace, pane))
+        };
+
+        move_pane(&mut harness, pane, &checkout);
+        assert_eq!(
+            paths(&harness),
+            PathsOn::ThisMachine(Some(checkout.clone()))
+        );
+
+        move_pane_to(&mut harness, pane, "buildbox.internal", &checkout);
+        assert_eq!(
+            paths(&harness),
+            PathsOn::AnotherMachine,
+            "the paths a pane on buildbox prints are read as this machine's"
+        );
+
+        move_pane(&mut harness, pane, &checkout);
+        assert_eq!(paths(&harness), PathsOn::ThisMachine(Some(checkout)));
+    }
+
+    #[test]
     fn a_pane_on_another_machine_is_saved_with_the_machine() {
         // So that a restore does not start a shell here in the far side's
         // directory: see `PaneSnapshot::remote_host`.

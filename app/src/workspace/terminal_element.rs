@@ -102,7 +102,6 @@
 //! [`Line`]: crookui_core::text_layout::Line
 
 use std::ops::Range;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crook_terminal::{
@@ -126,7 +125,7 @@ use crate::browser;
 use crate::clipboard::Clipboard;
 use crate::input_keys::Platform;
 use crate::pane_composition::{PaneComposition, Preedit};
-use crate::pane_link::{self, LinkRow, LinkSpan, LinkTarget, PaneLink};
+use crate::pane_link::{self, LinkRow, LinkSpan, LinkTarget, PaneLink, PathsOn};
 use crate::pane_selection::PaneSelection;
 use crate::pane_surface;
 use crate::selection::{Anchor, Blocks, Cells, Item, Region, Selection, grid_first_row};
@@ -304,9 +303,10 @@ pub struct TerminalElement {
     /// the move that finds one and the frame that underlines it are different
     /// frames. `None` for a grid nothing can be clicked in.
     links: Option<PaneLink>,
-    /// Where the pane's shell last said it was, which a relative path the
-    /// grid shows is read against. See [`Self::with_links`].
-    directory: Option<PathBuf>,
+    /// Which machine the pane's shell last said it was on, and where on this
+    /// one, which is what a path the grid shows is read against. See
+    /// [`Self::with_links`].
+    paths: PathsOn,
 
     /// The find matches on screen, and the current one wherever it is. See
     /// [`Self::with_find`].
@@ -325,7 +325,7 @@ impl TerminalElement {
             font,
             output: Output::detached(),
             links: None,
-            directory: None,
+            paths: PathsOn::ThisMachine(None),
             finds: Vec::new(),
             find_current: None,
             size: None,
@@ -379,12 +379,14 @@ impl TerminalElement {
     /// Makes the URLs and the paths the shell printed clickable, through the
     /// link state the workspace keeps for this pane.
     ///
-    /// `directory` is where the pane's shell last said it was. The grid is a
+    /// `paths` is where the pane's shell last said it was. The grid is a
     /// full-screen program or a command still running, both started there, so
-    /// it is what a relative path on it is read against.
-    pub fn with_links(mut self, links: PaneLink, directory: Option<PathBuf>) -> Self {
+    /// it is what a relative path on it is read against — and when that is
+    /// another machine, the paths on it are that machine's, and none is a
+    /// link.
+    pub fn with_links(mut self, links: PaneLink, paths: PathsOn) -> Self {
         self.links = Some(links);
-        self.directory = directory;
+        self.paths = paths;
         self
     }
 
@@ -448,13 +450,7 @@ impl TerminalElement {
             top: 0,
             count: self.snapshot.rows,
         };
-        pane_link::find(
-            &rows,
-            row,
-            column,
-            self.directory.as_deref(),
-            LinkRow::Viewport,
-        )
+        pane_link::find(&rows, row, column, &self.paths, LinkRow::Viewport)
     }
 
     /// Opens the link under the pointer, reporting whether there was one.

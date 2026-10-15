@@ -576,7 +576,7 @@ fn a_folded_url_in_a_finished_block_is_one_link_on_both_of_its_rows() {
 /// is read against.
 #[test]
 fn a_path_in_a_finished_block_is_read_against_the_directory_it_ran_in() {
-    use crate::pane_link::{FileLink, PaneLink};
+    use crate::pane_link::{FileLink, PaneLink, PathsOn};
     use crookui_core::geometry::{Point, ZIndex, vec2f};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -599,7 +599,10 @@ fn a_path_in_a_finished_block_is_read_against_the_directory_it_ran_in() {
     let font = crate::terminal_font::CellFont::headless(12.);
     let metrics = font.metrics();
     let mut list = BlockList::new(history, emulator.snapshot(), font, PaneBlocks::new())
-        .with_links(PaneLink::new(), Some(PathBuf::from("/elsewhere")));
+        .with_links(
+            PaneLink::new(),
+            PathsOn::ThisMachine(Some(PathBuf::from("/elsewhere"))),
+        );
     let size = vec2f(400., 300.);
     list.size = Some(size);
     list.origin = Some(Point::from_vec2f(vec2f(0., 0.), ZIndex::Normal(0)));
@@ -642,25 +645,32 @@ fn a_path_in_a_finished_block_is_read_against_the_directory_it_ran_in() {
     );
 }
 
-/// A path a command printed on the far side of an `ssh` is a path there. A
-/// relative one read against this machine's copy of the directory it ran in
-/// opens this machine's file, or none, so it is read the way the live block
-/// of a pane over there is: against no directory, which makes it no link.
+/// A path a command printed on the far side of an `ssh` is a path there, in
+/// every form. Read here — a relative one against this machine's copy of the
+/// directory it ran in, `~/` against this machine's home, an absolute one as
+/// it is — it opens this machine's file, or none. So none is a link, from a
+/// finished block that ran there or from the command still running in a pane
+/// that is there; a URL still is.
 #[test]
-fn a_relative_path_in_a_block_that_ran_on_another_machine_is_no_link() {
-    use crate::pane_link::{FileLink, PaneLink};
+fn no_path_printed_on_another_machine_is_a_link_but_a_url_is() {
+    use crate::pane_link::{FileLink, PaneLink, PathsOn};
     use crookui_core::geometry::{Point, ZIndex, vec2f};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     let mut emulator = emulator();
     emulator.advance(b"\x1b]7;file:///project\x07");
     cycle(&mut emulator, "cargo b", "src/main.rs:42:5", 0);
-    // `ssh buildbox`, into the same layout, and the same command there.
+    cycle(&mut emulator, "ls", "~/notes.md", 0);
+    // `ssh buildbox`, into the same layout, and the same commands there.
     emulator.advance(b"\x1b]7;file://buildbox.invalid/project\x07");
     cycle(&mut emulator, "cargo b", "src/main.rs:42:5", 0);
+    cycle(&mut emulator, "ls", "~/notes.md", 0);
+    cycle(&mut emulator, "python", "/srv/app/main.py:3", 1);
+    cycle(&mut emulator, "echo", "https://x.test/a", 0);
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07tail log\r\n\x1b]133;C\x07~/live.md\r\n");
     assert_eq!(
-        emulator.blocks()[1].working_directory.as_deref(),
+        emulator.blocks()[2].working_directory.as_deref(),
         Some(Path::new("/project")),
         "the far side's block was not filed under the path it reported"
     );
@@ -671,16 +681,17 @@ fn a_relative_path_in_a_block_that_ran_on_another_machine_is_no_link() {
     ));
     let font = crate::terminal_font::CellFont::headless(12.);
     let metrics = font.metrics();
+    // The pane is on buildbox, as the open block's command is.
     let mut list = BlockList::new(history, emulator.snapshot(), font, PaneBlocks::new())
-        .with_links(PaneLink::new(), None);
-    let size = vec2f(400., 300.);
+        .with_links(PaneLink::new(), PathsOn::AnotherMachine);
+    let size = vec2f(400., 1000.);
     list.size = Some(size);
     list.origin = Some(Point::from_vec2f(vec2f(0., 0.), ZIndex::Normal(0)));
     list.measure(size);
     let origin = list.bounds().expect("the list has bounds").origin();
     let follow = follow();
 
-    let path_in = |index: usize| {
+    let printed_in = |index: usize, column: f32| {
         let item = *list
             .window
             .iter()
@@ -689,24 +700,45 @@ fn a_relative_path_in_a_block_that_ran_on_another_machine_is_no_link() {
         let rows_top = item.top + list.padding_top(index) * metrics.height;
         let at = origin
             + vec2f(
-                GUTTER + 3.5 * metrics.width,
+                GUTTER + (column + 0.5) * metrics.width,
                 rows_top + 1.5 * metrics.height,
             );
         list.link_at(at, follow).map(|span| span.target)
     };
+    let file = |path: PathBuf, line, column| LinkTarget::File(FileLink { path, line, column });
+
+    // Here first, so that what turns the paths away below is the machine.
     assert_eq!(
-        path_in(0),
-        Some(LinkTarget::File(FileLink {
-            path: Path::new("/project").join("src/main.rs"),
-            line: Some(42),
-            column: Some(5),
-        })),
+        printed_in(0, 3.),
+        Some(file(
+            Path::new("/project").join("src/main.rs"),
+            Some(42),
+            Some(5)
+        )),
         "the block that ran here lost its link"
     );
     assert_eq!(
-        path_in(1),
-        None,
-        "a path printed on another machine opens this machine's file"
+        printed_in(1, 3.),
+        std::env::home_dir().map(|home| file(home.join("notes.md"), None, None)),
+        "the path under ~ that was printed here"
+    );
+
+    for (index, form) in [
+        (2, "a relative path"),
+        (3, "a path under ~"),
+        (4, "an absolute path"),
+        (6, "a path under ~ from the command still running"),
+    ] {
+        assert_eq!(
+            printed_in(index, 3.),
+            None,
+            "{form} printed on another machine opens this machine's file"
+        );
+    }
+    assert_eq!(
+        printed_in(5, 10.),
+        Some(LinkTarget::Url("https://x.test/a".to_owned())),
+        "a URL printed on another machine is still a link"
     );
 }
 
