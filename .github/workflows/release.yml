@@ -386,9 +386,10 @@ jobs:
             echo "### macOS: [\`$dmg\`](https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/$dmg)"
             cat <<'NOTES'
 
-          The image holds Crook.app, one universal build for Apple Silicon and Intel. It is signed
-          with a Developer ID, notarized and stapled, so it opens on a double click with no dialog:
-          open the image and drag Crook.app to Applications.
+          The image holds Crook.app, one universal build for Apple Silicon and Intel. Image and app
+          are each signed with a Developer ID, notarized and stapled, so the image opens with no
+          warning: drag Crook.app to Applications. Its first launch asks once to confirm an app
+          downloaded from the Internet, and **Open** starts it.
 
           Take the app rather than a bare `crook`: Notification Center banners, the Dock's badge and
           the settings' **Default terminal** row all need it. A binary outside the app posts no
