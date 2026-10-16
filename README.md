@@ -1386,6 +1386,7 @@ included, depends on the published `crook_plugin_api` rather than carrying a cop
 | `hooks/` | `commit-msg`, which runs `commit-lint` on every commit once `git config core.hooksPath script/hooks` points git at it |
 | `publish` | publishes `crook_plugin_api` and `crook_wasm` to crates.io; a person runs it, never CI |
 | `aur` | brings the `crook-bin` AUR package up to a release that is already out, and with `--push` pushes it |
+| `probe-permission-hooks` | records what an agent hands its permission hooks and does to them while they wait, in a throwaway project, for `docs/answering.md`; a person runs it, since it spends the agent's usage |
 | `icons` | regenerates the vendored Lucide icons from a pinned `lucide-static` |
 | `app-icon` | renders the macOS app icon into `assets/Crook.iconset` |
 | `macos-keychain` | puts a Developer ID certificate into a keychain `codesign` will find, on a CI runner |
