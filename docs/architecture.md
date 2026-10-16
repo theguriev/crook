@@ -937,9 +937,10 @@ would sit invisible until the shell next said something.
 
 **And a frame is spent only on a pane somebody can see.** The workspace answers a
 `TerminalUpdate::Repainted` with a frame only when the pane is on screen — in the active tab,
-not hidden by a zoom, with no section of the sidebar over the body. It asks at the moment the
-repaint arrives, from its own state, rather than keeping a set of visible panes pushed into the
-model: what decides it changes in a tab switch, a split, a zoom, a close, a restored session
+not hidden by a zoom, with no section of the sidebar over the body — in a window in sight
+(`Workspace::pane_can_be_seen`). It asks at the moment the repaint arrives, from its own
+state, rather than keeping a set of visible panes pushed into the model: what decides it
+changes in a tab switch, a split, a zoom, a close, a restored session
 and a plugin switched off under the section it was showing, and a push missed in any one of
 them would freeze a pane somebody is looking at. A pane nobody can see goes on being read,
 parsed and published, and everything its *row* shows — a title, a directory, a bell, an agent's
@@ -953,13 +954,20 @@ turning in front of the same name about once a second, its hooks saying running 
 every tool — asks for no frame of its own, because `Workspace::update_session` returns before
 its notify when `AgentSession::says_the_same_as` says nothing changed. Its own frame is all that
 goes. Both reports come only while an agent runs, and while one runs its mark breathes:
-`Workspace::keep_breathing` redraws the window every `BREATH_FRAME`, 80 ms, for as long as the
-tab list is in the sidebar. With the list up — the default — an agent at work in a tab nobody
-looks at still draws the window about twelve times a second; it goes quiet only with the list
-hidden or a settings page over it. Most of the budget's tests run in a harness that never lets
-the marks breathe, and the one that does hides the list. What the gate cannot see is the window
-itself: nothing tells the workspace that it has been minimised or covered, so a window nobody is
-looking at still asks to draw the panes it shows.
+`Workspace::keep_breathing` redraws the window every `BREATH_FRAME`, 80 ms, for as long as a
+running mark is inside the tab list's viewport. With the list up — the default — and the
+agent's row in view, an agent at work in a tab nobody looks at still draws the window about
+twelve times a second; it goes quiet with the list hidden, a settings page over it, the row
+scrolled out of view, motion kept still, or the window out of sight (see "Out of sight is
+another bit"). Most of the budget's tests run in a harness that never lets the marks breathe,
+and the one that does hides the list. The gate sees the window as well, as far as the desktop
+says: a window that has said it is minimised or covered (`Event::WindowOccluded`) draws no
+pane's output at all, and asks for the frame that draws every pane current when it says it is
+back; `ten_thousand_lines_in_a_window_out_of_sight_draw_nothing` holds it to no frame. That
+bit is the desktop's word rather than the workspace's own state, and costs something when the
+desktop is wrong: a window said to be out of sight while somebody can see it draws a pane's
+output with the next frame anything else asks for — a key, a click, the focus moving, a row
+changing — rather than as it comes.
 
 **Nor does a pane nobody can see build snapshots.** A snapshot is every cell of the viewport
 resolved through the palette and compared with the last — about 160 µs for a 200 by 50 grid, at
@@ -974,7 +982,11 @@ find, a copy, the control socket — under the emulator's mutex, from what the e
 then, with the block list synced beside it. That is what makes this push safe where the one
 above would not be: it decides where a snapshot is built and never which one is drawn, and a
 pane wrongly said to be off screen is still reported repainted, and drawn current by the frame
-that asks for its snapshot.
+that asks for its snapshot. In a window out of sight no frame draws any pane, and that is the
+one change no frame need follow, so `Workspace::set_window_occluded` says it to the model as it
+hears it, and says the panes on screen again when the window is back, before the frame that
+draws them. Nor does a repaint ask an open find bar's questions of a pane nobody can see: they
+are asked of the snapshot, which the UI thread would otherwise build for every publication.
 
 **Nothing writes to the pty on the UI thread or under the emulator's mutex.** A write waits
 for the child to read, a child that is printing reads nothing until its output has been read,
@@ -2016,7 +2028,7 @@ until the keyboard first arrives, so a window a script opened behind another was
 front and asked nobody for a look until it had been visited once. The caret comes with the
 keyboard, which a window opened in front is given as it appears.
 
-**Out of sight is another bit, and only the breath reads it.** crookui folds three ways of
+**Out of sight is another bit, which the breath and the panes read.** crookui folds three ways of
 hearing it into one `Event::WindowOccluded`, in `InputState`. winit's `WindowEvent::Occluded`
 says a window is covered or minimised on macOS, but on X11 only that it is covered, and only
 with no compositor running, which reports every window in view. Windows sends none, and a
@@ -2030,11 +2042,13 @@ the answer, since a window manager may map the window it restores before it take
 off. macOS and Windows already say it, and are not asked (`Window::is_minimised`): AppKit
 tells winit that a window it restores is in view while `isMiniaturized` may still say yes.
 A covered window on Windows or under an X11 compositor goes unremarked. The breath chain ends
-while the window cannot be seen and starts again when it can, because X11 and Windows draw
-every frame asked of a hidden window. Wayland holds those frames back by itself. The breath
-does not read the focus, on purpose: a window behind another but beside it is where a working
-agent is watched from. Within a window in sight, a breath repaints only while a running mark is inside
-the panel's viewport, on a row or on a group heading — the panel's `RowGeometry` keeps where
+while the window cannot be seen and starts again when it can, and a pane's output asks for no
+frame and builds no snapshot meanwhile (see "Nor does a pane nobody can see build snapshots"),
+because X11 and Windows draw every frame asked of a hidden window. Wayland holds those frames
+back by itself. Neither reads the focus, on purpose: a window behind another but beside it is
+where a working agent is watched from. Within a window in sight, a breath repaints only while
+a running mark is inside the panel's viewport, on a row or on a group heading — the panel's
+`RowGeometry` keeps where
 both were drawn — since a frame is the whole window and its cost grows with every tab.
 
 **And the window can be asked to keep still.** The Appearance page's *Motion* resolves, with
