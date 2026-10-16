@@ -100,15 +100,6 @@ impl DiffStats {
     }
 }
 
-/// Whether git has already been found to be missing from this machine.
-///
-/// A scheduler can stop asking for stats entirely once this is true. It does
-/// not have to: every call here goes through `run.rs`, which checks the same
-/// latch and returns immediately.
-pub fn git_is_missing() -> bool {
-    super::run::git_is_missing()
-}
-
 /// Counts the working tree's line changes against `HEAD`.
 ///
 /// **Blocking, and expensive**: it spawns `git` and waits for it, 5-50ms in a
@@ -242,6 +233,7 @@ pub fn base_name(base: &str) -> &str {
 /// than one merge-base with; a partial clone that lacks the files as the
 /// branch left the base, which a poll does not fetch; and every failure git
 /// can have, none of which a row should render.
+#[cfg(any(test, doc))]
 pub fn since_base_blocking(work_tree: &Path, base: &str) -> Option<SinceBase> {
     let commits = commits_since(work_tree, base).filter(|commits| *commits > 0)?;
     Some(SinceBase {

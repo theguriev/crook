@@ -739,6 +739,7 @@ impl AgentSession {
     /// So `None` for an agent run where its resume line could not follow
     /// it — in another directory, in a sandbox — which the title is still
     /// read for: see [`crate::agent::program_of`].
+    #[cfg(test)]
     pub fn agent(&self) -> Option<&str> {
         self.launch().map(|launch| launch.agent)
     }
@@ -1176,11 +1177,6 @@ impl Tab {
         self.panes.focused().map_or("", Pane::title)
     }
 
-    /// What the agent in the focused pane is doing.
-    pub fn status(&self) -> Option<AgentStatus> {
-        self.panes.focused().map(Pane::status)
-    }
-
     /// Points the focused pane at `directory`, for a pane whose shell has not
     /// started yet.
     ///
@@ -1588,12 +1584,6 @@ impl TabStrip {
     /// How many tabs there are. Never zero.
     pub fn len(&self) -> usize {
         self.tabs.len()
-    }
-
-    /// Always false: the strip refuses to empty itself. Here because a `len`
-    /// without an `is_empty` is a trap for the next reader.
-    pub fn is_empty(&self) -> bool {
-        self.tabs.is_empty()
     }
 
     /// Every tab, in bar order.

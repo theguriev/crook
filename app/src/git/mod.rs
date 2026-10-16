@@ -73,7 +73,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub use branch::{Head, RepoLayout, branches as branches_in, discover, read_head};
-pub use diff::{DiffStats, SinceBase, diff_stats_blocking, git_is_missing, since_base_blocking};
+#[cfg(any(test, doc))]
+pub use diff::since_base_blocking;
+pub use diff::{DiffStats, SinceBase, diff_stats_blocking};
 
 /// Everything a tab row knows about the repository its session sits in.
 ///
@@ -184,6 +186,7 @@ pub fn branch_at_work(dir: &Path) -> Option<BranchAtWork> {
 /// a repository and a repository with no refs both come back as. Nothing here
 /// distinguishes them, because nothing that asks can do anything with the
 /// difference.
+#[cfg(test)]
 pub fn branches(dir: &Path) -> Vec<String> {
     discover(dir).as_ref().map(branches_in).unwrap_or_default()
 }
@@ -222,6 +225,7 @@ pub fn facts_without_diff(dir: &Path) -> GitFacts {
 /// answer is used. A branch whose name is the base's own — `main` against
 /// `refs/remotes/origin/main` as much as against `refs/heads/main` — is the
 /// base itself, and is left with the plain count alone.
+#[cfg(any(test, doc))]
 pub fn gather(dir: &Path, bases: &mut Bases) -> GitFacts {
     let Some(layout) = discover(dir) else {
         return GitFacts::default();

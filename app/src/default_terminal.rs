@@ -13,6 +13,7 @@
 //! command and leaves the list alone, and this is the button that runs it.
 
 /// What the Linux list calls Crook: the desktop entry the installer writes.
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
 pub const DESKTOP_ENTRY: &str = "crook.desktop";
 
 /// Whether Crook is the terminal the system opens, or `None` where that cannot
@@ -29,6 +30,7 @@ pub fn make_default() -> Result<(), String> {
 
 /// The first terminal `list` names: a line that is neither blank nor a
 /// comment, trimmed, as `xdg-terminal-exec` reads it.
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
 pub fn first_entry(list: &str) -> Option<&str> {
     list.lines()
         .map(str::trim)
@@ -40,6 +42,7 @@ pub fn first_entry(list: &str) -> Option<&str> {
 ///
 /// A line that already names Crook is taken out, so asking twice does not
 /// list it twice.
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
 pub fn put_first(list: &str) -> String {
     let mut out = format!("{DESKTOP_ENTRY}\n");
     for line in list.lines().filter(|line| line.trim() != DESKTOP_ENTRY) {

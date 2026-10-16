@@ -34,9 +34,11 @@ use crookui_core::image::Bitmap;
 use crookui_core::prelude::*;
 use crookui_core::{AppContext, Element};
 
+#[cfg(test)]
+pub use crook_plugin::Tier;
 pub use crook_plugin::{
     ActionName, Actions, Cardinality, Complaint, EntryId, Manifest, PluginId, Registration, SlotId,
-    Slots, Tier,
+    Slots,
 };
 
 use crook_plugin_api::Event;
@@ -842,6 +844,7 @@ impl Host {
     }
 
     /// What one page's rail row says.
+    #[cfg(test)]
     pub fn settings_page_title(&self, id: PageId) -> Option<String> {
         let index = self.page_index(self.settings_page_key(id)?)?;
         self.pages
@@ -1245,6 +1248,7 @@ impl Host {
     }
 
     /// Every plugin that built, in the order it did.
+    #[cfg(test)]
     pub fn loaded(&self) -> &[&'static Manifest] {
         &self.loaded
     }

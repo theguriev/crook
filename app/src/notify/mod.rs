@@ -413,6 +413,7 @@ pub fn ask_to_badge(allowed: impl Fn() + Send + 'static) {
 /// What the Notifications page asks before it offers a switch: a switch that
 /// can change nothing here is drawn without a handler, as every control with
 /// nothing to do is.
+#[cfg(test)]
 pub fn posts_here() -> bool {
     Service::here().posts()
 }

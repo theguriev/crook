@@ -53,57 +53,73 @@
 // process exits 101 under `| head`. A print in a path nobody pipes often —
 // `--snapshot`'s `--run` lines — is easy to miss, and this is what finds it.
 #![warn(clippy::print_stdout)]
+// The documentation is built with `--document-private-items` (see
+// CONTRIBUTING), so a link from the few public items into the private rest of
+// the crate resolves, and is the point: those items are the way in.
+#![allow(rustdoc::private_intra_doc_links)]
 
-pub mod agent;
-pub mod bell;
-pub mod browser;
-pub mod clipboard;
-pub mod completion;
-pub mod control;
-pub mod default_terminal;
-pub mod diagnostics;
-pub mod duo;
-pub mod editor;
-pub mod file_drop;
-pub mod filename;
-pub mod forge;
-pub mod git;
-pub mod git_model;
-pub mod inline_image;
-pub mod input_keys;
-pub mod keybindings;
-pub mod login_item;
-pub mod motion;
-pub mod new_window;
-pub mod notify;
-pub mod order;
-pub mod pane_blocks;
-pub mod pane_composition;
-pub mod pane_find;
-pub mod pane_link;
-pub mod pane_selection;
-pub mod pane_split;
-pub mod pane_surface;
-pub mod picture;
-pub mod pirate;
-pub mod platform_insets;
-pub mod plugin;
-pub mod plugins;
+// The modules are private so that the compiler says when something in them
+// is no longer used: a `pub` item a `pub` module exports is one the dead-code
+// lint never asks about, called or not. What is `pub` is what is used from
+// outside the library — `run` and `Channel` by the binaries, `process` and
+// `hooks_text` by the tests in `app/tests`.
+mod agent;
+mod bell;
+mod browser;
+mod clipboard;
+mod completion;
+// Nothing listens on Windows yet (see the module's `# Windows`), but the
+// wire, the client and the feeds are still built there, with the window's
+// side of every answer: until a named pipe reaches them, that much of the
+// module is unused on Windows by design.
+#[cfg_attr(not(unix), allow(dead_code))]
+mod control;
+mod default_terminal;
+mod diagnostics;
+mod duo;
+mod editor;
+mod file_drop;
+mod filename;
+mod forge;
+mod git;
+mod git_model;
+mod inline_image;
+mod input_keys;
+mod keybindings;
+mod login_item;
+mod motion;
+mod new_window;
+mod notify;
+mod order;
+mod pane_blocks;
+mod pane_composition;
+mod pane_find;
+mod pane_link;
+mod pane_selection;
+mod pane_split;
+mod pane_surface;
+mod picture;
+mod pirate;
+mod platform_insets;
+mod plugin;
+mod plugins;
 pub mod process;
-pub mod selection;
-pub mod session;
-pub mod settings;
-pub mod shell_history;
-pub mod shell_integration;
-pub mod tab;
-pub mod terminal_font;
-pub mod terminal_keys;
-pub mod terminal_model;
-pub mod text_input;
-pub mod theme;
-pub mod update;
-pub mod window_controls;
-pub mod workspace;
+mod selection;
+mod session;
+mod settings;
+mod shell_history;
+mod shell_integration;
+mod tab;
+mod terminal_font;
+mod terminal_keys;
+mod terminal_model;
+mod text_input;
+mod theme;
+mod update;
+mod window_controls;
+mod workspace;
+
+pub use agent::{Hooks, hooks_text};
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -150,7 +166,7 @@ const WINDOW_SIZE: Vector2F = vec2f(1024., 640.);
 /// [`WindowChrome`] carries which of those a build gets, so the room the
 /// header reserves and the controls the window actually has cannot drift
 /// apart. One constant because it is one decision.
-pub const WINDOW_CHROME: WindowChrome = WindowChrome::Client;
+pub(crate) const WINDOW_CHROME: WindowChrome = WindowChrome::Client;
 
 /// The scale factor the headless snapshot renders at. Two, because that is
 /// where subpixel glyph positioning and the atlas are actually exercised.

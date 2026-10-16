@@ -69,11 +69,6 @@ pub struct Completions {
 }
 
 impl Completions {
-    /// Whether the shell had nothing to offer.
-    pub fn is_empty(&self) -> bool {
-        self.candidates.is_empty()
-    }
-
     /// The longest prefix every candidate shares.
     ///
     /// What Tab inserts when the answer is ambiguous, which is what every

@@ -14,19 +14,23 @@
 //! as every application whose login item is a path. A binary that is not
 //! there any more is named by nothing: the switch is refused, and says why.
 //!
-//! What each entry *says* is worked out by a function that runs everywhere,
-//! so that the macOS plist and the Linux desktop entry are both tested on
-//! every platform; only the writing is per platform.
+//! What each entry *says* is worked out by a function every platform's tests
+//! build, so that the macOS plist and the Linux desktop entry are both tested
+//! on every platform; only the writing is per platform, and a build that is
+//! not a test leaves out the entries its platform does not write.
 
 use std::path::{Path, PathBuf};
 
 /// The LaunchAgent's label, which is also its file's name.
+#[cfg(any(target_os = "macos", test))]
 pub const LAUNCH_AGENT: &str = "com.theguriev.crook.login";
 
 /// The Linux autostart entry's file name.
+#[cfg(all(unix, not(target_os = "macos")))]
 pub const AUTOSTART_ENTRY: &str = "crook.desktop";
 
 /// The name of the value Crook writes under Windows' `Run` key.
+#[cfg(windows)]
 pub const RUN_VALUE: &str = "Crook";
 
 /// Puts Crook's login entry in place, or takes it out.
@@ -72,6 +76,7 @@ fn program_to_list(running: Option<&str>) -> Result<PathBuf, String> {
 /// An application bundle is opened with `open`, as the Dock opens it, so it
 /// starts as an application — its own icon, its own menu — and not as a
 /// process launchd happens to be holding; a bare binary is started as it is.
+#[cfg(any(target_os = "macos", test))]
 pub fn launch_agent_plist(program: &Path) -> String {
     let arguments = match bundle_of(program) {
         Some(bundle) => vec!["/usr/bin/open".to_owned(), bundle.display().to_string()],
@@ -105,6 +110,7 @@ pub fn launch_agent_plist(program: &Path) -> String {
 /// The path quoted, as the Desktop Entry spec's `Exec` key quotes an argument
 /// with a space in it, and with `"`, `` ` ``, `$` and `\` escaped inside the
 /// quotes as it says to.
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
 pub fn autostart_entry(program: &Path) -> String {
     let mut quoted = String::from("\"");
     for character in program.display().to_string().chars() {
@@ -127,6 +133,7 @@ pub fn autostart_entry(program: &Path) -> String {
 }
 
 /// The `.app` a binary is inside, when it is inside one.
+#[cfg(any(target_os = "macos", test))]
 fn bundle_of(program: &Path) -> Option<PathBuf> {
     program
         .ancestors()
@@ -139,6 +146,7 @@ fn bundle_of(program: &Path) -> Option<PathBuf> {
 }
 
 /// `text` with the five characters XML gives a meaning written as entities.
+#[cfg(any(target_os = "macos", test))]
 fn escape_xml(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for character in text.chars() {

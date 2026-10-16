@@ -291,6 +291,7 @@ impl Keybindings {
     }
 
     /// Whether the person's file added nothing.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.user.is_empty()
     }
@@ -738,6 +739,7 @@ impl PendingSave {
     }
 
     /// Where it would be written.
+    #[cfg(test)]
     pub fn path(&self) -> &Path {
         &self.path
     }

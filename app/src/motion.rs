@@ -28,6 +28,7 @@ pub fn desktop_reduces_motion() -> Option<bool> {
 /// What `gsettings get org.gnome.desktop.interface enable-animations`
 /// printed, as whether the desktop asks for less motion: animations off is
 /// less motion.
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
 pub fn reduced_by_gsettings(printed: &str) -> Option<bool> {
     match printed.trim() {
         "true" => Some(false),

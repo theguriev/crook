@@ -1547,12 +1547,6 @@ impl Workspace {
         self.set_theme(&wanted, ctx);
     }
 
-    /// Whether the desktop is set to dark, as of the last thing the window
-    /// said.
-    pub fn system_is_dark(&self) -> bool {
-        self.system_is_dark
-    }
-
     /// Records whether the window has the desktop's keyboard focus, and
     /// settles what that moves.
     ///
@@ -1872,6 +1866,7 @@ impl Workspace {
     /// For a test, which otherwise has to infer this from pixels — and the
     /// window behind a popup is still in the scene, so "the menu does not say
     /// it is reading" is not the same question.
+    #[cfg(test)]
     pub fn worktrees_listed(&self) -> Option<usize> {
         match &self.tab_menu.contents {
             Contents::Ready(worktrees) => Some(worktrees.len()),
@@ -1881,6 +1876,7 @@ impl Workspace {
 
     /// The branches the menu has marked `merged`, in name order, or `None`
     /// until the proof has come back. For a test.
+    #[cfg(test)]
     pub fn worktrees_landed(&self) -> Option<Vec<String>> {
         let mut landed: Vec<String> = self.tab_menu.landed.as_ref()?.keys().cloned().collect();
         landed.sort();
@@ -1889,6 +1885,7 @@ impl Workspace {
 
     /// The branches "Delete N merged branches…" counts, in name order. For a
     /// test.
+    #[cfg(test)]
     pub fn worktree_branches_deletable(&self) -> Vec<String> {
         super::tab_menu::deletable_branches(&self.tab_menu)
             .iter()
@@ -1900,6 +1897,7 @@ impl Workspace {
     /// order — at most six of what [`Self::worktree_branches_deletable`]
     /// answers — or nothing when that question is not being asked. For a
     /// test.
+    #[cfg(test)]
     pub fn worktree_branches_asked_about(&self) -> Vec<String> {
         match &self.tab_menu.pruning {
             Pruning::Ready { going, .. } if self.tab_menu.mode == WorktreeMode::Pruning => going
@@ -1912,6 +1910,7 @@ impl Workspace {
 
     /// Whether the menu is asking about deleting those, or deleting them.
     /// For a test.
+    #[cfg(test)]
     pub fn worktree_menu_is_pruning(&self) -> bool {
         self.tab_menu.mode == WorktreeMode::Pruning
     }
@@ -1919,6 +1918,7 @@ impl Workspace {
     /// Which question about a task the menu is asking — `(discard, losing)`,
     /// where `losing` is Discard's second — or `None` when it is asking
     /// neither. For a test.
+    #[cfg(test)]
     pub fn worktree_menu_finishing(&self) -> Option<(bool, bool)> {
         match self.tab_menu.mode {
             WorktreeMode::Finishing { discard, losing } => Some((discard, losing)),
@@ -1928,6 +1928,7 @@ impl Workspace {
 
     /// Whether that question has finished looking at the checkout. For a
     /// test.
+    #[cfg(test)]
     pub fn worktree_finish_is_ready(&self) -> bool {
         matches!(self.tab_menu.finishing, Finishing::Ready(_))
     }
@@ -1935,6 +1936,7 @@ impl Workspace {
     /// Where the creator offers to start a branch from: what each row says,
     /// the ref it would hand git — `None` for the tab's own `HEAD` — and the
     /// badge on its right, which is what marks the default branch. For a test.
+    #[cfg(test)]
     pub fn worktree_bases(&self) -> Vec<(String, Option<String>, Option<&'static str>)> {
         self.tab_menu
             .bases
@@ -1944,23 +1946,27 @@ impl Workspace {
     }
 
     /// Which of them is picked, while the creator is up. For a test.
+    #[cfg(test)]
     pub fn worktree_base(&self) -> Option<usize> {
         (self.tab_menu.mode == WorktreeMode::Creating).then_some(self.tab_menu.base)
     }
 
     /// Whether the menu is asking about removing a checkout. For a test.
+    #[cfg(test)]
     pub fn worktree_menu_is_confirming(&self) -> bool {
         matches!(self.tab_menu.mode, WorktreeMode::Removing { .. })
     }
 
     /// Whether the menu is asking about removing every free checkout at once.
     /// For a test.
+    #[cfg(test)]
     pub fn worktree_menu_is_tidying(&self) -> bool {
         matches!(self.tab_menu.mode, WorktreeMode::Tidying)
     }
 
     /// How many checkouts that question would take, once it has looked in all
     /// of them, and `None` while it is still looking. For a test.
+    #[cfg(test)]
     pub fn worktrees_going(&self) -> Option<usize> {
         match &self.tab_menu.sweep {
             Sweep::Ready { going, .. } => Some(going.len()),
@@ -1971,6 +1977,7 @@ impl Workspace {
     /// How far the sweep has got — `(done, of)` — while it is looking in the
     /// checkouts or removing them, and `None` when it is doing neither. For a
     /// test, which is how the trail is checked without counting pellets.
+    #[cfg(test)]
     pub fn worktrees_swept(&self) -> Option<(usize, usize)> {
         if self.tab_menu.mode != WorktreeMode::Tidying {
             return None;
@@ -1984,23 +1991,27 @@ impl Workspace {
 
     /// Whether the sweep has been told to stop and is finishing the checkout
     /// in flight. For a test.
+    #[cfg(test)]
     pub fn worktree_sweep_is_stopping(&self) -> bool {
         matches!(self.tab_menu.sweep, Sweep::Removing { stopping: true, .. })
     }
 
     /// Whether the menu is waiting on git, which is when the pirate chews.
     /// For a test.
+    #[cfg(test)]
     pub fn worktree_menu_is_busy(&self) -> bool {
         self.tab_menu.is_busy()
     }
 
     /// How many frames into his bite the pirate is. For a test.
+    #[cfg(test)]
     pub fn worktree_menu_chomp(&self) -> usize {
         self.tab_menu.chomp
     }
 
     /// Whether the confirmation has already been refused once, which is what
     /// arms its "Remove anyway". For a test.
+    #[cfg(test)]
     pub fn worktree_menu_was_refused(&self) -> bool {
         matches!(self.tab_menu.mode, WorktreeMode::Removing { refused, .. } if refused)
     }
@@ -2032,6 +2043,7 @@ impl Workspace {
 
     /// The agents the creator offers, as their command names, in its order.
     /// For a test.
+    #[cfg(test)]
     pub fn worktree_agents(&self) -> Vec<&'static str> {
         self.tab_menu
             .agents
@@ -2042,6 +2054,7 @@ impl Workspace {
 
     /// Which of them is picked while the creator is up — `None` for "Shell
     /// only", and for a creator that is not up. For a test.
+    #[cfg(test)]
     pub fn worktree_agent(&self) -> Option<&'static str> {
         self.worktree_menu_is_creating()
             .then(|| self.tab_menu.picked_agent())
@@ -3013,6 +3026,7 @@ impl Workspace {
     }
 
     /// Whether the Themes panel is up.
+    #[cfg(test)]
     pub fn is_theme_panel_open(&self) -> bool {
         self.panel.open
     }
@@ -3034,6 +3048,7 @@ impl Workspace {
     }
 
     /// Whether it is showing the creator.
+    #[cfg(test)]
     pub fn is_creating_theme(&self) -> bool {
         self.panel.mode == Mode::Creating
     }
@@ -3654,16 +3669,19 @@ impl Workspace {
     /// A test's, and only a test's: creating one writes a whole checkout to
     /// disk, and a suite that wrote into the data directory of whoever ran it
     /// would leave real repositories lying about on their machine.
+    #[cfg(test)]
     pub fn set_worktrees_directory(&mut self, directory: PathBuf) {
         self.worktrees_directory = Some(directory);
     }
 
     /// Makes the worktree creator look for agents in these directories and
     /// nowhere else. A test's, for the reason the one above is.
+    #[cfg(test)]
     pub fn set_agent_directories(&mut self, directories: crate::agent::SearchPath) {
         self.agent_directories = Some(directories);
     }
 
+    #[cfg(test)]
     pub fn set_themes_directory(&mut self, directory: PathBuf) {
         self.themes_directory = Some(directory);
         self.refresh_themes();
@@ -3766,18 +3784,8 @@ impl Workspace {
             .unwrap_or(0);
     }
 
-    /// Which page of the settings the rail has selected, by its key.
-    ///
-    /// Public for the snapshot path and the tests: which page is showing is
-    /// not something a renderer asks for — it reads
-    /// [`Self::settings_page`] — and it is the one piece of the page's state
-    /// worth asserting from outside.
-    pub fn settings_page_key(&self) -> Option<String> {
-        let id = self.page.selected(&self.host)?;
-        self.host.settings_page_key(id).map(str::to_owned)
-    }
-
     /// What the rail row of the selected page says.
+    #[cfg(test)]
     pub fn settings_page_title(&self) -> Option<String> {
         let id = self.page.selected(&self.host)?;
         self.host.settings_page_title(id)
@@ -4723,6 +4731,7 @@ impl Workspace {
     }
 
     /// What is in the settings page's search box, for a test to read back.
+    #[cfg(test)]
     pub fn settings_search_text(&self) -> String {
         self.field(SETTINGS_SECTION, "search")
             .1
@@ -4732,6 +4741,7 @@ impl Workspace {
     }
 
     /// What is in the panel's search box, for a test to read back.
+    #[cfg(test)]
     pub fn panel_search_text(&self) -> String {
         self.panel_search.input().editor().text().to_owned()
     }
@@ -7990,6 +8000,7 @@ impl Workspace {
     /// is what a shell Crook has no integration for already does — and it is
     /// what a test asks for when it wants the whole session in one open block
     /// so that a drag across the output has something to select.
+    #[cfg(test)]
     pub fn set_shell_marks(&self, enabled: bool, ctx: &mut ViewContext<Self>) {
         self.terminals
             .update(ctx, |model, _| model.set_shell_marks(enabled));
@@ -8002,12 +8013,14 @@ impl Workspace {
     /// controls: a login shell reads the startup files of whoever is running
     /// the suite, and a test whose result depends on what a developer's
     /// `~/.zprofile` prints is not a test.
+    #[cfg(test)]
     pub fn set_shell_login(&self, login: bool, ctx: &mut ViewContext<Self>) {
         self.terminals
             .update(ctx, |model, _| model.set_shell_login(login));
     }
 
     /// Whether the next shell opened will be a login shell.
+    #[cfg(test)]
     pub fn shell_login(&self, app: &AppContext) -> bool {
         self.terminals.as_ref(app).shell_login()
     }
@@ -8075,6 +8088,7 @@ impl Workspace {
     /// keystroke. This is the raw write underneath, and it exists for the tests
     /// that have to put a shell in a state the field cannot ask for: an escape
     /// that takes the alt screen, a command that has to be running already.
+    #[cfg(any(test, doc))]
     pub fn type_into(&self, pane: PaneId, text: &str, ctx: &mut ViewContext<Self>) {
         self.terminals
             .update(ctx, |model, _| model.type_into(pane, text));
@@ -8481,6 +8495,7 @@ impl Workspace {
     ///
     /// Without the rows the find bar's filter hides, as the copy chord takes
     /// it: see [`Output::selected_text`](super::Output::selected_text).
+    #[cfg(test)]
     pub fn terminal_selection(&self, pane: PaneId, app: &AppContext) -> Option<String> {
         let interaction = self.interaction(pane)?;
         let selection = interaction.selection.selection()?;
@@ -8520,6 +8535,7 @@ impl Workspace {
     /// same reason: a selection is a state somebody is holding a button down
     /// to be in, and nobody is holding anything down in a headless run. See
     /// `--select-output`.
+    #[cfg(test)]
     pub fn select_in_output(&self, pane: PaneId, text: &str, ctx: &mut ViewContext<Self>) -> bool {
         self.select_in_output_through(pane, text, text, ctx)
     }
