@@ -907,23 +907,34 @@ pub mod unix {
                 return Err(anyhow!(error).context(format!("not asking {}", path.display())));
             }
         };
+        match fault(&metadata, uid) {
+            Some(why) => Err(refuse(why)),
+            None => Ok(path.to_path_buf()),
+        }
+    }
+
+    /// What is wrong with the socket an `lstat` described as `metadata`, for
+    /// a client running as `uid`, or `None` when nothing is: a link, not a
+    /// socket, somebody else's, or open to other users.
+    ///
+    /// Apart from [`checked_socket`], and given the uid rather than taking
+    /// it, the way [`server::check`] is, so that a test can ask as a user it
+    /// is not: no test can leave a socket that belongs to anybody else.
+    pub(crate) fn fault(metadata: &fs::Metadata, uid: u32) -> Option<String> {
         if metadata.file_type().is_symlink() {
-            return Err(refuse("it is a link".to_owned()));
+            return Some("it is a link".to_owned());
         }
         if !metadata.file_type().is_socket() {
-            return Err(refuse("it is not a socket".to_owned()));
+            return Some("it is not a socket".to_owned());
         }
         if metadata.uid() != uid {
-            return Err(refuse(format!(
-                "it belongs to uid {}, not {uid}",
-                metadata.uid()
-            )));
+            return Some(format!("it belongs to uid {}, not {uid}", metadata.uid()));
         }
         let mode = metadata.mode() & 0o777;
         if mode & 0o077 != 0 {
-            return Err(refuse(format!("it is open to other users (mode {mode:o})")));
+            return Some(format!("it is open to other users (mode {mode:o})"));
         }
-        Ok(path.to_path_buf())
+        None
     }
 
     /// A connection to the window at `path`, once the path has passed
@@ -936,12 +947,19 @@ pub mod unix {
     /// connect to it, and the kernel's record of who bound the socket is the
     /// one thing about it nobody else can set.
     pub fn connect_checked(path: &Path) -> Result<UnixStream> {
+        connect_checked_for(path, server::euid())
+    }
+
+    /// [`connect_checked`], with the uid the listener must have given rather
+    /// than taken from [`server::euid`], so that a test can ask for a
+    /// listener no test can make: one that is somebody else's. The path is
+    /// checked as this user's either way.
+    pub(crate) fn connect_checked_for(path: &Path, uid: u32) -> Result<UnixStream> {
         let socket = checked_socket(path)?;
         let stream = UnixStream::connect(&socket).map_err(|error| match error.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => gone(&socket),
             _ => anyhow!(error).context(format!("could not connect to {}", socket.display())),
         })?;
-        let uid = server::euid();
         let peer = server::peer_credentials(&stream).with_context(|| {
             format!(
                 "not asking {}: the kernel would not say who is listening there",
