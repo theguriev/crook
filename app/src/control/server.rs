@@ -149,6 +149,166 @@ pub fn euid() -> u32 {
     geteuid()
 }
 
+/// Who is at the other end of a connection, as the kernel recorded it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Peer {
+    /// The peer's effective user.
+    pub uid: u32,
+    /// The peer's process, when the kernel names it: `None` for one in a pid
+    /// namespace this process cannot see into, which Linux reports as 0, and
+    /// for one macOS will not name.
+    ///
+    /// Not the same process on both systems. On Linux it is the one that
+    /// made the peer's end, fixed like the uid. On macOS it is the last
+    /// process to have connected, sent, received or polled on that end, so a
+    /// descriptor passed to another process names that one once it uses it:
+    /// there it is a hint at lineage, worth what it says when read just after
+    /// the peer has spoken, and never a proof of who connected.
+    pub pid: Option<u32>,
+}
+
+/// Who is at the other end of `stream`.
+///
+/// What the kernel wrote down when that end was made — by `listen`,
+/// `connect` or `socketpair` — and not who holds it now, so it cannot be
+/// claimed by anything said over the connection, and a socket somebody swaps
+/// in at a name after it was looked at still names whoever bound it. That
+/// holds for the uid and the pid alike here; on macOS only the uid is fixed.
+#[cfg(target_os = "linux")]
+pub fn peer_credentials(stream: &UnixStream) -> io::Result<Peer> {
+    use std::ffi::c_void;
+    use std::os::fd::AsRawFd;
+
+    /// `SOL_SOCKET` and `SO_PEERCRED` in `<asm-generic/socket.h>`, which
+    /// x86_64 and aarch64 both take theirs from. Mips, PowerPC and SPARC
+    /// number them otherwise; there the call fails, or answers an `int` that
+    /// the length check below refuses.
+    const SOL_SOCKET: i32 = 1;
+    const SO_PEERCRED: i32 = 17;
+
+    /// `struct ucred`: a `pid_t`, a `uid_t` and a `gid_t`, 32 bits each, and
+    /// laid out alike on x86_64 and aarch64.
+    #[repr(C)]
+    struct Ucred {
+        pid: i32,
+        uid: u32,
+        gid: u32,
+    }
+
+    // Declared rather than depended on, as `euid` declares `geteuid`.
+    // `socklen_t` is 32 bits in glibc and musl alike.
+    unsafe extern "C" {
+        fn getsockopt(
+            socket: i32,
+            level: i32,
+            name: i32,
+            value: *mut c_void,
+            length: *mut u32,
+        ) -> i32;
+    }
+
+    // No uid anyone has, so that a call which wrote nothing names nobody
+    // rather than root.
+    let mut credentials = Ucred {
+        pid: 0,
+        uid: u32::MAX,
+        gid: u32::MAX,
+    };
+    let mut length = size_of::<Ucred>() as u32;
+    // SAFETY: the value points at a `Ucred` that lives across the call and
+    // the length says how big it is, which is as much as the kernel writes.
+    // The descriptor is `stream`'s, open for as long as it is borrowed.
+    let read = unsafe {
+        getsockopt(
+            stream.as_raw_fd(),
+            SOL_SOCKET,
+            SO_PEERCRED,
+            (&raw mut credentials).cast(),
+            &mut length,
+        )
+    };
+    if read != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if length as usize != size_of::<Ucred>() {
+        return Err(io::Error::other(format!(
+            "SO_PEERCRED answered {length} bytes, not a struct ucred's {}",
+            size_of::<Ucred>()
+        )));
+    }
+    Ok(Peer {
+        uid: credentials.uid,
+        pid: u32::try_from(credentials.pid).ok().filter(|pid| *pid != 0),
+    })
+}
+
+/// Who is at the other end of `stream`.
+///
+/// Two questions on macOS, which has no `SO_PEERCRED`, and they are not
+/// alike. `getpeereid` answers with the credentials the kernel wrote down
+/// when that end was made — by `listen`, `connect` or `socketpair` — and not
+/// who holds it now, so the uid cannot be claimed by anything said over the
+/// connection, and a socket somebody swaps in at a name after it was looked
+/// at still names whoever bound it. `LOCAL_PEERPID` answers with the peer
+/// socket's last owner, which XNU rewrites whenever a process connects,
+/// sends, receives or polls on it, so the pid is whoever used that end last;
+/// [`Peer::pid`] says what that is good for. macOS has nothing better:
+/// `LOCAL_PEERCRED`'s `xucred` carries no pid, and `LOCAL_PEERTOKEN` reads
+/// the same last owner.
+#[cfg(target_os = "macos")]
+pub fn peer_credentials(stream: &UnixStream) -> io::Result<Peer> {
+    use std::ffi::c_void;
+    use std::os::fd::AsRawFd;
+
+    /// `SOL_LOCAL` and `LOCAL_PEERPID` in `<sys/un.h>`.
+    const SOL_LOCAL: i32 = 0;
+    const LOCAL_PEERPID: i32 = 0x002;
+
+    // Declared rather than depended on, as `euid` declares `geteuid`: both
+    // are in libSystem. `uid_t`, `gid_t`, `pid_t` and `socklen_t` are 32
+    // bits there.
+    unsafe extern "C" {
+        fn getpeereid(socket: i32, uid: *mut u32, gid: *mut u32) -> i32;
+        fn getsockopt(
+            socket: i32,
+            level: i32,
+            name: i32,
+            value: *mut c_void,
+            length: *mut u32,
+        ) -> i32;
+    }
+
+    let socket = stream.as_raw_fd();
+    // No uid anyone has, as on Linux.
+    let (mut uid, mut gid) = (u32::MAX, u32::MAX);
+    // SAFETY: two `u32`s that live across the call, which writes one
+    // `uid_t` and one `gid_t` through them, and `stream`'s descriptor.
+    if unsafe { getpeereid(socket, &mut uid, &mut gid) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut pid: i32 = 0;
+    let mut length = size_of::<i32>() as u32;
+    // SAFETY: the value points at a `pid_t` that lives across the call and
+    // the length says how big it is, which is as much as the kernel writes.
+    let read = unsafe {
+        getsockopt(
+            socket,
+            SOL_LOCAL,
+            LOCAL_PEERPID,
+            (&raw mut pid).cast(),
+            &mut length,
+        )
+    };
+    // The user is what decides whether a socket is trusted; a process the
+    // kernel would not name is one nobody can check the lineage of, which is
+    // what `None` says.
+    let named = read == 0 && length as usize == size_of::<i32>();
+    Ok(Peer {
+        uid,
+        pid: u32::try_from(pid).ok().filter(|pid| named && *pid != 0),
+    })
+}
+
 /// The directory this user's control sockets live in.
 pub fn directory() -> PathBuf {
     directory_for(

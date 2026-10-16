@@ -1330,8 +1330,23 @@ mod socket {
 
     impl TempDir {
         fn new() -> Self {
+            Self::under(&std::env::temp_dir())
+        }
+
+        /// The same in `$XDG_RUNTIME_DIR` when there is one, which is short
+        /// and this user's alone, and is not `/tmp`, where a per-user quota
+        /// something else has filled fails the `mkdir` before the test has
+        /// asked anything.
+        fn runtime() -> Self {
+            let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+                .map(PathBuf::from)
+                .filter(|runtime| runtime.is_absolute() && runtime.is_dir());
+            Self::under(&runtime.unwrap_or_else(std::env::temp_dir))
+        }
+
+        fn under(base: &Path) -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
-            let path = std::env::temp_dir().join(format!(
+            let path = base.join(format!(
                 "crook-cc-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
@@ -1818,7 +1833,9 @@ mod socket {
             "{said}"
         );
 
-        let missing = root.0.join("nobody.sock");
+        // Beside the window's own, in a directory that passes the check, so
+        // that what is refused is the socket not being there.
+        let missing = socket.path().with_file_name("nobody.sock");
         let refusal = cli::unix::listing(&missing, None, true, None).expect_err("nothing there");
         assert!(
             refusal.to_string().contains("nothing is answering"),
@@ -1886,11 +1903,13 @@ mod socket {
                 .map_err(|error| error.to_string())
         };
 
-        // Inside a pane, the pane's own window, whatever else is running.
-        assert_eq!(
-            socket_from(Some("/run/user/1000/crook-control/42.sock"), Some("3")),
-            Ok(PathBuf::from("/run/user/1000/crook-control/42.sock"))
-        );
+        let text = |path: &Path| path.to_str().expect("a path in UTF-8").to_owned();
+
+        // A pane's own window is asked only once its socket has been checked,
+        // and one that has gone, with the directory it was in, is closed.
+        let closed = socket_from(Some(&text(&directory.join("42.sock"))), Some("3"))
+            .expect_err("nothing there");
+        assert!(closed.contains("nothing is answering"), "{closed}");
         let empty = socket_from(Some(""), Some("3")).expect_err("that window has no socket");
         assert!(empty.contains("has no control socket"), "{empty}");
         let older = socket_from(None, Some("3")).expect_err("a Crook from before the socket");
@@ -1915,13 +1934,208 @@ mod socket {
                 && several.contains(&second.path().display().to_string()),
             "the refusal names them: {several}"
         );
+        assert_eq!(
+            socket_from(Some(&text(second.path())), Some("3")),
+            Ok(second.path().to_owned()),
+            "inside a pane, the pane's own window, whatever else is running"
+        );
 
         drop((first, second));
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).expect("loosened");
-        let _stranger = UnixListener::bind(directory.join("9.sock")).expect("bound");
+        let stranger = directory.join("9.sock");
+        let _stranger = UnixListener::bind(&stranger).expect("bound");
         assert!(
             socket_from(None, None).is_err(),
             "a socket in a directory anyone could write to is nobody's to trust"
+        );
+        let planted = socket_from(Some(&text(&stranger)), Some("3"))
+            .expect_err("nor is it when the environment names it");
+        assert!(planted.contains("open to other users"), "{planted}");
+    }
+
+    /// A listener at `a` in `directory`, made with `mode`, that answers
+    /// nothing and accepts only when a test looks: what someone could leave
+    /// at a name `CROOK_SOCKET` holds, and a record of whether anything
+    /// connected to it. The socket is `0600`, as a window leaves its own, so
+    /// that only what a test changes is wrong with it.
+    fn planted(directory: &Path, mode: u32) -> (UnixListener, PathBuf) {
+        fs::create_dir(directory).expect("made");
+        fs::set_permissions(directory, fs::Permissions::from_mode(mode)).expect("its mode");
+        let socket = directory.join("a");
+        let listener = UnixListener::bind(&socket).expect("bound");
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).expect("locked");
+        listener.set_nonblocking(true).expect("non-blocking");
+        (listener, socket)
+    }
+
+    /// Whether anything has connected to `listener` since it was planted.
+    ///
+    /// A connection the kernel completed waits in the backlog until it is
+    /// accepted, even once its client has closed it, so a client that
+    /// connected and gave up is still seen.
+    fn connected(listener: &UnixListener) -> bool {
+        match listener.accept() {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(error) => panic!("the listener broke: {error}"),
+        }
+    }
+
+    #[test]
+    fn a_socket_in_a_directory_others_can_enter_is_not_asked() {
+        let root = TempDir::runtime();
+        let (listener, socket) = planted(&root.sockets(), 0o755);
+
+        let refusal = cli::unix::listing(&socket, None, true, None).expect_err("not asked");
+        let said = format!("{refusal:#}");
+        assert!(
+            said.contains(&format!(
+                "{} is open to other users",
+                root.sockets().display()
+            )),
+            "the refusal names the rule: {said}"
+        );
+        assert!(!connected(&listener), "nothing was even connected to");
+
+        // The directory is the one thing wrong with it.
+        fs::set_permissions(root.sockets(), fs::Permissions::from_mode(0o700)).expect("closed");
+        let _asked =
+            cli::unix::connect_checked(&socket).expect("asked once only this user can enter");
+        assert!(connected(&listener));
+    }
+
+    #[test]
+    fn a_socket_that_is_a_link_is_not_asked() {
+        let root = TempDir::runtime();
+        let (listener, socket) = planted(&root.sockets(), 0o700);
+        let link = root.sockets().join("l");
+        std::os::unix::fs::symlink(&socket, &link).expect("linked");
+
+        let refusal = cli::unix::listing(&link, None, true, None).expect_err("not asked");
+        let said = format!("{refusal:#}");
+        assert!(
+            said.contains("is a link"),
+            "the refusal names the rule: {said}"
+        );
+        assert!(!connected(&listener), "nothing was even connected to");
+
+        let _asked = cli::unix::connect_checked(&socket).expect("the socket it points at is asked");
+        assert!(connected(&listener));
+    }
+
+    #[test]
+    fn a_relative_socket_path_is_not_asked() {
+        let root = TempDir::runtime();
+        let (listener, socket) = planted(&root.sockets(), 0o700);
+        // Up from the working directory to the root and down to the socket:
+        // a path that does reach it, so that it is the path's being relative
+        // that is refused and not a name that leads nowhere.
+        let here = std::env::current_dir().expect("a working directory");
+        let relative = here
+            .components()
+            .skip(1)
+            .map(|_| std::path::Component::ParentDir)
+            .collect::<PathBuf>()
+            .join(socket.strip_prefix("/").expect("an absolute path"));
+        assert!(relative.is_relative());
+        assert!(
+            fs::symlink_metadata(&relative).is_ok_and(|metadata| metadata.file_type().is_socket()),
+            "{} reaches the socket",
+            relative.display()
+        );
+
+        let refusal = cli::unix::listing(&relative, None, true, None).expect_err("not asked");
+        let said = format!("{refusal:#}");
+        assert!(
+            said.contains("absolute"),
+            "the refusal names the rule: {said}"
+        );
+        assert!(!connected(&listener), "nothing was even connected to");
+    }
+
+    #[test]
+    fn a_socket_others_can_reach_is_not_asked() {
+        let root = TempDir::runtime();
+        let (listener, socket) = planted(&root.sockets(), 0o700);
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o666)).expect("loosened");
+
+        let refusal = cli::unix::listing(&socket, None, true, None).expect_err("not asked");
+        let said = format!("{refusal:#}");
+        assert!(
+            said.contains("open to other users (mode 666)"),
+            "the refusal names the rule: {said}"
+        );
+        assert!(!connected(&listener), "nothing was even connected to");
+
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).expect("locked");
+        let _asked =
+            cli::unix::connect_checked(&socket).expect("asked once it is this user's alone");
+        assert!(connected(&listener));
+    }
+
+    /// Asked as the next uid up, as `server::check`'s own test asks, since
+    /// no test can leave a socket that belongs to somebody else.
+    #[test]
+    fn a_socket_another_user_owns_is_not_asked() {
+        let root = TempDir::runtime();
+        let (_listener, socket) = planted(&root.sockets(), 0o700);
+        let metadata = fs::symlink_metadata(&socket).expect("there");
+        let (mine, theirs) = (server::euid(), server::euid() + 1);
+
+        assert_eq!(cli::unix::fault(&metadata, mine), None, "nothing wrong");
+        assert_eq!(
+            cli::unix::fault(&metadata, theirs),
+            Some(format!("it belongs to uid {mine}, not {theirs}")),
+            "the socket is the one thing whose owner is wrong"
+        );
+    }
+
+    /// A socket swapped in between the look at it and the connect passes
+    /// every rule about the path, so the listener is the last word: asked
+    /// for a listener of the next uid up, the same socket is refused once it
+    /// is connected to, and before anything is said to it.
+    #[test]
+    fn a_socket_another_user_listens_on_is_not_asked() {
+        use std::io::Read;
+
+        let root = TempDir::runtime();
+        let (listener, socket) = planted(&root.sockets(), 0o700);
+        let (mine, theirs) = (server::euid(), server::euid() + 1);
+
+        let refusal =
+            cli::unix::connect_checked_for(&socket, theirs).expect_err("not this user's listener");
+        let said = format!("{refusal:#}");
+        assert!(
+            said.contains(&format!(
+                "the process listening there is uid {mine}, not {theirs}"
+            )),
+            "the refusal names the rule: {said}"
+        );
+        let (mut asked, _) = listener
+            .accept()
+            .expect("connected to, since only a connection names its listener");
+        asked.set_nonblocking(false).expect("blocking");
+        let mut heard = Vec::new();
+        asked.read_to_end(&mut heard).expect("the client hung up");
+        assert!(heard.is_empty(), "and sent nothing: {heard:?}");
+    }
+
+    #[test]
+    fn the_peer_of_a_socketpair_is_this_user_and_has_a_pid() {
+        let (one, other) = UnixStream::pair().expect("a pair");
+        let this = server::Peer {
+            uid: server::euid(),
+            pid: Some(std::process::id()),
+        };
+        // The kernel records whoever made each end, and, for macOS's pid,
+        // whoever used it last; this process is both, for both ends.
+        assert_eq!(
+            server::peer_credentials(&one).expect("the kernel says"),
+            this
+        );
+        assert_eq!(
+            server::peer_credentials(&other).expect("the kernel says"),
+            this
         );
     }
 
