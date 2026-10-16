@@ -2969,11 +2969,12 @@ reaches every pane whose program asked. `vte` has no hook for the question, and 
 DECRQM about `?2031` with 0, not recognised, so the OSC watcher keeps the mode itself, stops on
 both questions to answer them in place among `Term`'s own answers, and drops `Term`'s `0`. A
 synchronized update holds an OSC 11 past `Term` until it ends, and answers the OSC 11 query
-behind it then, from the colour it set: so the watcher notes what sets the background, a
-question about the scheme behind one ends the update first, as one nobody ended is ended, and
-a theme switch that lands while one is held is weighed once it is let go of. An update that
-leaves the background alone stays whole either way. A mirror answers neither and reports
-nothing.
+behind it then, from the colour it set: so the watcher stops on what sets the background,
+where whether an update holds it is read off `vte`, a question about the scheme behind one
+ends the update first, as one nobody ended is ended, and a theme switch that lands while one
+is held is weighed once it is let go of: once `vte` has played it, even when another opens
+behind its end in the same read. An update that leaves the background alone stays whole
+either way. A mirror answers neither and reports nothing.
 
 One residue is worth writing down rather than discovering. End-of-file on the pty master is
 the only signal this design has that a session is over, and something other than the child

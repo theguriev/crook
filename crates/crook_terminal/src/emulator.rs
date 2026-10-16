@@ -246,7 +246,7 @@ impl EventListener for EventProxy {
 /// know. 2031 is the colour scheme's subscription, and the watcher keeps it:
 /// a program that turns it on is told whenever a new palette moves the
 /// background from dark to light or back, by [`Emulator::set_palette`]. And
-/// it notes what sets the background — OSC 10, 11 and 111 — because a
+/// it stops on what sets the background — OSC 10, 11 and 111 — because a
 /// synchronized update holds that past `Term`, which the answer is read
 /// from: see [`Emulator::background_held`].
 ///
@@ -310,12 +310,14 @@ struct OscWatcher {
     /// a stop: it is read only where the watcher already stands still, at a
     /// question about it and between feeds, when the palette changes.
     scheme_reports: bool,
-    /// Whether the piece set or gave back the background OSC 11 answers
+    /// Whether the program set or gave back the background OSC 11 answers
     /// with: OSC 11 with a colour, OSC 10 with one after the foreground's,
-    /// or OSC 111. Not a stop either: all that matters is whether `vte` is
-    /// still holding it in a synchronized update once the piece is fed,
-    /// which [`Emulator::advance`] reads off this into
-    /// [`Emulator::background_held`].
+    /// or OSC 111. Which is where the watcher stops, because what matters
+    /// is whether that escape is in a synchronized update `vte` is still
+    /// holding, and that is whether one is held right after it: anywhere
+    /// earlier in a piece, the escape could be ahead of the update's
+    /// opening, or in one that ended before it. [`Emulator::advance`] reads
+    /// that off into [`Emulator::background_held`].
     background_set: bool,
     /// Whether the program switched screens — `CSI ? 1049 h` or `l`, the one
     /// switch alacritty makes — which is where the watcher stops.
@@ -461,6 +463,10 @@ impl Perform for OscWatcher {
     ///
     /// And on a switch of screens, so that [`Emulator::switch_screens`] can
     /// feed it apart from the output before it.
+    ///
+    /// And on a background set or given back, so that whether a synchronized
+    /// update holds it can be read off the parser right after it: see
+    /// [`Self::background_set`].
     fn terminated(&self) -> bool {
         self.mark.is_some()
             || self.image.is_some()
@@ -470,6 +476,7 @@ impl Perform for OscWatcher {
             || self.scheme_reports_asked
             || self.long_title.is_some()
             || self.screen_switched
+            || self.background_set
     }
 }
 
@@ -707,7 +714,9 @@ pub struct Emulator {
     /// Whether the synchronized update `parser` is holding sets or gives
     /// back the program's own background, which the watcher saw go by and
     /// `Term` has not: what the background is, dark or light, is not known
-    /// until the update is let go of. See [`Self::scheme`].
+    /// until the update is let go of. See [`Self::scheme`]. One `vte` opens
+    /// behind that one's end, in the slice that ends it, holds none of its
+    /// bytes, and starts with this unset: see [`Self::feed`].
     background_held: bool,
     /// The palette's background from before a theme switch that came while
     /// [`Self::background_held`], which a program that turned colour-scheme
@@ -853,9 +862,9 @@ impl Emulator {
             } else {
                 self.feed(piece);
             }
-            // Before anything answers from the background: OSC 11 is no
-            // stop, so the piece may have carried one into the update `vte`
-            // is holding, past `Term`.
+            // Before anything answers from the background. The piece ends on
+            // the escape that set it, so an update held now holds that
+            // escape, past `Term`.
             self.background_held |=
                 std::mem::take(&mut self.osc_watcher.background_set) && self.updating();
             // Before anything else reads the anchor: a piece that took a
@@ -899,7 +908,7 @@ impl Emulator {
                 // in. An update that leaves the background alone stays one.
                 if self.background_held {
                     self.parser.stop_sync(&mut self.term);
-                    self.update_let_go();
+                    self.update_let_go(true);
                 }
                 self.proxy
                     .send_event(Event::PtyWrite(self.scheme().report()));
@@ -1057,9 +1066,16 @@ impl Emulator {
         while !rest.is_empty() {
             let (slice, after) = rest.split_at(self.history_room().min(rest.len()));
             let held = self.updating();
+            let buffered = self.parser.sync_bytes_count();
             self.parser.advance(&mut self.term, slice);
             if held {
-                self.update_let_go();
+                // `vte` adds the whole slice to the update it holds, unless
+                // the slice ends it. Then it plays the update to `Term`, and
+                // keeps nothing, or, when one opens again behind the end,
+                // the bytes from that opening on, and is holding one still.
+                let played =
+                    !self.updating() || self.parser.sync_bytes_count() < buffered + slice.len();
+                self.update_let_go(played);
             }
             self.blocks
                 .trim_history(&mut self.term, self.scrollback_lines);
@@ -1106,13 +1122,15 @@ impl Emulator {
     /// And one that changed the program's own background has now changed
     /// `Term`'s, so a theme switch that came while it was held can be
     /// weighed: what it owes goes onto the proxy behind the update's own
-    /// answers. See [`Self::set_palette`].
-    fn update_let_go(&mut self) {
+    /// answers. See [`Self::set_palette`]. That is once it was `played`, its
+    /// bytes handed to `Term`, whether or not `vte` is holding another that
+    /// opened behind its end.
+    fn update_let_go(&mut self, played: bool) {
         if self.switch_held {
             self.blocks.update_switched_screens(&self.term);
             self.switch_held = self.updating();
         }
-        self.background_held &= self.updating();
+        self.background_held &= !played;
         if let Some(report) = self.settle_scheme() {
             self.proxy.send_event(Event::PtyWrite(report));
         }
@@ -1737,7 +1755,7 @@ impl Emulator {
         // any other.
         let view = self.view();
         self.parser.stop_sync(&mut self.term);
-        self.update_let_go();
+        self.update_let_go(true);
         self.settle_history();
         self.keep_view(view);
         self.dirty = true;
@@ -2023,7 +2041,7 @@ impl Emulator {
                 return None;
             }
             self.parser.stop_sync(&mut self.term);
-            self.update_let_go();
+            self.update_let_go(true);
         }
         let exited = self.hand_over_term_events();
         if let Some(title) = &self.title {

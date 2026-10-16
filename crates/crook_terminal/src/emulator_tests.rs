@@ -1128,6 +1128,83 @@ fn test_a_theme_switch_during_an_update_that_left_the_background_alone_is_told_a
 }
 
 #[test]
+fn test_a_background_set_ahead_of_an_update_in_the_same_read_leaves_the_update_alone() {
+    // `Term` has the background before the update opens, so the update
+    // leaves it alone, as it does when the background came in a read of its
+    // own: a question in it is answered at once, and it stays a frame.
+    let mut asked = emulator();
+    asked.advance(b"\x1b]11;rgb:ff/ff/ff\x07\x1b[?2026hhalf");
+    asked.advance(b"\x1b[?996n");
+    assert_eq!(LIGHT, answered(&mut asked));
+    assert_eq!(
+        Some(""),
+        asked.snapshot().text().lines().next(),
+        "the update is still held"
+    );
+
+    // And a theme switch under it is weighed at once.
+    let mut switched = emulator();
+    switched.advance(b"\x1b[?2031h\x1b]111\x07\x1b[?2026hhalf");
+    switched.set_palette(light());
+    assert_eq!(LIGHT, answered(&mut switched));
+}
+
+#[test]
+fn test_an_update_that_set_the_background_is_let_go_of_in_the_read_that_opens_the_next() {
+    // `vte` plays the first update to `Term` at its end, and holds the
+    // second from its opening on. The second leaves the background alone,
+    // so however the pty cut the stream, the question in it is answered at
+    // once, from the background the first set, and it stays a frame.
+    let set = b"\x1b[?2026h\x1b]11;rgb:ff/ff/ff\x07first".as_slice();
+    let next = b"\x1b[?2026l\x1b[?2026hhalf\x1b[?996n".as_slice();
+    let whole = [set, next].concat();
+    for reads in [
+        vec![&whole[..]],
+        vec![set, next],
+        vec![set, &next[..8], &next[8..]],
+    ] {
+        let mut emulator = emulator();
+        for read in &reads {
+            emulator.advance(read);
+        }
+        assert_eq!(LIGHT, answered(&mut emulator), "in {} reads", reads.len());
+        assert_eq!(
+            Some("first"),
+            emulator.snapshot().text().lines().next(),
+            "in {} reads: the second update is still held",
+            reads.len()
+        );
+    }
+}
+
+#[test]
+fn test_a_theme_switch_after_an_update_that_gave_back_the_background_is_told_at_once() {
+    // The update that gave the palette's background back has reached the
+    // grid when the switch lands, and the one held then leaves the
+    // background alone, however the pty cut the stream between the two.
+    let given_back = b"\x1b[?2026h\x1b]111\x07".as_slice();
+    let next = b"\x1b[?2026l\x1b[?2026hhalf".as_slice();
+    let whole = [given_back, next].concat();
+    for reads in [
+        vec![&whole[..]],
+        vec![given_back, next],
+        vec![given_back, &next[..8], &next[8..]],
+    ] {
+        let mut emulator = emulator();
+        emulator.advance(b"\x1b[?2031h\x1b]11;rgb:00/00/00\x07");
+        for read in &reads {
+            emulator.advance(read);
+        }
+        emulator.set_palette(light());
+        assert_eq!(LIGHT, answered(&mut emulator), "in {} reads", reads.len());
+
+        // A background of its own in the second is the program's to know.
+        emulator.advance(b"\x1b]11;rgb:00/00/00\x07\x1b[?2026l");
+        assert_eq!("", answered(&mut emulator), "in {} reads", reads.len());
+    }
+}
+
+#[test]
 fn test_the_revision_moves_only_when_something_changed() {
     let mut emulator = emulator();
     let first = emulator.snapshot();
