@@ -315,7 +315,17 @@ mod tests {
             Some("NO"),
             "AppKit was told already, so this test cannot tell whether Crook tells it"
         );
-        leave_the_command_line_alone();
-        assert_eq!(asked().as_deref(), Some("NO"));
+        // Through `install`, the call Crook makes, so that the test fails if
+        // `install` stops registering the default or registers it only after
+        // one of its early returns. libtest runs each test on a thread of its
+        // own, where `install` returns at the main-thread check; on the main
+        // thread a test process has no delegate. Either way it never reaches
+        // `DELIVER` or teaches a class.
+        install(|_| {});
+        assert_eq!(
+            asked().as_deref(),
+            Some("NO"),
+            "install returned without telling AppKit the command line is not its to read"
+        );
     }
 }
