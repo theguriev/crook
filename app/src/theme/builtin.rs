@@ -208,11 +208,3 @@ pub const MIDNIGHT: Theme = Theme::derived(
         bright: ANSI_BRIGHT,
     },
 );
-
-/// The built-in with this name, if there is one.
-pub fn builtin_named(name: &str) -> Option<Theme> {
-    BUILTIN
-        .iter()
-        .find(|builtin| builtin.name == name)
-        .map(|builtin| builtin.theme)
-}

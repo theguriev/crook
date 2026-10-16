@@ -18,11 +18,15 @@ use std::time::Duration;
 pub const QUIET: Duration = Duration::from_millis(150);
 
 /// Plays the alert sound, without waiting for it.
+///
+/// Not in a test build: `Workspace::sound_the_bell` counts the bell there
+/// instead, because the sound would be the machine's.
+#[cfg(not(test))]
 pub fn sound() {
     platform::sound();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 mod platform {
     // Declared rather than depended on: one AppKit function, in a framework
     // the window already links.
@@ -38,7 +42,7 @@ mod platform {
     }
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(target_os = "macos"), not(test)))]
 mod platform {
     /// The freedesktop sound theme's bell, where distributions install it.
     const BELL_FILE: &str = "/usr/share/sounds/freedesktop/stereo/bell.oga";
@@ -65,7 +69,7 @@ mod platform {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 mod platform {
     /// winuser.h `MB_OK`: the default beep.
     const MB_OK: u32 = 0;

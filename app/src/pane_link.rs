@@ -198,6 +198,7 @@ impl PaneLink {
     }
 
     /// The link under the pointer, if there is one.
+    #[cfg(test)]
     pub fn get(&self) -> Option<LinkSpan> {
         self.0.borrow().shown.clone()
     }
@@ -218,6 +219,7 @@ impl PaneLink {
     }
 
     /// What a click would open.
+    #[cfg(test)]
     pub fn target(&self) -> Option<LinkTarget> {
         self.0
             .borrow()
@@ -272,6 +274,7 @@ impl PaneLink {
     }
 
     /// Whether there is a link under the pointer at all.
+    #[cfg(test)]
     pub fn is_some(&self) -> bool {
         self.0.borrow().shown.is_some()
     }

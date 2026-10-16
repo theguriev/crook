@@ -204,20 +204,11 @@ pub fn uninstall_from(root: &Path, id: &PluginId) -> Result<PathBuf, String> {
     Ok(home)
 }
 
-/// Where a plugin's versions live, whether or not any of them are there.
-pub fn home(id: &PluginId) -> Option<PathBuf> {
-    directory().map(|root| root.join(folder(id)))
-}
-
-/// The module a plugin is being loaded from, if it is installed as a file.
+/// The module a plugin is being loaded from, if it is installed as a file in
+/// the plugins directory `root`.
 ///
 /// `None` for a plugin that is in the binary, which is most of them, and for
 /// one whose directory has nothing in it a version can be read out of.
-pub fn module(id: &PluginId) -> Option<PathBuf> {
-    newest_module(&home(id)?)
-}
-
-/// The same, out of a named plugins directory.
 pub fn module_in(root: &Path, id: &PluginId) -> Option<PathBuf> {
     newest_module(&root.join(folder(id)))
 }

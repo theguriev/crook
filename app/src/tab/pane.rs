@@ -260,12 +260,6 @@ impl PaneGroup {
         self.panes.len()
     }
 
-    /// Always false: the group refuses to empty itself. Here because a `len`
-    /// without an `is_empty` is a trap for the next reader.
-    pub fn is_empty(&self) -> bool {
-        self.panes.is_empty()
-    }
-
     /// Every pane, in render order — left to right, or top to bottom.
     ///
     /// Warp needs both `pane_ids()` and `visible_pane_ids()` because a pane
@@ -353,6 +347,7 @@ impl PaneGroup {
     }
 
     /// Panes in most-recently-focused order, the focused one first.
+    #[cfg(test)]
     pub fn mru(&self) -> &[PaneId] {
         &self.mru
     }
@@ -530,6 +525,7 @@ impl PaneGroup {
     }
 
     /// The pane at `index` in render order.
+    #[cfg(test)]
     pub fn at(&self, index: usize) -> Option<PaneId> {
         self.panes.get(index).map(Pane::id)
     }

@@ -233,11 +233,13 @@ impl StoreModel {
     }
 
     /// Which plugin is being downloaded, if any.
+    #[cfg(test)]
     pub fn downloading(&self) -> Option<&PluginId> {
         self.downloading.as_ref()
     }
 
     /// The plugins waiting to be downloaded, in order.
+    #[cfg(test)]
     pub fn queued(&self) -> Vec<PluginId> {
         self.pending
             .iter()

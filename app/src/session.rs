@@ -80,7 +80,7 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{Launch, Resume};
-use crate::settings::{atomic_write, config_directory, ensure_directory};
+use crate::settings::{atomic_write, ensure_directory};
 use crate::tab::{Pane, PaneGroup, SplitAxis, Tab, TabGroup, TabId, TabStrip};
 
 /// The file the last session is remembered in.
@@ -325,6 +325,7 @@ impl Session {
     /// A session with no tabs is one written by something that had none, and
     /// restoring it would be opening a window with no panes — which the strip
     /// refuses to represent anyway.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.tabs.iter().all(|tab| tab.panes.is_empty())
     }
@@ -555,14 +556,6 @@ impl Session {
         session.fullscreen = read_or_default(&document, "fullscreen", path);
         session.groups = read_or_default(&document, "groups", path);
         session
-    }
-
-    /// Reads the per-user session file.
-    pub fn for_user() -> Self {
-        match user_session_path() {
-            Some(path) => Self::load(path),
-            None => Self::default(),
-        }
     }
 
     /// Writes the session to `path`, atomically.
@@ -879,17 +872,12 @@ fn prune_backups(directory: &Path) {
     }
 }
 
-/// Where the per-user session file lives.
-pub fn user_session_path() -> Option<PathBuf> {
-    Some(config_directory()?.join(SESSION_FILE))
-}
-
 /// Where the session file beside a settings file lives.
 ///
 /// The two are one directory's: a window that reads its settings from a
 /// scratch directory — a test's — writes its session there too, and never
 /// into the real one's place. For the settings a person actually has, this
-/// is [`user_session_path`].
+/// is the session file in [`crate::settings::config_directory`].
 pub fn session_path_beside(settings: &Path) -> PathBuf {
     settings.with_file_name(SESSION_FILE)
 }

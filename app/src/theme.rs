@@ -39,11 +39,12 @@ pub mod creator;
 mod file;
 mod omarchy;
 
-pub use builtin::{BUILTIN, Builtin, DARK, builtin_named};
-pub use file::{
-    ThemeFile, Unreadable, load_themes_in, load_user_themes, read_themes_in, user_themes_directory,
-    write_theme,
-};
+#[cfg(test)]
+pub use builtin::Builtin;
+pub use builtin::{BUILTIN, DARK};
+#[cfg(test)]
+pub use file::load_themes_in;
+pub use file::{Unreadable, read_themes_in, user_themes_directory, write_theme};
 
 /// A palette, in the roles the interface asks for.
 ///
@@ -360,6 +361,10 @@ pub struct Available {
 
 impl Available {
     /// Whether this came from a file rather than from the binary.
+    #[expect(
+        clippy::wrong_self_convention,
+        reason = "a question about where the theme came from, not a conversion"
+    )]
     pub fn from_file(&self) -> bool {
         self.path.is_some()
     }
@@ -382,6 +387,7 @@ pub fn available() -> Vec<Available> {
 /// The seam every test needs. Without it a test asserting "three themes" would
 /// be asserting something about the machine it runs on, and a test that
 /// *wrote* a theme would write into the themes folder of whoever ran it.
+#[cfg(test)]
 pub fn available_in(directory: &Path) -> Vec<Available> {
     listing_in(directory).available
 }
