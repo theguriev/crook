@@ -2463,6 +2463,12 @@ was one; both are refused rather than looked around, since either way the window
 cannot be asked. Outside every pane it takes the one live socket in this user's directory when
 there is exactly one, and refuses when there are several, naming them: each window is its own
 process, and choosing the newest would be a guess that hands a script another window's panes.
+Whichever way it found the socket, the CLI asks it only once it has been checked, since an
+inherited variable proves nothing about what is at the name now: the path absolute, its
+directory passing the window's own check, the socket a socket and not a link, this user's and
+`0600` or tighter, and — once connected — the process listening this user's, by `SO_PEERCRED`
+on Linux and `getpeereid` on macOS, since a name can be swapped between a look and a connect. A
+socket that fails is not connected to, and the refusal names the rule it failed.
 `crook tab new [--worktree B] [--in-my-group] [--title T] [--json] -- CMD…` prints the new
 pane's number, or the window's answer with `--json`; the `--` is required, since a command is
 the part of the line most likely to hold a word that starts with a dash. A `note` in the answer
