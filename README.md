@@ -1018,7 +1018,8 @@ Twenty-two features, and the page that configures them:
   middle-click paste, whether the tabs panel shows and how wide it is, and — set in the file
   rather than on the page — its font family and the line each agent is resumed with.
   Beside them, **Default terminal** makes Crook the terminal the system opens — Launch
-  Services' shell handler on macOS, what Finder runs a script with, and the first line of
+  Services' shell handler on macOS, what Finder runs a script with no extension in (each in a
+  tab of its own, started in the script's folder), and the first line of
   `xdg-terminals.list` on Linux — and says so once it is; it is the system's, so it is asked
   afresh each time the page is shown, and not offered on Windows, which has no such setting.
   The type size is also on `cmd/ctrl-plus`, `-minus` and `-0`, and every pane resizes with it:

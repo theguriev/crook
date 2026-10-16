@@ -618,7 +618,7 @@ fn exec_line(command: &[String]) -> String {
 /// shell treats specially is left bare, so the line in the pane reads
 /// `exec htop` rather than `exec 'htop'`; a leading `=` is not one of them,
 /// since zsh reads `=cat` as the path to `cat`.
-fn shell_word(word: &str) -> String {
+pub(crate) fn shell_word(word: &str) -> String {
     let bare = !word.is_empty()
         && !word.starts_with('=')
         && word
@@ -4590,6 +4590,18 @@ impl WindowDelegate for Shell {
             && self
                 .workspace
                 .read(&self.app, |workspace, _| workspace.asks_before_quitting())
+    }
+
+    /// Opens what macOS asked Crook to open — a script double-clicked in
+    /// Finder, once Crook is the terminal that runs them — each in a tab of
+    /// its own: see [`Workspace::open_files`].
+    fn open_files(&mut self, files: Vec<PathBuf>) -> bool {
+        let workspace = &self.workspace;
+        self.app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| workspace.open_files(&files, ctx));
+        });
+        self.app
+            .read(|ctx| ctx.has_window_invalidations(self.window_id))
     }
 
     /// The window took the keyboard, which the question a close asks has to

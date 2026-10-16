@@ -4,6 +4,7 @@
 #
 #   ./script/macos-app --binary dist/macos/crook
 #   ./script/macos-app --binary crook-universal --identity "Developer ID Application: … (TEAMID)"
+#   ./script/macos-app --info-plist     # print the Info.plist and stop, on any machine
 #
 # The .dmg is `script/macos-dmg`, and deliberately a separate step: a ticket is
 # stapled to the .app *before* the image is built around it, so that a copy
@@ -29,6 +30,7 @@ set -eu
 cd "$(dirname "$0")/.."
 
 BINARY=""
+INFO_PLIST_ONLY=""
 IDENTITY="${MACOS_SIGNING_IDENTITY:-}"
 OUT_DIR="dist/macos"
 # Reverse-DNS, and stable forever: macOS keys a saved window position, a
@@ -40,11 +42,14 @@ BUNDLE_ID="${CROOK_BUNDLE_ID:-com.theguriev.crook}"
 usage() {
   cat <<'EOF'
 Usage: ./script/macos-app --binary <path> [--identity <name>] [--out <directory>]
+       ./script/macos-app --info-plist
 
   --binary <path>     The macOS executable to wrap. Required.
   --identity <name>   Developer ID Application identity to sign with. Defaults
                       to $MACOS_SIGNING_IDENTITY; ad-hoc when neither is set.
   --out <directory>   Where Crook.app goes. Default: dist/macos.
+  --info-plist        Print the Info.plist the app would get, and stop. Needs
+                      no binary and no Mac.
   -h, --help          Show this message.
 EOF
 }
@@ -60,14 +65,17 @@ while [ $# -gt 0 ]; do
     --out) [ $# -ge 2 ] || { echo "error: --out needs a directory" >&2; exit 1; }
       OUT_DIR=$2; shift 2 ;;
     --out=*) OUT_DIR=${1#--out=}; shift ;;
+    --info-plist) INFO_PLIST_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument '$1'" >&2; usage >&2; exit 1 ;;
   esac
 done
 
-[ -n "$BINARY" ] || { echo "error: --binary is required" >&2; usage >&2; exit 1; }
-[ -f "$BINARY" ] || { echo "error: no binary at $BINARY" >&2; exit 1; }
-[ "$(uname -s)" = Darwin ] || { echo "error: this needs macOS: codesign and hdiutil" >&2; exit 1; }
+if [ -z "$INFO_PLIST_ONLY" ]; then
+  [ -n "$BINARY" ] || { echo "error: --binary is required" >&2; usage >&2; exit 1; }
+  [ -f "$BINARY" ] || { echo "error: no binary at $BINARY" >&2; exit 1; }
+  [ "$(uname -s)" = Darwin ] || { echo "error: this needs macOS: codesign and hdiutil" >&2; exit 1; }
+fi
 
 export PATH="$HOME/.cargo/bin:$PATH"
 
@@ -75,27 +83,15 @@ VERSION="$(cargo metadata --no-deps --format-version 1 |
   sed -n 's/.*"name":"crook","version":"\([^"]*\)".*/\1/p')"
 [ -n "$VERSION" ] || { echo "error: could not read the crook version" >&2; exit 1; }
 
-APP="$OUT_DIR/Crook.app"
-rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-
-cp "$BINARY" "$APP/Contents/MacOS/crook"
-chmod 755 "$APP/Contents/MacOS/crook"
-
-# The icon, compiled from the committed .iconset. `iconutil` ships with macOS,
-# so nothing here needs a rasterizer — the PNGs were rendered by
-# ./script/app-icon when the artwork last changed and are in the tree. This
-# runs before codesign because the signature covers Contents/Resources: an
-# icon added afterwards breaks it.
+# The icon is compiled from the committed .iconset further down; the key that
+# names it is decided here, so that the Info.plist printed alone is the one
+# the app gets.
 ICONSET=assets/Crook.iconset
 if [ -d "$ICONSET" ]; then
-  echo "==> Compiling $ICONSET"
-  iconutil --convert icns "$ICONSET" --output "$APP/Contents/Resources/Crook.icns"
   ICON_KEY='	<key>CFBundleIconFile</key>
 	<string>Crook</string>
 '
 else
-  echo "warning: no $ICONSET; the app will get the generic Dock icon" >&2
   ICON_KEY=""
 fi
 
@@ -109,13 +105,52 @@ fi
 # deprecated NSUserNotification API asked for alerts that stay until dismissed
 # instead. No entitlement either: only a push from a server needs one, and
 # Crook's banners are posted by the app itself.
-cat > "$APP/Contents/Info.plist" <<PLIST
+#
+# CFBundleDocumentTypes is what lets the settings' Default terminal button
+# mean something on a Mac. Launch Services hands a file only to an application
+# that says it opens files of that type, so making Crook the shell handler for
+# public.unix-executable without them left a script double-clicked in Finder
+# with nowhere to go. Both types with the role Shell — Crook runs them, which
+# is the role the button claims — and the rank Alternate: offered under Open
+# With, and never the first choice for either type by being declared here.
+# public.unix-executable is the system's type for a script or a program with
+# no extension; com.apple.terminal.shell-script, a .command file, is
+# declared by Terminal, which every Mac has, so neither is declared again.
+info_plist() {
+  cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Unix executable</string>
+			<key>CFBundleTypeRole</key>
+			<string>Shell</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.unix-executable</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Shell script</string>
+			<key>CFBundleTypeRole</key>
+			<string>Shell</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.apple.terminal.shell-script</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleExecutable</key>
 	<string>crook</string>
 	<key>CFBundleIdentifier</key>
@@ -141,7 +176,33 @@ ${ICON_KEY}	<key>CFBundleInfoDictionaryVersion</key>
 </dict>
 </plist>
 PLIST
+}
 
+if [ -n "$INFO_PLIST_ONLY" ]; then
+  info_plist
+  exit 0
+fi
+
+APP="$OUT_DIR/Crook.app"
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+
+cp "$BINARY" "$APP/Contents/MacOS/crook"
+chmod 755 "$APP/Contents/MacOS/crook"
+
+# The icon, compiled from the committed .iconset. `iconutil` ships with macOS,
+# so nothing here needs a rasterizer — the PNGs were rendered by
+# ./script/app-icon when the artwork last changed and are in the tree. This
+# runs before codesign because the signature covers Contents/Resources: an
+# icon added afterwards breaks it.
+if [ -d "$ICONSET" ]; then
+  echo "==> Compiling $ICONSET"
+  iconutil --convert icns "$ICONSET" --output "$APP/Contents/Resources/Crook.icns"
+else
+  echo "warning: no $ICONSET; the app will get the generic Dock icon" >&2
+fi
+
+info_plist > "$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
 # The hardened runtime is not optional: notarytool rejects anything without it.

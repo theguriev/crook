@@ -18,6 +18,7 @@
 
 use std::fmt;
 use std::mem::ManuallyDrop;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -98,7 +99,7 @@ impl Default for WindowOptions {
 /// What the window asks of the application above it.
 ///
 /// This is the whole seam between the platform layer and the application:
-/// eight methods, five of them with a default, no winit types, no wgpu types. A
+/// nine methods, six of them with a default, no winit types, no wgpu types. A
 /// headless test double implements it in a dozen lines.
 pub trait WindowDelegate: 'static {
     /// Lays out and paints the frame to draw.
@@ -175,6 +176,24 @@ pub trait WindowDelegate: 'static {
     /// puts it.
     fn placed(&mut self, placement: WindowPlacement) {
         let _ = placement;
+    }
+
+    /// The desktop asked the application to open these files, in this order:
+    /// on macOS, a file Finder hands it — double-clicked once the application
+    /// is the one that opens its kind, opened with it, dropped on its Dock
+    /// icon — or `open -a` names.
+    ///
+    /// Full paths, of files and folders alike; a URL of any other kind never
+    /// reaches here. Return `true` only when something changed and the frame
+    /// needs rebuilding, as [`Self::handle_event`] does.
+    ///
+    /// Before the window's first frame when the request is what launched the
+    /// application, and never off macOS: no other desktop hands a running
+    /// application files to open — a Linux launcher starts a new process with
+    /// them on its command line. The default opens nothing.
+    fn open_files(&mut self, files: Vec<PathBuf>) -> bool {
+        let _ = files;
+        false
     }
 
     /// Runs once, as the event loop stops, whatever stopped it.
@@ -349,6 +368,10 @@ enum CrookEvent {
     /// window's own close does. See [`quit`](super::quit).
     #[cfg(target_os = "macos")]
     QuitRequested,
+    /// macOS asked the application to open these files. See
+    /// [`open_documents`](super::open_documents).
+    #[cfg(target_os = "macos")]
+    OpenFiles(Vec<PathBuf>),
     /// Leave the event loop.
     Exit,
 }
@@ -384,6 +407,14 @@ pub fn run(
     super::quit::install({
         let proxy = proxy.clone();
         move || proxy.send(CrookEvent::QuitRequested)
+    });
+    // Then too, and for a reason of its own: a request to open a file that
+    // launched the application comes while the loop starts, before its first
+    // turn, and the proxy holds it until the window is open.
+    #[cfg(target_os = "macos")]
+    super::open_documents::install({
+        let proxy = proxy.clone();
+        move |files| proxy.send(CrookEvent::OpenFiles(files))
     });
 
     let controls = WindowControls::default();
@@ -585,6 +616,17 @@ impl ApplicationHandler<CrookEvent> for App {
             CrookEvent::QuitRequested => {
                 if self.delegate.close_requested() {
                     event_loop.exit();
+                }
+            }
+            // Whether or not the window is open yet: the application has had
+            // its workspace since before the loop ran, and the window's first
+            // frame draws whatever the files opened.
+            #[cfg(target_os = "macos")]
+            CrookEvent::OpenFiles(files) => {
+                if self.delegate.open_files(files)
+                    && let Some(window) = self.window.as_mut()
+                {
+                    window.request_redraw();
                 }
             }
             CrookEvent::Exit => event_loop.exit(),

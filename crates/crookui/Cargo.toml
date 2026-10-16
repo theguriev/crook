@@ -21,9 +21,9 @@ swash.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 
-# The dock icon's badge, and a window's arrival in fullscreen, which winit has
-# no word for. See the workspace manifest for why these bindings and not
-# winit's own.
+# The dock icon's badge, a window's arrival in fullscreen and the files Finder
+# asks the application to open, which winit has no word for. See the workspace
+# manifest for why these bindings and not winit's own.
 [target.'cfg(target_os = "macos")'.dependencies]
 block2.workspace = true
 objc2.workspace = true
