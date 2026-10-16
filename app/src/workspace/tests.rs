@@ -41453,6 +41453,7 @@ mod opening_files {
     //! window hands the workspace their paths: a tab for each, where it
     //! starts, and what it runs there.
 
+    #[cfg(unix)]
     use super::shells::a_shell_these_tests_speak;
     use super::*;
 
@@ -41466,6 +41467,7 @@ mod opening_files {
     }
 
     /// Where a pane's shell starts.
+    #[cfg(unix)]
     fn directory_of(harness: &Harness, pane: PaneId) -> Option<PathBuf> {
         harness.workspace.read(&harness.app, |workspace, _| {
             workspace
@@ -41476,6 +41478,7 @@ mod opening_files {
     }
 
     /// Whether a pane holds a line it will send at its shell's first prompt.
+    #[cfg(unix)]
     fn waits_for_its_prompt(harness: &Harness, pane: PaneId) -> bool {
         harness.workspace.read(&harness.app, |workspace, _| {
             workspace.waits_for_first_prompt(pane)
