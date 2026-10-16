@@ -245,7 +245,10 @@ impl EventListener for EventProxy {
 /// $ p`, which `Term` calls not recognised, as it does every mode it does not
 /// know. 2031 is the colour scheme's subscription, and the watcher keeps it:
 /// a program that turns it on is told whenever a new palette moves the
-/// background from dark to light or back, by [`Emulator::set_palette`].
+/// background from dark to light or back, by [`Emulator::set_palette`]. And
+/// it notes what sets the background — OSC 10, 11 and 111 — because a
+/// synchronized update holds that past `Term`, which the answer is read
+/// from: see [`Emulator::background_held`].
 ///
 /// So the bytes get a second pass through `vte`'s own parser with a `Perform`
 /// that implements little but `osc_dispatch`. That costs one extra walk of the
@@ -307,6 +310,13 @@ struct OscWatcher {
     /// a stop: it is read only where the watcher already stands still, at a
     /// question about it and between feeds, when the palette changes.
     scheme_reports: bool,
+    /// Whether the piece set or gave back the background OSC 11 answers
+    /// with: OSC 11 with a colour, OSC 10 with one after the foreground's,
+    /// or OSC 111. Not a stop either: all that matters is whether `vte` is
+    /// still holding it in a synchronized update once the piece is fed,
+    /// which [`Emulator::advance`] reads off this into
+    /// [`Emulator::background_held`].
+    background_set: bool,
     /// Whether the program switched screens — `CSI ? 1049 h` or `l`, the one
     /// switch alacritty makes — which is where the watcher stops.
     screen_switched: bool,
@@ -370,6 +380,16 @@ impl Perform for OscWatcher {
             }
             Some(&b"133") => self.mark = ShellMark::parse(params),
             Some(&b"1337") => self.image = self.images.read(params),
+            // `vte` sets the dynamic colours from the number up, one to a
+            // parameter, so the background is OSC 10's second and OSC 11's
+            // first. A `?` there asks for it and changes nothing.
+            Some(&b"10") => {
+                self.background_set |= params.get(2).is_some_and(|colour| *colour != b"?");
+            }
+            Some(&b"11") => {
+                self.background_set |= params.get(1).is_some_and(|colour| *colour != b"?");
+            }
+            Some(&b"111") => self.background_set = true,
             // Crook's own, and the number is deliberately far from anything
             // standardised: nothing but a shell Crook itself set up emits it,
             // and a stream that happens to contain one costs a caller a look
@@ -684,6 +704,16 @@ pub struct Emulator {
     /// Whether the synchronized update `parser` is holding switches screens,
     /// which the watcher saw go by: see [`Self::switch_screens`].
     switch_held: bool,
+    /// Whether the synchronized update `parser` is holding sets or gives
+    /// back the program's own background, which the watcher saw go by and
+    /// `Term` has not: what the background is, dark or light, is not known
+    /// until the update is let go of. See [`Self::scheme`].
+    background_held: bool,
+    /// The palette's background from before a theme switch that came while
+    /// [`Self::background_held`], which a program that turned colour-scheme
+    /// reports on is told about once the update is let go of: see
+    /// [`Self::set_palette`].
+    switched_from: Option<Rgb>,
     title: Option<String>,
     working_directory: Option<PathBuf>,
     /// The host the last OSC 7 named, beside [`Self::working_directory`]:
@@ -757,6 +787,8 @@ impl Emulator {
             size,
             scrollback_lines,
             switch_held: false,
+            background_held: false,
+            switched_from: None,
             title: None,
             working_directory: None,
             working_host: None,
@@ -821,6 +853,11 @@ impl Emulator {
             } else {
                 self.feed(piece);
             }
+            // Before anything answers from the background: OSC 11 is no
+            // stop, so the piece may have carried one into the update `vte`
+            // is holding, past `Term`.
+            self.background_held |=
+                std::mem::take(&mut self.osc_watcher.background_set) && self.updating();
             // Before anything else reads the anchor: a piece that took a
             // full-screen program down is the moment a reflow made under it
             // can be done on the screen it was for.
@@ -853,6 +890,17 @@ impl Emulator {
             // same reason. `Term` has answered the second already, wrongly,
             // and that answer is dropped on its way out of the proxy.
             if std::mem::take(&mut self.osc_watcher.scheme_asked) {
+                // Answered from `Term`'s background, which an update `vte`
+                // is holding may be about to change, and the OSC 11 query
+                // after it is answered from the changed one. So that update
+                // reaches the grid first, as one nobody ended does, and the
+                // rest of its frame is drawn as it arrives: its answers go
+                // out ahead of this one, which is the order they were asked
+                // in. An update that leaves the background alone stays one.
+                if self.background_held {
+                    self.parser.stop_sync(&mut self.term);
+                    self.update_let_go();
+                }
                 self.proxy
                     .send_event(Event::PtyWrite(self.scheme().report()));
             }
@@ -1054,10 +1102,19 @@ impl Emulator {
     /// one that switched screens may have scrolled the shell's history out of
     /// sight, where nothing could cut it back. See
     /// [`BlockTracker::update_switched_screens`].
+    ///
+    /// And one that changed the program's own background has now changed
+    /// `Term`'s, so a theme switch that came while it was held can be
+    /// weighed: what it owes goes onto the proxy behind the update's own
+    /// answers. See [`Self::set_palette`].
     fn update_let_go(&mut self) {
         if self.switch_held {
             self.blocks.update_switched_screens(&self.term);
             self.switch_held = self.updating();
+        }
+        self.background_held &= self.updating();
+        if let Some(report) = self.settle_scheme() {
+            self.proxy.send_event(Event::PtyWrite(report));
         }
     }
 
@@ -1586,24 +1643,56 @@ impl Emulator {
     /// new colour — and from one dark palette to another there is nothing to
     /// pick. Nor under a background the program set itself with OSC 11, which
     /// a new palette leaves where it is.
+    ///
+    /// Which background that is can be held up: a synchronized update `vte`
+    /// is holding may set the program's own, or give it back, and `Term`
+    /// does not know until the update is let go of. A switch that lands
+    /// then is weighed then, against the palette from before it, and what
+    /// it owes goes out behind the update's own answers. A switch under an
+    /// update that leaves the background alone is weighed at once.
     pub fn set_palette(&mut self, palette: Palette) {
-        let before = self.scheme();
+        let before = self.palette.background;
         self.palette = palette;
         self.dirty = true;
-        let after = self.scheme();
-        if self.osc_watcher.scheme_reports && after != before && !self.mirrored {
-            self.replies.extend_from_slice(after.report().as_bytes());
+        if self.osc_watcher.scheme_reports && !self.mirrored {
+            self.switched_from.get_or_insert(before);
         }
+        if let Some(report) = self.settle_scheme() {
+            self.replies.extend_from_slice(report.as_bytes());
+        }
+    }
+
+    /// The report the theme switches since [`Self::switched_from`] owe a
+    /// program that turned colour-scheme reports on, once `Term` holds the
+    /// background they are weighed against: nothing when dark and light did
+    /// not trade places, and nothing yet while an update that changes it is
+    /// held.
+    fn settle_scheme(&mut self) -> Option<String> {
+        if self.background_held {
+            return None;
+        }
+        let before = self.switched_from.take()?;
+        let now = self.scheme();
+        let owed =
+            self.osc_watcher.scheme_reports && !self.mirrored && self.scheme_over(before) != now;
+        owed.then(|| now.report())
     }
 
     /// Whether the background drawn now is dark or light: the palette's, or
     /// the one the program set with OSC 11, which is the colour OSC 11
-    /// answers with, so a program that asks both is told one story.
+    /// answers with, so a program that asks both is told one story — inside
+    /// a synchronized update too, where `vte` holds both and answers the
+    /// second only when the update ends: see [`Self::background_held`].
     fn scheme(&self) -> Scheme {
-        Scheme::of(
-            self.palette
-                .named(NamedColor::Background, self.term.colors()),
-        )
+        self.scheme_over(self.palette.background)
+    }
+
+    /// Whether the background is dark or light over a palette's
+    /// `background`: the program's own if it set one, which no palette
+    /// moves.
+    fn scheme_over(&self, background: Rgb) -> Scheme {
+        let own = self.term.colors()[NamedColor::Background];
+        Scheme::of(own.map_or(background, Rgb::from))
     }
 
     /// Sets what this answers a program that asks which terminal it is,

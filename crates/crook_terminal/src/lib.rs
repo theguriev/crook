@@ -571,7 +571,9 @@ impl Terminal {
     /// to be told, with mode 2031, is — see [`Emulator::set_palette`] —
     /// through the pty, or through the writer's queue once that has been
     /// taken, behind every answer already on its way, as [`Self::feed`]
-    /// sends one.
+    /// sends one. Or by the feed that ends a synchronized update setting a
+    /// background of the program's own, when one is held: whether the
+    /// switch moved what it is drawn on is known only then.
     ///
     /// The overrides a program set for itself with OSC 4, 10, 11 and 12 are
     /// not touched, and that is the contract those escapes carry: a program

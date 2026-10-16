@@ -1029,6 +1029,105 @@ fn test_a_mirror_answers_no_colour_scheme_question_and_reports_no_switch() {
 }
 
 #[test]
+fn test_a_colour_scheme_query_in_an_update_that_set_the_background_is_answered_from_it() {
+    // `vte` holds the update, the OSC 11 in it too, and answers the OSC 11
+    // query after it from the background the update set. The colour scheme
+    // is answered from that one as well, and in its place among the
+    // update's answers, whether the update came in one read or in two.
+    let set = b"\x1b[?2026h\x1b]11;rgb:ff/ff/ff\x07\x1b[6n";
+    let asked = b"\x1b[?996n\x1b]11;?\x07\x1b[c\x1b[?2026l";
+    let expected = format!("\x1b[1;1R{LIGHT}\x1b]11;rgb:ffff/ffff/ffff\x07\x1b[?6c");
+
+    let mut whole = emulator();
+    whole.advance(&[&set[..], &asked[..]].concat());
+    assert_eq!(expected, answered(&mut whole));
+
+    let mut split = emulator();
+    split.advance(set);
+    let mut replies = answered(&mut split);
+    split.advance(asked);
+    replies.push_str(&answered(&mut split));
+    assert_eq!(expected, replies, "split after the background was set");
+
+    // OSC 10 sets the foreground and, given a second colour, the background.
+    let mut both = emulator();
+    both.advance(b"\x1b[?2026h\x1b]10;rgb:00/00/00;rgb:ff/ff/ff\x07\x1b[?996n\x1b[?2026l");
+    assert_eq!(LIGHT, answered(&mut both));
+}
+
+#[test]
+fn test_a_colour_scheme_query_leaves_an_update_that_kept_the_background_held() {
+    // Only an update that may change the background has to reach the grid
+    // before the question is answered: one that does not stays a frame,
+    // asking OSC 11 for the background among it or not, and a background
+    // set before it is the one answered from.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]11;rgb:ff/ff/ff\x07");
+    emulator.advance(b"\x1b[?2026hhalf\x1b]11;?\x07\x1b]10;?;?\x07\x1b[?996n");
+    assert_eq!(LIGHT, answered(&mut emulator));
+    assert_eq!(
+        Some(""),
+        emulator.snapshot().text().lines().next(),
+        "the update is still held"
+    );
+
+    emulator.advance(b" drawn\x1b[?2026l");
+    assert_eq!(
+        Some("half drawn"),
+        emulator.snapshot().text().lines().next()
+    );
+}
+
+#[test]
+fn test_a_theme_switch_during_an_update_that_set_the_background_is_weighed_once_it_ends() {
+    // The switch lands while `vte` holds an OSC 11 that `Term` has not seen
+    // yet, so whether dark and light traded places under the program is
+    // known only once the update reaches the grid.
+    let mut kept_dark = emulator();
+    kept_dark.advance(b"\x1b[?2031h\x1b[?2026h\x1b]11;rgb:00/00/00\x07");
+    kept_dark.set_palette(light());
+    assert_eq!("", answered(&mut kept_dark), "nothing is known yet");
+    kept_dark.advance(b"\x1b[?2026l");
+    assert_eq!(
+        "",
+        answered(&mut kept_dark),
+        "the background it set is dark on either theme"
+    );
+
+    // A program that gives back the background it set, in the update the
+    // switch lands in, is drawn on the new theme's: it hears so behind the
+    // update's own answers.
+    let mut given_back = emulator();
+    given_back.advance(b"\x1b[?2031h\x1b]11;rgb:00/00/00\x07");
+    given_back.advance(b"\x1b[?2026h\x1b]111\x07\x1b[6n");
+    given_back.set_palette(light());
+    assert_eq!("", answered(&mut given_back), "nothing is known yet");
+    given_back.advance(b"\x1b[?2026l");
+    assert_eq!(format!("\x1b[1;1R{LIGHT}"), answered(&mut given_back));
+}
+
+#[test]
+fn test_a_theme_switch_during_an_update_that_expires_is_weighed_when_it_does() {
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b[?2031h\x1b]11;rgb:00/00/00\x07");
+    emulator.advance(b"\x1b[?2026h\x1b]111\x07");
+    emulator.set_palette(light());
+    assert_eq!("", answered(&mut emulator), "nothing is known yet");
+
+    std::thread::sleep(Duration::from_millis(200));
+    emulator.snapshot();
+    assert_eq!(LIGHT, answered(&mut emulator));
+}
+
+#[test]
+fn test_a_theme_switch_during_an_update_that_left_the_background_alone_is_told_at_once() {
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b[?2031h\x1b[?2026hhalf");
+    emulator.set_palette(light());
+    assert_eq!(LIGHT, answered(&mut emulator));
+}
+
+#[test]
 fn test_the_revision_moves_only_when_something_changed() {
     let mut emulator = emulator();
     let first = emulator.snapshot();
