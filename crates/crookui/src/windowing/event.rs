@@ -288,9 +288,9 @@ impl InputState {
     /// keyboard out of sight: see [`Self::occlusion`]. Should the desktop be
     /// wrong for a window without it, the next answer puts it right: each
     /// frame drawn meanwhile asks, and while the answer is all that holds
-    /// the window out of sight the event loop asks by itself — see
-    /// [`Self::held_by_an_answer`] — since a window out of sight need ask for
-    /// no frame at all.
+    /// the window out of sight the event loop asks by itself for a few
+    /// seconds after the event that asked — see [`Self::held_by_an_answer`]
+    /// — since a window out of sight need ask for no frame at all.
     pub(super) fn minimised(&mut self, minimised: Option<bool>) -> Option<Event> {
         self.minimised = minimised.unwrap_or(false);
         self.occlusion()
@@ -321,12 +321,14 @@ impl InputState {
 
     /// Whether the window is out of sight only because the desktop said it
     /// is minimised when last asked: no window over it that the desktop
-    /// told of, room in it, and no keyboard. The event loop asks again by
-    /// itself while this holds, since nothing else is sure to — a window
-    /// out of sight asks for no frame of its own, and an X11 window brought
-    /// back without the keyboard, and asked too soon, would stay out of
-    /// sight until somebody typed or clicked. Every other way of hiding it
-    /// says when it is over.
+    /// told of, room in it, and no keyboard. Every other way of hiding it
+    /// says when it is over. The event loop asks again by itself while this
+    /// holds, since nothing else is sure to — a window out of sight asks for
+    /// no frame of its own, and an X11 window brought back without the
+    /// keyboard, and asked too soon, would stay out of sight until somebody
+    /// typed or clicked — but only for a few seconds after the focus moving
+    /// or a frame asked, since those are what a restore comes with, and a
+    /// window left minimised is at rest.
     pub(super) fn held_by_an_answer(&self) -> bool {
         self.minimised && !self.focused && !self.covered && !self.shrunk
     }

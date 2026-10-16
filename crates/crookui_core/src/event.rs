@@ -252,8 +252,9 @@ pub enum Event {
     ///   which is asked about: as the focus moves, before each frame while
     ///   the window lacks the keyboard or was minimised when last asked, and
     ///   once a second while that answer alone holds the window out of
-    ///   sight. A window with the keyboard is mapped, and so in sight
-    ///   whatever the answer said.
+    ///   sight, for a few seconds after the focus or a frame last asked. A
+    ///   window with the keyboard is mapped, and so in sight whatever the
+    ///   answer said.
     /// - Wayland says neither, and holds a hidden window's frames back
     ///   instead, which is the same saving made by the compositor.
     WindowOccluded(bool),

@@ -2048,9 +2048,12 @@ off. So does the keyboard (`InputState::occlusion`): X gives it only to a window
 mapped. A window restored without it, and asked by its first frame too soon, would have nothing
 to ask again — a window out of sight asks for no frame of its own, its panes' output included —
 so while the answer is all that holds the window out of sight the event loop asks again by
-itself, once a second (`MINIMISED_LOOK`, `InputState::held_by_an_answer`). That is one round
-trip a second for a window left minimised on X11, and nothing anywhere else. macOS and Windows
-already say it, and are not asked (`Window::is_minimised`): AppKit tells winit that a window it
+itself, once a second (`MINIMISED_LOOK`, `InputState::held_by_an_answer`), for four seconds
+after the focus or a frame last asked and no longer (`MINIMISED_LOOKS_FOR`). A restore comes
+with both: X11 says the focus again as it maps a window, and exposes it, which asks for a frame.
+So a window left minimised is asked four times more and then waits for an event, since the
+window keeps no idle timer, and nothing is asked anywhere but X11. macOS and Windows already
+say it, and are not asked (`Window::is_minimised`): AppKit tells winit that a window it
 restores is in view while `isMiniaturized` may still say yes. A covered window on Windows or
 under an X11 compositor goes unremarked. The breath chain ends while the window cannot be seen
 and starts again when it can, and a pane's output asks for no frame and builds no snapshot
