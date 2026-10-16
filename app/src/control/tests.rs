@@ -2073,6 +2073,53 @@ mod socket {
         assert!(connected(&listener));
     }
 
+    /// Asked as the next uid up, as `server::check`'s own test asks, since
+    /// no test can leave a socket that belongs to somebody else.
+    #[test]
+    fn a_socket_another_user_owns_is_not_asked() {
+        let root = TempDir::runtime();
+        let (_listener, socket) = planted(&root.sockets(), 0o700);
+        let metadata = fs::symlink_metadata(&socket).expect("there");
+        let (mine, theirs) = (server::euid(), server::euid() + 1);
+
+        assert_eq!(cli::unix::fault(&metadata, mine), None, "nothing wrong");
+        assert_eq!(
+            cli::unix::fault(&metadata, theirs),
+            Some(format!("it belongs to uid {mine}, not {theirs}")),
+            "the socket is the one thing whose owner is wrong"
+        );
+    }
+
+    /// A socket swapped in between the look at it and the connect passes
+    /// every rule about the path, so the listener is the last word: asked
+    /// for a listener of the next uid up, the same socket is refused once it
+    /// is connected to, and before anything is said to it.
+    #[test]
+    fn a_socket_another_user_listens_on_is_not_asked() {
+        use std::io::Read;
+
+        let root = TempDir::runtime();
+        let (listener, socket) = planted(&root.sockets(), 0o700);
+        let (mine, theirs) = (server::euid(), server::euid() + 1);
+
+        let refusal =
+            cli::unix::connect_checked_for(&socket, theirs).expect_err("not this user's listener");
+        let said = format!("{refusal:#}");
+        assert!(
+            said.contains(&format!(
+                "the process listening there is uid {mine}, not {theirs}"
+            )),
+            "the refusal names the rule: {said}"
+        );
+        let (mut asked, _) = listener
+            .accept()
+            .expect("connected to, since only a connection names its listener");
+        asked.set_nonblocking(false).expect("blocking");
+        let mut heard = Vec::new();
+        asked.read_to_end(&mut heard).expect("the client hung up");
+        assert!(heard.is_empty(), "and sent nothing: {heard:?}");
+    }
+
     #[test]
     fn the_peer_of_a_socketpair_is_this_user_and_has_a_pid() {
         let (one, other) = UnixStream::pair().expect("a pair");
@@ -2080,8 +2127,8 @@ mod socket {
             uid: server::euid(),
             pid: Some(std::process::id()),
         };
-        // The kernel records whoever made each end, and this process made
-        // both.
+        // The kernel records whoever made each end, and, for macOS's pid,
+        // whoever used it last; this process is both, for both ends.
         assert_eq!(
             server::peer_credentials(&one).expect("the kernel says"),
             this
