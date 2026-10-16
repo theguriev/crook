@@ -24914,40 +24914,78 @@ mod shells {
         #[test]
         fn a_bar_over_a_grid_in_a_window_out_of_sight_searches_it_again_when_the_window_is_back() {
             // Nobody can see the answer while the window is out of sight, so
-            // what the grid prints meanwhile is not searched; the window
+            // the bar takes none in meanwhile: not for what the grid prints
+            // then, and not from a read asked before the window went either.
+            // That one waits out its pause and then reads the grid as it is
+            // by then, with whatever was printed since; the integration check
+            // caught one landing, once each time the window went. The window
             // coming back is the pane coming back on screen, and the bar
             // answers the grid it shows rather than the one it last saw.
             let mut harness = Harness::panel(1);
             let Some(pane) = searching(&mut harness, "qvx wqz rqv", "zq1xv") else {
                 return;
             };
+            // No echo, so that the Enter which lets the command go on changes
+            // nothing on screen: the first picture after it is the match.
             harness.type_into(
                 pane,
-                "printf 'zq%sxv\\n' 1; seq 1 400; read line; printf 'zq%sxv\\n' 1; sleep 600\n",
+                "stty -echo; printf 'zq%sxv\\n' 1; seq 1 400; read line; printf 'zq%sxv\\n' 1; \
+                 read line; printf 'zq%sxv\\n' 1; sleep 600\n",
             );
-            harness.wait_for("the command never overflowed the viewport", |harness| {
-                harness.terminal_text(pane).contains("399") && draws_grid(harness, pane)
+            // Its last line, and not merely its block past the viewport's top:
+            // from here the grid holds still until the Enter.
+            harness.wait_for("the command never printed its last line", |harness| {
+                let text = harness.terminal_text(pane);
+                text.lines().any(|line| line.trim() == "400") && draws_grid(harness, pane)
             });
             harness.frame();
             await_grid_matches(&mut harness, pane, 1);
-
-            harness.workspace_update(|workspace, ctx| workspace.set_window_occluded(true, ctx));
-            harness.type_into(pane, "\n");
-            harness.wait_for("the command never printed its second match", |harness| {
-                harness.terminal_text(pane).contains("zq1xv")
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("the pane has a find bar");
+            // Every line printed so far has been searched: the answer on
+            // screen was read from the picture on screen, and no read is out.
+            // Then the read the next match sets out is the only one there is.
+            harness.wait_for("the search never caught up with the command", |harness| {
+                let revision = harness.workspace.read(&harness.app, |workspace, app| {
+                    workspace
+                        .terminal(pane, app)
+                        .map(|(_, snapshot)| snapshot.revision)
+                });
+                find.grid_asked().is_none()
+                    && revision.is_some_and(|revision| find.grid_rows(revision).is_some())
             });
-            // Past the pause a grid that changed under an answer waits out
-            // before it is read again, so a search that was going to start
-            // has come back.
-            harness.settle(crate::pane_find::GRID_PAUSE * 3);
+            // The matches printed from here on: the first is in the scrollback.
+            let shown = |harness: &Harness| harness.terminal_text(pane).matches("zq1xv").count();
+
+            // The second match is printed while the window is in sight, and the
+            // window goes while the read its repaint asked for is still waiting
+            // out its pause. Whenever that read is made, then, it finds a match
+            // the answer on screen does not have, so an answer taken in while
+            // nobody can see the bar shows in the count.
+            harness.type_into(pane, "\n");
+            harness.wait_for("no read of the second match set out", |harness| {
+                shown(harness) == 1 && find.grid_asked() == Some(("zq1xv".to_owned(), true))
+            });
+            harness.workspace_update(|workspace, ctx| workspace.set_window_occluded(true, ctx));
+            // And the third while nobody can see it.
+            harness.type_into(pane, "\n");
+            harness.wait_for("the command never printed its third match", |harness| {
+                shown(harness) == 2
+            });
+            harness.wait_for(
+                "the read asked before the window went never came back",
+                |_| find.grid_asked().is_none(),
+            );
             assert_eq!(
                 1,
                 matches(&harness, pane),
-                "the bar searched a grid in a window nobody can see"
+                "the bar took in a search of a grid in a window nobody can see"
             );
 
             harness.workspace_update(|workspace, ctx| workspace.set_window_occluded(false, ctx));
-            await_grid_matches(&mut harness, pane, 2);
+            await_grid_matches(&mut harness, pane, 3);
         }
 
         #[test]

@@ -4035,7 +4035,9 @@ impl Workspace {
     /// read its scrollback after every line it printed, for an answer nobody
     /// can see — and build the snapshot no publication builds for such a
     /// pane, on this thread. It is asked again when the pane is shown — see
-    /// [`Self::search_grids_on_screen`].
+    /// [`Self::search_grids_on_screen`] — and a search that set out before
+    /// the pane went is not taken in when it comes back: see
+    /// [`Self::grid_searched`].
     ///
     /// A grid whose text is unchanged is not read again — see
     /// [`PaneFind::carry_over`] — and one that changed under an answer already
@@ -4129,7 +4131,8 @@ impl Workspace {
     }
 
     /// Takes in what a search of a pane's grid found, and brings the current
-    /// match into view if the bar asked for that before there was one.
+    /// match into view if the bar asked for that before there was one — or,
+    /// for a pane nobody can see any more, lets the search go.
     fn grid_searched(
         &mut self,
         pane: PaneId,
@@ -4142,6 +4145,18 @@ impl Workspace {
         let Some(find) = self.find(pane).cloned() else {
             return;
         };
+        // Asked while somebody could see the pane, and back after the window
+        // went out of sight or the tab was switched away: a read set out a
+        // moment before waits out its pause and then reads the grid as it is
+        // by then, with what was printed after the pane went. Taken in, the
+        // bar would answer output nobody was there to see, once each time
+        // the pane went. The pane coming back on screen asks again — see
+        // `search_grids_on_screen` — so the answer is dropped rather than
+        // kept for then, when the grid may have moved on from it too.
+        if !self.pane_can_be_seen(pane) {
+            find.drop_grid(&asked);
+            return;
+        }
         if !find.land_grid(asked, read_for, rows, matches) {
             return;
         }
