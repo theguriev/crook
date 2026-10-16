@@ -2492,6 +2492,49 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
     }
 
     #[test]
+    fn the_skill_says_a_codex_or_gemini_question_ends_as_idle_even_with_hooks() {
+        // Neither has an event for a question its model asks, which ends the
+        // turn: their hooks say needs-input for an approval and for nothing
+        // else, the ones Crook's plugin gives Codex included, since those are
+        // pinned to the same table. The skill is what tells an orchestrating
+        // agent which state to wait for, and a needs-input it promised for a
+        // question is a wait that runs out, and is run again, on a worker
+        // sitting idle until somebody answers it.
+        for (name, approval) in [("codex", "PermissionRequest"), ("gemini", "Notification")] {
+            let agent = AGENTS.iter().find(|agent| agent.name == name).unwrap();
+            let Fragment::Hooks {
+                events, missing, ..
+            } = agent.fragment
+            else {
+                panic!("{name} has command hooks");
+            };
+            let asking: Vec<&str> = events
+                .iter()
+                .filter(|(_, arguments)| arguments.starts_with("needs-input"))
+                .map(|(event, _)| *event)
+                .collect();
+            assert_eq!(vec![approval], asking, "{name}");
+            assert!(
+                missing.contains("a question the model asks ends its turn as idle"),
+                "{name}: {missing}"
+            );
+        }
+
+        let skill = SKILL.split_whitespace().collect::<Vec<_>>().join(" ");
+        for said in [
+            // Where the plugin is said to report all of it.
+            "Codex's needing input is only ever an approval, with the tool it wants: a question \
+its model asks ends its turn, so it reads as `idle`, never as `needs-input`.",
+            // And where a worker is waited on.
+            "A question a Codex or Gemini CLI worker asks reads as `idle` even with hooks, the \
+ones Crook's plugin gives Codex included, since those report `needs-input` only for an approval: \
+wait for `idle` there.",
+        ] {
+            assert!(skill.contains(said), "the skill no longer says: {said}");
+        }
+    }
+
+    #[test]
     fn every_hook_printed_for_every_agent_is_guarded_and_names_no_binary() {
         // A hook that is the binary's path and nothing else fails whenever
         // the report does, and Copilot CLI refuses the tool call such a hook

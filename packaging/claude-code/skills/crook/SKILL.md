@@ -110,12 +110,14 @@ taken back goes when the shell's own marks say the command ended.
 
 Claude Code, Codex and GitHub Copilot CLI report all of this by themselves once Crook's plugin
 is installed: running when a prompt is sent and around every tool, needing input when they stop
-to ask, and idle when the turn ends. Claude Code's hooks also say failed, with the error, when an
-API error such as a usage limit ends its turn; Claude Code's and Codex's report the pull request
-after a `gh pr create`; Copilot's name their session, so a subagent's prompt or stop is not taken
-for Copilot's own. The plugin carries this file too, and its hooks do nothing outside Crook. A
-person installs it with the two commands for their agent, which change that agent's own
-settings, so give them to the person rather than running them:
+to ask, and idle when the turn ends. Codex's needing input is only ever an approval, with the
+tool it wants: a question its model asks ends its turn, so it reads as `idle`, never as
+`needs-input`. Claude Code's hooks also say failed, with the error, when an API error such as a
+usage limit ends its turn; Claude Code's and Codex's report the pull request after a
+`gh pr create`; Copilot's name their session, so a subagent's prompt or stop is not taken for
+Copilot's own. The plugin carries this file too, and its hooks do nothing outside Crook. A person
+installs it with the two commands for their agent, which change that agent's own settings, so
+give them to the person rather than running them:
 
 ```sh
 claude plugin marketplace add theguriev/crook
@@ -255,13 +257,15 @@ runs out first, run the same wait again as a new command, until the pane gets th
 `idle` and `needs-input` are only as real as what the agent reports. A Claude Code worker with
 neither Crook's plugin nor the hooks `crook --agent-hooks claude` prints says only what its title
 says — running, and idle when its turn ends — so a question it stops to ask reads as `idle` too,
-and `needs-input` never comes: a worker you will wait on for a question needs one of the two. Codex and Gemini CLI workers
-without them say in their titles when they stop for an approval, so theirs does come, without the
-words of the question. The end of the question is not `idle`, since the agent works on after an
-approval: only its title saying the turn is over is, or its command ending. A codex without hooks
-that draws no spinner (`[tui] animations = false`), or that you start through `sh -c`, `npx` or
-`ssh`, never says that in its title, so its `idle` comes only when it exits: wait for `finished`
-there.
+and `needs-input` never comes: a worker you will wait on for a question needs one of the two. A
+question a Codex or Gemini CLI worker asks reads as `idle` even with hooks, the ones Crook's
+plugin gives Codex included, since those report `needs-input` only for an approval: wait for
+`idle` there. Codex and Gemini CLI workers without hooks say in their titles when they stop for
+an approval, so theirs does come, without the words of the question. The end of the question is
+not `idle`, since the agent works on after an approval: only its title saying the turn is over
+is, or its command ending. A codex without hooks that draws no spinner
+(`[tui] animations = false`), or that you start through `sh -c`, `npx` or `ssh`, never says that
+in its title, so its `idle` comes only when it exits: wait for `finished` there.
 
 `crook pane blocks <id> [--last N]` prints the pane's newest finished commands: the command line,
 what it printed (the end of it, when it is long), the exit status, how long it ran and where;
