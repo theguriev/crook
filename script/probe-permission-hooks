@@ -112,6 +112,18 @@ clean() {
     pkill -KILL -f "$dir/.probe/record" 2>/dev/null || true
   fi
   evidence=$(cat "$dir/.probe/evidence")
+  uid=$(id -u)
+  # Claude Code 2.1.280's temp directory is CLAUDE_CODE_TMPDIR, or else Bun's
+  # os.tmpdir(): $TMPDIR, $TMP or $TEMP, or /tmp when none is set, which on
+  # macOS makes it the per-user $TMPDIR under /var/folders. The session's
+  # environment need not have been this one, so the temp directory its
+  # scratchpad_dir, <temp>/claude-<uid>/<project>/<session>/scratchpad, names
+  # is tried as well.
+  temps="${CLAUDE_CODE_TMPDIR:-}
+${TMPDIR:-}
+${TMP:-}
+${TEMP:-}
+/tmp"
   # Claude Code keeps more for each session than its conversation, under the
   # session's id, which only the SessionStart payloads still name. They name
   # the directory the session saw, too, which on macOS is $TMPDIR's real
@@ -124,6 +136,9 @@ clean() {
       */crook-probe-*) seen="$seen
 $cwd" ;;
     esac
+    temp=$(sed -nE 's/.*"scratchpad_dir": *"([^"\\]*)\/claude-'"$uid"'\/[^"\\/]*\/[0-9a-f-]{36}\/scratchpad".*/\1/p' "$start" | head -n 1)
+    [ -z "$temp" ] || temps="$temps
+$temp"
     id=$(sed -nE 's/.*"session_id": *"([0-9a-f-]{36})".*/\1/p' "$start" | head -n 1)
     [ -n "$id" ] || continue
     for kept in "$HOME/.claude/session-env/$id" "$HOME/.claude/file-history/$id"; do
@@ -137,13 +152,19 @@ $cwd" ;;
     *) echo "kept the evidence in $evidence" ;;
   esac
   # Claude Code keeps each project's conversations under ~/.claude/projects,
-  # and its sessions' scratchpads under /tmp/claude-<uid>, in a directory
-  # named for the path with every character but a letter or a digit made a
-  # -, as 2.1.280's replace(/[^a-zA-Z0-9]/g,"-") names it. This project's
-  # are the probe's prompts and nothing else.
+  # and its sessions' scratchpads and task output under claude-<uid> in its
+  # temp directory, in a directory named for the path with every character
+  # but a letter or a digit made a -, as 2.1.280's replace(/[^a-zA-Z0-9]/g,"-")
+  # names it. This project's are the probe's prompts and nothing else, and no
+  # other project's has its name, so it is looked for in every temp directory
+  # the session might have used.
+  temps=$(printf '%s\n' "$temps" | grep . | sed 's:/*$::' | sort -u)
   printf '%s\n' "$seen" | sort -u | while IFS= read -r path; do
     mangled=$(printf '%s\n' "$path" | sed 's/[^A-Za-z0-9]/-/g')
-    for kept in "$HOME/.claude/projects/$mangled" "/tmp/claude-$(id -u)/$mangled"; do
+    {
+      printf '%s\n' "$HOME/.claude/projects/$mangled"
+      printf '%s\n' "$temps" | sed "s:\$:/claude-$uid/$mangled:"
+    } | while IFS= read -r kept; do
       [ ! -d "$kept" ] || { rm -rf "$kept" && echo "removed $kept"; }
     done
   done

@@ -1,12 +1,19 @@
 //! `script/probe-permission-hooks`, which a person runs against a live agent,
 //! so no test runs it end to end. What it does without an agent is tested
 //! here: the variant it leaves for the next hook, what it registers for
-//! Codex, and what `--clean` leaves behind, which is nothing that a later
-//! agent would run and nothing of the probe's in Claude Code's own state.
+//! Codex, and what `--clean` leaves behind. That is nothing that a later
+//! agent would run, and nothing of the probe's in what Claude Code keeps for
+//! the project: its directories under `~/.claude` (`projects`, `session-env`,
+//! `file-history`), and under `claude-<uid>` in the temp directories
+//! `CLAUDE_CODE_TMPDIR`, `TMPDIR` and a session's `scratchpad_dir` name.
+//! Claude Code's last resort, `/tmp`, which the script tries as well, is not
+//! checked: only a real `/tmp/claude-<uid>` would show it.
 //!
-//! Each case runs it with `XDG_RUNTIME_DIR` and `HOME` in a scratch directory
-//! of its own under Cargo's target directory, so it never finds a real probe
-//! project or a real `~/.claude`. Not under the system temp directory: the
+//! Each case runs it with `XDG_RUNTIME_DIR`, `HOME`, `TMPDIR` and
+//! `CLAUDE_CODE_TMPDIR` in a scratch directory of its own under Cargo's
+//! target directory, so it never finds a real probe project or a real
+//! `~/.claude`, and looks in the real `/tmp/claude-<uid>` only for names no
+//! project but the scratch one has. Not under the system temp directory: the
 //! script refuses `/tmp`, whose quota cargo builds fill on the machine it was
 //! written on.
 //!
@@ -16,6 +23,7 @@
 
 use std::ffi::OsString;
 use std::io::Write as _;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -56,7 +64,12 @@ impl Scratch {
         ));
         let _ = std::fs::remove_dir_all(&root);
         let scratch = Self { root };
-        for dir in [scratch.runtime(), scratch.home()] {
+        for dir in [
+            scratch.runtime(),
+            scratch.home(),
+            scratch.tmpdir(),
+            scratch.claude_code_tmpdir(),
+        ] {
             std::fs::create_dir_all(dir).expect("the target directory is writable");
         }
         scratch
@@ -68,6 +81,27 @@ impl Scratch {
 
     fn home(&self) -> PathBuf {
         self.root.join("home")
+    }
+
+    /// The `TMPDIR` the script sees, as macOS sets one for every user.
+    fn tmpdir(&self) -> PathBuf {
+        self.root.join("tmp")
+    }
+
+    /// The `CLAUDE_CODE_TMPDIR` the script sees, which Claude Code puts its
+    /// temp directory in ahead of `TMPDIR`.
+    fn claude_code_tmpdir(&self) -> PathBuf {
+        self.root.join("claude-code-tmp")
+    }
+
+    /// The `claude-<uid>` directory Claude Code keeps its sessions' files in
+    /// within the temp directory `temp`, for the uid this test runs as: the
+    /// owner of the scratch directory it made.
+    fn claude_code_temp(&self, temp: &Path) -> PathBuf {
+        let uid = std::fs::metadata(&self.root)
+            .expect("the scratch directory is there")
+            .uid();
+        temp.join(format!("claude-{uid}"))
     }
 
     /// The throwaway project the script makes for `agent`.
@@ -128,14 +162,22 @@ impl Scratch {
     }
 
     /// The scratch directories in place of the real ones, and each of the
-    /// probe's own settings empty, which it reads as unset, whatever the
-    /// environment of whoever runs the tests sets them to.
+    /// probe's own settings and the other temp directories empty, which it
+    /// reads as unset, whatever the environment of whoever runs the tests
+    /// sets them to.
     fn environment(&self) -> Vec<(&'static str, OsString)> {
         let mut environment = vec![
             ("XDG_RUNTIME_DIR", self.runtime().into_os_string()),
             ("HOME", self.home().into_os_string()),
+            ("TMPDIR", self.tmpdir().into_os_string()),
+            (
+                "CLAUDE_CODE_TMPDIR",
+                self.claude_code_tmpdir().into_os_string(),
+            ),
         ];
         for name in [
+            "TMP",
+            "TEMP",
             "PROBE_DIR",
             "PROBE_TIMEOUT",
             "PROBE_SECOND",
@@ -188,8 +230,8 @@ fn within_patience(mut done: impl FnMut() -> bool) -> bool {
 }
 
 /// The name Claude Code 2.1.280 gives a project's directory under
-/// `~/.claude/projects` and `/tmp/claude-<uid>`: its path with every
-/// character but an ASCII letter or digit made a `-`, by
+/// `~/.claude/projects` and under `claude-<uid>` in its temp directory: its
+/// path with every character but an ASCII letter or digit made a `-`, by
 /// `replace(/[^a-zA-Z0-9]/g,"-")`.
 fn claude_code_name(path: &str) -> String {
     path.chars()
@@ -274,8 +316,12 @@ fn clean_ends_a_held_recorder_that_stays_on_a_term_and_its_watcher() {
 /// Claude Code keeps the probe's conversations and session state under a
 /// name of the project's path in which an `_` is a `-` as well as a `/` or a
 /// `.`, and on macOS under the real path its sessions report, beneath
-/// `/private`. `--clean` has to find them by those names, and leave the
-/// projects that are not the probe's.
+/// `/private`. It keeps their scratchpads and task output under that name in
+/// its temp directory, which is `CLAUDE_CODE_TMPDIR` or else `TMPDIR`, a
+/// directory under `/var/folders` on macOS, and which the session's
+/// `scratchpad_dir` names when the session ran with another. `--clean` has to
+/// find them by those names in each of those places, and leave the projects
+/// that are not the probe's.
 #[test]
 fn clean_removes_what_claude_code_keeps_for_the_project_by_the_names_it_gives_them() {
     let scratch = Scratch::new("probe_clean_state");
@@ -285,23 +331,33 @@ fn clean_removes_what_claude_code_keeps_for_the_project_by_the_names_it_gives_th
     assert!(project.contains('_'), "{project} has no _ to be renamed");
 
     // Two sessions, as SessionStart hands them to the recorder: one in the
-    // project as the script named it, and one as macOS's getcwd names a
-    // directory under $TMPDIR.
+    // project as the script named it, with no scratchpad, as under `-p`; and
+    // one as macOS's getcwd names a directory under $TMPDIR, whose
+    // scratchpad is in a temp directory the script's environment does not
+    // name.
     let real = format!("/private{project}");
+    let session_temp = scratch.claude_code_temp(&scratch.root.join("session-tmp"));
+    let scratchpad = session_temp
+        .join(claude_code_name(&real))
+        .join(SESSION)
+        .join("scratchpad");
     let evidence = Path::new(project).join("evidence");
-    for (at, cwd) in [(1, project), (2, real.as_str())] {
+    for (at, cwd, pad) in [(1, project, None), (2, real.as_str(), Some(&scratchpad))] {
         let transcript = scratch
             .home()
             .join(".claude/projects")
             .join(claude_code_name(cwd))
             .join(format!("{SESSION}.jsonl"));
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "session_id": SESSION,
             "transcript_path": transcript,
             "cwd": cwd,
             "hook_event_name": "SessionStart",
             "source": "startup",
         });
+        if let Some(pad) = pad {
+            payload["scratchpad_dir"] = serde_json::json!(pad);
+        }
         std::fs::write(
             evidence.join(format!(
                 "179215262{at}.405199817-411178{at}-SessionStart.json"
@@ -312,28 +368,44 @@ fn clean_removes_what_claude_code_keeps_for_the_project_by_the_names_it_gives_th
     }
 
     let claude = scratch.home().join(".claude");
+    let tmpdir = scratch.claude_code_temp(&scratch.tmpdir());
     let probes = [
         claude.join("projects").join(claude_code_name(project)),
         claude.join("projects").join(claude_code_name(&real)),
         claude.join("session-env").join(SESSION),
         claude.join("file-history").join(SESSION),
+        scratch
+            .claude_code_temp(&scratch.claude_code_tmpdir())
+            .join(claude_code_name(project)),
+        tmpdir.join(claude_code_name(&real)),
+        scratchpad.clone(),
     ];
-    let other = claude.join("projects/-home-someone-work-crook");
-    for dir in probes.iter().chain([&other]) {
-        std::fs::create_dir_all(dir).expect("the scratch home is writable");
-        std::fs::write(dir.join("kept.jsonl"), "{}\n").expect("the scratch home is writable");
+    let others = [
+        claude.join("projects/-home-someone-work-crook"),
+        tmpdir.join("-home-someone-work-crook"),
+        session_temp.join("-home-someone-work-crook"),
+    ];
+    for dir in probes.iter().chain(&others) {
+        std::fs::create_dir_all(dir).expect("the scratch directory is writable");
+        std::fs::write(dir.join("kept.jsonl"), "{}\n").expect("the scratch directory is writable");
     }
 
     scratch.probe_ok(&["claude", "--clean"]);
     for dir in &probes {
         assert!(!dir.exists(), "--clean left {}", dir.display());
     }
-    assert!(!Path::new(project).exists(), "--clean left the project");
     assert!(
-        other.join("kept.jsonl").exists(),
-        "--clean removed {}, which is not the probe's",
-        other.display()
+        !session_temp.join(claude_code_name(&real)).exists(),
+        "--clean left the session's project directory around its scratchpad"
     );
+    assert!(!Path::new(project).exists(), "--clean left the project");
+    for other in &others {
+        assert!(
+            other.join("kept.jsonl").exists(),
+            "--clean removed {}, which is not the probe's",
+            other.display()
+        );
+    }
 }
 
 /// Codex keeps the trust it is given in its `CODEX_HOME`, so the probe's
