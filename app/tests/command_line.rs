@@ -49,7 +49,9 @@ fn a_word_that_is_not_text_is_a_line_on_stderr_and_not_a_panic() {
 #[test]
 #[cfg(unix)]
 fn an_answer_nobody_is_left_to_read_ends_the_command_and_is_not_a_panic() {
+    use std::fs::Permissions;
     use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
 
     let directory = std::env::temp_dir().join(format!("crook-cl-{}", std::process::id()));
@@ -57,6 +59,9 @@ fn an_answer_nobody_is_left_to_read_ends_the_command_and_is_not_a_panic() {
     std::fs::create_dir_all(&directory).expect("a temporary directory");
     let socket = directory.join("w.sock");
     let listener = UnixListener::bind(&socket).expect("a socket to answer on");
+    // Locked as a window locks its own, or the command line will not ask it.
+    std::fs::set_permissions(&directory, Permissions::from_mode(0o700)).expect("closed");
+    std::fs::set_permissions(&socket, Permissions::from_mode(0o600)).expect("locked");
     let window = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("the command line asks");
         let mut asked = String::new();
