@@ -16,9 +16,13 @@
 //! is index 4?", "how big is the text area?", a device attributes request. The
 //! emulator answers those into [`Emulator::take_replies`], and it is the
 //! caller's job to put those bytes back on the pty; a caller that drops them
-//! will hang any program that waits for an answer. The one caller that must
-//! not answer is a mirror — an emulator following a stream that another one
-//! is already answering — and [`Emulator::advance_mirrored`] is its feed.
+//! will hang any program that waits for an answer. One answer has no question
+//! in front of it: a program that asked to be told of a change of colour
+//! scheme is told when a new palette turns the background from dark to light
+//! or back, so [`Emulator::set_palette`] can owe replies too. The one caller
+//! that must not answer is a mirror — an emulator following a stream that
+//! another one is already answering — and [`Emulator::advance_mirrored`] is
+//! its feed.
 //!
 //! **Nothing here knows what the pointer has selected.** A pane's output is a
 //! list of blocks, and all but the last of them were harvested out of this
@@ -37,7 +41,7 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Handler, Processor};
+use alacritty_terminal::vte::ansi::{Handler, NamedColor, Processor};
 use alacritty_terminal::vte::{Params, Parser, Perform};
 use parking_lot::Mutex;
 
@@ -52,7 +56,7 @@ use crate::marks::ShellMark;
 use crate::mouse::MouseModes;
 use crate::notify::{self, Notification};
 use crate::pty::ChildExit;
-use crate::snapshot::{self, Palette, Snapshot, TerminalSize};
+use crate::snapshot::{self, Palette, Rgb, Snapshot, TerminalSize};
 
 /// One item of a stream fed to a mirror, in the order it happened.
 ///
@@ -233,9 +237,15 @@ impl EventListener for EventProxy {
 /// deliberately does not have — and OSC 133 because `vte::ansi::Handler` has no
 /// hook for it at all, so no amount of implementing that trait can see one.
 /// The notifications other terminals read — OSC 9, 99 and 777 — reach no hook
-/// either, and are logged as unhandled. So does one question: XTVERSION,
+/// either, and are logged as unhandled. So do two questions: XTVERSION,
 /// `CSI > q`, which asks for the terminal's name and version, and which `vte`
-/// does not tell apart from the `q`s it has no use for.
+/// does not tell apart from the `q`s it has no use for; and the colour scheme,
+/// `CSI ? 996 n`, which asks whether the background is dark or light. A third
+/// reaches `Term` and is answered wrongly: DECRQM about mode 2031, `CSI ? 2031
+/// $ p`, which `Term` calls not recognised, as it does every mode it does not
+/// know. 2031 is the colour scheme's subscription, and the watcher keeps it:
+/// a program that turns it on is told whenever a new palette moves the
+/// background from dark to light or back, by [`Emulator::set_palette`].
 ///
 /// So the bytes get a second pass through `vte`'s own parser with a `Perform`
 /// that implements little but `osc_dispatch`. That costs one extra walk of the
@@ -286,6 +296,17 @@ struct OscWatcher {
     /// Whether the program asked which terminal this is, with XTVERSION —
     /// `CSI > q`, which is where the watcher stops.
     version_asked: bool,
+    /// Whether the program asked whether the background is dark or light —
+    /// `CSI ? 996 n`, which is where the watcher stops.
+    scheme_asked: bool,
+    /// Whether the program asked whether colour-scheme reports are on —
+    /// DECRQM about mode 2031, which is where the watcher stops.
+    scheme_reports_asked: bool,
+    /// Whether the program in the pane is told of a change of colour scheme:
+    /// mode 2031, which it sets with `CSI ? 2031 h` and resets with `l`. Not
+    /// a stop: it is read only where the watcher already stands still, at a
+    /// question about it and between feeds, when the palette changes.
+    scheme_reports: bool,
     /// Whether the program switched screens — `CSI ? 1049 h` or `l`, the one
     /// switch alacritty makes — which is where the watcher stops.
     screen_switched: bool,
@@ -303,11 +324,16 @@ impl Perform for OscWatcher {
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
         if intermediates.is_empty() && byte == b'c' {
             self.reset = true;
+            // `Term` resets every mode it keeps, and this one goes with them.
+            self.scheme_reports = false;
         }
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         let first = params.iter().next();
+        // What `vte` reads a mode or a report's number from: the first
+        // parameter, less any subparameters after it.
+        let number = first.and_then(|param| param.first()).copied();
         match (action, intermediates) {
             // Only the plain form: `CSI ? 3 J` is the selective erase, which
             // leaves the history alone.
@@ -320,9 +346,17 @@ impl Perform for OscWatcher {
                 self.version_asked = true;
             }
             // Among other modes, maybe: `Term` sets each one in turn.
-            ('h' | 'l', [b'?']) if params.iter().any(|param| param.first() == Some(&1049)) => {
-                self.screen_switched = true;
+            ('h' | 'l', [b'?']) => {
+                for mode in params.iter().filter_map(|param| param.first()) {
+                    match mode {
+                        1049 => self.screen_switched = true,
+                        2031 => self.scheme_reports = action == 'h',
+                        _ => {}
+                    }
+                }
             }
+            ('n', [b'?']) if number == Some(996) => self.scheme_asked = true,
+            ('p', [b'?', b'$']) if number == Some(2031) => self.scheme_reports_asked = true,
             _ => {}
         }
     }
@@ -396,7 +430,11 @@ impl Perform for OscWatcher {
     /// And on XTVERSION, whose answer [`Emulator::advance`] makes from here:
     /// `Term` queues its own answers as it parses, so the version has to be
     /// answered once everything before the query is parsed and nothing after
-    /// it, or it goes out of order with the answers either side of it.
+    /// it, or it goes out of order with the answers either side of it. The
+    /// two questions about the colour scheme are answered from here for the
+    /// same reason, and the one about its subscription for another as well:
+    /// it is answered as the mode stood when it was asked, and the rest of
+    /// the read can change it.
     ///
     /// And on a title longer than [`agent::TITLE_BYTES`], so that the grid's
     /// own copy of it can be cut before the rest of the read pushes it.
@@ -408,6 +446,8 @@ impl Perform for OscWatcher {
             || self.image.is_some()
             || (self.agent.is_some() && self.notification.is_some())
             || self.version_asked
+            || self.scheme_asked
+            || self.scheme_reports_asked
             || self.long_title.is_some()
             || self.screen_switched
     }
@@ -419,6 +459,48 @@ impl Perform for OscWatcher {
 /// is far enough away from every number anything standardised uses that a
 /// stream carrying one came from a shell Crook set up.
 const COMPLETIONS_OSC: &[u8] = b"6339";
+
+/// What `Term` answers DECRQM about mode 2031 with: 0, not recognised, which
+/// it says of every mode it does not know. [`Emulator::advance`] answers that
+/// question itself, from the watcher, and this answer goes nowhere.
+const SCHEME_REPORTS_UNRECOGNISED: &str = "\x1b[?2031;0$y";
+
+/// Whether a background is dark or light, which is all a program asking for
+/// the colour scheme is told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scheme {
+    Dark,
+    Light,
+}
+
+impl Scheme {
+    /// Which side of the middle `background` is on, with Rec. 709's weights
+    /// on the channels as they are: the arithmetic the window's theme weighs
+    /// a colour's brightness with. A program told picks a whole theme on the
+    /// answer, and its themes are drawn for backgrounds far from the middle,
+    /// so nothing finer would change what it picks.
+    fn of(background: Rgb) -> Self {
+        let luma = 2126 * u32::from(background.r)
+            + 7152 * u32::from(background.g)
+            + 722 * u32::from(background.b);
+        if luma < 128 * 10_000 {
+            Self::Dark
+        } else {
+            Self::Light
+        }
+    }
+
+    /// `CSI ? 997 ; 1 n` for dark and `CSI ? 997 ; 2 n` for light: the
+    /// answer to `CSI ? 996 n`, and what a program that turned the reports
+    /// on is sent unasked.
+    fn report(self) -> String {
+        let code = match self {
+            Self::Dark => 1,
+            Self::Light => 2,
+        };
+        format!("\x1b[?997;{code}n")
+    }
+}
 
 /// The longest working directory OSC 7 is believed for, in bytes.
 ///
@@ -766,6 +848,22 @@ impl Emulator {
                 && let Some(reply) = &self.version_reply
             {
                 self.proxy.send_event(Event::PtyWrite(reply.clone()));
+            }
+            // The colour scheme's two questions, in the same place for the
+            // same reason. `Term` has answered the second already, wrongly,
+            // and that answer is dropped on its way out of the proxy.
+            if std::mem::take(&mut self.osc_watcher.scheme_asked) {
+                self.proxy
+                    .send_event(Event::PtyWrite(self.scheme().report()));
+            }
+            if std::mem::take(&mut self.osc_watcher.scheme_reports_asked) {
+                let state = if self.osc_watcher.scheme_reports {
+                    1
+                } else {
+                    2
+                };
+                self.proxy
+                    .send_event(Event::PtyWrite(format!("\x1b[?2031;{state}$y")));
             }
             // Wherever the watcher stopped, what it holds was written before
             // the stop and goes out now. A report earlier in this same read
@@ -1479,9 +1577,33 @@ impl Emulator {
 
     /// Redraws the grid in a different set of colours, which is how a theme
     /// change reaches an already-running session.
+    ///
+    /// And tells a program that turned colour-scheme reports on, with mode
+    /// 2031, when the new palette moves the background from dark to light or
+    /// back: the report that answers `CSI ? 996 n` goes into
+    /// [`Self::take_replies`]. Only then, because a program told picks a dark
+    /// or a light theme of its own on it — Claude Code asks OSC 11 for the
+    /// new colour — and from one dark palette to another there is nothing to
+    /// pick. Nor under a background the program set itself with OSC 11, which
+    /// a new palette leaves where it is.
     pub fn set_palette(&mut self, palette: Palette) {
+        let before = self.scheme();
         self.palette = palette;
         self.dirty = true;
+        let after = self.scheme();
+        if self.osc_watcher.scheme_reports && after != before && !self.mirrored {
+            self.replies.extend_from_slice(after.report().as_bytes());
+        }
+    }
+
+    /// Whether the background drawn now is dark or light: the palette's, or
+    /// the one the program set with OSC 11, which is the colour OSC 11
+    /// answers with, so a program that asks both is told one story.
+    fn scheme(&self) -> Scheme {
+        Scheme::of(
+            self.palette
+                .named(NamedColor::Background, self.term.colors()),
+        )
     }
 
     /// Sets what this answers a program that asks which terminal it is,
@@ -1636,6 +1758,7 @@ impl Emulator {
                 Event::ClipboardStore(_, text) => {
                     self.events.push(TerminalEvent::ClipboardStore(text));
                 }
+                Event::PtyWrite(text) if text == SCHEME_REPORTS_UNRECOGNISED => {}
                 Event::PtyWrite(text) => self.replies.extend_from_slice(text.as_bytes()),
                 Event::ColorRequest(index, format) => {
                     let color = self.palette.color_at(index, self.term.colors());

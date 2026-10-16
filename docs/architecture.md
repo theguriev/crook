@@ -2956,6 +2956,20 @@ OSC 52 clipboard writes are in too: the write reaches the window's one clipboard
 somebody had copied, and the *read* direction stays refused in the emulator, where answering
 it would hand any program that can print to a pty the contents of the clipboard.
 
+**Colour-scheme reports are in**, as contour specified them and kitty and Ghostty answer
+them. `CSI ? 996 n` asks whether the background is dark or light, and is answered `CSI ? 997 ;
+1 n` or `; 2 n`, from the background OSC 11 answers with — the palette's, or the program's own
+— split at the middle by the Rec. 709 weights the window's theme reads a colour's brightness
+with. Mode `?2031` asks to be sent the same report unasked, and `Emulator::set_palette` queues
+it into the replies whenever a new palette moves the background across that middle, and only
+then: a program that hears picks a dark or a light theme of its own on it, and Claude Code asks
+OSC 11 for the colour again. `Terminal::set_palette` sends those replies the way `feed` does,
+through the writer's queue in the app, so a theme switch or the desktop's light and dark pair
+reaches every pane whose program asked. `vte` has no hook for the question, and `Term` answers
+DECRQM about `?2031` with 0, not recognised, so the OSC watcher keeps the mode itself, stops on
+both questions to answer them in place among `Term`'s own answers, and drops `Term`'s `0`. A
+mirror answers neither and reports nothing.
+
 One residue is worth writing down rather than discovering. End-of-file on the pty master is
 the only signal this design has that a session is over, and something other than the child
 can hold that open — a `sleep 60 &`, a server that outlived the shell that started it. Such a
