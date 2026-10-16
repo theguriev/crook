@@ -4453,8 +4453,9 @@ impl WindowDelegate for Shell {
         }
 
         // And for whether the window can be seen at all, which decides
-        // whether anything in it is worth animating — the workspace's to
-        // weigh, since it is the one that animates.
+        // whether anything in it is worth animating, or a pane's output worth
+        // a frame — the workspace's to weigh, since it is the one that
+        // animates and the one that gates a pane's repaints.
         if let Event::WindowOccluded(occluded) = event {
             let workspace = &self.workspace;
             self.app.update(|ctx| {

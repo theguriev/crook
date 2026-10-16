@@ -773,6 +773,40 @@ fn a_read_that_has_begun_is_never_run_beside_another() {
 }
 
 #[test]
+fn a_search_let_go_of_leaves_the_answer_and_frees_the_question() {
+    // A search that comes back to a pane nobody can see any more is let go
+    // of. Declining what it found was not enough on its own: the search still
+    // counted as on its way, so the pane coming back on screen asked nothing
+    // and the count stayed where it was.
+    let (find, two, moved, _pause) = paused();
+    find.drop_grid(&moved);
+    assert!(
+        !find.land_grid(moved.clone(), two, Arc::default(), Vec::new()),
+        "what a search let go of found was taken in"
+    );
+    assert_eq!(
+        Some(0),
+        find.grid_matches("qvx", 20).map(|found| found.len()),
+        "the answer on screen went with it"
+    );
+    assert!(
+        find.ask_grid(&moved),
+        "the same question waited for a search that had been let go of"
+    );
+
+    // Only the search being waited for: one that set out before is not it.
+    let (find, _, moved, _pause) = paused();
+    find.drop_grid(&GridAsk {
+        query: "qv".to_owned(),
+        ..moved.clone()
+    });
+    assert!(
+        !find.ask_grid(&moved),
+        "a search still on its way was let go of for another"
+    );
+}
+
+#[test]
 fn closing_the_bar_ends_a_pause_at_once() {
     let (find, _, _, pause) = paused();
     find.close();
