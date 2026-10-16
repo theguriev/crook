@@ -42,7 +42,12 @@
 //! the tests here hold the plugin's files to what is printed and to
 //! [`SKILL`]. `codex`, `gemini` and `copilot` print the same commands under
 //! each one's own event names, which is how those three read their hooks
-//! too; `opencode` has no command hooks and gets the plugin its plugin
+//! too. Codex CLI and GitHub Copilot CLI install the same plugin from the
+//! same marketplace, so theirs lead with their own two commands as well:
+//! each reads a manifest of its own in the plugin's directory before Claude
+//! Code's, and that manifest names a hooks file of its own — what its
+//! `--agent-hooks` prints, under its event names, and nothing of Claude
+//! Code's. `opencode` has no command hooks and gets the plugin its plugin
 //! directory loads instead; `aider` has no hooks, and gets the sentence that
 //! says so and what to do instead.
 //!
@@ -619,8 +624,8 @@ fn one_line(text: &str, chars: usize) -> Option<String> {
 pub struct Hooks {
     /// The lead, for standard error before the fragment: the commands that
     /// install Crook's plugin for the agent, which carries the same hooks,
-    /// so the fragment after it is for a person who would rather merge by
-    /// hand. `None` for an agent Crook ships no plugin for.
+    /// so the fragment after it is for a person who would rather set them up
+    /// by hand. `None` for an agent Crook ships no plugin for.
     pub lead: Option<String>,
     /// The fragment, for standard output: a settings file's `hooks` object,
     /// a plugin file, or — for an agent with no hooks — the sentence that
@@ -838,6 +843,24 @@ const CODEX_EVENTS: &[(&str, &str)] = &[
 const CODEX_TRUST: &str = "\n# Codex runs none of them until you trust them: it asks on its next \
 start, or in its /hooks, and asks again whenever a hook's command changes.";
 
+/// The commands that install Crook's plugin for Codex CLI: the marketplace
+/// Claude Code's commands add, and the same plugin in it, in Codex's own
+/// words.
+///
+/// codex-cli 0.149 reads a marketplace's `.claude-plugin/marketplace.json`
+/// when it has none of its own, and in the plugin's directory reads
+/// `.codex-plugin/plugin.json` before Claude Code's manifest. That one names
+/// `hooks/codex.json` — [`CODEX_EVENTS`], as `--agent-hooks codex` prints
+/// them — in place of the `hooks/hooks.json` Claude Code reads, whose
+/// `Notification` Codex has no event for: with only that file the plugin
+/// said running and idle, and never that Codex had stopped for an approval.
+/// The plugin's hooks wait for the same review as hooks merged by hand, so
+/// the lead says [`CODEX_TRUST`] as well.
+const CODEX_PLUGIN: &[&str] = &[
+    "codex plugin marketplace add theguriev/crook",
+    "codex plugin add crook@crook",
+];
+
 /// The Gemini CLI hooks: the same object, in `~/.gemini/settings.json`,
 /// under its own names — `BeforeAgent` for the prompt, `BeforeTool` and
 /// `AfterTool` around a tool, `AfterAgent` for the end of a turn.
@@ -877,6 +900,11 @@ const GEMINI_EVENTS: &[(&str, &str)] = &[
 /// the sessions that started instead, so a turn in one takes the pane back
 /// — and knows every other session for a subagent's, a background one
 /// that goes on after the agent stopped included.
+///
+/// Not `permissionRequest`, which Copilot 1.0.89 runs before its rules have
+/// decided, so for a tool `--allow-all-tools` lets through with nobody asked
+/// as well as for one it stops to ask about; `notification` comes only for
+/// the second, with the question as its `message`.
 const COPILOT_EVENTS: &[(&str, &str)] = &[
     ("sessionStart", "running --title - --session-start -"),
     ("userPromptSubmitted", "running --title - --session -"),
@@ -885,6 +913,20 @@ const COPILOT_EVENTS: &[(&str, &str)] = &[
     ("notification", "needs-input --message - --session -"),
     ("agentStop", "idle --session -"),
     ("sessionEnd", "idle --session -"),
+];
+
+/// The commands that install Crook's plugin for GitHub Copilot CLI.
+///
+/// Copilot 1.0.89 reads the same `.claude-plugin/marketplace.json`, and in
+/// the plugin's directory reads `.github/plugin/plugin.json` before Claude
+/// Code's manifest. That one names `hooks/copilot.json` — [`COPILOT_EVENTS`],
+/// in the file `--agent-hooks copilot` prints. Without it Copilot runs
+/// Claude Code's `hooks/hooks.json` under Claude Code's names, which pass no
+/// `--session`: a subagent's prompt would name the tab and its stop would end
+/// the turn, which is what Copilot's own table is written to keep out.
+const COPILOT_PLUGIN: &[&str] = &[
+    "copilot plugin marketplace add theguriev/crook",
+    "copilot plugin install crook@crook",
 ];
 
 /// The OpenCode plugin: a TypeScript file its plugin directory loads at
@@ -1058,7 +1100,7 @@ permission, and a question the model asks ends its turn as idle.",
             without: "",
         },
         prompt_flag: None,
-        plugin: &[],
+        plugin: CODEX_PLUGIN,
         last: Some("codex resume --last"),
         pick: Some("codex resume"),
     },
@@ -1088,7 +1130,7 @@ model asks ends its turn as idle.",
             events: COPILOT_EVENTS,
         },
         prompt_flag: Some("-i"),
-        plugin: &[],
+        plugin: COPILOT_PLUGIN,
         last: Some("copilot --resume"),
         pick: Some("copilot --resume"),
     },
@@ -1976,11 +2018,18 @@ doing.",
         Fragment::None(sentence) => (sentence.replace("BINARY", &quoted(binary)), None),
     };
     // Comment lines and the commands and nothing else, so a person who pastes
-    // the whole of it into a shell runs exactly the two.
+    // the whole of it into a shell runs exactly the two. What an agent asks
+    // before it runs hooks it asks of its plugin's as well, so that is said
+    // here too, for the person who stops reading at the commands.
     let lead = (!known.plugin.is_empty()).then(|| {
+        let (by_hand, trust) = match known.fragment {
+            Fragment::Hooks { trust, .. } => ("merge the `hooks` below", trust),
+            Fragment::Copilot { .. } | Fragment::Plugin { .. } => ("save the file below", ""),
+            Fragment::None(_) => ("do what the sentence below says", ""),
+        };
         format!(
-            "# {} can install these hooks, and the skill beside them, as Crook's plugin:\n{}\n\
-# Or merge the `hooks` below by hand instead; with both, every report is made twice.",
+            "# {} can install these hooks, and the skill beside them, as Crook's plugin:\n{}{trust}\n\
+# Or {by_hand} by hand instead; with both, every report is made twice.",
             known.program,
             known.plugin.join("\n")
         )
@@ -2402,31 +2451,44 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
     }
 
     #[test]
-    fn the_codex_note_and_the_skill_say_codex_runs_the_hooks_only_once_trusted() {
+    fn the_codex_lead_note_and_skill_say_codex_runs_the_hooks_only_once_trusted() {
         // Codex holds hooks merged into its file back behind a review on its
         // next start, whose third choice is "Continue without trusting (hooks
         // won't run)", and keeps a hash of each hook it was told to trust, so
-        // a hook whose command changes is held back again. Either way the tab
-        // says nothing, and these are the two places a person, or the agent
-        // setting Codex up for them, can learn why.
-        let note = hooks_text("codex", Path::new("/opt/crook/bin/crook"))
-            .unwrap()
-            .note
-            .unwrap();
-        let trust = note
-            .lines()
-            .find(|line| line.contains("trust"))
-            .unwrap_or_else(|| panic!("the note never mentions trusting the hooks: {note}"));
-        assert!(trust.starts_with("# "), "{note}");
-        assert!(trust.contains("/hooks"), "{note}");
-        assert!(trust.contains("asks again"), "{note}");
+        // a hook whose command changes is held back again. The hooks its
+        // plugin carries are held back the same way: codex-cli 0.149.1 opened
+        // on "6 hooks are new or changed" after `codex plugin add`. Either
+        // way the tab says nothing, and these are the places a person, or the
+        // agent setting Codex up for them, can learn why: the lead for the
+        // plugin, the note for the hooks merged by hand.
+        let printed = hooks_text("codex", Path::new("/opt/crook/bin/crook")).unwrap();
+        let lead = printed.lead.unwrap();
+        let note = printed.note.unwrap();
+        for said in [&lead, &note] {
+            let trust = said
+                .lines()
+                .find(|line| line.contains("trust"))
+                .unwrap_or_else(|| panic!("this never mentions trusting the hooks: {said}"));
+            assert!(trust.starts_with("# "), "{said}");
+            assert!(trust.contains("/hooks"), "{said}");
+            assert!(trust.contains("asks again"), "{said}");
+        }
 
-        let skill = SKILL
-            .split("\n\n")
-            .find(|paragraph| paragraph.contains("`codex`, `gemini`, `copilot` and `opencode`"))
-            .expect("the skill says what `--agent-hooks` takes");
+        // The skill's sentence comes right after the commands that install
+        // the plugin, and says it of every hook, merged or installed.
+        let paragraphs: Vec<&str> = SKILL.split("\n\n").collect();
+        let commands = paragraphs
+            .iter()
+            .position(|paragraph| paragraph.contains("\ncodex plugin add crook@crook\n"))
+            .expect("the skill gives the commands that install Codex's plugin");
+        let skill = paragraphs[commands..]
+            .iter()
+            .find(|paragraph| !paragraph.starts_with("```"))
+            .unwrap();
+        assert!(skill.starts_with("Codex runs"), "{skill}");
         assert!(skill.contains("trust"), "{skill}");
         assert!(skill.contains("/hooks"), "{skill}");
+        assert!(skill.contains("asks again"), "{skill}");
     }
 
     #[test]
@@ -3093,28 +3155,119 @@ process.stdout.write(JSON.stringify({ ran, asked }))
     /// The marketplace the repository is, which lists the plugin.
     const MARKETPLACE: &str = include_str!("../../.claude-plugin/marketplace.json");
 
+    /// One agent the plugin serves, and the two files of it that are that
+    /// agent's.
+    struct Served {
+        /// The agent, by its name in [`AGENTS`].
+        agent: &'static str,
+        /// The manifest it reads in the plugin's directory.
+        manifest: &'static str,
+        /// The hooks file the manifest names, as it names it, or `None` for
+        /// one that names none and so is read with `hooks/hooks.json`.
+        names: Option<&'static str>,
+        /// That hooks file, where the repository keeps it.
+        path: &'static str,
+        /// And what is in it.
+        hooks: &'static str,
+    }
+
+    /// Every agent the plugin serves. Codex CLI and Copilot CLI each read a
+    /// manifest of their own before Claude Code's, and it names a hooks
+    /// file of their own: without one, both run Claude Code's
+    /// `hooks/hooks.json` under its names, which Codex reads with no
+    /// `Notification` and so never says it stopped for an approval, and
+    /// Copilot runs with no `--session`, so its subagents would rename the
+    /// tab.
+    const SERVED: [Served; 3] = [
+        Served {
+            agent: "claude",
+            manifest: PLUGIN_MANIFEST,
+            names: None,
+            path: "packaging/claude-code/hooks/hooks.json",
+            hooks: PLUGIN_HOOKS,
+        },
+        Served {
+            agent: "codex",
+            manifest: include_str!("../../packaging/claude-code/.codex-plugin/plugin.json"),
+            names: Some("./hooks/codex.json"),
+            path: "packaging/claude-code/hooks/codex.json",
+            hooks: include_str!("../../packaging/claude-code/hooks/codex.json"),
+        },
+        Served {
+            agent: "copilot",
+            manifest: include_str!("../../packaging/claude-code/.github/plugin/plugin.json"),
+            names: Some("./hooks/copilot.json"),
+            path: "packaging/claude-code/hooks/copilot.json",
+            hooks: include_str!("../../packaging/claude-code/hooks/copilot.json"),
+        },
+    ];
+
     #[test]
     fn the_plugin_hooks_are_the_printed_hooks() {
-        // The plugin is a second copy of what `--agent-hooks claude` prints,
-        // in a file Claude Code reads and Rust does not, so nothing but this
-        // keeps the two saying the same thing: an event added to the table
-        // and not the file would be a status the plugin never reports, and a
-        // guard changed in one and not the other a way to fail an agent.
-        let shipped: Value =
-            serde_json::from_str(PLUGIN_HOOKS).expect("the plugin's hooks.json is JSON");
-        let printed = hooks_text("claude", Path::new("/usr/bin/crook")).unwrap();
-        let printed: Value = serde_json::from_str(&printed.text).expect("the fragment is JSON");
-        assert_eq!(
-            printed["hooks"],
-            shipped["hooks"],
-            "packaging/claude-code/hooks/hooks.json has drifted from `--agent-hooks claude`; \
-its `hooks` should be\n{}",
-            serde_json::to_string_pretty(&printed["hooks"]).unwrap()
-        );
-        assert!(
-            shipped["description"].as_str().is_some(),
-            "a plugin's hooks file says what its hooks are for"
-        );
+        // The plugin is a second copy of what `--agent-hooks` prints for each
+        // agent it serves, in files the agents read and Rust does not, so
+        // nothing but this keeps the two saying the same thing: an event
+        // added to a table and not its file would be a status the plugin
+        // never reports, and a guard changed in one and not the other a way
+        // to fail an agent. Each command is then a `hook_command`, whose
+        // guard the test below runs under `sh`, and `claude_code_hooks.rs`
+        // runs what every agent's `--agent-hooks` prints against the real
+        // binary.
+        for served in SERVED {
+            let shipped: Value = serde_json::from_str(served.hooks)
+                .unwrap_or_else(|error| panic!("{} is not JSON: {error}", served.path));
+            let printed = hooks_text(served.agent, Path::new("/usr/bin/crook")).unwrap();
+            let printed: Value = serde_json::from_str(&printed.text).expect("the fragment is JSON");
+            // `hooks` everywhere, and Copilot's `version` beside it.
+            for (key, value) in printed.as_object().unwrap() {
+                assert_eq!(
+                    value,
+                    &shipped[key],
+                    "{} has drifted from `--agent-hooks {}`; its `{key}` should be\n{}",
+                    served.path,
+                    served.agent,
+                    serde_json::to_string_pretty(value).unwrap()
+                );
+            }
+            assert!(
+                shipped["description"].as_str().is_some(),
+                "{}: a plugin's hooks file says what its hooks are for",
+                served.path
+            );
+        }
+    }
+
+    #[test]
+    fn each_agent_the_plugin_serves_reads_a_manifest_that_names_its_own_hooks() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../packaging/claude-code");
+        for served in SERVED {
+            let manifest: Value = serde_json::from_str(served.manifest)
+                .unwrap_or_else(|error| panic!("{}'s manifest is not JSON: {error}", served.agent));
+            // Claude Code's names none, and reads `hooks/hooks.json` and no
+            // other agent's file; the other two name their own.
+            assert_eq!(
+                served.names,
+                manifest.get("hooks").and_then(Value::as_str),
+                "{}'s manifest",
+                served.agent
+            );
+            // The file the manifest names is the one the test above pins.
+            let named = served.names.unwrap_or("hooks/hooks.json");
+            let on_disk = std::fs::read_to_string(directory.join(named))
+                .unwrap_or_else(|error| panic!("{} names {named}: {error}", served.agent));
+            assert!(on_disk == served.hooks, "{} names {named}", served.agent);
+            // A manifest that names its hooks names its skills too, the one
+            // directory the skill is in, or the agent may load no skill.
+            if served.names.is_some() {
+                assert_eq!(
+                    Some("./skills/"),
+                    manifest["skills"].as_str(),
+                    "{}",
+                    served.agent
+                );
+            }
+        }
+        assert!(directory.join("skills/crook/SKILL.md").is_file());
     }
 
     /// Waits, for a minute at most, until the script just written at `path`
@@ -3376,11 +3529,9 @@ its `hooks` should be\n{}",
     }
 
     #[test]
-    fn the_claude_hooks_lead_with_the_commands_that_install_the_plugin_the_repository_ships() {
+    fn every_agent_the_plugin_serves_leads_with_the_commands_that_install_it() {
         let marketplace: Value =
             serde_json::from_str(MARKETPLACE).expect("the marketplace is JSON");
-        let manifest: Value =
-            serde_json::from_str(PLUGIN_MANIFEST).expect("the plugin's manifest is JSON");
         let name = marketplace["name"].as_str().unwrap();
         let plugins = marketplace["plugins"].as_array().unwrap();
         assert_eq!(1, plugins.len(), "{plugins:?}");
@@ -3391,30 +3542,80 @@ its `hooks` should be\n{}",
             Some("./packaging/claude-code"),
             plugins[0]["source"].as_str()
         );
-        // Claude Code's rule: an install by a name the manifest does not
-        // share is "not found in marketplace".
-        assert_eq!(Some(plugin), manifest["name"].as_str());
 
-        let printed = hooks_text("claude", Path::new("/usr/bin/crook")).unwrap();
-        let lead = printed.lead.expect("claude's hooks come as a plugin too");
-        let lines: Vec<&str> = lead.lines().filter(|line| !line.starts_with('#')).collect();
-        assert_eq!(
-            vec![
-                "claude plugin marketplace add theguriev/crook".to_owned(),
-                format!("claude plugin install {plugin}@{name}"),
-            ],
-            lines,
-            "the lead is comments and the commands, so pasting all of it runs just those"
-        );
-        // And the fragment is still what it was, for merging by hand.
-        let parsed: Value = serde_json::from_str(&printed.text).unwrap();
-        assert!(parsed["hooks"]["Notification"].is_array());
-        assert!(printed.note.unwrap().contains("~/.claude/settings.json"));
+        // Each CLI's own spelling, as its `plugin --help` gives it: Codex
+        // 0.149 adds a plugin where the other two install one. All three
+        // take GitHub's `owner/repo` for the marketplace, and installed
+        // `crook@crook` from it.
+        for (agent, install, by_hand) in [
+            ("claude", "install", "merge the `hooks` below"),
+            ("codex", "add", "merge the `hooks` below"),
+            ("copilot", "install", "save the file below"),
+        ] {
+            let served = SERVED.iter().find(|served| served.agent == agent).unwrap();
+            let manifest: Value = serde_json::from_str(served.manifest).unwrap();
+            // Claude Code's rule, and the others': an install by a name the
+            // manifest does not share is "not found in marketplace".
+            assert_eq!(Some(plugin), manifest["name"].as_str(), "{agent}");
+            assert_eq!(
+                Some("https://github.com/theguriev/crook"),
+                manifest["repository"].as_str(),
+                "{agent}: the marketplace the lead adds is the repository the plugin says it is"
+            );
 
-        // Only Claude Code has a plugin to lead with.
-        for agent in AGENTS.iter().filter(|agent| agent.name != "claude") {
+            let printed = hooks_text(agent, Path::new("/usr/bin/crook")).unwrap();
+            let lead = printed
+                .lead
+                .unwrap_or_else(|| panic!("{agent}'s hooks come as a plugin too"));
+            let lines: Vec<&str> = lead.lines().filter(|line| !line.starts_with('#')).collect();
+            assert_eq!(
+                vec![
+                    format!("{agent} plugin marketplace add theguriev/crook"),
+                    format!("{agent} plugin {install} {plugin}@{name}"),
+                ],
+                lines,
+                "the lead is comments and the commands, so pasting all of it runs just those"
+            );
+            // And the fragment after it is still there, for whoever would
+            // rather not install anything.
+            assert!(
+                lead.lines()
+                    .last()
+                    .unwrap()
+                    .starts_with(&format!("# Or {by_hand} by hand instead")),
+                "{agent}: {lead}"
+            );
+            assert!(printed.note.is_some(), "{agent}");
+        }
+
+        // Only those three have a plugin to lead with.
+        for agent in AGENTS
+            .iter()
+            .filter(|agent| !SERVED.iter().any(|served| served.agent == agent.name))
+        {
             let printed = hooks_text(agent.name, Path::new("/usr/bin/crook")).unwrap();
             assert_eq!(None, printed.lead, "{}", agent.name);
+        }
+    }
+
+    #[test]
+    fn the_skill_and_the_readme_give_every_command_that_installs_the_plugin() {
+        // Both say to lead with the plugin, and both are read by people and
+        // agents who will type what they say: a command renamed in the table
+        // and not here is a person typing one their CLI has never heard of.
+        const README: &str = include_str!("../../README.md");
+        let readme = README.split_whitespace().collect::<Vec<_>>().join(" ");
+        for agent in AGENTS.iter().filter(|agent| !agent.plugin.is_empty()) {
+            for command in agent.plugin {
+                assert!(
+                    SKILL.lines().any(|line| line == *command),
+                    "the skill does not give `{command}` a line of its own"
+                );
+                assert!(
+                    readme.contains(&format!("`{command}`")),
+                    "the README does not give `{command}`"
+                );
+            }
         }
     }
 

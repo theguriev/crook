@@ -1,0 +1,65 @@
+{
+  "description": "Tell the Crook tab Codex runs in what it is doing: running when a prompt is sent and around every tool, needs-input naming the tool whenever it stops for an approval, idle when its turn ends, and the pull request a `gh pr create` opened. Each command does nothing unless it runs in a Crook pane or inside tmux, with the crook binary reachable ($CROOK_BIN, else crook on PATH); inside tmux, crook writes the report to the terminal of each of tmux's clients, and one that is not Crook drops it unread. Each exits 0 even when the report fails. Codex runs none of them until you trust them, and asks again whenever a command here changes.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || [ -n \"$TMUX\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent running --title - || exit 0"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || [ -n \"$TMUX\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent running || exit 0"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || [ -n \"$TMUX\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent running --pull-request - || exit 0"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || [ -n \"$TMUX\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent needs-input --message - || exit 0"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || [ -n \"$TMUX\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent idle || exit 0"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || [ -n \"$TMUX\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent idle || exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}

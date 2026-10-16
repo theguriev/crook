@@ -108,25 +108,40 @@ it on only with `allow-passthrough` `on`, from a pane on screen, or, from 3.4, `
 configuration is the person's to change, so tell them rather than changing it. A status never
 taken back goes when the shell's own marks say the command ended.
 
-Claude Code reports all of this by itself once Crook's plugin is installed: running when a
-prompt is sent and around every tool, needing input on every notification, idle on stop, failed
-with the error when an API error such as a usage limit ends its turn, and the pull request after
-a `gh pr create`. It carries this file too, and its hooks do nothing outside Crook. A person
-installs it with two commands, which change their Claude Code settings, so give them to the
-person rather than running them:
+Claude Code, Codex and GitHub Copilot CLI report all of this by themselves once Crook's plugin
+is installed: running when a prompt is sent and around every tool, needing input when they stop
+to ask, and idle when the turn ends. Claude Code's hooks also say failed, with the error, when an
+API error such as a usage limit ends its turn; Claude Code's and Codex's report the pull request
+after a `gh pr create`; Copilot's name their session, so a subagent's prompt or stop is not taken
+for Copilot's own. The plugin carries this file too, and its hooks do nothing outside Crook. A
+person installs it with the two commands for their agent, which change that agent's own
+settings, so give them to the person rather than running them:
 
 ```sh
 claude plugin marketplace add theguriev/crook
 claude plugin install crook@crook
 ```
 
-`crook --agent-hooks claude` prints those two, then the same hooks as a fragment of Claude
-Code's settings, for a person who would rather merge it into `~/.claude/settings.json` or a
-project's `.claude/settings.json` by hand. Do not write either file yourself. The same flag
-takes `codex`, `gemini`, `copilot` and `opencode`, and prints each one's own hooks file or
-plugin with a note on stderr saying where it goes; `aider` has no hooks, and it says what to do
-instead. Codex runs merged hooks only once the person trusts them: it asks on its next start, or
-in its `/hooks`, and asks again whenever a hook's command changes, so tell them that as well.
+```sh
+codex plugin marketplace add theguriev/crook
+codex plugin add crook@crook
+```
+
+```sh
+copilot plugin marketplace add theguriev/crook
+copilot plugin install crook@crook
+```
+
+Codex runs the plugin's hooks, as it runs any hooks, only once the person trusts them: it asks
+on its next start, or in its `/hooks`, and asks again whenever a hook's command changes, so tell
+them that as well.
+
+`crook --agent-hooks claude`, `codex` or `copilot` prints those two commands, then the same hooks
+for a person who would rather set them up by hand: a fragment to merge into
+`~/.claude/settings.json` or `~/.codex/hooks.json`, or a file to save as
+`~/.copilot/hooks/crook.json`. Do not write any of them yourself. The same flag takes `gemini`
+and `opencode`, which have no plugin, and prints each one's own hooks or plugin with a note on
+stderr saying where it goes; `aider` has no hooks, and it says what to do instead.
 
 With neither the plugin nor the hooks, Claude Code can still light the row when it stops to ask,
 through a notification Crook reads — once its `preferredNotifChannel` setting is `ghostty`,
@@ -237,10 +252,10 @@ a failure, so `crook pane wait "$id" --until finished && …` reads the way it l
 0` answers at once. A tool that runs your shell commands may cut one off after a couple of
 minutes, with nothing learned: keep `--timeout` under that limit, as 110 is, and when the time
 runs out first, run the same wait again as a new command, until the pane gets there or exits.
-`idle` and `needs-input` are only as real as what the agent reports. A Claude Code worker without
-the hooks `crook --agent-hooks claude` prints says only what its title says — running, and idle
-when its turn ends — so a question it stops to ask reads as `idle` too, and `needs-input` never
-comes: a worker you will wait on for a question needs the hooks. Codex and Gemini CLI workers
+`idle` and `needs-input` are only as real as what the agent reports. A Claude Code worker with
+neither Crook's plugin nor the hooks `crook --agent-hooks claude` prints says only what its title
+says — running, and idle when its turn ends — so a question it stops to ask reads as `idle` too,
+and `needs-input` never comes: a worker you will wait on for a question needs one of the two. Codex and Gemini CLI workers
 without them say in their titles when they stop for an approval, so theirs does come, without the
 words of the question. The end of the question is not `idle`, since the agent works on after an
 approval: only its title saying the turn is over is, or its command ending. A codex without hooks
