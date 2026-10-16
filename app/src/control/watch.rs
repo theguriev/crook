@@ -171,6 +171,7 @@ impl Feed {
     }
 
     /// How many items it holds, which is never more than its capacity.
+    #[cfg(test)]
     pub fn held(&self) -> usize {
         self.lock().items.len()
     }
@@ -301,11 +302,13 @@ impl Watches {
     }
 
     /// How many waits have not got there yet.
+    #[cfg(test)]
     pub fn waiting(&self) -> usize {
         self.waiters.len()
     }
 
     /// How many streams are open.
+    #[cfg(test)]
     pub fn following(&self) -> usize {
         self.followers.len()
     }

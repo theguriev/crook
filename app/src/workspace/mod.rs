@@ -60,19 +60,21 @@ mod tests;
 
 use crate::theme::theme;
 
+#[cfg(test)]
+pub use action::{BlockAction, ChangesAction, EndingAction, EndingButton};
 pub use action::{
-    BlockAction, BlockEdge, BlockPart, ChangesAction, CrashNoteAction, CreatorField, EndingAction,
-    EndingButton, OptionsAction, SearchAction, SettingsAction, Subject, TabMenuAction, ThemeAction,
-    WindowAction, WorkspaceAction, WorktreeAction,
+    BlockEdge, BlockPart, OptionsAction, SettingsAction, TabMenuAction, ThemeAction, WindowAction,
+    WorkspaceAction, WorktreeAction,
 };
-pub use block_list::BlockList;
 pub use held_locks::HeldLocks;
-pub use input_element::CommandInput;
-pub use pane_output::{Keys, Output};
 pub(crate) use settings_page::widgets::Category;
-pub use terminal_element::TerminalElement;
 pub use text_field::TextField;
 pub use view::{BlockMenuState, Fonts, Opening, QuitRequest, Workspace};
+
+// Only documentation names these outside the module, and a doc link cannot
+// reach into the private modules they are declared in.
+#[cfg(doc)]
+pub use {block_list::BlockList, pane_output::Output, terminal_element::TerminalElement};
 
 /// The square reserved for a tab's close button, drawn or not.
 pub(crate) const CLOSE_BUTTON_SIZE: f32 = 16.;

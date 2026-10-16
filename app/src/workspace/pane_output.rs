@@ -297,11 +297,6 @@ impl Output {
         self.mouse.as_ref().map(|mouse| mouse.pane)
     }
 
-    /// This pane's selection, when the output is selectable at all.
-    pub fn pane_selection(&self) -> Option<&PaneSelection> {
-        self.mouse.as_ref().map(|mouse| &mouse.gesture)
-    }
-
     /// Lets go of a selection the frame being laid out cannot honour.
     ///
     /// Two things change what an anchor means and neither of them is
@@ -321,11 +316,6 @@ impl Output {
     /// The terminal behind the output, when there is one.
     pub fn handle(&self) -> Option<&TerminalHandle> {
         self.handle.as_ref()
-    }
-
-    /// How much of the keyboard this output takes.
-    pub fn keys(&self) -> Keys {
-        self.keys
     }
 
     /// Whether the program's cursor here is drawn as the one typing goes to —

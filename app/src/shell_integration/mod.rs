@@ -158,7 +158,7 @@ mod tests;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-pub use crate::shell_integration::launch::{HostEnv, Launch, ScratchFile};
+pub use crate::shell_integration::launch::HostEnv;
 pub use crate::shell_integration::scratch::Session;
 
 /// What `TERM_PROGRAM` is set to in every shell Crook starts.
@@ -337,6 +337,7 @@ pub enum Marks {
 
 impl Standing {
     /// The standing of the shell the environment names, right now.
+    #[cfg(test)]
     pub fn current() -> Self {
         Self::of(PathBuf::from(crook_terminal::default_shell()), opted_out())
     }
