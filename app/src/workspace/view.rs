@@ -10171,6 +10171,54 @@ impl Workspace {
         self.settle(effect, before, ctx)
     }
 
+    /// Opens each file the desktop asked Crook to open in a tab of its own,
+    /// in the order asked, and brings the window forward onto the last.
+    ///
+    /// What macOS hands the default terminal: a script double-clicked in
+    /// Finder, a file dropped on the Dock icon or opened with Crook. Each one
+    /// is a tab like the menu's — after the active one, and in front — whose
+    /// shell starts where [`default_terminal::opening`] says, with the line it
+    /// says typed into the field and sent at the shell's first prompt, as
+    /// `crook tab new`'s is: see [`Self::run_at_first_prompt`]. One that cannot
+    /// be opened is a line in the log and no tab.
+    ///
+    /// The request that launched Crook comes before the window's first frame,
+    /// which is before any shell has opened: its tab waits for its shell with
+    /// the rest — see [`Self::expect_terminals`] — and its line in its field.
+    /// Nothing is lost by coming early.
+    ///
+    /// [`default_terminal::opening`]: crate::default_terminal::opening
+    pub fn open_files(&mut self, files: &[PathBuf], ctx: &mut ViewContext<Self>) {
+        let openings: Vec<_> = files
+            .iter()
+            .filter_map(
+                |file| match crate::default_terminal::opening(file, file.is_dir()) {
+                    Ok(opening) => Some(opening),
+                    Err(why) => {
+                        log::warn!("not opening {}: {why}", file.display());
+                        None
+                    }
+                },
+            )
+            .collect();
+        if openings.is_empty() {
+            return;
+        }
+        // In front means on screen, by a person who is looking at Finder: a
+        // settings page over the panes, or a window left minimised, would run
+        // the script out of sight, and a search box still holding the
+        // keyboard would take the first thing they typed at it.
+        self.stop_searching();
+        self.show_section(None, ctx);
+        for opening in openings {
+            self.open_tab_in(opening.directory, ctx);
+            if let (Some(line), Some(pane)) = (opening.line, self.tabs.focused_pane_id()) {
+                self.run_at_first_prompt(pane, line, ctx);
+            }
+        }
+        self.window.bring_forward();
+    }
+
     /// Opens a tab for `crook tab new` beside `beside`, and answers the tab and
     /// the pane in it.
     ///
