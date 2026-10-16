@@ -249,7 +249,12 @@ pub enum Event {
     /// - X11 says a window is covered only when no compositor is running,
     ///   since a compositor draws every window off screen and the server
     ///   calls each of them in view; and says nothing of a minimised one,
-    ///   which is asked about while the window does not have the keyboard.
+    ///   which is asked about: as the focus moves, before each frame while
+    ///   the window lacks the keyboard or was minimised when last asked, and
+    ///   once a second while that answer alone holds the window out of
+    ///   sight, for a few seconds after the focus or a frame last asked. A
+    ///   window with the keyboard is mapped, and so in sight whatever the
+    ///   answer said.
     /// - Wayland says neither, and holds a hidden window's frames back
     ///   instead, which is the same saving made by the compositor.
     WindowOccluded(bool),

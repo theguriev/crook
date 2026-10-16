@@ -160,6 +160,9 @@ impl InputState {
             // Not input, strictly, but it crosses the line the way the theme
             // does: it is the desktop saying something about the window, and
             // only winit knows how each desktop says it.
+            // Noted already by the event loop, which asks whether the window
+            // is minimised before this and needs the keyboard noted first:
+            // see `focus_moved`.
             WindowEvent::Focused(focused) => {
                 self.focused = *focused;
                 Some(Event::WindowFocused(*focused))
@@ -281,8 +284,13 @@ impl InputState {
     /// `VisibilityNotify` comes only for a viewable window, and macOS counts
     /// a minimised one occluded — and an answer can lag a restore: a window
     /// manager may map the window it brings back before it takes
-    /// `_NET_WM_STATE_HIDDEN` off. Should the desktop be wrong, it costs a
-    /// frame, since the next one drawn without the keyboard asks again.
+    /// `_NET_WM_STATE_HIDDEN` off. Nor does it hold a window that has the
+    /// keyboard out of sight: see [`Self::occlusion`]. Should the desktop be
+    /// wrong for a window without it, the next answer puts it right: each
+    /// frame drawn meanwhile asks, and while the answer is all that holds
+    /// the window out of sight the event loop asks by itself for a few
+    /// seconds after the event that asked — see [`Self::held_by_an_answer`]
+    /// — since a window out of sight need ask for no frame at all.
     pub(super) fn minimised(&mut self, minimised: Option<bool>) -> Option<Event> {
         self.minimised = minimised.unwrap_or(false);
         self.occlusion()
@@ -302,6 +310,29 @@ impl InputState {
         !self.focused || self.minimised
     }
 
+    /// Notes that the window has gained or lost the keyboard, before the
+    /// desktop is asked whether it is minimised: the answer counts only
+    /// while the window does not have it — see [`Self::occlusion`] — and
+    /// the question that follows is what says whether the window can be
+    /// seen.
+    pub(super) fn focus_moved(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+
+    /// Whether the window is out of sight only because the desktop said it
+    /// is minimised when last asked: no window over it that the desktop
+    /// told of, room in it, and no keyboard. Every other way of hiding it
+    /// says when it is over. The event loop asks again by itself while this
+    /// holds, since nothing else is sure to — a window out of sight asks for
+    /// no frame of its own, and an X11 window brought back without the
+    /// keyboard, and asked too soon, would stay out of sight until somebody
+    /// typed or clicked — but only for a few seconds after the focus moving
+    /// or a frame asked, since those are what a restore comes with, and a
+    /// window left minimised is at rest.
+    pub(super) fn held_by_an_answer(&self) -> bool {
+        self.minimised && !self.focused && !self.covered && !self.shrunk
+    }
+
     /// [`Event::WindowOccluded`], when whether the window can be seen has
     /// just changed.
     ///
@@ -311,8 +342,14 @@ impl InputState {
     /// windows over it had gone. Only a change is said, since the desktop
     /// repeats itself: X11 sends `Occluded(true)` again for each window
     /// that moves over one already covered.
+    ///
+    /// Except that a window with the keyboard is not minimised, whatever the
+    /// last answer said. Only X11 is asked, and X gives the keyboard only to
+    /// a window that is mapped and takes it back from one that stops being,
+    /// so a window holding it is one a window manager has restored and not
+    /// yet said so of.
     fn occlusion(&mut self) -> Option<Event> {
-        let occluded = self.covered || self.shrunk || self.minimised;
+        let occluded = self.covered || self.shrunk || (self.minimised && !self.focused);
         (occluded != std::mem::replace(&mut self.occluded, occluded))
             .then_some(Event::WindowOccluded(occluded))
     }
@@ -858,6 +895,68 @@ mod tests {
         assert!(input.may_be_minimised());
         input.minimised(Some(false));
         assert!(!input.may_be_minimised());
+    }
+
+    #[test]
+    fn a_window_with_the_keyboard_is_in_sight_whatever_the_last_answer_said() {
+        // An X11 window manager giving the window it restores the keyboard
+        // before it takes `_NET_WM_STATE_HIDDEN` off. X gives the keyboard
+        // only to a window that is mapped.
+        let mut input = InputState::default();
+
+        assert!(matches!(
+            input.minimised(Some(true)),
+            Some(Event::WindowOccluded(true))
+        ));
+        input.focus_moved(true);
+        assert!(
+            matches!(
+                input.minimised(Some(true)),
+                Some(Event::WindowOccluded(false))
+            ),
+            "a window with the keyboard was held out of sight by a late answer"
+        );
+        // Asked again all the same, until the answer comes right.
+        assert!(input.may_be_minimised());
+        assert!(input.minimised(Some(false)).is_none());
+        assert!(!input.may_be_minimised());
+
+        // Without the keyboard, the answer counts again.
+        input.focus_moved(false);
+        assert!(matches!(
+            input.minimised(Some(true)),
+            Some(Event::WindowOccluded(true))
+        ));
+    }
+
+    #[test]
+    fn only_an_answer_that_alone_holds_the_window_out_of_sight_is_asked_again_unprompted() {
+        let mut input = InputState::default();
+        assert!(!input.held_by_an_answer());
+
+        input.minimised(Some(true));
+        assert!(
+            input.held_by_an_answer(),
+            "a window out of sight on an answer alone would wait for a frame it never asks for"
+        );
+
+        // Covered too: the desktop says when the windows over it go, and a
+        // restore's `Occluded(false)` overrides the answer.
+        input.convert(&WindowEvent::Occluded(true), 1.);
+        assert!(!input.held_by_an_answer());
+        input.convert(&WindowEvent::Occluded(false), 1.);
+        assert!(!input.held_by_an_answer());
+
+        // With no room in it, which a resize says the end of.
+        input.minimised(Some(true));
+        input.resized(PhysicalSize::new(0, 0));
+        assert!(!input.held_by_an_answer());
+        input.resized(PhysicalSize::new(800, 600));
+        assert!(input.held_by_an_answer());
+
+        // With the keyboard, which puts it in sight.
+        input.focus_moved(true);
+        assert!(!input.held_by_an_answer());
     }
 
     #[test]

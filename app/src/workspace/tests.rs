@@ -24912,6 +24912,45 @@ mod shells {
         }
 
         #[test]
+        fn a_bar_over_a_grid_in_a_window_out_of_sight_searches_it_again_when_the_window_is_back() {
+            // Nobody can see the answer while the window is out of sight, so
+            // what the grid prints meanwhile is not searched; the window
+            // coming back is the pane coming back on screen, and the bar
+            // answers the grid it shows rather than the one it last saw.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = searching(&mut harness, "qvx wqz rqv", "zq1xv") else {
+                return;
+            };
+            harness.type_into(
+                pane,
+                "printf 'zq%sxv\\n' 1; seq 1 400; read line; printf 'zq%sxv\\n' 1; sleep 600\n",
+            );
+            harness.wait_for("the command never overflowed the viewport", |harness| {
+                harness.terminal_text(pane).contains("399") && draws_grid(harness, pane)
+            });
+            harness.frame();
+            await_grid_matches(&mut harness, pane, 1);
+
+            harness.workspace_update(|workspace, ctx| workspace.set_window_occluded(true, ctx));
+            harness.type_into(pane, "\n");
+            harness.wait_for("the command never printed its second match", |harness| {
+                harness.terminal_text(pane).contains("zq1xv")
+            });
+            // Past the pause a grid that changed under an answer waits out
+            // before it is read again, so a search that was going to start
+            // has come back.
+            harness.settle(crate::pane_find::GRID_PAUSE * 3);
+            assert_eq!(
+                1,
+                matches(&harness, pane),
+                "the bar searched a grid in a window nobody can see"
+            );
+
+            harness.workspace_update(|workspace, ctx| workspace.set_window_occluded(false, ctx));
+            await_grid_matches(&mut harness, pane, 2);
+        }
+
+        #[test]
         fn a_full_screen_program_is_searched_on_its_screen() {
             // The alternate screen keeps no scrollback — Claude Code's
             // fullscreen renderer keeps its history itself — so what there is
@@ -26426,6 +26465,33 @@ mod the_frame_budget {
         harness.settle_drawing(QUIET);
     }
 
+    /// Says the window has gone out of sight, or come back into it, as the
+    /// window on a desktop says it from `Event::WindowOccluded`.
+    fn out_of_sight(harness: &mut Harness, occluded: bool) {
+        harness.workspace_update(|workspace, ctx| workspace.set_window_occluded(occluded, ctx));
+    }
+
+    /// Whether the row has the title [`TITLED`] sets after its last line,
+    /// read off the session: neither a frame nor the grid's text, each of
+    /// which would build a snapshot of the pane on the way.
+    fn titled(harness: &Harness, pane: PaneId) -> bool {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .pane(pane)
+                .is_some_and(|pane| pane.session().derived_title.as_deref() == Some("crook-behind"))
+        })
+    }
+
+    /// One tab, with a shell at its prompt, or `None` where no shell these
+    /// tests speak could be started.
+    fn a_shell_in_front() -> Option<(Harness, PaneId)> {
+        let mut harness = Harness::new(1);
+        let pane = marked_shell(&mut harness)?;
+        await_prompt(&mut harness, pane);
+        Some((harness, pane))
+    }
+
     #[test]
     fn ten_thousand_lines_in_a_tab_nobody_can_see_draw_nothing() {
         // Before the gate this was six to eight renders on an idle laptop —
@@ -26449,6 +26515,33 @@ mod the_frame_budget {
             harness.frames_built() - frames,
             0,
             "a frame was drawn for output nobody can see"
+        );
+    }
+
+    #[test]
+    fn ten_thousand_lines_in_a_window_out_of_sight_draw_nothing() {
+        // The pane is in front, in a window nobody can see: minimised, or
+        // under other windows. X11 and Windows draw every frame asked of a
+        // window like that, and its output asked for one per publication.
+        let Some((mut harness, pane)) = a_shell_in_front() else {
+            return;
+        };
+        hold(&mut harness, pane, STREAM);
+        out_of_sight(&mut harness, true);
+        let renders = harness.workspace_renders();
+        let frames = harness.frames_built();
+
+        release(&mut harness, pane);
+
+        assert_eq!(
+            harness.workspace_renders() - renders,
+            0,
+            "the window was rebuilt for output in a window nobody can see"
+        );
+        assert_eq!(
+            harness.frames_built() - frames,
+            0,
+            "a frame was drawn for output in a window nobody can see"
         );
     }
 
@@ -26597,6 +26690,204 @@ mod the_frame_budget {
     }
 
     #[test]
+    fn a_window_out_of_sight_builds_no_snapshot_until_the_frame_that_shows_it_again() {
+        // The pane is in front, so every publication built its snapshot for
+        // a frame — and in a window nobody can see, there is no frame to
+        // build it for. Waited on with no frame drawn: the title asks for a
+        // frame of its own, for the row, and X11 and Windows draw it, panes
+        // and all. That is one snapshot for the row's change, built by the
+        // frame that draws it, and not what the output costs.
+        let Some((mut harness, pane)) = a_shell_in_front() else {
+            return;
+        };
+        hold(&mut harness, pane, TITLED);
+        out_of_sight(&mut harness, true);
+        let built = harness.snapshots_built(pane);
+
+        harness.type_into(pane, "\n");
+        harness.wait_for("the row never took the title", |harness| {
+            titled(harness, pane)
+        });
+        harness.settle(QUIET);
+        assert_eq!(
+            harness.snapshots_built(pane) - built,
+            0,
+            "snapshots were built of a grid in a window nobody can see"
+        );
+
+        // Back in sight, the frame the window asks for draws what the pane
+        // printed while it was away, and builds it on the way.
+        out_of_sight(&mut harness, false);
+        assert_eq!(
+            harness.snapshots_built(pane) - built,
+            0,
+            "something before the frame built the snapshot it draws"
+        );
+        let scene = harness.frame();
+        assert!(
+            pane_shows(&scene, "10000"),
+            "the window came back without the last thing the pane printed: {:?}",
+            frame_text(&scene)
+        );
+        assert_eq!(
+            harness.snapshots_built(pane) - built,
+            1,
+            "the frame that brought the window back did not build what it drew"
+        );
+
+        // And the shell builds its snapshots as it prints again, as one
+        // drawn does, rather than leaving every one to a frame to build.
+        harness.type_into(pane, "\n");
+        harness.wait_for("the command never finished", |harness| {
+            !running(harness, pane)
+        });
+        assert!(
+            harness.snapshots_built(pane) - built > 1,
+            "the window came back and its pane's shell still built nothing"
+        );
+    }
+
+    #[test]
+    fn a_frame_drawn_in_a_window_out_of_sight_leaves_its_shells_building_nothing() {
+        // X11 and Windows draw a frame asked of a window nobody can see — a
+        // row that changed asks for one — and every frame says which panes
+        // it draws. In a window out of sight that is none of them, or the
+        // frame would set every shell in front building again. Waited on
+        // with no frame drawn after it, as above.
+        let Some((mut harness, pane)) = a_shell_in_front() else {
+            return;
+        };
+        hold(&mut harness, pane, TITLED);
+        out_of_sight(&mut harness, true);
+        harness.render_again();
+        let built = harness.snapshots_built(pane);
+
+        harness.type_into(pane, "\n");
+        harness.wait_for("the row never took the title", |harness| {
+            titled(harness, pane)
+        });
+        harness.settle(QUIET);
+        assert_eq!(
+            harness.snapshots_built(pane) - built,
+            0,
+            "a frame drawn out of sight left the shell building snapshots"
+        );
+    }
+
+    #[test]
+    fn a_shell_that_opens_in_a_window_out_of_sight_builds_no_snapshot() {
+        // A shell is drawn until somebody says otherwise, and in a window
+        // out of sight no frame may come to say it: a restore's shells
+        // arriving off the pool one at a time after the window was
+        // minimised, a tab opened over the control socket. So its first
+        // report says it — the one behind the active tab arrives off the
+        // pool, the one in front opens in place. Waited on with no frame
+        // drawn, as above.
+        let mut harness = Harness::new(2);
+        out_of_sight(&mut harness, true);
+        let Some(shown) = marked_shell(&mut harness) else {
+            return;
+        };
+        let panes = [shown, pane_behind(&harness)];
+        for pane in panes {
+            harness.wait_for("the shell never reached a prompt", |harness| {
+                harness
+                    .workspace
+                    .read(&harness.app, |workspace, app| {
+                        let (_, snapshot) = workspace.terminal(pane, app)?;
+                        Some(snapshot.live_block.state == crook_terminal::BlockState::AtPrompt)
+                    })
+                    .unwrap_or_default()
+            });
+        }
+        for pane in panes {
+            harness.type_into(pane, TITLED);
+        }
+        for pane in panes {
+            harness.wait_for("the command never started", |harness| {
+                printed(harness, pane, "ready") && running(harness, pane)
+            });
+        }
+        harness.settle(QUIET);
+        let built = panes.map(|pane| harness.snapshots_built(pane));
+
+        for pane in panes {
+            harness.type_into(pane, "\n");
+        }
+        for pane in panes {
+            harness.wait_for("the row never took the title", |harness| {
+                titled(harness, pane)
+            });
+        }
+        harness.settle(QUIET);
+        let after = panes.map(|pane| harness.snapshots_built(pane));
+        assert_eq!(
+            [after[0] - built[0], after[1] - built[1]],
+            [0, 0],
+            "a shell that opened in a window out of sight, in front or behind, \
+             built snapshots of its grid"
+        );
+    }
+
+    #[test]
+    fn a_find_bar_open_in_a_window_out_of_sight_builds_no_snapshot() {
+        // The repaint asks an open bar whether a full-screen program took
+        // the screen from under it, and has the bar search what the grid
+        // says now: both of the snapshot, which in a window nobody can see
+        // no publication builds, so the thread that draws built one for
+        // each. Waited on with no frame drawn, as above.
+        let Some((mut harness, pane)) = a_shell_in_front() else {
+            return;
+        };
+        harness.dispatch_workspace_action(WorkspaceAction::Find {
+            pane,
+            action: crate::workspace::action::FindAction::Open,
+        });
+        harness.frame();
+        let find_is_open = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .find(pane)
+                    .is_some_and(crate::pane_find::PaneFind::is_open)
+            })
+        };
+        assert!(find_is_open(&harness));
+
+        hold(&mut harness, pane, TITLED);
+        out_of_sight(&mut harness, true);
+        let built = harness.snapshots_built(pane);
+        harness.type_into(pane, "\n");
+        harness.wait_for("the row never took the title", |harness| {
+            titled(harness, pane)
+        });
+        harness.settle(QUIET);
+        assert_eq!(
+            harness.snapshots_built(pane) - built,
+            0,
+            "snapshots were built of a grid in a window nobody can see, for the bar over it"
+        );
+
+        // A full-screen program taking the screen while nobody can see it:
+        // the frame that shows the window again takes the bar down.
+        harness.type_into(pane, "\n");
+        harness.type_into(pane, "printf '\\033[?1049h'; read line\n");
+        harness.wait_for("the pane never went to the alternate screen", |harness| {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace
+                    .terminal(pane, app)
+                    .is_some_and(|(_, snapshot)| snapshot.alt_screen)
+            })
+        });
+        harness.settle(QUIET);
+        out_of_sight(&mut harness, false);
+        harness.frame();
+        assert!(
+            !find_is_open(&harness),
+            "the bar stayed open over a screen it was not opened over"
+        );
+    }
+
+    #[test]
     fn a_title_set_where_nobody_can_see_is_one_frame_for_its_row() {
         // The row is on screen even when the pane is not, so what it shows
         // still arrives as it happens — and costs what it costs, one frame,
@@ -26727,6 +27018,21 @@ mod the_frame_budget {
         assert!(!repaint_asks_for_a_frame(&mut harness, pane));
 
         harness.show_tabs();
+        assert!(repaint_asks_for_a_frame(&mut harness, pane));
+    }
+
+    #[test]
+    fn a_window_out_of_sight_hides_every_pane_until_it_is_back() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+
+        out_of_sight(&mut harness, true);
+        assert!(
+            !repaint_asks_for_a_frame(&mut harness, pane),
+            "a pane in a window nobody can see asked for a frame"
+        );
+
+        out_of_sight(&mut harness, false);
         assert!(repaint_asks_for_a_frame(&mut harness, pane));
     }
 
