@@ -5,9 +5,11 @@
 //!
 //! The answering plan reads a few fields from each agent's payload, and only
 //! those. A fixture that stops parsing, or loses one of them, fails here
-//! rather than in whichever later test happens to load it, and an agent that
-//! was measured but has no fixtures fails too, so a capture cannot be dropped
-//! without a test saying so. Each file is named
+//! rather than in whichever later test happens to load it. An agent that was
+//! measured but has no fixtures fails too, and so does a fixture that
+//! `docs/answering.md` cites as evidence and that is not here, so a capture
+//! the findings rest on cannot be dropped without a test saying so. Each file
+//! is named
 //! `<agent>-<version>-<case>.json`, the version being the agent's own, since
 //! a payload is only ever true of the version that sent it.
 
@@ -117,6 +119,90 @@ fn every_agent_the_probe_measured_has_fixtures() {
             fixtures().display()
         );
     }
+}
+
+/// The fixtures `text` names: every `<agent>-<version>-<case>.json` in it, a
+/// `{a,b}` group in a name standing for one name a choice, as a shell expands
+/// it.
+fn fixtures_named_in(text: &str) -> Vec<String> {
+    let in_name = |c: char| c.is_ascii_alphanumeric() || "-._{},".contains(c);
+    let mut named = Vec::new();
+    for (agent, _) in AGENTS {
+        for (at, _) in text.match_indices(&format!("{agent}-")) {
+            let joined = text[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            if joined {
+                continue;
+            }
+            let rest = &text[at..];
+            let end = rest.find(|c: char| !in_name(c)).unwrap_or(rest.len());
+            let name = rest[..end].trim_end_matches(['.', ',']);
+            if name.ends_with(".json") {
+                named.extend(expanded(name));
+            }
+        }
+    }
+    named.sort();
+    named.dedup();
+    named
+}
+
+/// `name` with its first `{a,b}` group made one name a choice, and so on for
+/// the groups after it.
+fn expanded(name: &str) -> Vec<String> {
+    let Some(open) = name.find('{') else {
+        return vec![name.to_owned()];
+    };
+    let close = open
+        + name[open..]
+            .find('}')
+            .unwrap_or_else(|| panic!("{name} opens a {{ group it never closes"));
+    name[open + 1..close]
+        .split(',')
+        .flat_map(|choice| expanded(&format!("{}{choice}{}", &name[..open], &name[close + 1..])))
+        .collect()
+}
+
+/// docs/answering.md gives a fixture as the evidence for a finding, and the
+/// later milestones' tests load the ones it names, so each has to be here.
+#[test]
+fn every_fixture_docs_answering_cites_is_here() {
+    let page = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/answering.md");
+    let text = fs::read_to_string(&page)
+        .unwrap_or_else(|error| panic!("{} does not read: {error}", page.display()));
+    let here: Vec<String> = every_fixture().into_iter().map(|(name, _)| name).collect();
+    let cited = fixtures_named_in(&text);
+    assert!(
+        !cited.is_empty(),
+        "docs/answering.md cites no fixture, so no finding rests on a capture"
+    );
+    for name in cited {
+        assert!(
+            here.contains(&name),
+            "docs/answering.md cites {name}, which is not in {}",
+            fixtures().display()
+        );
+    }
+}
+
+/// The names in a page are found whether they stand alone, in a path, or in
+/// a `{a,b}` group, and a word that only looks like one is not.
+#[test]
+fn a_fixture_is_found_by_the_name_the_page_gives_it() {
+    let page = "fixtures `claude-2.1.280-bash.json` and `claude-2.1.280-{write,edit}.json`, \
+                app/tests/fixtures/asks/codex-0.149.1-shell.json. Not crook-claude-1.0-x.json, \
+                nor claude-2.1.280, nor `<agent>-<version>-<case>.json`.";
+    assert_eq!(
+        vec![
+            "claude-2.1.280-bash.json",
+            "claude-2.1.280-edit.json",
+            "claude-2.1.280-write.json",
+            "codex-0.149.1-shell.json",
+        ],
+        fixtures_named_in(page)
+    );
 }
 
 /// The name is the only place the version a payload came from is kept, and
