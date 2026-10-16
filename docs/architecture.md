@@ -985,8 +985,11 @@ pane wrongly said to be off screen is still reported repainted, and drawn curren
 that asks for its snapshot. In a window out of sight no frame draws any pane, and that is the
 one change no frame need follow, so `Workspace::set_window_occluded` says it to the model as it
 hears it, and says the panes on screen again when the window is back, before the frame that
-draws them. Nor does a repaint ask an open find bar's questions of a pane nobody can see: they
-are asked of the snapshot, which the UI thread would otherwise build for every publication.
+draws them. A shell that opened since the last frame — a restore's arrival off the pool, a tab
+opened over the control socket — is drawn until told otherwise, so a repaint reported for a
+pane nobody can see says it of that pane as well (`TerminalModel::not_drawn`). Nor does a
+repaint ask an open find bar's questions of a pane nobody can see: they are asked of the
+snapshot, which the UI thread would otherwise build for every publication.
 
 **Nothing writes to the pty on the UI thread or under the emulator's mutex.** A write waits
 for the child to read, a child that is printing reads nothing until its output has been read,

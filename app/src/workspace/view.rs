@@ -9746,6 +9746,14 @@ impl Workspace {
             TerminalUpdate::Repainted(pane) => {
                 if self.pane_can_be_seen(*pane) {
                     ctx.notify();
+                } else {
+                    // And its shell builds no snapshot of what it prints next.
+                    // Said by the render for every pane it knows, but a shell
+                    // that opened since — a restore's arrival, a tab opened
+                    // over the control socket — is drawn until told
+                    // otherwise, and in a window out of sight no render may
+                    // come to tell it.
+                    self.terminals.as_ref(ctx).not_drawn(*pane);
                 }
                 // A full-screen program starting or ending under a find bar
                 // takes the bar down, and the keyboard back to the composer.

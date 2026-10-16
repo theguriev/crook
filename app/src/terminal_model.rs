@@ -69,8 +69,10 @@
 //! sixty microseconds for a 200 by 50 grid, at up to the repaint ceiling — and
 //! a window of agents can have dozens of panes printing behind the one in
 //! front. So the render, which is what decides the answer, also says it here
-//! ([`TerminalModel::draw_only`]) — as does the window going out of sight,
-//! which no frame need follow — and a publication for a pane no frame draws
+//! ([`TerminalModel::draw_only`]) — as do the window going out of sight,
+//! which no frame need follow, and the repaint of a pane nobody can see,
+//! whose shell may have opened since the last frame
+//! ([`TerminalModel::not_drawn`]) — and a publication for a pane no frame draws
 //! hands over its block list, its open block and its events and builds no
 //! snapshot. The snapshot is built when somebody asks for one — the frame that
 //! brings the pane back, a find, a copy, the control socket — under the
@@ -1035,6 +1037,22 @@ impl TerminalModel {
                 .shared
                 .on_screen
                 .store(on_screen(*pane), Ordering::Relaxed);
+        }
+    }
+
+    /// Says that no frame draws `pane`, as [`Self::draw_only`] says it of
+    /// every pane at once.
+    ///
+    /// For a shell that opened since the last frame said it, which is drawn
+    /// until somebody says otherwise: a restore's arrival off the pool, a
+    /// tab opened over the control socket. In a window out of sight no frame
+    /// may come to say it, so the workspace says it as each repaint of a
+    /// pane nobody can see is reported. Safe for the reason `draw_only` is:
+    /// a pane wrongly said here to be off screen has its snapshot built by
+    /// the frame that draws it.
+    pub fn not_drawn(&self, pane: PaneId) {
+        if let Some(session) = self.sessions.get(&pane) {
+            session.shared.on_screen.store(false, Ordering::Relaxed);
         }
     }
 

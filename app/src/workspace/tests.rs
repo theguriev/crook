@@ -26775,6 +26775,61 @@ mod the_frame_budget {
     }
 
     #[test]
+    fn a_shell_that_opens_in_a_window_out_of_sight_builds_no_snapshot() {
+        // A shell is drawn until somebody says otherwise, and in a window
+        // out of sight no frame may come to say it: a restore's shells
+        // arriving off the pool one at a time after the window was
+        // minimised, a tab opened over the control socket. So its first
+        // report says it — the one behind the active tab arrives off the
+        // pool, the one in front opens in place. Waited on with no frame
+        // drawn, as above.
+        let mut harness = Harness::new(2);
+        out_of_sight(&mut harness, true);
+        let Some(shown) = marked_shell(&mut harness) else {
+            return;
+        };
+        let panes = [shown, pane_behind(&harness)];
+        for pane in panes {
+            harness.wait_for("the shell never reached a prompt", |harness| {
+                harness
+                    .workspace
+                    .read(&harness.app, |workspace, app| {
+                        let (_, snapshot) = workspace.terminal(pane, app)?;
+                        Some(snapshot.live_block.state == crook_terminal::BlockState::AtPrompt)
+                    })
+                    .unwrap_or_default()
+            });
+        }
+        for pane in panes {
+            harness.type_into(pane, TITLED);
+        }
+        for pane in panes {
+            harness.wait_for("the command never started", |harness| {
+                printed(harness, pane, "ready") && running(harness, pane)
+            });
+        }
+        harness.settle(QUIET);
+        let built = panes.map(|pane| harness.snapshots_built(pane));
+
+        for pane in panes {
+            harness.type_into(pane, "\n");
+        }
+        for pane in panes {
+            harness.wait_for("the row never took the title", |harness| {
+                titled(harness, pane)
+            });
+        }
+        harness.settle(QUIET);
+        let after = panes.map(|pane| harness.snapshots_built(pane));
+        assert_eq!(
+            [after[0] - built[0], after[1] - built[1]],
+            [0, 0],
+            "a shell that opened in a window out of sight, in front or behind, \
+             built snapshots of its grid"
+        );
+    }
+
+    #[test]
     fn a_find_bar_open_in_a_window_out_of_sight_builds_no_snapshot() {
         // The repaint asks an open bar whether a full-screen program took
         // the screen from under it, and has the bar search what the grid
