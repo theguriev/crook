@@ -1,13 +1,14 @@
 //! `script/probe-permission-hooks`, which a person runs against a live agent,
 //! so no test runs it end to end. What it does without an agent is tested
 //! here: the variant it leaves for the next hook, what it registers for
-//! Codex, and what `--clean` leaves behind. That is nothing that a later
-//! agent would run, and nothing of the probe's in what Claude Code keeps for
-//! the project: its directories under `~/.claude` (`projects`, `session-env`,
-//! `file-history`), and under `claude-<uid>` in the temp directories
-//! `CLAUDE_CODE_TMPDIR`, `TMPDIR` and a session's `scratchpad_dir` name.
-//! Claude Code's last resort, `/tmp`, which the script tries as well, is not
-//! checked: only a real `/tmp/claude-<uid>` would show it.
+//! Codex and the line it prints to start Codex, and what `--clean` leaves
+//! behind. That is nothing that a later agent would run, and nothing of the
+//! probe's in what Claude Code keeps for the project: its directories under
+//! `~/.claude` (`projects`, `session-env`, `file-history`), and under
+//! `claude-<uid>` in the temp directories `CLAUDE_CODE_TMPDIR`, `TMPDIR` and
+//! a session's `scratchpad_dir` name. Claude Code's last resort, `/tmp`,
+//! which the script tries as well, is not checked: only a real
+//! `/tmp/claude-<uid>` would show it.
 //!
 //! Each case runs it with `XDG_RUNTIME_DIR`, `HOME`, `TMPDIR` and
 //! `CLAUDE_CODE_TMPDIR` in a scratch directory of its own under Cargo's
@@ -418,10 +419,16 @@ fn codex_gets_a_codex_home_of_the_projects_own() {
     let setup = scratch.probe_ok(&["codex"]);
     let project = scratch.project("codex");
     let home = project.join(".probe/codex-home");
-    let start = format!("CODEX_HOME={} codex", home.display());
+    // The whole line, since the login line below it holds `CODEX_HOME=<home>
+    // codex` too.
+    let start = format!(
+        "  cd {} && CODEX_HOME={} codex",
+        project.display(),
+        home.display()
+    );
     assert!(
-        setup.stdout.contains(&start),
-        "the start line does not set CODEX_HOME: {}",
+        setup.stdout.lines().any(|line| line == start),
+        "no line starts Codex with its CODEX_HOME set, as {start:?} does: {}",
         setup.stdout
     );
 
