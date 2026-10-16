@@ -40215,6 +40215,40 @@ mod agent_titles {
         assert_eq!(status_and_source(&harness, pane).0, AgentStatus::NeedsInput);
     }
 
+    /// Codex 0.149.1 in Plan mode asks in a dialog, its `request_user_input`
+    /// tool, which holds the turn open: its hooks say running for the tool
+    /// and nothing more until the person answers, while its title blinks
+    /// "Action Required". The hooks outrank the title, so the row says
+    /// running and a wait for idle is not answered, which is what the skill
+    /// tells an orchestrator, and what it has to stop saying if this changes.
+    /// With no hooks the same title is the question.
+    #[test]
+    fn a_codex_question_in_plan_mode_keeps_the_running_its_hooks_said() {
+        let blinks = [
+            "[ ! ] Action Required | proj",
+            "[ . ] Action Required | proj",
+            "[ ! ] Action Required | proj",
+        ];
+
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+        hooked(&mut harness, pane, AgentStatus::Running, None);
+        for title in blinks {
+            titled(&mut harness, pane, title);
+        }
+        assert_eq!(
+            as_watched(&harness, pane),
+            (AgentStatus::Running, false, false)
+        );
+
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+        for title in blinks {
+            titled(&mut harness, pane, title);
+        }
+        assert_eq!(as_watched(&harness, pane).0, AgentStatus::NeedsInput);
+    }
+
     /// What a pane's agent says through its hooks, the way the model hands
     /// over the OSC its `crook --agent` wrote.
     fn hooked(harness: &mut Harness, pane: PaneId, status: AgentStatus, message: Option<&str>) {

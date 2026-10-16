@@ -816,8 +816,14 @@ const CLAUDE_PLUGIN: &[&str] = &[
 /// Codex has no `Notification`; what it has is `PermissionRequest`, run
 /// before an approval prompt, whose input names the tool and not a message
 /// — [`message_from_hook`] says "permission to use" the tool then. Nor has
-/// it a `StopFailure`. A question the model asks ends its turn, which is
-/// `Stop`. Its older `notify` setting runs a program with a JSON argument
+/// it a `StopFailure`. A question the model asks in its reply ends its turn,
+/// which is `Stop`. In Plan mode it can ask in a dialog instead, its
+/// `request_user_input` tool, which holds the turn open: codex-cli 0.149.1
+/// runs `PreToolUse` for it and nothing more until the person answers, so
+/// the row says running, and the title's "Action Required", which says the
+/// question in a pane with no hooks, is outranked by that running. Outside
+/// Plan mode the tool only tells the model it is unavailable.
+/// Its older `notify` setting runs a program with a JSON argument
 /// when a turn ends and nothing else, and is the legacy of these; the hooks
 /// say more. Its `PostToolUse` names the shell tool `Bash` and puts the
 /// command under `tool_input.command` as Claude Code's does, with the output
@@ -865,9 +871,13 @@ const CODEX_PLUGIN: &[&str] = &[
 /// under its own names — `BeforeAgent` for the prompt, `BeforeTool` and
 /// `AfterTool` around a tool, `AfterAgent` for the end of a turn.
 ///
-/// Its `Notification` fires for a tool permission and carries a `message`,
-/// the way Claude Code's does; a question the model asks is the end of a
-/// turn, which is `AfterAgent`.
+/// Its `Notification` fires whenever a tool waits for confirmation and
+/// carries a `message`, the way Claude Code's does. One of those tools is
+/// `ask_user`, the dialog its model asks a person questions in, which Gemini
+/// CLI 0.61.0 offers in every interactive session and always confirms: its
+/// notification says "Tool requires confirmation", with the questions only
+/// under `details`, so the row says needs-input without them. A question the
+/// model asks in its reply is the end of a turn, which is `AfterAgent`.
 const GEMINI_EVENTS: &[(&str, &str)] = &[
     ("BeforeAgent", "running --title -"),
     ("BeforeTool", "running"),
@@ -1095,7 +1105,8 @@ const AGENTS: &[Agent] = &[
             file: "~/.codex/hooks.json, or a project's .codex/hooks.json",
             events: CODEX_EVENTS,
             missing: " Codex has no notification hook: the row says needs-input for a \
-permission, and a question the model asks ends its turn as idle.",
+permission, a question the model asks in its reply ends its turn as idle, and one it asks \
+in Plan mode, in its question dialog, keeps the row running until it is answered.",
             trust: CODEX_TRUST,
             without: "",
         },
@@ -1111,8 +1122,9 @@ permission, and a question the model asks ends its turn as idle.",
         fragment: Fragment::Hooks {
             file: "~/.gemini/settings.json, or a project's .gemini/settings.json",
             events: GEMINI_EVENTS,
-            missing: " Gemini CLI notifies for a tool permission only: a question the \
-model asks ends its turn as idle.",
+            missing: " Gemini CLI notifies whenever a tool waits for confirmation, its \
+ask_user questions included, which the row says as needs-input: a question the model asks \
+in its reply ends its turn as idle.",
             trust: "",
             without: "",
         },
@@ -2492,15 +2504,15 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
     }
 
     #[test]
-    fn the_skill_says_a_codex_or_gemini_question_ends_as_idle_even_with_hooks() {
-        // Neither has an event for a question its model asks, which ends the
-        // turn: their hooks say needs-input for an approval and for nothing
-        // else, the ones Crook's plugin gives Codex included, since those are
-        // pinned to the same table. The skill is what tells an orchestrating
-        // agent which state to wait for, and a needs-input it promised for a
-        // question is a wait that runs out, and is run again, on a worker
-        // sitting idle until somebody answers it.
-        for (name, approval) in [("codex", "PermissionRequest"), ("gemini", "Notification")] {
+    fn the_skill_says_which_codex_and_gemini_questions_come_as_needs_input() {
+        // The skill is what tells an orchestrating agent which state to wait
+        // for, and a state it promised that never comes is a wait that runs
+        // out, and is run again, on a worker sitting at a question. A question
+        // either agent's model asks in its reply ends its turn, and neither has
+        // an event for that: each table says needs-input for one event, the
+        // ones Crook's plugin gives Codex included, since those are pinned to
+        // the same table.
+        fn hooks(name: &str) -> (&'static [(&'static str, &'static str)], &'static str) {
             let agent = AGENTS.iter().find(|agent| agent.name == name).unwrap();
             let Fragment::Hooks {
                 events, missing, ..
@@ -2508,29 +2520,70 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
             else {
                 panic!("{name} has command hooks");
             };
-            let asking: Vec<&str> = events
+            (events, missing)
+        }
+        for (name, asking) in [("codex", "PermissionRequest"), ("gemini", "Notification")] {
+            let (events, missing) = hooks(name);
+            let needs_input: Vec<&str> = events
                 .iter()
                 .filter(|(_, arguments)| arguments.starts_with("needs-input"))
                 .map(|(event, _)| *event)
                 .collect();
-            assert_eq!(vec![approval], asking, "{name}");
+            assert_eq!(vec![asking], needs_input, "{name}");
             assert!(
-                missing.contains("a question the model asks ends its turn as idle"),
+                missing.contains("a question the model asks in its reply ends its turn as idle"),
                 "{name}: {missing}"
             );
         }
 
+        // Gemini CLI 0.61.0 runs that `Notification` whenever a tool waits for
+        // confirmation, and its `ask_user` dialog always does. This is the
+        // input its hook was handed for one, from a session against a
+        // stand-in model, cut to the fields that say what it was: the row
+        // says the message, and the question is only under `details`.
+        let ask_user = r#"{"hook_event_name": "Notification", "notification_type": "ToolPermission", "message": "Tool requires confirmation", "details": {"type": "ask_user", "title": "Ask User", "questions": [{"question": "Which module first?", "header": "Module", "type": "choice"}]}}"#;
+        let message = message_from_hook(ask_user).unwrap();
+        assert_eq!("Tool requires confirmation", message);
+        let gemini = hooks("gemini").1;
+        assert!(
+            gemini.contains("its ask_user questions included, which the row says as needs-input"),
+            "{gemini}"
+        );
+
+        // codex-cli 0.149.1 asks in a dialog only in Plan mode, through its
+        // `request_user_input` tool, and runs `PreToolUse` for that and nothing
+        // more until the person answers: no `Stop`, since the turn is still
+        // open, and no `PermissionRequest`, since it is no approval. That the
+        // row keeps that running against the title's "Action Required" is
+        // `a_codex_question_in_plan_mode_keeps_the_running_its_hooks_said`, in
+        // the workspace's tests.
+        let (codex, missing) = hooks("codex");
+        assert!(codex.contains(&("PreToolUse", "running")), "{codex:?}");
+        assert!(
+            missing.contains("in Plan mode, in its question dialog, keeps the row running"),
+            "{missing}"
+        );
+
         let skill = SKILL.split_whitespace().collect::<Vec<_>>().join(" ");
         for said in [
             // Where the plugin is said to report all of it.
-            "Codex's needing input is only ever an approval, with the tool it wants: a question \
-its model asks ends its turn, so it reads as `idle`, never as `needs-input`.",
+            "A question its model asks in its reply ends its turn, so it reads as `idle`; one it \
+asks in Plan mode, in its question dialog, keeps the turn open, and the row says `running` until \
+it is answered."
+                .to_owned(),
             // And where a worker is waited on.
-            "A question a Codex or Gemini CLI worker asks reads as `idle` even with hooks, the \
-ones Crook's plugin gives Codex included, since those report `needs-input` only for an approval: \
-wait for `idle` there.",
+            "a question a Codex or Gemini CLI worker asks in its reply ends its turn, so it reads \
+as `idle`, and `needs-input` never comes for it."
+                .to_owned(),
+            format!(
+                "Gemini CLI can also ask in its `ask_user` dialog, which its hooks report as \
+`needs-input` with \"{message}\", not the question"
+            ),
+            "Codex asks in a dialog only in Plan mode, and its hooks say `running` until it is \
+answered"
+                .to_owned(),
         ] {
-            assert!(skill.contains(said), "the skill no longer says: {said}");
+            assert!(skill.contains(&said), "the skill no longer says: {said}");
         }
     }
 
