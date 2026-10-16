@@ -404,6 +404,7 @@ pub fn run(
         attention_requested: false,
         replay_requested_redraw: false,
         frame_retry: None,
+        minimised_asked: None,
     };
 
     event_loop
@@ -432,6 +433,11 @@ struct App {
     /// How long to wait before trying the frame that just failed again, if one
     /// did. `None` once a frame reaches the screen.
     frame_retry: Option<Duration>,
+
+    /// When the desktop was last asked whether the window is minimised, for
+    /// asking again [`MINIMISED_LOOK`] later while the answer is all that
+    /// holds the window out of sight.
+    minimised_asked: Option<Instant>,
 }
 
 /// How long to wait after a frame failed before trying again, and the longest
@@ -445,11 +451,26 @@ struct App {
 const FIRST_FRAME_RETRY: Duration = Duration::from_millis(50);
 const LONGEST_FRAME_RETRY: Duration = Duration::from_secs(1);
 
+/// How long an answer that the window is minimised stands before the desktop
+/// is asked again, while nothing else holds the window out of sight
+/// (`InputState::held_by_an_answer`).
+///
+/// Only X11 is asked, and its window manager may map the window it restores
+/// before it takes `_NET_WM_STATE_HIDDEN` off. A window brought back without
+/// the keyboard and asked by its first frame, too soon, would otherwise stay
+/// out of sight until somebody typed or clicked in it: a window out of sight
+/// asks for no frame of its own, its panes' output included, and a frame is
+/// where the question is otherwise asked. A second is how long such a window
+/// can look frozen, and one round trip a second is what a window left
+/// minimised costs, as a frame retrying does.
+const MINIMISED_LOOK: Duration = Duration::from_secs(1);
+
 impl ApplicationHandler<CrookEvent> for App {
     fn new_events(&mut self, _: &ActiveEventLoop, cause: StartCause) {
         // A timer is set for a failed frame, and for a refused fullscreen in
-        // the window's first seconds, which `about_to_wait` asks again for.
-        // Reaching it with a frame waiting means trying that frame again.
+        // the window's first seconds and an answer that the window is
+        // minimised, which `about_to_wait` asks again for. Reaching it with
+        // a frame waiting means trying that frame again.
         if matches!(cause, StartCause::ResumeTimeReached { .. })
             && self.frame_retry.is_some()
             && let Some(window) = self.window.as_mut()
@@ -489,18 +510,32 @@ impl ApplicationHandler<CrookEvent> for App {
             self.delegate.placed(placement);
         }
 
+        // An answer that the window is minimised, once it is old enough to
+        // ask again: see `MINIMISED_LOOK`. Here rather than only when the
+        // timer set for it is reached, since a batch of something else — a
+        // pane's output, which a window out of sight draws no frame for —
+        // may come first every time.
+        if self.window.is_some()
+            && self.minimised_look().is_some_and(|look| look <= now)
+            && self.ask_whether_minimised()
+        {
+            self.with_window(Window::request_redraw);
+        }
+
         // Every batch of events ends here, and a Quit that comes before the
         // next one is answered with what is written down now.
         #[cfg(target_os = "macos")]
         super::quit::set_asks(self.delegate.asks_before_quitting());
 
         let frame_retry = self.frame_retry.map(|delay| now + delay);
-        event_loop.set_control_flow(
-            match [frame_retry, fullscreen_look].into_iter().flatten().min() {
-                Some(wake) => ControlFlow::WaitUntil(wake),
-                None => ControlFlow::Wait,
-            },
-        );
+        let wake = [frame_retry, fullscreen_look, self.minimised_look()]
+            .into_iter()
+            .flatten()
+            .min();
+        event_loop.set_control_flow(match wake {
+            Some(wake) => ControlFlow::WaitUntil(wake),
+            None => ControlFlow::Wait,
+        });
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -685,7 +720,9 @@ impl ApplicationHandler<CrookEvent> for App {
             // Gained or lost, the keyboard moving is also when a window is
             // minimised or comes back, so it asks whether it is: losing it is
             // how a minimise starts, and X11 says the focus again when it
-            // maps a window it had minimised.
+            // maps a window it had minimised. The keyboard is noted first,
+            // since a window that has it is in sight whatever the answer
+            // says: see `InputState::occlusion`.
             WindowEvent::Focused(focused) => {
                 if focused {
                     self.controls.focused();
@@ -694,6 +731,7 @@ impl ApplicationHandler<CrookEvent> for App {
                     }
                     self.delegate.focused();
                 }
+                self.input.focus_moved(focused);
                 if self.ask_whether_minimised() {
                     self.with_window(Window::request_redraw);
                 }
@@ -760,9 +798,17 @@ impl App {
     /// [`Window::is_minimised`].
     fn ask_whether_minimised(&mut self) -> bool {
         let minimised = self.with_window(|window| window.is_minimised());
+        self.minimised_asked = Some(Instant::now());
         self.input
             .minimised(minimised)
             .is_some_and(|occluded| self.delegate.handle_event(occluded))
+    }
+
+    /// When to ask the desktop again whether the window is minimised, if the
+    /// last answer is all that holds the window out of sight. See
+    /// [`MINIMISED_LOOK`].
+    fn minimised_look(&self) -> Option<Instant> {
+        next_minimised_look(self.input.held_by_an_answer(), self.minimised_asked)
     }
 
     /// Tells the application where the window is, if that changed since it
@@ -950,6 +996,14 @@ fn tell_the_opening(delegate: &mut dyn WindowDelegate, theme: SystemTheme, focus
     themed || unfocused
 }
 
+/// When to ask again whether the window is minimised, given whether the
+/// answer is all that holds it out of sight and when it was asked last.
+fn next_minimised_look(held_by_an_answer: bool, asked: Option<Instant>) -> Option<Instant> {
+    asked
+        .filter(|_| held_by_an_answer)
+        .map(|asked| asked + MINIMISED_LOOK)
+}
+
 /// How long to wait before trying a failed frame again, given how long the
 /// wait before it was.
 fn next_frame_retry(previous: Option<Duration>) -> Duration {
@@ -1032,5 +1086,19 @@ mod tests {
             delay = next_frame_retry(Some(delay));
         }
         assert_eq!(delay, LONGEST_FRAME_RETRY);
+    }
+
+    #[test]
+    fn an_answer_that_the_window_is_minimised_is_asked_again_only_while_it_is_all_that_hides_it() {
+        let asked = Instant::now();
+        assert_eq!(
+            next_minimised_look(true, Some(asked)),
+            Some(asked + MINIMISED_LOOK),
+            "a window out of sight on an answer alone was never asked again"
+        );
+        // Anything else holding it out of sight says when it is over, and a
+        // window in sight is asked by its frames.
+        assert_eq!(next_minimised_look(false, Some(asked)), None);
+        assert_eq!(next_minimised_look(true, None), None);
     }
 }

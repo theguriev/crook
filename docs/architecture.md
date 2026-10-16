@@ -967,7 +967,9 @@ back; `ten_thousand_lines_in_a_window_out_of_sight_draw_nothing` holds it to no 
 bit is the desktop's word rather than the workspace's own state, and costs something when the
 desktop is wrong: a window said to be out of sight while somebody can see it draws a pane's
 output with the next frame anything else asks for — a key, a click, the focus moving, a row
-changing — rather than as it comes.
+changing — rather than as it comes. The one way it is known to be wrong, an X11 answer that
+lags a restore, crookui puts right by itself, at once for a window given the keyboard and
+within a second for one that was not (see "Out of sight is another bit").
 
 **Nor does a pane nobody can see build snapshots.** A snapshot is every cell of the viewport
 resolved through the palette and compared with the last — about 160 µs for a 200 by 50 grid, at
@@ -2031,27 +2033,32 @@ until the keyboard first arrives, so a window a script opened behind another was
 front and asked nobody for a look until it had been visited once. The caret comes with the
 keyboard, which a window opened in front is given as it appears.
 
-**Out of sight is another bit, which the breath and the panes read.** crookui folds three ways of
-hearing it into one `Event::WindowOccluded`, in `InputState`. winit's `WindowEvent::Occluded`
-says a window is covered or minimised on macOS, but on X11 only that it is covered, and only
-with no compositor running, which reports every window in view. Windows sends none, and a
-window resized to nothing is the minimised one there (`InputState::resized`). X11 says nothing
-of a minimised window, which its window manager unmaps, and the server sends no visibility
-event for a window that stops being viewable. So crookui asks X11, and only X11: winit's
-`is_minimized` reads `_NET_WM_STATE_HIDDEN`, and that is a round trip to the server. It is
-asked when the focus moves and before each frame while the window lacks the keyboard or was
+**Out of sight is another bit, which the breath and the panes read.** crookui folds three ways
+of hearing it into one `Event::WindowOccluded`, in `InputState`. winit's
+`WindowEvent::Occluded` says a window is covered or minimised on macOS, but on X11 only that it
+is covered, and only with no compositor running, which reports every window in view. Windows
+sends none, and a window resized to nothing is the minimised one there (`InputState::resized`).
+X11 says nothing of a minimised window, which its window manager unmaps, and the server sends
+no visibility event for a window that stops being viewable. So crookui asks X11, and only X11:
+winit's `is_minimized` reads `_NET_WM_STATE_HIDDEN`, and that is a round trip to the server. It
+is asked when the focus moves and before each frame while the window lacks the keyboard or was
 minimised when last asked (`InputState::may_be_minimised`), and an `Occluded(false)` overrides
 the answer, since a window manager may map the window it restores before it takes the property
-off. macOS and Windows already say it, and are not asked (`Window::is_minimised`): AppKit
-tells winit that a window it restores is in view while `isMiniaturized` may still say yes.
-A covered window on Windows or under an X11 compositor goes unremarked. The breath chain ends
-while the window cannot be seen and starts again when it can, and a pane's output asks for no
-frame and builds no snapshot meanwhile (see "Nor does a pane nobody can see build snapshots"),
-because X11 and Windows draw every frame asked of a hidden window. Wayland holds those frames
-back by itself. Neither reads the focus, on purpose: a window behind another but beside it is
-where a working agent is watched from. Within a window in sight, a breath repaints only while
-a running mark is inside the panel's viewport, on a row or on a group heading — the panel's
-`RowGeometry` keeps where
+off. So does the keyboard (`InputState::occlusion`): X gives it only to a window that is
+mapped. A window restored without it, and asked by its first frame too soon, would have nothing
+to ask again — a window out of sight asks for no frame of its own, its panes' output included —
+so while the answer is all that holds the window out of sight the event loop asks again by
+itself, once a second (`MINIMISED_LOOK`, `InputState::held_by_an_answer`). That is one round
+trip a second for a window left minimised on X11, and nothing anywhere else. macOS and Windows
+already say it, and are not asked (`Window::is_minimised`): AppKit tells winit that a window it
+restores is in view while `isMiniaturized` may still say yes. A covered window on Windows or
+under an X11 compositor goes unremarked. The breath chain ends while the window cannot be seen
+and starts again when it can, and a pane's output asks for no frame and builds no snapshot
+meanwhile (see "Nor does a pane nobody can see build snapshots"), because X11 and Windows draw
+every frame asked of a hidden window. Wayland holds those frames back by itself. Neither reads
+the focus itself, on purpose: a window behind another but beside it is where a working agent is
+watched from. Within a window in sight, a breath repaints only while a running mark is inside
+the panel's viewport, on a row or on a group heading — the panel's `RowGeometry` keeps where
 both were drawn — since a frame is the whole window and its cost grows with every tab.
 
 **And the window can be asked to keep still.** The Appearance page's *Motion* resolves, with

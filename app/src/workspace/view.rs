@@ -1634,8 +1634,10 @@ impl Workspace {
     /// wrong than it did when only the breath heard it: a window said to be
     /// out of sight while somebody can see it draws a pane's output with
     /// the next frame anything else asks for — a key, a click, the focus
-    /// moving, a row changing — rather than as it comes. See
-    /// `Event::WindowOccluded` for what each desktop says, and when.
+    /// moving, a row changing — rather than as it comes. The one way it is
+    /// known to be wrong, an X11 answer that lags a restore, crookui puts
+    /// right by itself within a second. See `Event::WindowOccluded` for
+    /// what each desktop says, and when.
     pub fn set_window_occluded(&mut self, occluded: bool, ctx: &mut ViewContext<Self>) {
         if self.window_occluded == occluded {
             return;
