@@ -157,6 +157,13 @@ pub struct Peer {
     /// The peer's process, when the kernel names it: `None` for one in a pid
     /// namespace this process cannot see into, which Linux reports as 0, and
     /// for one macOS will not name.
+    ///
+    /// Not the same process on both systems. On Linux it is the one that
+    /// made the peer's end, fixed like the uid. On macOS it is the last
+    /// process to have connected, sent, received or polled on that end, so a
+    /// descriptor passed to another process names that one once it uses it:
+    /// there it is a hint at lineage, worth what it says when read just after
+    /// the peer has spoken, and never a proof of who connected.
     pub pid: Option<u32>,
 }
 
@@ -165,7 +172,8 @@ pub struct Peer {
 /// What the kernel wrote down when that end was made — by `listen`,
 /// `connect` or `socketpair` — and not who holds it now, so it cannot be
 /// claimed by anything said over the connection, and a socket somebody swaps
-/// in at a name after it was looked at still names whoever bound it.
+/// in at a name after it was looked at still names whoever bound it. That
+/// holds for the uid and the pid alike here; on macOS only the uid is fixed.
 #[cfg(target_os = "linux")]
 pub fn peer_credentials(stream: &UnixStream) -> io::Result<Peer> {
     use std::ffi::c_void;
@@ -236,13 +244,17 @@ pub fn peer_credentials(stream: &UnixStream) -> io::Result<Peer> {
 
 /// Who is at the other end of `stream`.
 ///
-/// What the kernel wrote down when that end was made — by `listen`,
-/// `connect` or `socketpair` — and not who holds it now, so it cannot be
-/// claimed by anything said over the connection, and a socket somebody swaps
-/// in at a name after it was looked at still names whoever bound it.
-///
-/// Two questions on macOS, which has no `SO_PEERCRED`: `getpeereid` for the
-/// user, and `LOCAL_PEERPID` for the process.
+/// Two questions on macOS, which has no `SO_PEERCRED`, and they are not
+/// alike. `getpeereid` answers with the credentials the kernel wrote down
+/// when that end was made — by `listen`, `connect` or `socketpair` — and not
+/// who holds it now, so the uid cannot be claimed by anything said over the
+/// connection, and a socket somebody swaps in at a name after it was looked
+/// at still names whoever bound it. `LOCAL_PEERPID` answers with the peer
+/// socket's last owner, which XNU rewrites whenever a process connects,
+/// sends, receives or polls on it, so the pid is whoever used that end last;
+/// [`Peer::pid`] says what that is good for. macOS has nothing better:
+/// `LOCAL_PEERCRED`'s `xucred` carries no pid, and `LOCAL_PEERTOKEN` reads
+/// the same last owner.
 #[cfg(target_os = "macos")]
 pub fn peer_credentials(stream: &UnixStream) -> io::Result<Peer> {
     use std::ffi::c_void;
