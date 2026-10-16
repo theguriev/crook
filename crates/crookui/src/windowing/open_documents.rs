@@ -27,6 +27,19 @@
 //! and the application — built before the loop ran — has had its workspace
 //! from the start. The request waits in the queue; nothing is dropped, and
 //! nothing waits on a clock.
+//!
+//! # Not the command line
+//!
+//! AppKit has a second source of the same request: unless it is told
+//! otherwise, it reads a Cocoa application's own command line as it launches
+//! and asks the delegate to open every word that is neither an option nor an
+//! option's value. Crook reads its command line itself, and in `crook -e vim
+//! deploy.sh` AppKit takes `-e vim` for an option and its value and
+//! `deploy.sh` for a file — which, once the delegate answers, would be a
+//! second tab in front of the editor, running the script it was opened to
+//! edit. So [`install`] tells AppKit the command line is not its to read. What
+//! Finder, Open With and `open -a` send comes as an Apple Event, never on the
+//! command line, and is not touched.
 
 use std::cell::OnceCell;
 use std::path::PathBuf;
@@ -63,6 +76,10 @@ pub(super) fn install(deliver: impl Fn(Vec<PathBuf>) + 'static) {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSApplication;
 
+    // First, and whether or not the delegate can be taught: a word of the
+    // command line is never a file to open, method or no method.
+    leave_the_command_line_alone();
+
     let Some(main_thread) = MainThreadMarker::new() else {
         log::warn!("opening files was set up off the main thread; Crook will open none");
         return;
@@ -93,6 +110,30 @@ pub(super) fn install(deliver: impl Fn(Vec<PathBuf>) + 'static) {
     // answers when it was handed it, and this one came after.
     application.setDelegate(None);
     application.setDelegate(Some(&*delegate));
+}
+
+/// The default that says whether AppKit opens the words of an application's
+/// command line, as it launches, as files.
+const TREAT_UNKNOWN_ARGUMENTS_AS_OPEN: &str = "NSTreatUnknownArgumentsAsOpen";
+
+/// Tells AppKit not to open the words of Crook's command line as files: see
+/// [the module](self#not-the-command-line).
+///
+/// Before the event loop runs, since AppKit reads the command line as the
+/// application finishes launching. Registered rather than stored, as Java's
+/// AppKit glue does it: said again at every launch and never written into
+/// the person's preferences, so a value they set there themselves still
+/// stands. As the string `NO`, the form AppKit reads it in — Firefox's glue
+/// says so of the same setting.
+fn leave_the_command_line_alone() {
+    use objc2_foundation::{NSDictionary, NSString, NSUserDefaults, ns_string};
+
+    let key = NSString::from_str(TREAT_UNKNOWN_ARGUMENTS_AS_OPEN);
+    let no: &AnyObject = ns_string!("NO");
+    let defaults = NSDictionary::<NSString, AnyObject>::from_slices(&[&*key], &[no]);
+    // SAFETY: the dictionary's keys are strings and its value one too, which
+    // is what the registration domain holds and what AppKit reads this one as.
+    unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
 }
 
 /// Adds `application:openURLs:` to `class`, answered by [`open_urls`], and
@@ -256,5 +297,25 @@ mod tests {
             1,
             "a request with no file was handed on"
         );
+    }
+
+    #[test]
+    fn the_words_of_the_command_line_are_not_files_to_open() {
+        use objc2_foundation::NSUserDefaults;
+
+        // What AppKit asks, as it launches, before it opens a loose word of
+        // `crook -e vim deploy.sh` as a file.
+        let asked = || {
+            NSUserDefaults::standardUserDefaults()
+                .stringForKey(&NSString::from_str(TREAT_UNKNOWN_ARGUMENTS_AS_OPEN))
+                .map(|value| value.to_string())
+        };
+        assert_ne!(
+            asked().as_deref(),
+            Some("NO"),
+            "AppKit was told already, so this test cannot tell whether Crook tells it"
+        );
+        leave_the_command_line_alone();
+        assert_eq!(asked().as_deref(), Some("NO"));
     }
 }

@@ -75,7 +75,8 @@ log = "0.4"
 # macOS's own frameworks, for the two things winit does not say to the dock and
 # Notification Center: the badge with the count of waiting panes, and a banner;
 # for the one thing it does not pass on from a window: that it has finished
-# going fullscreen; and for the files Finder asks the application to open.
+# going fullscreen; and for the files Finder asks the application to open, and
+# not the words of its own command line.
 # The 0.6 family `arboard` and `wgpu` already resolve, not winit's 0.5, so the
 # graph gains one crate — the UserNotifications bindings, generated like the
 # rest and with no build script (`build = false`) — and every one of them only
@@ -98,11 +99,14 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
   "block2",
   "NSArray",
   "NSBundle",
+  "NSDictionary",
   "NSError",
   "NSNotification",
+  "NSObject",
   "NSOperation",
   "NSString",
   "NSURL",
+  "NSUserDefaults",
   "NSUUID",
 ] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = [

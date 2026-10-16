@@ -701,11 +701,13 @@ handler of `public.unix-executable` — needs them: before them, pressing it lef
 double-clicked in Finder with nowhere to go. AppKit then tells the application's delegate
 `application:openURLs:`, which winit's delegate does not have; `crookui` adds it at run time, as
 it adds `applicationShouldTerminate:` (`windowing/open_documents.rs`), and posts the paths on
-the event loop's proxy. The window opens a tab for each (`Workspace::open_files`), started in the
-file's folder, with the file typed at the shell's first prompt — not `exec`'d, as `-e`'s program
-is, so what a script prints stays on screen when it ends. A request that launches Crook comes
-before the loop's first turn and waits in the proxy's queue, and its tab waits for its shell
-with the rest.
+the event loop's proxy. It also registers `NSTreatUnknownArgumentsAsOpen` as `NO`: AppKit would
+otherwise send the same request for every loose word of Crook's own command line, which in
+`crook -e vim deploy.sh` is `deploy.sh`, run in a tab of its own. The window opens a tab for each
+(`Workspace::open_files`), started in the file's folder, with the file typed at the shell's first
+prompt — not `exec`'d, as `-e`'s program is, so what a script prints stays on screen when it ends.
+A request that launches Crook comes before the loop's first turn and waits in the proxy's queue,
+and its tab waits for its shell with the rest.
 
 What `--check-only` does today is the part that earns its keep immediately: it type-checks the
 workspace with the release profile and the release feature set. It is one of the five the
