@@ -857,7 +857,12 @@ Twenty-two features, and the page that configures them:
   A theme names a background, a foreground, an accent and the sixteen ANSI colours; everything
   else — surfaces, borders, overlays, muted text — is derived from those, which is why a theme
   file is twenty lines rather than sixty. Choosing one applies it to the chrome, to the grid
-  and to every shell already running.
+  and to every shell already running. A program that asks whether the terminal is dark or
+  light (`CSI ? 996 n`) is told, from the background, and one that asked to hear of a change
+  (mode `?2031`, which Claude Code, OpenCode and Copilot set) is told when a new theme, or the
+  desktop's light and dark pair, takes the background from one to the other — so an agent that
+  matches its colours to the terminal's matches the theme it is on now, not the one it started
+  under.
 
   The **Themes panel** is a second side panel, opened from the settings page's current-theme
   row: preview cards, arrow keys that browse by applying, and a `+` that **makes a theme** out
