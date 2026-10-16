@@ -1,40 +1,70 @@
-# crook, the Claude Code plugin
+# crook, the plugin for Claude Code, Codex and Copilot CLI
 
-The plugin that connects Claude Code to Crook, from the marketplace this repository is
-(`.claude-plugin/marketplace.json` at its root):
+The plugin that connects Claude Code, Codex CLI and GitHub Copilot CLI to Crook, from the
+marketplace this repository is (`.claude-plugin/marketplace.json` at its root, which all three
+read):
 
 ```sh
 claude plugin marketplace add theguriev/crook
 claude plugin install crook@crook
+
+codex plugin marketplace add theguriev/crook
+codex plugin add crook@crook
+
+copilot plugin marketplace add theguriev/crook
+copilot plugin install crook@crook
 ```
 
-It carries two things, and installing it is Claude Code writing its own settings, so nobody
-merges JSON and Crook opens no file it does not own:
+Installing it is the agent writing its own settings, so nobody merges JSON and Crook opens no
+file it does not own. Codex holds the plugin's hooks back until they are trusted, as it does any
+hooks: it asks on its next start, or in its `/hooks`, and asks again whenever a hook's command
+changes.
 
-- `hooks/hooks.json` — the hooks `crook --agent-hooks claude` prints, calling `"$CROOK_BIN"`
-  (the binary every pane is told it belongs to, or `crook` on `PATH` when a pane has none) and
-  exiting 0 without a word unless `TERM_PROGRAM` is `Crook` or `CROOK_PANE_ID` is set, or they
-  run inside tmux; anywhere else they do nothing. Inside tmux `crook --agent` asks tmux for the
-  terminals of its clients and writes the report to each, and a terminal that is not Crook
-  drops it unread. In a pane they exit 0 after the report too, whatever it did, so a Crook
-  that cannot be reached is a line of stderr in Claude Code's debug log rather than a notice on
-  every prompt and tool call. Claude Code runs each hook with no terminal of its own, and
-  `crook --agent` reaches the pane through the terminal of the program that ran it, which
-  needs a Crook newer than 0.1.13.
-- `skills/crook/SKILL.md` — the skill `crook --skill` prints.
+Each agent reads a manifest of its own here, and the manifest says which hooks are its:
 
-Both are copies of what lives in `app/src`, and the tests in `app/src/agent.rs` fail when they
-drift: `hooks.json` has to be the `hooks` `crook --agent-hooks claude` prints, and each command is
-run under `sh` inside and outside a pane; `SKILL.md` has to be `app/src/skill.md` byte for
-byte. Edit those, then copy the result here — the failing test prints the `hooks` it expects.
-`app/tests/claude_code_hooks.rs` runs each command the way Claude Code does, with the real
-binary in a session of its own below a process on a pty, and fails unless the report arrives
-on that pty — and once more below a program with no terminal, the way `claude -p` is when
-another agent runs it, and fails if anything arrives. Where tmux is installed it runs them again
-with the agent inside tmux on that pty, which keeps the sequence to itself unless
-`crook --agent` goes round it, and once with a second tmux client whose terminal nobody reads,
-which must not hold the hook.
+- `.claude-plugin/plugin.json` — Claude Code's. It names no hooks file, so Claude Code reads
+  `hooks/hooks.json`: the hooks `crook --agent-hooks claude` prints.
+- `.codex-plugin/plugin.json` — Codex's, read before Claude Code's, naming `hooks/codex.json`:
+  the hooks `crook --agent-hooks codex` prints, with `PermissionRequest` for the approval Codex
+  stops for, since Codex has no `Notification`.
+- `.github/plugin/plugin.json` — Copilot CLI's, read before Claude Code's, naming
+  `hooks/copilot.json`: the file `crook --agent-hooks copilot` prints, whose commands pass
+  `--session -` so that a subagent's prompt names no tab and its stop ends no turn. A Crook older
+  than 0.1.27 does not read `--session`, and reports nothing for them. Each is a `bash` command,
+  for macOS and Linux.
 
-There is no `version` in `plugin.json` on purpose: without one, Claude Code takes the commit
-the plugin was installed from as its version, so `claude plugin update crook@crook` picks up
+Without a manifest of its own, Codex or Copilot reads Claude Code's and runs `hooks/hooks.json`
+under Claude Code's event names: running and idle, but no approval from Codex and no session from
+Copilot. Claude Code reads only its own file, so the `PermissionRequest` it is kept out of stays
+out of it.
+
+Every command calls `"$CROOK_BIN"` (the binary every pane is told it belongs to, or `crook` on
+`PATH` when a pane has none) and exits 0 without a word unless `TERM_PROGRAM` is `Crook` or
+`CROOK_PANE_ID` is set, or it runs inside tmux; anywhere else it does nothing. Inside tmux
+`crook --agent` asks tmux for the terminals of its clients and writes the report to each, and a
+terminal that is not Crook drops it unread. In a pane it exits 0 after the report too, whatever
+the report did, so a Crook that cannot be reached is a line of stderr in the agent's log rather
+than a notice on every prompt and tool call, and never the reason Copilot refuses a tool call,
+as it does when a `preToolUse` hook fails. The agents run each hook with no terminal of its own,
+and `crook --agent` reaches the pane through the terminal of the program that ran it, which
+needs a Crook newer than 0.1.13.
+
+`skills/crook/SKILL.md` is the skill `crook --skill` prints, and all three load it.
+
+These are copies of what lives in `app/src`, and the tests in `app/src/agent.rs` fail when they
+drift: each hooks file has to be what `crook --agent-hooks` prints for its agent, each manifest
+has to name the file it does, and the commands of `hooks/hooks.json` are run under `sh` inside
+and outside a pane; `SKILL.md` has to be `app/src/skill.md` byte for byte. Edit those, then copy
+the result here — the failing test prints what it expects. `app/tests/claude_code_hooks.rs`
+runs each command the way Claude Code does, with the real binary in a session of its own below a
+process on a pty, and fails unless the report arrives on that pty — and once more below a program
+with no terminal, the way `claude -p` is when another agent runs it, and fails if anything
+arrives. Where tmux is installed it runs them again with the agent inside tmux on that pty, which
+keeps the sequence to itself unless `crook --agent` goes round it, and once with a second tmux
+client whose terminal nobody reads, which must not hold the hook. The commands
+`--agent-hooks codex` and `copilot` print are run the same way, and once more with the binary
+gone.
+
+There is no `version` in the manifests on purpose: without one, Claude Code takes the commit the
+plugin was installed from as its version, so `claude plugin update crook@crook` picks up
 whatever `main` has rather than waiting for somebody to bump a number here.

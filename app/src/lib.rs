@@ -1800,8 +1800,9 @@ OPTIONS:
                        itself, to merge into its settings: `claude` (Claude
                        Code), `codex`, `gemini`, `copilot` or `opencode`;
                        `aider` has none, and this says what to do instead.
-                       `claude` leads with the two commands that install the
-                       same hooks as Crook's Claude Code plugin. The command
+                       `claude`, `codex` and `copilot` lead with the two
+                       commands that install the same hooks as Crook's
+                       plugin, which each of the three reads. The command
                        hooks (`claude`, `codex`, `gemini`, `copilot`) do
                        nothing where none of TERM_PROGRAM=Crook,
                        CROOK_PANE_ID and tmux's TMUX is set, which ssh and

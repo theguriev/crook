@@ -1769,7 +1769,17 @@ the way that needs no merging at all: the repository is a Claude Code plugin mar
 (`.claude-plugin/marketplace.json`) whose one plugin, `packaging/claude-code`, carries the same
 hooks and the skill, and `claude plugin marketplace add theguriev/crook` with
 `claude plugin install crook@crook` is Claude Code writing its own settings. The printed hooks
-and the plugin's are the same commands. A hook runs in whatever `PATH` its agent was started
+and the plugin's are the same commands. Codex CLI and GitHub Copilot CLI read the same
+marketplace and install the same plugin (`codex plugin add crook@crook`,
+`copilot plugin install crook@crook`), and `--agent-hooks codex` and `copilot` lead with their
+two commands too. Each reads a manifest of its own in the plugin's directory before Claude
+Code's — `.codex-plugin/plugin.json`, `.github/plugin/plugin.json` — and it names a hooks file
+of its own, `hooks/codex.json` or `hooks/copilot.json`, which is what that agent's
+`--agent-hooks` prints. Without one, both run Claude Code's `hooks/hooks.json` under its event
+names: Codex has no Notification, so the plugin never said it had stopped for an approval, and
+those commands pass no `--session`, which would let Copilot's subagents rename the tab and end
+its turn. Claude Code reads `hooks/hooks.json` and nothing else, so neither file gives it the
+PermissionRequest it is kept out of. A hook runs in whatever `PATH` its agent was started
 with, and a path written into the file goes stale — a moved Crook.app, a deleted build — while
 the file stays, so each calls `"$CROOK_BIN"`, the binary its pane names, and `crook` on `PATH`
 when a pane names none or the one it names has gone. Each is behind a guard that exits 0 unless
@@ -1790,8 +1800,9 @@ pane's machine anyway, so an agent on the far side of either reports nothing thr
 (`docker exec -e CROOK_BIN=/opt/crook/crook`). `crook --agent` run there by hand, which has no
 guard, reaches the pane as it always did, and so do the OpenCode plugin and aider's command,
 which run the binary by the path they were printed with and have no guard either. Tests in
-`agent.rs` hold the plugin's `hooks/hooks.json` to what `--agent-hooks claude` prints and run
-each of its commands under `sh`, and hold its `SKILL.md` byte for byte to `skill.md`. Codex CLI and Gemini
+`agent.rs` hold each of the plugin's hooks files to what `--agent-hooks` prints for its agent,
+and each manifest to the file it names, run the commands of `hooks/hooks.json` under `sh`, and
+hold its `SKILL.md` byte for byte to `skill.md`. Codex CLI and Gemini
 CLI read the same object under their own event names, and GitHub Copilot CLI a versioned
 cousin of it with `bash` for the command, so `--agent-hooks codex`, `gemini` and `copilot`
 are the same table with a different first column; OpenCode has no command hooks, and
