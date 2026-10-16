@@ -14,9 +14,11 @@
 # XDG_RUNTIME_DIR), never /tmp: the /tmp tmpfs on the machine this was written
 # on carries a per-user quota that cargo builds fill, and a full quota breaks
 # Crook's shell integration in every pane. The hooks are registered in that
-# project alone: its .claude/settings.json, .codex/hooks.json,
-# .github/hooks/probe.json or .opencode/plugins/record.ts. Nothing here edits
-# ~/.claude/settings.json, ~/.codex, ~/.copilot or the installed Crook plugin.
+# project alone: its .claude/settings.json, .github/hooks/probe.json or
+# .opencode/plugins/record.ts, or for Codex the hooks.json of a CODEX_HOME
+# inside it, .probe/codex-home, where trusting them is kept too. Nothing here
+# edits ~/.claude/settings.json, ~/.codex, ~/.copilot or the installed Crook
+# plugin.
 #
 # The recorder is one POSIX sh file, run by every hook of the agent's. Each run
 # appends to $PROBE_DIR/<epoch>-<pid>-<event>.*:
@@ -102,13 +104,26 @@ clean() {
   dir=$1
   [ -f "$dir/.probe/agent" ] || fail "$dir was not made by this script; leaving it alone"
   # A held recorder, its background children and its watcher, still running
-  # after the agent went: each was started from this project's recorder.
-  pkill -f "$dir/.probe/record" 2>/dev/null || true
+  # after the agent went: each was started from this project's recorder. A
+  # TERM first, which a recorder that exits on one logs; then a KILL for
+  # whatever stayed, as a TRAP=stay recorder and every watcher do.
+  if pkill -f "$dir/.probe/record" 2>/dev/null; then
+    sleep 1
+    pkill -KILL -f "$dir/.probe/record" 2>/dev/null || true
+  fi
   evidence=$(cat "$dir/.probe/evidence")
   # Claude Code keeps more for each session than its conversation, under the
-  # session's id, which only the SessionStart payloads still name.
+  # session's id, which only the SessionStart payloads still name. They name
+  # the directory the session saw, too, which on macOS is $TMPDIR's real
+  # path under /private rather than the one this script was handed.
+  seen=$dir
   for start in "$evidence"/*-SessionStart.json; do
     [ -f "$start" ] || continue
+    cwd=$(sed -nE 's/.*"cwd": *"([^"\\]*)".*/\1/p' "$start" | head -n 1)
+    case $cwd in
+      */crook-probe-*) seen="$seen
+$cwd" ;;
+    esac
     id=$(sed -nE 's/.*"session_id": *"([0-9a-f-]{36})".*/\1/p' "$start" | head -n 1)
     [ -n "$id" ] || continue
     for kept in "$HOME/.claude/session-env/$id" "$HOME/.claude/file-history/$id"; do
@@ -123,11 +138,14 @@ clean() {
   esac
   # Claude Code keeps each project's conversations under ~/.claude/projects,
   # and its sessions' scratchpads under /tmp/claude-<uid>, in a directory
-  # named for the path with every / and . made a -. This project's are the
-  # probe's prompts and nothing else.
-  mangled=$(printf '%s' "$dir" | tr '/.' '--')
-  for kept in "$HOME/.claude/projects/$mangled" "/tmp/claude-$(id -u)/$mangled"; do
-    [ ! -d "$kept" ] || { rm -rf "$kept" && echo "removed $kept"; }
+  # named for the path with every character but a letter or a digit made a
+  # -, as 2.1.280's replace(/[^a-zA-Z0-9]/g,"-") names it. This project's
+  # are the probe's prompts and nothing else.
+  printf '%s\n' "$seen" | sort -u | while IFS= read -r path; do
+    mangled=$(printf '%s\n' "$path" | sed 's/[^A-Za-z0-9]/-/g')
+    for kept in "$HOME/.claude/projects/$mangled" "/tmp/claude-$(id -u)/$mangled"; do
+      [ ! -d "$kept" ] || { rm -rf "$kept" && echo "removed $kept"; }
+    done
   done
 }
 
@@ -162,7 +180,12 @@ case ${1:-} in
   variant)
     shift
     [ -f "$root/.probe/agent" ] || fail "no project at $root; run script/probe-permission-hooks $agent first"
-    : >"$root/.probe/variant"
+    # Every pair is checked before the variant changes, and the new one takes
+    # the old one's place in one rename, so a refused variant leaves the last
+    # one as it was and a hook never reads half of one.
+    next=$root/.probe/variant.next
+    trap 'rm -f "$next"' EXIT
+    : >"$next"
     for pair in "$@"; do
       key=${pair%%=*}
       value=${pair#*=}
@@ -176,8 +199,9 @@ case ${1:-} in
         MESSAGE) ;;
         *) fail "a variant sets HOLD, AFTER, DECISION, TRAP or MESSAGE, not $key" ;;
       esac
-      printf 'PROBE_%s=%s\n' "$key" "$value" >>"$root/.probe/variant"
+      printf 'PROBE_%s=%s\n' "$key" "$value" >>"$next"
     done
+    mv -f "$next" "$root/.probe/variant"
     echo "next permission hook: ${*:-as the environment says}"
     exit 0
     ;;
@@ -485,17 +509,25 @@ Headless, for C1:
 EOF
     ;;
   codex)
-    mkdir -p "$root/.codex"
+    # A CODEX_HOME of the project's own, for the hooks and for everything
+    # trusting them writes: Codex 0.149.1 keeps a trusted directory's
+    # trust_level and each trusted hook's trusted_hash in CODEX_HOME's
+    # config.toml, which would otherwise be ~/.codex's. It starts empty
+    # rather than copied, so no login of the person's is copied with it.
+    home=$root/.probe/codex-home
+    mkdir -p "$home"
     {
       echo '{'
       echo '  "hooks": {'
       settings_hooks PermissionRequest PreToolUse PostToolUse UserPromptSubmit Stop SessionEnd
       echo '  }'
       echo '}'
-    } >"$root/.codex/hooks.json"
+    } >"$home/hooks.json"
     cat <<EOF
-Codex CLI, from a Crook pane:
-  cd $root && codex
+Codex CLI, from a Crook pane, with a CODEX_HOME of the probe's own:
+  cd $root && CODEX_HOME=$home codex
+That home has no login yet. Log in to it first, which --clean removes with it:
+  CODEX_HOME=$home codex login
 It holds the hooks for review on start: trust them there or in /hooks.
 EOF
     ;;

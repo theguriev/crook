@@ -145,8 +145,12 @@ payload's `session_id`) and `CLAUDE_PID`.
 ## Codex CLI 0.149.1
 
 Not measured: deferred by the owner on 2026-10-16. `script/probe-permission-hooks codex`
-installs the recorder in the project's `.codex/hooks.json`, which Codex holds for review until it
-is trusted in `/hooks`.
+installs the recorder in the `hooks.json` of a `CODEX_HOME` of the project's own,
+`.probe/codex-home`, and prints the `CODEX_HOME=… codex` to start Codex with. Codex holds the
+hooks for review until they are trusted in `/hooks`, and keeps that trust, and the directory's,
+in its `CODEX_HOME`'s `config.toml`, so none of it reaches `~/.codex`. That home starts empty
+rather than copied, so no login is copied into it: `CODEX_HOME=… codex login` first, and
+`--clean` removes that login with the rest.
 
 | | Finding | Evidence | Gates |
 |---|---|---|---|
@@ -200,6 +204,9 @@ script/probe-permission-hooks claude variant HOLD=60 AFTER=5 TRAP=stay
 script/probe-permission-hooks claude timeline # every hook run and signal, in seconds from the first
 script/probe-permission-hooks --clean         # the project, the recorder and its processes, gone
 ```
+
+`--clean` sends a leftover recorder, its children and its watcher a TERM, and a second later a
+KILL to whichever stayed, as a `TRAP=stay` recorder does.
 
 The script's header says what each variant does. It spends the agent's usage, so a person runs
 it: the cheapest model, a prompt a case, and `--clean` at the end, since a recorder left where
