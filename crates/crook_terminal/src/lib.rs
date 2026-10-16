@@ -645,6 +645,12 @@ impl Terminal {
         self.link.process_id()
     }
 
+    /// The device number of the terminal the child runs on, where it has one
+    /// this process opened. See [`PtyLink::tty_device`].
+    pub fn tty_device(&self) -> Option<u32> {
+        self.link.tty_device()
+    }
+
     /// How the child finished, or `None` while it is still running.
     ///
     /// Does not block. The first call that finds the child gone also queues a

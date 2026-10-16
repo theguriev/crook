@@ -1046,6 +1046,15 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
             // about is already open, and this process is a program inside it
             // saying one thing to it.
             "--agent" => {
+                // A permission hook rather than a report, and first, before
+                // the status is parsed or anything else here is looked at:
+                // it exits 0 and prints nothing on every path but an answer,
+                // a word out of place included. An older binary refuses `ask`
+                // as a status, before it reads stdin or writes anywhere.
+                if args.next_if(|word| word == "ask").is_some() {
+                    agent::ask::run(args.by_ref());
+                    return Ok(Startup::Answered);
+                }
                 // A `--title` in front of the status is the window's as far
                 // as the loop could tell, and almost always the report's put
                 // in the wrong place — which it was refused as before the
@@ -1811,6 +1820,14 @@ OPTIONS:
                        names one that starts with the report, never a
                        subagent\'s, and hands it the pane whichever session held
                        it
+    --agent ask <AGENT>
+                       Be `claude`\'s (Claude Code\'s) permission hook: hand the
+                       window this pane is in the request the hook reads on
+                       stdin, over CROOK_SOCKET, wait there for an answer, and
+                       print it as the hook\'s decision. Prints nothing, and
+                       exits 0, whenever there is none — outside Crook, in
+                       tmux, for `claude -p` or a subagent, and on Windows.
+                       Writes to no terminal, and no hook runs it yet
     --agent-hooks <AGENT>
                        Print the hooks that make an agent say all of that by
                        itself, to merge into its settings: `claude` (Claude

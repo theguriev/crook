@@ -34,6 +34,10 @@
 //! what the table says again.
 //! A notification a program sent while nobody was looking takes the same
 //! line for as long as nobody has — see `AgentSession::row_message`.
+//! And while the agent's permission hook is waiting on a question the
+//! window holds, the line is that question — "Bash: rm -rf build", read off
+//! what the hook handed the window rather than anything the agent said —
+//! for as long as the pane needs input. See [`RowFacts::asking`].
 
 use std::path::Path;
 
@@ -43,7 +47,7 @@ use crookui_core::prelude::*;
 
 use crate::git::{DiffStats, GitFacts, Head, SinceBase};
 use crate::settings::{Granularity, PrimaryInfo, Subtitle, TabOptions, resolve_subtitle};
-use crate::tab::{AgentSession, Pane, PaneId, PullRequestCheck, Tab};
+use crate::tab::{AgentSession, AgentStatus, Pane, PaneId, PullRequestCheck, Tab};
 use crate::theme::theme;
 
 use super::action::WorkspaceAction;
@@ -183,6 +187,20 @@ impl RowFacts {
                 .map(str::to_owned),
             message: session.row_message().map(str::to_owned),
         }
+    }
+
+    /// The same, with `summary` on the second line while the pane needs
+    /// input: what the question its agent's hook is waiting on asks, in a
+    /// line — see `control::ask::summary` — which says more than the
+    /// "Claude needs your permission to use Bash" the agent said, and is the
+    /// command the hook was handed rather than one the agent described.
+    pub(super) fn asking(mut self, session: &AgentSession, summary: Option<&str>) -> Self {
+        if let Some(summary) = summary
+            && session.shown_status() == AgentStatus::NeedsInput
+        {
+            self.message = Some(summary.to_owned());
+        }
+        self
     }
 
     /// The machine the session is on, when it is not this one, as the title
@@ -1061,6 +1079,59 @@ mod naming_tests {
         let working = facts(&session);
         assert_eq!(
             working.subtitle(options).map(|line| line.text),
+            Some("~/work/crook".to_owned())
+        );
+    }
+
+    /// While the agent's hook is waiting on a question and the pane needs
+    /// input, the second line is the question as the hook handed it — the
+    /// command — and not the sentence the agent's notification said, which
+    /// names only the tool. Before the notice arrives, and once the agent is
+    /// back at work, the line is what it would be without the question.
+    #[test]
+    fn the_row_says_which_command_while_the_pane_needs_input() {
+        let mut session = session("/Users/eugen/work/crook");
+        session.derived_title = Some("port the tab bar".to_owned());
+        session.status = AgentStatus::NeedsInput;
+        session.message = Some("Claude needs your permission to use Bash".to_owned());
+        let options = TabOptions {
+            primary_info: PrimaryInfo::Command,
+            subtitle: Subtitle::Branch,
+            ..TabOptions::default()
+        };
+        let asking = Some("Bash: rm -rf build");
+
+        let waiting = facts(&session).asking(&session, asking);
+        assert_eq!(
+            waiting
+                .description(PrimaryInfo::Command)
+                .map(|line| line.text),
+            Some("Bash: rm -rf build".to_owned())
+        );
+        assert_eq!(
+            waiting.subtitle(options).map(|line| line.text),
+            Some("Bash: rm -rf build".to_owned())
+        );
+        // The title stays the agent's name for its work.
+        assert_eq!(waiting.title(PrimaryInfo::Command).text, "port the tab bar");
+
+        // A question with nobody asked yet — the title's `✳` before the
+        // notification — leaves the line to the table.
+        session.status = AgentStatus::Idle;
+        session.message = None;
+        assert_eq!(
+            facts(&session)
+                .asking(&session, asking)
+                .description(PrimaryInfo::Command)
+                .map(|line| line.text),
+            Some("~/work/crook".to_owned())
+        );
+        session.status = AgentStatus::Running;
+        assert_eq!(
+            facts(&session)
+                .asking(&session, asking)
+                .subtitle(options)
+                .map(|line| line.text),
             Some("~/work/crook".to_owned())
         );
     }

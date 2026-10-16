@@ -55,6 +55,15 @@
 //! the end of what the client says is taken for its leaving, and a client of
 //! a kept verb keeps its half open until the reply comes. See
 //! [`until_closed`].
+//!
+//! # An agent's question
+//!
+//! `agent.ask` keeps its connection too, in a lane of its own — at most
+//! [`MAX_ASKS`], counted apart from the waits and streams — and only for a
+//! process the kernel says is this user's. Its connection is the question's
+//! whole life: the window holds it and says so, a reader on the hook's half
+//! tells the window the moment the hook goes, and the one answer written is
+//! a person's, or a pass when the time runs out, or `gone`. See [`ask_on`].
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, Permissions};
@@ -63,14 +72,19 @@ use std::net::Shutdown;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::Value;
 
-use super::protocol::{self, MAX_LINE, PaneEvent, Refusal, Reply, Request, Verb, Wait, code};
+use super::Notice;
+use super::ask::{AskId, Cause};
+use super::protocol::{
+    self, Answered, Asker, Delivered, MAX_LINE, PaneEvent, Refusal, Reply, Request, Verb, Wait,
+    code,
+};
 use super::watch::{Feed, Next};
 
 /// The name of the directory the sockets live in, under the runtime or the
@@ -112,6 +126,31 @@ pub const MAX_CONNECTIONS: usize = 8;
 /// is two threads — one waiting on the window, one on the client — so this is
 /// what bounds them.
 pub const MAX_KEPT: usize = 32;
+
+/// How many agents' questions are held at once, apart from the
+/// [`MAX_KEPT`] waits and streams. The next is refused as `busy`, and its
+/// hook passes to the agent's own prompt.
+///
+/// Sixteen: a pane holds four — see `ask::MAX_PER_PANE` — and a window with
+/// a few agents each asking is well inside it. Counted apart from the waits,
+/// so that a lead waiting on every worker it may open cannot leave a
+/// worker's question with nowhere to wait, nor a burst of questions a lead's
+/// `crook pane wait` turned away. Each is two threads, like a wait.
+pub const MAX_ASKS: usize = 16;
+
+/// How long after a question's own wait the connection gives it before
+/// telling the hook it has expired.
+///
+/// The hook stops reading a little after its own wait — see
+/// `agent::ask::CLAUDE_AWAIT` — so this is what makes the window, which
+/// knows, the side that says the question is over.
+pub const ASK_MARGIN: Duration = Duration::from_secs(5);
+
+/// The longest line a hook may send after its question, in bytes.
+///
+/// It sends one, `{"delivered":true}`; four kilobytes is far past it, and a
+/// bound on what a client sending something else can make a thread hold.
+pub const MAX_ASKER_LINE: usize = 4 * 1024;
 
 /// How old a refusing socket must be before a starting Crook sweeps it.
 ///
@@ -567,6 +606,8 @@ pub struct Lanes {
     answered: AtomicUsize,
     /// Connections kept for a wait or a stream: at most [`MAX_KEPT`].
     kept: AtomicUsize,
+    /// Connections holding an agent's question: at most [`MAX_ASKS`].
+    asking: AtomicUsize,
 }
 
 /// A connection's place in one of the [`Lanes`], given back when it is
@@ -574,7 +615,18 @@ pub struct Lanes {
 #[derive(Debug)]
 pub struct Place {
     lanes: Arc<Lanes>,
-    kept: bool,
+    lane: Lane,
+}
+
+/// Which of the [`Lanes`] a [`Place`] is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lane {
+    /// Among the connections answered.
+    Answered,
+    /// Among the connections kept for a wait or a stream.
+    Kept,
+    /// Among the connections holding an agent's question.
+    Asking,
 }
 
 impl Place {
@@ -586,33 +638,47 @@ impl Place {
         }
         Some(Self {
             lanes: lanes.clone(),
-            kept: false,
+            lane: Lane::Answered,
         })
     }
 
-    /// Moves this place to the connections kept, giving the one it had back,
-    /// or says there is no room there.
-    fn keep(&mut self) -> bool {
-        if self.kept {
+    /// Moves this place to the lane `verb` keeps its connection in, giving
+    /// the one it had back, or says there is no room there: an agent's
+    /// question to the questions held, and a wait or a stream to the
+    /// connections kept.
+    fn keep_for(&mut self, verb: &Verb) -> bool {
+        let lane = match verb {
+            Verb::AgentAsk(_) => Lane::Asking,
+            _ => Lane::Kept,
+        };
+        if self.lane == lane {
             return true;
         }
-        if self.lanes.kept.fetch_add(1, Ordering::AcqRel) >= MAX_KEPT {
-            self.lanes.kept.fetch_sub(1, Ordering::AcqRel);
+        let (count, most) = self.lanes.lane(lane);
+        if count.fetch_add(1, Ordering::AcqRel) >= most {
+            count.fetch_sub(1, Ordering::AcqRel);
             return false;
         }
-        self.lanes.answered.fetch_sub(1, Ordering::AcqRel);
-        self.kept = true;
+        self.lanes.lane(self.lane).0.fetch_sub(1, Ordering::AcqRel);
+        self.lane = lane;
         true
+    }
+}
+
+impl Lanes {
+    /// The count of a lane, and how many it holds at most.
+    fn lane(&self, lane: Lane) -> (&AtomicUsize, usize) {
+        match lane {
+            Lane::Answered => (&self.answered, MAX_CONNECTIONS),
+            Lane::Kept => (&self.kept, MAX_KEPT),
+            Lane::Asking => (&self.asking, MAX_ASKS),
+        }
     }
 }
 
 impl Drop for Place {
     fn drop(&mut self) {
-        let lane = match self.kept {
-            true => &self.lanes.kept,
-            false => &self.lanes.answered,
-        };
-        lane.fetch_sub(1, Ordering::AcqRel);
+        self.lanes.lane(self.lane).0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -655,7 +721,12 @@ pub fn converse(stream: &UnixStream, deadline: Instant, answer: &Ask, place: &mu
             if let Ok(request) = &request
                 && request.verb.keeps_connection()
             {
-                keep(stream, id, request.clone(), deadline, answer, place);
+                match request.verb {
+                    Verb::AgentAsk(_) => {
+                        ask_on(stream, id, request.clone(), deadline, answer, place);
+                    }
+                    _ => keep(stream, id, request.clone(), deadline, answer, place),
+                }
                 return;
             }
             // A verb that waits on git is given its own time, for this reply
@@ -708,7 +779,7 @@ fn keep(
     place: &mut Place,
 ) {
     let asked_at = Instant::now();
-    if !place.keep() {
+    if !place.keep_for(&request.verb) {
         let refusal = Refusal::new(
             code::BUSY,
             format!(
@@ -763,6 +834,7 @@ fn wait_on(
                     ..asked.clone()
                 }),
                 token: request.token.clone(),
+                asker: None,
             };
             let deadline = Instant::now() + DEADLINE;
             let answer_by = deadline.checked_sub(REPLY_MARGIN).unwrap_or(deadline);
@@ -816,6 +888,222 @@ fn stream_to(stream: &UnixStream, id: Option<Value>, first: Value, deadline: Ins
             return;
         }
     }
+}
+
+/// Holds an agent's question in the window for as long as its hook waits,
+/// and writes the hook the one answer it gets — or why it gets none.
+///
+/// The question takes a place among the [`MAX_ASKS`] held, and is asked of
+/// the window only when the kernel says the process at the other end is this
+/// user's: a question is the one request whose answer could ever carry an
+/// allow, and a socket somebody else reached by a loosened directory gets
+/// none. Whose process it is, and whose that process's ancestors are, go to
+/// the window with it, read here on the connection's thread.
+///
+/// Once the window holds it, `{"asked": id}` is written, and two things wait:
+/// this thread on the feed, until the question's wait and [`ASK_MARGIN`] are
+/// up, and a reader on the client's half — see [`hear_the_hook`] — which is
+/// how the window hears the hook went the moment it did. An answer pushed in
+/// time is written, and the reader is given a moment to hear the hook say it
+/// printed it; a wait that runs out is a pass, `expired`, which the window is
+/// told of; a window that closes is `gone`.
+fn ask_on(
+    stream: &UnixStream,
+    id: Option<Value>,
+    request: Request,
+    deadline: Instant,
+    answer: &Ask,
+    place: &mut Place,
+) {
+    let asked_at = Instant::now();
+    let refuse = |refusal: Refusal| {
+        let _ = send(stream, deadline, &Reply::refused(id.clone(), refusal));
+    };
+    if !place.keep_for(&request.verb) {
+        refuse(Refusal::new(
+            code::BUSY,
+            format!(
+                "this Crook is holding {MAX_ASKS} agents' questions already; answer in the \
+                 agent's own prompt"
+            ),
+        ));
+        return;
+    }
+    let asker = match asker(stream, euid()) {
+        Ok(asker) => asker,
+        Err(refusal) => {
+            refuse(refusal);
+            return;
+        }
+    };
+    let Verb::AgentAsk(asked) = &request.verb else {
+        return;
+    };
+    let until = asked_at + asked.wait() + ASK_MARGIN;
+    let request = Request {
+        asker: Some(asker),
+        ..request
+    };
+    let feed = Arc::new(Feed::for_verb(&request.verb));
+
+    let answer_by = deadline.checked_sub(REPLY_MARGIN).unwrap_or(deadline);
+    let registered = match answer(request, Some(feed.clone()), answer_by) {
+        Ok(registered) => registered,
+        Err(refusal) => {
+            feed.hang_up();
+            refuse(refusal);
+            return;
+        }
+    };
+    let held = registered
+        .get("asked")
+        .and_then(Value::as_u64)
+        .map(AskId::from_wire);
+    let Some(held) = held else {
+        feed.hang_up();
+        return;
+    };
+    if send(stream, deadline, &Reply::answered(id.clone(), registered)).is_err() {
+        if feed.hang_up() {
+            feed.notice(Notice::Withdrawn(held));
+        }
+        let _ = stream.shutdown(Shutdown::Both);
+        return;
+    }
+
+    let heard = hear_the_hook(stream, &feed, held);
+    match feed.next_or_close(until) {
+        Next::Item(item) => {
+            let mut line = item.to_string();
+            line.push('\n');
+            if write_line(stream, &line).is_ok() {
+                // The hook's `delivered`, or its leaving, whichever is first:
+                // either is the end of what this connection is for.
+                let _ = heard.recv_timeout(DEADLINE);
+            }
+        }
+        Next::TimedOut => {
+            let _ = write_line(stream, &Answered::pass(Cause::Expired.word()).line());
+            feed.notice(Notice::Expired(held));
+        }
+        // By a deadline of its own: the connection's ran out long ago, as
+        // a question is held for minutes.
+        Next::Ended => {
+            let gone = Refusal::new(
+                code::GONE,
+                "the window closed before the question was answered",
+            );
+            let _ = send(stream, Instant::now() + DEADLINE, &Reply::refused(id, gone));
+        }
+        Next::HungUp | Next::Lagged(_) => {}
+    }
+    feed.hang_up();
+    // Ends the connection for the hook, and returns the read the reader is
+    // parked in.
+    let _ = stream.shutdown(Shutdown::Both);
+}
+
+/// Who the process at the other end of `stream` is, when the kernel says it
+/// runs as `uid`; refused as `unauthorized` otherwise.
+///
+/// Its lineage is read here, on the connection's thread, and only for a
+/// question: a walk of up to [`MOST_ASKERS`] processes is no work for a
+/// frame to do. Read now, just after the request arrived, because on macOS
+/// the pid the kernel names is whoever used the connection last.
+pub fn asker(stream: &UnixStream, uid: u32) -> Result<Asker, Refusal> {
+    let unauthorized = |why: String| {
+        Refusal::new(
+            code::UNAUTHORIZED,
+            format!("only a process of this window's user may ask it a question: {why}"),
+        )
+    };
+    let peer = peer_credentials(stream)
+        .map_err(|error| unauthorized(format!("the kernel would not say who asked: {error}")))?;
+    if peer.uid != uid {
+        return Err(unauthorized(format!(
+            "the process that asked is uid {}, not {uid}",
+            peer.uid
+        )));
+    }
+    Ok(Asker {
+        pid: peer.pid,
+        lineage: peer.pid.map(lineage).unwrap_or_default(),
+    })
+}
+
+/// How many processes up from the asker its lineage is read.
+pub const MOST_ASKERS: usize = 64;
+
+/// `pid` and its ancestors, nearest first, as far as they can be read.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn lineage(pid: u32) -> Vec<u32> {
+    crate::agent::ancestors::lineage(pid, MOST_ASKERS)
+}
+
+/// Nowhere else reads a process's parent yet, so a question asked there is
+/// from a process nobody can place, and is shown and never answered.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn lineage(_: u32) -> Vec<u32> {
+    Vec::new()
+}
+
+/// Starts the thread that reads what a hook says after its question, and
+/// tells the window: [`Notice::Delivered`] for its `{"delivered":true}`, and
+/// [`Notice::Withdrawn`] — once, and only while the question was still open
+/// — when it hangs up.
+///
+/// Not [`watch_for_hangup`]: that one reads and lets go, and would race this
+/// for the line. Whatever this hears — a delivery or the end — is sent on
+/// the channel it hands back, which the connection's thread waits on after
+/// writing the answer. A hook never closes only its half, so the end of what
+/// it says is its leaving, on every platform.
+fn hear_the_hook(stream: &UnixStream, feed: &Arc<Feed>, held: AskId) -> mpsc::Receiver<()> {
+    let (heard, hearing) = mpsc::channel();
+    let Ok(reading) = stream.try_clone() else {
+        return hearing;
+    };
+    // The connection's deadline set a timeout on reads, and a read that timed
+    // out would be taken for the hook leaving.
+    if reading.set_read_timeout(None).is_err() {
+        return hearing;
+    }
+    let feed = feed.clone();
+    let started = thread::Builder::new()
+        .name("crook-control-asker".to_owned())
+        .spawn(move || {
+            let mut lines = BufReader::new(&reading);
+            loop {
+                let mut line = Vec::new();
+                match (&mut lines)
+                    .take(MAX_ASKER_LINE as u64 + 1)
+                    .read_until(b'\n', &mut line)
+                {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) if line.len() > MAX_ASKER_LINE => break,
+                    Ok(_) => {}
+                }
+                let said = serde_json::from_slice::<Delivered>(&line);
+                if said.is_ok_and(|said| said.delivered) {
+                    feed.notice(Notice::Delivered(held));
+                    let _ = heard.send(());
+                }
+            }
+            if feed.hang_up() {
+                feed.notice(Notice::Withdrawn(held));
+            }
+            let _ = heard.send(());
+        });
+    if let Err(error) = started {
+        log::debug!("no reader for an agent's question: {error}");
+    }
+    hearing
+}
+
+/// Writes one line, by [`DEADLINE`] from now.
+fn write_line(stream: &UnixStream, line: &str) -> io::Result<()> {
+    stream.set_write_timeout(Some(DEADLINE))?;
+    let mut stream = stream;
+    stream.write_all(line.as_bytes())
 }
 
 /// Starts the thread that sees a kept connection's client hang up, and hangs

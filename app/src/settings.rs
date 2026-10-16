@@ -514,6 +514,15 @@ pub struct GeneralOptions {
     /// asked; "End all agents and quit" is the same answer given once, with
     /// this left on. See `workspace::closing`.
     pub ask_before_ending_agents: bool,
+    /// Whether the window takes the questions agents' permission hooks hand
+    /// it — see [`crate::control::ask`] — or refuses each as `declined`, and
+    /// the hook passes at once to the agent's own prompt.
+    ///
+    /// On, because a question taken changes nothing a person does not look
+    /// for: the agent's prompt is still up, and the window only shows the
+    /// command on the row. Off is the switch for a person who wants Crook
+    /// to have no part in what an agent is allowed to do.
+    pub answer_agents_from_crook: bool,
     /// Whether a pane whose row turns to needs-input while the window is
     /// behind another one posts a desktop notification.
     ///
@@ -578,6 +587,7 @@ impl Default for GeneralOptions {
             tab_key: TabKey::Completions,
             option_as_meta: OptionAsMeta::Auto,
             ask_before_ending_agents: true,
+            answer_agents_from_crook: true,
             notify_on_needs_input: true,
             notify_on_failed: false,
             notify_on_long_command: false,
@@ -2035,6 +2045,9 @@ mod tests {
 
         assert_eq!(
             vec![
+                // Crook's own: whether the window takes the questions agents'
+                // permission hooks hand it.
+                "answer_agents_from_crook",
                 // Crook's own: whether a close that would end an agent still
                 // working asks first.
                 "ask_before_ending_agents",
@@ -2274,11 +2287,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Nine tab options, sixteen general ones and three theme names, and
+        // Nine tab options, seventeen general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(28, written.len());
+        assert_eq!(29, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),

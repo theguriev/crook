@@ -42,9 +42,14 @@
 //! the window keeping everything it said for a client that is not reading.
 //! A client that hangs up closes its feed, and a closed feed is dropped here
 //! the next time anything is pushed.
+//!
+//! An agent's question waits on a feed too — see [`super::ask`] — and its
+//! feed is the strictest: one answer, never dropped for another, and closed
+//! at the moment the question expires under the same lock a push takes, so
+//! that an answer either reaches the hook or is told it was too late.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use crook_terminal::BlockState;
@@ -52,7 +57,7 @@ use crookui_core::prelude::*;
 use serde_json::Value;
 
 use super::protocol::{Follow, Following, PaneEvent, Refusal, Until, Verb, Wait, Waited, code};
-use super::{blocks, word};
+use super::{Inbox, Notice, blocks, word};
 use crate::tab::{AgentSession, AgentStatus, PaneId, StatusSource, TabStrip};
 use crate::workspace::Workspace;
 
@@ -77,11 +82,19 @@ pub const REMEMBERED_CLOSED: usize = 256;
 ///
 /// Shared by exactly two threads: the window's, which pushes, and the
 /// connection's, which takes. Bounded at `capacity`: a push past it drops the
-/// oldest item and counts it, and the next take says how many went.
+/// oldest item and counts it, and the next take says how many went — but for
+/// an agent's question, whose one answer is never dropped for another: a push
+/// past its capacity is refused instead. See [`Feed::for_verb`].
 pub struct Feed {
     state: Mutex<Fed>,
     changed: Condvar,
     capacity: usize,
+    /// Whether a push past the capacity is refused rather than dropping the
+    /// oldest.
+    refuses_when_full: bool,
+    /// Where the connection's thread tells the window what happened to an
+    /// agent's question — see [`Feed::notice`] — once the window has said.
+    inbox: Mutex<Option<Weak<Inbox>>>,
 }
 
 /// What a [`Feed`] holds.
@@ -119,14 +132,23 @@ impl Feed {
             state: Mutex::default(),
             changed: Condvar::new(),
             capacity: capacity.max(1),
+            refuses_when_full: false,
+            inbox: Mutex::default(),
         }
     }
 
     /// The feed a kept connection asking `verb` needs: room for one answer
-    /// for a wait, and [`FOLLOW_BUFFER`] events for a stream.
+    /// for a wait, [`FOLLOW_BUFFER`] events for a stream, and one answer for
+    /// an agent's question, which refuses a second rather than dropping the
+    /// first — an allow that silently replaced a pass, or the other way
+    /// round, would be an answer nobody gave.
     pub fn for_verb(verb: &Verb) -> Self {
         match verb {
             Verb::PaneWait(_) => Self::new(1),
+            Verb::AgentAsk(_) => Self {
+                refuses_when_full: true,
+                ..Self::new(1)
+            },
             _ => Self::new(FOLLOW_BUFFER),
         }
     }
@@ -135,19 +157,25 @@ impl Feed {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Adds an item, dropping the oldest when the feed is full. Nothing, once
-    /// the feed is ended or hung up.
-    pub fn push(&self, item: Value) {
+    /// Adds an item, dropping the oldest when the feed is full — or, for an
+    /// agent's question, refusing it. Whether the item was taken: never once
+    /// the feed is ended or hung up, which is what tells an answer that lost
+    /// the race with its question's expiry from one that was given.
+    pub fn push(&self, item: Value) -> bool {
         let mut fed = self.lock();
         if fed.ended || fed.hung_up {
-            return;
+            return false;
         }
         if fed.items.len() >= self.capacity {
+            if self.refuses_when_full {
+                return false;
+            }
             fed.items.pop_front();
             fed.dropped += 1;
         }
         fed.items.push_back(item);
         self.changed.notify_all();
+        true
     }
 
     /// Says nothing more will be pushed. What is held can still be taken.
@@ -157,11 +185,36 @@ impl Feed {
     }
 
     /// Says the connection is done with it, and lets go of what it holds.
-    pub fn hang_up(&self) {
+    /// Whether it was still open: neither ended nor hung up before.
+    pub fn hang_up(&self) -> bool {
         let mut fed = self.lock();
+        let was_open = !fed.ended && !fed.hung_up;
         fed.hung_up = true;
         fed.items.clear();
         self.changed.notify_all();
+        was_open
+    }
+
+    /// Says where the connection's thread tells the window what happened to
+    /// the question this feed answers. Set by the window, on its own thread,
+    /// before the connection is told the question is held — so before
+    /// anything can happen to it.
+    pub fn tell(&self, inbox: Weak<Inbox>) {
+        *self.inbox.lock().unwrap_or_else(PoisonError::into_inner) = Some(inbox);
+    }
+
+    /// Tells the window `notice`, and wakes it to hear it. Nothing when the
+    /// window has said nowhere, or has closed.
+    pub fn notice(&self, notice: Notice) {
+        let inbox = self
+            .inbox
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(Weak::upgrade);
+        if let Some(inbox) = inbox {
+            inbox.notice(notice);
+        }
     }
 
     /// Whether anything pushed now could still be taken.
@@ -212,6 +265,42 @@ impl Feed {
                         .0
                 }
             };
+        }
+    }
+
+    /// Takes the next item as [`Self::next`] does until `until`, and when
+    /// nothing came by then hangs the feed up before letting go of the lock.
+    ///
+    /// For an agent's question, whose expiry and whose answer must never
+    /// both happen: a push that comes a moment after the time ran out finds
+    /// the feed hung up and is refused, and the press it came from is told it
+    /// was too late, rather than being taken here and never written.
+    pub fn next_or_close(&self, until: Instant) -> Next {
+        let mut fed = self.lock();
+        loop {
+            if fed.hung_up {
+                return Next::HungUp;
+            }
+            if fed.dropped > 0 {
+                return Next::Lagged(std::mem::take(&mut fed.dropped));
+            }
+            if let Some(item) = fed.items.pop_front() {
+                return Next::Item(item);
+            }
+            if fed.ended {
+                return Next::Ended;
+            }
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                fed.hung_up = true;
+                self.changed.notify_all();
+                return Next::TimedOut;
+            }
+            fed = self
+                .changed
+                .wait_timeout(fed, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
     }
 }

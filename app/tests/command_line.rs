@@ -97,3 +97,89 @@ fn an_answer_nobody_is_left_to_read_ends_the_command_and_is_not_a_panic() {
         "the window was not asked for the blocks: {asked:?}"
     );
 }
+
+/// What Claude Code hands a permission hook for a `Bash` call, with every
+/// rule `crook --agent ask` reads holding but the ones a case breaks.
+const PERMISSION_REQUEST: &str = r#"{"session_id":"4f1c2b7e","cwd":"/home/someone/work","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}"#;
+
+/// `crook --agent ask` with `words` after it, `environment` set, and the
+/// request on stdin: its exit status, stdout and stderr.
+fn ask(words: &[&str], environment: &[(&str, &str)]) -> (Option<i32>, String, String) {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut command = crook::process::command(env!("CARGO_BIN_EXE_crook"));
+    command
+        .args(words)
+        .env_remove("CROOK_SOCKET")
+        .env_remove("CROOK_TOKEN")
+        .env("CLAUDE_CODE_ENTRYPOINT", "cli")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in environment {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().expect("the crook binary runs");
+    // A hook that reads nothing has closed its input already, and the write
+    // fails; what it prints is the test either way.
+    let _ = child
+        .stdin
+        .take()
+        .expect("piped")
+        .write_all(PERMISSION_REQUEST.as_bytes());
+    let output = child.wait_with_output().expect("the crook binary ends");
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// A permission hook outside Crook is no question and no complaint: Claude
+/// Code reads nothing on stdout as "go on with your own dialog", and a hook
+/// that said something on stderr every time would be noise in every agent
+/// run anywhere. Exit 0 whatever is wrong, a word out of place included,
+/// since a hook that fails can fail its agent; and one line on stderr for an
+/// agent this binary does not ask for, which is what a newer hook reaching
+/// an older binary looks like.
+#[test]
+fn a_permission_hook_prints_nothing_and_exits_0_outside_crook_or_for_an_agent_it_does_not_know() {
+    assert_eq!(
+        ask(&["--agent", "ask", "claude"], &[]),
+        (Some(0), String::new(), String::new())
+    );
+    assert_eq!(
+        ask(&["--title", "x", "--agent", "ask", "claude"], &[]),
+        (Some(0), String::new(), String::new()),
+        "a misplaced --title fails a report, and not a hook"
+    );
+    for words in [
+        &["--agent", "ask", "codex"][..],
+        &["--agent", "ask"][..],
+        &["--agent", "ask", "claude", "--wait"][..],
+    ] {
+        let (status, stdout, stderr) = ask(words, &[("CROOK_SOCKET", "/nonexistent/w.sock")]);
+        assert_eq!(status, Some(0), "{words:?}: {stderr}");
+        assert_eq!(stdout, "", "{words:?}");
+        assert_eq!(stderr.lines().count(), 1, "{words:?}: {stderr:?}");
+        assert!(stderr.contains("`--agent ask` takes claude"), "{stderr}");
+    }
+}
+
+/// Windows has no socket, so with every rule holding there is still nobody
+/// to ask, and the hook passes at once.
+#[test]
+#[cfg(windows)]
+fn a_permission_hook_on_windows_prints_nothing_and_exits_0() {
+    assert_eq!(
+        ask(
+            &["--agent", "ask", "claude"],
+            &[
+                ("CROOK_SOCKET", r"\\.\pipe\crook"),
+                ("CROOK_TOKEN", "c0ffee")
+            ]
+        ),
+        (Some(0), String::new(), String::new())
+    );
+}

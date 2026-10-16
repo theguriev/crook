@@ -9,11 +9,28 @@
 //!
 //! See "The window answers" in `docs/architecture.md` for the shape, and why
 //! a verb, once shipped, is only ever added to.
+//!
+//! # A question a hook asks, and never an answer
+//!
+//! Six verbs, and the sixth, `agent.ask`, goes the other way: not a script
+//! asking the window something, but an agent's permission hook handing the
+//! window the question its agent is about to ask a person — the whole
+//! request, normalised — and waiting on the same connection for what the
+//! person says. The answer comes back down that connection and no other, so
+//! a process that makes a question up is answered about the question it made
+//! up and about nothing else. No verb answers: an answer is a person's press
+//! on a card in the window, and a verb that any process of this user could
+//! send would be a way round the press. `agent.answer` is an unknown verb,
+//! and a test holds it to that. See "Answering an agent" in
+//! `docs/architecture.md`.
 
+use std::fmt;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+
+use crate::agent::request::{self, AskRequest};
 
 /// The version of the protocol this window speaks, carried on every reply.
 pub const VERSION: u64 = 1;
@@ -82,6 +99,9 @@ pub mod code {
     /// is still running, a full-screen program or an agent's TUI has the
     /// pane, or its shell reports no command marks and so never finishes one.
     pub const NO_BLOCKS: &str = "no-blocks";
+    /// This window is set not to take agents' questions: the person turned
+    /// answering them from Crook off, and the agent's own prompt is the one.
+    pub const DECLINED: &str = "declined";
 }
 
 /// The longest a `pane.wait` may wait, in seconds, and how long one that
@@ -102,10 +122,11 @@ pub const MAX_BLOCKS: usize = 100;
 
 /// What a request can ask for.
 ///
-/// Five verbs: one that lists, one that opens a tab, and three that watch a
-/// pane the caller may watch — itself, and the tabs it opened. Every one is a
-/// promise that is hard to take back, which is why each is added on purpose
-/// and none by a pattern.
+/// Six verbs: one that lists, one that opens a tab, three that watch a pane
+/// the caller may watch — itself, and the tabs it opened — and one an
+/// agent's hook asks its own question with. Every one is a promise that is
+/// hard to take back, which is why each is added on purpose and none by a
+/// pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verb {
     /// Every pane of the window, as a list of [`PaneEntry`].
@@ -123,16 +144,21 @@ pub enum Verb {
     /// for as long as the connection stays open: see [`Follow`]. Answered
     /// with a [`Following`], and then a [`PaneEvent`] a line.
     EventsFollow(Follow),
+    /// An agent's permission hook handing the window the question its agent
+    /// is asking, and waiting for what a person says: see [`AgentAsk`].
+    /// Answered with a [`Registered`], then one [`Answered`] line.
+    AgentAsk(AgentAsk),
 }
 
 impl Verb {
     /// Every verb's name, in the order a refusal names them.
-    pub const NAMES: [&str; 5] = [
+    pub const NAMES: [&str; 6] = [
         "pane.list",
         "tab.new",
         "pane.wait",
         "pane.blocks",
         "events.follow",
+        "agent.ask",
     ];
 
     /// Its name on the wire: a noun and a verb, joined by a dot.
@@ -143,6 +169,7 @@ impl Verb {
             Self::PaneWait(_) => Self::NAMES[2],
             Self::PaneBlocks(_) => Self::NAMES[3],
             Self::EventsFollow(_) => Self::NAMES[4],
+            Self::AgentAsk(_) => Self::NAMES[5],
         }
     }
 
@@ -154,21 +181,22 @@ impl Verb {
             Self::PaneWait(asked) => serde_json::to_value(asked),
             Self::PaneBlocks(asked) => serde_json::to_value(asked),
             Self::EventsFollow(asked) => serde_json::to_value(asked),
+            Self::AgentAsk(asked) => serde_json::to_value(asked),
         };
         Some(encoded.expect("a verb's arguments are numbers, strings and booleans"))
     }
 
     /// Whether the connection is kept for this verb after it is asked: a
-    /// wait with time to wait, and a stream of events.
+    /// wait with time to wait, a stream of events, and an agent's question.
     ///
-    /// Such a connection answers nothing after it, holds a place of its own
-    /// rather than one of the few a question is answered in — see
-    /// `server::MAX_KEPT` — and ends early when the client hangs up. A wait
+    /// Such a connection holds a place of its own rather than one of the few
+    /// a question is answered in — see `server::MAX_KEPT` and
+    /// `server::MAX_ASKS` — and ends early when the client hangs up. A wait
     /// of no time at all is a question like any other.
     pub fn keeps_connection(&self) -> bool {
         match self {
             Self::PaneWait(asked) => !asked.timeout().is_zero(),
-            Self::EventsFollow(_) => true,
+            Self::EventsFollow(_) | Self::AgentAsk(_) => true,
             Self::PaneList | Self::TabNew(_) | Self::PaneBlocks(_) => false,
         }
     }
@@ -482,6 +510,217 @@ pub struct Opened {
     pub note: Option<String>,
 }
 
+/// The longest an agent's question may be held, in seconds.
+///
+/// Ten minutes: past the five a Claude Code permission hook is given, with
+/// room for an agent that gives its hooks longer, and short enough that a
+/// question nobody looks at gives its place back.
+pub const MAX_ASK_WAIT_SECS: u64 = 600;
+
+/// The longest working directory a question carries, in bytes: `PATH_MAX`
+/// on Linux, past macOS's.
+pub const MAX_CWD: usize = 4096;
+
+/// The agents whose hooks may ask: one so far.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AskingAgent {
+    /// Claude Code, through its `PermissionRequest` hook.
+    Claude,
+}
+
+impl AskingAgent {
+    /// The word on the wire and after `crook --agent ask`.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+        }
+    }
+
+    /// What a person calls it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude Code",
+        }
+    }
+
+    /// The agent's own name for the tool a request is for, which is what a
+    /// question's digest is taken over.
+    pub fn tool(self, request: &AskRequest) -> &'static str {
+        match (self, request) {
+            (Self::Claude, AskRequest::Command { .. }) => "Bash",
+        }
+    }
+}
+
+/// What `agent.ask` carries: the question an agent's permission hook was
+/// handed, normalised, and where it was asked from.
+///
+/// Unknown fields refused, as every verb's are, and here most of all: a
+/// field this window does not know is one it would not show, and a person
+/// must not be asked to allow less than will happen.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentAsk {
+    /// Which agent asks.
+    pub agent: AskingAgent,
+    /// The agent's session, as its hook was handed it: what a newer question
+    /// from the same session replaces an older one by.
+    pub session: String,
+    /// The directory the agent works in, absolute.
+    pub cwd: String,
+    /// The device number of the terminal a status from the hook would be
+    /// written to: the hook's own controlling terminal, or the agent's. What
+    /// binds the question to the pane whose pty that is.
+    pub tty: u32,
+    /// How long the hook waits for an answer, in seconds, from 1 to
+    /// [`MAX_ASK_WAIT_SECS`].
+    pub wait: u64,
+    /// What the agent asks to do.
+    pub request: AskRequest,
+}
+
+impl AgentAsk {
+    /// How long the hook waits.
+    pub fn wait(&self) -> Duration {
+        Duration::from_secs(self.wait)
+    }
+
+    /// The agent's name for the tool the request is for.
+    pub fn tool(&self) -> &'static str {
+        self.agent.tool(&self.request)
+    }
+
+    /// The question's digest: see [`request::digest`].
+    pub fn digest(&self) -> [u8; 32] {
+        request::digest(&self.session, self.tool(), &self.request)
+    }
+
+    /// Why the window will not take this question, or `None` when it will.
+    fn fault(&self) -> Option<String> {
+        if crook_terminal::agent::session_id(&self.session).is_none() {
+            return Some(format!(
+                "`session` is one word of at most {} bytes",
+                crook_terminal::agent::SESSION_BYTES
+            ));
+        }
+        if !self.cwd.starts_with('/') || self.cwd.len() > MAX_CWD || self.cwd.contains('\0') {
+            return Some(format!(
+                "`cwd` is an absolute path of at most {MAX_CWD} bytes"
+            ));
+        }
+        if !(1..=MAX_ASK_WAIT_SECS).contains(&self.wait) {
+            return Some(format!("`wait` is from 1 to {MAX_ASK_WAIT_SECS} seconds"));
+        }
+        self.request
+            .fault()
+            .map(|fault| format!("`request` cannot be shown whole: {fault}"))
+    }
+}
+
+/// The agent, the kind of request and the first twelve hex digits of its
+/// digest — never the command, nor the directory: a request is printed in
+/// logs and panics, and what an agent asks to run stays between the agent,
+/// its hook and the person asked.
+impl fmt::Debug for AgentAsk {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentAsk")
+            .field("agent", &self.agent)
+            .field("kind", &self.request.kind())
+            .field("sha256", &request::hex(&self.digest()[..6]))
+            .finish_non_exhaustive()
+    }
+}
+
+/// What `agent.ask` answers first: the question is held, under this number.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Registered {
+    /// The question's number in this window, never given to another.
+    pub asked: u64,
+}
+
+/// What a person said to an agent's question, or that nobody will.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Decision {
+    /// Run it, this once.
+    Allow,
+    /// Do not run it.
+    Deny,
+    /// Nothing: the agent's own prompt is the one that answers.
+    Pass,
+}
+
+/// The decision and what goes with it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Verdict {
+    /// What was decided.
+    pub decision: Decision,
+    /// What a deny tells the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Why a pass is one, in a word: `expired`, `asked-again`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+/// The one line `agent.ask` answers with after [`Registered`].
+///
+/// Read with unknown fields refused at every level, so that a hook this old
+/// never acts on an answer a newer window meant more by.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Answered {
+    /// What was said.
+    pub answer: Verdict,
+}
+
+impl Answered {
+    /// A pass, and why.
+    pub fn pass(why: &str) -> Self {
+        Self {
+            answer: Verdict {
+                decision: Decision::Pass,
+                message: None,
+                why: Some(why.to_owned()),
+            },
+        }
+    }
+
+    /// The answer as it is written: one line of JSON and its newline.
+    pub fn line(&self) -> String {
+        let mut line =
+            serde_json::to_string(self).expect("an answer is words and strings, which encode");
+        line.push('\n');
+        line
+    }
+}
+
+/// The one line a hook sends after its answer: it has printed it, for its
+/// agent to read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Delivered {
+    /// Always `true`.
+    pub delivered: bool,
+}
+
+/// Who connected to ask, as the kernel says rather than as the request does.
+///
+/// Filled in by the connection, for a question only, and never read off the
+/// wire: what binds a question to a pane is the terminal it names, and this
+/// is what says whether the asker is a process of that pane's at all.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Asker {
+    /// The process at the other end of the connection, when the kernel
+    /// names one.
+    pub pid: Option<u32>,
+    /// That process and its ancestors, nearest first.
+    pub lineage: Vec<u32>,
+}
+
 /// One request: what it asks, and who asks it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
@@ -490,6 +729,9 @@ pub struct Request {
     /// The asking pane's `CROOK_TOKEN`, when it sent one. Whose it is, if it
     /// is anybody's, is the window's to say: see `control::spawn`.
     pub token: Option<String>,
+    /// Who connected, for an agent's question: see [`Asker`]. `None` off
+    /// the wire, always.
+    pub asker: Option<Asker>,
 }
 
 /// Why a request was not answered: a code a script can branch on, and a
@@ -731,6 +973,20 @@ fn request_of(request: &Map<String, Value>) -> Result<Request, Refusal> {
                     .map_err(|error| malformed(&format!("`events.follow`'s args: {error}")))?,
             ),
         },
+        "agent.ask" => {
+            let Some(args) = args else {
+                return Err(malformed(
+                    "`agent.ask` needs `args` naming its `agent`, `session`, `cwd`, `tty`, `wait` \
+                     and `request`",
+                ));
+            };
+            let asked = AgentAsk::deserialize(args)
+                .map_err(|error| malformed(&format!("`agent.ask`'s args: {error}")))?;
+            if let Some(fault) = asked.fault() {
+                return Err(Refusal::new(code::BAD_REQUEST, fault));
+            }
+            Verb::AgentAsk(asked)
+        }
         name => {
             return Err(Refusal::new(
                 code::UNKNOWN_VERB,
@@ -741,7 +997,11 @@ fn request_of(request: &Map<String, Value>) -> Result<Request, Refusal> {
             ));
         }
     };
-    Ok(Request { verb, token })
+    Ok(Request {
+        verb,
+        token,
+        asker: None,
+    })
 }
 
 /// A `bad-request` refusal that says what a request looks like.

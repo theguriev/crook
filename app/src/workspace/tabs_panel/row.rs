@@ -194,7 +194,13 @@ pub(super) fn render(
         Granularity::Tabs => TabAction::Close(tab),
     };
 
-    let facts = RowFacts::resolve(session, git, home);
+    let facts = RowFacts::resolve(session, git, home).asking(
+        session,
+        workspace
+            .asks()
+            .in_pane(pane)
+            .map(|ask| ask.summary.as_str()),
+    );
     // One-based, because it is what the chord's key says: `cmd-1` is the
     // first tab. Counted off the strip and not off the rows, so a split tab's
     // rows share it and a filtered-out tab still takes its number with it.

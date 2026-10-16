@@ -67,6 +67,18 @@ pub trait PtyLink: Send + fmt::Debug {
     /// The child's process id, where there is one to give.
     fn process_id(&self) -> Option<u32>;
 
+    /// The device number of the terminal the child runs on, where there is
+    /// one: the low 32 bits of its `st_rdev`.
+    ///
+    /// The number a process on that terminal finds as its own controlling
+    /// terminal's — Linux's `tty_nr`, macOS's `e_tdev` — which is how a
+    /// program in the pane can say which pane it is in with nothing a child
+    /// could have inherited from somewhere else. `None` by default: a link
+    /// whose child is not on a terminal this process opened has no number.
+    fn tty_device(&self) -> Option<u32> {
+        None
+    }
+
     /// How the child finished, or `None` while it is still running.
     ///
     /// Must not block: the application asks under the same lock every other

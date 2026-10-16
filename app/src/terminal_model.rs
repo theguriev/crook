@@ -718,6 +718,11 @@ struct Session {
     /// The shell this pane was started with, which the setting may have
     /// moved on from since: see [`TerminalModel::shell_of`].
     shell: PathBuf,
+    /// The device number of the pty the shell is on: what an agent's
+    /// question names the pane by. See [`TerminalModel::pane_with_tty`].
+    tty_device: Option<u32>,
+    /// The shell's process, which everything the pane runs descends from.
+    shell_pid: Option<u32>,
 }
 
 impl Entity for TerminalModel {
@@ -988,6 +993,31 @@ impl TerminalModel {
         self.sessions.get(&pane)?.token.as_deref()
     }
 
+    /// The pane whose shell runs on the terminal numbered `device`, while it
+    /// runs.
+    ///
+    /// The number a process on that terminal finds as its own controlling
+    /// terminal's, so it names the pane without anything a process could
+    /// have inherited from another: see [`crate::control::ask`]. A walk of
+    /// the open sessions, asked once per agent's question.
+    pub fn pane_with_tty(&self, device: u32) -> Option<PaneId> {
+        self.sessions
+            .iter()
+            .find(|(_, session)| session.tty_device == Some(device))
+            .map(|(pane, _)| *pane)
+    }
+
+    /// The device number of the terminal a pane's shell runs on, or `None`
+    /// when it has none.
+    pub fn tty_device(&self, pane: PaneId) -> Option<u32> {
+        self.sessions.get(&pane)?.tty_device
+    }
+
+    /// The process id of a pane's shell, or `None` when it has none.
+    pub fn shell_pid(&self, pane: PaneId) -> Option<u32> {
+        self.sessions.get(&pane)?.shell_pid
+    }
+
     /// Whether a pane's shell reports command marks, or `None` when the pane
     /// has no shell running. A shell without them is one open block for the
     /// whole session: nothing in it ever finishes.
@@ -1242,6 +1272,8 @@ impl TerminalModel {
             token,
             shell,
             palette,
+            tty_device,
+            shell_pid,
         } = opened;
         // A theme applied while the shell was being opened on the pool
         // reached every session but this one.
@@ -1266,6 +1298,8 @@ impl TerminalModel {
                 marks,
                 prompted: false,
                 shell,
+                tty_device,
+                shell_pid,
             },
         );
         self.watch(pane, ctx);
@@ -2340,6 +2374,10 @@ struct Opened {
     /// What its cells were resolved against when it started, which a theme
     /// applied since may have moved on from.
     palette: Palette,
+    /// The pty's device number. See [`Session::tty_device`].
+    tty_device: Option<u32>,
+    /// The shell's process id.
+    shell_pid: Option<u32>,
 }
 
 /// Starts the shell a [`Launch`] describes and the threads that read and
@@ -2379,6 +2417,10 @@ fn spawn_session(launch: Launch, flusher: &Arc<Flusher>) -> Result<Opened, Strin
         log::error!("could not open a shell for pane {pane:?}: {reason}");
         reason
     })?;
+    // Read once, here: neither changes for as long as the shell runs, and
+    // asking the terminal later would take its lock on the UI thread.
+    let tty_device = terminal.tty_device();
+    let shell_pid = terminal.process_id();
     let shared = start(terminal, pane, flusher)?;
     Ok(Opened {
         shared,
@@ -2387,6 +2429,8 @@ fn spawn_session(launch: Launch, flusher: &Arc<Flusher>) -> Result<Opened, Strin
         token,
         shell,
         palette,
+        tty_device,
+        shell_pid,
     })
 }
 

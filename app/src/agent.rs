@@ -91,6 +91,15 @@
 //! without knowing it is; the skill is for an agent a person has asked to
 //! know.
 //!
+//! `--agent ask claude` is the one that waits for something back. It is a
+//! permission hook rather than a report: it hands the window the pane is in
+//! the whole of what Claude Code is about to ask a person — over the control
+//! socket, since a question read off a pane's output could be forged by
+//! anything that prints — and prints what the person said there as the
+//! hook's decision, or nothing. It writes to no terminal; the terminal is
+//! only how it names its pane. See [`ask`], and [`request`] for the one
+//! shape a question is shown in.
+//!
 //! The same table is what the worktree creator offers to start in a new
 //! checkout: which of these agents are installed — [`found_on`], a look in
 //! each directory of `PATH`, and in the ones the agents' own installers put
@@ -111,7 +120,9 @@ use crook_terminal::agent::Session;
 use serde_json::{Value, json};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod ancestors;
+pub(crate) mod ancestors;
+pub mod ask;
+pub mod request;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod tmux;
 
@@ -594,7 +605,7 @@ fn presentable_message(text: &str) -> Option<String> {
 
 /// `text` as one line of at most `chars` characters, with a mark where it
 /// was cut.
-fn one_line(text: &str, chars: usize) -> Option<String> {
+pub(crate) fn one_line(text: &str, chars: usize) -> Option<String> {
     let mut line = String::with_capacity(text.len());
     let mut space = true;
     for character in text.chars() {

@@ -297,6 +297,9 @@ pub struct Pty {
     child: Box<dyn Child + Send + Sync>,
     reader: Option<PtyReader>,
     exit: Option<ChildExit>,
+    /// The slave's device number, read while it was open: see
+    /// [`PtyLink::tty_device`].
+    tty_device: Option<u32>,
     /// Closed when this is dropped, which is what releases a write waiting
     /// on a child that will never read. See the `nonblocking` module.
     #[cfg(unix)]
@@ -347,6 +350,9 @@ impl Pty {
         let child = pair.slave.spawn_command(command).with_context(|| {
             format!("Failed to start {} in a pseudo-terminal", describe(program))
         })?;
+        // Before the slave goes: while this process holds it open, the node
+        // its name names is certainly the child's.
+        let tty_device = device_of(&*pair.master);
         // The slave is dropped here on purpose: while this process holds it
         // open, a read on the master never sees end-of-file, so the reader
         // thread would never learn that the child had gone.
@@ -374,10 +380,35 @@ impl Pty {
             child,
             reader: Some(reader),
             exit: None,
+            tty_device,
             #[cfg(unix)]
             closing: Arc::default(),
         })
     }
+}
+
+/// The device number of the terminal `master` is the far end of: the low 32
+/// bits of its slave's `st_rdev`, which is all Linux's `tty_nr` and macOS's
+/// `e_tdev` carry, and where both encodings put a terminal's major and minor.
+///
+/// Read off the node the slave's name names, which is the one thing about a
+/// pty that a process on it and this one both see. `None` where the name
+/// cannot be had or is not a character device.
+#[cfg(unix)]
+fn device_of(master: &dyn MasterPty) -> Option<u32> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let metadata = std::fs::metadata(master.tty_name()?).ok()?;
+    metadata
+        .file_type()
+        .is_char_device()
+        .then_some(metadata.rdev() as u32)
+}
+
+/// ConPTY has no device number for a program to find.
+#[cfg(not(unix))]
+fn device_of(_: &dyn MasterPty) -> Option<u32> {
+    None
 }
 
 /// The master on a descriptor of its own, sharing its open file.
@@ -441,6 +472,12 @@ impl PtyLink for Pty {
     /// The child's process id, on the platforms that have one.
     fn process_id(&self) -> Option<u32> {
         self.child.process_id()
+    }
+
+    /// The slave's device number, as it was while the slave was open: the
+    /// pty keeps its number for as long as this holds the master.
+    fn tty_device(&self) -> Option<u32> {
+        self.tty_device
     }
 
     /// How the child finished, or `None` while it is still running. Does not

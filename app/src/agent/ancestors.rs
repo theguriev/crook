@@ -32,7 +32,14 @@
 //!
 //! The same reading answers one question for `tmux`: whether a terminal tmux
 //! names is the one a report from here goes to, which is what tells a process
-//! in tmux's pane from one that only inherited tmux's variables.
+//! in tmux's pane from one that only inherited tmux's variables. And one for
+//! an agent's question — see [`super::ask`] — which names its pane by the
+//! number of the terminal a report from here would go to, and opens nothing:
+//! [`device`].
+//!
+//! The window reads the same table the other way, for a question it is
+//! handed: which processes the one that asked descends from — [`lineage`] —
+//! which is what says whether it is a process of the pane it named.
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -47,7 +54,7 @@ const MOST_ANCESTORS: usize = 64;
 
 /// What the walk reads about one process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Process {
+pub(crate) struct Process {
     /// Its parent's pid.
     parent: u32,
     /// Its session: the pid of the process that started the session, which
@@ -69,12 +76,46 @@ pub(super) fn terminal() -> Option<io::Result<File>> {
 /// Whether `path` is the terminal a report from this process goes to: its own
 /// controlling terminal, or the one [`terminal`] finds when it has none.
 pub(super) fn is_the_terminal(path: &Path) -> bool {
-    let Some(own) = process(std::process::id()) else {
-        return false;
-    };
+    device().is_some_and(|device| is_device(path, device))
+}
+
+/// The device number of the terminal a report from this process goes to:
+/// its own controlling terminal's, or — when it has none, as a hook Claude
+/// Code ran has none — that of the first process outside its session, the
+/// program that ran it. `None` when neither has one.
+///
+/// Read off the process table and nothing else: no terminal is opened, so a
+/// process that only wants to name its pane cannot write to it by mistake.
+pub(super) fn device() -> Option<u32> {
+    let own = process(std::process::id())?;
     own.terminal
         .or_else(|| session_terminal(own.session, std::os::unix::process::parent_id(), process))
-        .is_some_and(|device| is_device(path, device))
+}
+
+/// `pid` and the processes it descends from, nearest first: at most `most`,
+/// and only as far as each can be read.
+///
+/// Stops at the first parent it cannot read — gone, or in a namespace this
+/// one cannot see into, which reads as 0 — and before pid 1's parent, which
+/// is nobody.
+pub(crate) fn lineage(pid: u32, most: usize) -> Vec<u32> {
+    lineage_in(pid, most, process)
+}
+
+/// [`lineage`], with the process table given, so a test can say what it is.
+fn lineage_in(mut pid: u32, most: usize, process: impl Fn(u32) -> Option<Process>) -> Vec<u32> {
+    let mut lineage = Vec::new();
+    while lineage.len() < most && pid != 0 && !lineage.contains(&pid) {
+        let Some(found) = process(pid) else {
+            break;
+        };
+        lineage.push(pid);
+        if pid == 1 {
+            break;
+        }
+        pid = found.parent;
+    }
+    lineage
 }
 
 /// The terminal device of the first process from `pid` up that either has
@@ -142,7 +183,7 @@ fn is_device(path: &Path, device: u32) -> bool {
 /// Process `pid`'s parent, session and terminal; `None` when the process
 /// cannot be read.
 #[cfg(target_os = "linux")]
-fn process(pid: u32) -> Option<Process> {
+pub(crate) fn process(pid: u32) -> Option<Process> {
     stat_fields(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
 }
 
@@ -173,7 +214,7 @@ fn stat_fields(stat: &str) -> Option<Process> {
 /// Process `pid`'s parent, session and terminal; `None` when the process
 /// cannot be read.
 #[cfg(target_os = "macos")]
-fn process(pid: u32) -> Option<Process> {
+pub(crate) fn process(pid: u32) -> Option<Process> {
     use std::ffi::{c_int, c_void};
     use std::mem::{MaybeUninit, size_of};
 
@@ -354,6 +395,74 @@ mod tests {
         assert_eq!(None, walk(&[(7, 0, 7, None)], 7, 7));
         // Nor is a process that cannot be read.
         assert_eq!(None, walk(&[(7, 8, 7, None)], 7, 7));
+    }
+
+    #[test]
+    fn a_hook_names_the_terminal_its_report_would_go_to_by_its_number() {
+        // The walk `device` takes, from a hook in a session of its own below
+        // `claude` on the pane: the pane's number, read and not opened.
+        let mut table = PANE_AND_CLAUDE.to_vec();
+        table.push((300, 200, 300, None));
+        assert_eq!(Some(PANE), walk(&table, 300, 300));
+        // And this process's own: whatever terminal the suite runs on, or
+        // none, the number is the one `is_the_terminal` compares.
+        let own = process(std::process::id()).expect("this process can read itself");
+        if own.terminal.is_some() {
+            assert_eq!(own.terminal, device());
+        }
+    }
+
+    #[test]
+    fn a_lineage_is_the_process_and_its_ancestors_nearest_first() {
+        let table: HashMap<u32, Process> = PANE_AND_CLAUDE
+            .iter()
+            .map(|&(pid, parent, session, terminal)| {
+                let process = Process {
+                    parent,
+                    session,
+                    terminal,
+                };
+                (pid, process)
+            })
+            .chain([(
+                1,
+                Process {
+                    parent: 0,
+                    session: 1,
+                    terminal: None,
+                },
+            )])
+            .collect();
+        let read = |pid| table.get(&pid).copied();
+        assert_eq!(vec![200, 100, 50, 1], lineage_in(200, 64, read));
+        assert_eq!(
+            vec![200, 100],
+            lineage_in(200, 2, read),
+            "no more than asked"
+        );
+        // A parent that cannot be read ends it.
+        assert_eq!(
+            vec![7],
+            lineage_in(7, 64, |pid| (pid == 7).then_some(Process {
+                parent: 8,
+                session: 7,
+                terminal: None,
+            }))
+        );
+        // A table that loops is walked once round.
+        assert_eq!(
+            vec![5, 6],
+            lineage_in(5, 64, |pid| Some(Process {
+                parent: if pid == 5 { 6 } else { 5 },
+                session: 5,
+                terminal: None,
+            }))
+        );
+
+        // And for real: this process, then its parent.
+        let real = lineage(std::process::id(), 64);
+        assert_eq!(real.first(), Some(&std::process::id()));
+        assert_eq!(real.get(1), Some(&std::os::unix::process::parent_id()));
     }
 
     #[test]

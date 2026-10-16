@@ -156,6 +156,45 @@ fn test_the_child_is_started_at_the_size_it_was_asked_for() {
     );
 }
 
+/// What a child on the terminal finds as its own: the device `tty` names,
+/// read off the node, which is the number a program in the pane reports
+/// when it asks the window which pane it is in.
+#[cfg(unix)]
+#[test]
+fn test_the_terminal_names_the_device_its_child_has_as_its_own() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let Some(program) = shell_command("printf 'on:%s:end\\n' \"$(tty)\"") else {
+        return;
+    };
+    let mut terminal = Terminal::spawn(TerminalOptions {
+        program,
+        size: TerminalSize::new(120, 6),
+        ..TerminalOptions::default()
+    })
+    .expect("a shell should start on a pty");
+    let output = read_on_a_thread(terminal.take_reader().expect("a reader"));
+    assert!(
+        feed_until(&mut terminal, &output, ":end"),
+        "the child never said which terminal it is on: {:?}",
+        terminal.snapshot().text()
+    );
+    let text = terminal.snapshot().text();
+    let named = text
+        .split("on:")
+        .nth(1)
+        .and_then(|rest| rest.split(":end").next())
+        .expect("the child named its terminal");
+    let device = std::fs::metadata(named)
+        .unwrap_or_else(|error| panic!("{named} is not there: {error}"))
+        .rdev() as u32;
+    assert_eq!(
+        Some(device),
+        terminal.tty_device(),
+        "the child is on {named}"
+    );
+}
+
 #[test]
 fn test_typing_reaches_the_child() {
     // `cat` sends back what it is given, so seeing it on the grid proves the
@@ -703,6 +742,11 @@ fn test_a_terminal_over_an_in_memory_link_runs_a_scripted_session() {
         "the reader is handed out exactly once"
     );
     assert_eq!(Some(FAKE_PID), terminal.process_id());
+    assert_eq!(
+        None,
+        terminal.tty_device(),
+        "a child on no terminal this process opened has no device to name"
+    );
 
     // An integrated shell's first prompt: where it is, then the prompt
     // between its two marks.
