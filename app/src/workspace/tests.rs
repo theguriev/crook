@@ -45381,10 +45381,28 @@ mod answering_card {
         let text = list_text(&mut harness);
         assert!(text.contains("3 requests waiting"), "{text}");
         assert!(text.contains("read-only"), "{text}");
+        // Each earlier one as "Why this status" says it: the one wording.
+        let said: Vec<String> = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .asks()
+                .history()
+                .map(|outcome| outcome.said())
+                .collect()
+        });
+        assert_eq!(said.len(), 3);
         assert!(
-            text.contains("Allow sent") && text.contains("Deny sent"),
-            "{text}"
+            said.contains(
+                &How::Ended(crate::control::ask::Cause::AnsweredInAgent)
+                    .said()
+                    .to_owned()
+            )
         );
+        for said in said {
+            assert!(
+                text.contains(&format!("{said} · Claude Code · ")),
+                "{said:?} in {text}"
+            );
+        }
     }
 
     #[test]

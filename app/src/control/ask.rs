@@ -931,11 +931,11 @@ pub fn register(
     // patience is handed a question its connection has given up on, which
     // `add` refuses: see its docs.
     feed.tell(Arc::downgrade(inbox));
-    let id = workspace
-        .asks_mut()
-        .add(asked, found, feed, Instant::now())?;
+    let added = workspace.asks_mut().add(asked, found, feed, Instant::now());
+    // Refused or not: `add` may have ended questions on its way — one their
+    // hook gave up on — and the leads following their pane hear of it now.
     workspace.asks_changed(ctx);
-    Ok(encode(&Registered { asked: id.0 }))
+    Ok(encode(&Registered { asked: added?.0 }))
 }
 
 /// Takes in what the questions' connections said happened to them, and

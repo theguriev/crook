@@ -7075,6 +7075,76 @@ mod socket {
     }
 
     #[test]
+    fn a_question_refused_as_busy_still_tells_the_leads_what_it_ended_on_the_way() {
+        let mut served = Served::new(|_, _, _| {});
+        let pane = first_pane(&served);
+        let token = served.token(pane);
+        // A question whose hook gave up without the window hearing, which
+        // the next question held ends as its hook having gone.
+        let abandoned = question("gone", 0, "echo gone");
+        let feed = Arc::new(Feed::for_verb(&Verb::AgentAsk(abandoned.clone())));
+        let held_feed = Arc::clone(&feed);
+        let id = served.update(move |workspace, ctx| {
+            let id = workspace
+                .asks_mut()
+                .add(
+                    abandoned,
+                    super::super::ask::Found {
+                        pane,
+                        cannot_answer: None,
+                        tab_title: "worker".to_owned(),
+                    },
+                    held_feed,
+                    Instant::now(),
+                )
+                .expect("held");
+            workspace.asks_changed(ctx);
+            id
+        });
+        // The pane is full of the questions a hook asking from here is
+        // counted among, so the next is refused.
+        for session in ["r1", "r2", "r3", "r4"] {
+            served.hold_found(
+                pane,
+                session,
+                "ls",
+                Some(super::super::ask::CannotAnswer::NotFromThisTab),
+            );
+        }
+        let following = served.start(follow(Some(&token), Some(pane)));
+        served.pump_until("the stream never began", |served| served.following() == 1);
+        feed.hang_up();
+
+        let (_client, reply) =
+            served.ask_as(question("r5", served.tty(pane), "ls"), Some(token.clone()));
+        assert_eq!(refused(&reply), code::BUSY);
+        assert_eq!(served.ended(id.as_u64()), Some(How::Ended(Cause::HookGone)));
+        assert_eq!(
+            served.read(|workspace, _| workspace.asks().untold()),
+            0,
+            "told within the turn that refused"
+        );
+
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::New, ctx);
+        });
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::ClosePane(pane), ctx);
+        });
+        let events = served.finish(following).expect("followed until it closed");
+        let withdrawn = PaneEvent::Answered {
+            pane_id: pane.as_u64(),
+            by: super::super::protocol::AnsweredBy::Withdrawn,
+            decision: None,
+        };
+        assert_eq!(
+            asking_events(&events).first(),
+            Some(&withdrawn),
+            "{events:#?}"
+        );
+    }
+
+    #[test]
     fn pane_list_says_asking_and_nothing_more() {
         const MARKER: &str = "crook-marker-0c4d2a";
         let mut served = Served::new(|workspace, ctx, _| {
