@@ -12,7 +12,7 @@
 //!
 //! # A question a hook asks, and never an answer
 //!
-//! Six verbs, and the sixth, `agent.ask`, goes the other way: not a script
+//! Seven verbs, and the sixth, `agent.ask`, goes the other way: not a script
 //! asking the window something, but an agent's permission hook handing the
 //! window the question its agent is about to ask a person — the whole
 //! request, normalised — and waiting on the same connection for what the
@@ -23,6 +23,11 @@
 //! send would be a way round the press. `agent.answer` is an unknown verb,
 //! and a test holds it to that. See "Answering an agent" in
 //! `docs/architecture.md`.
+//!
+//! The seventh, `pane.find`, is that hook's too, and carries nothing of the
+//! question: only the terminals of the tmux clients the agent's tmux has, so
+//! that a hook whose `CROOK_SOCKET` is stale can find the window holding one
+//! before it tells any window what its agent asks. See [`Find`].
 
 use std::fmt;
 use std::time::Duration;
@@ -122,11 +127,11 @@ pub const MAX_BLOCKS: usize = 100;
 
 /// What a request can ask for.
 ///
-/// Six verbs: one that lists, one that opens a tab, three that watch a pane
-/// the caller may watch — itself, and the tabs it opened — and one an
-/// agent's hook asks its own question with. Every one is a promise that is
-/// hard to take back, which is why each is added on purpose and none by a
-/// pattern.
+/// Seven verbs: one that lists, one that opens a tab, three that watch a
+/// pane the caller may watch — itself, and the tabs it opened — one an
+/// agent's hook asks its own question with, and one it finds the window to
+/// ask with. Every one is a promise that is hard to take back, which is why
+/// each is added on purpose and none by a pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verb {
     /// Every pane of the window, as a list of [`PaneEntry`].
@@ -148,17 +153,21 @@ pub enum Verb {
     /// is asking, and waiting for what a person says: see [`AgentAsk`].
     /// Answered with a [`Registered`], then one [`Answered`] line.
     AgentAsk(AgentAsk),
+    /// Whether one of this window's panes is on one of a few terminals: see
+    /// [`Find`]. Answered with a [`Located`].
+    PaneFind(Find),
 }
 
 impl Verb {
     /// Every verb's name, in the order a refusal names them.
-    pub const NAMES: [&str; 6] = [
+    pub const NAMES: [&str; 7] = [
         "pane.list",
         "tab.new",
         "pane.wait",
         "pane.blocks",
         "events.follow",
         "agent.ask",
+        "pane.find",
     ];
 
     /// Its name on the wire: a noun and a verb, joined by a dot.
@@ -170,6 +179,7 @@ impl Verb {
             Self::PaneBlocks(_) => Self::NAMES[3],
             Self::EventsFollow(_) => Self::NAMES[4],
             Self::AgentAsk(_) => Self::NAMES[5],
+            Self::PaneFind(_) => Self::NAMES[6],
         }
     }
 
@@ -182,6 +192,7 @@ impl Verb {
             Self::PaneBlocks(asked) => serde_json::to_value(asked),
             Self::EventsFollow(asked) => serde_json::to_value(asked),
             Self::AgentAsk(asked) => serde_json::to_value(asked),
+            Self::PaneFind(asked) => serde_json::to_value(asked),
         };
         Some(encoded.expect("a verb's arguments are numbers, strings and booleans"))
     }
@@ -197,7 +208,7 @@ impl Verb {
         match self {
             Self::PaneWait(asked) => !asked.timeout().is_zero(),
             Self::EventsFollow(_) | Self::AgentAsk(_) => true,
-            Self::PaneList | Self::TabNew(_) | Self::PaneBlocks(_) => false,
+            Self::PaneList | Self::TabNew(_) | Self::PaneBlocks(_) | Self::PaneFind(_) => false,
         }
     }
 
@@ -634,7 +645,19 @@ pub struct AgentAsk {
     /// The device number of the terminal a status from the hook would be
     /// written to: the hook's own controlling terminal, or the agent's. What
     /// binds the question to the pane whose pty that is.
-    pub tty: u32,
+    ///
+    /// Left out for a question from inside a multiplexer, which names the
+    /// terminals of its clients instead: there the agent's terminal is one
+    /// of the multiplexer's own, which no pane is on. A window from before
+    /// [`Self::multiplexer`] refuses a question without it, and its hook
+    /// passes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tty: Option<u32>,
+    /// For a question from inside tmux, in place of [`Self::tty`]: the
+    /// terminals of the clients attached to the agent's session, one of
+    /// which a pane of the window is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multiplexer: Option<Multiplexer>,
     /// How long the hook waits for an answer, in seconds, from 1 to
     /// [`MAX_ASK_WAIT_SECS`].
     pub wait: u64,
@@ -674,6 +697,15 @@ impl AgentAsk {
         if !(1..=MAX_ASK_WAIT_SECS).contains(&self.wait) {
             return Some(format!("`wait` is from 1 to {MAX_ASK_WAIT_SECS} seconds"));
         }
+        match (&self.tty, &self.multiplexer) {
+            (Some(_), None) => {}
+            (None, Some(multiplexer)) => {
+                if let Some(fault) = multiplexer.fault() {
+                    return Some(fault);
+                }
+            }
+            _ => return Some("a question names exactly one of `tty` and `multiplexer`".to_owned()),
+        }
         self.request
             .fault()
             .map(|fault| format!("`request` cannot be shown whole: {fault}"))
@@ -693,6 +725,98 @@ impl fmt::Debug for AgentAsk {
             .field("sha256", &request::hex(&self.digest()[..6]))
             .finish_non_exhaustive()
     }
+}
+
+/// The most terminals a question from inside a multiplexer names, and a
+/// `pane.find` asks about.
+///
+/// Eight: a person attaches to a session from a few terminals at most, and
+/// this bounds the walk of the panes a window makes for one.
+pub const MAX_CLIENTS: usize = 8;
+
+/// The longest tmux pane id a question carries, in bytes: `%` and the
+/// pane's number.
+pub const MAX_PANE_ID: usize = 12;
+
+/// The multiplexers a question can come from inside: one so far.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MultiplexerKind {
+    /// tmux, whose clients' terminals it can be asked for.
+    Tmux,
+}
+
+impl MultiplexerKind {
+    /// Its word on the wire, and what a person calls it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Tmux => "tmux",
+        }
+    }
+}
+
+/// Where a question from inside a multiplexer was asked: the terminals of
+/// the multiplexer's clients, which bind it, and the multiplexer's own name
+/// for the agent's pane, which is only shown.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Multiplexer {
+    /// Which multiplexer.
+    pub kind: MultiplexerKind,
+    /// The device numbers of its clients' terminals, from 1 to
+    /// [`MAX_CLIENTS`] of them: the question goes to the first pane of the
+    /// window, in the panel's order, that is on one.
+    pub clients: Vec<u32>,
+    /// The agent's pane, as tmux names it — `%` and a number. Shown, and
+    /// never what binds anything.
+    pub pane: String,
+}
+
+impl Multiplexer {
+    /// Why the window will not take this, or `None` when it will.
+    fn fault(&self) -> Option<String> {
+        if !(1..=MAX_CLIENTS).contains(&self.clients.len()) {
+            return Some(format!(
+                "`multiplexer.clients` names from 1 to {MAX_CLIENTS} terminals"
+            ));
+        }
+        if !is_pane_id(&self.pane) {
+            return Some(format!(
+                "`multiplexer.pane` is `%` and a number, at most {MAX_PANE_ID} bytes"
+            ));
+        }
+        None
+    }
+}
+
+/// Whether `pane` is a tmux pane id: `%` and at least one digit, and
+/// nothing else, so that what the card shows of it is never more than that.
+pub fn is_pane_id(pane: &str) -> bool {
+    pane.len() <= MAX_PANE_ID
+        && pane.strip_prefix('%').is_some_and(|number| {
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
+/// What `pane.find` asks: whether a pane of this window is on one of these
+/// terminals.
+///
+/// Nothing else, and no token: a hook asks it of windows that may not hold
+/// its agent's pane, so that only the one that does is ever told what the
+/// agent asks. Unknown fields refused, so that nothing more can ride on it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Find {
+    /// The device numbers of the terminals, from 1 to [`MAX_CLIENTS`].
+    pub ttys: Vec<u32>,
+}
+
+/// What `pane.find` answers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Located {
+    /// Whether a pane of this window is on one of the terminals, and the
+    /// window would take a question about it.
+    pub found: bool,
 }
 
 /// What `agent.ask` answers first: the question is held, under this number.
@@ -1047,8 +1171,8 @@ fn request_of(request: &Map<String, Value>) -> Result<Request, Refusal> {
         "agent.ask" => {
             let Some(args) = args else {
                 return Err(malformed(
-                    "`agent.ask` needs `args` naming its `agent`, `session`, `cwd`, `tty`, `wait` \
-                     and `request`",
+                    "`agent.ask` needs `args` naming its `agent`, `session`, `cwd`, `tty` or \
+                     `multiplexer`, `wait` and `request`",
                 ));
             };
             let asked = AgentAsk::deserialize(args)
@@ -1057,6 +1181,20 @@ fn request_of(request: &Map<String, Value>) -> Result<Request, Refusal> {
                 return Err(Refusal::new(code::BAD_REQUEST, fault));
             }
             Verb::AgentAsk(asked)
+        }
+        "pane.find" => {
+            let Some(args) = args else {
+                return Err(malformed("`pane.find` needs `args` naming its `ttys`"));
+            };
+            let asked = Find::deserialize(args)
+                .map_err(|error| malformed(&format!("`pane.find`'s args: {error}")))?;
+            if !(1..=MAX_CLIENTS).contains(&asked.ttys.len()) {
+                return Err(Refusal::new(
+                    code::BAD_REQUEST,
+                    format!("`ttys` names from 1 to {MAX_CLIENTS} terminals"),
+                ));
+            }
+            Verb::PaneFind(asked)
         }
         name => {
             return Err(Refusal::new(

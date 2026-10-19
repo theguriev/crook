@@ -478,6 +478,7 @@ fn answer(
                 workspace, asked, token, &asker, feed, inbox, ctx,
             ));
         }
+        Verb::PaneFind(asked) => answer.send(Ok(ask::find(workspace, &asked, ctx))),
     }
 }
 

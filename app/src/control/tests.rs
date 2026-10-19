@@ -140,7 +140,8 @@ fn a_verb_this_window_does_not_know_is_refused_by_name() {
             "pane.wait",
             "pane.blocks",
             "events.follow",
-            "agent.ask"
+            "agent.ask",
+            "pane.find"
         ]
     );
     for name in Verb::NAMES {
@@ -1149,7 +1150,8 @@ fn agent_ask(command: &str) -> protocol::AgentAsk {
         agent: protocol::AskingAgent::Claude,
         session: "4f1c2b7e-0d3a".to_owned(),
         cwd: "/home/someone/work/crook".to_owned(),
-        tty: 34819,
+        tty: Some(34819),
+        multiplexer: None,
         wait: 300,
         request: AskRequest::Command {
             command: command.to_owned(),
@@ -1258,6 +1260,112 @@ fn an_ask_with_a_field_or_kind_this_window_does_not_know_is_refused() {
     assert_eq!(asked_with(&args), refused, "a command too long");
     assert_eq!(
         verdict(r#"{"v":1,"verb":"agent.ask"}"#).1,
+        refused,
+        "no args at all"
+    );
+}
+
+/// `agent_ask`, from inside tmux: its clients' terminals in place of its own.
+fn agent_ask_in_tmux(command: &str) -> protocol::AgentAsk {
+    protocol::AgentAsk {
+        tty: None,
+        multiplexer: Some(protocol::Multiplexer {
+            kind: protocol::MultiplexerKind::Tmux,
+            clients: vec![34819, 34823],
+            pane: "%3".to_owned(),
+        }),
+        ..agent_ask(command)
+    }
+}
+
+#[test]
+fn a_question_from_inside_tmux_names_the_clients_and_one_from_a_pane_is_what_it_was() {
+    let asked = agent_ask_in_tmux("rm -rf build");
+    let line = protocol::request_line(&Verb::AgentAsk(asked.clone()), None);
+    let (_, request) = protocol::read(line.trim_end().as_bytes());
+    assert_eq!(
+        request.map(|request| request.verb),
+        Ok(Verb::AgentAsk(asked))
+    );
+    let sent: Value = serde_json::from_str(&line).expect("JSON");
+    assert_eq!(sent["args"].get("tty"), None);
+    assert_eq!(
+        sent["args"]["multiplexer"],
+        json!({"kind": "tmux", "clients": [34819, 34823], "pane": "%3"})
+    );
+
+    // A question from a pane carries what it always did, and no more: the
+    // line an older window reads.
+    let args = agent_ask_args();
+    let mut keys: Vec<_> = args.as_object().expect("an object").keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["agent", "cwd", "request", "session", "tty", "wait"]);
+}
+
+#[test]
+fn a_question_names_one_terminal_or_a_multiplexers_clients_and_never_both_or_neither() {
+    let refused = Err(code::BAD_REQUEST.to_owned());
+    let tmux = || serde_json::to_value(agent_ask_in_tmux("ls")).expect("encodes");
+    assert!(matches!(asked_with(&tmux()), Ok(Verb::AgentAsk(_))));
+
+    let mut both = tmux();
+    both["tty"] = json!(34819);
+    assert_eq!(asked_with(&both), refused, "both");
+    let mut neither = agent_ask_args();
+    neither.as_object_mut().expect("an object").remove("tty");
+    assert_eq!(asked_with(&neither), refused, "neither");
+    for (field, wrong) in [
+        ("clients", json!([])),
+        (
+            "clients",
+            json!((0..=protocol::MAX_CLIENTS as u32).collect::<Vec<_>>()),
+        ),
+        ("clients", json!([-1])),
+        ("pane", json!("3")),
+        ("pane", json!("%")),
+        ("pane", json!("%3; rm -rf ~")),
+        ("pane", json!("%\u{202e}3")),
+        (
+            "pane",
+            json!(format!("%{}", "1".repeat(protocol::MAX_PANE_ID))),
+        ),
+        ("kind", json!("screen")),
+        ("socket", json!("/tmp/tmux-1000/default")),
+    ] {
+        let mut args = tmux();
+        args["multiplexer"][field] = wrong.clone();
+        assert_eq!(asked_with(&args), refused, "{field}: {wrong}");
+    }
+}
+
+#[test]
+fn pane_find_carries_terminals_and_nothing_else() {
+    let find =
+        |args: Value| verdict(&json!({"v": 1, "verb": "pane.find", "args": args}).to_string()).1;
+    let asked = protocol::Find {
+        ttys: vec![34819, 34823],
+    };
+    assert_eq!(
+        find(json!({"ttys": [34819, 34823]})),
+        Ok(Verb::PaneFind(asked.clone()))
+    );
+    assert_eq!(
+        protocol::request_line(&Verb::PaneFind(asked.clone()), None),
+        "{\"args\":{\"ttys\":[34819,34823]},\"v\":1,\"verb\":\"pane.find\"}\n"
+    );
+    assert!(!Verb::PaneFind(asked).keeps_connection());
+    let refused = Err(code::BAD_REQUEST.to_owned());
+    for wrong in [
+        json!({"ttys": []}),
+        json!({"ttys": (0..=protocol::MAX_CLIENTS as u32).collect::<Vec<_>>()}),
+        json!({"ttys": [1], "request": {"kind": "command", "command": "ls"}}),
+        json!({"ttys": [1], "session": "s1"}),
+        json!({}),
+    ] {
+        assert_eq!(find(wrong.clone()), refused, "{wrong}");
+    }
+    assert_eq!(
+        verdict(r#"{"v":1,"verb":"pane.find"}"#).1,
         refused,
         "no args at all"
     );
@@ -1489,6 +1597,7 @@ fn a_press_reaches_only_the_question_it_was_given_about() {
         pane,
         cannot_answer,
         tab_title: "crook".to_owned(),
+        inside: None,
     };
     let feed = || Arc::new(watch::Feed::for_verb(&Verb::AgentAsk(agent_ask("ls"))));
     let from = |session: &str, command: &str| protocol::AgentAsk {
@@ -1580,6 +1689,7 @@ fn hold_in(
         pane,
         cannot_answer,
         tab_title: "crook".to_owned(),
+        inside: None,
     };
     asks.add(asked, found, feed.clone(), Instant::now())
         .map(|id| (id, feed))
@@ -1681,6 +1791,7 @@ fn a_question_whose_connection_gave_up_is_neither_held_nor_shown_nor_kept() {
                 pane,
                 cannot_answer: None,
                 tab_title: "crook".to_owned(),
+                inside: None,
             },
             feed,
             Instant::now(),
@@ -1753,6 +1864,7 @@ fn the_window_remembers_the_last_sixty_four_questions_and_no_more() {
                     pane,
                     cannot_answer: None,
                     tab_title: "crook".to_owned(),
+                    inside: None,
                 },
                 Arc::new(watch::Feed::for_verb(&Verb::AgentAsk(agent_ask("ls")))),
                 Instant::now(),
@@ -5842,7 +5954,7 @@ mod socket {
     fn question(session: &str, tty: u32, command: &str) -> AgentAsk {
         AgentAsk {
             session: session.to_owned(),
-            tty,
+            tty: Some(tty),
             ..agent_ask(command)
         }
     }
@@ -6092,6 +6204,116 @@ mod socket {
         assert_eq!(served.asks(), 0);
     }
 
+    /// A question about `command` from `session` inside tmux, whose clients
+    /// are on the terminals numbered `clients`.
+    fn from_tmux(session: &str, clients: Vec<u32>, command: &str) -> AgentAsk {
+        AgentAsk {
+            session: session.to_owned(),
+            tty: None,
+            multiplexer: Some(protocol::Multiplexer {
+                kind: protocol::MultiplexerKind::Tmux,
+                clients,
+                pane: "%3".to_owned(),
+            }),
+            ..agent_ask(command)
+        }
+    }
+
+    /// What the window answers a `pane.find` for `ttys`.
+    fn finds(served: &mut Served, ttys: Vec<u32>) -> Reply {
+        served.ask(move |socket| {
+            let mut client = Client::connect(&socket);
+            client.send(&protocol::request_line(
+                &Verb::PaneFind(protocol::Find { ttys }),
+                None,
+            ));
+            client.reply().expect("the window replies")
+        })
+    }
+
+    #[test]
+    fn a_question_from_inside_tmux_binds_to_the_first_pane_holding_a_client() {
+        let mut served = Served::new(|workspace, ctx, _| {
+            workspace.apply(TabAction::New, ctx);
+            workspace.apply(TabAction::New, ctx);
+        });
+        let panes: Vec<PaneId> = served.read(|workspace, _| {
+            workspace
+                .tabs()
+                .panes()
+                .map(|(_, pane)| pane.id())
+                .collect()
+        });
+        let [first, second, third] = panes[..] else {
+            panic!("three panes: {panes:?}");
+        };
+        // The clients named last first, and a terminal no pane is on: the
+        // panel's order decides, and the token of another pane, which a
+        // tmux server keeps from wherever it started, changes nothing.
+        let clients = vec![served.tty(third), 7, served.tty(second)];
+        let (_client, reply) =
+            served.ask_as(from_tmux("s1", clients, "ls"), Some(served.token(first)));
+        let id = held(&reply);
+        served.read(|workspace, _| {
+            let ask = workspace
+                .asks()
+                .in_pane(second)
+                .expect("held in the second pane");
+            assert_eq!(ask.id.as_u64(), id);
+            // Not below the pane's shell, as no tmux server is, and
+            // answerable all the same.
+            assert_eq!(ask.cannot_answer, None);
+            let inside = ask.inside.as_ref().expect("from inside tmux");
+            assert_eq!(inside.pane, "%3");
+            assert_eq!(inside.said(), "inside tmux (also attached in 1 other tab)");
+            assert_eq!(ask.summary, "Bash inside tmux: ls");
+            assert!(workspace.asks().in_pane(third).is_none());
+            assert!(workspace.asks().in_pane(first).is_none());
+        });
+
+        // Attached in one tab only, it says nothing of others.
+        let (_alone, reply) = served.ask_as(from_tmux("s2", vec![served.tty(first)], "ls"), None);
+        held(&reply);
+        served.read(|workspace, _| {
+            let ask = workspace
+                .asks()
+                .in_pane(first)
+                .expect("held in the first pane");
+            assert_eq!(
+                ask.inside.as_ref().map(|inside| inside.said()).as_deref(),
+                Some("inside tmux")
+            );
+        });
+
+        // And clients no pane is on are no pane.
+        let (_none, reply) = served.ask_as(from_tmux("s3", vec![7, 8], "ls"), None);
+        assert_eq!(refused(&reply), code::NO_SUCH_PANE);
+    }
+
+    #[test]
+    fn a_pane_find_says_only_whether_a_pane_is_on_one_of_the_terminals() {
+        let mut served = Served::new(|_, _, _| {});
+        let pane = first_pane(&served);
+        let tty = served.tty(pane);
+        let found = |reply: Reply| {
+            assert!(reply.ok, "{reply:?}");
+            reply.result.expect("a result")
+        };
+        assert_eq!(
+            found(finds(&mut served, vec![7, tty])),
+            json!({"found": true})
+        );
+        assert_eq!(found(finds(&mut served, vec![7])), json!({"found": false}));
+        assert_eq!(served.asks(), 0, "nothing is held for a find");
+
+        // A window not taking questions holds none of them.
+        served.update(|workspace, ctx| workspace.take_agents_questions(false, ctx));
+        assert_eq!(
+            found(finds(&mut served, vec![tty])),
+            json!({"found": false})
+        );
+    }
+
     #[test]
     fn a_fifth_ask_on_one_pane_is_busy() {
         let mut served = Served::new(|_, _, _| {});
@@ -6230,7 +6452,8 @@ mod socket {
         let beside = held(&reply);
         let (_elsewhere, reply) = served.ask_as(
             AgentAsk {
-                tty: served.tty(second),
+                tty: Some(served.tty(second)),
+                multiplexer: None,
                 ..answered
             },
             None,

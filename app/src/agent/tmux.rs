@@ -114,6 +114,17 @@ pub(super) fn route() -> Option<Route> {
     )
 }
 
+/// The terminals of the clients attached to the pane's session, for a
+/// question from inside tmux to name: `None` where [`route`] finds no client
+/// to write to — not inside tmux, not its pane, or a session no client but
+/// one in control mode is attached to.
+pub(super) fn clients() -> Option<Vec<PathBuf>> {
+    match route()? {
+        Route::Clients(clients) => Some(clients),
+        Route::Passthrough => None,
+    }
+}
+
 /// [`route`], from what [`ask`] answered, whether `TERM_PROGRAM` says tmux
 /// started this process's shell, and how to tell this process's terminal.
 ///

@@ -11055,6 +11055,22 @@ impl Workspace {
             .filter(|pane| self.tabs.pane(*pane).is_some())
     }
 
+    /// Every open pane whose shell runs on one of the terminals numbered
+    /// `devices`, with its tab, in the panel's order: where a question from
+    /// inside a multiplexer, which names its clients' terminals, may go.
+    pub(crate) fn panes_on(&self, devices: &[u32], app: &AppContext) -> Vec<(TabId, PaneId)> {
+        let terminals = self.terminals.as_ref(app);
+        self.tabs
+            .panes()
+            .map(|(tab, pane)| (tab, pane.id()))
+            .filter(|(_, pane)| {
+                terminals
+                    .tty_device(*pane)
+                    .is_some_and(|device| devices.contains(&device))
+            })
+            .collect()
+    }
+
     /// The process id of a pane's shell, while it runs.
     pub(crate) fn shell_pid(&self, pane: PaneId, app: &AppContext) -> Option<u32> {
         self.terminals.as_ref(app).shell_pid(pane)

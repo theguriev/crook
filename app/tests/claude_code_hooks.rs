@@ -42,7 +42,9 @@
 //! nothing to the pty, prints nothing Claude Code would read as a decision,
 //! and exits 0 — with no window to ask, below an agent with no terminal,
 //! inside tmux, with the binary gone, and with an older binary that refuses
-//! `ask`.
+//! `ask`. And against windows the test plays on sockets of its own: inside
+//! tmux it names the terminal of tmux's client, which is the pty, and tells
+//! no window what it asks until that window has said it holds the client.
 
 #![cfg(unix)]
 
@@ -348,6 +350,9 @@ impl Drop for Scratch {
 struct Ran {
     /// Everything that arrived on the pty: the pane, as far as the hook knows.
     pane: String,
+    /// The device number of the pty: the pane's terminal, which is tmux's
+    /// client's when the agent is inside tmux.
+    device: Option<u32>,
     /// `detached` when the hook had no terminal of its own, as under Claude
     /// Code.
     probe: String,
@@ -398,6 +403,18 @@ fn run_as_a_hook_given(command: &str, agent: Agent, input: &str) -> Ran {
 /// [`run_as_a_hook`], with the agent where `place` says rather than always on
 /// the pty itself, and `input` on stdin.
 fn run_as_a_hook_in(command: &str, agent: Agent, place: Pane, input: &str) -> Ran {
+    run_as_a_hook_with(command, agent, place, input, &[])
+}
+
+/// [`run_as_a_hook_in`], with `extra` in the environment in place of what it
+/// would otherwise have: a window's socket, a runtime directory of its own.
+fn run_as_a_hook_with(
+    command: &str,
+    agent: Agent,
+    place: Pane,
+    input: &str,
+    extra: &[(&str, &str)],
+) -> Ran {
     let scratch = Scratch::new();
     fs::write(scratch.0.join("input"), input).expect("the input should be writable");
     let (hook, under_the_agent) = match agent {
@@ -439,6 +456,8 @@ fn run_as_a_hook_in(command: &str, agent: Agent, place: Pane, input: &str) -> Ra
             script
         }
     };
+    environment.retain(|(key, _)| extra.iter().all(|(replaced, _)| replaced != key));
+    environment.extend(extra.iter().copied());
     let environment: Vec<_> = environment
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
@@ -451,6 +470,7 @@ fn run_as_a_hook_in(command: &str, agent: Agent, place: Pane, input: &str) -> Ra
     )
     .expect("a shell should start on a pty");
 
+    let device = pty.tty_device();
     let arriving = reading(&mut pty);
     let pane = match place {
         Pane::Tmux(tmux) => {
@@ -471,6 +491,7 @@ fn run_as_a_hook_in(command: &str, agent: Agent, place: Pane, input: &str) -> Ra
     );
     Ran {
         pane,
+        device,
         probe: scratch.read("probe"),
         status: scratch.read("status"),
         stdout: scratch.read("stdout"),
@@ -1268,4 +1289,421 @@ fn the_hook_after_a_tool_says_its_running_and_then_its_question_done_in_one_writ
     );
     assert!(!ran.pane.contains("\x1b]6340;"), "{:?}", ran.pane);
     assert_eq!("0\n", ran.status, "{}", ran.stderr);
+}
+
+/// What a stand-in window says to a hook.
+#[derive(Clone, Copy, Debug)]
+struct Says {
+    /// What it answers a `pane.find`: whether it holds one of the terminals.
+    finds: bool,
+    /// Whether it holds a question and answers it Allow, rather than
+    /// refusing it as `no-such-pane`.
+    holds: bool,
+}
+
+/// A window's control socket, played by the test: it answers `pane.find`
+/// and `agent.ask` the way [`Says`] says, and keeps every line it is sent
+/// and a count of the connections made to it.
+struct FakeWindow {
+    socket: PathBuf,
+    heard: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    closing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl FakeWindow {
+    /// Listening at `socket`, which is this user's and open to nobody else,
+    /// as a window's is.
+    fn listen(socket: PathBuf, says: Says) -> Self {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let listener = std::os::unix::net::UnixListener::bind(&socket)
+            .expect("the stand-in window should listen");
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
+            .expect("the socket should be made private");
+        let window = Self {
+            socket,
+            heard: Default::default(),
+            connections: Default::default(),
+            closing: Default::default(),
+        };
+        let (heard, connections, closing) = (
+            window.heard.clone(),
+            window.connections.clone(),
+            window.closing.clone(),
+        );
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                if closing.load(Ordering::Relaxed) {
+                    return;
+                }
+                let Ok(stream) = stream else { continue };
+                connections.fetch_add(1, Ordering::Relaxed);
+                let heard = heard.clone();
+                thread::spawn(move || {
+                    let _ = stream.set_read_timeout(Some(DEADLINE));
+                    let mut writing = &stream;
+                    for line in BufReader::new(&stream).lines() {
+                        let Ok(line) = line else { return };
+                        heard.lock().unwrap().push(line.clone());
+                        let request: Value = serde_json::from_str(&line).unwrap_or_default();
+                        let reply = match (request["verb"].as_str(), says.holds) {
+                            (Some("pane.find"), _) => {
+                                format!("{{\"v\":1,\"ok\":true,\"result\":{{\"found\":{}}}}}\n", says.finds)
+                            }
+                            (Some("agent.ask"), true) => "{\"v\":1,\"ok\":true,\"result\":{\"asked\":1}}\n\
+                                 {\"answer\":{\"decision\":\"allow\"}}\n"
+                                .to_owned(),
+                            (Some("agent.ask"), false) => "{\"v\":1,\"ok\":false,\"error\":{\"code\":\"no-such-pane\",\"message\":\"no\"}}\n".to_owned(),
+                            // The hook's `delivered`.
+                            _ => continue,
+                        };
+                        if writing.write_all(reply.as_bytes()).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        window
+    }
+
+    /// Every line it was sent, in the order it got them.
+    fn heard(&self) -> Vec<String> {
+        self.heard.lock().unwrap().clone()
+    }
+
+    /// How many connections were made to it.
+    fn connections(&self) -> usize {
+        self.connections.load(Ordering::Relaxed)
+    }
+
+    /// Its socket's path, as text for the environment.
+    fn path(&self) -> &str {
+        self.socket.to_str().expect("the scratch path is text")
+    }
+}
+
+impl Drop for FakeWindow {
+    fn drop(&mut self) {
+        self.closing.store(true, Ordering::Relaxed);
+        // Wakes the accept the listener is parked in.
+        let _ = std::os::unix::net::UnixStream::connect(&self.socket);
+    }
+}
+
+/// A runtime directory of the test's own, with this user's control directory
+/// in it, private as a window makes it: where a hook looks for windows, so
+/// that none of a person's own is ever asked.
+fn runtime() -> (Scratch, PathBuf) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let runtime = Scratch::new();
+    let control = runtime.0.join("crook-control");
+    fs::create_dir(&control).expect("the control directory should be creatable");
+    for directory in [&runtime.0, &control] {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+            .expect("the directory should be made private");
+    }
+    (runtime, control)
+}
+
+/// The environment a hook asks the windows of `runtime` from, with
+/// `CROOK_SOCKET` set to `socket`.
+fn asking<'a>(runtime: &'a Scratch, socket: &'a str) -> [(&'a str, &'a str); 2] {
+    [
+        ("CROOK_SOCKET", socket),
+        (
+            "XDG_RUNTIME_DIR",
+            runtime.0.to_str().expect("the scratch path is text"),
+        ),
+    ]
+}
+
+/// What Claude Code reads as "allow it, this once".
+const ALLOWED: &str = "{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"allow\"}}}\n";
+
+/// The `args` of the `agent.ask` among `lines`, which there is exactly one
+/// of.
+fn the_question(lines: &[String]) -> Value {
+    let asks: Vec<Value> = lines
+        .iter()
+        .map(|line| serde_json::from_str::<Value>(line).expect("a line of JSON"))
+        .filter(|line| line["verb"] == "agent.ask")
+        .collect();
+    assert_eq!(asks.len(), 1, "{lines:?}");
+    asks[0]["args"].clone()
+}
+
+/// Whether `line` is a `pane.find` naming `device` among its terminals and
+/// carrying nothing but them.
+fn finds_only(line: &str, device: u32) -> bool {
+    let sent: Value = serde_json::from_str(line).expect("a line of JSON");
+    let keys = |value: &Value| {
+        let mut keys: Vec<String> = value
+            .as_object()
+            .map(|object| object.keys().cloned().collect())
+            .unwrap_or_default();
+        keys.sort();
+        keys
+    };
+    sent["verb"] == "pane.find"
+        && keys(&sent) == ["args", "v", "verb"]
+        && keys(&sent["args"]) == ["ttys"]
+        && sent["args"]["ttys"]
+            .as_array()
+            .is_some_and(|ttys| ttys.contains(&Value::from(device)))
+}
+
+#[test]
+fn a_question_inside_tmux_binds_to_the_pane_holding_the_client() {
+    // The terminal a status from inside tmux is written to is that of tmux's
+    // client, which is the pane Crook draws; the question names it, and not
+    // the agent's terminal, which is one of tmux's panes.
+    if !perl_is_here() {
+        return;
+    }
+    let Some(tmux) = Tmux::new("") else {
+        return;
+    };
+    let (runtime, control) = runtime();
+    let window = FakeWindow::listen(
+        control.join("1.sock"),
+        Says {
+            finds: true,
+            holds: true,
+        },
+    );
+    let ran = run_as_a_hook_with(
+        &plugin_hook("PermissionRequest"),
+        Agent::OnThePane,
+        Pane::Tmux(&tmux),
+        ASK_INPUT,
+        &asking(&runtime, window.path()),
+    );
+    let device = ran.device.expect("the pty has a device number");
+    assert_eq!(ALLOWED, ran.stdout, "the hook said {:?}", ran.stderr);
+    assert_eq!("0\n", ran.status);
+    let heard = window.heard();
+    assert!(finds_only(&heard[0], device), "{heard:?}");
+    let asked = the_question(&heard);
+    assert_eq!(asked.get("tty"), None, "{asked}");
+    assert_eq!(asked["multiplexer"]["kind"], "tmux");
+    assert!(
+        asked["multiplexer"]["clients"]
+            .as_array()
+            .is_some_and(|clients| clients.contains(&Value::from(device))),
+        "the question does not name the client's terminal, {device}: {asked}"
+    );
+    let pane = tmux.ask(&["display-message", "-p", "#{pane_id}"]);
+    assert_eq!(asked["multiplexer"]["pane"], Value::from(pane));
+    assert!(!heard.iter().any(|line| line.contains("\"token\"")));
+}
+
+#[test]
+fn an_ahead_agent_inside_tmux_does_not_connect() {
+    // A subagent's question passes before anything is connected to, inside
+    // tmux as everywhere, whatever the window would have said.
+    if !perl_is_here() {
+        return;
+    }
+    let Some(tmux) = Tmux::new("") else {
+        return;
+    };
+    let (runtime, control) = runtime();
+    let window = FakeWindow::listen(
+        control.join("1.sock"),
+        Says {
+            finds: true,
+            holds: true,
+        },
+    );
+    let mut input: Value = serde_json::from_str(ASK_INPUT).unwrap();
+    input["agent_id"] = Value::from("a1b2c3");
+    let ran = run_as_a_hook_with(
+        &plugin_hook("PermissionRequest"),
+        Agent::OnThePane,
+        Pane::Tmux(&tmux),
+        &input.to_string(),
+        &asking(&runtime, window.path()),
+    );
+    assert_quiet("PermissionRequest", &ran, Pane::Tmux(&tmux));
+    assert_eq!(0, window.connections(), "{:?}", window.heard());
+}
+
+#[test]
+fn zellij_and_screen_still_pass() {
+    // Neither can be asked where its clients are.
+    if !perl_is_here() {
+        return;
+    }
+    let (runtime, control) = runtime();
+    let window = FakeWindow::listen(
+        control.join("1.sock"),
+        Says {
+            finds: true,
+            holds: true,
+        },
+    );
+    for (variable, value) in [("ZELLIJ", "0"), ("STY", "4242.pts-3.host")] {
+        let [socket, directory] = asking(&runtime, window.path());
+        let ran = run_as_a_hook_with(
+            &plugin_hook("PermissionRequest"),
+            Agent::OnThePane,
+            Pane::Plain,
+            ASK_INPUT,
+            &[socket, directory, (variable, value)],
+        );
+        assert_quiet(variable, &ran, Pane::Plain);
+    }
+    assert_eq!(0, window.connections(), "{:?}", window.heard());
+}
+
+#[test]
+fn a_stale_crook_socket_inside_tmux_finds_the_window_without_sending_content_to_others() {
+    // tmux started from another window, which the server's CROOK_SOCKET
+    // still names: that window holds no client of tmux's, and is told
+    // nothing of the question; nor is one listed before the window that
+    // holds one. And once more with that window closed, and its socket gone.
+    if !perl_is_here() {
+        return;
+    }
+    let (runtime, control) = runtime();
+    let stale = FakeWindow::listen(
+        control.join("1.sock"),
+        Says {
+            finds: false,
+            holds: true,
+        },
+    );
+    let other = FakeWindow::listen(
+        control.join("2.sock"),
+        Says {
+            finds: false,
+            holds: true,
+        },
+    );
+    // A socket left by a window that died: nothing listens there.
+    drop(std::os::unix::net::UnixListener::bind(control.join("3.sock")).unwrap());
+    let holder = FakeWindow::listen(
+        control.join("4.sock"),
+        Says {
+            finds: true,
+            holds: true,
+        },
+    );
+    let closed = control.join("0.sock");
+    // As CROOK_SOCKET, and then as the first listed once CROOK_SOCKET is
+    // gone; the other each time, as the next listed.
+    for (socket, asked) in [(stale.path(), [1, 1]), (closed.to_str().unwrap(), [1, 1])] {
+        // A server of its own each time, started with this CROOK_SOCKET,
+        // which it keeps.
+        let Some(tmux) = Tmux::new("") else {
+            return;
+        };
+        let ran = run_as_a_hook_with(
+            &plugin_hook("PermissionRequest"),
+            Agent::OnThePane,
+            Pane::Tmux(&tmux),
+            ASK_INPUT,
+            &asking(&runtime, socket),
+        );
+        assert_eq!(
+            ALLOWED, ran.stdout,
+            "{socket}: the hook said {:?}",
+            ran.stderr
+        );
+        let device = ran.device.expect("the pty has a device number");
+        for window in [&stale, &other] {
+            let heard = window.heard();
+            assert!(
+                heard.iter().all(|line| finds_only(line, device)),
+                "{} was told more than where to look: {heard:?}",
+                window.path()
+            );
+            assert!(!heard.iter().any(|line| line.contains("touch probe")));
+        }
+        assert_eq!(
+            asked,
+            [stale.heard().len(), other.heard().len()],
+            "{socket}"
+        );
+        assert!(the_question(&holder.heard())["request"]["command"] == "touch probe");
+        for window in [&stale, &other, &holder] {
+            window.heard.lock().unwrap().clear();
+        }
+    }
+}
+
+#[test]
+fn pane_find_carries_no_request() {
+    // Every window says no: each is asked where to look, and nothing else,
+    // and the hook passes.
+    if !perl_is_here() {
+        return;
+    }
+    let Some(tmux) = Tmux::new("") else {
+        return;
+    };
+    let (runtime, control) = runtime();
+    let says = Says {
+        finds: false,
+        holds: true,
+    };
+    let windows: Vec<FakeWindow> = (1..=6)
+        .map(|number| FakeWindow::listen(control.join(format!("{number}.sock")), says))
+        .collect();
+    let ran = run_as_a_hook_with(
+        &plugin_hook("PermissionRequest"),
+        Agent::OnThePane,
+        Pane::Tmux(&tmux),
+        ASK_INPUT,
+        &asking(&runtime, windows[0].path()),
+    );
+    assert_quiet("PermissionRequest", &ran, Pane::Tmux(&tmux));
+    let device = ran.device.expect("the pty has a device number");
+    let asked: Vec<usize> = windows.iter().map(|window| window.heard().len()).collect();
+    // CROOK_SOCKET's window, and four others at most.
+    assert_eq!(asked, [1, 1, 1, 1, 1, 0], "{asked:?}");
+    for window in &windows {
+        for line in window.heard() {
+            assert!(finds_only(&line, device), "{line}");
+        }
+    }
+}
+
+#[test]
+fn outside_a_multiplexer_only_crook_socket_is_asked() {
+    // The window CROOK_SOCKET names says no pane of its is on the terminal:
+    // the hook passes, and no other window is so much as connected to.
+    if !perl_is_here() {
+        return;
+    }
+    let (runtime, control) = runtime();
+    let named = FakeWindow::listen(
+        control.join("1.sock"),
+        Says {
+            finds: false,
+            holds: false,
+        },
+    );
+    let other = FakeWindow::listen(
+        control.join("2.sock"),
+        Says {
+            finds: true,
+            holds: true,
+        },
+    );
+    let ran = run_as_a_hook_with(
+        &plugin_hook("PermissionRequest"),
+        Agent::OnThePane,
+        Pane::Plain,
+        ASK_INPUT,
+        &asking(&runtime, named.path()),
+    );
+    assert_quiet("PermissionRequest", &ran, Pane::Plain);
+    let asked = the_question(&named.heard());
+    assert_eq!(asked["tty"], Value::from(ran.device.expect("a device")));
+    assert_eq!(0, other.connections());
 }

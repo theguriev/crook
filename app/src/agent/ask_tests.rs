@@ -31,13 +31,18 @@ fn environment() -> Environment {
     Environment {
         socket: Some(PathBuf::from("/run/user/1000/crook-control/7.sock")),
         token: Some("c0ffee".to_owned()),
-        multiplexed: false,
+        multiplexer: None,
         entrypoint: Some("cli".to_owned()),
     }
 }
 
 /// The pane's terminal: pts/3.
 const PTY: u32 = 34819;
+
+/// The terminal found, on the pane and in no multiplexer.
+fn on_the_pane() -> Option<Bound> {
+    Some(Bound::Tty(PTY))
+}
 
 /// A look at the disk that finds the file inside the working directory and
 /// nothing there to replace.
@@ -119,6 +124,7 @@ const QUICK: Patience = Patience {
     register: Duration::from_millis(200),
     answer: Duration::from_millis(300),
     poll: Duration::from_millis(20),
+    find: Duration::from_millis(400),
 };
 
 /// What the hook prints, given `input`, `environment` and `window`, its
@@ -128,9 +134,9 @@ fn hook(input: &Value, environment: &Environment, window: &Window) -> (Option<St
     let decided = decide(
         input.to_string().as_bytes(),
         environment,
-        || Some(PTY),
+        on_the_pane,
         seen_nothing,
-        |_| {
+        |_: &Path| {
             connected.set(true);
             Some(window.clone())
         },
@@ -145,7 +151,7 @@ fn the_question_is_the_whole_request_bound_by_the_terminal_and_not_the_token() {
     let asked = question(
         input().to_string().as_bytes(),
         &environment(),
-        || Some(PTY),
+        on_the_pane,
         seen_nothing,
     )
     .expect("a question");
@@ -157,7 +163,8 @@ fn the_question_is_the_whole_request_bound_by_the_terminal_and_not_the_token() {
     assert_eq!(asked.asked.agent, AskingAgent::Claude);
     assert_eq!(asked.asked.session, "4f1c2b7e-0d3a-4e5f-9a8b-7c6d5e4f3a2b");
     assert_eq!(asked.asked.cwd, "/home/someone/work/crook");
-    assert_eq!(asked.asked.tty, PTY);
+    assert_eq!(asked.asked.tty, Some(PTY));
+    assert_eq!(asked.asked.multiplexer, None);
     assert_eq!(asked.asked.wait, 300);
     assert_eq!(
         asked.asked.request,
@@ -190,8 +197,8 @@ fn every_pass_rule_passes_without_connecting() {
         rules.push((rule, input, environment));
     };
     with("not in Crook", &|_, environment| environment.socket = None);
-    with("in a multiplexer", &|_, environment| {
-        environment.multiplexed = true;
+    with("in screen or zellij", &|_, environment| {
+        environment.multiplexer = Some(Multiplexed::Other);
     });
     with("another event", &|input, _| {
         input["hook_event_name"] = json!("PreToolUse");
@@ -261,7 +268,7 @@ fn every_pass_rule_passes_without_connecting() {
         decide(
             b"not json",
             &environment(),
-            || Some(PTY),
+            on_the_pane,
             seen_nothing,
             connect,
             &QUICK,
@@ -403,9 +410,9 @@ fn unknown_verb_eof_garbage_and_timeout_print_nothing() {
     let decided = decide(
         input().to_string().as_bytes(),
         &environment(),
-        || Some(PTY),
+        on_the_pane,
         seen_nothing,
-        |_| Some(window.clone()),
+        |_: &Path| Some(window.clone()),
         &Patience {
             answer: Duration::from_secs(60),
             ..QUICK
@@ -475,7 +482,7 @@ fn fixture(text: &str) -> Value {
 #[test]
 fn an_edit_request_is_asked_with_its_change_and_its_path() {
     let asked =
-        question(EDIT.as_bytes(), &environment(), || Some(PTY), seen_nothing).expect("a question");
+        question(EDIT.as_bytes(), &environment(), on_the_pane, seen_nothing).expect("a question");
     assert_eq!(asked.asked.cwd, "/run/user/1000/crook-probe-claude");
     assert_eq!(
         asked.asked.request,
@@ -492,7 +499,7 @@ fn an_edit_request_is_asked_with_its_change_and_its_path() {
     assert_eq!(asked.asked.tool(), "Edit");
 
     let asked =
-        question(WRITE.as_bytes(), &environment(), || Some(PTY), seen_nothing).expect("a question");
+        question(WRITE.as_bytes(), &environment(), on_the_pane, seen_nothing).expect("a question");
     assert_eq!(
         asked.asked.request,
         AskRequest::Write {
@@ -509,7 +516,7 @@ fn an_edit_request_is_asked_with_its_change_and_its_path() {
         question(
             NOTEBOOK_EDIT.as_bytes(),
             &environment(),
-            || Some(PTY),
+            on_the_pane,
             seen_nothing
         ),
         None
@@ -633,7 +640,7 @@ fn a_change_carries_what_the_look_found_on_disk_and_a_write_it_could_not_see_is_
     let asked = question(
         WRITE.as_bytes(),
         &environment(),
-        || Some(PTY),
+        on_the_pane,
         |request, cwd| {
             looked.borrow_mut().push((request.kind(), cwd.to_owned()));
             Some(found)
@@ -653,12 +660,9 @@ fn a_change_carries_what_the_look_found_on_disk_and_a_write_it_could_not_see_is_
         panic!("a write");
     };
     assert_eq!((resolves_outside, replaces), (true, found.replaces));
-    let asked = question(
-        EDIT.as_bytes(),
-        &environment(),
-        || Some(PTY),
-        |_, _| Some(found),
-    )
+    let asked = question(EDIT.as_bytes(), &environment(), on_the_pane, |_, _| {
+        Some(found)
+    })
     .expect("a question");
     assert!(matches!(
         asked.asked.request,
@@ -671,7 +675,7 @@ fn a_change_carries_what_the_look_found_on_disk_and_a_write_it_could_not_see_is_
     // Nothing to say about the disk is no question, and the window is
     // never connected to.
     assert_eq!(
-        question(WRITE.as_bytes(), &environment(), || Some(PTY), |_, _| None),
+        question(WRITE.as_bytes(), &environment(), on_the_pane, |_, _| None),
         None
     );
     // A command lands nowhere, and the disk is not looked at for it; nor is
@@ -681,7 +685,7 @@ fn a_change_carries_what_the_look_found_on_disk_and_a_write_it_could_not_see_is_
         question(
             input().to_string().as_bytes(),
             &environment(),
-            || Some(PTY),
+            on_the_pane,
             never
         )
         .is_some()
@@ -725,5 +729,297 @@ fn a_window_from_before_the_look_refuses_a_change_that_carries_it() {
                 assert!(path.ends_with("notes.txt") && content == "alpha")
             }
         }
+    }
+}
+
+/// A pane's environment inside tmux: the socket and token the tmux server
+/// kept from wherever it was started.
+fn in_tmux() -> Environment {
+    Environment {
+        multiplexer: Some(Multiplexed::Tmux),
+        ..environment()
+    }
+}
+
+/// tmux's clients, as the hook found them: on pts/3 and on one more.
+fn clients() -> Multiplexer {
+    Multiplexer {
+        kind: crate::control::protocol::MultiplexerKind::Tmux,
+        clients: vec![PTY, 34820],
+        pane: "%3".to_owned(),
+    }
+}
+
+/// A window's answer to `pane.find`.
+fn located(found: bool) -> Says {
+    Says::Line(format!(
+        "{{\"v\":1,\"ok\":true,\"result\":{{\"found\":{found}}}}}\n"
+    ))
+}
+
+/// The machine a hook asks from: the windows listening, by socket, the
+/// others the control directory lists, and every socket connected to.
+#[derive(Default)]
+struct Machine {
+    windows: Vec<(PathBuf, Window)>,
+    others: Vec<PathBuf>,
+    listed: Cell<bool>,
+    connected: RefCell<Vec<PathBuf>>,
+}
+
+impl Machine {
+    /// With the window `CROOK_SOCKET` names saying `says`, and others, each
+    /// listed in the control directory in this order, saying theirs — or,
+    /// for `None`, listed and not listening.
+    fn with(
+        says: Window,
+        others: impl IntoIterator<Item = (&'static str, Option<Window>)>,
+    ) -> Self {
+        let mut machine = Self {
+            windows: vec![(PathBuf::from("/run/user/1000/crook-control/7.sock"), says)],
+            ..Self::default()
+        };
+        for (name, window) in others {
+            let socket = PathBuf::from(format!("/run/user/1000/crook-control/{name}.sock"));
+            machine.others.push(socket.clone());
+            if let Some(window) = window {
+                machine.windows.push((socket, window));
+            }
+        }
+        machine
+    }
+}
+
+impl Windows for &Machine {
+    type Connection = Window;
+
+    fn connect(&mut self, socket: &Path) -> Option<Window> {
+        self.connected.borrow_mut().push(socket.to_owned());
+        self.windows
+            .iter()
+            .find(|(listening, _)| listening == socket)
+            .map(|(_, window)| window.clone())
+    }
+
+    fn others(&mut self, _: &Path) -> Vec<PathBuf> {
+        self.listed.set(true);
+        self.others.clone()
+    }
+}
+
+/// What the hook prints from inside tmux, asking the windows of `machine`.
+fn hook_in_tmux(machine: &Machine) -> Option<String> {
+    decide(
+        input().to_string().as_bytes(),
+        &in_tmux(),
+        || Some(Bound::Multiplexer(clients())),
+        seen_nothing,
+        machine,
+        &QUICK,
+        || false,
+    )
+    .map(|(line, _)| line)
+}
+
+/// Whether `line` is a `pane.find` carrying exactly `ttys`, and nothing
+/// else: no token, nothing of the question.
+fn is_a_find_of(line: &str, ttys: &[u32]) -> bool {
+    let sent: Value = serde_json::from_str(line).expect("a line of JSON");
+    sent == json!({"v": 1, "verb": "pane.find", "args": {"ttys": ttys}})
+}
+
+#[test]
+fn inside_tmux_the_question_names_the_clients_terminals_and_carries_no_token() {
+    let asked = question(
+        input().to_string().as_bytes(),
+        &in_tmux(),
+        || Some(Bound::Multiplexer(clients())),
+        seen_nothing,
+    )
+    .expect("a question");
+    assert_eq!(asked.asked.tty, None);
+    assert_eq!(asked.asked.multiplexer, Some(clients()));
+    assert_eq!(asked.token, None, "the token tmux kept is no hint");
+
+    // What the environment says to look for is what has to be found: a
+    // terminal of its own is no answer inside tmux, nor tmux's clients
+    // outside it.
+    for (environment, bound) in [
+        (in_tmux(), Bound::Tty(PTY)),
+        (environment(), Bound::Multiplexer(clients())),
+    ] {
+        assert_eq!(
+            question(
+                input().to_string().as_bytes(),
+                &environment,
+                || Some(bound.clone()),
+                seen_nothing
+            ),
+            None
+        );
+    }
+}
+
+#[test]
+fn inside_tmux_the_question_goes_to_crook_socket_once_it_finds_a_client_there() {
+    let window = Window::saying([
+        located(true),
+        held(),
+        Says::Line(format!("{}\n", json!({"answer": {"decision": "allow"}}))),
+    ]);
+    let machine = Machine::with(window.clone(), [("8", Some(Window::default()))]);
+    assert_eq!(hook_in_tmux(&machine).as_deref(), Some(ALLOW));
+    let sent = window.sent();
+    assert!(is_a_find_of(&sent[0], &[PTY, 34820]), "{:?}", sent[0]);
+    let (_, read) = protocol::read(sent[1].trim_end().as_bytes());
+    let Verb::AgentAsk(asked) = read.expect("a request the window takes").verb else {
+        panic!("not a question: {:?}", sent[1]);
+    };
+    assert_eq!(asked.multiplexer, Some(clients()));
+    assert!(!machine.listed.get(), "no other window was looked for");
+}
+
+#[test]
+fn a_stale_crook_socket_inside_tmux_finds_the_window_without_telling_the_others_anything() {
+    // CROOK_SOCKET's window holds none of the clients; of the others, one is
+    // not listening, one holds none either, and the third does.
+    let stale = Window::saying([located(false)]);
+    let none = Window::saying([located(false)]);
+    let holder = Window::saying([
+        located(true),
+        held(),
+        Says::Line(format!("{}\n", json!({"answer": {"decision": "allow"}}))),
+    ]);
+    let after = Window::default();
+    let machine = Machine::with(
+        stale.clone(),
+        [
+            ("1", None),
+            ("2", Some(none.clone())),
+            ("3", Some(holder.clone())),
+            ("4", Some(after.clone())),
+        ],
+    );
+    assert_eq!(hook_in_tmux(&machine).as_deref(), Some(ALLOW));
+    for (name, window) in [("CROOK_SOCKET's", &stale), ("the other", &none)] {
+        let sent = window.sent();
+        assert_eq!(sent.len(), 1, "{name} window was sent more: {sent:?}");
+        assert!(is_a_find_of(&sent[0], &[PTY, 34820]), "{sent:?}");
+        assert!(!sent[0].contains("rm -rf"));
+    }
+    let sent = holder.sent();
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert!(sent[1].contains("rm -rf build"), "{sent:?}");
+    assert!(
+        after.sent().is_empty(),
+        "a window after the one that found it"
+    );
+}
+
+#[test]
+fn inside_tmux_at_most_four_other_windows_are_asked_and_then_nothing() {
+    let others: Vec<(&'static str, Option<Window>)> = ["1", "2", "3", "4", "5", "6"]
+        .into_iter()
+        .map(|name| (name, Some(Window::saying([located(false)]))))
+        .collect();
+    let machine = Machine::with(Window::saying([located(false)]), others);
+    assert_eq!(hook_in_tmux(&machine), None);
+    // CROOK_SOCKET's, then four of the others; a socket that is not
+    // listening is no window, and does not count.
+    assert_eq!(machine.connected.borrow().len(), 1 + MAX_OTHER_WINDOWS);
+
+    let mut others: Vec<(&'static str, Option<Window>)> = vec![("0", None)];
+    others.extend(
+        ["1", "2", "3", "4", "5"]
+            .into_iter()
+            .map(|name| (name, Some(Window::saying([located(false)])))),
+    );
+    let machine = Machine::with(Window::saying([located(false)]), others);
+    assert_eq!(hook_in_tmux(&machine), None);
+    assert_eq!(machine.connected.borrow().len(), 2 + MAX_OTHER_WINDOWS);
+}
+
+#[test]
+fn inside_tmux_a_window_that_refuses_or_says_nothing_is_passed_over_in_time() {
+    // An older window, which knows no `pane.find`, and one that never
+    // answers: neither is told anything more, and the search ends within
+    // its time whatever the windows do.
+    let older = Window::saying([Says::Line(
+        "{\"v\":1,\"ok\":false,\"error\":{\"code\":\"unknown-verb\",\"message\":\"no\"}}\n"
+            .to_owned(),
+    )]);
+    let silent = Window::saying([Says::Nothing]);
+    let machine = Machine::with(
+        older.clone(),
+        [
+            ("1", Some(silent.clone())),
+            ("2", Some(Window::saying([Says::Nothing]))),
+        ],
+    );
+    let started = Instant::now();
+    assert_eq!(hook_in_tmux(&machine), None);
+    assert!(
+        started.elapsed() < QUICK.find + QUICK.register,
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(older.sent().len(), 1);
+    assert_eq!(silent.sent().len(), 1);
+}
+
+#[test]
+fn outside_a_multiplexer_only_crook_socket_is_asked() {
+    // Refused as `no-such-pane`: the hook passes, and asks nobody else.
+    let window = Window::saying([Says::Line(
+        "{\"v\":1,\"ok\":false,\"error\":{\"code\":\"no-such-pane\",\"message\":\"no\"}}\n"
+            .to_owned(),
+    )]);
+    let elsewhere = Window::saying([located(true), held()]);
+    let machine = Machine::with(window.clone(), [("8", Some(elsewhere.clone()))]);
+    let decided = decide(
+        input().to_string().as_bytes(),
+        &environment(),
+        on_the_pane,
+        seen_nothing,
+        &machine,
+        &QUICK,
+        || false,
+    );
+    assert!(decided.is_none());
+    assert!(!machine.listed.get(), "another window was looked for");
+    assert_eq!(machine.connected.borrow().len(), 1);
+    assert!(elsewhere.sent().is_empty());
+    assert_eq!(window.sent().len(), 1);
+}
+
+#[test]
+fn an_ahead_agent_or_screen_or_zellij_inside_a_multiplexer_connects_to_nothing() {
+    // A subagent's question passes before anything is looked for, inside
+    // tmux as everywhere; screen and zellij cannot be asked for their
+    // clients at all.
+    let mut subagent = input();
+    subagent["agent_id"] = json!("a1b2c3");
+    let other = Environment {
+        multiplexer: Some(Multiplexed::Other),
+        ..environment()
+    };
+    for (input, environment) in [(subagent, in_tmux()), (input(), other)] {
+        let machine = Machine::with(Window::saying([located(true), held()]), []);
+        let looked = Cell::new(false);
+        let decided = decide(
+            input.to_string().as_bytes(),
+            &environment,
+            || {
+                looked.set(true);
+                Some(Bound::Multiplexer(clients()))
+            },
+            seen_nothing,
+            &machine,
+            &QUICK,
+            || false,
+        );
+        assert!(decided.is_none());
+        assert!(!looked.get(), "tmux was asked where its clients are");
+        assert!(machine.connected.borrow().is_empty(), "connected");
     }
 }
