@@ -3056,6 +3056,22 @@ impl Workspace {
         .detach();
     }
 
+    /// Takes in what the frame just drawn found, which its layout and paint
+    /// could not say themselves: how long the card's command is, and that it
+    /// was on screen to its end. The frame was built before it knew — Allow
+    /// inert — so the card is built again, and whether it has to be is what
+    /// the caller asks the next frame for.
+    pub fn frame_drawn(&mut self, ctx: &mut ViewContext<Self>) -> bool {
+        let news = self
+            .ask_card
+            .as_ref()
+            .is_some_and(|card| card.body().take_news());
+        if news {
+            ctx.notify();
+        }
+        news
+    }
+
     /// Takes in that the questions the window holds have changed: one held,
     /// or one ended by what its connection said.
     ///

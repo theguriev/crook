@@ -313,11 +313,16 @@ impl Harness {
     fn frame_sized(&mut self, window: Vector2F) -> Rc<Scene> {
         let window_id = self.window_id;
         let presenter = &mut self.presenter;
-        self.app.update(|ctx| {
+        let scene = self.app.update(|ctx| {
             let invalidation = ctx.take_all_invalidations_for_window(window_id);
             presenter.invalidate(invalidation, ctx);
             presenter.build_scene(window, 1., ctx)
-        })
+        });
+        // What the window's delegate does after every frame.
+        let workspace = &self.workspace;
+        self.app
+            .update(|ctx| workspace.update(ctx, |workspace, ctx| workspace.frame_drawn(ctx)));
+        scene
     }
 
     /// Arms the first row's detail card, the way `--hover` does.
@@ -43326,6 +43331,116 @@ mod answering_card {
         );
         assert!(held.nothing_sent());
         assert!(card_says(&mut harness, "This request changed or ended"));
+    }
+
+    #[test]
+    fn in_a_short_window_allow_waits_for_the_end_to_be_on_screen() {
+        // Ten lines fit the box in an ordinary window. In one 270 px tall the
+        // card is shortened to it, the box shows what room is left, and the
+        // end has to be scrolled to — and drawn inside the window — before
+        // Allow is anything.
+        let short = vec2f(WINDOW.x(), 270.);
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let ten: String = (1..=9)
+            .map(|line| format!("echo line {line}"))
+            .chain(["rm -rf ~".to_owned()])
+            .collect::<Vec<_>>()
+            .join("\n");
+        let held = hold(&mut harness, pane, &ten);
+        harness.run_command("crook/tabs/answer-waiting");
+        harness.workspace_update(|workspace, ctx| workspace.settle_the_ask_card(ctx));
+        let window = RectF::new(Vector2F::zero(), short);
+        // The first frame measures the box, and the second says so.
+        harness.frame_sized(short);
+        let scene = harness.frame_sized(short);
+
+        // The whole card is in the window, its buttons with it.
+        word_in(&scene, window, "Not now");
+        assert!(
+            frame_text(&scene).contains("scroll to the end to allow it"),
+            "{}",
+            frame_text(&scene)
+        );
+        let allow_reached = |harness: &mut Harness| {
+            for _ in 0..3 {
+                harness.press_key("left", Modifiers::default());
+            }
+            keyboard_on(harness) == Some(AskButton::Allow)
+        };
+        assert!(!allow_reached(&mut harness), "the keyboard reached Allow");
+        harness.dispatch_workspace_action(
+            AskAction::Answer {
+                ask: held.id,
+                digest: held.digest,
+                decision: Choice::Allow,
+                by: Pressed::Keys,
+            }
+            .into(),
+        );
+        assert!(held.nothing_sent(), "Allow before the end was on screen");
+
+        // Scrolled to the end and drawn there, it is read.
+        let held = hold_request(&mut harness, pane, "s2", command(&ten, false), None);
+        harness.run_command("crook/tabs/answer-waiting");
+        harness.workspace_update(|workspace, ctx| workspace.settle_the_ask_card(ctx));
+        harness.frame_sized(short);
+        assert!(harness.press_key("end", Modifiers::default()));
+        let scene = harness.frame_sized(short);
+        word_in(&scene, window, "rm -rf ~");
+        harness.frame_sized(short);
+        harness.workspace_update(|workspace, ctx| workspace.settle_the_ask_card(ctx));
+        assert!(allow_reached(&mut harness));
+        assert!(harness.press_key("enter", Modifiers::default()));
+        assert_eq!(
+            held.sent().expect("an allow")["answer"]["decision"],
+            "allow"
+        );
+    }
+
+    #[test]
+    fn a_command_drawn_past_the_windows_edge_has_not_been_read() {
+        // A window shorter than the least the card is shortened to: the box
+        // shows the one line, below the window's edge, and a line nobody can
+        // see has not been read, however short the command.
+        let tiny = vec2f(WINDOW.x(), 60.);
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf ~");
+        harness.run_command("crook/tabs/answer-waiting");
+        harness.workspace_update(|workspace, ctx| workspace.settle_the_ask_card(ctx));
+        for _ in 0..3 {
+            harness.frame_sized(tiny);
+        }
+        assert!(
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .ask_card()
+                    .is_some_and(|card| !card.body().read_to_end())
+            }),
+            "a command drawn where the window does not reach was read"
+        );
+        harness.dispatch_workspace_action(
+            AskAction::Answer {
+                ask: held.id,
+                digest: held.digest,
+                decision: Choice::Allow,
+                by: Pressed::Keys,
+            }
+            .into(),
+        );
+        assert!(held.nothing_sent());
+
+        // The same card in a window that shows it is read at once.
+        let held = hold_request(&mut harness, pane, "s2", command("rm -rf ~", false), None);
+        harness.run_command("crook/tabs/answer-waiting");
+        harness.frame();
+        assert!(harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .ask_card()
+                .is_some_and(|card| card.body().read_to_end())
+        }));
+        assert!(held.nothing_sent());
     }
 
     #[test]

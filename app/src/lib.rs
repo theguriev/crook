@@ -4568,6 +4568,14 @@ impl WindowDelegate for Shell {
         // screen of them was printed in may have just closed, and then no
         // frame will draw one again to notice.
         inline_image::forget_the_gone();
+        // What the frame's paint learned and could not ask a frame for.
+        let workspace = &self.workspace;
+        if self
+            .app
+            .update(|ctx| workspace.update(ctx, |workspace, ctx| workspace.frame_drawn(ctx)))
+        {
+            self.proxy.request_redraw();
+        }
         if self.start_expected_terminals() {
             // The shells opened after a frame that had none: the next frame
             // is the first with a field to type into, and it is asked for

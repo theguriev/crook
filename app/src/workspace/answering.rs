@@ -61,8 +61,12 @@
 //!
 //! **Nor anything not shown.** A command longer than its box has room for
 //! keeps Allow inert, for keys and the pointer alike, until its last line has
-//! been on screen. Deny needs no such thing: a no is never the dangerous
-//! answer.
+//! been on screen — drawn inside the window, which the paint checks, and not
+//! only inside the box, which is all the layout knows. A window too short for
+//! the card shortens it, and the box gives up lines to the rest and scrolls
+//! through the others, so that a short window cannot leave the end of the
+//! command below its edge, read. Deny needs no such thing: a no is never the
+//! dangerous answer.
 //!
 //! **The pane under it hears nothing**, as under the close question, and for
 //! its reason: a reflexive `ctrl-c` to be rid of the card would interrupt the
@@ -126,11 +130,16 @@ const CARD_WIDTH: f32 = 480.;
 /// The least the card is narrowed to in a window narrower than it.
 const CARD_LEAST_WIDTH: f32 = 300.;
 
+/// The least the card is shortened to in a window shorter than it, which
+/// still leaves its command a line or two.
+const CARD_LEAST_HEIGHT: f32 = 200.;
+
 /// The card's corner radius, which is every menu's in this application.
 const CARD_RADIUS: f32 = 6.;
 
-/// How many lines of the command the card shows at once. The rest scrolls,
-/// inside the box, and the buttons below it never move.
+/// How many lines of the command the card shows at once, at most: fewer in a
+/// window too short for the card to have them all. The rest scrolls, inside
+/// the box, and the buttons below it never move.
 pub(super) const BODY_LINES: usize = 12;
 
 /// How many columns a line of the command is wrapped at when the box has no
@@ -194,8 +203,19 @@ pub(super) struct Body {
     /// How many lines the command wrapped to, at the last layout; zero before
     /// the first.
     lines: Cell<usize>,
+    /// How many of them the box had room to show, at the last layout: at
+    /// most [`BODY_LINES`], and fewer in a short window; zero before the
+    /// first.
+    shown: Cell<usize>,
     /// Whether its last line has been on screen.
     read_to_end: Cell<bool>,
+    /// Whether a frame has learned something about the box since the card
+    /// was last built: how many lines the command wraps to, how many the box
+    /// shows, or that the end was on screen. The card that frame drew was
+    /// built before it knew — Allow inert, the line under the box saying
+    /// nothing — and the next has to be asked for; see
+    /// `Workspace::frame_drawn`.
+    news: Cell<bool>,
 }
 
 impl Body {
@@ -205,18 +225,27 @@ impl Body {
         self.read_to_end.get()
     }
 
-    /// The largest first line that still fills the box.
-    fn last_top(&self) -> usize {
-        self.lines.get().saturating_sub(BODY_LINES)
+    /// How many lines the box shows at once.
+    fn shown(&self) -> usize {
+        match self.shown.get() {
+            0 => BODY_LINES,
+            shown => shown,
+        }
     }
 
-    /// Puts `top` first, kept inside the command, and notes whether that
-    /// shows its end. Whether it moved.
+    /// The largest first line that still fills the box.
+    fn last_top(&self) -> usize {
+        self.lines.get().saturating_sub(self.shown())
+    }
+
+    /// Puts `top` first, kept inside the command. Whether it moved.
+    ///
+    /// Whether that shows the end is the paint's to say, which is the one
+    /// that knows where the box landed in the window.
     fn scroll_to(&self, top: usize) -> bool {
         let top = top.min(self.last_top());
         let moved = top != self.top.get();
         self.top.set(top);
-        self.note_the_end();
         moved
     }
 
@@ -225,11 +254,33 @@ impl Body {
         self.scroll_to(self.top.get().saturating_add_signed(lines))
     }
 
-    /// Writes down that the end has been seen, when the box shows it.
-    fn note_the_end(&self) {
-        if self.lines.get() > 0 && self.top.get() + BODY_LINES >= self.lines.get() {
-            self.read_to_end.set(true);
+    /// Writes down that the end has been seen, when the box shows it and
+    /// `on_screen`, which the paint says: whether the last line was drawn
+    /// inside the window and inside whatever clips the card.
+    fn note_the_end(&self, on_screen: bool) {
+        if on_screen && self.shows_the_end() && !self.read_to_end.replace(true) {
+            self.news.set(true);
         }
+    }
+
+    /// Takes in how many lines the command wraps to and how many the box
+    /// shows, as a layout found them.
+    fn measured(&self, lines: usize, shown: usize) {
+        let was = (self.lines.replace(lines), self.shown.replace(shown));
+        if was != (lines, shown) {
+            self.news.set(true);
+        }
+    }
+
+    /// Whether a frame has learned anything since this was last asked, which
+    /// it then forgets.
+    pub(super) fn take_news(&self) -> bool {
+        self.news.replace(false)
+    }
+
+    /// Whether the box, scrolled where it is, shows the command's last line.
+    fn shows_the_end(&self) -> bool {
+        self.lines.get() > 0 && self.top.get() + self.shown() >= self.lines.get()
     }
 }
 
@@ -544,7 +595,7 @@ pub(super) fn action_for(
         let count = reachable.len() as isize;
         reachable[(at as isize + by).rem_euclid(count) as usize]
     };
-    let page = BODY_LINES as isize - 1;
+    let page = card.body.shown() as isize - 1;
     // Taken whether it moved or not: an arrow at the end of the command must
     // not fall through to whatever is under the card.
     let scrolled = |_moved: bool| {
@@ -657,6 +708,7 @@ pub(super) fn render(workspace: &Workspace, card: &AskCard) -> Box<dyn Element> 
         .finish(),
     )
     .with_width_inset(WINDOW_INSET, CARD_LEAST_WIDTH)
+    .with_height_inset(WINDOW_INSET, CARD_LEAST_HEIGHT)
     .finish();
 
     // Placed as the close question is, centred and a third of the way down.
@@ -706,17 +758,24 @@ fn live_face(
             ui,
         ));
     }
+    // The one part of the card that gives up height in a short window: what
+    // the rest leaves is the lines it shows, and it scrolls through the
+    // others.
     column.add_child(
-        Container::new(
-            CommandBody::new(
-                visible(command),
-                card.body.clone(),
-                workspace.fonts().monospace,
+        Shrinkable::new(
+            1.,
+            Container::new(
+                CommandBody::new(
+                    visible(command),
+                    card.body.clone(),
+                    workspace.fonts().monospace,
+                )
+                .finish(),
             )
+            .with_horizontal_padding(ROW_INSET)
+            .with_margin_bottom(6.)
             .finish(),
         )
-        .with_horizontal_padding(ROW_INSET)
-        .with_margin_bottom(6.)
         .finish(),
     );
     column.add_child(extent(&card.body, ui));
@@ -771,12 +830,12 @@ fn extent(body: &Body, ui: FamilyId) -> Box<dyn Element> {
     let said = match lines {
         0 => " ".to_owned(),
         1 => "1 line".to_owned(),
-        lines if lines <= BODY_LINES => format!("{lines} lines"),
+        lines if lines <= body.shown() => format!("{lines} lines"),
         lines => {
             let shown = format!(
                 "Lines {}–{} of {lines}",
                 top + 1,
-                (top + BODY_LINES).min(lines)
+                (top + body.shown()).min(lines)
             );
             if body.read_to_end() {
                 shown
@@ -876,7 +935,8 @@ fn button_row(
 }
 
 /// The command, wrapped at whichever column the box's width runs out at and
-/// shown [`BODY_LINES`] at a time.
+/// shown [`BODY_LINES`] at a time, or as many as the height it is given has
+/// room for.
 ///
 /// Built here rather than from a [`Scrollable`], which lays out the whole of
 /// what it scrolls: a command can be as long as the socket's line, and the
@@ -960,16 +1020,24 @@ impl Element for CommandBody {
             FALLBACK_COLUMNS
         };
 
+        // As many lines as the card has room for under the window's edge, so
+        // that a short window scrolls the command rather than running the
+        // card's end, the command's with it, off the bottom of the window.
+        let room = constraint.max.y();
+        let fits = if room.is_finite() {
+            ((room / self.line_height).floor() as usize).clamp(1, BODY_LINES)
+        } else {
+            BODY_LINES
+        };
         let wrapped = wrap(&self.text, columns);
-        self.body.lines.set(wrapped.len());
+        self.body.measured(wrapped.len(), fits);
         let top = self.body.top.get().min(self.body.last_top());
         self.body.top.set(top);
-        self.body.note_the_end();
 
         let mut lines = Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Start);
-        for (start, end) in wrapped.iter().skip(top).take(BODY_LINES) {
+        for (start, end) in wrapped.iter().skip(top).take(fits) {
             let line = &self.text[*start..*end];
             // A line with nothing on it is still a line of the command.
             let line = if line.is_empty() { " " } else { line };
@@ -1005,11 +1073,37 @@ impl Element for CommandBody {
         if let Some(lines) = self.lines.as_mut() {
             lines.paint(origin, ctx, app);
         }
+        // The end has been read only once its line was where a person could
+        // see it: inside the window, and inside whatever clips the card. The
+        // layout knows the box shows it, and not where the box landed; a
+        // card taller than a short window has its last rows past the edge.
+        if self.body.shows_the_end() {
+            let last = self.body.lines.get() - 1 - self.body.top.get();
+            let line = RectF::new(
+                origin + vec2f(0., last as f32 * self.line_height),
+                vec2f(size.x(), self.line_height),
+            );
+            // Whole, give or take a rounding: half a line cut off is a line
+            // somebody may not have read.
+            let whole = |seen: Option<RectF>| {
+                seen.is_some_and(|seen| {
+                    seen.width() >= line.width() - 0.5 && seen.height() >= line.height() - 0.5
+                })
+            };
+            let in_the_window =
+                whole(RectF::new(Vector2F::zero(), ctx.window_size).intersection(line));
+            let unclipped = whole(ctx.scene.visible_rect(
+                Point::from_vec2f(line.origin(), ctx.scene.z_index()),
+                line.size(),
+            ));
+            self.body.note_the_end(in_the_window && unclipped);
+        }
         // A thumb, as a list's, so that a box that does not show all of the
         // command says so before anybody scrolls it.
         let total = self.body.lines.get();
-        if total > BODY_LINES {
-            let share = BODY_LINES as f32 / total as f32;
+        let shown = self.body.shown();
+        if total > shown {
+            let share = shown as f32 / total as f32;
             let length = (size.y() * share).max(12.).min(size.y());
             let travel = size.y() - length;
             let at = travel * self.body.top.get() as f32 / self.body.last_top().max(1) as f32;
@@ -1093,15 +1187,34 @@ mod tests {
         let body = Body::default();
         assert!(!body.read_to_end(), "not before it is laid out");
         body.lines.set(BODY_LINES + 5);
-        body.note_the_end();
+        body.note_the_end(true);
         assert!(!body.read_to_end());
         assert!(body.scroll_by(4));
+        body.note_the_end(true);
         assert!(!body.read_to_end(), "a line short of the end");
         assert!(body.scroll_by(1));
+        assert!(!body.read_to_end(), "scrolled there and not yet drawn");
+        // Drawn where the window does not reach, it has not been seen.
+        body.note_the_end(false);
+        assert!(!body.read_to_end());
+        body.note_the_end(true);
         assert!(body.read_to_end());
         // And it stays seen: scrolled back up, the end was on screen once.
         assert!(body.scroll_to(0));
+        body.note_the_end(true);
         assert!(body.read_to_end());
         assert!(!body.scroll_by(-1), "nothing above the top");
+    }
+
+    #[test]
+    fn a_box_with_room_for_fewer_lines_scrolls_by_what_it_shows() {
+        let body = Body::default();
+        body.lines.set(10);
+        body.shown.set(4);
+        assert_eq!(body.last_top(), 6);
+        assert!(!body.shows_the_end());
+        assert!(body.scroll_to(usize::MAX));
+        assert_eq!(body.top.get(), 6);
+        assert!(body.shows_the_end());
     }
 }
