@@ -462,6 +462,27 @@ impl PaneFind {
         true
     }
 
+    /// Lets go of the search that set out as `asked` without taking in what
+    /// it found. The answer on screen stands, and the next question asked
+    /// starts a search, this very one included.
+    ///
+    /// For an answer that comes back to a pane nobody can see any more. Its
+    /// rows were read out of the emulator when the read was made, which can
+    /// be a [`GRID_PAUSE`] after the pane went, so they hold what was printed
+    /// where nobody was looking. Only declining [`Self::land_grid`] would not
+    /// do: the search would still count as on its way, and the pane coming
+    /// back on screen would wait for it rather than ask again.
+    pub fn drop_grid(&self, asked: &GridAsk) {
+        let mut state = self.0.borrow_mut();
+        let grid = &mut state.grid;
+        // Only the search being waited for: one that comes back after the bar
+        // closed and opened again is not, and the one that is stays asked.
+        if grid.asking.as_ref() == Some(asked) {
+            grid.asking = None;
+            grid.pausing = None;
+        }
+    }
+
     /// Asks for the current match to be brought into view when the grid's
     /// next answer lands.
     pub fn reveal_when_found(&self) {

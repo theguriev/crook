@@ -1622,20 +1622,43 @@ impl Workspace {
     /// Records that nothing of the window can be seen any more, or that
     /// some of it can again.
     ///
-    /// Only the breath reads it. Its chain ends while the window is out of
-    /// sight, since X11 and Windows draw every frame asked of a window
-    /// nobody can see, and starts again here when it comes back. Unlike
-    /// the focus, which the breath ignores on purpose: a window behind
-    /// another but beside it is where a working agent is watched from.
+    /// The breath and the panes read it, since X11 and Windows draw every
+    /// frame asked of a window nobody can see. The breath's chain ends while
+    /// the window is out of sight and starts again here when it comes back.
+    /// A pane's output asks for no frame meanwhile, and its shell builds no
+    /// snapshot — see [`Self::pane_can_be_seen`]. Unlike the focus, which
+    /// neither reads on purpose: a window behind another but beside it is
+    /// where a working agent is watched from.
+    ///
+    /// Trusted with the panes, the desktop's word costs more when it is
+    /// wrong than it did when only the breath heard it: a window said to be
+    /// out of sight while somebody can see it draws a pane's output with
+    /// the next frame anything else asks for — a key, a click, the focus
+    /// moving, a row changing — rather than as it comes. The one way it is
+    /// known to be wrong, an X11 answer that lags a restore, crookui puts
+    /// right by itself within a second. See `Event::WindowOccluded` for
+    /// what each desktop says, and when.
     pub fn set_window_occluded(&mut self, occluded: bool, ctx: &mut ViewContext<Self>) {
         if self.window_occluded == occluded {
             return;
         }
         self.window_occluded = occluded;
+        // Said now rather than by the next frame, which is where it is
+        // otherwise said: a window out of sight may draw none, and its
+        // shells would build a snapshot of every publication until it did.
+        // Coming back, the frame asked for below says the same again.
+        self.terminals
+            .as_ref(ctx)
+            .draw_only(|pane| self.pane_can_be_seen(pane));
         if !occluded {
             self.start_breathing(ctx);
+            // A find bar over a pane in the window answers the grid as it
+            // was when the window went: its repaints were not searched since.
+            self.search_grids_on_screen(ctx);
             // The desktop shows the frame it hid, which has the breath where
-            // it was when the window went.
+            // it was when the window went, and every pane as it was then.
+            // This one is drawn from what they hold now, the snapshots no
+            // publication built meanwhile built on the way.
             ctx.notify();
         }
     }
@@ -4007,10 +4030,14 @@ impl Workspace {
     /// keystroke in the field, a repaint of the grid, which is what says the
     /// program has printed, and the pane coming back on screen.
     ///
-    /// Only for a pane that is on screen. A bar left open over an agent in a
-    /// tab behind this one would otherwise read its scrollback after every
-    /// line it printed, for an answer nobody can see; it is asked again when
-    /// the pane is shown — see [`Self::search_grids_on_screen`].
+    /// Only for a pane somebody can see. A bar left open over an agent in a
+    /// tab behind this one, or in a window out of sight, would otherwise
+    /// read its scrollback after every line it printed, for an answer nobody
+    /// can see — and build the snapshot no publication builds for such a
+    /// pane, on this thread. It is asked again when the pane is shown — see
+    /// [`Self::search_grids_on_screen`] — and a search that set out before
+    /// the pane went is not taken in when it comes back: see
+    /// [`Self::grid_searched`].
     ///
     /// A grid whose text is unchanged is not read again — see
     /// [`PaneFind::carry_over`] — and one that changed under an answer already
@@ -4023,7 +4050,7 @@ impl Workspace {
         let Some(find) = self.find(pane).cloned() else {
             return;
         };
-        if !find.is_open() || !self.pane_is_on_screen(pane) {
+        if !find.is_open() || !self.pane_can_be_seen(pane) {
             return;
         }
         let Some((handle, snapshot)) = self.terminal(pane, ctx) else {
@@ -4088,9 +4115,9 @@ impl Workspace {
     /// Asks every find bar open over a grid on screen to search it again.
     ///
     /// For a pane coming back on screen — a tab switched to, a zoom let go of,
-    /// a section closed — whose repaints were not searched while it was
-    /// hidden. A bar whose answer is still to the picture on screen asks
-    /// nothing.
+    /// a section closed, the window back in sight — whose repaints were not
+    /// searched while it was hidden. A bar whose answer is still to the
+    /// picture on screen asks nothing.
     fn search_grids_on_screen(&mut self, ctx: &mut ViewContext<Self>) {
         let open: Vec<PaneId> = self
             .interactions
@@ -4104,7 +4131,8 @@ impl Workspace {
     }
 
     /// Takes in what a search of a pane's grid found, and brings the current
-    /// match into view if the bar asked for that before there was one.
+    /// match into view if the bar asked for that before there was one — or,
+    /// for a pane nobody can see any more, lets the search go.
     fn grid_searched(
         &mut self,
         pane: PaneId,
@@ -4117,6 +4145,18 @@ impl Workspace {
         let Some(find) = self.find(pane).cloned() else {
             return;
         };
+        // Asked while somebody could see the pane, and back after the window
+        // went out of sight or the tab was switched away: a read set out a
+        // moment before waits out its pause and then reads the grid as it is
+        // by then, with what was printed after the pane went. Taken in, the
+        // bar would answer output nobody was there to see, once each time
+        // the pane went. The pane coming back on screen asks again — see
+        // `search_grids_on_screen` — so the answer is dropped rather than
+        // kept for then, when the grid may have moved on from it too.
+        if !self.pane_can_be_seen(pane) {
+            find.drop_grid(&asked);
+            return;
+        }
         if !find.land_grid(asked, read_for, rows, matches) {
             return;
         }
@@ -9699,7 +9739,7 @@ impl Workspace {
     /// it if it was the last pane, and the window goes if that was the last
     /// tab. There is deliberately no second way to close anything.
     ///
-    /// A grid that changed is a frame only when [`Self::pane_is_on_screen`]
+    /// A grid that changed is a frame only when [`Self::pane_can_be_seen`]
     /// says so. Everything else here is applied whether or not anybody can see
     /// the pane: it is about the session — what its row says, the clipboard,
     /// the pane closing — and none of that can wait for the tab to be looked
@@ -9715,23 +9755,33 @@ impl Workspace {
     ) {
         let reported = match update {
             // The one update that is about pixels, and the gate that keeps a
-            // tab nobody is looking at from rebuilding the window every time
-            // its shell prints. Nothing else is lost by skipping it: the grid
-            // is all it changed, and the frame that brings the pane back on
-            // screen reads the snapshot the model holds *now*.
+            // tab nobody is looking at — or a window nobody can see — from
+            // rebuilding the window every time its shell prints. Nothing else
+            // is lost by skipping it: the grid is all it changed, and the
+            // frame that brings the pane back on screen reads the snapshot
+            // the model holds *now*.
             TerminalUpdate::Repainted(pane) => {
-                if self.pane_is_on_screen(*pane) {
+                if self.pane_can_be_seen(*pane) {
                     ctx.notify();
+                } else {
+                    // And its shell builds no snapshot of what it prints next.
+                    // Said by the render for every pane it knows, but a shell
+                    // that opened since — a restore's arrival, a tab opened
+                    // over the control socket — is drawn until told
+                    // otherwise, and in a window out of sight no render may
+                    // come to tell it.
+                    self.terminals.as_ref(ctx).not_drawn(*pane);
                 }
                 // A full-screen program starting or ending under a find bar
                 // takes the bar down, and the keyboard back to the composer.
-                // Only under an open one, over a pane on screen: the snapshot
-                // of a pane off screen is built when it is asked for, and
+                // Only under an open one, over a pane somebody can see: the
+                // snapshot of any other is built when it is asked for, and
                 // asked for here by every repaint, it would be built for every
                 // publication again, on this thread. A bar stays open on a
-                // tab switched away from, and the frame that brings its pane
-                // back asks the same question of the snapshot it draws.
-                if self.pane_is_on_screen(*pane)
+                // tab switched away from, and in a window gone out of sight,
+                // and the frame that brings its pane back asks the same
+                // question of the snapshot it draws.
+                if self.pane_can_be_seen(*pane)
                     && self.find(*pane).is_some_and(PaneFind::is_open)
                     && let Some((_, snapshot)) = self.terminal(*pane, ctx)
                 {
@@ -9739,7 +9789,7 @@ impl Workspace {
                 }
                 // A grid's find answers the grid as it was; what it printed
                 // since is searched again, off this thread. Nothing when no
-                // bar is open over a grid on screen.
+                // bar is open over a grid somebody can see.
                 self.search_grid(*pane, ctx);
                 self.tabs.pane(*pane).is_some()
             }
@@ -9982,15 +10032,30 @@ impl Workspace {
     /// follows, so there is no path — a tab switch, a split, a zoom, a close,
     /// a restore, a plugin switched off under the section it was showing —
     /// that can leave it saying a pane is hidden while the frame draws it.
-    /// The render asks it too, for every pane, and hands the answer to the
-    /// model, whose readers build no snapshot for a pane it says is hidden:
-    /// see [`TerminalModel::draw_only`].
+    ///
+    /// A drop asks it as it stands: files let go over the window are word
+    /// enough that somebody can see it, whatever the desktop said last. The
+    /// repaint and the render ask [`Self::pane_can_be_seen`], which is this
+    /// in a window in sight.
     pub(super) fn pane_is_on_screen(&self, pane: PaneId) -> bool {
         self.showing_section().is_none()
             && self
                 .tabs
                 .active()
                 .is_some_and(|tab| tab.panes().is_visible(pane))
+    }
+
+    /// Whether anybody can see `pane`'s output: a frame draws it, and the
+    /// window it is drawn in is in sight.
+    ///
+    /// What a repaint is worth a frame for, and what an open find bar's
+    /// questions are asked of the snapshot for. The render hands it to the
+    /// model, whose readers build no snapshot for a pane it says nobody can
+    /// see — see [`TerminalModel::draw_only`] — and so does
+    /// [`Self::set_window_occluded`], since a window out of sight may draw
+    /// no frame to say it.
+    pub(super) fn pane_can_be_seen(&self, pane: PaneId) -> bool {
+        !self.window_occluded && self.pane_is_on_screen(pane)
     }
 
     /// Spends what a restore left in a pane once a command has finished
@@ -12650,10 +12715,13 @@ impl View for Workspace {
         // snapshot built by this frame, from what it printed while it was
         // away. Said here because the render is where the answer is — see
         // `pane_is_on_screen` — so no tab switch, split, zoom or section can
-        // move a pane without the frame that shows the move saying so.
+        // move a pane without the frame that shows the move saying so. None,
+        // in a window out of sight: a frame drawn there anyway — X11 and
+        // Windows draw one for a row that changed — builds what it draws on
+        // the way, once, and leaves the shells building nothing for it.
         self.terminals
             .as_ref(app)
-            .draw_only(|pane| self.pane_is_on_screen(pane));
+            .draw_only(|pane| self.pane_can_be_seen(pane));
 
         // The panel is the full height of the window and the header starts
         // beside it, not above it. That is what puts the panel's first row in

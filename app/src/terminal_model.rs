@@ -54,21 +54,25 @@
 //! A changed grid is reported rather than notified, and the workspace decides
 //! whether it is worth a frame. The model cannot: which panes a frame draws is
 //! the active tab's, less the one a zoom hides, less all of them while a
-//! section of the sidebar has the body — the workspace's state, which it
-//! reads at the moment the repaint arrives rather than having it pushed here
-//! from every place that state can change. A pane that is not on screen goes
-//! on being read, parsed and published, and everything its *row* shows still
-//! arrives as it happens — a title, a bell, an agent's status, a command
-//! finishing — because those are the tab's facts and the tab is on screen.
-//! Only its grid stops costing frames, and the frame that puts it back on
-//! screen reads a current snapshot, not the last one drawn.
+//! section of the sidebar has the body or the window is out of sight — the
+//! workspace's state, which it reads at the moment the repaint arrives rather
+//! than having it pushed here from every place that state can change. A pane
+//! that is not on screen goes on being read, parsed and published, and
+//! everything its *row* shows still arrives as it happens — a title, a bell,
+//! an agent's status, a command finishing — because those are the tab's facts
+//! and the tab is on screen whenever the window is. Only its grid stops
+//! costing frames, and the frame that puts it back on screen reads a current
+//! snapshot, not the last one drawn.
 //!
 //! Nor does its grid cost a snapshot. Building one walks every cell of the
 //! viewport through the palette and compares it with the last — a hundred and
 //! sixty microseconds for a 200 by 50 grid, at up to the repaint ceiling — and
 //! a window of agents can have dozens of panes printing behind the one in
 //! front. So the render, which is what decides the answer, also says it here
-//! ([`TerminalModel::draw_only`]), and a publication for a pane no frame draws
+//! ([`TerminalModel::draw_only`]) — as do the window going out of sight,
+//! which no frame need follow, and the repaint of a pane nobody can see,
+//! whose shell may have opened since the last frame
+//! ([`TerminalModel::not_drawn`]) — and a publication for a pane no frame draws
 //! hands over its block list, its open block and its events and builds no
 //! snapshot. The snapshot is built when somebody asks for one — the frame that
 //! brings the pane back, a find, a copy, the control socket — under the
@@ -1017,7 +1021,10 @@ impl TerminalModel {
     ///
     /// Asked by the workspace's render, which is the one place the answer
     /// cannot go stale: a tab switch, a split, a zoom or a section over the
-    /// body is drawn by a frame, and that frame says it here first. And
+    /// body is drawn by a frame, and that frame says it here first. A window
+    /// gone out of sight is the one change no frame need follow, so the
+    /// workspace says it here as it hears it: every pane is off screen then,
+    /// in each frame drawn there anyway too, until the window is back. And
     /// nothing goes stale if a pane is wrongly said to be off screen anyway:
     /// its reader goes on publishing everything but the grid, a repaint is
     /// still reported for it, and the snapshot no publication built is built
@@ -1030,6 +1037,22 @@ impl TerminalModel {
                 .shared
                 .on_screen
                 .store(on_screen(*pane), Ordering::Relaxed);
+        }
+    }
+
+    /// Says that no frame draws `pane`, as [`Self::draw_only`] says it of
+    /// every pane at once.
+    ///
+    /// For a shell that opened since the last frame said it, which is drawn
+    /// until somebody says otherwise: a restore's arrival off the pool, a
+    /// tab opened over the control socket. In a window out of sight no frame
+    /// may come to say it, so the workspace says it as each repaint of a
+    /// pane nobody can see is reported. Safe for the reason `draw_only` is:
+    /// a pane wrongly said here to be off screen has its snapshot built by
+    /// the frame that draws it.
+    pub fn not_drawn(&self, pane: PaneId) {
+        if let Some(session) = self.sessions.get(&pane) {
+            session.shared.on_screen.store(false, Ordering::Relaxed);
         }
     }
 
