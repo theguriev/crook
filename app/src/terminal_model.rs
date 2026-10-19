@@ -1009,6 +1009,7 @@ impl TerminalModel {
 
     /// The device number of the terminal a pane's shell runs on, or `None`
     /// when it has none.
+    #[cfg(all(test, unix))]
     pub fn tty_device(&self, pane: PaneId) -> Option<u32> {
         self.sessions.get(&pane)?.tty_device
     }

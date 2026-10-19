@@ -150,6 +150,7 @@ impl fmt::Debug for AskRequest {
 /// booleans. Anything else — a key not in that list, a `null`, a number where
 /// a string goes — is no request, and neither is one [`AskRequest::fault`]
 /// refuses.
+#[cfg(any(unix, test, doc))]
 pub fn from_claude_bash(tool_input: &Value) -> Option<AskRequest> {
     let input = tool_input.as_object()?;
     let mut command = None;
@@ -253,6 +254,7 @@ pub fn digest(session: &str, tool: &str, request: &AskRequest) -> [u8; 32] {
 
 /// The first half of a [`digest`], as 32 lowercase hex digits: what a hook
 /// that saw the tool run says it saw, without saying what the tool was.
+#[cfg(any(test, doc))]
 pub fn fingerprint(digest: &[u8; 32]) -> String {
     hex(&digest[..16])
 }

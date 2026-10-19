@@ -41,14 +41,20 @@
 //! There is no socket there, and this prints nothing at once.
 
 use std::io::{self, Write};
+#[cfg(any(unix, test))]
 use std::path::{Path, PathBuf};
+#[cfg(any(unix, test))]
 use std::time::{Duration, Instant};
 
+#[cfg(any(unix, test))]
 use serde_json::Value;
 
+#[cfg(any(unix, test))]
 use super::request::from_claude_bash;
+use crate::control::protocol::AskingAgent;
+#[cfg(any(unix, test))]
 use crate::control::protocol::{
-    self, AgentAsk, Answered, AskingAgent, Decision, MAX_CWD, Registered, Reply, Verb, Verdict,
+    self, AgentAsk, Answered, Decision, MAX_CWD, Registered, Reply, Verb, Verdict,
 };
 
 /// How long a Claude Code hook waits for a person, in all.
@@ -56,30 +62,37 @@ use crate::control::protocol::{
 /// Five minutes, which Claude Code's dialog waits beside it, and under the
 /// timeout its hook entry will be given; the window holds the question this
 /// long and a little more, and says when it is over.
+#[cfg(any(unix, test))]
 pub const CLAUDE_AWAIT: Duration = Duration::from_secs(300);
 
 /// How long the window has to say it holds the question.
 ///
 /// A second: the window answers between two frames, and a window that cannot
 /// in a second is one whose agent's own prompt is the better place to answer.
+#[cfg(unix)]
 pub const REGISTER_DEADLINE: Duration = Duration::from_secs(1);
 
 /// How much longer than [`CLAUDE_AWAIT`] the hook reads, so that the window,
 /// which knows the question is over, is the side that says so.
+#[cfg(unix)]
 const PAST_THE_AWAIT: Duration = Duration::from_secs(15);
 
 /// How often, while it waits, the hook looks at whether its parent is still
 /// the one that started it.
+#[cfg(unix)]
 const POLL: Duration = Duration::from_millis(500);
 
 /// The most of standard input read, in bytes. More is no question: a
 /// request too long to show is not asked.
+#[cfg(unix)]
 pub const MAX_INPUT: usize = 1024 * 1024;
 
 /// What Claude Code reads as "allow it, this once".
+#[cfg(any(unix, test))]
 pub const ALLOW: &str = "{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"allow\"}}}\n";
 
 /// The parts of the environment the hook's rules read.
+#[cfg(any(unix, test))]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Environment {
     /// `CROOK_SOCKET`.
@@ -92,8 +105,10 @@ pub struct Environment {
     pub entrypoint: Option<String>,
 }
 
+#[cfg(any(unix, test))]
 impl Environment {
     /// This process's.
+    #[cfg(unix)]
     pub fn here() -> Self {
         let named = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
         Self {
@@ -110,6 +125,7 @@ impl Environment {
 }
 
 /// A question to ask, and where.
+#[cfg(any(unix, test))]
 #[derive(Debug, PartialEq, Eq)]
 pub struct Question {
     /// The window's socket.
@@ -124,6 +140,7 @@ pub struct Question {
 /// The question `input` asks, or `None` when the hook asks nothing: see the
 /// module docs for the rules, in the order they are read. `terminal` is
 /// asked last, and only when every other rule holds.
+#[cfg(any(unix, test))]
 pub fn question(
     input: &[u8],
     environment: &Environment,
@@ -167,6 +184,7 @@ pub fn question(
 }
 
 /// How long the hook waits for each thing, and how often it looks up.
+#[cfg(any(unix, test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Patience {
     /// For the window to say it holds the question.
@@ -177,8 +195,10 @@ pub struct Patience {
     pub poll: Duration,
 }
 
+#[cfg(any(unix, test))]
 impl Patience {
     /// A Claude Code hook's.
+    #[cfg(unix)]
     pub const CLAUDE: Self = Self {
         register: REGISTER_DEADLINE,
         answer: CLAUDE_AWAIT.saturating_add(PAST_THE_AWAIT),
@@ -187,6 +207,7 @@ impl Patience {
 }
 
 /// What one read of the window's half found.
+#[cfg(any(unix, test))]
 #[derive(Debug, PartialEq, Eq)]
 pub enum Line {
     /// A line, its newline included when it had one.
@@ -199,6 +220,7 @@ pub enum Line {
 
 /// The hook's end of a connection to the window: what [`converse`] needs,
 /// and what a test stands in for.
+#[cfg(any(unix, test))]
 pub trait Connection {
     /// Sends `line`, whole.
     fn send(&mut self, line: &[u8]) -> io::Result<()>;
@@ -213,6 +235,7 @@ pub trait Connection {
 /// answer by [`Patience::answer`], the connection closing, a line that is
 /// not an answer, or `parent_left` saying the hook's parent has gone, which
 /// it is asked before every wait.
+#[cfg(any(unix, test))]
 pub fn converse(
     connection: &mut impl Connection,
     request: &str,
@@ -245,6 +268,7 @@ pub fn converse(
 /// The next line by `deadline`, looking at `parent_left` at least every
 /// [`Patience::poll`]; `None` when the deadline passes, the parent goes, or
 /// the connection ends or fails first.
+#[cfg(any(unix, test))]
 fn next_line(
     connection: &mut impl Connection,
     deadline: Instant,
@@ -272,6 +296,7 @@ fn next_line(
 ///
 /// Only the behaviour, and for a deny the window's message: never anything
 /// that would change the request, write a rule, or stop the agent's turn.
+#[cfg(any(unix, test))]
 pub fn decision_line(verdict: &Verdict) -> Option<String> {
     match verdict.decision {
         Decision::Allow => Some(ALLOW.to_owned()),
@@ -293,6 +318,7 @@ pub fn decision_line(verdict: &Verdict) -> Option<String> {
 /// `connect` makes to the socket it names, and the line to print with the
 /// connection it came down — or `None`, having connected to nothing unless
 /// every rule held.
+#[cfg(any(unix, test))]
 pub fn decide<C: Connection>(
     input: &[u8],
     environment: &Environment,
@@ -319,6 +345,7 @@ pub fn decide<C: Connection>(
 
 /// Prints `line` in one write, and says whether it all went: a reader that
 /// has gone — EPIPE — is no answer printed, and nothing to say.
+#[cfg(unix)]
 pub fn print(out: &mut impl Write, line: &str) -> bool {
     out.write_all(line.as_bytes())
         .and_then(|()| out.flush())
@@ -344,10 +371,10 @@ pub fn run(mut args: impl Iterator<Item = String>) {
             io::stderr().lock(),
             "crook: `--agent ask` takes claude, {said}; this hook asks nothing"
         );
-        return;
+    } else {
+        #[cfg(unix)]
+        unix::run();
     }
-    #[cfg(unix)]
-    unix::run();
 }
 
 /// The socket half, which only Unix has.

@@ -62,9 +62,9 @@ use std::time::Instant;
 use crookui_core::prelude::*;
 use serde_json::Value;
 
-use super::protocol::{
-    AgentAsk, Answered, Asker, AskingAgent, Decision, Refusal, Registered, Verdict, code,
-};
+use super::protocol::{AgentAsk, Answered, Asker, AskingAgent, Refusal, Registered, code};
+#[cfg(test)]
+use super::protocol::{Decision, Verdict};
 use super::watch::Feed;
 use super::{Inbox, Notice};
 use crate::agent::request::{self, AskRequest};
@@ -88,6 +88,7 @@ pub const HISTORY: usize = 64;
 pub const SUMMARY_CHARS: usize = 120;
 
 /// What a deny tells the agent: who said no, and where.
+#[cfg(test)]
 pub const DENIED: &str = "Denied in Crook by the person at the keyboard.";
 
 /// A question's number in this window: counted up from one, never handed to
@@ -97,6 +98,7 @@ pub struct AskId(u64);
 
 impl AskId {
     /// The number, as the wire carries it.
+    #[cfg(test)]
     pub fn as_u64(self) -> u64 {
         self.0
     }
@@ -177,6 +179,7 @@ impl Cause {
 }
 
 /// What a person can answer a question with.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Choice {
     /// Run it, this once.
@@ -186,6 +189,7 @@ pub enum Choice {
 }
 
 /// What became of an answer handed to [`Asks::deliver`].
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Delivery {
     /// The hook's connection took it.
@@ -204,6 +208,7 @@ pub enum Delivery {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum How {
     /// A person answered it.
+    #[cfg(test)]
     Answered(Choice),
     /// It ended without an answer.
     Ended(Cause),
@@ -213,7 +218,9 @@ impl How {
     /// The word the log says.
     pub fn word(self) -> &'static str {
         match self {
+            #[cfg(test)]
             Self::Answered(Choice::Allow) => "allowed",
+            #[cfg(test)]
             Self::Answered(Choice::Deny) => "denied",
             Self::Ended(cause) => cause.word(),
         }
@@ -228,8 +235,6 @@ pub struct Ask {
     pub agent: AskingAgent,
     /// The agent's session.
     pub session: String,
-    /// Where the agent works.
-    pub cwd: String,
     /// What it asks to do, whole.
     pub request: AskRequest,
     /// What it asks in one line: see [`summary`].
@@ -238,6 +243,7 @@ pub struct Ask {
     /// carries, so an answer can only reach the question it was given about.
     pub digest: [u8; 32],
     /// The digest's first half in hex: see [`request::fingerprint`].
+    #[cfg(test)]
     pub fingerprint: String,
     /// The pane whose terminal it named.
     pub pane: PaneId,
@@ -315,6 +321,7 @@ impl Asks {
     }
 
     /// How many questions are held.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.live().count()
     }
@@ -353,6 +360,7 @@ impl Asks {
     }
 
     /// How the questions that have ended went, oldest first.
+    #[cfg(test)]
     pub fn history(&self) -> impl Iterator<Item = &Outcome> {
         self.history.iter()
     }
@@ -421,7 +429,6 @@ impl Asks {
         let AgentAsk {
             agent,
             session,
-            cwd,
             request,
             ..
         } = asked;
@@ -429,10 +436,10 @@ impl Asks {
             id,
             agent,
             summary: summary(agent.tool(&request), &request),
+            #[cfg(test)]
             fingerprint: request::fingerprint(&digest),
             digest,
             session,
-            cwd,
             request,
             pane: found.pane,
             cannot_answer: found.cannot_answer,
@@ -515,6 +522,7 @@ impl Asks {
     /// The answer is pushed into the question's feed under the lock its
     /// expiry is decided under, so it either reaches the hook's connection or
     /// is [`Delivery::TooLate`]: never taken and lost.
+    #[cfg(test)]
     pub fn deliver(&mut self, id: AskId, digest: &[u8; 32], choice: Choice) -> Delivery {
         let Some(index) = self.live.iter().position(|ask| ask.id == id) else {
             return Delivery::TooLate;
