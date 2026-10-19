@@ -18,6 +18,7 @@
 
 use std::fmt;
 use std::mem::ManuallyDrop;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -98,7 +99,7 @@ impl Default for WindowOptions {
 /// What the window asks of the application above it.
 ///
 /// This is the whole seam between the platform layer and the application:
-/// eight methods, five of them with a default, no winit types, no wgpu types. A
+/// nine methods, six of them with a default, no winit types, no wgpu types. A
 /// headless test double implements it in a dozen lines.
 pub trait WindowDelegate: 'static {
     /// Lays out and paints the frame to draw.
@@ -175,6 +176,24 @@ pub trait WindowDelegate: 'static {
     /// puts it.
     fn placed(&mut self, placement: WindowPlacement) {
         let _ = placement;
+    }
+
+    /// The desktop asked the application to open these files, in this order:
+    /// on macOS, a file Finder hands it — double-clicked once the application
+    /// is the one that opens its kind, opened with it, dropped on its Dock
+    /// icon — or `open -a` names.
+    ///
+    /// Full paths, of files and folders alike; a URL of any other kind never
+    /// reaches here. Return `true` only when something changed and the frame
+    /// needs rebuilding, as [`Self::handle_event`] does.
+    ///
+    /// Before the window's first frame when the request is what launched the
+    /// application, and never off macOS: no other desktop hands a running
+    /// application files to open — a Linux launcher starts a new process with
+    /// them on its command line. The default opens nothing.
+    fn open_files(&mut self, files: Vec<PathBuf>) -> bool {
+        let _ = files;
+        false
     }
 
     /// Runs once, as the event loop stops, whatever stopped it.
@@ -349,6 +368,10 @@ enum CrookEvent {
     /// window's own close does. See [`quit`](super::quit).
     #[cfg(target_os = "macos")]
     QuitRequested,
+    /// macOS asked the application to open these files. See
+    /// [`open_documents`](super::open_documents).
+    #[cfg(target_os = "macos")]
+    OpenFiles(Vec<PathBuf>),
     /// Leave the event loop.
     Exit,
 }
@@ -385,6 +408,14 @@ pub fn run(
         let proxy = proxy.clone();
         move || proxy.send(CrookEvent::QuitRequested)
     });
+    // Then too, and for a reason of its own: a request to open a file that
+    // launched the application comes while the loop starts, before its first
+    // turn, and the proxy holds it until the window is open.
+    #[cfg(target_os = "macos")]
+    super::open_documents::install({
+        let proxy = proxy.clone();
+        move |files| proxy.send(CrookEvent::OpenFiles(files))
+    });
 
     let controls = WindowControls::default();
     let platform = Platform {
@@ -404,6 +435,7 @@ pub fn run(
         attention_requested: false,
         replay_requested_redraw: false,
         frame_retry: None,
+        minimised_asked: None,
     };
 
     event_loop
@@ -432,6 +464,12 @@ struct App {
     /// How long to wait before trying the frame that just failed again, if one
     /// did. `None` once a frame reaches the screen.
     frame_retry: Option<Duration>,
+
+    /// When the desktop was last asked whether the window is minimised, and
+    /// when an event last asked it, for asking again [`MINIMISED_LOOK`]
+    /// later while the answer is all that holds the window out of sight —
+    /// for [`MINIMISED_LOOKS_FOR`] after that event and no longer.
+    minimised_asked: Option<MinimisedAsked>,
 }
 
 /// How long to wait after a frame failed before trying again, and the longest
@@ -445,11 +483,40 @@ struct App {
 const FIRST_FRAME_RETRY: Duration = Duration::from_millis(50);
 const LONGEST_FRAME_RETRY: Duration = Duration::from_secs(1);
 
+/// How long an answer that the window is minimised stands before the desktop
+/// is asked again, while nothing else holds the window out of sight
+/// (`InputState::held_by_an_answer`).
+///
+/// Only X11 is asked, and its window manager may map the window it restores
+/// before it takes `_NET_WM_STATE_HIDDEN` off. A window brought back without
+/// the keyboard and asked by its first frame, too soon, would otherwise stay
+/// out of sight until somebody typed or clicked in it: a window out of sight
+/// asks for no frame of its own, its panes' output included, and a frame is
+/// where the question is otherwise asked. A second is how long such a window
+/// can look frozen.
+const MINIMISED_LOOK: Duration = Duration::from_secs(1);
+
+/// How long after an event asked whether the window is minimised it goes on
+/// being asked again by itself, [`MINIMISED_LOOK`] apart.
+///
+/// The events that ask — the keyboard moving, a frame — are what a restore
+/// comes with: X11 says the focus again as it maps a window and exposes it,
+/// which asks for a frame. The lag being put right is between two things one
+/// window manager does for one restore, so an answer still saying minimised
+/// this long after the event that asked is a window that is minimised. It is
+/// left alone from then on, because the window keeps no idle timer, and a
+/// window left minimised is the one most at rest: a clock a second there is
+/// 3600 wakes, and as many round trips to the server, for each hour it stays
+/// down.
+const MINIMISED_LOOKS_FOR: Duration = Duration::from_secs(4);
+
 impl ApplicationHandler<CrookEvent> for App {
     fn new_events(&mut self, _: &ActiveEventLoop, cause: StartCause) {
         // A timer is set for a failed frame, and for a refused fullscreen in
-        // the window's first seconds, which `about_to_wait` asks again for.
-        // Reaching it with a frame waiting means trying that frame again.
+        // the window's first seconds and an answer that the window is
+        // minimised in the seconds after an event asked, which
+        // `about_to_wait` asks again for. Reaching it with a frame waiting
+        // means trying that frame again.
         if matches!(cause, StartCause::ResumeTimeReached { .. })
             && self.frame_retry.is_some()
             && let Some(window) = self.window.as_mut()
@@ -489,18 +556,33 @@ impl ApplicationHandler<CrookEvent> for App {
             self.delegate.placed(placement);
         }
 
+        // An answer that the window is minimised, once it is old enough to
+        // ask again and the event that asked is recent enough: see
+        // `MINIMISED_LOOK`. Here rather than only when the timer set for it
+        // is reached, since a batch of something else — a pane's output,
+        // which a window out of sight draws no frame for — may come first
+        // every time.
+        if self.window.is_some()
+            && self.minimised_look().is_some_and(|look| look <= now)
+            && self.look_again_whether_minimised(now)
+        {
+            self.with_window(Window::request_redraw);
+        }
+
         // Every batch of events ends here, and a Quit that comes before the
         // next one is answered with what is written down now.
         #[cfg(target_os = "macos")]
         super::quit::set_asks(self.delegate.asks_before_quitting());
 
         let frame_retry = self.frame_retry.map(|delay| now + delay);
-        event_loop.set_control_flow(
-            match [frame_retry, fullscreen_look].into_iter().flatten().min() {
-                Some(wake) => ControlFlow::WaitUntil(wake),
-                None => ControlFlow::Wait,
-            },
-        );
+        let wake = [frame_retry, fullscreen_look, self.minimised_look()]
+            .into_iter()
+            .flatten()
+            .min();
+        event_loop.set_control_flow(match wake {
+            Some(wake) => ControlFlow::WaitUntil(wake),
+            None => ControlFlow::Wait,
+        });
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -585,6 +667,17 @@ impl ApplicationHandler<CrookEvent> for App {
             CrookEvent::QuitRequested => {
                 if self.delegate.close_requested() {
                     event_loop.exit();
+                }
+            }
+            // Whether or not the window is open yet: the application has had
+            // its workspace since before the loop ran, and the window's first
+            // frame draws whatever the files opened.
+            #[cfg(target_os = "macos")]
+            CrookEvent::OpenFiles(files) => {
+                if self.delegate.open_files(files)
+                    && let Some(window) = self.window.as_mut()
+                {
+                    window.request_redraw();
                 }
             }
             CrookEvent::Exit => event_loop.exit(),
@@ -685,7 +778,9 @@ impl ApplicationHandler<CrookEvent> for App {
             // Gained or lost, the keyboard moving is also when a window is
             // minimised or comes back, so it asks whether it is: losing it is
             // how a minimise starts, and X11 says the focus again when it
-            // maps a window it had minimised.
+            // maps a window it had minimised. The keyboard is noted first,
+            // since a window that has it is in sight whatever the answer
+            // says: see `InputState::occlusion`.
             WindowEvent::Focused(focused) => {
                 if focused {
                     self.controls.focused();
@@ -694,6 +789,7 @@ impl ApplicationHandler<CrookEvent> for App {
                     }
                     self.delegate.focused();
                 }
+                self.input.focus_moved(focused);
                 if self.ask_whether_minimised() {
                     self.with_window(Window::request_redraw);
                 }
@@ -750,19 +846,43 @@ impl App {
         )
     }
 
-    /// Asks the desktop whether the window is minimised, and tells the
-    /// application when the answer changed whether it can be seen. Returns
-    /// whether the application wants a frame for it.
+    /// Asks the desktop whether the window is minimised, for an event that
+    /// may come with the window being minimised or brought back, and tells
+    /// the application when the answer changed whether it can be seen.
+    /// Returns whether the application wants a frame for it.
     ///
     /// Asked rather than heard, because X11 never says: see
     /// [`InputState::minimised`]. Elsewhere the answer is `None`, since the
     /// rest either say it by themselves or cannot: see
     /// [`Window::is_minimised`].
     fn ask_whether_minimised(&mut self) -> bool {
+        self.minimised_asked = Some(MinimisedAsked::by_an_event(Instant::now()));
+        self.hear_whether_minimised()
+    }
+
+    /// [`Self::ask_whether_minimised`] for the look at `now` rather than for
+    /// an event. It is noted as a look, so the looking still stops
+    /// [`MINIMISED_LOOKS_FOR`] after the event that started it.
+    fn look_again_whether_minimised(&mut self, now: Instant) -> bool {
+        self.minimised_asked = self.minimised_asked.map(|asked| asked.looked(now));
+        self.hear_whether_minimised()
+    }
+
+    /// The question itself, for [`Self::ask_whether_minimised`] and
+    /// [`Self::look_again_whether_minimised`].
+    fn hear_whether_minimised(&mut self) -> bool {
         let minimised = self.with_window(|window| window.is_minimised());
         self.input
             .minimised(minimised)
             .is_some_and(|occluded| self.delegate.handle_event(occluded))
+    }
+
+    /// When to ask the desktop again whether the window is minimised, if the
+    /// last answer is all that holds the window out of sight and an event
+    /// asked recently enough. See [`MINIMISED_LOOK`].
+    fn minimised_look(&self) -> Option<Instant> {
+        self.minimised_asked?
+            .next_look(self.input.held_by_an_answer())
     }
 
     /// Tells the application where the window is, if that changed since it
@@ -950,6 +1070,41 @@ fn tell_the_opening(delegate: &mut dyn WindowDelegate, theme: SystemTheme, focus
     themed || unfocused
 }
 
+/// When the desktop was asked whether the window is minimised: last of all,
+/// and last by an event rather than by the look that follows one.
+#[derive(Clone, Copy, Debug)]
+struct MinimisedAsked {
+    /// The last time it was asked, by anything.
+    last: Instant,
+    /// The last time an event asked: the keyboard moving, or a frame.
+    by_an_event: Instant,
+}
+
+impl MinimisedAsked {
+    /// Asked at `now` by an event.
+    fn by_an_event(now: Instant) -> Self {
+        Self {
+            last: now,
+            by_an_event: now,
+        }
+    }
+
+    /// Asked again at `now` by the look, which leaves the event that started
+    /// the looking, and so when it stops, where they were.
+    fn looked(self, now: Instant) -> Self {
+        Self { last: now, ..self }
+    }
+
+    /// When to ask again, given whether the answer is all that holds the
+    /// window out of sight: [`MINIMISED_LOOK`] after it was last asked, if
+    /// that is no later than [`MINIMISED_LOOKS_FOR`] after an event last
+    /// asked.
+    fn next_look(self, held_by_an_answer: bool) -> Option<Instant> {
+        let look = self.last + MINIMISED_LOOK;
+        (held_by_an_answer && look <= self.by_an_event + MINIMISED_LOOKS_FOR).then_some(look)
+    }
+}
+
 /// How long to wait before trying a failed frame again, given how long the
 /// wait before it was.
 fn next_frame_retry(previous: Option<Duration>) -> Duration {
@@ -1032,5 +1187,52 @@ mod tests {
             delay = next_frame_retry(Some(delay));
         }
         assert_eq!(delay, LONGEST_FRAME_RETRY);
+    }
+
+    #[test]
+    fn an_answer_that_the_window_is_minimised_is_asked_again_only_while_it_is_all_that_hides_it() {
+        let event = Instant::now();
+        let asked = MinimisedAsked::by_an_event(event);
+        assert_eq!(
+            asked.next_look(true),
+            Some(event + MINIMISED_LOOK),
+            "a window out of sight on an answer alone was never asked again"
+        );
+        // Anything else holding it out of sight says when it is over, and a
+        // window in sight is asked by its frames.
+        assert_eq!(asked.next_look(false), None);
+    }
+
+    #[test]
+    fn a_window_left_minimised_stops_being_asked_a_few_seconds_after_the_event_that_asked() {
+        // A restore comes with the focus and a frame, which ask; nothing
+        // comes for a window that stays minimised, which must then wait for
+        // the next event rather than wake every second for as long as it
+        // stays down.
+        let event = Instant::now();
+        let mut asked = MinimisedAsked::by_an_event(event);
+        let mut looks = 0;
+        while let Some(look) = asked.next_look(true) {
+            assert!(
+                look <= event + MINIMISED_LOOKS_FOR,
+                "a window left minimised was still asked {:?} after the event that asked",
+                look - event
+            );
+            looks += 1;
+            asked = asked.looked(look);
+        }
+        assert_eq!(
+            looks,
+            MINIMISED_LOOKS_FOR.as_millis() / MINIMISED_LOOK.as_millis(),
+            "the looking stopped before the seconds after the event were up"
+        );
+
+        // The next event that asks — a restore's, an hour later — looks
+        // again.
+        let restored = event + Duration::from_secs(3600);
+        assert_eq!(
+            MinimisedAsked::by_an_event(restored).next_look(true),
+            Some(restored + MINIMISED_LOOK)
+        );
     }
 }

@@ -54,21 +54,25 @@
 //! A changed grid is reported rather than notified, and the workspace decides
 //! whether it is worth a frame. The model cannot: which panes a frame draws is
 //! the active tab's, less the one a zoom hides, less all of them while a
-//! section of the sidebar has the body — the workspace's state, which it
-//! reads at the moment the repaint arrives rather than having it pushed here
-//! from every place that state can change. A pane that is not on screen goes
-//! on being read, parsed and published, and everything its *row* shows still
-//! arrives as it happens — a title, a bell, an agent's status, a command
-//! finishing — because those are the tab's facts and the tab is on screen.
-//! Only its grid stops costing frames, and the frame that puts it back on
-//! screen reads a current snapshot, not the last one drawn.
+//! section of the sidebar has the body or the window is out of sight — the
+//! workspace's state, which it reads at the moment the repaint arrives rather
+//! than having it pushed here from every place that state can change. A pane
+//! that is not on screen goes on being read, parsed and published, and
+//! everything its *row* shows still arrives as it happens — a title, a bell,
+//! an agent's status, a command finishing — because those are the tab's facts
+//! and the tab is on screen whenever the window is. Only its grid stops
+//! costing frames, and the frame that puts it back on screen reads a current
+//! snapshot, not the last one drawn.
 //!
 //! Nor does its grid cost a snapshot. Building one walks every cell of the
 //! viewport through the palette and compares it with the last — a hundred and
 //! sixty microseconds for a 200 by 50 grid, at up to the repaint ceiling — and
 //! a window of agents can have dozens of panes printing behind the one in
 //! front. So the render, which is what decides the answer, also says it here
-//! ([`TerminalModel::draw_only`]), and a publication for a pane no frame draws
+//! ([`TerminalModel::draw_only`]) — as do the window going out of sight,
+//! which no frame need follow, and the repaint of a pane nobody can see,
+//! whose shell may have opened since the last frame
+//! ([`TerminalModel::not_drawn`]) — and a publication for a pane no frame draws
 //! hands over its block list, its open block and its events and builds no
 //! snapshot. The snapshot is built when somebody asks for one — the frame that
 //! brings the pane back, a find, a copy, the control socket — under the
@@ -774,6 +778,7 @@ impl TerminalModel {
     }
 
     /// Whether shells are being opened at all.
+    #[cfg(test)]
     pub fn is_live(&self) -> bool {
         self.live
     }
@@ -818,6 +823,7 @@ impl TerminalModel {
     ///
     /// Only shells opened *after* this: the integration is installed when a
     /// shell starts and cannot be taken out of one that is already running.
+    #[cfg(test)]
     pub fn set_shell_marks(&mut self, enabled: bool) {
         self.shell_marks = enabled;
     }
@@ -842,6 +848,7 @@ impl TerminalModel {
     }
 
     /// Whether the next shell opened will be a login shell.
+    #[cfg(test)]
     pub fn shell_login(&self) -> bool {
         self.shell_login
     }
@@ -1017,7 +1024,10 @@ impl TerminalModel {
     ///
     /// Asked by the workspace's render, which is the one place the answer
     /// cannot go stale: a tab switch, a split, a zoom or a section over the
-    /// body is drawn by a frame, and that frame says it here first. And
+    /// body is drawn by a frame, and that frame says it here first. A window
+    /// gone out of sight is the one change no frame need follow, so the
+    /// workspace says it here as it hears it: every pane is off screen then,
+    /// in each frame drawn there anyway too, until the window is back. And
     /// nothing goes stale if a pane is wrongly said to be off screen anyway:
     /// its reader goes on publishing everything but the grid, a repaint is
     /// still reported for it, and the snapshot no publication built is built
@@ -1030,6 +1040,22 @@ impl TerminalModel {
                 .shared
                 .on_screen
                 .store(on_screen(*pane), Ordering::Relaxed);
+        }
+    }
+
+    /// Says that no frame draws `pane`, as [`Self::draw_only`] says it of
+    /// every pane at once.
+    ///
+    /// For a shell that opened since the last frame said it, which is drawn
+    /// until somebody says otherwise: a restore's arrival off the pool, a
+    /// tab opened over the control socket. In a window out of sight no frame
+    /// may come to say it, so the workspace says it as each repaint of a
+    /// pane nobody can see is reported. Safe for the reason `draw_only` is:
+    /// a pane wrongly said here to be off screen has its snapshot built by
+    /// the frame that draws it.
+    pub fn not_drawn(&self, pane: PaneId) {
+        if let Some(session) = self.sessions.get(&pane) {
+            session.shared.on_screen.store(false, Ordering::Relaxed);
         }
     }
 
@@ -1085,6 +1111,7 @@ impl TerminalModel {
     ///
     /// Queued for the session's writer, so this works before the shell has
     /// finished starting: what is sent now is read when it gets there.
+    #[cfg(test)]
     pub fn type_into(&self, pane: PaneId, text: &str) {
         let Some(session) = self.sessions.get(&pane) else {
             log::warn!("nothing to type into: pane {pane:?} has no terminal");
@@ -1102,8 +1129,10 @@ impl TerminalModel {
     /// to it when its shell started, so a theme change has to reach every
     /// terminal that is already running. Each one is given the new palette and
     /// asked to publish a fresh snapshot — the emulator has not changed, only
-    /// what its cells resolve to, so nothing is reparsed and the shell is not
-    /// told anything.
+    /// what its cells resolve to, so nothing is reparsed. A program is told
+    /// only when it asked to be and the background went from dark to light
+    /// or back: an agent that chose its colours for one keeps them on the
+    /// other, hard to read, until it hears.
     pub fn set_palette(&mut self, palette: Palette, ctx: &mut ModelContext<Self>) {
         if self.palette == palette {
             return;
@@ -3059,8 +3088,14 @@ impl Shared {
     /// shell writes nothing, so nothing would ever come along to carry the new
     /// colours to the screen, and a theme that only applied to panes with a
     /// command running would be a theme nobody could see themselves choose.
+    ///
+    /// What the new palette owes a program that asked to hear of a change of
+    /// colour scheme goes onto the writer's queue under the same lock, which
+    /// writes nothing itself: see "The writer".
     fn repaint_in(&self, palette: Palette) {
-        self.lock().set_palette(palette);
+        if let Err(error) = self.lock().set_palette(palette) {
+            log::debug!("could not tell a shell its colour scheme changed: {error}");
+        }
         self.publish();
     }
 

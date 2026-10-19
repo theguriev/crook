@@ -692,6 +692,23 @@ entry is a terminal's: it advertises `-e`, `--working-directory`, `--title` and 
 --desktop` copies that tree under `~/.local/share`; the updater replaces `<stem>/crook` and reads
 nothing else out of the archive.
 
+The Mac's counterpart is in `Crook.app`'s `Info.plist`, which `script/macos-app` writes and
+`--info-plist` prints alone, on any machine, for a test to read: `CFBundleDocumentTypes` for
+`public.unix-executable` and Terminal's own `com.apple.terminal.shell-script`, with the role
+`Shell` and the rank `Alternate`. Launch Services hands a file only to an application that
+declares its type, so the settings' Default terminal button — which makes Crook the shell
+handler of `public.unix-executable` — needs them: before them, pressing it left a script
+double-clicked in Finder with nowhere to go. AppKit then tells the application's delegate
+`application:openURLs:`, which winit's delegate does not have; `crookui` adds it at run time, as
+it adds `applicationShouldTerminate:` (`windowing/open_documents.rs`), and posts the paths on
+the event loop's proxy. It also registers `NSTreatUnknownArgumentsAsOpen` as `NO`: AppKit would
+otherwise send the same request for every loose word of Crook's own command line, which in
+`crook -e vim deploy.sh` is `deploy.sh`, run in a tab of its own. The window opens a tab for each
+(`Workspace::open_files`), started in the file's folder, with the file typed at the shell's first
+prompt — not `exec`'d, as `-e`'s program is, so what a script prints stays on screen when it ends.
+A request that launches Crook comes before the loop's first turn and waits in the proxy's queue,
+and its tab waits for its shell with the rest.
+
 What `--check-only` does today is the part that earns its keep immediately: it type-checks the
 workspace with the release profile and the release feature set. It is one of the five the
 `Crook CI` workflow runs on all three platforms, on every pull request to `main` and every push
@@ -937,9 +954,10 @@ would sit invisible until the shell next said something.
 
 **And a frame is spent only on a pane somebody can see.** The workspace answers a
 `TerminalUpdate::Repainted` with a frame only when the pane is on screen — in the active tab,
-not hidden by a zoom, with no section of the sidebar over the body. It asks at the moment the
-repaint arrives, from its own state, rather than keeping a set of visible panes pushed into the
-model: what decides it changes in a tab switch, a split, a zoom, a close, a restored session
+not hidden by a zoom, with no section of the sidebar over the body — in a window in sight
+(`Workspace::pane_can_be_seen`). It asks at the moment the repaint arrives, from its own
+state, rather than keeping a set of visible panes pushed into the model: what decides it
+changes in a tab switch, a split, a zoom, a close, a restored session
 and a plugin switched off under the section it was showing, and a push missed in any one of
 them would freeze a pane somebody is looking at. A pane nobody can see goes on being read,
 parsed and published, and everything its *row* shows — a title, a directory, a bell, an agent's
@@ -953,13 +971,22 @@ turning in front of the same name about once a second, its hooks saying running 
 every tool — asks for no frame of its own, because `Workspace::update_session` returns before
 its notify when `AgentSession::says_the_same_as` says nothing changed. Its own frame is all that
 goes. Both reports come only while an agent runs, and while one runs its mark breathes:
-`Workspace::keep_breathing` redraws the window every `BREATH_FRAME`, 80 ms, for as long as the
-tab list is in the sidebar. With the list up — the default — an agent at work in a tab nobody
-looks at still draws the window about twelve times a second; it goes quiet only with the list
-hidden or a settings page over it. Most of the budget's tests run in a harness that never lets
-the marks breathe, and the one that does hides the list. What the gate cannot see is the window
-itself: nothing tells the workspace that it has been minimised or covered, so a window nobody is
-looking at still asks to draw the panes it shows.
+`Workspace::keep_breathing` redraws the window every `BREATH_FRAME`, 80 ms, for as long as a
+running mark is inside the tab list's viewport. With the list up — the default — and the
+agent's row in view, an agent at work in a tab nobody looks at still draws the window about
+twelve times a second; it goes quiet with the list hidden, a settings page over it, the row
+scrolled out of view, motion kept still, or the window out of sight (see "Out of sight is
+another bit"). Most of the budget's tests run in a harness that never lets the marks breathe,
+and the one that does hides the list. The gate sees the window as well, as far as the desktop
+says: a window that has said it is minimised or covered (`Event::WindowOccluded`) draws no
+pane's output at all, and asks for the frame that draws every pane current when it says it is
+back; `ten_thousand_lines_in_a_window_out_of_sight_draw_nothing` holds it to no frame. That
+bit is the desktop's word rather than the workspace's own state, and costs something when the
+desktop is wrong: a window said to be out of sight while somebody can see it draws a pane's
+output with the next frame anything else asks for — a key, a click, the focus moving, a row
+changing — rather than as it comes. The one way it is known to be wrong, an X11 answer that
+lags a restore, crookui puts right by itself, at once for a window given the keyboard and
+within a second for one that was not (see "Out of sight is another bit").
 
 **Nor does a pane nobody can see build snapshots.** A snapshot is every cell of the viewport
 resolved through the palette and compared with the last — about 160 µs for a 200 by 50 grid, at
@@ -974,7 +1001,17 @@ find, a copy, the control socket — under the emulator's mutex, from what the e
 then, with the block list synced beside it. That is what makes this push safe where the one
 above would not be: it decides where a snapshot is built and never which one is drawn, and a
 pane wrongly said to be off screen is still reported repainted, and drawn current by the frame
-that asks for its snapshot.
+that asks for its snapshot. In a window out of sight no frame draws any pane, and that is the
+one change no frame need follow, so `Workspace::set_window_occluded` says it to the model as it
+hears it, and says the panes on screen again when the window is back, before the frame that
+draws them. A shell that opened since the last frame — a restore's arrival off the pool, a tab
+opened over the control socket — is drawn until told otherwise, so a repaint reported for a
+pane nobody can see says it of that pane as well (`TerminalModel::not_drawn`). Nor does a
+repaint ask an open find bar's questions of a pane nobody can see: they are asked of the
+snapshot, which the UI thread would otherwise build for every publication. A question asked a
+moment before the pane went is still answered off the UI thread, after the read's pause, from
+the grid as printed since; that answer is dropped when it comes back (`PaneFind::drop_grid`),
+and the pane coming back on screen asks again.
 
 **Nothing writes to the pty on the UI thread or under the emulator's mutex.** A write waits
 for the child to read, a child that is printing reads nothing until its output has been read,
@@ -1769,7 +1806,17 @@ the way that needs no merging at all: the repository is a Claude Code plugin mar
 (`.claude-plugin/marketplace.json`) whose one plugin, `packaging/claude-code`, carries the same
 hooks and the skill, and `claude plugin marketplace add theguriev/crook` with
 `claude plugin install crook@crook` is Claude Code writing its own settings. The printed hooks
-and the plugin's are the same commands. A hook runs in whatever `PATH` its agent was started
+and the plugin's are the same commands. Codex CLI and GitHub Copilot CLI read the same
+marketplace and install the same plugin (`codex plugin add crook@crook`,
+`copilot plugin install crook@crook`), and `--agent-hooks codex` and `copilot` lead with their
+two commands too. Each reads a manifest of its own in the plugin's directory before Claude
+Code's — `.codex-plugin/plugin.json`, `.github/plugin/plugin.json` — and it names a hooks file
+of its own, `hooks/codex.json` or `hooks/copilot.json`, which is what that agent's
+`--agent-hooks` prints. Without one, both run Claude Code's `hooks/hooks.json` under its event
+names: Codex has no Notification, so the plugin never said it had stopped for an approval, and
+those commands pass no `--session`, which would let Copilot's subagents rename the tab and end
+its turn. Claude Code reads `hooks/hooks.json` and nothing else, so neither file gives it the
+PermissionRequest it is kept out of. A hook runs in whatever `PATH` its agent was started
 with, and a path written into the file goes stale — a moved Crook.app, a deleted build — while
 the file stays, so each calls `"$CROOK_BIN"`, the binary its pane names, and `crook` on `PATH`
 when a pane names none or the one it names has gone. Each is behind a guard that exits 0 unless
@@ -1790,8 +1837,9 @@ pane's machine anyway, so an agent on the far side of either reports nothing thr
 (`docker exec -e CROOK_BIN=/opt/crook/crook`). `crook --agent` run there by hand, which has no
 guard, reaches the pane as it always did, and so do the OpenCode plugin and aider's command,
 which run the binary by the path they were printed with and have no guard either. Tests in
-`agent.rs` hold the plugin's `hooks/hooks.json` to what `--agent-hooks claude` prints and run
-each of its commands under `sh`, and hold its `SKILL.md` byte for byte to `skill.md`. Codex CLI and Gemini
+`agent.rs` hold each of the plugin's hooks files to what `--agent-hooks` prints for its agent,
+and each manifest to the file it names, run the commands of `hooks/hooks.json` under `sh`, and
+hold its `SKILL.md` byte for byte to `skill.md`. Codex CLI and Gemini
 CLI read the same object under their own event names, and GitHub Copilot CLI a versioned
 cousin of it with `bash` for the command, so `--agent-hooks codex`, `gemini` and `copilot`
 are the same table with a different first column; OpenCode has no command hooks, and
@@ -2016,24 +2064,34 @@ until the keyboard first arrives, so a window a script opened behind another was
 front and asked nobody for a look until it had been visited once. The caret comes with the
 keyboard, which a window opened in front is given as it appears.
 
-**Out of sight is another bit, and only the breath reads it.** crookui folds three ways of
-hearing it into one `Event::WindowOccluded`, in `InputState`. winit's `WindowEvent::Occluded`
-says a window is covered or minimised on macOS, but on X11 only that it is covered, and only
-with no compositor running, which reports every window in view. Windows sends none, and a
-window resized to nothing is the minimised one there (`InputState::resized`). X11 says nothing
-of a minimised window, which its window manager unmaps, and the server sends no visibility
-event for a window that stops being viewable. So crookui asks X11, and only X11: winit's
-`is_minimized` reads `_NET_WM_STATE_HIDDEN`, and that is a round trip to the server. It is
-asked when the focus moves and before each frame while the window lacks the keyboard or was
+**Out of sight is another bit, which the breath and the panes read.** crookui folds three ways
+of hearing it into one `Event::WindowOccluded`, in `InputState`. winit's
+`WindowEvent::Occluded` says a window is covered or minimised on macOS, but on X11 only that it
+is covered, and only with no compositor running, which reports every window in view. Windows
+sends none, and a window resized to nothing is the minimised one there (`InputState::resized`).
+X11 says nothing of a minimised window, which its window manager unmaps, and the server sends
+no visibility event for a window that stops being viewable. So crookui asks X11, and only X11:
+winit's `is_minimized` reads `_NET_WM_STATE_HIDDEN`, and that is a round trip to the server. It
+is asked when the focus moves and before each frame while the window lacks the keyboard or was
 minimised when last asked (`InputState::may_be_minimised`), and an `Occluded(false)` overrides
 the answer, since a window manager may map the window it restores before it takes the property
-off. macOS and Windows already say it, and are not asked (`Window::is_minimised`): AppKit
-tells winit that a window it restores is in view while `isMiniaturized` may still say yes.
-A covered window on Windows or under an X11 compositor goes unremarked. The breath chain ends
-while the window cannot be seen and starts again when it can, because X11 and Windows draw
-every frame asked of a hidden window. Wayland holds those frames back by itself. The breath
-does not read the focus, on purpose: a window behind another but beside it is where a working
-agent is watched from. Within a window in sight, a breath repaints only while a running mark is inside
+off. So does the keyboard (`InputState::occlusion`): X gives it only to a window that is
+mapped. A window restored without it, and asked by its first frame too soon, would have nothing
+to ask again — a window out of sight asks for no frame of its own, its panes' output included —
+so while the answer is all that holds the window out of sight the event loop asks again by
+itself, once a second (`MINIMISED_LOOK`, `InputState::held_by_an_answer`), for four seconds
+after the focus or a frame last asked and no longer (`MINIMISED_LOOKS_FOR`). A restore comes
+with both: X11 says the focus again as it maps a window, and exposes it, which asks for a frame.
+So a window left minimised is asked four times more and then waits for an event, since the
+window keeps no idle timer, and nothing is asked anywhere but X11. macOS and Windows already
+say it, and are not asked (`Window::is_minimised`): AppKit tells winit that a window it
+restores is in view while `isMiniaturized` may still say yes. A covered window on Windows or
+under an X11 compositor goes unremarked. The breath chain ends while the window cannot be seen
+and starts again when it can, and a pane's output asks for no frame and builds no snapshot
+meanwhile (see "Nor does a pane nobody can see build snapshots"), because X11 and Windows draw
+every frame asked of a hidden window. Wayland holds those frames back by itself. Neither reads
+the focus itself, on purpose: a window behind another but beside it is where a working agent is
+watched from. Within a window in sight, a breath repaints only while a running mark is inside
 the panel's viewport, on a row or on a group heading — the panel's `RowGeometry` keeps where
 both were drawn — since a frame is the whole window and its cost grows with every tab.
 
@@ -2955,6 +3013,26 @@ OSC 52 clipboard writes are in too: the write reaches the window's one clipboard
 `TerminalUpdate::ClipboardStore`, an empty payload is dropped rather than destroying what
 somebody had copied, and the *read* direction stays refused in the emulator, where answering
 it would hand any program that can print to a pty the contents of the clipboard.
+
+**Colour-scheme reports are in**, as contour specified them and kitty and Ghostty answer
+them. `CSI ? 996 n` asks whether the background is dark or light, and is answered `CSI ? 997 ;
+1 n` or `; 2 n`, from the background OSC 11 answers with — the palette's, or the program's own
+— split at the middle by the Rec. 709 weights the window's theme reads a colour's brightness
+with. Mode `?2031` asks to be sent the same report unasked, and `Emulator::set_palette` queues
+it into the replies whenever a new palette moves the background across that middle, and only
+then: a program that hears picks a dark or a light theme of its own on it, and Claude Code asks
+OSC 11 for the colour again. `Terminal::set_palette` sends those replies the way `feed` does,
+through the writer's queue in the app, so a theme switch or the desktop's light and dark pair
+reaches every pane whose program asked. `vte` has no hook for the question, and `Term` answers
+DECRQM about `?2031` with 0, not recognised, so the OSC watcher keeps the mode itself, stops on
+both questions to answer them in place among `Term`'s own answers, and drops `Term`'s `0`. A
+synchronized update holds an OSC 11 past `Term` until it ends, and answers the OSC 11 query
+behind it then, from the colour it set: so the watcher stops on what sets the background,
+where whether an update holds it is read off `vte`, a question about the scheme behind one
+ends the update first, as one nobody ended is ended, and a theme switch that lands while one
+is held is weighed once it is let go of: once `vte` has played it, even when another opens
+behind its end in the same read. An update that leaves the background alone stays whole
+either way. A mirror answers neither and reports nothing.
 
 One residue is worth writing down rather than discovering. End-of-file on the pty master is
 the only signal this design has that a session is over, and something other than the child

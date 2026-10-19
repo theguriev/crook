@@ -121,36 +121,26 @@ pub struct Unreadable {
 /// not.
 #[derive(Clone, Debug, Default)]
 pub struct Read {
-    /// Sorted by name and then by path — see [`load_themes_in`].
+    /// Sorted by name and then by path — see [`read_themes_in`].
     pub themes: Vec<ThemeFile>,
     /// In path order, which is the order they were found in.
     pub unreadable: Vec<Unreadable>,
 }
 
-/// Every theme file under the user's themes directory, sorted by name.
-///
-/// Failures are skipped — a missing directory is the ordinary state of a
-/// machine that has never written a theme, and an unparseable file is one
-/// theme fewer rather than an error anybody has to act on; [`read_themes_in`]
-/// is the reader that says which files those were.
-pub fn load_user_themes() -> Vec<ThemeFile> {
-    match user_themes_directory() {
-        Some(directory) => load_themes_in(&directory),
-        None => Vec::new(),
-    }
+/// The themes [`read_themes_in`] finds in `directory`, without the files it
+/// could not read.
+#[cfg(test)]
+pub fn load_themes_in(directory: &Path) -> Vec<ThemeFile> {
+    read_themes_in(directory).themes
 }
 
-/// The same, from a directory named outright, sorted by name and then by path.
+/// The themes in `directory`, sorted by name and then by path, and the files
+/// there that could not be read.
 ///
 /// Sorted by *both* because a name does not identify a theme: two files can
 /// declare the same one, and a list whose order depended on `read_dir` would
 /// hand the same two themes to the chooser in a different order on every
 /// launch.
-pub fn load_themes_in(directory: &Path) -> Vec<ThemeFile> {
-    read_themes_in(directory).themes
-}
-
-/// The themes in `directory`, and the files there that could not be read.
 pub fn read_themes_in(directory: &Path) -> Read {
     let mut read = Read::default();
     collect(directory, 0, &mut read);

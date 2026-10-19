@@ -875,6 +875,49 @@ fn test_a_terminal_whose_writer_was_taken_queues_everything_in_order_for_it() {
 }
 
 #[test]
+fn test_a_theme_switch_reaches_a_child_that_asked_in_order_with_everything_queued_around_it() {
+    // The application's shape: the writer taken, so the report the switch
+    // owes is queued behind the answer before it and ahead of the key after.
+    let (mut terminal, child) = over_a_fake_link();
+    let writer = terminal
+        .take_writer()
+        .expect("a fresh terminal has its writer");
+
+    terminal
+        .feed(b"\x1b[?2031h\x1b[6n")
+        .expect("the answer is queued");
+    let light = Palette {
+        background: Rgb::hex(0xffffff),
+        ..Palette::default()
+    };
+    terminal.set_palette(light).expect("the report is queued");
+    terminal
+        .send_key(Key::Char('x'), Modifiers::NONE)
+        .expect("queued");
+
+    let running = thread::spawn(move || writer.run());
+    let deadline = Instant::now() + DEADLINE;
+    while !child.received().ends_with(b"x") {
+        assert!(
+            Instant::now() < deadline,
+            "the writer never wrote what was queued: {:?}",
+            String::from_utf8_lossy(&child.received())
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        "\x1b[1;1R\x1b[?997;2nx",
+        String::from_utf8_lossy(&child.received())
+    );
+
+    drop(terminal);
+    running
+        .join()
+        .expect("the writer panicked")
+        .expect("a terminal that went away ends its writer without an error");
+}
+
+#[test]
 fn test_a_line_submitted_behind_a_backlog_is_queued_with_its_enter_or_not_at_all() {
     // A queue refuses input only once the backlog is already full, so the
     // line that fills it must take its Enter along: a line queued without it

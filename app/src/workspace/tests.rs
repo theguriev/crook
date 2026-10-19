@@ -24912,6 +24912,83 @@ mod shells {
         }
 
         #[test]
+        fn a_bar_over_a_grid_in_a_window_out_of_sight_searches_it_again_when_the_window_is_back() {
+            // Nobody can see the answer while the window is out of sight, so
+            // the bar takes none in meanwhile: not for what the grid prints
+            // then, and not from a read asked before the window went either.
+            // That one waits out its pause and then reads the grid as it is
+            // by then, with whatever was printed since; the integration check
+            // caught one landing, once each time the window went. The window
+            // coming back is the pane coming back on screen, and the bar
+            // answers the grid it shows rather than the one it last saw.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = searching(&mut harness, "qvx wqz rqv", "zq1xv") else {
+                return;
+            };
+            // No echo, so that the Enter which lets the command go on changes
+            // nothing on screen: the first picture after it is the match.
+            harness.type_into(
+                pane,
+                "stty -echo; printf 'zq%sxv\\n' 1; seq 1 400; read line; printf 'zq%sxv\\n' 1; \
+                 read line; printf 'zq%sxv\\n' 1; sleep 600\n",
+            );
+            // Its last line, and not merely its block past the viewport's top:
+            // from here the grid holds still until the Enter.
+            harness.wait_for("the command never printed its last line", |harness| {
+                let text = harness.terminal_text(pane);
+                text.lines().any(|line| line.trim() == "400") && draws_grid(harness, pane)
+            });
+            harness.frame();
+            await_grid_matches(&mut harness, pane, 1);
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("the pane has a find bar");
+            // Every line printed so far has been searched: the answer on
+            // screen was read from the picture on screen, and no read is out.
+            // Then the read the next match sets out is the only one there is.
+            harness.wait_for("the search never caught up with the command", |harness| {
+                let revision = harness.workspace.read(&harness.app, |workspace, app| {
+                    workspace
+                        .terminal(pane, app)
+                        .map(|(_, snapshot)| snapshot.revision)
+                });
+                find.grid_asked().is_none()
+                    && revision.is_some_and(|revision| find.grid_rows(revision).is_some())
+            });
+            // The matches printed from here on: the first is in the scrollback.
+            let shown = |harness: &Harness| harness.terminal_text(pane).matches("zq1xv").count();
+
+            // The second match is printed while the window is in sight, and the
+            // window goes while the read its repaint asked for is still waiting
+            // out its pause. Whenever that read is made, then, it finds a match
+            // the answer on screen does not have, so an answer taken in while
+            // nobody can see the bar shows in the count.
+            harness.type_into(pane, "\n");
+            harness.wait_for("no read of the second match set out", |harness| {
+                shown(harness) == 1 && find.grid_asked() == Some(("zq1xv".to_owned(), true))
+            });
+            harness.workspace_update(|workspace, ctx| workspace.set_window_occluded(true, ctx));
+            // And the third while nobody can see it.
+            harness.type_into(pane, "\n");
+            harness.wait_for("the command never printed its third match", |harness| {
+                shown(harness) == 2
+            });
+            harness.wait_for(
+                "the read asked before the window went never came back",
+                |_| find.grid_asked().is_none(),
+            );
+            assert_eq!(
+                1,
+                matches(&harness, pane),
+                "the bar took in a search of a grid in a window nobody can see"
+            );
+
+            harness.workspace_update(|workspace, ctx| workspace.set_window_occluded(false, ctx));
+            await_grid_matches(&mut harness, pane, 3);
+        }
+
+        #[test]
         fn a_full_screen_program_is_searched_on_its_screen() {
             // The alternate screen keeps no scrollback — Claude Code's
             // fullscreen renderer keeps its history itself — so what there is
@@ -26426,6 +26503,33 @@ mod the_frame_budget {
         harness.settle_drawing(QUIET);
     }
 
+    /// Says the window has gone out of sight, or come back into it, as the
+    /// window on a desktop says it from `Event::WindowOccluded`.
+    fn out_of_sight(harness: &mut Harness, occluded: bool) {
+        harness.workspace_update(|workspace, ctx| workspace.set_window_occluded(occluded, ctx));
+    }
+
+    /// Whether the row has the title [`TITLED`] sets after its last line,
+    /// read off the session: neither a frame nor the grid's text, each of
+    /// which would build a snapshot of the pane on the way.
+    fn titled(harness: &Harness, pane: PaneId) -> bool {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .pane(pane)
+                .is_some_and(|pane| pane.session().derived_title.as_deref() == Some("crook-behind"))
+        })
+    }
+
+    /// One tab, with a shell at its prompt, or `None` where no shell these
+    /// tests speak could be started.
+    fn a_shell_in_front() -> Option<(Harness, PaneId)> {
+        let mut harness = Harness::new(1);
+        let pane = marked_shell(&mut harness)?;
+        await_prompt(&mut harness, pane);
+        Some((harness, pane))
+    }
+
     #[test]
     fn ten_thousand_lines_in_a_tab_nobody_can_see_draw_nothing() {
         // Before the gate this was six to eight renders on an idle laptop —
@@ -26449,6 +26553,33 @@ mod the_frame_budget {
             harness.frames_built() - frames,
             0,
             "a frame was drawn for output nobody can see"
+        );
+    }
+
+    #[test]
+    fn ten_thousand_lines_in_a_window_out_of_sight_draw_nothing() {
+        // The pane is in front, in a window nobody can see: minimised, or
+        // under other windows. X11 and Windows draw every frame asked of a
+        // window like that, and its output asked for one per publication.
+        let Some((mut harness, pane)) = a_shell_in_front() else {
+            return;
+        };
+        hold(&mut harness, pane, STREAM);
+        out_of_sight(&mut harness, true);
+        let renders = harness.workspace_renders();
+        let frames = harness.frames_built();
+
+        release(&mut harness, pane);
+
+        assert_eq!(
+            harness.workspace_renders() - renders,
+            0,
+            "the window was rebuilt for output in a window nobody can see"
+        );
+        assert_eq!(
+            harness.frames_built() - frames,
+            0,
+            "a frame was drawn for output in a window nobody can see"
         );
     }
 
@@ -26597,6 +26728,204 @@ mod the_frame_budget {
     }
 
     #[test]
+    fn a_window_out_of_sight_builds_no_snapshot_until_the_frame_that_shows_it_again() {
+        // The pane is in front, so every publication built its snapshot for
+        // a frame — and in a window nobody can see, there is no frame to
+        // build it for. Waited on with no frame drawn: the title asks for a
+        // frame of its own, for the row, and X11 and Windows draw it, panes
+        // and all. That is one snapshot for the row's change, built by the
+        // frame that draws it, and not what the output costs.
+        let Some((mut harness, pane)) = a_shell_in_front() else {
+            return;
+        };
+        hold(&mut harness, pane, TITLED);
+        out_of_sight(&mut harness, true);
+        let built = harness.snapshots_built(pane);
+
+        harness.type_into(pane, "\n");
+        harness.wait_for("the row never took the title", |harness| {
+            titled(harness, pane)
+        });
+        harness.settle(QUIET);
+        assert_eq!(
+            harness.snapshots_built(pane) - built,
+            0,
+            "snapshots were built of a grid in a window nobody can see"
+        );
+
+        // Back in sight, the frame the window asks for draws what the pane
+        // printed while it was away, and builds it on the way.
+        out_of_sight(&mut harness, false);
+        assert_eq!(
+            harness.snapshots_built(pane) - built,
+            0,
+            "something before the frame built the snapshot it draws"
+        );
+        let scene = harness.frame();
+        assert!(
+            pane_shows(&scene, "10000"),
+            "the window came back without the last thing the pane printed: {:?}",
+            frame_text(&scene)
+        );
+        assert_eq!(
+            harness.snapshots_built(pane) - built,
+            1,
+            "the frame that brought the window back did not build what it drew"
+        );
+
+        // And the shell builds its snapshots as it prints again, as one
+        // drawn does, rather than leaving every one to a frame to build.
+        harness.type_into(pane, "\n");
+        harness.wait_for("the command never finished", |harness| {
+            !running(harness, pane)
+        });
+        assert!(
+            harness.snapshots_built(pane) - built > 1,
+            "the window came back and its pane's shell still built nothing"
+        );
+    }
+
+    #[test]
+    fn a_frame_drawn_in_a_window_out_of_sight_leaves_its_shells_building_nothing() {
+        // X11 and Windows draw a frame asked of a window nobody can see — a
+        // row that changed asks for one — and every frame says which panes
+        // it draws. In a window out of sight that is none of them, or the
+        // frame would set every shell in front building again. Waited on
+        // with no frame drawn after it, as above.
+        let Some((mut harness, pane)) = a_shell_in_front() else {
+            return;
+        };
+        hold(&mut harness, pane, TITLED);
+        out_of_sight(&mut harness, true);
+        harness.render_again();
+        let built = harness.snapshots_built(pane);
+
+        harness.type_into(pane, "\n");
+        harness.wait_for("the row never took the title", |harness| {
+            titled(harness, pane)
+        });
+        harness.settle(QUIET);
+        assert_eq!(
+            harness.snapshots_built(pane) - built,
+            0,
+            "a frame drawn out of sight left the shell building snapshots"
+        );
+    }
+
+    #[test]
+    fn a_shell_that_opens_in_a_window_out_of_sight_builds_no_snapshot() {
+        // A shell is drawn until somebody says otherwise, and in a window
+        // out of sight no frame may come to say it: a restore's shells
+        // arriving off the pool one at a time after the window was
+        // minimised, a tab opened over the control socket. So its first
+        // report says it — the one behind the active tab arrives off the
+        // pool, the one in front opens in place. Waited on with no frame
+        // drawn, as above.
+        let mut harness = Harness::new(2);
+        out_of_sight(&mut harness, true);
+        let Some(shown) = marked_shell(&mut harness) else {
+            return;
+        };
+        let panes = [shown, pane_behind(&harness)];
+        for pane in panes {
+            harness.wait_for("the shell never reached a prompt", |harness| {
+                harness
+                    .workspace
+                    .read(&harness.app, |workspace, app| {
+                        let (_, snapshot) = workspace.terminal(pane, app)?;
+                        Some(snapshot.live_block.state == crook_terminal::BlockState::AtPrompt)
+                    })
+                    .unwrap_or_default()
+            });
+        }
+        for pane in panes {
+            harness.type_into(pane, TITLED);
+        }
+        for pane in panes {
+            harness.wait_for("the command never started", |harness| {
+                printed(harness, pane, "ready") && running(harness, pane)
+            });
+        }
+        harness.settle(QUIET);
+        let built = panes.map(|pane| harness.snapshots_built(pane));
+
+        for pane in panes {
+            harness.type_into(pane, "\n");
+        }
+        for pane in panes {
+            harness.wait_for("the row never took the title", |harness| {
+                titled(harness, pane)
+            });
+        }
+        harness.settle(QUIET);
+        let after = panes.map(|pane| harness.snapshots_built(pane));
+        assert_eq!(
+            [after[0] - built[0], after[1] - built[1]],
+            [0, 0],
+            "a shell that opened in a window out of sight, in front or behind, \
+             built snapshots of its grid"
+        );
+    }
+
+    #[test]
+    fn a_find_bar_open_in_a_window_out_of_sight_builds_no_snapshot() {
+        // The repaint asks an open bar whether a full-screen program took
+        // the screen from under it, and has the bar search what the grid
+        // says now: both of the snapshot, which in a window nobody can see
+        // no publication builds, so the thread that draws built one for
+        // each. Waited on with no frame drawn, as above.
+        let Some((mut harness, pane)) = a_shell_in_front() else {
+            return;
+        };
+        harness.dispatch_workspace_action(WorkspaceAction::Find {
+            pane,
+            action: crate::workspace::action::FindAction::Open,
+        });
+        harness.frame();
+        let find_is_open = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .find(pane)
+                    .is_some_and(crate::pane_find::PaneFind::is_open)
+            })
+        };
+        assert!(find_is_open(&harness));
+
+        hold(&mut harness, pane, TITLED);
+        out_of_sight(&mut harness, true);
+        let built = harness.snapshots_built(pane);
+        harness.type_into(pane, "\n");
+        harness.wait_for("the row never took the title", |harness| {
+            titled(harness, pane)
+        });
+        harness.settle(QUIET);
+        assert_eq!(
+            harness.snapshots_built(pane) - built,
+            0,
+            "snapshots were built of a grid in a window nobody can see, for the bar over it"
+        );
+
+        // A full-screen program taking the screen while nobody can see it:
+        // the frame that shows the window again takes the bar down.
+        harness.type_into(pane, "\n");
+        harness.type_into(pane, "printf '\\033[?1049h'; read line\n");
+        harness.wait_for("the pane never went to the alternate screen", |harness| {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace
+                    .terminal(pane, app)
+                    .is_some_and(|(_, snapshot)| snapshot.alt_screen)
+            })
+        });
+        harness.settle(QUIET);
+        out_of_sight(&mut harness, false);
+        harness.frame();
+        assert!(
+            !find_is_open(&harness),
+            "the bar stayed open over a screen it was not opened over"
+        );
+    }
+
+    #[test]
     fn a_title_set_where_nobody_can_see_is_one_frame_for_its_row() {
         // The row is on screen even when the pane is not, so what it shows
         // still arrives as it happens — and costs what it costs, one frame,
@@ -26727,6 +27056,21 @@ mod the_frame_budget {
         assert!(!repaint_asks_for_a_frame(&mut harness, pane));
 
         harness.show_tabs();
+        assert!(repaint_asks_for_a_frame(&mut harness, pane));
+    }
+
+    #[test]
+    fn a_window_out_of_sight_hides_every_pane_until_it_is_back() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+
+        out_of_sight(&mut harness, true);
+        assert!(
+            !repaint_asks_for_a_frame(&mut harness, pane),
+            "a pane in a window nobody can see asked for a frame"
+        );
+
+        out_of_sight(&mut harness, false);
         assert!(repaint_asks_for_a_frame(&mut harness, pane));
     }
 
@@ -40215,6 +40559,40 @@ mod agent_titles {
         assert_eq!(status_and_source(&harness, pane).0, AgentStatus::NeedsInput);
     }
 
+    /// Codex 0.149.1 in Plan mode asks in a dialog, its `request_user_input`
+    /// tool, which holds the turn open: its hooks say running for the tool
+    /// and nothing more until the person answers, while its title blinks
+    /// "Action Required". The hooks outrank the title, so the row says
+    /// running and a wait for idle is not answered, which is what the skill
+    /// tells an orchestrator, and what it has to stop saying if this changes.
+    /// With no hooks the same title is the question.
+    #[test]
+    fn a_codex_question_in_plan_mode_keeps_the_running_its_hooks_said() {
+        let blinks = [
+            "[ ! ] Action Required | proj",
+            "[ . ] Action Required | proj",
+            "[ ! ] Action Required | proj",
+        ];
+
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+        hooked(&mut harness, pane, AgentStatus::Running, None);
+        for title in blinks {
+            titled(&mut harness, pane, title);
+        }
+        assert_eq!(
+            as_watched(&harness, pane),
+            (AgentStatus::Running, false, false)
+        );
+
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+        for title in blinks {
+            titled(&mut harness, pane, title);
+        }
+        assert_eq!(as_watched(&harness, pane).0, AgentStatus::NeedsInput);
+    }
+
     /// What a pane's agent says through its hooks, the way the model hands
     /// over the OSC its `crook --agent` wrote.
     fn hooked(harness: &mut Harness, pane: PaneId, status: AgentStatus, message: Option<&str>) {
@@ -41445,6 +41823,170 @@ fn the_menu_offers_every_close_and_below_takes_nothing_from_the_bottom_tab() {
         tabs,
         "the bottom tab had nothing below it"
     );
+}
+
+mod opening_files {
+    //! Files the desktop asks Crook to open — a script double-clicked in
+    //! Finder once Crook is the terminal that runs them — from the moment the
+    //! window hands the workspace their paths: a tab for each, where it
+    //! starts, and what it runs there.
+
+    #[cfg(unix)]
+    use super::shells::a_shell_these_tests_speak;
+    use super::*;
+
+    /// Asks the workspace to open `files`, the way the window delegate hands
+    /// them on.
+    fn open(harness: &mut Harness, files: &[PathBuf]) {
+        let workspace = &harness.workspace;
+        harness
+            .app
+            .update(|ctx| workspace.update(ctx, |workspace, ctx| workspace.open_files(files, ctx)));
+    }
+
+    /// Where a pane's shell starts.
+    #[cfg(unix)]
+    fn directory_of(harness: &Harness, pane: PaneId) -> Option<PathBuf> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .pane(pane)
+                .and_then(|pane| pane.session().working_directory.clone())
+        })
+    }
+
+    /// Whether a pane holds a line it will send at its shell's first prompt.
+    #[cfg(unix)]
+    fn waits_for_its_prompt(harness: &Harness, pane: PaneId) -> bool {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.waits_for_first_prompt(pane)
+        })
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn each_file_opens_a_tab_of_its_own_started_in_its_folder() {
+        let mut harness = Harness::new(1);
+        let first = harness.active_id();
+        // A folder that is there, since whether a path is one is asked of
+        // the disk; the script need not be.
+        let folder = std::env::temp_dir();
+        open(
+            &mut harness,
+            &[
+                PathBuf::from("/Users/someone/bin/deploy"),
+                folder.clone(),
+                PathBuf::from("/Users/someone/two\nlines"),
+            ],
+        );
+
+        let tabs = harness.tab_ids();
+        let [kept, script, there] = tabs[..] else {
+            panic!(
+                "one tab for each file that can be opened, and none for one that cannot: {tabs:?}"
+            );
+        };
+        assert_eq!(kept, first);
+
+        let script = harness.panes_of(script)[0];
+        assert_eq!(
+            directory_of(&harness, script),
+            Some(PathBuf::from("/Users/someone/bin"))
+        );
+        assert_eq!(harness.field_text(script), " /Users/someone/bin/deploy");
+        assert!(
+            waits_for_its_prompt(&harness, script),
+            "the script's line is not sent when its shell is ready"
+        );
+
+        let there = harness.panes_of(there)[0];
+        assert_eq!(directory_of(&harness, there), Some(folder));
+        assert_eq!(harness.field_text(there), "", "a folder has nothing to run");
+        assert!(!waits_for_its_prompt(&harness, there));
+
+        assert_eq!(
+            harness.focused_pane_id(),
+            Some(there),
+            "the last file asked for is not the tab in front"
+        );
+        assert_eq!(harness.window_requests(), [Request::BringForward]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_file_opened_over_the_settings_is_shown_rather_than_run_behind_them() {
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        open(&mut harness, &[PathBuf::from("/Users/someone/bin/deploy")]);
+        assert_eq!(
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.showing_section()),
+            None,
+            "the settings stayed over the tab the script runs in"
+        );
+        let pane = harness.focused_pane_id().expect("the script's tab");
+        assert_eq!(harness.field_text(pane), " /Users/someone/bin/deploy");
+    }
+
+    #[test]
+    fn a_request_with_nothing_that_can_be_opened_leaves_the_window_as_it_was() {
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        let tabs = harness.tab_ids();
+        let section = harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.showing_section());
+        open(&mut harness, &[PathBuf::from("bin/deploy")]);
+        assert_eq!(harness.tab_ids(), tabs);
+        assert_eq!(
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.showing_section()),
+            section,
+            "the settings were closed over nothing"
+        );
+        assert!(
+            harness.window_requests().is_empty(),
+            "the window was brought forward over nothing"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_script_asked_for_before_the_shells_open_runs_at_its_first_prompt_in_its_folder() {
+        // How Crook is launched by a double-click: the request comes before
+        // the window's first frame, which is when the shells open.
+        let mut harness = Harness::new(1);
+        if !a_shell_these_tests_speak() {
+            return;
+        }
+        let scratch = Scratch::new();
+        let folder = scratch.path().join("my scripts");
+        fs::create_dir_all(&folder).expect("the folder is made");
+        let script = folder.join("say where");
+        crate::process::write_program(&script, "#!/bin/sh\nprintf 'ran in %s\\n' \"$(pwd -P)\"\n");
+        let expected = format!(
+            "ran in {}",
+            fs::canonicalize(&folder)
+                .expect("the folder is there")
+                .display()
+        );
+
+        open(&mut harness, std::slice::from_ref(&script));
+        let pane = harness.focused_pane_id().expect("the script's tab");
+        if !harness.start_terminals_with_marks() {
+            return;
+        }
+        harness.wait_for("the script never ran", |harness| {
+            harness
+                .workspace
+                .read(&harness.app, |workspace, app| {
+                    workspace.newest_block_output(pane, app)
+                })
+                .is_some_and(|output| output.contains(&expected))
+        });
+    }
 }
 
 mod dropping_files {

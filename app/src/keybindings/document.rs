@@ -63,11 +63,6 @@ impl Document {
         &self.text
     }
 
-    /// Whether the file has nothing in it to write.
-    pub fn is_empty(&self) -> bool {
-        self.text.trim().is_empty()
-    }
-
     /// Whether the file says nothing but a person's own prose.
     ///
     /// The state VSCode's file is created in — its own is four lines of
@@ -157,6 +152,7 @@ impl Document {
     }
 
     /// Every entry of the array, in the order they are written.
+    #[cfg(test)]
     pub fn entries(&self) -> Vec<Value> {
         scan(&self.text)
             .map(|array| array.entries.into_iter().filter_map(|(_, it)| it).collect())

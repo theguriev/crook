@@ -496,22 +496,30 @@ Twenty-two features, and the page that configures them:
   own text as the message, idle when it is done, failed with the error when an API error such
   as a usage limit ends its turn — once Crook's plugin is installed:
   `claude plugin marketplace add theguriev/crook`, then `claude plugin install crook@crook`,
-  with a Crook newer than 0.1.13. That is Claude Code writing its own settings, not anyone
-  merging JSON; the plugin's hooks call `$CROOK_BIN`, do nothing in any other terminal unless
-  it runs tmux, and exit 0 even when a report fails, so a Crook that cannot be reached is a
-  line in Claude Code's debug log rather than a notice on every prompt; it carries the skill
-  below too.
-  `crook --agent-hooks claude` prints those two commands, then the same hooks as JSON for a
-  person who would rather merge them into `~/.claude/settings.json` by hand.
+  with a Crook newer than 0.1.13. Codex CLI and GitHub Copilot CLI install the same plugin from
+  the same marketplace — `codex plugin marketplace add theguriev/crook`, then
+  `codex plugin add crook@crook`; `copilot plugin marketplace add theguriev/crook`, then
+  `copilot plugin install crook@crook` — and each reads a manifest of its own there, which names
+  hooks under that agent's own event names: Codex's say needs-input, with the tool, when it
+  stops for an approval, and Copilot's name their session, below, which a Crook older than
+  0.1.27 does not read and reports nothing for. That is each agent writing its own settings,
+  not anyone merging JSON; the plugin's hooks call `$CROOK_BIN`, do nothing in any other
+  terminal unless it runs tmux, and exit 0 even when a report fails, so a Crook that cannot be
+  reached is a line in the agent's log rather than a notice on every prompt; it carries the
+  skill below too. Codex runs the plugin's hooks, as it runs any hooks, only once you trust
+  them: it asks on its next start, or in its `/hooks`, and asks again whenever a hook's command
+  changes.
+  `crook --agent-hooks claude`, `codex` or `copilot` prints those two commands, then the same
+  hooks for a person who would rather set them up by hand: JSON to merge into
+  `~/.claude/settings.json` or `~/.codex/hooks.json`, or a file to save as
+  `~/.copilot/hooks/crook.json`.
   With no hooks at all Claude Code still says half of it, in the glyph it puts in front of its
   own terminal title — `✳` at its prompt, a turning half circle while it works — which the row
   reads as idle and running, wearing the title without the glyph; a hook's report outranks it,
   but for the `✳` an Esc leaves, which no hook reports and which takes a hook's running back.
-  `codex`, `gemini` and `copilot` print the same guarded hooks for Codex CLI, Gemini CLI and
-  GitHub Copilot CLI in each one's own hooks file, `opencode` prints the plugin OpenCode loads
-  instead, and `aider`, which has no hooks, gets a sentence saying what to do instead. Codex
-  runs the hooks merged into its file only once you trust them: it asks on its next start, or in
-  its `/hooks`, and asks again whenever a hook's command changes.
+  `--agent-hooks gemini` prints the same guarded hooks for Gemini CLI, which has no plugin, to
+  merge into its settings, `opencode` prints the plugin OpenCode loads instead, and `aider`,
+  which has no hooks, gets a sentence saying what to do instead.
   A subagent works in a session of its own, and Copilot CLI runs its hooks for one as for the
   session you are talking to, so its hooks pass `--session -`: the pane takes a title or a stop
   only from the session whose turn it is, until that one stops, another takes the pane or its
@@ -534,7 +542,7 @@ Twenty-two features, and the page that configures them:
   any tmux the hooks run, since only tmux can name the terminals its clients are on:
   `crook --agent` asks it for them and writes the report to each, and one that is not Crook
   drops it unread. `ssh` and `docker exec` carry neither variable, so an agent on the far side
-  of either reports nothing through these command hooks, the Claude Code plugin's included,
+  of either reports nothing through these command hooks, the plugin's included,
   until two things hold there.
   `TERM_PROGRAM` is passed on: `SendEnv TERM_PROGRAM` in the ssh client's configuration with
   `AcceptEnv TERM_PROGRAM` in the server's, or `docker exec -e TERM_PROGRAM`. And the hooks find
@@ -857,7 +865,12 @@ Twenty-two features, and the page that configures them:
   A theme names a background, a foreground, an accent and the sixteen ANSI colours; everything
   else — surfaces, borders, overlays, muted text — is derived from those, which is why a theme
   file is twenty lines rather than sixty. Choosing one applies it to the chrome, to the grid
-  and to every shell already running.
+  and to every shell already running. A program that asks whether the terminal is dark or
+  light (`CSI ? 996 n`) is told, from the background, and one that asked to hear of a change
+  (mode `?2031`, which Claude Code, OpenCode and Copilot set) is told when a new theme, or the
+  desktop's light and dark pair, takes the background from one to the other — so an agent that
+  matches its colours to the terminal's matches the theme it is on now, not the one it started
+  under.
 
   The **Themes panel** is a second side panel, opened from the settings page's current-theme
   row: preview cards, arrow keys that browse by applying, and a `+` that **makes a theme** out
@@ -1018,7 +1031,8 @@ Twenty-two features, and the page that configures them:
   middle-click paste, whether the tabs panel shows and how wide it is, and — set in the file
   rather than on the page — its font family and the line each agent is resumed with.
   Beside them, **Default terminal** makes Crook the terminal the system opens — Launch
-  Services' shell handler on macOS, what Finder runs a script with, and the first line of
+  Services' shell handler on macOS, what Finder runs a script with no extension in (each in a
+  tab of its own, started in the script's folder), and the first line of
   `xdg-terminals.list` on Linux — and says so once it is; it is the system's, so it is asked
   afresh each time the page is shown, and not offered on Windows, which has no such setting.
   The type size is also on `cmd/ctrl-plus`, `-minus` and `-0`, and every pane resizes with it:
@@ -1359,8 +1373,8 @@ docs/plugins.md          the two plugin tiers, and what each of them may do
 docs/images/             the README's screenshots, rendered by `--snapshot`
 assets/                  the app icon: pirate.svg, composed for Apple's grid
                          in icon-macos.svg, rendered into Crook.iconset
-packaging/               the Claude Code plugin, the Linux desktop entry and AppStream
-                         record, and the AUR package
+packaging/               the plugin for Claude Code, Codex and Copilot CLI, the Linux
+                         desktop entry and AppStream record, and the AUR package
 script/                  the scripts below, each explained in its own header comment
 ```
 

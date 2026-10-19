@@ -211,16 +211,19 @@ impl Session {
     }
 
     /// What to run, and with which arguments.
+    #[cfg(test)]
     pub fn program(&self) -> &Program {
         &self.program
     }
 
     /// Environment variables to apply on top of the inherited ones.
+    #[cfg(test)]
     pub fn environment(&self) -> &[(String, String)] {
         &self.environment
     }
 
     /// The directory holding this session's stub files, while there is one.
+    #[cfg(test)]
     pub fn scratch(&self) -> Option<&Path> {
         self.scratch.as_deref()
     }

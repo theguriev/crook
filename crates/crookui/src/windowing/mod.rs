@@ -41,6 +41,8 @@ mod chrome;
 mod dock;
 mod event;
 mod fullscreen_entered;
+#[cfg(target_os = "macos")]
+mod open_documents;
 mod placement;
 #[cfg(any(target_os = "macos", test))]
 mod quit;

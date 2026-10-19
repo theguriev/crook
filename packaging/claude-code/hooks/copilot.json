@@ -1,0 +1,48 @@
+{
+  "description": "Tell the Crook tab GitHub Copilot CLI runs in what it is doing: running when a prompt is sent and around every tool, needs-input with the notification's text whenever it stops to ask, and idle when its turn ends, each naming the session it is from, so a subagent's prompt names no tab and its stop ends no turn. Each command does nothing unless it runs in a Crook pane or inside tmux, with the crook binary reachable ($CROOK_BIN, else crook on PATH); inside tmux, crook writes the report to the terminal of each of tmux's clients, and one that is not Crook drops it unread. Each exits 0 even when the report fails, since Copilot denies the tool call a preToolUse hook failed over. Each is a bash command, for macOS and Linux.",
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || [ -n \"$TMUX\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent running --title - --session-start - || exit 0"
+      }
+    ],
+    "userPromptSubmitted": [
+      {
+        "type": "command",
+        "bash": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || [ -n \"$TMUX\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent running --title - --session - || exit 0"
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || [ -n \"$TMUX\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent running --session - || exit 0"
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "bash": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || [ -n \"$TMUX\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent running --session - || exit 0"
+      }
+    ],
+    "notification": [
+      {
+        "type": "command",
+        "bash": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || [ -n \"$TMUX\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent needs-input --message - --session - || exit 0"
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || [ -n \"$TMUX\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent idle --session - || exit 0"
+      }
+    ],
+    "sessionEnd": [
+      {
+        "type": "command",
+        "bash": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || [ -n \"$TMUX\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent idle --session - || exit 0"
+      }
+    ]
+  }
+}
