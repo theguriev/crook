@@ -1816,8 +1816,8 @@ of its own, `hooks/codex.json` or `hooks/copilot.json`, which is what that agent
 `--agent-hooks` prints. Without one, both run Claude Code's `hooks/hooks.json` under its event
 names: Codex has no Notification, so the plugin never said it had stopped for an approval, and
 those commands pass no `--session`, which would let Copilot's subagents rename the tab and end
-its turn. Claude Code reads `hooks/hooks.json` and nothing else, so neither file gives it the
-PermissionRequest it is kept out of. A hook runs in whatever `PATH` its agent was started
+its turn. Claude Code reads `hooks/hooks.json` and nothing else, so neither file gives it
+Codex's PermissionRequest, which says needs-input: its own runs the ask. A hook runs in whatever `PATH` its agent was started
 with, and a path written into the file goes stale — a moved Crook.app, a deleted build — while
 the file stays, so each calls `"$CROOK_BIN"`, the binary its pane names, and `crook` on `PATH`
 when a pane names none or the one it names has gone. Each is behind a guard that exits 0 unless
