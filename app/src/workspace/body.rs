@@ -409,7 +409,8 @@ fn panel(
     // would interrupt the very agent it is there to protect. See
     // [`closing`](super::closing). So does the card an agent's question is
     // answered on, for the same reason: the agent under it is the one asking.
-    // See [`answering`](super::answering).
+    // See [`answering`](super::answering). And so does the list of every
+    // question, which is that card's other face.
     //
     // A comment being typed in the Changes column takes all of it, the three
     // included. Every element sees every keystroke, so without this a
@@ -419,7 +420,9 @@ fn panel(
     let keys = match (is_focused, workspace.a_popup_is_open()) {
         (false, _) => Keys::None,
         (true, true)
-            if workspace.closing_question().is_some() || workspace.ask_card().is_some() =>
+            if workspace.closing_question().is_some()
+                || workspace.ask_card().is_some()
+                || workspace.ask_list().is_some() =>
         {
             Keys::None
         }

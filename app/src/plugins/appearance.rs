@@ -217,7 +217,8 @@ fn appearance(workspace: &Workspace) -> Vec<Category> {
         Words::new("Let agents ask in Crook")
             .with_description(
                 "Claude Code's permission requests can be read whole and answered from Crook, \
-                 with \u{201c}Answer waiting agent\u{201d}, while its own dialog stays up in its tab.",
+                 with \u{201c}Answer waiting agent\u{201d} or the header\u{2019}s \u{201c}to answer\u{201d}, \
+                 while its own dialog stays up in its tab.",
             )
             .with_keywords(&[
                 "permission", "allow", "deny", "approve", "answer", "agents", "hook", "request",

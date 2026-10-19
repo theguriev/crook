@@ -24,6 +24,7 @@
 //! lets the tab model stay a thing that can be tested with no window.
 
 mod action;
+mod answer_list;
 mod answering;
 mod block_list;
 pub(crate) mod block_menu;
@@ -69,6 +70,7 @@ pub use action::{
     BlockEdge, BlockPart, OptionsAction, SettingsAction, TabMenuAction, ThemeAction, WindowAction,
     WorkspaceAction, WorktreeAction,
 };
+pub use answer_list::AskFixture;
 pub use held_locks::HeldLocks;
 pub(crate) use settings_page::widgets::Category;
 pub use text_field::TextField;
