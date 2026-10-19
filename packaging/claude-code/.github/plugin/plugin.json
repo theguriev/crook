@@ -1,0 +1,19 @@
+{
+  "name": "crook",
+  "displayName": "Crook",
+  "description": "Tells the Crook tab GitHub Copilot CLI runs in what it is doing, and teaches Copilot what a Crook pane can do. Does nothing in any other terminal.",
+  "author": {
+    "name": "Eugen Guriev",
+    "url": "https://github.com/theguriev"
+  },
+  "repository": "https://github.com/theguriev/crook",
+  "license": "MIT",
+  "keywords": [
+    "crook",
+    "terminal",
+    "status",
+    "hooks"
+  ],
+  "hooks": "./hooks/copilot.json",
+  "skills": "./skills/"
+}
