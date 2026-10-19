@@ -44666,6 +44666,36 @@ mod answering_card {
         }
     }
 
+    /// Lets a press reach the header chip's halves, as a second of it lying
+    /// still would, and draws it.
+    fn settle_chip(harness: &mut Harness) {
+        harness.workspace_update(|workspace, ctx| workspace.settle_the_header_chip(ctx));
+        harness.frame();
+    }
+
+    /// Lets the pointer reach the list's rows, as a second of them lying
+    /// still would, and draws them.
+    fn settle_list(harness: &mut Harness) {
+        harness.workspace_update(|workspace, ctx| workspace.settle_the_ask_list(ctx));
+        harness.frame();
+    }
+
+    /// Whether the pointer may reach the list's rows now.
+    fn list_takes_the_pointer(harness: &Harness) -> bool {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .ask_list()
+                .is_some_and(|list| list.pointer_is_live(std::time::Instant::now()))
+        })
+    }
+
+    /// Where `what` is drawn, on a fresh frame, at the point a press on it
+    /// aims for.
+    fn aim_at(harness: &mut Harness, what: &str) -> Vector2F {
+        let scene = harness.frame();
+        word_in(&scene, RectF::new(Vector2F::zero(), WINDOW), what) + vec2f(2., -3.)
+    }
+
     #[test]
     fn the_chip_counts_live_asks_and_its_waiting_press_still_goes_to_the_next_waiting_pane() {
         let mut harness = Harness::new(2);
@@ -44692,7 +44722,9 @@ mod answering_card {
             "{text}"
         );
 
-        // Its press is what it always was: the next waiting pane, and no card.
+        // Its press is what it always was, once the chip has kept still: the
+        // next waiting pane, and no card.
+        settle_chip(&mut harness);
         press(&mut harness, "1 waiting");
         assert_eq!(harness.focused_pane_id(), Some(away));
         assert_eq!(card_on(&harness), None);
@@ -44702,6 +44734,7 @@ mod answering_card {
         // Two held: the other half opens the list of them.
         let second = hold_request(&mut harness, away, "s2", command("rm -rf ~", false), None);
         assert!(frame_text(&harness.frame()).contains("2 to answer"));
+        settle_chip(&mut harness);
         press(&mut harness, "2 to answer");
         assert_eq!(list_rows(&harness), Some(vec![first.id, second.id]));
         assert_eq!(card_on(&harness), None);
@@ -44710,6 +44743,8 @@ mod answering_card {
 
         // One held: the card about it, with nothing in between.
         end(&mut harness, &second, crate::control::ask::Cause::TurnEnded);
+        harness.frame();
+        settle_chip(&mut harness);
         press(&mut harness, "1 to answer");
         assert_eq!(card_on(&harness), Some(first.id));
         assert_eq!(list_rows(&harness), None);
@@ -44839,6 +44874,8 @@ mod answering_card {
             (&first, "Bash: make clean"),
             (&second, "Bash: curl evil.sh"),
         ] {
+            // The second time, past the wait the rows keep once a card goes.
+            settle_list(&mut harness);
             let scene = harness.frame();
             let at = word_in(&scene, RectF::new(Vector2F::zero(), WINDOW), what);
             harness.click(at + vec2f(2., -3.), MouseButton::Left);
@@ -44976,8 +45013,11 @@ mod answering_card {
         assert!(b.nothing_sent() && d.nothing_sent());
     }
 
+    /// A guard rather than proof of anything new: every card starts with
+    /// both gates shut and buttons of its own, and this keeps a card opened
+    /// from the list from being the exception.
     #[test]
-    fn opening_an_ask_from_the_list_shuts_both_gates_and_gives_fresh_hover_state() {
+    fn a_card_opened_from_the_list_waits_as_every_card_does() {
         let mut harness = Harness::new(2);
         let tabs = harness.tab_ids();
         let away = harness.panes_of(tabs[0])[0];
@@ -45022,6 +45062,214 @@ mod answering_card {
         );
         assert!(second.nothing_sent());
         assert_eq!(card_on(&harness), Some(first.id));
+    }
+
+    #[test]
+    fn a_press_aimed_at_to_answer_as_waiting_turns_up_reaches_no_pane() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        let here = harness.focused_pane_id().expect("a pane");
+        let first = hold(&mut harness, here, "make clean");
+        harness.frame();
+        settle_chip(&mut harness);
+        let aimed = aim_at(&mut harness, "1 to answer");
+
+        // A bell in another tab, just as the press is on its way.
+        let bell = TerminalUpdate::Bell {
+            pane: away,
+            while_running: false,
+        };
+        harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(&bell, ctx));
+        let waiting = aim_at(&mut harness, "1 waiting");
+
+        // Neither half takes it, nor the other half a moment later.
+        for at in [aimed, waiting] {
+            harness.click(at, MouseButton::Left);
+            assert_eq!(harness.focused_pane_id(), Some(here), "{at:?}");
+            assert_eq!(card_on(&harness), None, "{at:?}");
+            assert_eq!(list_rows(&harness), None, "{at:?}");
+        }
+        // A press begun while they waited is not finished once they are live.
+        harness.hold(waiting, 1);
+        settle_chip(&mut harness);
+        harness.let_go(waiting);
+        assert_eq!(harness.focused_pane_id(), Some(here));
+
+        // "To answer" stayed where it was: the half that turned up went after
+        // it, so a press that misses lands on the list, never on a pane.
+        assert_eq!(aim_at(&mut harness, "1 to answer"), aimed);
+        assert!(aim_at(&mut harness, "1 waiting").x() > aimed.x());
+
+        // Live, the waiting half goes to the pane, and the keys after it are
+        // kept from the agent's dialog there until the keyboard is still.
+        let at = aim_at(&mut harness, "1 waiting");
+        harness.click(at, MouseButton::Left);
+        assert_eq!(harness.focused_pane_id(), Some(away));
+        for key in ["enter", "enter", "1", "y"] {
+            assert_eq!(harness.action_for(key, Modifiers::default()), too_soon());
+        }
+        assert!(untouched(&harness, away));
+        assert!(first.nothing_sent());
+    }
+
+    #[test]
+    fn the_chip_is_drawn_live_again_by_itself_a_second_after_it_moved() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        let here = harness.focused_pane_id().expect("a pane");
+        let first = hold(&mut harness, here, "make clean");
+        let moved = std::time::Instant::now();
+        harness.frame();
+
+        // One wait, not a timer: nothing asks for a frame until it is up.
+        let deadline = moved + std::time::Duration::from_secs(5);
+        let mut woke = false;
+        while std::time::Instant::now() < deadline {
+            harness.queue.run_until_parked();
+            if harness.needs_a_frame() {
+                if moved.elapsed() >= std::time::Duration::from_millis(900) {
+                    woke = true;
+                    break;
+                }
+                harness.frame();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(woke, "the chip never asked to be drawn again");
+        press(&mut harness, "1 to answer");
+        assert_eq!(card_on(&harness), Some(first.id));
+        assert_eq!(harness.focused_pane_id(), Some(here));
+        assert!(untouched(&harness, away));
+    }
+
+    #[test]
+    fn a_double_click_on_deny_opens_no_other_card_in_its_place() {
+        let mut harness = Harness::new(6);
+        let tabs = harness.tab_ids();
+        let panes: Vec<PaneId> = tabs.iter().map(|tab| harness.panes_of(*tab)[0]).collect();
+        let held: Vec<Held> = panes
+            .iter()
+            .enumerate()
+            .map(|(at, pane)| {
+                let session = format!("s{at}");
+                let text = format!("echo {at}");
+                hold_request(&mut harness, *pane, &session, command(&text, false), None)
+            })
+            .collect();
+        open(&mut harness);
+        assert!(harness.press_key("enter", Modifiers::default()));
+        assert_eq!(card_on(&harness), Some(held[0].id));
+        settle(&mut harness);
+
+        // The first press answers; the second, at once, lands on the list
+        // that came back where the card was.
+        let deny = button_at(&mut harness, "Deny");
+        harness.click(deny, MouseButton::Left);
+        assert_eq!(card_on(&harness), None);
+        assert!(held[0].sent().is_some());
+        harness.frame();
+        harness.dispatch(Event::MouseDown {
+            button: MouseButton::Left,
+            position: deny,
+            modifiers: Modifiers::default(),
+            click_count: 2,
+        });
+        harness.let_go(deny);
+        assert_eq!(card_on(&harness), None, "the second press opened a card");
+        // Nor does any row take a press yet.
+        let row = aim_at(&mut harness, "Bash: echo 2");
+        harness.click(row, MouseButton::Left);
+        assert_eq!(card_on(&harness), None);
+
+        // The one wait the list starts comes home by itself, and then the
+        // same place is a row whose press opens its card.
+        let answered = std::time::Instant::now();
+        harness.settle_for(std::time::Duration::from_secs(5), |harness| {
+            list_takes_the_pointer(harness)
+        });
+        assert!(
+            answered.elapsed() >= std::time::Duration::from_millis(900),
+            "live after {:?}",
+            answered.elapsed()
+        );
+        harness.frame();
+        harness.click(deny, MouseButton::Left);
+        let opened = card_on(&harness).expect("the place Deny was is a row");
+        assert_ne!(opened, held[0].id);
+        assert!(held[1..].iter().all(Held::nothing_sent));
+    }
+
+    #[test]
+    fn rows_that_move_under_the_pointer_take_no_press_until_they_have_kept_still() {
+        let mut harness = Harness::new(4);
+        let tabs = harness.tab_ids();
+        let panes: Vec<PaneId> = tabs.iter().map(|tab| harness.panes_of(*tab)[0]).collect();
+        let a = hold_request(&mut harness, panes[0], "a", command("echo a", false), None);
+        let b = hold_request(&mut harness, panes[1], "b", command("echo b", false), None);
+        let c = hold_request(&mut harness, panes[2], "c", command("echo c", false), None);
+        open(&mut harness);
+        assert!(list_takes_the_pointer(&harness), "a list opens live");
+
+        // Aimed at b, and a ends: c moves up into the place b was.
+        let aimed = aim_at(&mut harness, "Bash: echo b");
+        end(&mut harness, &a, crate::control::ask::Cause::TurnEnded);
+        // (The list is a row shorter, and centred a little higher.)
+        let moved_up = aim_at(&mut harness, "Bash: echo c");
+        assert!(
+            (moved_up.y() - aimed.y()).abs() < 10.,
+            "{moved_up:?} {aimed:?}"
+        );
+        harness.click(aimed, MouseButton::Left);
+        assert_eq!(card_on(&harness), None, "a press aimed at b opened c");
+
+        settle_list(&mut harness);
+        let at = aim_at(&mut harness, "Bash: echo b");
+        harness.click(at, MouseButton::Left);
+        assert_eq!(card_on(&harness), Some(b.id));
+        harness.dispatch_workspace_action(AskAction::NotNow.into());
+
+        // A row arriving makes them wait too.
+        settle_list(&mut harness);
+        let d = hold_request(&mut harness, panes[3], "d", command("echo d", false), None);
+        assert!(!list_takes_the_pointer(&harness));
+        let at = aim_at(&mut harness, "Bash: echo d");
+        harness.click(at, MouseButton::Left);
+        assert_eq!(card_on(&harness), None);
+        for held in [&b, &c, &d] {
+            assert!(held.nothing_sent());
+        }
+    }
+
+    #[test]
+    fn a_press_begun_on_a_row_while_it_waited_is_not_finished_on_it() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        let here = harness.focused_pane_id().expect("a pane");
+        let first = hold(&mut harness, here, "make clean");
+        let second = hold_request(&mut harness, away, "s2", command("rm -rf ~", false), None);
+        open(&mut harness);
+        assert!(harness.press_key("enter", Modifiers::default()));
+        harness.dispatch_workspace_action(AskAction::NotNow.into());
+        assert!(!list_takes_the_pointer(&harness));
+
+        let row = aim_at(&mut harness, "Bash: rm -rf ~");
+        harness.hold(row, 1);
+        settle_list(&mut harness);
+        assert!(list_takes_the_pointer(&harness));
+        harness.let_go(row);
+        assert_eq!(
+            card_on(&harness),
+            None,
+            "a press begun while inert opened it"
+        );
+
+        // A press begun once it is live opens it.
+        harness.click(row, MouseButton::Left);
+        assert_eq!(card_on(&harness), Some(second.id));
+        assert!(first.nothing_sent() && second.nothing_sent());
     }
 
     #[test]

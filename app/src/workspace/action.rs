@@ -383,6 +383,12 @@ pub enum AskAction {
     NotNow,
     /// The command on the card was scrolled.
     Scrolled,
+    /// Keep every key from whatever has the keyboard until it has been still
+    /// for a second, as after the card closes. What the header's "N waiting"
+    /// press does once it has focused the next waiting pane: the agent there
+    /// may have its dialog up with Yes as its default, and the Enter pressed
+    /// next was meant for the list the press missed.
+    HoldKeys,
     /// Put the list's keyboard on the row of this question: Up and Down, on
     /// the list of every question the window holds.
     Pick(AskId),

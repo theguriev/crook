@@ -36,6 +36,7 @@ mod closing;
 mod controls;
 mod crash_note;
 mod finish;
+mod header_chip;
 mod header_toolbar;
 mod held_locks;
 mod input_element;
@@ -62,8 +63,9 @@ mod tests;
 
 use crate::theme::theme;
 
+pub(crate) use action::AskAction;
 #[cfg(all(test, unix))]
-pub use action::{AskAction, Pressed};
+pub use action::Pressed;
 #[cfg(test)]
 pub use action::{BlockAction, ChangesAction, EndingAction, EndingButton};
 pub use action::{

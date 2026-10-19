@@ -130,7 +130,9 @@ use crate::theme::theme;
 use crate::workspace::tab_context_menu::{
     entry, field_entry, inert_entry, submenu_entry, swatch_entry,
 };
-use crate::workspace::{OptionsAction, TabMenuAction, Workspace, WorkspaceAction, status_color};
+use crate::workspace::{
+    AskAction, OptionsAction, TabMenuAction, Workspace, WorkspaceAction, status_color,
+};
 
 /// The mark at the head of a tab's row.
 pub const TAB_ROW_MARK: SlotId = SlotId::new("tab.row.mark");
@@ -358,13 +360,6 @@ impl Rename {
 #[derive(Default)]
 pub struct Tabs {
     rename: Rc<Rename>,
-    /// The pointer's relationship to the chip in the header, kept here for
-    /// the reason the rename state is: the contribution that draws the chip
-    /// is a closure that outlives `build`, and a fresh state on every frame
-    /// would be a chip that never knew it was hovered.
-    waiting: MouseStateHandle,
-    /// The same, for the chip's other half: the questions to answer.
-    to_answer: MouseStateHandle,
 }
 
 impl Tabs {
@@ -739,16 +734,8 @@ impl Plugin for Tabs {
             },
             action("next-waiting"),
         );
-        host.contribute(HEADER_LEFT, "waiting", 0, {
-            let hover = self.waiting.clone();
-            let to_answer = self.to_answer.clone();
-            move |workspace, _| {
-                Some(waiting_chip(
-                    workspace,
-                    [hover.clone(), to_answer.clone()],
-                    [next_waiting, answers],
-                ))
-            }
+        host.contribute(HEADER_LEFT, "waiting", 0, move |workspace, _| {
+            Some(waiting_chip(workspace, [answers, next_waiting]))
         });
 
         // The field every rename is typed into. One, not two: only one of the
@@ -1354,45 +1341,52 @@ pub fn to_answer_count(workspace: &Workspace) -> usize {
     workspace.asks().live().count()
 }
 
-/// The chip in the header: the waiting panes, whose press goes to the next
-/// one, and beside it the questions held, whose press opens the list of
-/// them — or the card, when there is one. Each half is there only while it
+/// The chip in the header: the questions held, whose press opens the list
+/// of them — or the card, when there is one — and after it the waiting
+/// panes, whose press goes to the next one. Each half is there only while it
 /// has something to count, and the chip is nothing at all while neither
 /// has: a count of zero is not information.
 ///
-/// `hover` and `go` are the two halves', waiting first.
-fn waiting_chip(
-    workspace: &Workspace,
-    hover: [MouseStateHandle; 2],
-    go: [ActionId; 2],
-) -> Box<dyn Element> {
+/// "To answer" first, because a half turning up shifts the one after it: a
+/// press aimed at where "to answer" was must not land on "N waiting", which
+/// hands the keyboard to a pane whose agent's dialog may be up with Yes as
+/// its default. And neither half takes a press for a second after the chip
+/// changes shape; see `workspace::header_chip`.
+///
+/// `go` is the two halves' actions, "to answer" first.
+fn waiting_chip(workspace: &Workspace, go: [ActionId; 2]) -> Box<dyn Element> {
     let waiting = waiting_count(workspace);
     let asked = to_answer_count(workspace);
+    let (live, [asked_hover, waiting_hover]) =
+        workspace
+            .header_chip()
+            .lay_out(asked, waiting, std::time::Instant::now());
     if waiting == 0 && asked == 0 {
         return Empty::new().finish();
     }
     let ui = workspace.fonts().ui;
-    let [waiting_hover, asked_hover] = hover;
-    let [next, answers] = go;
+    let [answers, next] = go;
     let mut chip = Flex::row()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_spacing(WAITING_GAP);
-    if waiting > 0 {
-        chip.add_child(pill(
-            waiting_hover,
-            true,
-            format!("{waiting} waiting"),
-            next,
-            ui,
-        ));
-    }
     if asked > 0 {
         chip.add_child(pill(
             asked_hover,
             false,
             format!("{asked} to answer"),
-            answers,
+            live.then_some(vec![WorkspaceAction::Run(answers)]),
+            ui,
+        ));
+    }
+    if waiting > 0 {
+        // The pane it focuses may be an agent's with its dialog up, and the
+        // keys after a press are kept from it as after the card's Go to.
+        chip.add_child(pill(
+            waiting_hover,
+            true,
+            format!("{waiting} waiting"),
+            live.then_some(vec![WorkspaceAction::Run(next), AskAction::HoldKeys.into()]),
             ui,
         ));
     }
@@ -1400,16 +1394,18 @@ fn waiting_chip(
 }
 
 /// One half of the chip: a count, with the bell before it when `bell`, that
-/// runs `go` when pressed.
+/// dispatches `go` in turn when pressed — or, with none, is drawn unlit
+/// under the pointer and has no handler.
 fn pill(
     hover: MouseStateHandle,
     bell: bool,
     label: String,
-    go: ActionId,
+    go: Option<Vec<WorkspaceAction>>,
     ui: FamilyId,
 ) -> Box<dyn Element> {
-    Hoverable::new(hover, move |mouse| {
-        let ground = if mouse.is_hovered() {
+    let live = go.is_some();
+    let drawn = Hoverable::new(hover, move |mouse| {
+        let ground = if live && mouse.is_hovered() {
             theme().overlay_2
         } else {
             theme().overlay_1
@@ -1440,9 +1436,17 @@ fn pill(
                 right: 9.,
             })
             .finish()
-    })
-    .on_click(move |_, ctx, _| ctx.dispatch_typed_action(WorkspaceAction::Run(go)))
-    .finish()
+    });
+    match go {
+        Some(go) => drawn
+            .on_click(move |_, ctx, _| {
+                for action in &go {
+                    ctx.dispatch_typed_action(*action);
+                }
+            })
+            .finish(),
+        None => drawn.finish(),
+    }
 }
 
 /// The chip's type, the same size as a row's chips in the panel.

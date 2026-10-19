@@ -85,6 +85,7 @@ use super::closed::{Closed, Taking};
 use super::closing::{self, Close, Question};
 use super::crash_note::CrashNote;
 use super::finish::{Again, Finishing};
+use super::header_chip::HeaderChip;
 use super::held_locks::HeldLocks;
 use super::row_content::row_name;
 use super::session_note::SessionNote;
@@ -1229,9 +1230,13 @@ pub struct Workspace {
     ask_list: Option<AskList>,
     /// Until when the keys are kept from whatever has the keyboard once the
     /// card is down: [`closing::SETTLE`] after it closed, however it closed,
-    /// and after every key that came before then. See
-    /// [`Self::close_ask_card`].
-    keys_held_after_the_card: Cell<Option<Instant>>,
+    /// or after the header's "N waiting" was pressed, and after every key
+    /// that came before then. See [`Self::close_ask_card`] and
+    /// [`Self::hold_the_keys`].
+    keys_held: Cell<Option<Instant>>,
+    /// What the header's chip keeps from one frame to the next. See
+    /// [`header_chip`](super::header_chip).
+    header_chip: HeaderChip,
 }
 
 impl Workspace {
@@ -1456,7 +1461,8 @@ impl Workspace {
             closing: None,
             ask_card: None,
             ask_list: None,
-            keys_held_after_the_card: Cell::new(None),
+            keys_held: Cell::new(None),
+            header_chip: HeaderChip::default(),
         };
         workspace.sync_interactions();
         workspace.sync_git(ctx);
@@ -3046,7 +3052,7 @@ impl Workspace {
         self.close_block_menu(ctx);
         self.host.take_panels_down();
         self.ask_card = None;
-        self.ask_list = Some(AskList::new());
+        self.ask_list = Some(AskList::new(&self.asks));
         self.sync_input_keys();
         ctx.notify();
     }
@@ -3065,13 +3071,82 @@ impl Workspace {
     /// one whose question has ended, and closes the list once it has no row
     /// left — unless a card it opened is up over it, which says why its
     /// question ended, and the list closes when that card goes.
+    ///
+    /// Rows that came or went make the pointer wait, as the card's buttons
+    /// do: the rows after one that ended have moved up under a still
+    /// pointer, and a press aimed at one would open the next.
     fn follow_the_ask_list(&mut self, ctx: &mut ViewContext<Self>) {
         let Some(list) = self.ask_list.as_ref() else {
             return;
         };
-        list.follow(&self.asks);
+        let moved = list.follow(&self.asks);
         if self.ask_card.is_none() && self.asks.is_empty() {
             self.close_ask_list(ctx);
+        } else if moved {
+            self.hold_the_lists_pointer(ctx);
+        }
+    }
+
+    /// Makes the list's rows wait out [`closing::SETTLE`] for the pointer
+    /// from now, and starts the one wait that makes them live again, as
+    /// [`Self::hold_the_pointer`] does for the card.
+    fn hold_the_lists_pointer(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(list) = self.ask_list.as_ref() else {
+            return;
+        };
+        let until = list.hold_the_pointer(Instant::now());
+        Self::wake_at(until, ctx, move |workspace, ctx| {
+            if let Some(list) = workspace.ask_list.as_ref()
+                && list.free_the_pointer(until)
+            {
+                ctx.notify();
+            }
+        });
+    }
+
+    /// Runs `then` once, at `until`: one sleep on the pool, which comes home
+    /// once. What lets every wait on the pointer end without a timer.
+    fn wake_at(
+        until: Instant,
+        ctx: &mut ViewContext<Self>,
+        then: impl FnOnce(&mut Self, &mut ViewContext<Self>) + 'static,
+    ) {
+        let waiting = ctx.background().spawn(async move {
+            std::thread::sleep(until.saturating_duration_since(Instant::now()));
+        });
+        ctx.spawn(waiting, move |workspace, (), ctx| then(workspace, ctx))
+            .detach();
+    }
+
+    /// Keeps the keys from whatever has the keyboard until it has been still
+    /// for [`closing::SETTLE`]: what a gesture that hands the keyboard to a
+    /// pane does after it, when the pane may be an agent's with its dialog
+    /// up and Yes as its default.
+    fn hold_the_keys(&self) {
+        self.keys_held.set(Some(Instant::now() + closing::SETTLE));
+    }
+
+    /// What the header's chip keeps from one frame to the next, for the
+    /// plugin that draws it.
+    pub(crate) fn header_chip(&self) -> &HeaderChip {
+        &self.header_chip
+    }
+
+    /// Lets a press reach the header chip's halves, as a second of it lying
+    /// still would.
+    #[cfg(test)]
+    pub(crate) fn settle_the_header_chip(&mut self, ctx: &mut ViewContext<Self>) {
+        self.header_chip.settle();
+        ctx.notify();
+    }
+
+    /// Lets the pointer reach the list's rows, as a second of them lying
+    /// still would, and draws them so.
+    #[cfg(test)]
+    pub(crate) fn settle_the_ask_list(&mut self, ctx: &mut ViewContext<Self>) {
+        if let Some(list) = self.ask_list.as_ref() {
+            list.settle();
+            ctx.notify();
         }
     }
 
@@ -3108,18 +3183,18 @@ impl Workspace {
     /// agent's own, with its dialog up and Yes as its default. Escape still
     /// closes the card at once; only what comes after it waits.
     ///
-    /// A card opened from the list goes back to it, with its rows' mouse
-    /// state forgotten, and never on to another card: the list opens nothing
-    /// by itself, and the keys kept from it are what keep a held Enter from
-    /// opening the next. A list with no question left closes.
+    /// A card opened from the list goes back to it, and never on to another
+    /// card: the list opens nothing by itself, the keys kept from it are
+    /// what keep a held Enter from opening the next, and its rows wait for
+    /// the pointer as the card's buttons did — the list comes back where the
+    /// card was, and the second press of a double click on Deny would open
+    /// another question's card in the same place. A list with no question
+    /// left closes.
     fn close_ask_card(&mut self, ctx: &mut ViewContext<Self>) {
         if self.ask_card.take().is_some() {
-            self.keys_held_after_the_card
-                .set(Some(Instant::now() + closing::SETTLE));
-            if let Some(list) = self.ask_list.as_ref() {
-                list.forget_hover_state();
-            }
+            self.hold_the_keys();
             self.follow_the_ask_list(ctx);
+            self.hold_the_lists_pointer(ctx);
             self.sync_input_keys();
             ctx.notify();
         }
@@ -3134,17 +3209,13 @@ impl Workspace {
             return;
         };
         let until = card.hold_the_pointer(Instant::now());
-        let waiting = ctx.background().spawn(async move {
-            std::thread::sleep(until.saturating_duration_since(Instant::now()));
-        });
-        ctx.spawn(waiting, move |workspace, (), ctx| {
+        Self::wake_at(until, ctx, move |workspace, ctx| {
             if let Some(card) = workspace.ask_card.as_mut()
                 && card.free_the_pointer(until)
             {
                 ctx.notify();
             }
-        })
-        .detach();
+        });
     }
 
     /// Takes in what the frame just drawn found, which its layout and paint
@@ -3159,6 +3230,11 @@ impl Workspace {
             .is_some_and(|card| card.body().take_news());
         if news {
             ctx.notify();
+        }
+        // The header's chip changed shape in this frame, and has its presses
+        // waiting: it is drawn again, live, once.
+        if let Some(until) = self.header_chip.take_wake() {
+            Self::wake_at(until, ctx, |_, ctx| ctx.notify());
         }
         news
     }
@@ -3219,6 +3295,7 @@ impl Workspace {
             // The wait it restarts was written down when the key was asked
             // about, and nothing on the card changes.
             AskAction::TooSoon => {}
+            AskAction::HoldKeys => self.hold_the_keys(),
             AskAction::Scrolled => ctx.notify(),
             // One face back: a card to the list it was opened from, if it
             // was, and the list to nothing.
@@ -11173,7 +11250,8 @@ impl Workspace {
             return Some(action);
         }
 
-        // Whatever has the keyboard once the card is down waits for it to be
+        // Whatever has the keyboard once the card is down, or once the
+        // header's "N waiting" has handed it to a pane, waits for it to be
         // still, as the card did: see [`Self::close_ask_card`]. The list a
         // card goes back to is one of them, but for its Escape: the second
         // of two that walk back from a card to nothing would otherwise be
@@ -11182,15 +11260,14 @@ impl Workspace {
             && self.ask_list.is_some()
             && keystroke.key == "escape"
             && keystroke.modifiers.is_empty();
-        if let Some(until) = self.keys_held_after_the_card.get() {
+        if let Some(until) = self.keys_held.get() {
             let now = Instant::now();
             if now < until && !Recording::is_a_modifier(keystroke) && !walking_back {
-                self.keys_held_after_the_card
-                    .set(Some(now + closing::SETTLE));
+                self.keys_held.set(Some(now + closing::SETTLE));
                 return Some(super::action::AskAction::TooSoon.into());
             }
             if now >= until {
-                self.keys_held_after_the_card.set(None);
+                self.keys_held.set(None);
             }
         }
 

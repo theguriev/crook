@@ -14,7 +14,7 @@
 //! **Open its card, and nothing else.** A row has no Allow and no Deny, and
 //! neither its Enter nor its press is an answer: either opens the card about
 //! that question, which starts as every card starts — fresh mouse state, the
-//! keyboard's [`SETTLE`](super::closing::SETTLE) begun and the pointer gate
+//! keyboard's [`SETTLE`] begun and the pointer gate
 //! shut — so a press or a key that opened it cannot go on to answer on it.
 //! Escape on the card comes back here, and Escape here closes.
 //!
@@ -27,6 +27,16 @@
 //! list until the keyboard has been still, so a held Enter does not open it.
 //! A question arriving opens nothing either: the list is drawn again with one
 //! more row, if it is up.
+//!
+//! **Nor under the pointer.** The rows have no handler for
+//! [`SETTLE`] after the list comes back from a card —
+//! it comes back where the card was, and the second press of a double click
+//! on the card's Deny would land on a row and open another question's card
+//! in the same place — and after any row comes or goes, since the rows after
+//! one that ended move up under a still pointer and a press aimed at one
+//! would open the next. One one-shot wait makes them live again, as on the
+//! card, and the rows turn live with mouse state of their own, so a press
+//! begun on an inert row cannot be finished on a live one.
 //!
 //! Below the rows, read-only, is how the last [`EARLIER`] questions ended,
 //! newest first. A list with no question left in it closes.
@@ -52,6 +62,7 @@ use crate::theme::theme;
 
 use super::action::{AskAction, WorkspaceAction};
 use super::answering::duration;
+use super::closing::SETTLE;
 use super::tab_menu::{LABEL_SIZE, PATH_SIZE, ROW_INSET, divider, header, note};
 use super::view::Workspace;
 use super::window_room::WindowRoom;
@@ -85,21 +96,35 @@ pub(super) struct AskList {
     /// The row the keyboard was last on, by its question; see
     /// [`Self::selected`] for what it is while that question is over.
     selected: Cell<Option<AskId>>,
-    /// The rows' mouse state, by question: none kept from one showing of the
-    /// list to the next, so that a press begun on the card that was over it
-    /// cannot be finished on a row.
+    /// The rows' mouse state, by question: forgotten each time the rows
+    /// turn live, so that a press begun while they were inert cannot be
+    /// finished on one.
     handles: RefCell<HashMap<AskId, MouseStateHandle>>,
     /// Where its rows and the earlier ones are scrolled to.
     scroll: ScrollStateHandle,
+    /// The questions its rows were last followed with, in their order: what
+    /// says the rows have moved.
+    shown: RefCell<Vec<AskId>>,
+    /// When the pointer may first reach the rows: [`SETTLE`] after the list
+    /// came back from a card or its rows last moved.
+    pointer_live_at: Cell<Instant>,
+    /// Whether the one-shot wait for [`Self::pointer_live_at`] has come home
+    /// and drawn them live.
+    pointer_live: Cell<bool>,
 }
 
 impl AskList {
-    /// A list, with the keyboard on its first row.
-    pub(super) fn new() -> Self {
+    /// A list of `asks`, with the keyboard on its first row and the pointer
+    /// free to reach every row: it opens from a gesture somewhere else, and
+    /// nothing was under the pointer to move.
+    pub(super) fn new(asks: &Asks) -> Self {
         Self {
             selected: Cell::new(None),
             handles: RefCell::default(),
             scroll: ScrollStateHandle::default(),
+            shown: RefCell::new(ids(asks)),
+            pointer_live_at: Cell::new(Instant::now()),
+            pointer_live: Cell::new(true),
         }
     }
 
@@ -121,9 +146,15 @@ impl AskList {
 
     /// Writes down the row the keyboard is on now, by `asks`: what keeps it
     /// on the row after one whose question ended, rather than on whichever
-    /// question is asked next after that.
-    pub(super) fn follow(&self, asks: &Asks) {
+    /// question is asked next after that. Whether the rows have moved since
+    /// they were last followed.
+    pub(super) fn follow(&self, asks: &Asks) -> bool {
         self.selected.set(self.selected(asks));
+        let now = ids(asks);
+        *self.shown.borrow_mut() != now && {
+            *self.shown.borrow_mut() = now;
+            true
+        }
     }
 
     /// Puts the keyboard on question `id`'s row, and scrolls the row into
@@ -147,10 +178,41 @@ impl AskList {
         }
     }
 
-    /// Forgets the rows' mouse state, for the list coming back from under
-    /// the card it opened.
-    pub(super) fn forget_hover_state(&self) {
+    /// Makes the pointer wait [`SETTLE`] again from `now`, and hands back the
+    /// moment it may reach the rows, which the one-shot wait that makes them
+    /// live is for.
+    pub(super) fn hold_the_pointer(&self, now: Instant) -> Instant {
+        self.pointer_live.set(false);
+        self.pointer_live_at.set(now + SETTLE);
+        now + SETTLE
+    }
+
+    /// Lets the pointer reach the rows, when the wait that came home is the
+    /// one the list is still waiting on, with their mouse state forgotten:
+    /// an inert row still hears a press begin, and the press must not be
+    /// finished on the live one. Whether it did.
+    pub(super) fn free_the_pointer(&self, waited_for: Instant) -> bool {
+        if self.pointer_live.get() || waited_for != self.pointer_live_at.get() {
+            return false;
+        }
         self.handles.borrow_mut().clear();
+        self.pointer_live.set(true);
+        true
+    }
+
+    /// Whether the pointer may reach the rows, at `now`.
+    pub(super) fn pointer_is_live(&self, now: Instant) -> bool {
+        self.pointer_live.get() && now >= self.pointer_live_at.get()
+    }
+
+    /// Lets the pointer reach the rows from now on, the way the one-shot
+    /// wait coming home does — which a test says this way rather than by
+    /// sleeping through it.
+    #[cfg(test)]
+    pub(super) fn settle(&self) {
+        let now = Instant::now();
+        self.pointer_live_at.set(now);
+        self.free_the_pointer(now);
     }
 
     /// The mouse state of question `id`'s row.
@@ -168,6 +230,11 @@ pub(super) fn rows(asks: &Asks) -> Vec<&Ask> {
     let mut held: Vec<&Ask> = asks.live().collect();
     held.sort_by_key(|ask| ask.id);
     held
+}
+
+/// The questions of [`rows`], by number.
+fn ids(asks: &Asks) -> Vec<AskId> {
+    rows(asks).into_iter().map(|ask| ask.id).collect()
 }
 
 /// What a keystroke means while the list is up.
@@ -206,6 +273,7 @@ pub(super) fn render(workspace: &Workspace, list: &AskList) -> Box<dyn Element> 
     let asks = workspace.asks();
     let held = rows(asks);
     let selected = list.selected(asks);
+    let pointer = list.pointer_is_live(now);
 
     let mut body = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
@@ -215,10 +283,9 @@ pub(super) fn render(workspace: &Workspace, list: &AskList) -> Box<dyn Element> 
             workspace,
             ask,
             selected == Some(ask.id),
+            pointer,
             list.handle(ask.id),
             now,
-            fonts.monospace,
-            ui,
         ));
     }
     let ended: Vec<&Outcome> = asks.history().collect();
@@ -304,16 +371,18 @@ pub(super) fn render(workspace: &Workspace, list: &AskList) -> Box<dyn Element> 
 /// ago, and, for one this window can only show, that it is read-only — in
 /// words, since a colour alone says nothing to somebody who cannot tell it.
 ///
-/// Its press opens the question's card, and that is its one handler.
+/// Its press opens the question's card, and that is its one handler — which
+/// it is drawn without, and unlit under the pointer, until `live`.
 fn row(
     workspace: &Workspace,
     ask: &Ask,
     selected: bool,
+    live: bool,
     hover: MouseStateHandle,
     now: Instant,
-    monospace: FamilyId,
-    ui: FamilyId,
 ) -> Box<dyn Element> {
+    let fonts = workspace.fonts();
+    let (monospace, ui) = (fonts.monospace, fonts.ui);
     // The tab as it is called now, read off the strip as the card reads it.
     let strip = workspace.tabs();
     let tab = strip
@@ -335,8 +404,8 @@ fn row(
     let summary = ask.summary.clone();
     let open = WorkspaceAction::from(AskAction::Open(ask.id));
 
-    Hoverable::new(hover, move |mouse| {
-        let ground = match (selected, mouse.is_hovered()) {
+    let drawn = Hoverable::new(hover, move |mouse| {
+        let ground = match (selected, live && mouse.is_hovered()) {
             (true, _) => theme().overlay_2,
             (false, true) => theme().overlay_1,
             (false, false) => Color::TRANSPARENT,
@@ -383,9 +452,14 @@ fn row(
         )
         .with_height(ROW_HEIGHT)
         .finish()
-    })
-    .on_click(move |_, ctx, _| ctx.dispatch_typed_action(open))
-    .finish()
+    });
+    if live {
+        drawn
+            .on_click(move |_, ctx, _| ctx.dispatch_typed_action(open))
+            .finish()
+    } else {
+        drawn.finish()
+    }
 }
 
 /// What the list says about a question that ended: how, who asked, the tab
