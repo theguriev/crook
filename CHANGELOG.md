@@ -5,6 +5,39 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.29
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.28...v0.1.29)
+
+### Features
+
+- **terminal:** Tell programs whether the theme is dark or light, and when it flips ([#539](https://github.com/theguriev/crook/pull/539))
+- **agent:** Let Codex and Copilot CLI install Crook's plugin, each with hooks of its own ([#540](https://github.com/theguriev/crook/pull/540))
+- **control:** Hold a Claude Code permission request in the window of the pane it runs in ([#546](https://github.com/theguriev/crook/pull/546))
+- **agent:** Withdraw a request answered in Claude Code's own dialog when its command finishes ([#547](https://github.com/theguriev/crook/pull/547))
+- **agent:** Answer a Claude Code Bash request Allow once or Deny from a card in Crook ([#548](https://github.com/theguriev/crook/pull/548))
+
+### Performance
+
+- **terminal:** Build no snapshot and ask no frame for a pane in a window out of sight ([#543](https://github.com/theguriev/crook/pull/543))
+
+### Fixes
+
+- **settings:** Run the scripts Finder hands Crook once it is the default terminal ([#541](https://github.com/theguriev/crook/pull/541))
+- **control:** Check the socket and who listens on it before asking a window ([#544](https://github.com/theguriev/crook/pull/544))
+
+### Refactors
+
+- **app:** Make the library's modules private and delete the code nothing calls ([#542](https://github.com/theguriev/crook/pull/542))
+
+### Tests
+
+- **agents:** Measure what Claude Code 2.1.280 does while a permission hook waits ([#545](https://github.com/theguriev/crook/pull/545))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.28
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.27...v0.1.28)
