@@ -43843,6 +43843,54 @@ mod answering_card {
     }
 
     #[test]
+    fn a_done_on_its_own_withdraws_the_card_and_its_buttons_wait_again() {
+        // A failed or an interrupted tool's hook writes the done with no
+        // status behind it, and the done is all that ends the question.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+        settle(&mut harness);
+        let fingerprint = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .asks()
+                .get(held.id)
+                .map(|ask| ask.fingerprint.clone())
+                .expect("held")
+        });
+
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &TerminalUpdate::AskDone {
+                    pane,
+                    fingerprints: vec![
+                        crook_terminal::agent::Fingerprint::parse(&fingerprint)
+                            .expect("a question's fingerprint"),
+                    ],
+                },
+                ctx,
+            );
+        });
+
+        assert_eq!(
+            held.sent(),
+            Some(serde_json::json!({"answer": {"decision": "pass", "why": "answered-in-agent"}}))
+        );
+        assert_eq!(card_on(&harness), Some(held.id));
+        assert!(card_says(
+            &mut harness,
+            "It was answered in Claude Code's own tab, and the command has run."
+        ));
+        // What its buttons would do changed under them: they wait again.
+        assert_eq!(harness.action_for("left", Modifiers::default()), too_soon());
+        assert!(harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .ask_card()
+                .is_some_and(|card| !card.pointer_is_live(std::time::Instant::now()))
+        }));
+    }
+
+    #[test]
     fn the_card_never_moves_on_to_another_ask() {
         let mut harness = Harness::new(2);
         let tabs = harness.tab_ids();

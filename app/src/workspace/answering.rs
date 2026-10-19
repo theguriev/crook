@@ -101,9 +101,10 @@
 //! # When the question ends under it
 //!
 //! Its hook went, its time ran out, its turn ended, its pane closed, the
-//! agent asked something newer: the card turns to say Claude Code is no
-//! longer waiting on it, and why, and leaves only Go to tab — still waiting
-//! its second — and Close.
+//! agent asked something newer, the command ran after a yes in the agent's
+//! own tab, or letting agents ask in Crook was turned off: the card turns to
+//! say Claude Code is no longer waiting on it, and why, and leaves only Go to
+//! tab — still waiting its second — and Close.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

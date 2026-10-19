@@ -10377,9 +10377,13 @@ impl Workspace {
             TerminalUpdate::PullRequest { pane, url } => {
                 self.pull_request_reported(*pane, url.clone(), ctx)
             }
+            // A card up on a question this ends turns to say so, and its
+            // buttons wait again, as for any other end: a done can come with
+            // no status behind it — a failed or an interrupted tool's — and
+            // nothing else would.
             TerminalUpdate::AskDone { pane, fingerprints } => {
                 if self.asks.answered_in_agent(*pane, fingerprints) {
-                    ctx.notify();
+                    self.asks_changed(ctx);
                 }
                 self.tabs.pane(*pane).is_some()
             }
