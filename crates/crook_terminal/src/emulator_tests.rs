@@ -1939,6 +1939,166 @@ fn test_a_pull_request_survives_a_split_and_a_refused_one_says_nothing() {
     assert!(emulator.take_events().is_empty());
 }
 
+/// A question's fingerprint, as the window names one.
+const ASKED: &str = "0123456789abcdef0f1e2d3c4b5a6978";
+
+/// Another question's.
+const ASKED_TOO: &str = "fedcba98765432100f1e2d3c4b5a6978";
+
+fn fingerprint(text: &str) -> agent::Fingerprint {
+    agent::Fingerprint::parse(text).expect("32 lowercase hex digits")
+}
+
+fn done(text: &str) -> String {
+    agent::done_sequence(&fingerprint(text))
+}
+
+#[test]
+fn test_a_done_is_read_with_its_fingerprint() {
+    // With either terminator: `vte` ends an OSC on ST as well as BEL.
+    for sequence in [done(ASKED), format!("\x1b]6341;done;{ASKED}\x1b\\")] {
+        let mut emulator = emulator();
+        emulator.advance(sequence.as_bytes());
+        assert_eq!(
+            vec![TerminalEvent::AskDone(vec![fingerprint(ASKED)])],
+            emulator.take_events(),
+            "{sequence:?}"
+        );
+    }
+
+    // And nothing that is not exactly one, a sequence split across reads
+    // aside, which `vte` puts back together.
+    let mut pane = emulator();
+    pane.advance(format!("\x1b]6341;done;{}\x07", ASKED.to_uppercase()).as_bytes());
+    pane.advance(format!("\x1b]6341;done;{ASKED};x\x07").as_bytes());
+    assert!(pane.take_events().is_empty());
+    let whole = done(ASKED);
+    let (first, second) = whole.as_bytes().split_at(20);
+    pane.advance(first);
+    pane.advance(second);
+    assert_eq!(
+        vec![TerminalEvent::AskDone(vec![fingerprint(ASKED)])],
+        pane.take_events()
+    );
+}
+
+#[test]
+fn test_two_dones_in_one_read_are_both_handed_over() {
+    let mut emulator = emulator();
+    emulator.advance(format!("{}{}", done(ASKED), done(ASKED_TOO)).as_bytes());
+    assert_eq!(
+        vec![TerminalEvent::AskDone(vec![
+            fingerprint(ASKED),
+            fingerprint(ASKED_TOO)
+        ])],
+        emulator.take_events()
+    );
+
+    // Never on change only: the same one again is said again.
+    emulator.advance(done(ASKED).as_bytes());
+    assert_eq!(
+        vec![TerminalEvent::AskDone(vec![fingerprint(ASKED)])],
+        emulator.take_events()
+    );
+}
+
+#[test]
+fn test_a_read_hands_over_at_most_eight_dones() {
+    let mut emulator = emulator();
+    let flood = done(ASKED).repeat(ASK_DONES_PER_READ + 1);
+    emulator.advance(flood.as_bytes());
+    let events = emulator.take_events();
+    let [TerminalEvent::AskDone(handed)] = events.as_slice() else {
+        panic!("{events:?}");
+    };
+    assert_eq!(ASK_DONES_PER_READ, handed.len());
+
+    // Per read: the next one is counted afresh.
+    emulator.advance(done(ASKED_TOO).as_bytes());
+    assert_eq!(
+        vec![TerminalEvent::AskDone(vec![fingerprint(ASKED_TOO)])],
+        emulator.take_events()
+    );
+}
+
+#[test]
+fn test_a_done_is_handed_over_before_the_running_beside_it() {
+    // What a PostToolUse hook writes, in one write: the status, then the
+    // done. The question has to be gone before the running arrives.
+    let mut hooked = emulator();
+    hooked.advance(b"\x1b]6340;needs-input\x07");
+    hooked.take_events();
+    hooked.advance(format!("\x1b]6340;running\x07{}", done(ASKED)).as_bytes());
+    assert_eq!(
+        vec![
+            TerminalEvent::AskDone(vec![fingerprint(ASKED)]),
+            TerminalEvent::Agent(Reported {
+                status: AgentReport::Running,
+                title: None,
+                message: None,
+            }),
+        ],
+        hooked.take_events()
+    );
+
+    // And where the read stops on a notification after the status, which
+    // hands the status over there.
+    let mut pane = emulator();
+    pane.advance(
+        format!(
+            "\x1b]6340;running\x07{}\x1b]9;tests passed\x07",
+            done(ASKED)
+        )
+        .as_bytes(),
+    );
+    let events = pane.take_events();
+    assert!(
+        matches!(
+            events.as_slice(),
+            [
+                TerminalEvent::AskDone(_),
+                TerminalEvent::Agent(_),
+                TerminalEvent::Notification(_)
+            ]
+        ),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn test_a_done_draws_nothing() {
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]2;building crook\x07hello");
+    let before = emulator.snapshot();
+    emulator.take_events();
+
+    emulator.advance(done(ASKED).as_bytes());
+    let after = emulator.snapshot();
+    assert_eq!(before.text(), after.text());
+    assert_eq!(before.title, after.title);
+    assert_eq!(before.cursor_cell, after.cursor_cell);
+    assert_eq!(AgentReport::Idle, emulator.agent());
+    assert_eq!(
+        vec![TerminalEvent::AskDone(vec![fingerprint(ASKED)])],
+        emulator.take_events()
+    );
+}
+
+#[test]
+fn test_a_mirror_reads_a_done_the_way_the_pane_does() {
+    let written = format!("\x1b]6340;running\x07{}", done(ASKED));
+    let mut pane = emulator();
+    pane.advance(written.as_bytes());
+    let mut mirror = emulator();
+    mirror.advance_mirrored(Fed::Output(written.as_bytes()));
+    let events = pane.take_events();
+    assert!(
+        matches!(events.first(), Some(TerminalEvent::AskDone(_))),
+        "{events:?}"
+    );
+    assert_eq!(events, mirror.take_events());
+}
+
 #[test]
 fn test_the_command_ending_takes_a_running_status_with_it() {
     // An agent that was interrupted never says it stopped. The shell's `D`
