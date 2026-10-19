@@ -2965,6 +2965,16 @@ impl Workspace {
         }
     }
 
+    /// Turns answering agents from Crook off without ending the questions
+    /// held, which no switch does: what the press is checked against when
+    /// nothing else stands in its way.
+    #[cfg(test)]
+    pub(crate) fn turn_answering_off_and_keep_the_questions(&mut self) {
+        let mut general = self.general();
+        general.answer_agents_from_crook = false;
+        self.settings.set_general(general);
+    }
+
     /// Says the card's command has been read to its end, for a window with
     /// no frame to lay it out in.
     #[cfg(all(test, unix))]
@@ -3193,7 +3203,10 @@ impl Workspace {
         let held = self.asks.get(ask).filter(|held| {
             held.digest == digest && held.cannot_answer.is_none() && held.pane == card.pane()
         });
-        let passes = held.is_some()
+        // Checked again here, beside the rest, though turning it off ends
+        // every question held: the switch is what says nothing is answered.
+        let passes = self.general().answer_agents_from_crook
+            && held.is_some()
             && card.digest() == digest
             && !card.is_withdrawn()
             && self.ask_card_lets_through(ask, by, now)
@@ -8025,7 +8038,17 @@ impl Workspace {
         }
 
         let was_still = self.motion_is_reduced();
+        let answering_off =
+            self.general().answer_agents_from_crook && !general.answer_agents_from_crook;
         self.settings.set_general(general);
+        // Every question held goes back to the agent's own prompt as a pass,
+        // and the card up on one turns to say so: the switch says this window
+        // takes no questions, and one it already holds is one it would
+        // otherwise go on answering.
+        if answering_off && !self.asks.is_empty() {
+            self.asks.end_all(crate::control::ask::Cause::AnsweringOff);
+            self.asks_changed(ctx);
+        }
         // The shells already running keep the startup they were given; there is
         // no way to read a file into a shell that has drawn its prompt. This
         // decides the next one opened.

@@ -184,6 +184,9 @@ impl Withdrawn {
             Self::Ended(Cause::TurnEnded) => format!("{agent}'s turn ended."),
             Self::Ended(Cause::AskedAgain) => format!("{agent} asked something newer."),
             Self::Ended(Cause::WindowClosed) => "The window is closing.".to_owned(),
+            Self::Ended(Cause::AnsweringOff) => {
+                "Letting agents ask in Crook was turned off.".to_owned()
+            }
         }
     }
 }

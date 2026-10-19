@@ -385,6 +385,7 @@ fn ended_by(cause: Cause) -> &'static str {
         Cause::TurnEnded => "the agent's turn ended",
         Cause::AskedAgain => "a newer question replaced it",
         Cause::WindowClosed => "the window closed",
+        Cause::AnsweringOff => "letting agents ask in Crook was turned off",
     }
 }
 

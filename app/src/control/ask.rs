@@ -168,6 +168,8 @@ pub enum Cause {
     AnsweredInAgent,
     /// The window closed.
     WindowClosed,
+    /// Answering agents from Crook was turned off while it waited.
+    AnsweringOff,
 }
 
 impl Cause {
@@ -182,6 +184,7 @@ impl Cause {
             Self::AskedAgain => "asked-again",
             Self::AnsweredInAgent => "answered-in-agent",
             Self::WindowClosed => "window-closed",
+            Self::AnsweringOff => "answering-off",
         }
     }
 
@@ -197,6 +200,7 @@ impl Cause {
             Self::AskedAgain => format!("{} asked again", agent.name()),
             Self::AnsweredInAgent => format!("answered in {}", agent.name()),
             Self::WindowClosed => "the window closed".to_owned(),
+            Self::AnsweringOff => "answering in Crook was turned off".to_owned(),
         }
     }
 }
@@ -510,6 +514,14 @@ impl Asks {
             .filter(|ask| ask.pane == pane)
             .map(|ask| ask.id)
             .collect();
+        for id in ids {
+            self.end(id, cause);
+        }
+    }
+
+    /// Ends every question held, for `cause`.
+    pub fn end_all(&mut self, cause: Cause) {
+        let ids: Vec<AskId> = self.live.iter().map(|ask| ask.id).collect();
         for id in ids {
             self.end(id, cause);
         }

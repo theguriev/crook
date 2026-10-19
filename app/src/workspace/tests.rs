@@ -43162,6 +43162,61 @@ mod answering_card {
     }
 
     #[test]
+    fn turning_answering_off_passes_every_question_held_and_answers_none() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        let here = harness.focused_pane_id().expect("a pane");
+        let shown = hold(&mut harness, here, "rm -rf build");
+        let other = hold_request(&mut harness, away, "s2", command("make", false), None);
+        open(&mut harness);
+        settle(&mut harness);
+        assert_eq!(card_on(&harness), Some(shown.id));
+
+        harness.dispatch_workspace_action(SettingsAction::ToggleAgentsAsk.into());
+
+        for held in [&shown, &other] {
+            assert_eq!(
+                held.sent(),
+                Some(serde_json::json!({"answer": {"decision": "pass", "why": "answering-off"}}))
+            );
+            assert_eq!(
+                ended(&harness, held.id),
+                Some(How::Ended(crate::control::ask::Cause::AnsweringOff))
+            );
+        }
+        assert_eq!(card_on(&harness), Some(shown.id));
+        assert!(card_says(
+            &mut harness,
+            "Letting agents ask in Crook was turned off."
+        ));
+        assert!(!card_says(&mut harness, "Allow once"));
+    }
+
+    #[test]
+    fn a_press_is_refused_while_answering_is_off() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+        settle(&mut harness);
+        harness.workspace_update(|workspace, _| {
+            workspace.turn_answering_off_and_keep_the_questions();
+        });
+        harness.dispatch_workspace_action(
+            AskAction::Answer {
+                ask: held.id,
+                digest: held.digest,
+                decision: Choice::Deny,
+                by: Pressed::Pointer,
+            }
+            .into(),
+        );
+        assert!(held.nothing_sent(), "a press answered with answering off");
+        assert!(card_says(&mut harness, "This request changed or ended"));
+    }
+
+    #[test]
     fn keys_typed_before_the_card_settles_reach_neither_allow_nor_the_pane() {
         let mut harness = Harness::new(1);
         let pane = harness.focused_pane_id().expect("a pane");
