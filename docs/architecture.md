@@ -2559,9 +2559,11 @@ whose pane is working on another machine, is held and shown read-only. A read-on
 one the window cannot place, so it is counted apart from the answerable ones in the pane's four,
 never replaces an answerable one from the same session, comes after one in "Why this status", and
 is never the row's second line. A person who turns
-answering from Crook off ("Let agents ask in Crook" in Settings > General,
+answering from Crook off ("Let agents ask in Crook", under Tabs on Settings' Appearance page,
 `answer_agents_from_crook`, on by default) has every question refused as `declined`, at once,
-before anything about the panes is said.
+before anything about the panes is said — and every question the window already holds ended as a
+pass, `answering-off`, so the card up on one turns to say so and nothing held stays answerable;
+the press checks the switch again besides.
 
 **How a question ends.** A reader on the hook's half of the connection sees the hook go — Claude
 Code kills it once its dialog is answered No or Esc, or its parent dies — and tells the window
