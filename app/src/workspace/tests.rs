@@ -44235,7 +44235,7 @@ mod answering_card {
                 write("/home/someone/work/crook/a.txt", "x", Some(replaces)),
                 None,
             );
-            open(&mut harness);
+            open_newest(&mut harness);
             assert!(card_says(&mut harness, says_it), "{says_it}");
             assert!(!card_says(&mut harness, "Creates this file"), "{says_it}");
             assert!(harness.press_key("escape", Modifiers::default()));
@@ -44314,7 +44314,7 @@ mod answering_card {
             ("s3", "/home/someone/work/crook-old/a.rs"),
         ] {
             hold_request(&mut harness, pane, session, edit(path, "a", "b"), None);
-            open(&mut harness);
+            open_newest(&mut harness);
             let text = card_text(&mut harness);
             let warning = text
                 .find("Outside its working directory")
@@ -44331,7 +44331,7 @@ mod answering_card {
             edit("/home/someone/work/crook/\u{202e}sr.txt", "a", "b"),
             None,
         );
-        open(&mut harness);
+        open_newest(&mut harness);
         let text = card_text(&mut harness);
         assert!(!text.contains("Outside its working directory"), "{text}");
         assert!(text.contains("⟨U+202E⟩sr.txt"), "{text}");
