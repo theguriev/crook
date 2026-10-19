@@ -704,12 +704,12 @@ pub(super) fn render(workspace: &Workspace, card: &AskCard) -> Box<dyn Element> 
                 Some(tab) => format!("{} · {}", visible(&tab), visible(&cwd)),
                 None => visible(&cwd),
             };
-            column.add_child(note(place, ui));
+            column.add_child(one_line(place, ui));
             live_face(&mut column, workspace, card, ask, now, ui);
         }
         Face::Withdrawn(why) => {
             if let Some(tab) = tab {
-                column.add_child(note(visible(&tab), ui));
+                column.add_child(one_line(visible(&tab), ui));
             }
             column.add_child(divider());
             column.add_child(note(why.sentence(agent), ui));
@@ -820,7 +820,7 @@ fn live_face(
         ));
     }
     column.add_child(divider());
-    column.add_child(note(
+    column.add_child(one_line(
         format!(
             "{agent} is asking in its tab too · asked {} ago",
             duration(now.saturating_duration_since(ask.asked_at))
@@ -874,6 +874,25 @@ fn extent(body: &Body, ui: FamilyId) -> Box<dyn Element> {
     )
     .with_horizontal_padding(ROW_INSET)
     .with_margin_bottom(6.)
+    .finish()
+}
+
+/// A note that can change while the card is up — the tab's name, which a
+/// rename changes, and how long ago the agent asked, which every frame
+/// changes — on one line, cut with a mark where the card runs out.
+///
+/// A [`note`] wraps, and one of these wrapping onto a second line would push
+/// the buttons down under a pointer on its way to them, with nothing to say
+/// they had moved and no wait started again.
+fn one_line(text: String, ui: FamilyId) -> Box<dyn Element> {
+    Container::new(
+        Text::new(text, ui, super::tab_menu::PATH_SIZE)
+            .with_color(theme().text_muted)
+            .with_ellipsis(Cut::End)
+            .finish(),
+    )
+    .with_horizontal_padding(ROW_INSET)
+    .with_margin_bottom(4.)
     .finish()
 }
 

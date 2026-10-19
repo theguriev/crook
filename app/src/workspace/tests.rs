@@ -43498,7 +43498,9 @@ mod answering_card {
         // A window shorter than the least the card is shortened to: the box
         // shows the one line, below the window's edge, and a line nobody can
         // see has not been read, however short the command.
-        let tiny = vec2f(WINDOW.x(), 60.);
+        // Shorter than the header and the line under it, so the command is
+        // below the edge whatever the card's lines measure.
+        let tiny = vec2f(WINDOW.x(), 30.);
         let mut harness = Harness::new(1);
         let pane = harness.focused_pane_id().expect("a pane");
         let held = hold(&mut harness, pane, "rm -rf ~");
@@ -43536,6 +43538,75 @@ mod answering_card {
                 .is_some_and(|card| card.body().read_to_end())
         }));
         assert!(held.nothing_sent());
+    }
+
+    #[test]
+    fn what_changes_on_the_card_while_it_is_up_never_moves_its_buttons() {
+        // A narrow card, a tab renamed to something long while it is up, and
+        // a question asked an hour ago: every line that can change stays on
+        // one line, so the buttons stay where the pointer was going.
+        let narrow = vec2f(320., WINDOW.y());
+        let mut harness = Harness::new(1);
+        let tab = harness.tab_ids()[0];
+        let pane = harness.focused_pane_id().expect("a pane");
+        hold(&mut harness, pane, "rm -rf build");
+        harness.run_command("crook/tabs/answer-waiting");
+        let deny_at = |harness: &mut Harness| {
+            harness.frame_sized(narrow);
+            let scene = harness.frame_sized(narrow);
+            word_in(&scene, RectF::new(Vector2F::zero(), narrow), "Deny")
+        };
+        let before = deny_at(&mut harness);
+        harness.workspace_update(|workspace, ctx| {
+            workspace.rename_tab(
+                tab,
+                Some("the tab whose name runs on past any card's edge and on".to_owned()),
+                ctx,
+            );
+        });
+        assert_eq!(deny_at(&mut harness), before, "a rename moved the buttons");
+        assert!(harness.press_key("escape", Modifiers::default()));
+
+        // The same question, asked long before the card came up: an hour
+        // less a second, or as long ago as the clock goes, since Windows
+        // counts an Instant from boot and a runner may not be an hour up.
+        let asked = AgentAsk {
+            agent: AskingAgent::Claude,
+            session: "s2".to_owned(),
+            cwd: "/home/someone/work/crook".to_owned(),
+            tty: 34819,
+            wait: 300,
+            request: command("rm -rf build", false),
+        };
+        let feed = Arc::new(Feed::for_verb(&Verb::AgentAsk(asked.clone())));
+        let long_ago = [3_599, 599, 61]
+            .into_iter()
+            .find_map(|seconds| {
+                std::time::Instant::now().checked_sub(std::time::Duration::from_secs(seconds))
+            })
+            .expect("a clock a minute old");
+        harness.workspace_update(|workspace, ctx| {
+            workspace
+                .asks_mut()
+                .add(
+                    asked,
+                    Found {
+                        pane,
+                        cannot_answer: None,
+                        tab_title: "crook".to_owned(),
+                    },
+                    feed,
+                    long_ago,
+                )
+                .expect("held");
+            workspace.asks_changed(ctx);
+        });
+        harness.run_command("crook/tabs/answer-waiting");
+        assert_eq!(
+            deny_at(&mut harness),
+            before,
+            "an older question moved the buttons"
+        );
     }
 
     #[test]
