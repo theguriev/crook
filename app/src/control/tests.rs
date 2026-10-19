@@ -6062,6 +6062,76 @@ mod socket {
     }
 
     #[test]
+    fn a_done_withdraws_only_the_matching_ask() {
+        let mut served = Served::new(|workspace, ctx, _| {
+            workspace.apply(TabAction::New, ctx);
+        });
+        let (first, second) = served.read(|workspace, _| {
+            let mut panes = workspace.tabs().panes().map(|(_, pane)| pane.id());
+            (panes.next().expect("one"), panes.next().expect("two"))
+        });
+        let answered = question("s1", served.tty(first), "touch probe-c9a");
+        let done = crook_terminal::agent::Fingerprint::parse(&crate::agent::request::fingerprint(
+            &answered.digest(),
+        ))
+        .expect("a fingerprint the wire carries");
+        let (mut client, reply) = served.ask_as(answered.clone(), None);
+        let id = held(&reply);
+        // Another session's in the same pane, and the very same question
+        // asked in another pane, which has the same fingerprint.
+        let (_beside, reply) = served.ask_as(question("s2", served.tty(first), "ls"), None);
+        let beside = held(&reply);
+        let (_elsewhere, reply) = served.ask_as(
+            AgentAsk {
+                tty: served.tty(second),
+                ..answered
+            },
+            None,
+        );
+        let elsewhere = held(&reply);
+
+        // A fingerprint no question has ends nothing.
+        let forged =
+            crook_terminal::agent::Fingerprint::parse("0123456789abcdef0123456789abcdef").unwrap();
+        served.update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &TerminalUpdate::AskDone {
+                    pane: first,
+                    fingerprints: vec![forged],
+                },
+                ctx,
+            );
+        });
+        assert_eq!(served.asks(), 3);
+
+        served.update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &TerminalUpdate::AskDone {
+                    pane: first,
+                    fingerprints: vec![done],
+                },
+                ctx,
+            );
+        });
+        assert_eq!(client.answer(), pass("answered-in-agent"));
+        assert_eq!(served.ended(id), Some(How::Ended(Cause::AnsweredInAgent)));
+        assert_eq!(served.ended(beside), None);
+        assert_eq!(served.ended(elsewhere), None, "another pane's is its own");
+        assert_eq!(served.asks(), 2);
+        served.read(|workspace, _| {
+            let outcome = workspace
+                .asks()
+                .history()
+                .find(|outcome| outcome.id.as_u64() == id)
+                .expect("an ended question is remembered");
+            let How::Ended(cause) = outcome.how else {
+                panic!("{:?}", outcome.how);
+            };
+            assert_eq!(cause.said(outcome.agent), "answered in Claude Code");
+        });
+    }
+
+    #[test]
     fn an_ask_ends_with_pass_when_its_wait_runs_out() {
         let mut served = Served::new(|_, _, _| {});
         let pane = first_pane(&served);

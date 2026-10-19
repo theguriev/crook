@@ -489,6 +489,18 @@ pub enum TerminalUpdate {
         /// The pull request's address.
         url: String,
     },
+    /// A program in the pane said the tools these questions were about have
+    /// run: a person answered each in the agent's own dialog.
+    ///
+    /// Carried up because the questions are the window's, held beside the
+    /// sockets rather than in any one pane's model. Ahead of the
+    /// [`Self::Agent`] from the same read, as the emulator hands them over.
+    AskDone {
+        /// Which pane said it.
+        pane: PaneId,
+        /// The questions' fingerprints, in the order said.
+        fingerprints: Vec<crook_terminal::agent::Fingerprint>,
+    },
 }
 
 /// The finished blocks of one pane, as the surface holds them.
@@ -1682,6 +1694,9 @@ impl TerminalModel {
                 }
                 TerminalEvent::PullRequest(url) => {
                     updates.push(TerminalUpdate::PullRequest { pane, url });
+                }
+                TerminalEvent::AskDone(fingerprints) => {
+                    updates.push(TerminalUpdate::AskDone { pane, fingerprints });
                 }
                 // The enum is `#[non_exhaustive]`. A shell asking for something
                 // a later version of the emulator learned to report is not an
