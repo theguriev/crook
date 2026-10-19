@@ -21012,9 +21012,18 @@ mod shells {
         assert_eq!(feed.held(), 0, "a key answered");
 
         // With the card gone the same key reaches it, which is what makes the
-        // wait above a wait for something that would have come.
+        // wait above a wait for something that would have come — once the
+        // keyboard has been still for the card's second: a key on the heels
+        // of the Escape that closed it is kept from the pane as well.
         assert!(harness.press_key("escape", Modifiers::default()));
         harness.frame();
+        assert_eq!(
+            harness.action_for("c", ctrl()),
+            Some(super::super::action::AskAction::TooSoon.into())
+        );
+        harness.press("c", ctrl(), "c");
+        harness.settle(super::super::closing::SETTLE + Duration::from_millis(200));
+        assert!(running(&harness), "ctrl-c reached it on the heels of Escape");
         harness.press("c", ctrl(), "c");
         harness.wait_for("ctrl-c never reached the command", |harness| {
             !running(harness)
@@ -43066,6 +43075,45 @@ mod answering_card {
             harness.pane_takes_keys(),
             "the pane never got the keyboard back"
         );
+    }
+
+    #[test]
+    fn a_key_held_across_the_card_closing_never_reaches_the_pane_under_it() {
+        // The pane under the card is the agent's, with its own dialog up and
+        // Yes as its default. Whatever closed the card, held until it
+        // repeats, is kept from it until the keyboard has been still.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        for key in ["enter", "space", "escape"] {
+            open(&mut harness);
+            // Escape closes at once, and so do Enter and Space on Not now.
+            assert!(harness.press_key(key, Modifiers::default()));
+            assert_eq!(card_on(&harness), None, "{key} left the card up");
+            for _ in 0..3 {
+                assert_eq!(
+                    harness.action_for(key, Modifiers::default()),
+                    too_soon(),
+                    "a repeat of {key} reached the pane"
+                );
+            }
+            assert_eq!(harness.action_for("y", Modifiers::default()), too_soon());
+        }
+        // Settled, an answer sent closes it the same way.
+        open(&mut harness);
+        settle(&mut harness);
+        assert!(harness.press_key("left", Modifiers::default()));
+        assert!(harness.press_key("left", Modifiers::default()));
+        assert_eq!(keyboard_on(&harness), Some(AskButton::Deny));
+        harness.workspace_update(|workspace, ctx| workspace.settle_the_ask_card(ctx));
+        assert!(harness.press_key("enter", Modifiers::default()));
+        assert_eq!(card_on(&harness), None);
+        assert_eq!(held.sent().expect("a deny")["answer"]["decision"], "deny");
+        assert_eq!(
+            harness.action_for("enter", Modifiers::default()),
+            too_soon()
+        );
+        assert_eq!(harness.field_text(pane), "", "the pane was typed into");
     }
 
     #[test]

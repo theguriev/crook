@@ -47,9 +47,11 @@
 //! Until then Tab, the arrows, and Enter or Space on any of the three are
 //! [`AskAction::TooSoon`]: taken, and the wait starts again. Go to waits as
 //! well, because it hands the keyboard to Claude Code's dialog, whose own
-//! default is Yes — and once it has, that tab is kept from the keyboard until
-//! it has been still for the same second, so the Enter that pressed Go to,
-//! held until it repeats, does not answer the dialog. The scroll keys move
+//! default is Yes. And however the card closes — Go to, an answer sent, or
+//! Escape, Enter or Space on Not now — what has the keyboard after it is kept
+//! from it until it has been still for the same second, so the key that
+//! closed the card, held until it repeats, does not answer the dialog in the
+//! pane under it. Escape still closes the card at once. The scroll keys move
 //! the command and start the wait again: a person still reading has not
 //! decided.
 //!

@@ -1222,10 +1222,11 @@ pub struct Workspace {
     /// Beside the close question, which beats it: a close takes it down, and
     /// it does not open over one.
     ask_card: Option<AskCard>,
-    /// Until when the keys are kept from the pane Go to tab just focused:
-    /// [`closing::SETTLE`] after the card's Go to, and after every key that
-    /// came before then. See [`Self::go_to_asking_tab`].
-    keys_held_after_go_to: Cell<Option<Instant>>,
+    /// Until when the keys are kept from whatever has the keyboard once the
+    /// card is down: [`closing::SETTLE`] after it closed, however it closed,
+    /// and after every key that came before then. See
+    /// [`Self::close_ask_card`].
+    keys_held_after_the_card: Cell<Option<Instant>>,
 }
 
 impl Workspace {
@@ -1449,7 +1450,7 @@ impl Workspace {
             control_layout: ControlLayout::host(),
             closing: None,
             ask_card: None,
-            keys_held_after_go_to: Cell::new(None),
+            keys_held_after_the_card: Cell::new(None),
         };
         workspace.sync_interactions();
         workspace.sync_git(ctx);
@@ -3026,9 +3027,18 @@ impl Workspace {
         ctx.notify();
     }
 
-    /// Takes the card down, answering nothing.
+    /// Takes the card down, and keeps the keys from what has the keyboard
+    /// after it until the keyboard has been still for [`closing::SETTLE`].
+    ///
+    /// However it closed — Escape, Enter or Space on Not now, an answer
+    /// sent, Go to tab — the key that closed it may be held down, and its
+    /// repeats would go to the pane under it, which is as often as not the
+    /// agent's own, with its dialog up and Yes as its default. Escape still
+    /// closes the card at once; only what comes after it waits.
     fn close_ask_card(&mut self, ctx: &mut ViewContext<Self>) {
         if self.ask_card.take().is_some() {
+            self.keys_held_after_the_card
+                .set(Some(Instant::now() + closing::SETTLE));
             self.sync_input_keys();
             ctx.notify();
         }
@@ -3224,12 +3234,12 @@ impl Workspace {
         {
             return;
         }
-        self.close_ask_card(ctx);
         // The pane is the agent's, and its dialog is up with Yes as its
         // default and a digit for each answer: the Enter that pressed Go to,
         // held a moment too long, would repeat into it, and so would keys
-        // typed on. They are kept from it until the keyboard has been still.
-        self.keys_held_after_go_to.set(Some(now + closing::SETTLE));
+        // typed on. The close keeps them from it until the keyboard has been
+        // still.
+        self.close_ask_card(ctx);
         self.handle_action(&WorkspaceAction::ShowSection(None), ctx);
         self.handle_action(&WorkspaceAction::Tab(TabAction::FocusPane(pane)), ctx);
     }
@@ -11029,16 +11039,17 @@ impl Workspace {
             return Some(action);
         }
 
-        // The pane Go to tab has just handed the keyboard to waits for it to
-        // be still, as the card did: see [`Self::go_to_asking_tab`].
-        if let Some(until) = self.keys_held_after_go_to.get() {
+        // Whatever has the keyboard once the card is down waits for it to be
+        // still, as the card did: see [`Self::close_ask_card`].
+        if let Some(until) = self.keys_held_after_the_card.get() {
             let now = Instant::now();
             if now < until && !Recording::is_a_modifier(keystroke) {
-                self.keys_held_after_go_to.set(Some(now + closing::SETTLE));
+                self.keys_held_after_the_card
+                    .set(Some(now + closing::SETTLE));
                 return Some(super::action::AskAction::TooSoon.into());
             }
             if now >= until {
-                self.keys_held_after_go_to.set(None);
+                self.keys_held_after_the_card.set(None);
             }
         }
 
