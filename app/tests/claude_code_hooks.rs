@@ -1033,10 +1033,10 @@ fn expected_done(input: &str) -> String {
     let session = hook["session_id"]
         .as_str()
         .expect("the fixture has a session");
-    let request = crook::agent::request::from_claude_bash(&hook["tool_input"])
+    let request = crook::from_claude_bash(&hook["tool_input"])
         .expect("the fixture's input is one the allowlist reads");
-    let digest = crook::agent::request::digest(session, "Bash", &request);
-    let fingerprint = crook::agent::request::fingerprint(&digest);
+    let digest = crook::digest(session, "Bash", &request);
+    let fingerprint = crook::fingerprint(&digest);
     crook_terminal::agent::done_sequence(
         &crook_terminal::agent::Fingerprint::parse(&fingerprint).expect("32 lowercase hex digits"),
     )

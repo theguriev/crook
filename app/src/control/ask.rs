@@ -186,6 +186,7 @@ impl Cause {
     }
 
     /// How a person is told it ended, of a question `agent` asked.
+    #[cfg(test)]
     pub fn said(self, agent: AskingAgent) -> String {
         match self {
             Self::HookGone => "its hook went".to_owned(),
@@ -265,7 +266,6 @@ pub struct Ask {
     /// carries, so an answer can only reach the question it was given about.
     pub digest: [u8; 32],
     /// The digest's first half in hex: see [`request::fingerprint`].
-    #[cfg(test)]
     pub fingerprint: String,
     /// The pane whose terminal it named.
     pub pane: PaneId,
@@ -458,7 +458,6 @@ impl Asks {
             id,
             agent,
             summary: summary(agent.tool(&request), &request),
-            #[cfg(test)]
             fingerprint: request::fingerprint(&digest),
             digest,
             session,
