@@ -217,9 +217,9 @@ impl Tmux {
     /// A server yet to start, with `config` after [`TMUX_CONFIG`]; `None`,
     /// saying so, where no tmux runs.
     ///
-    /// Skipped rather than failed without one, on CI too: tmux is what a
-    /// person chooses to run in a pane, not something Crook needs, and a
-    /// runner image is not promised to carry it.
+    /// Skipped rather than failed without one, except on CI, which installs
+    /// it: a skip there is a pass for the wrong reason, which is how macOS
+    /// ran none of these until it did.
     fn new(config: &str) -> Option<Self> {
         let here = crook::process::command("tmux")
             .arg("-V")
@@ -227,6 +227,10 @@ impl Tmux {
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success());
+        assert!(
+            here || std::env::var_os("CI").is_none(),
+            "no tmux on PATH, which CI installs for these tests"
+        );
         if !here {
             eprintln!("skipped: no tmux to run");
             return None;

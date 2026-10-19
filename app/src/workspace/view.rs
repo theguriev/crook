@@ -11076,10 +11076,8 @@ impl Workspace {
         self.terminals.as_ref(app).shell_pid(pane)
     }
 
-    /// The device number of the terminal a pane's shell runs on, for a test
-    /// that has to ask as a program in it.
-    #[cfg(all(test, unix))]
-    pub(crate) fn tty_of(&self, pane: PaneId, app: &AppContext) -> Option<u32> {
+    /// The device number of the terminal a pane's shell runs on.
+    pub(crate) fn tty_device_of(&self, pane: PaneId, app: &AppContext) -> Option<u32> {
         self.terminals.as_ref(app).tty_device(pane)
     }
 

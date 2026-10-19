@@ -2586,9 +2586,17 @@ terminal that is a character device this user owns gives its `st_rdev`, low 32 b
 eight — and the question carries `multiplexer: {kind: "tmux", clients: [u32], pane: "%N"}` in place
 of `tty`, and no token; the pane id is checked as `%` and digits and only shown. A window from
 before the field refuses it, and the hook passes. The window binds it to the first open pane, in
-the panel's order, whose pty is one of the clients, and skips the token and ancestry checks, which
-say nothing here: the tmux server is not below that pane's shell. A remote pane still makes it
-read-only. The row, the list and "Why this status" say "Bash inside tmux: …", and the card names
+the panel's order, whose pty is one of the clients, and skips the token and lineage checks, which
+say nothing here: the tmux server is not below that pane's shell. What it checks instead is the
+kernel's account of the asker's ancestors, read on the connection's thread (`agent/holders.rs`,
+at most 16 of them and 1024 descriptors each): one of them — never the asker itself — has to hold
+the pane's pty slave open and run the same executable, by device and inode, as the leader of the
+pane's foreground process group (`tpgid`, from `/proc/<shell>/stat` or `e_tpgid`). tmux's server
+is that ancestor for every process in its panes; a process that only names the terminal, one
+under a program that opened it, and one under a tmux that is not the pane's foreground or holds
+another pane's terminal are each shown read-only, "not from the tmux whose client is in this tab".
+Questions from inside tmux are counted apart from the pane's own four, never replace one, and come
+after one on the row and the card. A remote pane still makes it read-only. The row, the list and "Why this status" say "Bash inside tmux: …", and the card names
 tmux's pane and "inside tmux (also attached in N other tabs)" when other tabs hold a client of the
 same session; Go to tab goes to the pane holding the client. No window is told the request until it
 has said it holds one of those terminals: the hook first sends `pane.find {ttys: [u32]}` — a verb

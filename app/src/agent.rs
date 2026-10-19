@@ -125,6 +125,8 @@ use serde_json::{Value, json};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod ancestors;
 pub mod ask;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod holders;
 #[cfg(unix)]
 mod on_disk;
 pub mod request;

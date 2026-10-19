@@ -905,6 +905,34 @@ pub struct Asker {
     pub pid: Option<u32>,
     /// That process and its ancestors, nearest first.
     pub lineage: Vec<u32>,
+    /// For a question from inside a multiplexer, its ancestors — not itself
+    /// — as far as they were read: which program each runs and which
+    /// terminals each holds open. What says whether the multiplexer whose
+    /// client is on the pane is one the asker runs under. Empty for every
+    /// other question.
+    pub holders: Vec<Holder>,
+}
+
+/// A program file, as the kernel names it: the device and inode of the
+/// executable a process runs, which a name or a path could only claim.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Executable {
+    /// The device the file is on.
+    pub device: u64,
+    /// The file's inode there.
+    pub inode: u64,
+}
+
+/// One ancestor of a process that asked, as the kernel says.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Holder {
+    /// Its pid.
+    pub pid: u32,
+    /// The program it runs, when that could be read.
+    pub executable: Option<Executable>,
+    /// The device numbers of the terminals it holds open, low 32 bits, as
+    /// many as were read.
+    pub terminals: Vec<u32>,
 }
 
 /// One request: what it asks, and who asks it.
