@@ -19,7 +19,7 @@
 //! by hand as `ancestors` declares its own.
 
 use std::fs;
-use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
 use crate::control::protocol::{Executable, Holder};
@@ -83,8 +83,12 @@ fn identity(path: &Path) -> Option<Executable> {
 
 /// The low 32 bits of the device number of the terminal at `path`, when it
 /// is a character device: a pty's master is `/dev/ptmx`'s number for every
-/// pty, so only a slave — a terminal a client is on — ever names one.
+/// pty, so only a slave — a terminal a client is on — ever names one. macOS
+/// reads the same out of `proc_pidfdinfo` instead.
+#[cfg(target_os = "linux")]
 fn terminal_at(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::FileTypeExt as _;
+
     let metadata = fs::metadata(path).ok()?;
     metadata
         .file_type()
