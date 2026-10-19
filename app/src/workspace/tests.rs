@@ -21023,7 +21023,10 @@ mod shells {
         );
         harness.press("c", ctrl(), "c");
         harness.settle(super::super::closing::SETTLE + Duration::from_millis(200));
-        assert!(running(&harness), "ctrl-c reached it on the heels of Escape");
+        assert!(
+            running(&harness),
+            "ctrl-c reached it on the heels of Escape"
+        );
         harness.press("c", ctrl(), "c");
         harness.wait_for("ctrl-c never reached the command", |harness| {
             !running(harness)
@@ -43117,6 +43120,48 @@ mod answering_card {
     }
 
     #[test]
+    fn tab_never_goes_round_from_not_now_to_allow_and_a_move_waits_before_a_press() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+        settle(&mut harness);
+
+        // Tab from the default stays on it: Not now is the last button.
+        assert!(harness.press_key("tab", Modifiers::default()));
+        assert_eq!(keyboard_on(&harness), Some(AskButton::NotNow));
+        settle(&mut harness);
+        assert!(harness.press_key("enter", Modifiers::default()));
+        assert_eq!(card_on(&harness), None, "Tab, Enter was not Not now");
+        assert!(held.nothing_sent(), "Tab, Enter answered");
+
+        // Moved onto Allow, Enter at once is too soon, and starts it again.
+        open(&mut harness);
+        settle(&mut harness);
+        for _ in 0..3 {
+            assert!(harness.press_key("tab", shift()));
+            settle(&mut harness);
+        }
+        assert_eq!(keyboard_on(&harness), Some(AskButton::Allow));
+        assert!(harness.press_key("tab", shift()), "Shift-Tab went round");
+        assert_eq!(keyboard_on(&harness), Some(AskButton::Allow));
+        assert_eq!(
+            harness.action_for("enter", Modifiers::default()),
+            too_soon()
+        );
+        assert!(
+            held.nothing_sent(),
+            "a move and a press in one breath allowed"
+        );
+        settle(&mut harness);
+        assert!(harness.press_key("enter", Modifiers::default()));
+        assert_eq!(
+            held.sent().expect("an allow")["answer"]["decision"],
+            "allow"
+        );
+    }
+
+    #[test]
     fn keys_typed_before_the_card_settles_reach_neither_allow_nor_the_pane() {
         let mut harness = Harness::new(1);
         let pane = harness.focused_pane_id().expect("a pane");
@@ -43251,6 +43296,7 @@ mod answering_card {
         settle(&mut harness);
         assert!(harness.press_key("left", Modifiers::default()));
         assert_eq!(keyboard_on(&harness), Some(AskButton::GoTo));
+        settle(&mut harness);
         assert!(harness.press_key("enter", Modifiers::default()));
         assert_eq!(card_on(&harness), None);
         assert_eq!(harness.focused_pane_id(), Some(away));
@@ -43439,6 +43485,7 @@ mod answering_card {
         harness.frame_sized(short);
         harness.workspace_update(|workspace, ctx| workspace.settle_the_ask_card(ctx));
         assert!(allow_reached(&mut harness));
+        harness.workspace_update(|workspace, ctx| workspace.settle_the_ask_card(ctx));
         assert!(harness.press_key("enter", Modifiers::default()));
         assert_eq!(
             held.sent().expect("an allow")["answer"]["decision"],
@@ -43952,11 +43999,13 @@ mod answering_card {
         let held = hold(&mut harness, pane, "rm -rf build");
         open(&mut harness);
         settle(&mut harness);
-        // By the keyboard this time: Tab from Not now wraps to Allow, Deny
-        // is the one after.
-        assert!(harness.press_key("tab", Modifiers::default()));
-        assert!(harness.press_key("tab", Modifiers::default()));
+        // By the keyboard this time: Shift-Tab twice from Not now, past Go
+        // to, and a second on Deny before Enter presses it.
+        assert!(harness.press_key("tab", shift()));
+        settle(&mut harness);
+        assert!(harness.press_key("tab", shift()));
         assert_eq!(keyboard_on(&harness), Some(AskButton::Deny));
+        settle(&mut harness);
         assert!(harness.press_key("enter", Modifiers::default()));
 
         let sent = held.sent().expect("a deny");

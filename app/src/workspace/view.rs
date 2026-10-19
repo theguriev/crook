@@ -3127,7 +3127,7 @@ impl Workspace {
         match action {
             AskAction::Choose(button) => {
                 if let Some(card) = self.ask_card.as_mut() {
-                    card.choose(button);
+                    card.choose(button, Instant::now());
                     ctx.notify();
                 }
             }
@@ -3160,7 +3160,7 @@ impl Workspace {
         card.ask() == ask
             && now >= card.pointer_live_at()
             && match by {
-                super::action::Pressed::Keys => card.has_settled(now),
+                super::action::Pressed::Keys => card.press_has_settled(now),
                 super::action::Pressed::Pointer => card.pointer_is_live(now),
             }
     }

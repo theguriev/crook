@@ -39,6 +39,10 @@
 //! It is drawn filled at the trailing edge, where the close question keeps
 //! Cancel; Allow and Deny are outlined beside it. Not now answers nothing:
 //! the agent's own dialog is still up, and the card can be opened again.
+//! Tab, Shift-Tab and the arrows stop at the ends rather than going round, so
+//! that Allow, at the leading edge, is never one key from the default, and a
+//! button the keyboard has just been moved to waits [`SETTLE`] before Enter
+//! or Space presses it: Tab and Enter in one breath answer nothing.
 //!
 //! **Nothing typed ahead can answer.** Allow, Deny and Go to tab wait for the
 //! keyboard to have been still for [`SETTLE`] — the close question's second —
@@ -340,6 +344,10 @@ pub(super) struct AskCard {
     /// A cell for the close question's reason: the keystroke being asked
     /// about is what moves it, and the window asks about each one once.
     settles_at: Cell<Instant>,
+    /// When Enter or Space may first press the button the keyboard is on:
+    /// [`SETTLE`] after Tab or an arrow last moved it there, so that a move
+    /// and a press in one breath — Tab, Enter — answer nothing.
+    press_settles_at: Instant,
     /// When the pointer may first reach them: [`SETTLE`] after the card came
     /// up or its face changed, or the window last took the keyboard.
     pointer_live_at: Instant,
@@ -367,6 +375,7 @@ impl AskCard {
             pane: ask.pane,
             chosen: AskButton::default(),
             settles_at: Cell::new(now + SETTLE),
+            press_settles_at: now,
             pointer_live_at: now + SETTLE,
             pointer_live: false,
             body: Rc::default(),
@@ -397,9 +406,11 @@ impl AskCard {
         self.chosen
     }
 
-    /// Puts the keyboard on `button`.
-    pub(super) fn choose(&mut self, button: AskButton) {
+    /// Puts the keyboard on `button`, at `now`, which starts the wait before
+    /// Enter or Space may press it.
+    pub(super) fn choose(&mut self, button: AskButton, now: Instant) {
         self.chosen = button;
+        self.press_settles_at = now + SETTLE;
     }
 
     /// The command's box.
@@ -412,9 +423,15 @@ impl AskCard {
         self.settles_at.set(now + SETTLE);
     }
 
-    /// Whether the keyboard has been still long enough, by `now`.
+    /// Whether the keyboard has been still long enough, by `now`, to move.
     pub(super) fn has_settled(&self, now: Instant) -> bool {
         now >= self.settles_at.get()
+    }
+
+    /// Whether it has been still long enough, by `now`, to press the button
+    /// it is on: settled, and on that button for [`SETTLE`].
+    pub(super) fn press_has_settled(&self, now: Instant) -> bool {
+        self.has_settled(now) && now >= self.press_settles_at
     }
 
     /// Makes the pointer wait [`SETTLE`] again from `now`, and hands back the
@@ -491,6 +508,7 @@ impl AskCard {
     pub(super) fn settle(&mut self) {
         let now = Instant::now();
         self.settles_at.set(now);
+        self.press_settles_at = now;
         self.pointer_live_at = now;
         self.pointer_live = true;
     }
@@ -593,10 +611,6 @@ pub(super) fn action_for(
         .iter()
         .position(|button| *button == chosen)
         .unwrap_or(reachable.len() - 1);
-    let step = |by: isize| {
-        let count = reachable.len() as isize;
-        reachable[(at as isize + by).rem_euclid(count) as usize]
-    };
     let page = card.body.shown() as isize - 1;
     // Taken whether it moved or not: an arrow at the end of the command must
     // not fall through to whatever is under the card.
@@ -610,8 +624,10 @@ pub(super) fn action_for(
             AskButton::NotNow => return Some(AskAction::NotNow.into()),
             button => pressing(card, button, Pressed::Keys),
         },
-        "tab" if bare => AskAction::Choose(step(1)),
-        "tab" if shifted => AskAction::Choose(step(-1)),
+        // Never round from the end: Not now is the last button and the
+        // default, and Tab wrapping from it would put the keyboard on Allow.
+        "tab" if bare => AskAction::Choose(reachable[(at + 1).min(reachable.len() - 1)]),
+        "tab" if shifted => AskAction::Choose(reachable[at.saturating_sub(1)]),
         "left" if bare => AskAction::Choose(reachable[at.saturating_sub(1)]),
         "right" if bare => AskAction::Choose(reachable[(at + 1).min(reachable.len() - 1)]),
         "up" if bare => return scrolled(card.body.scroll_by(-1)),
@@ -625,7 +641,11 @@ pub(super) fn action_for(
             return Some(AskAction::TooSoon.into());
         }
     };
-    if card.has_settled(now) {
+    let settled = match action {
+        AskAction::Choose(_) => card.has_settled(now),
+        _ => card.press_has_settled(now),
+    };
+    if settled {
         return Some(action.into());
     }
     card.unsettle(now);
