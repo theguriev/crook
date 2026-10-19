@@ -474,7 +474,7 @@ impl Asks {
         self.live.push(Ask {
             id,
             agent,
-            summary: summary(agent.tool(&request), &request),
+            summary: summary(agent.tool(&request), &request, &cwd),
             fingerprint: request::fingerprint(&digest),
             digest,
             session,
@@ -703,17 +703,24 @@ pub fn log_line(ask: &Ask, how: How, now: Instant) -> String {
 }
 
 /// What a question asks, in one line of at most [`SUMMARY_CHARS`]: the tool,
-/// and the first line of the command with something on it, written out the
-/// way [`request::visible`] writes it and cut the way a row's message is,
-/// with a mark at the end when lines follow it.
-pub fn summary(tool: &str, request: &AskRequest) -> String {
-    let mut lines = request
-        .command()
-        .split('\n')
-        .filter(|line| !line.trim().is_empty());
-    let first = lines.next().unwrap_or_default();
-    let more = if lines.next().is_some() { " …" } else { "" };
-    let line = format!("{tool}: {}{more}", request::visible(first));
+/// and the first line of the command with something on it — or, for a
+/// change to a file, the file, relative to `cwd` when it is inside it —
+/// written out the way [`request::visible`] writes it and cut the way a
+/// row's message is, with a mark at the end when lines follow it.
+pub fn summary(tool: &str, request: &AskRequest, cwd: &str) -> String {
+    let line = match (request.command(), request.path()) {
+        (Some(command), _) => {
+            let mut lines = command.split('\n').filter(|line| !line.trim().is_empty());
+            let first = lines.next().unwrap_or_default();
+            let more = if lines.next().is_some() { " …" } else { "" };
+            format!("{tool}: {}{more}", request::visible(first))
+        }
+        (None, Some(path)) => {
+            let shown = request::relative_to(path, cwd).unwrap_or_else(|| path.to_owned());
+            format!("{tool}: {}", request::visible(&shown))
+        }
+        (None, None) => format!("{tool}:"),
+    };
     crate::agent::one_line(&line, SUMMARY_CHARS - 1).unwrap_or_else(|| format!("{tool}:"))
 }
 

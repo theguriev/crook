@@ -546,9 +546,17 @@ impl AskingAgent {
 
     /// The agent's own name for the tool a request is for, which is what a
     /// question's digest is taken over.
+    ///
+    /// Read off the request, so that the hook after the tool, which reads
+    /// the same input into the same request, names it the same: a
+    /// `MultiEdit` of one edit is the same change as an `Edit`, and is
+    /// called one.
     pub fn tool(self, request: &AskRequest) -> &'static str {
         match (self, request) {
             (Self::Claude, AskRequest::Command { .. }) => "Bash",
+            (Self::Claude, AskRequest::Edit { edits, .. }) if edits.len() == 1 => "Edit",
+            (Self::Claude, AskRequest::Edit { .. }) => "MultiEdit",
+            (Self::Claude, AskRequest::Write { .. }) => "Write",
         }
     }
 }

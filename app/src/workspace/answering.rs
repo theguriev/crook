@@ -34,6 +34,22 @@
 //! no timer to move it — and, once the pane has said it is running again,
 //! that the question may already have been answered there.
 //!
+//! **A change to a file is shown as the change.** An edit's old text is drawn
+//! as removed lines and its new text as added ones, in the colours the
+//! Changes column draws a diff in — see `changes_panel::diff_colour` — under
+//! the file's path, written out whole and broken at any character rather
+//! than cut. A tab in it is drawn as a muted `→` and a space a line ends in
+//! as a muted `·`, as a diff viewer marks them. A write is its content, all
+//! of it added, under a line saying whether it creates the file or replaces
+//! one, and how many lines and bytes that one held, as the hook found it
+//! when the agent asked — the window reads no file, and says that what is
+//! there may change before the agent writes. A path that is not under the
+//! directory the agent works in, by its text or, as the hook found it,
+//! through a symbolic link on the way, is warned about above the change.
+//! The change is the box a command is, and keeps its rules: the lines on
+//! screen are the only ones built, and Allow waits for the last of them to
+//! have been seen.
+//!
 //! **Not now is the default.** Escape presses it, a press off the card
 //! presses it, and so do Enter and Space until the keyboard is moved off it.
 //! It is drawn filled at the trailing edge, where the close question keeps
@@ -119,7 +135,7 @@ use crookui_core::prelude::*;
 use crookui_core::presenter::{LayoutContext, PaintContext};
 use unicode_width::UnicodeWidthChar;
 
-use crate::agent::request::{AskRequest, visible};
+use crate::agent::request::{AskRequest, Mark, Replaced, lexically_inside, visible};
 use crate::control::ask::{Ask, AskId, Asks, Cause, Choice, How};
 use crate::keybindings::Recording;
 use crate::tab::PaneId;
@@ -669,7 +685,11 @@ pub(super) fn duration(span: Duration) -> String {
 /// The card's first line.
 pub(super) fn title(agent: &str, face: &Face<'_>) -> String {
     match face {
-        Face::Live(_) => format!("{agent} wants to run a command"),
+        Face::Live(ask) => match ask.request {
+            AskRequest::Command { .. } => format!("{agent} wants to run a command"),
+            AskRequest::Edit { .. } => format!("{agent} wants to edit a file"),
+            AskRequest::Write { .. } => format!("{agent} wants to write a file"),
+        },
         Face::Withdrawn(_) => format!("{agent} is no longer waiting on this"),
     }
 }
@@ -771,57 +791,66 @@ fn live_face(
     ui: FamilyId,
 ) {
     let agent = ask.agent.name();
-    let AskRequest::Command {
-        command,
-        note: said,
-        timeout_ms,
-        background,
-        outside_sandbox,
-    } = &ask.request;
-    if *outside_sandbox {
-        column.add_child(warning(
-            format!("Outside {agent}'s sandbox: it would run with none of the sandbox's limits."),
-            ui,
-        ));
-    }
-    // The one part of the card that gives up height in a short window: what
-    // the rest leaves is the lines it shows, and it scrolls through the
-    // others.
-    column.add_child(
-        Shrinkable::new(
-            1.,
-            Container::new(
-                CommandBody::new(
-                    visible(command),
-                    card.body.clone(),
-                    workspace.fonts().monospace,
-                )
-                .finish(),
-            )
-            .with_horizontal_padding(ROW_INSET)
-            .with_margin_bottom(6.)
-            .finish(),
-        )
-        .finish(),
-    );
-    column.add_child(extent(&card.body, ui));
-    if let Some(said) = said {
-        column.add_child(note(format!("{agent} says: {}", visible(said)), ui));
-    }
-    if *background {
-        column.add_child(note(
-            format!("In the background: {agent} goes on without waiting for it."),
-            ui,
-        ));
-    }
-    if let Some(timeout) = timeout_ms {
-        column.add_child(note(
-            format!(
-                "With a time limit of {}.",
-                duration(Duration::from_millis(*timeout))
-            ),
-            ui,
-        ));
+    let monospace = workspace.fonts().monospace;
+    match &ask.request {
+        AskRequest::Command {
+            command,
+            note: said,
+            timeout_ms,
+            background,
+            outside_sandbox,
+        } => {
+            if *outside_sandbox {
+                column.add_child(warning(
+                    format!(
+                        "Outside {agent}'s sandbox: it would run with none of the sandbox's limits."
+                    ),
+                    ui,
+                ));
+            }
+            let lines = vec![Shown {
+                text: visible(command),
+                color: theme().text_primary,
+                muted: Vec::new(),
+            }];
+            column.add_child(body_box(lines, card, monospace));
+            column.add_child(extent(&card.body, ui));
+            if let Some(said) = said {
+                column.add_child(note(format!("{agent} says: {}", visible(said)), ui));
+            }
+            if *background {
+                column.add_child(note(
+                    format!("In the background: {agent} goes on without waiting for it."),
+                    ui,
+                ));
+            }
+            if let Some(timeout) = timeout_ms {
+                column.add_child(note(
+                    format!(
+                        "With a time limit of {}.",
+                        duration(Duration::from_millis(*timeout))
+                    ),
+                    ui,
+                ));
+            }
+        }
+        AskRequest::Edit { path, .. } | AskRequest::Write { path, .. } => {
+            if let Some(outside) = outside_warning(&ask.request, &ask.cwd) {
+                column.add_child(warning(outside.to_owned(), ui));
+            }
+            column.add_child(file_path(
+                crate::git::user_friendly_path(std::path::Path::new(path), workspace.home()),
+                monospace,
+            ));
+            if let AskRequest::Write { replaces, .. } = &ask.request {
+                column.add_child(note(
+                    what_a_write_does(*replaces, ask.request.change_lines(), agent),
+                    ui,
+                ));
+            }
+            column.add_child(body_box(change_lines(&ask.request), card, monospace));
+            column.add_child(extent(&card.body, ui));
+        }
     }
     column.add_child(divider());
     column.add_child(one_line(
@@ -840,6 +869,121 @@ fn live_face(
     if let Some(cannot) = ask.cannot_answer {
         column.add_child(note(cannot.sentence(), ui));
     }
+}
+
+/// The box the command or the change is drawn in.
+///
+/// The one part of the card that gives up height in a short window: what
+/// the rest leaves is the lines it shows, and it scrolls through the others.
+fn body_box(lines: Vec<Shown>, card: &AskCard, monospace: FamilyId) -> Box<dyn Element> {
+    Shrinkable::new(
+        1.,
+        Container::new(CommandBody::new(lines, card.body.clone(), monospace).finish())
+            .with_horizontal_padding(ROW_INSET)
+            .with_margin_bottom(6.)
+            .finish(),
+    )
+    .finish()
+}
+
+/// The warning a change to a file is shown under when the file is not
+/// under `cwd`, or `None` when it is: by its text, which the window reads,
+/// or through a link, which only the hook could look for.
+pub(super) fn outside_warning(request: &AskRequest, cwd: &str) -> Option<&'static str> {
+    let path = request.path()?;
+    if !lexically_inside(path, cwd) {
+        Some(
+            "Outside its working directory: this file is not under the directory the agent \
+             works in.",
+        )
+    } else if request.outside(cwd) {
+        Some(
+            "Outside its working directory: a symbolic link on the way to this file leads out \
+             of the directory the agent works in, or could not be followed.",
+        )
+    } else {
+        None
+    }
+}
+
+/// What a write does to the file, as its hook found the file when `agent`
+/// asked, putting in `lines` lines: creates it, or replaces one of so many
+/// lines and bytes — and that this was then, not now.
+pub(super) fn what_a_write_does(replaces: Option<Replaced>, lines: usize, agent: &str) -> String {
+    let counted = |count: u64, one: &str, many: &str| match count {
+        1 => format!("1 {one}"),
+        count => format!("{count} {many}"),
+    };
+    let these = match lines {
+        0 => "nothing".to_owned(),
+        1 => "this 1 line".to_owned(),
+        lines => format!("these {lines} lines"),
+    };
+    let done = match replaces {
+        None => format!("Creates this file, with {these}: there was none when {agent} asked."),
+        Some(Replaced { bytes: 0, .. }) => format!("Replaces an empty file with {these}."),
+        Some(Replaced {
+            lines: held,
+            bytes,
+            more,
+        }) => format!(
+            "Replaces a file of {}{} ({}) with {these}.",
+            if more { "at least " } else { "" },
+            counted(held, "line", "lines"),
+            counted(bytes, "byte", "bytes"),
+        ),
+    };
+    format!("{done} Measured when {agent} asked; what is there may change before it writes.")
+}
+
+/// A change to a file as the box draws it: each line behind the mark a diff
+/// gives it, in the colour the Changes column draws that mark in, its marks
+/// for white space muted; and for a change with no text at all, one line
+/// saying so, in no mark's colour.
+pub(super) fn change_lines(request: &AskRequest) -> Vec<Shown> {
+    let lines: Vec<Shown> = request
+        .change()
+        .into_iter()
+        .map(|line| {
+            let (mark, prefix) = match line.mark {
+                Mark::Removed => (b'-', "- "),
+                Mark::Added => (b'+', "+ "),
+                Mark::Heading => (b'@', "@@ "),
+            };
+            Shown {
+                text: format!("{prefix}{}", line.text),
+                color: super::changes_panel::diff_colour(Some(mark)),
+                muted: line
+                    .muted
+                    .into_iter()
+                    .map(|mark| mark.start + prefix.len()..mark.end + prefix.len())
+                    .collect(),
+            }
+        })
+        .collect();
+    if lines.is_empty() {
+        return vec![Shown {
+            text: "(empty)".to_owned(),
+            color: theme().text_muted,
+            muted: Vec::new(),
+        }];
+    }
+    lines
+}
+
+/// The file a change is to, whole: in the terminal's family, broken at any
+/// character, and never cut — the end of a path is the part that names the
+/// file.
+fn file_path(path: String, monospace: FamilyId) -> Box<dyn Element> {
+    Container::new(
+        crookui_core::elements::Paragraph::new(visible(&path), monospace, LABEL_SIZE)
+            .with_color(theme().text_primary)
+            .breaking_anywhere()
+            .finish(),
+    )
+    .with_horizontal_padding(ROW_INSET)
+    .with_margin_bottom(6.)
+    .finish()
 }
 
 /// One line under the command saying how much of it is shown, and, while
@@ -979,9 +1123,22 @@ fn button_row(
         .finish()
 }
 
-/// The command, wrapped at whichever column the box's width runs out at and
-/// shown [`BODY_LINES`] at a time, or as many as the height it is given has
-/// room for.
+/// One run of the box's text, in one colour: the whole command, or one line
+/// of a change.
+pub(super) struct Shown {
+    /// The text, written out through [`visible`]; a command's has its
+    /// newlines in it.
+    pub(super) text: String,
+    /// What it is drawn in.
+    pub(super) color: crookui_core::geometry::Color,
+    /// Where in [`Self::text`] the marks drawn muted are, in bytes: a
+    /// change's marks for tabs and spaces at the ends of lines.
+    pub(super) muted: Vec<std::ops::Range<usize>>,
+}
+
+/// The command or the change, wrapped at whichever column the box's width
+/// runs out at and shown [`BODY_LINES`] at a time, or as many as the height
+/// it is given has room for.
 ///
 /// Built here rather than from a [`Scrollable`], which lays out the whole of
 /// what it scrolls: a command can be as long as the socket's line, and the
@@ -989,7 +1146,7 @@ fn button_row(
 /// work, no shaping — and builds the lines on screen, and writes into the
 /// [`Body`] how many lines there are and whether the last is showing.
 struct CommandBody {
-    text: String,
+    text: Vec<Shown>,
     body: Rc<Body>,
     family: FamilyId,
     lines: Option<Box<dyn Element>>,
@@ -999,7 +1156,7 @@ struct CommandBody {
 }
 
 impl CommandBody {
-    fn new(text: String, body: Rc<Body>, family: FamilyId) -> Self {
+    fn new(text: Vec<Shown>, body: Rc<Body>, family: FamilyId) -> Self {
         Self {
             text,
             body,
@@ -1010,6 +1167,145 @@ impl CommandBody {
             origin: None,
         }
     }
+}
+
+/// The row of `shown` from `range`, in its colour and its marks muted.
+///
+/// One shaped line however many colours it has: a row of separate texts
+/// would be placed by each one's measured width, which need not count the
+/// spaces a tab's mark is followed by.
+fn row(shown: &Shown, range: std::ops::Range<usize>, family: FamilyId) -> Box<dyn Element> {
+    let line = &shown.text[range.clone()];
+    // A line with nothing on it is still a line of the command.
+    if line.is_empty() {
+        return Text::new(" ", family, LABEL_SIZE)
+            .with_color(shown.color)
+            .finish();
+    }
+    let muted: Vec<std::ops::Range<usize>> = shown
+        .muted
+        .iter()
+        .filter(|mark| mark.start >= range.start && mark.end <= range.end)
+        .map(|mark| mark.start - range.start..mark.end - range.start)
+        .collect();
+    if muted.is_empty() {
+        return Text::new(line.to_owned(), family, LABEL_SIZE)
+            .with_color(shown.color)
+            .finish();
+    }
+    Marked {
+        text: line.to_owned(),
+        muted,
+        color: shown.color,
+        family,
+        line: None,
+        size: None,
+        origin: None,
+    }
+    .finish()
+}
+
+/// One line of text in one colour with some runs of it muted, shaped as one
+/// line so that every character stays in its column.
+struct Marked {
+    text: String,
+    muted: Vec<std::ops::Range<usize>>,
+    color: crookui_core::geometry::Color,
+    family: FamilyId,
+    line: Option<crookui_core::text_layout::Line>,
+    size: Option<Vector2F>,
+    origin: Option<Point>,
+}
+
+impl Element for Marked {
+    fn layout(
+        &mut self,
+        constraint: SizeConstraint,
+        ctx: &mut LayoutContext,
+        _: &AppContext,
+    ) -> Vector2F {
+        use crookui_core::fonts::{
+            DEFAULT_TOP_BOTTOM_RATIO, DEFAULT_UI_LINE_HEIGHT_RATIO, LineStyle, Properties,
+            StyleAndFont, TextStyle,
+        };
+        let style = |color: Option<crookui_core::geometry::Color>| {
+            StyleAndFont::new(
+                self.family,
+                Properties::default(),
+                TextStyle {
+                    foreground_color: color,
+                    ..TextStyle::default()
+                },
+            )
+        };
+        let mut runs = Vec::new();
+        let mut at = 0;
+        for mark in &self.muted {
+            if mark.start > at {
+                runs.push((at..mark.start, style(None)));
+            }
+            runs.push((mark.clone(), style(Some(theme().text_muted))));
+            at = mark.end;
+        }
+        if at < self.text.len() {
+            runs.push((at..self.text.len(), style(None)));
+        }
+        let line = ctx.text_layout.layout_line(
+            &self.text,
+            LineStyle {
+                font_size: LABEL_SIZE,
+                line_height_ratio: DEFAULT_UI_LINE_HEIGHT_RATIO,
+                baseline_ratio: DEFAULT_TOP_BOTTOM_RATIO,
+                fixed_width_tab_size: None,
+            },
+            &runs,
+            constraint.max.x(),
+        );
+        let size = constraint.apply(vec2f(line.width, line.height()));
+        self.line = Some(line);
+        self.size = Some(size);
+        size
+    }
+
+    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, _: &AppContext) {
+        let size = self
+            .size
+            .expect("a line was painted before it was laid out");
+        self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
+        if let Some(line) = &self.line {
+            line.paint(RectF::new(origin, size), self.color, ctx.scene);
+        }
+    }
+
+    fn dispatch_event(
+        &mut self,
+        _: &DispatchedEvent,
+        _: &mut EventContext,
+        _: &AppContext,
+    ) -> bool {
+        false
+    }
+
+    fn size(&self) -> Option<Vector2F> {
+        self.size
+    }
+
+    fn origin(&self) -> Option<Point> {
+        self.origin
+    }
+}
+
+/// The rows `text` wraps to at `columns`, as which run each is of and where
+/// in it it starts and ends, in bytes.
+fn rows(text: &[Shown], columns: usize) -> Vec<(usize, usize, usize)> {
+    text.iter()
+        .enumerate()
+        .flat_map(|(run, shown)| {
+            wrap(&shown.text, columns)
+                .into_iter()
+                .map(move |(start, end)| (run, start, end))
+        })
+        .collect()
 }
 
 /// Where each line of `text` starts and ends, in bytes, wrapped at `columns`
@@ -1074,7 +1370,7 @@ impl Element for CommandBody {
         } else {
             BODY_LINES
         };
-        let wrapped = wrap(&self.text, columns);
+        let wrapped = rows(&self.text, columns);
         self.body.measured(wrapped.len(), fits);
         let top = self.body.top.get().min(self.body.last_top());
         self.body.top.set(top);
@@ -1082,15 +1378,8 @@ impl Element for CommandBody {
         let mut lines = Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Start);
-        for (start, end) in wrapped.iter().skip(top).take(fits) {
-            let line = &self.text[*start..*end];
-            // A line with nothing on it is still a line of the command.
-            let line = if line.is_empty() { " " } else { line };
-            lines.add_child(
-                Text::new(line.to_owned(), self.family, LABEL_SIZE)
-                    .with_color(theme().text_primary)
-                    .finish(),
-            );
+        for (run, start, end) in wrapped.iter().skip(top).take(fits) {
+            lines.add_child(row(&self.text[*run], *start..*end, self.family));
         }
         let mut lines = lines.finish();
         let shown = lines.layout(

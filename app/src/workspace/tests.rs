@@ -78,10 +78,27 @@ impl TextLayoutSystem for StubShaper {
             })
             .collect();
         let width = glyphs.len() as f32 * advance;
-
-        Line {
-            width,
-            runs: vec![Run {
+        // A run per style run, as a real shaper gives, so that a line drawn
+        // in more than one colour is drawn so here.
+        let runs = if style_runs.len() > 1 {
+            style_runs
+                .iter()
+                .map(|(range, style_and_font)| {
+                    let glyphs: Vec<_> = glyphs
+                        .iter()
+                        .filter(|glyph| range.contains(&glyph.index))
+                        .cloned()
+                        .collect();
+                    Run {
+                        font_id: FontId(0),
+                        width: glyphs.len() as f32 * advance,
+                        glyphs,
+                        styles: style_and_font.style,
+                    }
+                })
+                .collect()
+        } else {
+            vec![Run {
                 font_id: FontId(0),
                 glyphs,
                 styles: style_runs
@@ -89,7 +106,12 @@ impl TextLayoutSystem for StubShaper {
                     .map(|(_, style_and_font)| style_and_font.style)
                     .unwrap_or_default(),
                 width,
-            }],
+            }]
+        };
+
+        Line {
+            width,
+            runs,
             font_size: line_style.font_size,
             line_height_ratio: line_style.line_height_ratio,
             baseline_ratio: line_style.baseline_ratio,
@@ -42771,7 +42793,7 @@ mod answering_card {
 
     use super::super::action::{AskAction, AskButton, Pressed};
     use super::*;
-    use crate::agent::request::AskRequest;
+    use crate::agent::request::{AskRequest, Replaced};
     use crate::control::ask::{AskId, CannotAnswer, Choice, DENIED, Found, How};
     use crate::control::protocol::{AgentAsk, AskingAgent, Verb};
     use crate::control::watch::{Feed, Next};
@@ -42919,10 +42941,15 @@ mod answering_card {
     /// What the card says, all of it, with its lines run together.
     fn card_text(harness: &mut Harness) -> String {
         let scene = harness.frame();
-        let header = ["wants to run a command", "no longer waiting on this"]
-            .into_iter()
-            .find(|header| says(&scene, header))
-            .unwrap_or_else(|| panic!("no card is drawn: {}", frame_text(&scene)));
+        let header = [
+            "wants to run a command",
+            "wants to edit a file",
+            "wants to write a file",
+            "no longer waiting on this",
+        ]
+        .into_iter()
+        .find(|header| says(&scene, header))
+        .unwrap_or_else(|| panic!("no card is drawn: {}", frame_text(&scene)));
         let at = word_in(&scene, RectF::new(Vector2F::zero(), WINDOW), header);
         let ground = scene
             .layers()
@@ -43985,6 +44012,295 @@ mod answering_card {
             "{text}"
         );
         assert!(text.contains("~/work/crook") || text.contains("/home/someone/work/crook"));
+    }
+
+    /// The request an edit of `path` that takes `old` out and puts `new` in
+    /// carries.
+    fn edit(path: &str, old: &str, new: &str) -> AskRequest {
+        AskRequest::Edit {
+            path: path.to_owned(),
+            edits: vec![crate::agent::request::FileEdit {
+                old: old.to_owned(),
+                new: new.to_owned(),
+                replace_all: false,
+            }],
+            resolves_outside: false,
+        }
+    }
+
+    /// The colour of the glyph that starts the line of the frame reading
+    /// exactly `line`, and every glyph of it.
+    fn line_colours(scene: &Scene, line: &str) -> Vec<Color> {
+        let (at, _) = text_lines(scene, |_| true)
+            .into_iter()
+            .find(|(_, text)| text == line)
+            .unwrap_or_else(|| panic!("no line says {line:?}: {}", frame_text(scene)));
+        scene
+            .layers()
+            .flat_map(|layer| layer.glyphs.iter())
+            .filter(|glyph| glyph.position.y().round() == at.y() && glyph.position.x() >= at.x())
+            .filter(|glyph| char::from_u32(glyph.glyph_key.glyph_id).is_some())
+            .map(|glyph| glyph.color)
+            .take(line.chars().count())
+            .collect()
+    }
+
+    #[test]
+    fn the_card_draws_old_and_new_in_the_changes_colours_and_builds_only_the_rows_on_screen() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let old: String = (1..=20)
+            .map(|line| format!("old line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let new: String = (1..=20)
+            .map(|line| format!("new line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let held = hold_request(
+            &mut harness,
+            pane,
+            "s1",
+            edit("/home/someone/work/crook/src/lib.rs", &old, &new),
+            None,
+        );
+        open(&mut harness);
+        settle(&mut harness);
+
+        let text = card_text(&mut harness);
+        assert!(text.contains("Claude Code wants to edit a file"), "{text}");
+        assert!(text.contains("work/crook/src/lib.rs"), "{text}");
+        assert!(!text.contains("Outside its working directory"), "{text}");
+        let scene = harness.frame();
+        let removed = line_colours(&scene, "- old line 1");
+        assert!(!removed.is_empty());
+        assert!(
+            removed.iter().all(|color| *color == theme().diff_removed),
+            "{removed:?}"
+        );
+        // Only the rows on screen are built at all: the box's twelve, and
+        // nothing of the twenty-eight below them, not even out of sight.
+        assert!(says(&scene, "- old line 12"));
+        assert!(!says(&scene, "- old line 13"), "{}", frame_text(&scene));
+        assert!(!says(&scene, "+ new line"), "{}", frame_text(&scene));
+        assert!(card_says(
+            &mut harness,
+            "Lines 1–12 of 40 · scroll to the end to allow it"
+        ));
+        press(&mut harness, "Allow once");
+        assert!(held.nothing_sent(), "Allow before the change was read");
+
+        assert!(harness.press_key("end", Modifiers::default()));
+        let scene = harness.frame();
+        let added = line_colours(&scene, "+ new line 20");
+        assert!(
+            added.iter().all(|color| *color == theme().diff_added),
+            "{added:?}"
+        );
+        assert!(!says(&scene, "- old line"), "scrolled off and not built");
+        settle(&mut harness);
+        press(&mut harness, "Allow once");
+        assert_eq!(
+            held.sent().expect("an allow")["answer"]["decision"],
+            "allow"
+        );
+    }
+
+    /// A write of `content` to `path`, over what `replaces` says was there.
+    fn write(path: &str, content: &str, replaces: Option<Replaced>) -> AskRequest {
+        AskRequest::Write {
+            path: path.to_owned(),
+            content: content.to_owned(),
+            resolves_outside: false,
+            replaces,
+        }
+    }
+
+    #[test]
+    fn a_write_says_it_creates_or_replaces_and_shows_all_it_writes() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        hold_request(
+            &mut harness,
+            pane,
+            "s1",
+            write(
+                "/home/someone/work/crook/run.sh",
+                "echo safe\rrm -rf ~\n",
+                None,
+            ),
+            None,
+        );
+        open(&mut harness);
+        let text = card_text(&mut harness);
+        assert!(text.contains("Claude Code wants to write a file"), "{text}");
+        assert!(card_says(
+            &mut harness,
+            "Creates this file, with these 2 lines: there was none when Claude Code asked."
+        ));
+        assert!(card_says(
+            &mut harness,
+            "Measured when Claude Code asked; what is there may change before it writes."
+        ));
+        // Written out, never obeyed: the carriage return is a mark.
+        assert!(text.contains("+ echo safe␍rm -rf ~"), "{text}");
+        let scene = harness.frame();
+        assert!(
+            line_colours(&scene, "+ echo safe␍rm -rf ~")
+                .iter()
+                .all(|color| *color == theme().diff_added)
+        );
+    }
+
+    #[test]
+    fn a_write_over_a_file_says_how_much_it_replaces() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        for (session, replaces, says_it) in [
+            (
+                "s1",
+                Replaced {
+                    lines: 3000,
+                    bytes: 81_234,
+                    more: false,
+                },
+                "Replaces a file of 3000 lines (81234 bytes) with this 1 line.",
+            ),
+            (
+                "s2",
+                Replaced {
+                    lines: 1,
+                    bytes: 1,
+                    more: false,
+                },
+                "Replaces a file of 1 line (1 byte) with this 1 line.",
+            ),
+            (
+                "s3",
+                Replaced {
+                    lines: 0,
+                    bytes: 0,
+                    more: false,
+                },
+                "Replaces an empty file with this 1 line.",
+            ),
+            (
+                "s4",
+                Replaced {
+                    lines: 98_000,
+                    bytes: 9_000_000,
+                    more: true,
+                },
+                "Replaces a file of at least 98000 lines (9000000 bytes) with this 1 line.",
+            ),
+        ] {
+            hold_request(
+                &mut harness,
+                pane,
+                session,
+                write("/home/someone/work/crook/a.txt", "x", Some(replaces)),
+                None,
+            );
+            open(&mut harness);
+            assert!(card_says(&mut harness, says_it), "{says_it}");
+            assert!(!card_says(&mut harness, "Creates this file"), "{says_it}");
+            assert!(harness.press_key("escape", Modifiers::default()));
+        }
+    }
+
+    #[test]
+    fn a_tab_and_trailing_spaces_in_a_change_are_drawn_as_muted_marks() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        hold_request(
+            &mut harness,
+            pane,
+            "s1",
+            write(
+                "/home/someone/work/crook/Makefile",
+                "all:\n\tcc -o a a.c \\ \n        EOF",
+                None,
+            ),
+            None,
+        );
+        open(&mut harness);
+        let scene = harness.frame();
+        let line = "+ →       cc -o a a.c \\·";
+        let colours = line_colours(&scene, line);
+        let muted = theme().text_muted;
+        let added = theme().diff_added;
+        // The tab's mark and the space's are muted, and the rest is the
+        // colour of what is added, in the columns it would be without them.
+        assert_eq!(colours.len(), line.chars().count(), "{colours:?}");
+        for (at, colour) in colours.iter().enumerate() {
+            let want = if at == 2 || at == colours.len() - 1 {
+                muted
+            } else {
+                added
+            };
+            assert_eq!(*colour, want, "{at}: {colours:?}");
+        }
+        // Eight spaces are drawn as the spaces they are, and nothing marks
+        // them.
+        let spaces = "+         EOF";
+        assert!(
+            line_colours(&scene, spaces)
+                .iter()
+                .all(|colour| *colour == added)
+        );
+    }
+
+    #[test]
+    fn a_path_through_a_link_out_of_the_working_directory_is_warned_about() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let mut through_a_link = edit("/home/someone/work/crook/vendor/passwd", "a", "b");
+        if let AskRequest::Edit {
+            resolves_outside, ..
+        } = &mut through_a_link
+        {
+            *resolves_outside = true;
+        }
+        hold_request(&mut harness, pane, "s1", through_a_link, None);
+        open(&mut harness);
+        let text = card_text(&mut harness);
+        let warning = text
+            .find("a symbolic link on the way to this file")
+            .unwrap_or_else(|| panic!("no warning: {text}"));
+        assert!(warning < text.find("- a").expect("the change"), "{text}");
+    }
+
+    #[test]
+    fn a_path_outside_the_working_directory_is_warned_about() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        for (session, path) in [
+            ("s1", "/etc/hosts"),
+            ("s2", "/home/someone/work/crook/../crook-old/a.rs"),
+            ("s3", "/home/someone/work/crook-old/a.rs"),
+        ] {
+            hold_request(&mut harness, pane, session, edit(path, "a", "b"), None);
+            open(&mut harness);
+            let text = card_text(&mut harness);
+            let warning = text
+                .find("Outside its working directory")
+                .unwrap_or_else(|| panic!("{path}: no warning: {text}"));
+            let change = text.find("- a").expect("the change");
+            assert!(warning < change, "{text}");
+            assert!(harness.press_key("escape", Modifiers::default()));
+        }
+        // A path whose characters would read as another's is written out.
+        hold_request(
+            &mut harness,
+            pane,
+            "s4",
+            edit("/home/someone/work/crook/\u{202e}sr.txt", "a", "b"),
+            None,
+        );
+        open(&mut harness);
+        let text = card_text(&mut harness);
+        assert!(!text.contains("Outside its working directory"), "{text}");
+        assert!(text.contains("⟨U+202E⟩sr.txt"), "{text}");
     }
 
     #[test]
