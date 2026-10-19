@@ -245,3 +245,296 @@ fn a_requests_debug_never_shows_the_command() {
     assert!(!printed.contains("Rebuild"), "{printed}");
     assert!(printed.contains("outside_sandbox: true"), "{printed}");
 }
+
+/// What Claude Code 2.1.280 hands an `Edit` permission hook as `tool_input`,
+/// as the probe recorded it (`claude-2.1.280-edit.json`).
+fn edit_input() -> Value {
+    json!({
+        "file_path": "/work/crook/notes.txt",
+        "old_string": "alpha\nbeta",
+        "new_string": "gamma",
+        "replace_all": false,
+    })
+}
+
+fn edit(old: &str, new: &str, replace_all: bool) -> FileEdit {
+    FileEdit {
+        old: old.to_owned(),
+        new: new.to_owned(),
+        replace_all,
+    }
+}
+
+#[test]
+fn an_edit_and_a_write_are_read_whole_and_drawn_as_their_change() {
+    let request = from_claude("Edit", &edit_input()).expect("an edit");
+    assert_eq!(
+        request,
+        AskRequest::Edit {
+            path: "/work/crook/notes.txt".to_owned(),
+            edits: vec![edit("alpha\nbeta", "gamma", false)],
+        }
+    );
+    assert_eq!(request.kind(), "edit");
+    assert_eq!(request.path(), Some("/work/crook/notes.txt"));
+    assert_eq!(request.command(), None);
+    let change = |request: &AskRequest| -> Vec<(Mark, String)> {
+        request
+            .change()
+            .into_iter()
+            .map(|line| (line.mark, line.text))
+            .collect()
+    };
+    assert_eq!(
+        change(&request),
+        [
+            (Mark::Removed, "alpha".to_owned()),
+            (Mark::Removed, "beta".to_owned()),
+            (Mark::Added, "gamma".to_owned()),
+        ]
+    );
+    // `replace_all` left out is Claude Code's own default, off.
+    let mut input = edit_input();
+    input
+        .as_object_mut()
+        .expect("an object")
+        .remove("replace_all");
+    assert_eq!(from_claude("Edit", &input), Some(request));
+
+    // Every line, a last empty one included, and what would not print as
+    // itself written out: a trailing newline is part of what is replaced.
+    let write = from_claude(
+        "Write",
+        &json!({"file_path": "/work/crook/a.sh", "content": "echo \u{202e}hi\r\n"}),
+    )
+    .expect("a write");
+    assert_eq!(write.kind(), "write");
+    assert_eq!(
+        change(&write),
+        [
+            (Mark::Added, "echo ⟨U+202E⟩hi␍".to_owned()),
+            (Mark::Added, String::new()),
+        ]
+    );
+    // An empty text is no lines; replacing every match says so.
+    let creating = AskRequest::Edit {
+        path: "/a".to_owned(),
+        edits: vec![edit("", "new", true)],
+    };
+    assert_eq!(
+        change(&creating),
+        [
+            (Mark::Heading, "Every match".to_owned()),
+            (Mark::Added, "new".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn a_multi_edit_shows_every_edit() {
+    let request = from_claude(
+        "MultiEdit",
+        &json!({
+            "file_path": "/work/crook/src/lib.rs",
+            "edits": [
+                {"old_string": "one", "new_string": "uno"},
+                {"old_string": "two", "new_string": "dos", "replace_all": true},
+                {"old_string": "three\nfour", "new_string": ""},
+            ],
+        }),
+    )
+    .expect("a multi-edit");
+    let AskRequest::Edit { edits, .. } = &request else {
+        panic!("not an edit: {request:?}");
+    };
+    assert_eq!(edits.len(), 3);
+    let drawn: Vec<(Mark, String)> = request
+        .change()
+        .into_iter()
+        .map(|line| (line.mark, line.text))
+        .collect();
+    assert_eq!(
+        drawn,
+        [
+            (Mark::Heading, "Edit 1 of 3".to_owned()),
+            (Mark::Removed, "one".to_owned()),
+            (Mark::Added, "uno".to_owned()),
+            (Mark::Heading, "Edit 2 of 3 · every match".to_owned()),
+            (Mark::Removed, "two".to_owned()),
+            (Mark::Added, "dos".to_owned()),
+            (Mark::Heading, "Edit 3 of 3".to_owned()),
+            (Mark::Removed, "three".to_owned()),
+            (Mark::Removed, "four".to_owned()),
+        ]
+    );
+    assert_eq!(request.change_lines(), drawn.len());
+    // None of the edits is lost to a digest that named only one.
+    let fewer = AskRequest::Edit {
+        path: "/work/crook/src/lib.rs".to_owned(),
+        edits: edits[..2].to_vec(),
+    };
+    assert_ne!(
+        digest("s", "MultiEdit", &request),
+        digest("s", "MultiEdit", &fewer)
+    );
+}
+
+#[test]
+fn an_unknown_edit_field_is_not_asked() {
+    // Any key Crook does not know, in the input or in one of its edits.
+    let mut input = edit_input();
+    input["encoding"] = json!("latin1");
+    assert_eq!(from_claude("Edit", &input), None);
+    for wrong in [
+        json!({"file_path": "/a", "content": "x", "mode": "0755"}),
+        json!({"file_path": "/a", "content": "x", "old_string": "y"}),
+    ] {
+        assert_eq!(from_claude("Write", &wrong), None, "{wrong}");
+    }
+    for wrong in [
+        json!({"file_path": "/a", "edits": [{"old_string": "a", "new_string": "b", "line": 3}]}),
+        json!({"file_path": "/a", "edits": [{"old_string": "a", "new_string": "b", "file_path": "/b"}]}),
+        json!({"file_path": "/a", "edits": [], "dry_run": true}),
+        json!({"file_path": "/a", "edits": []}),
+        json!({"file_path": "/a", "edits": [{"old_string": "a"}]}),
+        json!({"file_path": "/a", "edits": {"old_string": "a", "new_string": "b"}}),
+        json!({"file_path": "/a", "edits": ["a"]}),
+    ] {
+        assert_eq!(from_claude("MultiEdit", &wrong), None, "{wrong}");
+    }
+    // A known key of a type it does not take, a null included, or left out.
+    for (key, wrong) in [
+        ("file_path", json!(null)),
+        ("file_path", json!(["/a"])),
+        ("old_string", json!(1)),
+        ("new_string", json!(null)),
+        ("replace_all", json!("true")),
+    ] {
+        let mut input = edit_input();
+        input[key] = wrong.clone();
+        assert_eq!(from_claude("Edit", &input), None, "{key}: {wrong}");
+    }
+    for key in ["file_path", "old_string", "new_string"] {
+        let mut input = edit_input();
+        input.as_object_mut().expect("an object").remove(key);
+        assert_eq!(from_claude("Edit", &input), None, "{key} left out");
+    }
+    assert_eq!(from_claude("Write", &json!({"file_path": "/a"})), None);
+
+    // A path that is not absolute, or that a card would draw as other lines;
+    // a NUL in what is written.
+    for path in [
+        "notes.txt",
+        "./notes.txt",
+        "~/notes.txt",
+        "/a\nb",
+        "/a\rb",
+        "/a\u{1b}b",
+        "/a\u{85}b",
+    ] {
+        let mut input = edit_input();
+        input["file_path"] = json!(path);
+        assert_eq!(from_claude("Edit", &input), None, "{path:?}");
+    }
+    let path = |path: String| {
+        let mut input = edit_input();
+        input["file_path"] = json!(path);
+        from_claude("Edit", &input)
+    };
+    assert!(path(format!("/{}", "d".repeat(MAX_PATH - 1))).is_some());
+    assert_eq!(
+        path(format!("/{}", "d".repeat(MAX_PATH))),
+        None,
+        "a path too long"
+    );
+    // Counted as it is written out: thirty-two overrides are 256 characters.
+    assert_eq!(path(format!("/{}", "\u{202e}".repeat(32))), None);
+    assert!(path(format!("/{}", "\u{202e}".repeat(31))).is_some());
+    let mut input = edit_input();
+    input["new_string"] = json!("a\0b");
+    assert_eq!(from_claude("Edit", &input), None, "a NUL");
+    assert_eq!(
+        from_claude("Write", &json!({"file_path": "/a", "content": "a\0b"})),
+        None
+    );
+    // A path with a bidirectional override is shown, written out, not
+    // refused.
+    let mut input = edit_input();
+    input["file_path"] = json!("/work/\u{202e}txt.rs");
+    assert!(from_claude("Edit", &input).is_some());
+
+    // And no tool Crook does not ask about, whatever its input.
+    for tool in [
+        "NotebookEdit",
+        "WebFetch",
+        "Read",
+        "mcp__x__y",
+        "edit",
+        "bash",
+    ] {
+        assert_eq!(from_claude(tool, &edit_input()), None, "{tool}");
+    }
+}
+
+#[test]
+fn a_change_longer_than_a_diff_is_drawn_to_is_no_request() {
+    let lines = |count: usize| vec!["x"; count].join("\n");
+    let write =
+        |content: String| from_claude("Write", &json!({"file_path": "/a", "content": content}));
+    assert!(write(lines(MAX_CHANGE_LINES)).is_some());
+    assert_eq!(write(lines(MAX_CHANGE_LINES + 1)), None);
+    // An edit's two sides and its heading are counted together.
+    let half = MAX_CHANGE_LINES / 2;
+    let edit = |old: usize, new: usize, replace_all: bool| {
+        from_claude(
+            "Edit",
+            &json!({"file_path": "/a", "old_string": lines(old), "new_string": lines(new), "replace_all": replace_all}),
+        )
+    };
+    assert!(edit(half, half, false).is_some());
+    assert_eq!(edit(half, half + 1, false), None);
+    assert_eq!(edit(half, half, true), None, "the heading is a line too");
+}
+
+#[test]
+fn a_path_is_inside_its_working_directory_by_its_text_alone() {
+    for (path, directory) in [
+        ("/work/crook/a.rs", "/work/crook"),
+        ("/work/crook/src/a.rs", "/work/crook/"),
+        ("/work//crook/./src/a.rs", "/work/crook"),
+    ] {
+        assert!(lexically_inside(path, directory), "{path} in {directory}");
+    }
+    for (path, directory) in [
+        ("/work/crook-old/a.rs", "/work/crook"),
+        ("/work/crook", "/work/crook"),
+        ("/etc/passwd", "/work/crook"),
+        // Where `..` leads depends on the links under it, which nothing here
+        // looks at: outside, whatever its text seems to say.
+        ("/work/crook/../crook/a.rs", "/work/crook"),
+        ("/work/crook/src/../../../etc/passwd", "/work/crook"),
+        ("relative/a.rs", "/work/crook"),
+    ] {
+        assert!(!lexically_inside(path, directory), "{path} in {directory}");
+    }
+    assert_eq!(
+        relative_to("/work/crook/./src/a.rs", "/work/crook"),
+        Some("src/a.rs".to_owned())
+    );
+    assert_eq!(relative_to("/etc/passwd", "/work/crook"), None);
+}
+
+#[test]
+fn a_changes_debug_never_shows_its_path_or_its_text() {
+    let edit = from_claude("Edit", &edit_input()).expect("an edit");
+    let write = from_claude(
+        "Write",
+        &json!({"file_path": "/work/secret/plan.md", "content": "launch codes"}),
+    )
+    .expect("a write");
+    for printed in [format!("{edit:?}"), format!("{write:?}")] {
+        for hidden in ["notes", "alpha", "gamma", "secret", "launch"] {
+            assert!(!printed.contains(hidden), "{printed}");
+        }
+    }
+}

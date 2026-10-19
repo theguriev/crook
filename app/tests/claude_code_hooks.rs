@@ -1198,9 +1198,12 @@ fn expected_done(input: &str) -> String {
     let session = hook["session_id"]
         .as_str()
         .expect("the fixture has a session");
-    let request = crook::from_claude_bash(&hook["tool_input"])
+    let tool = hook["tool_name"]
+        .as_str()
+        .expect("the fixture names its tool");
+    let request = crook::from_claude(tool, &hook["tool_input"])
         .expect("the fixture's input is one the allowlist reads");
-    let digest = crook::digest(session, "Bash", &request);
+    let digest = crook::digest(session, tool, &request);
     let fingerprint = crook::fingerprint(&digest);
     crook_terminal::agent::done_sequence(
         &crook_terminal::agent::Fingerprint::parse(&fingerprint).expect("32 lowercase hex digits"),
@@ -1213,7 +1216,18 @@ fn the_hook_after_a_tool_says_its_running_and_then_its_question_done_in_one_writ
         return;
     }
     let running = crook_terminal::agent::report(AgentReport::Running, None, None, None);
-    for (event, input) in [("PostToolUse", RAN), ("PostToolUseFailure", FAILED)] {
+    // An edit's PostToolUse carries the request's `tool_input` as a Bash
+    // call's does (C11), so its done is said the same way.
+    let mut edited: Value =
+        serde_json::from_str(include_str!("fixtures/asks/claude-2.1.280-edit.json")).unwrap();
+    edited["hook_event_name"] = Value::from("PostToolUse");
+    edited["tool_response"] = serde_json::json!({"filePath": "notes.txt"});
+    let edited = edited.to_string();
+    for (event, input) in [
+        ("PostToolUse", RAN),
+        ("PostToolUseFailure", FAILED),
+        ("PostToolUse", edited.as_str()),
+    ] {
         let ran = run_as_a_hook_given(&plugin_hook(event), Agent::OnThePane, input);
         assert_eq!(
             "detached\n", ran.probe,

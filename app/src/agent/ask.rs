@@ -27,8 +27,9 @@
 //! Before it connects anywhere, unless all of these hold: `CROOK_SOCKET` names
 //! a window; no `TMUX`, `STY` or `ZELLIJ` says a multiplexer stands between
 //! the agent and the pane; the input is Claude Code's `PermissionRequest` for
-//! `Bash`, from the main thread and not a subagent, with a session and an
-//! absolute working directory; `CLAUDE_CODE_ENTRYPOINT` is exactly `cli` —
+//! `Bash`, `Edit`, `MultiEdit` or `Write`, from the main thread and not a
+//! subagent, with a session and an absolute working directory;
+//! `CLAUDE_CODE_ENTRYPOINT` is exactly `cli` —
 //! under `claude -p` an empty answer is Claude Code's own immediate deny, and
 //! holding it would turn a refusal into a wait; the tool's input is one the
 //! allowlist in [`super::request`] reads whole; and a terminal is found.
@@ -51,7 +52,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 #[cfg(any(unix, test))]
-use super::request::from_claude_bash;
+use super::request::from_claude;
 use crate::control::protocol::AskingAgent;
 #[cfg(any(unix, test))]
 use crate::control::protocol::{
@@ -153,9 +154,10 @@ pub fn question(
     }
     let hook: Value = serde_json::from_slice(input).ok()?;
     let said = |key: &str| hook.get(key).and_then(Value::as_str);
-    if said("hook_event_name") != Some("PermissionRequest") || said("tool_name") != Some("Bash") {
+    if said("hook_event_name") != Some("PermissionRequest") {
         return None;
     }
+    let tool = said("tool_name")?;
     // A subagent's: Claude Code puts its `agent_id` in every hook it runs
     // for one, and an id that is not a string is no promise it is not.
     match hook.get("agent_id") {
@@ -168,7 +170,7 @@ pub fn question(
     if environment.entrypoint.as_deref() != Some("cli") {
         return None;
     }
-    let request = from_claude_bash(hook.get("tool_input")?)?;
+    let request = from_claude(tool, hook.get("tool_input")?)?;
     let tty = terminal()?;
     Some(Question {
         socket,

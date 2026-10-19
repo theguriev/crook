@@ -328,11 +328,13 @@ fn sequence(
 /// the same `tool_input`, byte for byte, as the request had. So the
 /// question's fingerprint is computed here from that input exactly as the
 /// window computed it from the request ([`request::digest`] over the
-/// session, the tool and what [`request::from_claude_bash`] reads), and the
-/// window lets go of the question that has it.
+/// session, the tool and what [`request::from_claude`] reads), and the
+/// window lets go of the question that has it. Measured byte for byte for
+/// `Bash`, `Edit` and `Write` alike (C11 in `docs/answering.md`).
 ///
-/// Only for what a question could have been asked about: `Bash`, with a
-/// session the wire takes, an input the allowlist reads whole, and not a
+/// Only for what a question could have been asked about: `Bash`, `Edit`,
+/// `MultiEdit` or `Write`, with a session the wire takes, an input the
+/// allowlist reads whole, and not a
 /// subagent's, which [`ask`] asks nothing for — a subagent that ran the
 /// command its parent is still being asked about would otherwise withdraw
 /// the parent's question.
@@ -345,17 +347,17 @@ fn done_from_hook(input: &str) -> Option<crook_terminal::agent::Fingerprint> {
     if !matches!(
         said("hook_event_name"),
         Some("PostToolUse" | "PostToolUseFailure")
-    ) || said("tool_name") != Some("Bash")
-    {
+    ) {
         return None;
     }
+    let tool = said("tool_name")?;
     match hook.get("agent_id") {
         None | Some(Value::Null) => {}
         Some(Value::String(id)) if id.trim().is_empty() => {}
         Some(_) => return None,
     }
     let session = said("session_id").and_then(crook_terminal::agent::session_id)?;
-    let request = request::from_claude_bash(hook.get("tool_input")?)?;
+    let request = request::from_claude(tool, hook.get("tool_input")?)?;
     let tool = crate::control::protocol::AskingAgent::Claude.tool(&request);
     let digest = request::digest(session, tool, &request);
     let fingerprint = crook_terminal::agent::Fingerprint::parse(&request::fingerprint(&digest))
@@ -3221,6 +3223,68 @@ process.stdout.write(JSON.stringify({ ran, asked }))
         assert_ne!(held, failed.as_str());
     }
 
+    /// Claude Code 2.1.280's PermissionRequest for an Edit and for a Write
+    /// (C13).
+    const EDIT_ASKED: &str = include_str!("../tests/fixtures/asks/claude-2.1.280-edit.json");
+    const WRITE_ASKED: &str = include_str!("../tests/fixtures/asks/claude-2.1.280-write.json");
+
+    /// The PostToolUse that follows `asked` once its tool has run: the same
+    /// `tool_input`, byte for byte, as C11 measured for Edit and Write as for
+    /// Bash, and what PostToolUse adds in place of what only the request
+    /// carries.
+    fn ran_after(asked: &str) -> String {
+        let mut hook: Value = serde_json::from_str(asked).unwrap();
+        let fields = hook.as_object_mut().unwrap();
+        fields.remove("permission_suggestions");
+        fields.insert("hook_event_name".to_owned(), json!("PostToolUse"));
+        fields.insert("tool_response".to_owned(), json!({"filePath": "x"}));
+        fields.insert("tool_use_id".to_owned(), json!("toolu_01"));
+        fields.insert("duration_ms".to_owned(), json!(3));
+        hook.to_string()
+    }
+
+    #[test]
+    fn the_done_fingerprint_matches_for_an_edit() {
+        for asked in [EDIT_ASKED, WRITE_ASKED] {
+            let held = fingerprint_the_window_holds(asked);
+            let done = done_from_hook(&ran_after(asked)).expect("a change that ran is done");
+            assert_eq!(held, done.as_str(), "{asked}");
+            let failed = with(
+                &ran_after(asked),
+                "hook_event_name",
+                json!("PostToolUseFailure"),
+            );
+            assert_eq!(Some(done), done_from_hook(&failed));
+        }
+        assert_ne!(
+            fingerprint_the_window_holds(EDIT_ASKED),
+            fingerprint_the_window_holds(WRITE_ASKED)
+        );
+        // Another edit to the same file is another question's done.
+        let mut other: Value = serde_json::from_str(&ran_after(EDIT_ASKED)).unwrap();
+        other["tool_input"]["new_string"] = json!("gamma");
+        assert_ne!(
+            fingerprint_the_window_holds(EDIT_ASKED),
+            done_from_hook(&other.to_string()).unwrap().as_str()
+        );
+        // A MultiEdit of the one edit is that edit, at both ends.
+        let mut multi: Value = serde_json::from_str(&ran_after(EDIT_ASKED)).unwrap();
+        multi["tool_name"] = json!("MultiEdit");
+        multi["tool_input"] = json!({
+            "file_path": "/run/user/1000/crook-probe-claude/notes.txt",
+            "edits": [{"old_string": "alpha", "new_string": "beta", "replace_all": false}],
+        });
+        assert_eq!(
+            fingerprint_the_window_holds(EDIT_ASKED),
+            done_from_hook(&multi.to_string()).unwrap().as_str()
+        );
+        // A subagent's edit is never the main thread's question's done.
+        assert_eq!(
+            None,
+            done_from_hook(&with(&ran_after(EDIT_ASKED), "agent_id", json!("a1")))
+        );
+    }
+
     #[test]
     fn a_done_is_said_only_for_what_a_question_could_have_been_about() {
         assert!(done_from_hook(RAN).is_some());
@@ -3230,6 +3294,7 @@ process.stdout.write(JSON.stringify({ ran, asked }))
             with(RAN, "hook_event_name", json!("PreToolUse")),
             // Another tool, or none.
             with(RAN, "tool_name", json!("Write")),
+            with(RAN, "tool_name", json!("NotebookEdit")),
             with(RAN, "tool_name", Value::Null),
             // A subagent's, which the window was never asked about.
             with(RAN, "agent_id", json!("ac87da6c09324f43e")),

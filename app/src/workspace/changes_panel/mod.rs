@@ -1885,14 +1885,24 @@ fn actions_row(
         .finish()
 }
 
-/// One line of a hunk, in the colour of what happened to it.
-fn diff_line(text: &str, monospace: FamilyId) -> Box<dyn Element> {
-    let color = match text.as_bytes().first() {
+/// The colour a line of a diff is drawn in, by the mark it starts with: `+`
+/// added, `-` removed, `@` a hunk's header, anything else context.
+///
+/// The card an agent's change to a file is answered on draws that change in
+/// these too — see [`super::answering`] — so that a removed line reads the
+/// same before it is allowed as after it is made.
+pub(super) fn diff_colour(mark: Option<u8>) -> Color {
+    match mark {
         Some(b'+') => theme().diff_added,
         Some(b'-') => theme().diff_removed,
         Some(b'@') => theme().accent,
         _ => theme().text_muted,
-    };
+    }
+}
+
+/// One line of a hunk, in the colour of what happened to it.
+fn diff_line(text: &str, monospace: FamilyId) -> Box<dyn Element> {
+    let color = diff_colour(text.as_bytes().first().copied());
     // A tab is drawn as whatever the font has for it, which is a box or
     // nothing; four spaces is what a diff viewer shows.
     let shown = text.replace('\t', "    ");

@@ -1219,8 +1219,11 @@ fn an_ask_with_a_field_or_kind_this_window_does_not_know_is_refused() {
     args["request"]["env"] = json!({"PATH": "/tmp"});
     assert_eq!(asked_with(&args), refused, "a field of the request's");
     let mut args = agent_ask_args();
-    args["request"]["kind"] = json!("edit");
+    args["request"]["kind"] = json!("notebook-edit");
     assert_eq!(asked_with(&args), refused, "a kind");
+    let mut args = agent_ask_args();
+    args["request"]["kind"] = json!("edit");
+    assert_eq!(asked_with(&args), refused, "a kind with another's fields");
     let mut args = agent_ask_args();
     args["agent"] = json!("codex");
     assert_eq!(asked_with(&args), refused, "an agent");
@@ -1255,6 +1258,99 @@ fn an_ask_with_a_field_or_kind_this_window_does_not_know_is_refused() {
         verdict(r#"{"v":1,"verb":"agent.ask"}"#).1,
         refused,
         "no args at all"
+    );
+}
+
+/// `agent_ask`, about an edit to `path` instead.
+fn agent_ask_edit(path: &str) -> protocol::AgentAsk {
+    protocol::AgentAsk {
+        request: AskRequest::Edit {
+            path: path.to_owned(),
+            edits: vec![crate::agent::request::FileEdit {
+                old: "alpha".to_owned(),
+                new: "beta".to_owned(),
+                replace_all: false,
+            }],
+        },
+        ..agent_ask("ls")
+    }
+}
+
+#[test]
+fn an_edit_or_a_write_comes_off_the_wire_whole_or_is_refused() {
+    let asked = agent_ask_edit("/home/someone/work/crook/notes.txt");
+    let line = protocol::request_line(&Verb::AgentAsk(asked.clone()), None);
+    let (_, request) = protocol::read(line.trim_end().as_bytes());
+    assert_eq!(
+        request.map(|request| request.verb),
+        Ok(Verb::AgentAsk(asked))
+    );
+    let write = protocol::AgentAsk {
+        request: AskRequest::Write {
+            path: "/home/someone/work/crook/notes.txt".to_owned(),
+            content: "alpha\n".to_owned(),
+        },
+        ..agent_ask("ls")
+    };
+    let line = protocol::request_line(&Verb::AgentAsk(write.clone()), None);
+    let (_, request) = protocol::read(line.trim_end().as_bytes());
+    assert_eq!(
+        request.map(|request| request.verb),
+        Ok(Verb::AgentAsk(write))
+    );
+
+    let refused = Err(code::BAD_REQUEST.to_owned());
+    let args = || serde_json::to_value(agent_ask_edit("/w/notes.txt")).expect("encodes");
+    assert!(matches!(asked_with(&args()), Ok(Verb::AgentAsk(_))));
+    for (case, spoil) in [
+        ("a field of the request's", json!({"mode": "0755"})),
+        ("a relative path", json!({"path": "notes.txt"})),
+        ("a newline in the path", json!({"path": "/w/a\nb"})),
+        ("no edits", json!({"edits": []})),
+        (
+            "a field of an edit's",
+            json!({"edits": [{"old": "a", "new": "b", "replace_all": false, "line": 1}]}),
+        ),
+        (
+            "a flag left out",
+            json!({"edits": [{"old": "a", "new": "b"}]}),
+        ),
+        (
+            "a NUL",
+            json!({"edits": [{"old": "a", "new": "b\0", "replace_all": false}]}),
+        ),
+        (
+            "more lines than a diff is drawn to",
+            json!({"edits": [{
+                "old": "",
+                "new": "\n".repeat(crate::agent::request::MAX_CHANGE_LINES),
+                "replace_all": false,
+            }]}),
+        ),
+    ] {
+        let mut args = args();
+        for (key, value) in spoil.as_object().expect("an object") {
+            args["request"][key] = value.clone();
+        }
+        assert_eq!(asked_with(&args), refused, "{case}");
+    }
+}
+
+#[test]
+fn a_change_to_a_file_is_summed_up_by_its_path_from_where_the_agent_works() {
+    use super::ask::summary;
+
+    let edit = agent_ask_edit("/w/crook/src/lib.rs").request;
+    assert_eq!(summary("Edit", &edit, "/w/crook"), "Edit: src/lib.rs");
+    assert_eq!(
+        summary("Edit", &edit, "/elsewhere"),
+        "Edit: /w/crook/src/lib.rs",
+        "outside it, the whole path"
+    );
+    let tricked = agent_ask_edit("/w/crook/../../etc/\u{202e}passwd").request;
+    assert_eq!(
+        summary("Edit", &tricked, "/w/crook"),
+        "Edit: /w/crook/../../etc/⟨U+202E⟩passwd"
     );
 }
 
@@ -1620,16 +1716,16 @@ fn a_question_is_summed_up_by_its_first_line_written_out_and_cut() {
         outside_sandbox: false,
     };
     assert_eq!(
-        summary("Bash", &command("rm -rf build")),
+        summary("Bash", &command("rm -rf build"), "/w"),
         "Bash: rm -rf build"
     );
     // A carriage return is shown, not obeyed; and lines after the first
     // are said to be there.
     assert_eq!(
-        summary("Bash", &command("\n  \necho safe\rrm -rf ~\nmake")),
+        summary("Bash", &command("\n  \necho safe\rrm -rf ~\nmake"), "/w"),
         "Bash: echo safe␍rm -rf ~ …"
     );
-    let long = summary("Bash", &command(&"x".repeat(500)));
+    let long = summary("Bash", &command(&"x".repeat(500)), "/w");
     assert_eq!(long.chars().count(), SUMMARY_CHARS);
     assert!(long.ends_with('…'));
 }
@@ -5927,7 +6023,7 @@ mod socket {
                 .in_pane(second)
                 .expect("held in the second pane");
             assert_eq!(ask.id.as_u64(), id);
-            assert_eq!(ask.request.command(), "ls");
+            assert_eq!(ask.request.command(), Some("ls"));
             assert!(workspace.asks().in_pane(first).is_none());
         });
         // And the numbers go up and are never handed out again.
@@ -5982,7 +6078,7 @@ mod socket {
                 workspace
                     .asks()
                     .in_pane(pane)
-                    .map(|ask| ask.request.command()),
+                    .and_then(|ask| ask.request.command()),
                 Some("rm -rf dist")
             );
         });
@@ -6503,7 +6599,7 @@ mod socket {
         });
         let (id, shell) = served.read(|workspace, app| {
             let ask = workspace.asks().in_pane(pane).expect("held in its pane");
-            assert_eq!(ask.request.command(), "rm -rf build");
+            assert_eq!(ask.request.command(), Some("rm -rf build"));
             assert_eq!(
                 ask.cannot_answer, None,
                 "a process the pane's shell started, with the pane's token, on the pane's \

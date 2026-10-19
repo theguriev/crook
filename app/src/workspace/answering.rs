@@ -34,6 +34,18 @@
 //! no timer to move it — and, once the pane has said it is running again,
 //! that the question may already have been answered there.
 //!
+//! **A change to a file is shown as the change.** An edit's old text is drawn
+//! as removed lines and its new text as added ones, in the colours the
+//! Changes column draws a diff in — see `changes_panel::diff_colour` — under
+//! the file's path, written out whole and broken at any character rather
+//! than cut. A write is its content, all of it added, under a line saying it
+//! creates the file or replaces all of it: nothing reads the file to say
+//! which, since what is on disk when the card is drawn need not be what is
+//! there when the agent writes. A path that is not under the directory the
+//! agent works in, by its text, is warned about above the change. The change
+//! is the box a command is, and keeps its rules: the lines on screen are the
+//! only ones built, and Allow waits for the last of them to have been seen.
+//!
 //! **Not now is the default.** Escape presses it, a press off the card
 //! presses it, and so do Enter and Space until the keyboard is moved off it.
 //! It is drawn filled at the trailing edge, where the close question keeps
@@ -119,7 +131,7 @@ use crookui_core::prelude::*;
 use crookui_core::presenter::{LayoutContext, PaintContext};
 use unicode_width::UnicodeWidthChar;
 
-use crate::agent::request::{AskRequest, visible};
+use crate::agent::request::{AskRequest, Mark, lexically_inside, visible};
 use crate::control::ask::{Ask, AskId, Asks, Cause, Choice, How};
 use crate::keybindings::Recording;
 use crate::tab::PaneId;
@@ -669,7 +681,11 @@ pub(super) fn duration(span: Duration) -> String {
 /// The card's first line.
 pub(super) fn title(agent: &str, face: &Face<'_>) -> String {
     match face {
-        Face::Live(_) => format!("{agent} wants to run a command"),
+        Face::Live(ask) => match ask.request {
+            AskRequest::Command { .. } => format!("{agent} wants to run a command"),
+            AskRequest::Edit { .. } => format!("{agent} wants to edit a file"),
+            AskRequest::Write { .. } => format!("{agent} wants to write a file"),
+        },
         Face::Withdrawn(_) => format!("{agent} is no longer waiting on this"),
     }
 }
@@ -771,57 +787,71 @@ fn live_face(
     ui: FamilyId,
 ) {
     let agent = ask.agent.name();
-    let AskRequest::Command {
-        command,
-        note: said,
-        timeout_ms,
-        background,
-        outside_sandbox,
-    } = &ask.request;
-    if *outside_sandbox {
-        column.add_child(warning(
-            format!("Outside {agent}'s sandbox: it would run with none of the sandbox's limits."),
-            ui,
-        ));
-    }
-    // The one part of the card that gives up height in a short window: what
-    // the rest leaves is the lines it shows, and it scrolls through the
-    // others.
-    column.add_child(
-        Shrinkable::new(
-            1.,
-            Container::new(
-                CommandBody::new(
-                    visible(command),
-                    card.body.clone(),
-                    workspace.fonts().monospace,
-                )
-                .finish(),
-            )
-            .with_horizontal_padding(ROW_INSET)
-            .with_margin_bottom(6.)
-            .finish(),
-        )
-        .finish(),
-    );
-    column.add_child(extent(&card.body, ui));
-    if let Some(said) = said {
-        column.add_child(note(format!("{agent} says: {}", visible(said)), ui));
-    }
-    if *background {
-        column.add_child(note(
-            format!("In the background: {agent} goes on without waiting for it."),
-            ui,
-        ));
-    }
-    if let Some(timeout) = timeout_ms {
-        column.add_child(note(
-            format!(
-                "With a time limit of {}.",
-                duration(Duration::from_millis(*timeout))
-            ),
-            ui,
-        ));
+    let monospace = workspace.fonts().monospace;
+    match &ask.request {
+        AskRequest::Command {
+            command,
+            note: said,
+            timeout_ms,
+            background,
+            outside_sandbox,
+        } => {
+            if *outside_sandbox {
+                column.add_child(warning(
+                    format!(
+                        "Outside {agent}'s sandbox: it would run with none of the sandbox's limits."
+                    ),
+                    ui,
+                ));
+            }
+            let lines = vec![Shown {
+                text: visible(command),
+                color: theme().text_primary,
+            }];
+            column.add_child(body_box(lines, card, monospace));
+            column.add_child(extent(&card.body, ui));
+            if let Some(said) = said {
+                column.add_child(note(format!("{agent} says: {}", visible(said)), ui));
+            }
+            if *background {
+                column.add_child(note(
+                    format!("In the background: {agent} goes on without waiting for it."),
+                    ui,
+                ));
+            }
+            if let Some(timeout) = timeout_ms {
+                column.add_child(note(
+                    format!(
+                        "With a time limit of {}.",
+                        duration(Duration::from_millis(*timeout))
+                    ),
+                    ui,
+                ));
+            }
+        }
+        AskRequest::Edit { path, .. } | AskRequest::Write { path, .. } => {
+            if !lexically_inside(path, &ask.cwd) {
+                column.add_child(warning(
+                    "Outside its working directory: this file is not under the directory the \
+                     agent works in."
+                        .to_owned(),
+                    ui,
+                ));
+            }
+            column.add_child(file_path(
+                crate::git::user_friendly_path(std::path::Path::new(path), workspace.home()),
+                monospace,
+            ));
+            if matches!(ask.request, AskRequest::Write { .. }) {
+                column.add_child(note(
+                    "Creates this file, or replaces all of it, with what is below. Crook has \
+                     not read what is there now.",
+                    ui,
+                ));
+            }
+            column.add_child(body_box(change_lines(&ask.request), card, monospace));
+            column.add_child(extent(&card.body, ui));
+        }
     }
     column.add_child(divider());
     column.add_child(one_line(
@@ -840,6 +870,64 @@ fn live_face(
     if let Some(cannot) = ask.cannot_answer {
         column.add_child(note(cannot.sentence(), ui));
     }
+}
+
+/// The box the command or the change is drawn in.
+///
+/// The one part of the card that gives up height in a short window: what
+/// the rest leaves is the lines it shows, and it scrolls through the others.
+fn body_box(lines: Vec<Shown>, card: &AskCard, monospace: FamilyId) -> Box<dyn Element> {
+    Shrinkable::new(
+        1.,
+        Container::new(CommandBody::new(lines, card.body.clone(), monospace).finish())
+            .with_horizontal_padding(ROW_INSET)
+            .with_margin_bottom(6.)
+            .finish(),
+    )
+    .finish()
+}
+
+/// A change to a file as the box draws it: each line behind the mark a diff
+/// gives it, in the colour the Changes column draws that mark in; and for a
+/// change with no text at all, one line saying so, in no mark's colour.
+pub(super) fn change_lines(request: &AskRequest) -> Vec<Shown> {
+    let lines: Vec<Shown> = request
+        .change()
+        .into_iter()
+        .map(|line| {
+            let (mark, prefix) = match line.mark {
+                Mark::Removed => (b'-', "- "),
+                Mark::Added => (b'+', "+ "),
+                Mark::Heading => (b'@', "@@ "),
+            };
+            Shown {
+                text: format!("{prefix}{}", line.text),
+                color: super::changes_panel::diff_colour(Some(mark)),
+            }
+        })
+        .collect();
+    if lines.is_empty() {
+        return vec![Shown {
+            text: "(empty)".to_owned(),
+            color: theme().text_muted,
+        }];
+    }
+    lines
+}
+
+/// The file a change is to, whole: in the terminal's family, broken at any
+/// character, and never cut — the end of a path is the part that names the
+/// file.
+fn file_path(path: String, monospace: FamilyId) -> Box<dyn Element> {
+    Container::new(
+        crookui_core::elements::Paragraph::new(visible(&path), monospace, LABEL_SIZE)
+            .with_color(theme().text_primary)
+            .breaking_anywhere()
+            .finish(),
+    )
+    .with_horizontal_padding(ROW_INSET)
+    .with_margin_bottom(6.)
+    .finish()
 }
 
 /// One line under the command saying how much of it is shown, and, while
@@ -979,9 +1067,19 @@ fn button_row(
         .finish()
 }
 
-/// The command, wrapped at whichever column the box's width runs out at and
-/// shown [`BODY_LINES`] at a time, or as many as the height it is given has
-/// room for.
+/// One run of the box's text, in one colour: the whole command, or one line
+/// of a change.
+pub(super) struct Shown {
+    /// The text, written out through [`visible`]; a command's has its
+    /// newlines in it.
+    pub(super) text: String,
+    /// What it is drawn in.
+    pub(super) color: crookui_core::geometry::Color,
+}
+
+/// The command or the change, wrapped at whichever column the box's width
+/// runs out at and shown [`BODY_LINES`] at a time, or as many as the height
+/// it is given has room for.
 ///
 /// Built here rather than from a [`Scrollable`], which lays out the whole of
 /// what it scrolls: a command can be as long as the socket's line, and the
@@ -989,7 +1087,7 @@ fn button_row(
 /// work, no shaping — and builds the lines on screen, and writes into the
 /// [`Body`] how many lines there are and whether the last is showing.
 struct CommandBody {
-    text: String,
+    text: Vec<Shown>,
     body: Rc<Body>,
     family: FamilyId,
     lines: Option<Box<dyn Element>>,
@@ -999,7 +1097,7 @@ struct CommandBody {
 }
 
 impl CommandBody {
-    fn new(text: String, body: Rc<Body>, family: FamilyId) -> Self {
+    fn new(text: Vec<Shown>, body: Rc<Body>, family: FamilyId) -> Self {
         Self {
             text,
             body,
@@ -1010,6 +1108,19 @@ impl CommandBody {
             origin: None,
         }
     }
+}
+
+/// The rows `text` wraps to at `columns`, as which run each is of and where
+/// in it it starts and ends, in bytes.
+fn rows(text: &[Shown], columns: usize) -> Vec<(usize, usize, usize)> {
+    text.iter()
+        .enumerate()
+        .flat_map(|(run, shown)| {
+            wrap(&shown.text, columns)
+                .into_iter()
+                .map(move |(start, end)| (run, start, end))
+        })
+        .collect()
 }
 
 /// Where each line of `text` starts and ends, in bytes, wrapped at `columns`
@@ -1074,7 +1185,7 @@ impl Element for CommandBody {
         } else {
             BODY_LINES
         };
-        let wrapped = wrap(&self.text, columns);
+        let wrapped = rows(&self.text, columns);
         self.body.measured(wrapped.len(), fits);
         let top = self.body.top.get().min(self.body.last_top());
         self.body.top.set(top);
@@ -1082,13 +1193,14 @@ impl Element for CommandBody {
         let mut lines = Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Start);
-        for (start, end) in wrapped.iter().skip(top).take(fits) {
-            let line = &self.text[*start..*end];
+        for (run, start, end) in wrapped.iter().skip(top).take(fits) {
+            let shown = &self.text[*run];
+            let line = &shown.text[*start..*end];
             // A line with nothing on it is still a line of the command.
             let line = if line.is_empty() { " " } else { line };
             lines.add_child(
                 Text::new(line.to_owned(), self.family, LABEL_SIZE)
-                    .with_color(theme().text_primary)
+                    .with_color(shown.color)
                     .finish(),
             );
         }

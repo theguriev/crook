@@ -257,20 +257,42 @@ fn about(session: &AgentSession, now: Instant) -> Vec<String> {
 /// [`SHOWN_CHARACTERS`] of those, each drawn whole, and how much more there
 /// is, said in words wherever it stops — never an ellipsis a person could
 /// take for the end of it.
+///
+/// A change to a file the same way: its path, and the lines of the change as
+/// the card draws them, each behind its `-` or `+`.
 fn asking(ask: &Ask, now: Instant, said: &mut Vec<Said>) {
-    let AskRequest::Command {
-        command,
-        note,
-        timeout_ms,
-        background,
-        outside_sandbox,
-    } = &ask.request;
     let agent = ask.agent.name();
-    said.push(Said::Sentence(format!(
-        "It asks Crook, through {agent}'s PermissionRequest hook, to run:"
-    )));
-    let shown = visible(command);
-    let all: Vec<&str> = shown.split('\n').collect();
+    let all: Vec<String> = match &ask.request {
+        AskRequest::Command { command, .. } => {
+            said.push(Said::Sentence(format!(
+                "It asks Crook, through {agent}'s PermissionRequest hook, to run:"
+            )));
+            visible(command).split('\n').map(str::to_owned).collect()
+        }
+        AskRequest::Edit { path, .. } | AskRequest::Write { path, .. } => {
+            let verb = match ask.request {
+                AskRequest::Write { .. } => "create or replace",
+                _ => "edit",
+            };
+            said.push(Said::Sentence(format!(
+                "It asks Crook, through {agent}'s PermissionRequest hook, to {verb} the file:"
+            )));
+            // On a line of its own, broken anywhere and never cut, as the
+            // command is: the end of a path is the part that names the file.
+            said.push(Said::Command(visible(path)));
+            if !crate::agent::request::lexically_inside(path, &ask.cwd) {
+                said.push(Said::Sentence(
+                    "Outside its working directory: the file is not under the directory the \
+                     agent works in."
+                        .to_owned(),
+                ));
+            }
+            super::answering::change_lines(&ask.request)
+                .into_iter()
+                .map(|line| line.text)
+                .collect()
+        }
+    };
     let mut room = SHOWN_CHARACTERS;
     let mut lines = 0;
     for line in all.iter().take(SHOWN_LINES) {
@@ -278,7 +300,7 @@ fn asking(ask: &Ask, now: Instant, said: &mut Vec<Said>) {
         let length = line.chars().count();
         if length <= room {
             room -= length;
-            said.push(Said::Command((*line).to_owned()));
+            said.push(Said::Command(line.clone()));
             continue;
         }
         said.push(Said::Command(line.chars().take(room).collect()));
@@ -293,24 +315,22 @@ fn asking(ask: &Ask, now: Instant, said: &mut Vec<Said>) {
         1 => said.push(Said::Sentence("and 1 more line".to_owned())),
         more => said.push(Said::Sentence(format!("and {more} more lines"))),
     }
-    if let Some(note) = note {
-        said.push(Said::Sentence(format!("{agent} says: {}", visible(note))));
-    }
-    if *outside_sandbox {
-        said.push(Said::Sentence(format!(
-            "Outside {agent}'s sandbox: it asks to run with none of the sandbox's limits."
-        )));
-    }
-    if *background {
-        said.push(Said::Sentence(
-            "In the background: the agent goes on without waiting for it.".to_owned(),
-        ));
-    }
-    if let Some(timeout) = timeout_ms {
-        said.push(Said::Sentence(format!(
-            "With a time limit of {}.",
-            duration(Duration::from_millis(*timeout))
-        )));
+    if let AskRequest::Command {
+        note,
+        timeout_ms,
+        background,
+        outside_sandbox,
+        ..
+    } = &ask.request
+    {
+        command_notes(
+            agent,
+            note.as_deref(),
+            *timeout_ms,
+            *background,
+            *outside_sandbox,
+            said,
+        );
     }
     said.push(Said::Sentence(format!(
         "Asked {} ago.",
@@ -318,6 +338,36 @@ fn asking(ask: &Ask, now: Instant, said: &mut Vec<Said>) {
     )));
     if let Some(cannot) = ask.cannot_answer {
         said.push(Said::Sentence(cannot.sentence().to_owned()));
+    }
+}
+
+/// What goes with a command: the agent's words, and how it would run.
+fn command_notes(
+    agent: &str,
+    note: Option<&str>,
+    timeout_ms: Option<u64>,
+    background: bool,
+    outside_sandbox: bool,
+    said: &mut Vec<Said>,
+) {
+    if let Some(note) = note {
+        said.push(Said::Sentence(format!("{agent} says: {}", visible(note))));
+    }
+    if outside_sandbox {
+        said.push(Said::Sentence(format!(
+            "Outside {agent}'s sandbox: it asks to run with none of the sandbox's limits."
+        )));
+    }
+    if background {
+        said.push(Said::Sentence(
+            "In the background: the agent goes on without waiting for it.".to_owned(),
+        ));
+    }
+    if let Some(timeout) = timeout_ms {
+        said.push(Said::Sentence(format!(
+            "With a time limit of {}.",
+            duration(Duration::from_millis(timeout))
+        )));
     }
 }
 
@@ -587,5 +637,77 @@ mod tests {
             Said::Sentence("and 7 more characters on that line".to_owned())
         );
         assert_eq!(said[from + 4], Said::Sentence("and 1 more line".to_owned()));
+    }
+
+    #[test]
+    fn why_this_status_shows_an_edits_path_and_the_first_twelve_lines_of_its_change() {
+        let session = AgentSession::new("agent 1");
+        let old: String = (1..=10).map(|line| format!("o{line}\n")).collect();
+        let request = AskRequest::Edit {
+            path: "/etc/\u{202e}hosts".to_owned(),
+            edits: vec![crate::agent::request::FileEdit {
+                old,
+                new: "n1\nn2".to_owned(),
+                replace_all: false,
+            }],
+        };
+        let edit = AgentAsk {
+            request,
+            ..asked("ls")
+        };
+        let mut asks = Asks::default();
+        let asked_at = Instant::now();
+        asks.add(
+            edit,
+            Found {
+                pane: PaneId::next(),
+                cannot_answer: None,
+                tab_title: "crook".to_owned(),
+            },
+            Arc::new(Feed::for_verb(&Verb::AgentAsk(asked("ls")))),
+            asked_at,
+        )
+        .expect("held");
+        let ask = asks.live().next().expect("held");
+        assert_eq!(ask.summary, "Edit: /etc/⟨U+202E⟩hosts");
+
+        let said = lines(&session, Some(ask), asked_at);
+        let from = said
+            .iter()
+            .position(|line| {
+                line.text() == "It asks Crook, through Claude Code's PermissionRequest hook, to edit the file:"
+            })
+            .unwrap_or_else(|| panic!("{said:#?}"));
+        assert_eq!(
+            said[from + 1],
+            Said::Command("/etc/⟨U+202E⟩hosts".to_owned())
+        );
+        assert!(
+            said[from + 2]
+                .text()
+                .starts_with("Outside its working directory"),
+            "{said:#?}"
+        );
+        // Ten removed lines, the empty one after the last newline, and the
+        // first added: twelve. The other is counted.
+        let change: Vec<&str> = said[from + 3..from + 15].iter().map(Said::text).collect();
+        assert_eq!(change[0], "- o1");
+        assert_eq!(change[9], "- o10");
+        assert_eq!(change[10], "- ");
+        assert_eq!(change[11], "+ n1");
+        assert!(
+            said[from + 3..from + 15]
+                .iter()
+                .all(|line| matches!(line, Said::Command(_)))
+        );
+        assert_eq!(
+            said[from + 15],
+            Said::Sentence("and 1 more line".to_owned())
+        );
+        // A command's notes are a command's: none of them here.
+        assert!(
+            !said.iter().any(|line| line.text().contains("sandbox")),
+            "{said:#?}"
+        );
     }
 }

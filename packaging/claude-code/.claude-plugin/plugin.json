@@ -1,7 +1,7 @@
 {
   "name": "crook",
   "displayName": "Crook",
-  "description": "Tells the Crook tab Claude Code runs in what it is doing, lets the person there Allow once or Deny a Bash command from a card in the Crook window, and teaches Claude what a Crook pane can do. Does nothing in any other terminal.",
+  "description": "Tells the Crook tab Claude Code runs in what it is doing, lets the person there Allow once or Deny a Bash command or a file edit from a card in the Crook window, and teaches Claude what a Crook pane can do. Does nothing in any other terminal.",
   "author": {
     "name": "Eugen Guriev",
     "url": "https://github.com/theguriev"

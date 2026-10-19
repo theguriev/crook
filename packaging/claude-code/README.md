@@ -51,7 +51,9 @@ needs a Crook newer than 0.1.13.
 
 One of Claude Code's hooks waits rather than reports: `PermissionRequest`, which Claude Code runs
 as it opens a permission dialog, runs `crook --agent ask claude` with a `timeout` of 330 seconds.
-For a Bash command it hands the Crook window the pane is in the whole command, and holds for up
+For a Bash command it hands the Crook window the pane is in the whole command, and for an Edit,
+MultiEdit or Write the file's path and the whole change, drawn as a diff; a change longer than the
+3000 lines a diff is drawn to, or over the socket's 64 KiB line, is not asked about. It holds for up
 to five minutes while a person may open a card for it there — from the palette's "Answer waiting
 agent" or the tab menu's "Answer…" — and press Allow once or Deny. Claude Code's own dialog stays
 up the whole time, and whichever is answered first wins: Claude Code drops a later answer. Deny

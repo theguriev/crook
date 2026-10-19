@@ -122,7 +122,7 @@ mod workspace;
 pub use agent::{Hooks, hooks_text};
 // What app/tests/claude_code_hooks.rs computes a question's done from, as
 // the window does.
-pub use agent::request::{AskRequest, digest, fingerprint, from_claude_bash};
+pub use agent::request::{AskRequest, digest, fingerprint, from_claude};
 
 use std::fs::File;
 use std::io::BufWriter;

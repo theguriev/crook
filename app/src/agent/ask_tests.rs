@@ -182,6 +182,9 @@ fn every_pass_rule_passes_without_connecting() {
         input["hook_event_name"] = json!("PreToolUse");
     });
     with("another tool", &|input, _| {
+        input["tool_name"] = json!("NotebookEdit")
+    });
+    with("another tool's name on this input", &|input, _| {
         input["tool_name"] = json!("Edit")
     });
     with("a subagent", &|input, _| {
@@ -438,4 +441,152 @@ fn no_path_prints_updated_input_updated_permissions_or_interrupt() {
         let window = Window::answering(json!({ "answer": extra }));
         assert_eq!(hook(&input(), &environment(), &window).0, None, "{extra}");
     }
+}
+
+/// Claude Code 2.1.280's `PermissionRequest` for an `Edit`, a `Write` and a
+/// `NotebookEdit`, as the probe in `docs/answering.md` recorded them (C13).
+const EDIT: &str = include_str!("../../tests/fixtures/asks/claude-2.1.280-edit.json");
+const WRITE: &str = include_str!("../../tests/fixtures/asks/claude-2.1.280-write.json");
+const NOTEBOOK_EDIT: &str =
+    include_str!("../../tests/fixtures/asks/claude-2.1.280-notebookedit.json");
+
+fn fixture(text: &str) -> Value {
+    serde_json::from_str(text).expect("the fixture is JSON")
+}
+
+#[test]
+fn an_edit_request_is_asked_with_its_change_and_its_path() {
+    let asked = question(EDIT.as_bytes(), &environment(), || Some(PTY)).expect("a question");
+    assert_eq!(asked.asked.cwd, "/run/user/1000/crook-probe-claude");
+    assert_eq!(
+        asked.asked.request,
+        AskRequest::Edit {
+            path: "/run/user/1000/crook-probe-claude/notes.txt".to_owned(),
+            edits: vec![crate::agent::request::FileEdit {
+                old: "alpha".to_owned(),
+                new: "beta".to_owned(),
+                replace_all: false,
+            }],
+        }
+    );
+    assert_eq!(asked.asked.tool(), "Edit");
+
+    let asked = question(WRITE.as_bytes(), &environment(), || Some(PTY)).expect("a question");
+    assert_eq!(
+        asked.asked.request,
+        AskRequest::Write {
+            path: "/run/user/1000/crook-probe-claude/notes.txt".to_owned(),
+            content: "alpha".to_owned(),
+        }
+    );
+    assert_eq!(asked.asked.tool(), "Write");
+
+    // A notebook's cell is not a change this card can draw.
+    assert_eq!(
+        question(NOTEBOOK_EDIT.as_bytes(), &environment(), || Some(PTY)),
+        None
+    );
+
+    // And the line the hook sends is the window's to read back whole, the
+    // allow it gets back printed as for a command.
+    for (input, kind) in [(EDIT, "edit"), (WRITE, "write")] {
+        let window = Window::answering(json!({"answer": {"decision": "allow"}}));
+        let (printed, connected) = hook(&fixture(input), &environment(), &window);
+        assert!(connected);
+        assert_eq!(printed.as_deref(), Some(ALLOW));
+        let (_, read) = protocol::read(window.sent()[0].trim_end().as_bytes());
+        let Verb::AgentAsk(read) = read.expect("a request the window takes").verb else {
+            panic!("not a question");
+        };
+        assert_eq!(read.request.kind(), kind);
+    }
+}
+
+#[test]
+fn a_write_over_the_cap_is_not_asked() {
+    let write = |content: String| {
+        let mut input = fixture(WRITE);
+        input["tool_input"]["content"] = json!(content);
+        input
+    };
+    let lines = |count: usize| vec!["x"; count].join("\n");
+    let asks = |input: &Value| {
+        let window = Window::answering(json!({"answer": {"decision": "pass"}}));
+        hook(input, &environment(), &window).1
+    };
+    assert!(asks(&write(lines(crate::agent::request::MAX_CHANGE_LINES))));
+    // A line more than the Changes column draws of a diff.
+    assert!(!asks(&write(lines(
+        crate::agent::request::MAX_CHANGE_LINES + 1
+    ))));
+    // One line, and more than the window reads in one: not cut, not asked.
+    assert!(!asks(&write("x".repeat(protocol::MAX_LINE))));
+    // Short of the line, after JSON's escapes have had their say.
+    assert!(!asks(&write("\u{1}".repeat(protocol::MAX_LINE / 6))));
+    assert!(asks(&write("x".repeat(protocol::MAX_LINE / 2))));
+}
+
+#[test]
+fn an_older_window_refuses_the_edit_kind_and_the_hook_prints_nothing() {
+    // A window from before edits reads `kind: edit` as a field it does not
+    // know, and refuses the question as a bad request; so does one that
+    // knows the kind and not a field in it. Either way the hook passes and
+    // Claude Code's own dialog is the one that asks.
+    for code in ["bad-request", "unknown-verb"] {
+        let window = Window::saying([Says::Line(format!(
+            "{{\"v\":1,\"ok\":false,\"error\":{{\"code\":\"{code}\",\"message\":\"no\"}}}}\n"
+        ))]);
+        let (printed, connected) = hook(&fixture(EDIT), &environment(), &window);
+        assert!(connected, "{code}");
+        assert_eq!(printed, None, "{code}");
+        assert!(window.sent()[0].contains("\"kind\":\"edit\""), "{code}");
+    }
+
+    // What v0.1.29's window reads a request as, which knew commands alone:
+    // the line this hook sends is one it refuses, rather than one it reads
+    // as something else.
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+    enum Older {
+        Command {
+            command: String,
+            #[serde(default)]
+            note: Option<String>,
+            #[serde(default)]
+            timeout_ms: Option<u64>,
+            background: bool,
+            outside_sandbox: bool,
+        },
+    }
+    let window = Window::answering(json!({"answer": {"decision": "pass"}}));
+    hook(&fixture(EDIT), &environment(), &window);
+    let sent: Value = serde_json::from_str(&window.sent()[0]).expect("a line of JSON");
+    assert!(serde_json::from_value::<Older>(sent["args"]["request"].clone()).is_err());
+    let window = Window::answering(json!({"answer": {"decision": "pass"}}));
+    hook(&input(), &environment(), &window);
+    let sent: Value = serde_json::from_str(&window.sent()[0]).expect("a line of JSON");
+    let Older::Command {
+        command,
+        note,
+        timeout_ms,
+        background,
+        outside_sandbox,
+    } = serde_json::from_value::<Older>(sent["args"]["request"].clone())
+        .expect("and a command still reads as it did");
+    assert_eq!(
+        (
+            command.as_str(),
+            note.as_deref(),
+            timeout_ms,
+            background,
+            outside_sandbox
+        ),
+        (
+            "rm -rf build",
+            Some("Remove the build directory"),
+            None,
+            false,
+            false
+        )
+    );
 }
