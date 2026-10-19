@@ -1271,6 +1271,7 @@ fn agent_ask_edit(path: &str) -> protocol::AgentAsk {
                 new: "beta".to_owned(),
                 replace_all: false,
             }],
+            resolves_outside: false,
         },
         ..agent_ask("ls")
     }
@@ -1289,6 +1290,8 @@ fn an_edit_or_a_write_comes_off_the_wire_whole_or_is_refused() {
         request: AskRequest::Write {
             path: "/home/someone/work/crook/notes.txt".to_owned(),
             content: "alpha\n".to_owned(),
+            resolves_outside: false,
+            replaces: None,
         },
         ..agent_ask("ls")
     };

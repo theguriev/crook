@@ -125,6 +125,8 @@ use serde_json::{Value, json};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod ancestors;
 pub mod ask;
+#[cfg(unix)]
+mod on_disk;
 pub mod request;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod tmux;
@@ -3189,7 +3191,19 @@ process.stdout.write(JSON.stringify({ ran, asked }))
             entrypoint: Some("cli".to_owned()),
             ..ask::Environment::default()
         };
-        let question = ask::question(input.as_bytes(), &environment, || Some(1))
+        // Whatever the disk held when it asked: the done is taken over the
+        // request alone, and the hook after the tool looks at no disk.
+        let found = |_: &request::AskRequest, _: &str| {
+            Some(request::OnDisk {
+                resolves_outside: true,
+                replaces: Some(request::Replaced {
+                    lines: 7,
+                    bytes: 64,
+                    more: false,
+                }),
+            })
+        };
+        let question = ask::question(input.as_bytes(), &environment, || Some(1), found)
             .expect("the fixture is a question the hook asks");
         request::fingerprint(&question.asked.digest())
     }

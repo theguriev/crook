@@ -273,6 +273,7 @@ fn an_edit_and_a_write_are_read_whole_and_drawn_as_their_change() {
         AskRequest::Edit {
             path: "/work/crook/notes.txt".to_owned(),
             edits: vec![edit("alpha\nbeta", "gamma", false)],
+            resolves_outside: true,
         }
     );
     assert_eq!(request.kind(), "edit");
@@ -320,6 +321,7 @@ fn an_edit_and_a_write_are_read_whole_and_drawn_as_their_change() {
     let creating = AskRequest::Edit {
         path: "/a".to_owned(),
         edits: vec![edit("", "new", true)],
+        resolves_outside: true,
     };
     assert_eq!(
         change(&creating),
@@ -372,6 +374,7 @@ fn a_multi_edit_shows_every_edit() {
     let fewer = AskRequest::Edit {
         path: "/work/crook/src/lib.rs".to_owned(),
         edits: edits[..2].to_vec(),
+        resolves_outside: true,
     };
     assert_ne!(
         digest("s", "MultiEdit", &request),
@@ -537,4 +540,157 @@ fn a_changes_debug_never_shows_its_path_or_its_text() {
             assert!(!printed.contains(hidden), "{printed}");
         }
     }
+}
+
+#[test]
+fn a_tab_and_the_spaces_a_line_ends_in_are_drawn_as_muted_marks_in_a_change() {
+    let drawn = |content: &str| -> Vec<(String, Vec<String>)> {
+        from_claude("Write", &json!({"file_path": "/a", "content": content}))
+            .expect("a write")
+            .change()
+            .into_iter()
+            .map(|line| {
+                let marks = line
+                    .muted
+                    .iter()
+                    .map(|mark| line.text[mark.clone()].to_owned())
+                    .collect();
+                (line.text, marks)
+            })
+            .collect()
+    };
+    // A heredoc's `<<-` strips the tab and not the spaces: the two are not
+    // the same file, and are not drawn as one.
+    assert_eq!(
+        drawn("\tEOF"),
+        [("→       EOF".to_owned(), vec!["→".to_owned()])]
+    );
+    assert_eq!(drawn("        EOF"), [("        EOF".to_owned(), vec![])]);
+    assert_ne!(drawn("\tEOF"), drawn("        EOF"));
+    // A tab goes to the next stop from where it is.
+    assert_eq!(drawn("ab\tc")[0].0, "ab→     c");
+    // A space after a `\` ends the line it seemed to continue.
+    assert_eq!(
+        drawn("foo \\ "),
+        [("foo \\·".to_owned(), vec!["·".to_owned()])]
+    );
+    assert_eq!(drawn("foo \\"), [("foo \\".to_owned(), vec![])]);
+    assert_ne!(drawn("foo\\ "), drawn("foo\\"));
+    // Every space and tab a line ends in, and only those; on every line.
+    assert_eq!(
+        drawn("a  \t\nb c \n  "),
+        [
+            (
+                "a··→    ".to_owned(),
+                vec!["·".to_owned(), "·".to_owned(), "→".to_owned()]
+            ),
+            ("b c·".to_owned(), vec!["·".to_owned()]),
+            ("··".to_owned(), vec!["·".to_owned(), "·".to_owned()]),
+        ]
+    );
+    // Everything else is written out as a command's is.
+    assert_eq!(drawn("x\r\u{202e} ")[0].0, "x␍⟨U+202E⟩·");
+    // A command's tab is still the spaces it reads as.
+    assert_eq!(visible("a\tb"), "a       b");
+}
+
+#[test]
+fn a_path_with_a_part_that_starts_or_ends_with_a_space_is_no_request() {
+    let path = |path: &str| {
+        let mut input = edit_input();
+        input["file_path"] = json!(path);
+        from_claude("Edit", &input)
+    };
+    for spaced in [
+        "/work/ src/main.rs",
+        "/work/src /main.rs",
+        "/work/src/main.rs ",
+        "/ work/main.rs",
+        "/work/ /main.rs",
+    ] {
+        assert_eq!(path(spaced), None, "{spaced:?}");
+    }
+    // A space inside a part is drawn as itself, and is no trick.
+    assert!(path("/work/my notes/a b.txt").is_some());
+}
+
+#[test]
+fn what_the_hook_found_on_disk_is_carried_and_required_but_not_digested() {
+    let edit = from_claude("Edit", &edit_input()).expect("an edit");
+    // Nothing looked at is the worst a card can say.
+    assert!(edit.outside("/work/crook"));
+    let inside = edit.clone().seen(OnDisk {
+        resolves_outside: false,
+        replaces: None,
+    });
+    assert!(!inside.outside("/work/crook"));
+    // Outside by its text whatever the hook found.
+    assert!(inside.outside("/work/other"));
+    assert_eq!(
+        digest("s", "Edit", &edit),
+        digest("s", "Edit", &inside),
+        "the disk is not the request"
+    );
+
+    let write = from_claude(
+        "Write",
+        &json!({"file_path": "/work/crook/a", "content": "x"}),
+    )
+    .expect("a write");
+    let replacing = write.clone().seen(OnDisk {
+        resolves_outside: false,
+        replaces: Some(Replaced {
+            lines: 3,
+            bytes: 12,
+            more: false,
+        }),
+    });
+    assert_eq!(
+        digest("s", "Write", &write),
+        digest("s", "Write", &replacing)
+    );
+    assert_ne!(
+        digest("s", "Write", &write),
+        digest(
+            "s",
+            "Write",
+            &from_claude(
+                "Write",
+                &json!({"file_path": "/work/crook/a", "content": "y"})
+            )
+            .unwrap()
+        )
+    );
+
+    // On the wire both are required: a hook that did not look is refused
+    // rather than read as having found the file inside and nothing there.
+    let encoded = serde_json::to_value(&replacing).expect("encodes");
+    assert_eq!(
+        encoded["replaces"],
+        json!({"lines": 3, "bytes": 12, "more": false})
+    );
+    assert_eq!(
+        serde_json::from_value::<AskRequest>(encoded.clone()).ok(),
+        Some(replacing)
+    );
+    let encoded_none = serde_json::to_value(&write).expect("encodes");
+    assert_eq!(encoded_none["replaces"], Value::Null);
+    assert_eq!(
+        serde_json::from_value::<AskRequest>(encoded_none).ok(),
+        Some(write)
+    );
+    for field in ["replaces", "resolves_outside"] {
+        let mut without = encoded.clone();
+        without.as_object_mut().unwrap().remove(field);
+        assert!(
+            serde_json::from_value::<AskRequest>(without).is_err(),
+            "{field}"
+        );
+    }
+    let mut without = serde_json::to_value(&inside).expect("encodes");
+    without.as_object_mut().unwrap().remove("resolves_outside");
+    assert!(serde_json::from_value::<AskRequest>(without).is_err());
+    let mut wrong = encoded.clone();
+    wrong["replaces"]["mode"] = json!("0644");
+    assert!(serde_json::from_value::<AskRequest>(wrong).is_err());
 }

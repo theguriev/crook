@@ -16,9 +16,14 @@
 //! lines a card draws, what an edit takes out and what it puts in, and a
 //! change with more lines than the Changes column draws of a diff is no
 //! request at all — a card that showed part of it would be asking a person
-//! to allow what they had not read. Nothing reads the file: what is on disk
-//! is not what the agent was handed, and a read on the window's thread is a
-//! stall the window does not take for anyone.
+//! to allow what they had not read. The window reads no file: a stat on its
+//! thread of a path on a hung mount is a stall the window does not take for
+//! anyone. What is on disk where the change would land — whether a symbolic
+//! link on the way leads out of the working directory, and whether a write
+//! replaces a file and how big — is looked at by the hook, off the window,
+//! and carried in the request's `resolves_outside` and `replaces`; it
+//! describes the disk when the agent asked, not the request, and is left out
+//! of the [`digest`].
 //!
 //! The same request is what both ends name an ask by. [`digest`] is SHA-256
 //! over a domain tag, the session, the tool and the request as
@@ -37,6 +42,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -69,6 +75,17 @@ pub const MAX_CHANGE_LINES: usize = crate::git::changes::MAX_DIFF_LINES;
 /// The domain tag a [`digest`] starts with, so that no other hash over the
 /// same bytes can be taken for one.
 const DOMAIN: &str = "crook-ask-v1";
+
+/// The fields of a request that say what the hook found on disk, which a
+/// [`digest`] is not taken over.
+///
+/// They describe the disk, not what the agent asked: the hook after the
+/// tool reads the same input into the same request with nothing looked at,
+/// and its fingerprint has to be the question's, or a question answered in
+/// the agent's own dialog would never be let go of. A press is still bound
+/// to its question by the question's number as well as its digest, so two
+/// questions told apart only by these are never answered for each other.
+const ON_DISK: [&str; 2] = ["resolves_outside", "replaces"];
 
 /// How many columns a tab stop is, for [`visible`].
 const TAB_STOP: usize = 8;
@@ -105,6 +122,10 @@ pub enum AskRequest {
         path: String,
         /// What is replaced with what, in the order they are made.
         edits: Vec<FileEdit>,
+        /// Whether the file, followed through every symbolic link on the
+        /// way to it, is not under the working directory, or could not be
+        /// followed — as the hook found it when the agent asked.
+        resolves_outside: bool,
     },
     /// A file written whole: created, or replaced if it is there.
     Write {
@@ -112,7 +133,44 @@ pub enum AskRequest {
         path: String,
         /// Everything it will hold.
         content: String,
+        /// As an edit's, as the hook found it.
+        resolves_outside: bool,
+        /// The file the write would replace, or `None` when nothing was
+        /// there, as the hook found it when the agent asked: required on the
+        /// wire, `null` included, so that a hook that did not look is
+        /// refused rather than read as having found nothing there.
+        #[serde(deserialize_with = "Option::deserialize")]
+        replaces: Option<Replaced>,
     },
+}
+
+/// What the hook found on disk where a change to a file would land, when the
+/// agent asked: never looked at by the window, and possibly not what is there
+/// by the time the agent writes. Only the hook, which only Unix has, looks.
+#[cfg(any(unix, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OnDisk {
+    /// Whether the file, followed through every symbolic link on the way to
+    /// it, is somewhere other than under the working directory — or could not
+    /// be followed, which a card warns about the same.
+    pub resolves_outside: bool,
+    /// The file a write would replace, or `None` when nothing is there.
+    pub replaces: Option<Replaced>,
+}
+
+/// The file a write would replace, as the hook measured it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Replaced {
+    /// How many lines it holds, counted as [`AskRequest::change`] counts a
+    /// text's — every newline and the line after the last — over as much of
+    /// it as was read.
+    pub lines: u64,
+    /// How long it is, in bytes.
+    pub bytes: u64,
+    /// Whether the count stopped before the end of the file, which then has
+    /// at least [`Self::lines`] lines.
+    pub more: bool,
 }
 
 /// One replacement in a file.
@@ -143,8 +201,12 @@ pub enum Mark {
 pub struct Changed {
     /// What the line is.
     pub mark: Mark,
-    /// Its text, written out through [`visible`], with no newline.
+    /// Its text, written out through [`visible`] — but for its tabs and the
+    /// spaces it ends in, which are drawn as marks — with no newline.
     pub text: String,
+    /// Where in [`Self::text`] the marks for white space are, in bytes, to
+    /// be drawn muted: they are not in the file, and stand for what is.
+    pub muted: Vec<Range<usize>>,
 }
 
 impl AskRequest {
@@ -173,6 +235,45 @@ impl AskRequest {
         }
     }
 
+    /// Whether the file is not under `cwd`: by its text, or, as the hook
+    /// found it, through a symbolic link on the way. `false` for a command.
+    pub fn outside(&self, cwd: &str) -> bool {
+        match self {
+            Self::Command { .. } => false,
+            Self::Edit {
+                path,
+                resolves_outside,
+                ..
+            }
+            | Self::Write {
+                path,
+                resolves_outside,
+                ..
+            } => *resolves_outside || !lexically_inside(path, cwd),
+        }
+    }
+
+    /// This request with what the hook found on disk where it would land.
+    /// A command lands nowhere, and is left as it is.
+    #[cfg(any(unix, test))]
+    pub fn seen(mut self, on_disk: OnDisk) -> Self {
+        match &mut self {
+            Self::Command { .. } => {}
+            Self::Edit {
+                resolves_outside, ..
+            } => *resolves_outside = on_disk.resolves_outside,
+            Self::Write {
+                resolves_outside,
+                replaces,
+                ..
+            } => {
+                *resolves_outside = on_disk.resolves_outside;
+                *replaces = on_disk.replaces;
+            }
+        }
+        self
+    }
+
     /// The lines a change to a file is drawn as, or nothing for a command.
     ///
     /// Each edit's old text as removed lines, then its new text as added
@@ -181,16 +282,19 @@ impl AskRequest {
     /// text, split at its newlines, an empty last one included — `"a\n"` is
     /// two lines, the second empty — so that two texts drawn alike are the
     /// same text, give or take what [`visible`] writes out. An empty text is
-    /// no lines.
+    /// no lines. Each line is drawn as [`file_line`] draws it, so that a tab
+    /// and the spaces before a newline are seen: in a file they are the
+    /// difference between a Makefile that builds and one that does not, and
+    /// between a `\` that continues a line and one that does not.
     pub fn change(&self) -> Vec<Changed> {
         let mut lines = Vec::new();
         let mut push = |mark: Mark, text: &str| {
             if text.is_empty() {
                 return;
             }
-            lines.extend(visible(text).split('\n').map(|line| Changed {
-                mark,
-                text: line.to_owned(),
+            lines.extend(text.split('\n').map(|line| {
+                let (text, muted) = file_line(line);
+                Changed { mark, text, muted }
             }));
         };
         match self {
@@ -222,7 +326,7 @@ impl AskRequest {
 
     /// How many lines [`Self::change`] would be, counted without building
     /// them.
-    fn change_lines(&self) -> usize {
+    pub fn change_lines(&self) -> usize {
         let lines = |text: &str| match text {
             "" => 0,
             text => text.matches('\n').count() + 1,
@@ -265,7 +369,7 @@ impl AskRequest {
                 }
                 None
             }
-            Self::Edit { path, edits } => {
+            Self::Edit { path, edits, .. } => {
                 if let Some(fault) = path_fault(path) {
                     return Some(fault);
                 }
@@ -280,7 +384,7 @@ impl AskRequest {
                 }
                 self.change_fault()
             }
-            Self::Write { path, content } => {
+            Self::Write { path, content, .. } => {
                 if let Some(fault) = path_fault(path) {
                     return Some(fault);
                 }
@@ -300,10 +404,12 @@ impl AskRequest {
 }
 
 /// Why `path` is not one a card can name a file by, or `None` when it is:
-/// absolute, at most [`MAX_PATH`] characters written out, and with no
-/// control character in it — a newline or a carriage return in a path is a
-/// line a card would draw as two, or rewrite, and a file named so is rare
-/// enough that its agent's own prompt can ask about it.
+/// absolute, at most [`MAX_PATH`] characters written out, with no control
+/// character in it — a newline or a carriage return in a path is a line a
+/// card would draw as two, or rewrite — and no part of it starting or ending
+/// with a space, which a card draws as nothing at all: `/work/ src/main.rs`
+/// is another file than the one it reads as. A file named either way is
+/// rare enough that its agent's own prompt can ask about it.
 fn path_fault(path: &str) -> Option<&'static str> {
     if !path.starts_with('/') {
         return Some("the path is not absolute");
@@ -316,6 +422,12 @@ fn path_fault(path: &str) -> Option<&'static str> {
     if path.chars().any(char::is_control) {
         return Some("the path holds a control character");
     }
+    if path
+        .split('/')
+        .any(|part| part.starts_with(' ') || part.ends_with(' '))
+    {
+        return Some("a part of the path starts or ends with a space");
+    }
     None
 }
 
@@ -324,7 +436,8 @@ fn path_fault(path: &str) -> Option<&'static str> {
 ///
 /// No file is looked at — this is asked on the window's thread, where a
 /// stat of a path on a hung network mount would hang the window — so a
-/// symbolic link inside the directory that leads out of it is not seen. A
+/// symbolic link inside the directory that leads out of it is not seen
+/// here: the hook looks for one, and [`AskRequest::outside`] asks both. A
 /// `..` anywhere in `path` counts as outside: whether it climbs out depends
 /// on what links lie under it, which only a look at the disk could say.
 pub fn lexically_inside(path: &str, directory: &str) -> bool {
@@ -384,7 +497,11 @@ impl fmt::Debug for AskRequest {
                 .finish(),
             // Never the path either: a file's name says what is being worked
             // on as plainly as its content does.
-            Self::Edit { path, edits } => formatter
+            Self::Edit {
+                path,
+                edits,
+                resolves_outside,
+            } => formatter
                 .debug_struct("Edit")
                 .field("path_bytes", &path.len())
                 .field("edits", &edits.len())
@@ -395,11 +512,19 @@ impl fmt::Debug for AskRequest {
                         .map(|edit| edit.old.len() + edit.new.len())
                         .sum::<usize>(),
                 )
+                .field("resolves_outside", resolves_outside)
                 .finish(),
-            Self::Write { path, content } => formatter
+            Self::Write {
+                path,
+                content,
+                resolves_outside,
+                replaces,
+            } => formatter
                 .debug_struct("Write")
                 .field("path_bytes", &path.len())
                 .field("bytes", &content.len())
+                .field("resolves_outside", resolves_outside)
+                .field("replaces", replaces)
                 .finish(),
         }
     }
@@ -411,6 +536,11 @@ impl fmt::Debug for AskRequest {
 /// `Bash`, `Edit`, `MultiEdit` and `Write`, each read by its own allowlist;
 /// see [`from_claude_bash`] and the three beside it. `NotebookEdit`, web
 /// fetches and MCP tools are not asked about at all.
+///
+/// A change to a file comes back as though nothing had been looked at on
+/// disk: outside, the worst a card can say, and replacing nothing. The hook
+/// sends it only once it has looked and said what is there; the hook
+/// after the tool needs no look, since the [`digest`] leaves it out.
 pub fn from_claude(tool: &str, tool_input: &Value) -> Option<AskRequest> {
     match tool {
         "Bash" => from_claude_bash(tool_input),
@@ -431,6 +561,7 @@ fn from_claude_edit(tool_input: &Value) -> Option<AskRequest> {
     checked(AskRequest::Edit {
         path: path?,
         edits: vec![edit],
+        resolves_outside: true,
     })
 }
 
@@ -463,6 +594,7 @@ fn from_claude_multi_edit(tool_input: &Value) -> Option<AskRequest> {
     checked(AskRequest::Edit {
         path: path?,
         edits: edits?,
+        resolves_outside: true,
     })
 }
 
@@ -504,6 +636,8 @@ fn from_claude_write(tool_input: &Value) -> Option<AskRequest> {
     checked(AskRequest::Write {
         path: path?,
         content: content?,
+        resolves_outside: true,
+        replaces: None,
     })
 }
 
@@ -601,14 +735,20 @@ fn write_object<'a>(fields: impl IntoIterator<Item = (&'a String, &'a Value)>, i
 }
 
 /// SHA-256 over [`DOMAIN`], `session`, `tool` and the request's
-/// [`canonical`] JSON, each after a NUL but the first.
+/// [`canonical`] JSON, each after a NUL but the first, with the fields
+/// [`ON_DISK`] names left out.
 ///
 /// What a press on the card carries and the window checks before it answers,
 /// so that an answer meant for one request can never reach another that took
 /// its place.
 pub fn digest(session: &str, tool: &str, request: &AskRequest) -> [u8; 32] {
-    let encoded = serde_json::to_value(request)
+    let mut encoded = serde_json::to_value(request)
         .expect("a request is strings, numbers, booleans and lists of them, which encode");
+    if let Some(fields) = encoded.as_object_mut() {
+        for field in ON_DISK {
+            fields.remove(field);
+        }
+    }
     let mut hash = Sha256::new();
     for (index, part) in [DOMAIN, session, tool, &canonical(&encoded)]
         .into_iter()
@@ -657,22 +797,66 @@ pub fn visible(text: &str) -> String {
                 shown.extend(std::iter::repeat_n(' ', spaces));
                 column += spaces;
             }
-            '\r' => {
-                shown.push('␍');
-                column += 1;
-            }
-            character if hidden(character) => {
-                let mark = format!("⟨U+{:04X}⟩", u32::from(character));
-                column += mark.chars().count();
-                shown.push_str(&mark);
-            }
-            character => {
-                shown.push(character);
-                column += unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
-            }
+            character => written_out(character, &mut shown, &mut column),
         }
     }
     shown
+}
+
+/// One line of a file, with no newline in it, as a change draws it: as
+/// [`visible`] writes it out, but a tab as `→` and the spaces to the next
+/// stop, and each space after the last character that is not a space or a
+/// tab as `·`, with where the marks are, to be drawn muted.
+///
+/// A command's tab is shown as the spaces it reads as, since a shell splits
+/// words at either; in a file a tab is not a space, as a Makefile's recipe
+/// or a heredoc's `<<-` says, and a space after a `\` turns a continued
+/// line into two. A diff viewer marks both, and so does this.
+fn file_line(line: &str) -> (String, Vec<Range<usize>>) {
+    let ends_at = line.trim_end_matches([' ', '\t']).len();
+    let mut shown = String::with_capacity(line.len());
+    let mut muted = Vec::new();
+    let mut column = 0;
+    for (at, character) in line.char_indices() {
+        match character {
+            '\t' => {
+                let start = shown.len();
+                let spaces = TAB_STOP - column % TAB_STOP;
+                shown.push('→');
+                muted.push(start..shown.len());
+                shown.extend(std::iter::repeat_n(' ', spaces - 1));
+                column += spaces;
+            }
+            ' ' if at >= ends_at => {
+                let start = shown.len();
+                shown.push('·');
+                muted.push(start..shown.len());
+                column += 1;
+            }
+            character => written_out(character, &mut shown, &mut column),
+        }
+    }
+    (shown, muted)
+}
+
+/// `character`, which is neither a newline nor a tab, onto `into` as
+/// [`visible`] writes it out, with `column` moved past it.
+fn written_out(character: char, into: &mut String, column: &mut usize) {
+    match character {
+        '\r' => {
+            into.push('␍');
+            *column += 1;
+        }
+        character if hidden(character) => {
+            let mark = format!("⟨U+{:04X}⟩", u32::from(character));
+            *column += mark.chars().count();
+            into.push_str(&mark);
+        }
+        character => {
+            into.push(character);
+            *column += unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        }
+    }
 }
 
 /// Whether `character` would not print as itself: a control character, a

@@ -2520,8 +2520,8 @@ before; the question is a record beside the status, never a rewrite of it.
 **The question rides the socket, as a kept verb.** `agent.ask` carries
 `{agent, session, cwd, tty, wait, request}` — the request
 `{"kind":"command","command":…,"note":…,"timeout_ms":…,"background":…,"outside_sandbox":…}`,
-`{"kind":"edit","path":…,"edits":[{"old":…,"new":…,"replace_all":…}]}` or
-`{"kind":"write","path":…,"content":…}` —
+`{"kind":"edit","path":…,"edits":[{"old":…,"new":…,"replace_all":…}],"resolves_outside":…}` or
+`{"kind":"write","path":…,"content":…,"resolves_outside":…,"replaces":null|{"lines":…,"bytes":…,"more":…}}` —
 with every unknown field refused at every level, so a window never shows less than will happen,
 and a window from before a kind refuses it and its hook passes. The
 request is what the hook read through an allowlist of Claude Code's keys for the tool: `Bash`'s
@@ -2530,13 +2530,24 @@ request is what the hook read through an allowlist of Claude Code's keys for the
 the last three) or `Write`'s (`file_path`, `content`), each with its type: a
 key Crook has never heard of may change what runs, so it means no question at all, and the
 agent's own prompt is the only one. A command is 1 byte to 48 KiB with no NUL, a note at most 1
-KiB; a path is absolute, at most 256 characters written out and with no control character, and a
-change holds no NUL and is at most the 3000 lines the Changes column draws a diff to, counted as
+KiB; a path is absolute, at most 256 characters written out, with no control character and no
+part of it starting or ending with a space, and a change holds no NUL and is at most the 3000 lines the Changes column draws a diff to, counted as
 the card draws it; and a line over 64 KiB is not asked. The card draws an edit's old text as
-removed lines and its new text as added ones, in the Changes column's colours, and a write's
-content as added lines under "Creates this file, or replaces all of it"; nothing reads the file.
-A path not under the agent's directory by its text — a `..` in it counting as outside, since
-nothing looks at the links under it — is warned about above the change. Questions have a lane of their own, sixteen at once and
+removed lines and its new text as added ones, in the Changes column's colours, a tab as a muted
+`→` and a space a line ends in as a muted `·`, and a write's content as added lines under
+"Creates this file" or "Replaces a file of N lines (M bytes)". The window reads no file: the
+hook, a process of its own with Claude Code's 330 seconds, looks for at most a second
+(`agent::on_disk`) and sends what it found as the two required fields. `resolves_outside` is
+whether the file, followed through every link on the way to it — the deepest part of the path
+that exists, resolved whole, at most 64 parts — is not under the working directory, also
+resolved, and is true for anything it could not follow; `replaces` is the file a write would
+replace, its lines counted over at most 4 MiB, or `null` for none, and a write whose file could
+not be looked at in time is not asked. Being required, both are refused by a window from before
+them, and its hook passes. They describe the disk when the agent asked, not the request, so the
+digest and the done fingerprint leave them out: the hook after the tool reads the same input
+with nothing looked at, and has to name the same question. A path not under the agent's
+directory by its text — a `..` in it counting as outside — or through a link, as the hook found
+it, is warned about above the change. Questions have a lane of their own, sixteen at once and
 four in a pane, counted apart from the thirty-two waits and streams. The window answers
 `{"asked":<id>}` within a second; later it writes exactly one
 `{"answer":{"decision":"allow"|"deny"|"pass","message"?:…,"why"?:…}}`, or a `gone` refusal; the

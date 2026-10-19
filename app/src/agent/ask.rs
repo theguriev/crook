@@ -20,7 +20,9 @@
 //! every path, since a hook that fails can fail its agent. It never opens or
 //! writes a terminal: which pane it is in is the device number of the
 //! terminal a status from it would be written to, read off the process table
-//! by `super::ancestors`, and nothing else is looked at.
+//! by `super::ancestors`. For a change to a file it looks, for at most a
+//! second, at where the change would land — through which links, and over
+//! what file — and writes nothing: see `super::on_disk`.
 //!
 //! # When it asks nothing
 //!
@@ -32,7 +34,8 @@
 //! `CLAUDE_CODE_ENTRYPOINT` is exactly `cli` —
 //! under `claude -p` an empty answer is Claude Code's own immediate deny, and
 //! holding it would turn a refusal into a wait; the tool's input is one the
-//! allowlist in [`super::request`] reads whole; and a terminal is found.
+//! allowlist in [`super::request`] reads whole; a terminal is found; and, for
+//! a write, whether a file is there could be said.
 //!
 //! The socket is asked only once it has been checked, as every client's is
 //! — see `control::cli` — and the connection is never half closed: on macOS
@@ -52,7 +55,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 #[cfg(any(unix, test))]
-use super::request::from_claude;
+use super::request::{AskRequest, OnDisk, from_claude};
 use crate::control::protocol::AskingAgent;
 #[cfg(any(unix, test))]
 use crate::control::protocol::{
@@ -141,12 +144,15 @@ pub struct Question {
 
 /// The question `input` asks, or `None` when the hook asks nothing: see the
 /// module docs for the rules, in the order they are read. `terminal` is
-/// asked last, and only when every other rule holds.
+/// asked once every other rule holds, and then `look`, for a change to a
+/// file, says what is on disk where it would land under the working
+/// directory — or `None`, which is no question.
 #[cfg(any(unix, test))]
 pub fn question(
     input: &[u8],
     environment: &Environment,
     terminal: impl FnOnce() -> Option<u32>,
+    look: impl FnOnce(&AskRequest, &str) -> Option<OnDisk>,
 ) -> Option<Question> {
     let socket = environment.socket.clone()?;
     if environment.multiplexed {
@@ -172,6 +178,13 @@ pub fn question(
     }
     let request = from_claude(tool, hook.get("tool_input")?)?;
     let tty = terminal()?;
+    let request = match request.path() {
+        Some(_) => {
+            let on_disk = look(&request, cwd)?;
+            request.seen(on_disk)
+        }
+        None => request,
+    };
     Some(Question {
         socket,
         token: environment.token.clone(),
@@ -317,15 +330,16 @@ pub fn decision_line(verdict: &Verdict) -> Option<String> {
     }
 }
 
-/// Everything the hook does before it prints: the question, the connection
-/// `connect` makes to the socket it names, and the line to print with the
-/// connection it came down — or `None`, having connected to nothing unless
-/// every rule held.
+/// Everything the hook does before it prints: the question, `terminal` and
+/// `look` asked as [`question`] asks them, the connection `connect` makes to
+/// the socket it names, and the line to print with the connection it came
+/// down — or `None`, having connected to nothing unless every rule held.
 #[cfg(any(unix, test))]
 pub fn decide<C: Connection>(
     input: &[u8],
     environment: &Environment,
     terminal: impl FnOnce() -> Option<u32>,
+    look: impl FnOnce(&AskRequest, &str) -> Option<OnDisk>,
     connect: impl FnOnce(&Path) -> Option<C>,
     patience: &Patience,
     parent_left: impl Fn() -> bool,
@@ -334,7 +348,7 @@ pub fn decide<C: Connection>(
         socket,
         token,
         asked,
-    } = question(input, environment, terminal)?;
+    } = question(input, environment, terminal, look)?;
     let line = protocol::request_line(&Verb::AgentAsk(asked), token.as_deref());
     // Not asked rather than cut: the window reads no more than this, and a
     // request it could not show whole is no question.
@@ -406,6 +420,7 @@ mod unix {
             &input,
             &Environment::here(),
             device,
+            crate::agent::on_disk::look,
             |socket| connect_checked(socket).ok().map(Socketed::new),
             &Patience::CLAUDE,
             || std::os::unix::process::parent_id() != parent,

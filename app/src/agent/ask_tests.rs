@@ -39,6 +39,15 @@ fn environment() -> Environment {
 /// The pane's terminal: pts/3.
 const PTY: u32 = 34819;
 
+/// A look at the disk that finds the file inside the working directory and
+/// nothing there to replace.
+fn seen_nothing(_: &AskRequest, _: &str) -> Option<OnDisk> {
+    Some(OnDisk {
+        resolves_outside: false,
+        replaces: None,
+    })
+}
+
 /// One thing the window does, in order.
 #[derive(Clone, Debug)]
 enum Says {
@@ -120,6 +129,7 @@ fn hook(input: &Value, environment: &Environment, window: &Window) -> (Option<St
         input.to_string().as_bytes(),
         environment,
         || Some(PTY),
+        seen_nothing,
         |_| {
             connected.set(true);
             Some(window.clone())
@@ -132,8 +142,13 @@ fn hook(input: &Value, environment: &Environment, window: &Window) -> (Option<St
 
 #[test]
 fn the_question_is_the_whole_request_bound_by_the_terminal_and_not_the_token() {
-    let asked =
-        question(input().to_string().as_bytes(), &environment(), || Some(PTY)).expect("a question");
+    let asked = question(
+        input().to_string().as_bytes(),
+        &environment(),
+        || Some(PTY),
+        seen_nothing,
+    )
+    .expect("a question");
     assert_eq!(
         asked.socket,
         PathBuf::from("/run/user/1000/crook-control/7.sock")
@@ -247,6 +262,7 @@ fn every_pass_rule_passes_without_connecting() {
             b"not json",
             &environment(),
             || Some(PTY),
+            seen_nothing,
             connect,
             &QUICK,
             || false
@@ -258,6 +274,7 @@ fn every_pass_rule_passes_without_connecting() {
             input().to_string().as_bytes(),
             &environment(),
             || None,
+            seen_nothing,
             |_: &Path| {
                 connected.set(true);
                 Some(Window::default())
@@ -387,6 +404,7 @@ fn unknown_verb_eof_garbage_and_timeout_print_nothing() {
         input().to_string().as_bytes(),
         &environment(),
         || Some(PTY),
+        seen_nothing,
         |_| Some(window.clone()),
         &Patience {
             answer: Duration::from_secs(60),
@@ -456,7 +474,8 @@ fn fixture(text: &str) -> Value {
 
 #[test]
 fn an_edit_request_is_asked_with_its_change_and_its_path() {
-    let asked = question(EDIT.as_bytes(), &environment(), || Some(PTY)).expect("a question");
+    let asked =
+        question(EDIT.as_bytes(), &environment(), || Some(PTY), seen_nothing).expect("a question");
     assert_eq!(asked.asked.cwd, "/run/user/1000/crook-probe-claude");
     assert_eq!(
         asked.asked.request,
@@ -467,23 +486,32 @@ fn an_edit_request_is_asked_with_its_change_and_its_path() {
                 new: "beta".to_owned(),
                 replace_all: false,
             }],
+            resolves_outside: false,
         }
     );
     assert_eq!(asked.asked.tool(), "Edit");
 
-    let asked = question(WRITE.as_bytes(), &environment(), || Some(PTY)).expect("a question");
+    let asked =
+        question(WRITE.as_bytes(), &environment(), || Some(PTY), seen_nothing).expect("a question");
     assert_eq!(
         asked.asked.request,
         AskRequest::Write {
             path: "/run/user/1000/crook-probe-claude/notes.txt".to_owned(),
             content: "alpha".to_owned(),
+            resolves_outside: false,
+            replaces: None,
         }
     );
     assert_eq!(asked.asked.tool(), "Write");
 
     // A notebook's cell is not a change this card can draw.
     assert_eq!(
-        question(NOTEBOOK_EDIT.as_bytes(), &environment(), || Some(PTY)),
+        question(
+            NOTEBOOK_EDIT.as_bytes(),
+            &environment(),
+            || Some(PTY),
+            seen_nothing
+        ),
         None
     );
 
@@ -589,4 +617,113 @@ fn an_older_window_refuses_the_edit_kind_and_the_hook_prints_nothing() {
             false
         )
     );
+}
+
+#[test]
+fn a_change_carries_what_the_look_found_on_disk_and_a_write_it_could_not_see_is_not_asked() {
+    let looked = RefCell::new(Vec::new());
+    let found = OnDisk {
+        resolves_outside: true,
+        replaces: Some(crate::agent::request::Replaced {
+            lines: 3000,
+            bytes: 70_000,
+            more: false,
+        }),
+    };
+    let asked = question(
+        WRITE.as_bytes(),
+        &environment(),
+        || Some(PTY),
+        |request, cwd| {
+            looked.borrow_mut().push((request.kind(), cwd.to_owned()));
+            Some(found)
+        },
+    )
+    .expect("a question");
+    assert_eq!(
+        looked.take(),
+        [("write", "/run/user/1000/crook-probe-claude".to_owned())]
+    );
+    let AskRequest::Write {
+        resolves_outside,
+        replaces,
+        ..
+    } = asked.asked.request
+    else {
+        panic!("a write");
+    };
+    assert_eq!((resolves_outside, replaces), (true, found.replaces));
+    let asked = question(
+        EDIT.as_bytes(),
+        &environment(),
+        || Some(PTY),
+        |_, _| Some(found),
+    )
+    .expect("a question");
+    assert!(matches!(
+        asked.asked.request,
+        AskRequest::Edit {
+            resolves_outside: true,
+            ..
+        }
+    ));
+
+    // Nothing to say about the disk is no question, and the window is
+    // never connected to.
+    assert_eq!(
+        question(WRITE.as_bytes(), &environment(), || Some(PTY), |_, _| None),
+        None
+    );
+    // A command lands nowhere, and the disk is not looked at for it; nor is
+    // it for a hook that has already found it asks nothing.
+    let never = |_: &AskRequest, _: &str| -> Option<OnDisk> { panic!("looked") };
+    assert!(
+        question(
+            input().to_string().as_bytes(),
+            &environment(),
+            || Some(PTY),
+            never
+        )
+        .is_some()
+    );
+    assert_eq!(
+        question(WRITE.as_bytes(), &environment(), || None, never),
+        None
+    );
+}
+
+#[test]
+fn a_window_from_before_the_look_refuses_a_change_that_carries_it() {
+    // A window that drew edits and writes from their text alone, without
+    // `resolves_outside` or `replaces`: the line this hook sends is one it
+    // refuses, so that its hook passes rather than its card leaving a link
+    // or a file replaced unsaid.
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+    enum Before {
+        Edit { path: String, edits: Vec<Value> },
+        Write { path: String, content: String },
+    }
+    for input in [EDIT, WRITE] {
+        let window = Window::answering(json!({"answer": {"decision": "pass"}}));
+        hook(&fixture(input), &environment(), &window);
+        let sent: Value = serde_json::from_str(&window.sent()[0]).expect("a line of JSON");
+        let request = &sent["args"]["request"];
+        assert!(
+            serde_json::from_value::<Before>(request.clone()).is_err(),
+            "{request}"
+        );
+        let mut without = request.clone();
+        let fields = without.as_object_mut().unwrap();
+        fields.remove("resolves_outside");
+        fields.remove("replaces");
+        match serde_json::from_value::<Before>(without).expect("the rest reads as it did") {
+            Before::Edit { path, edits } => {
+                assert!(path.ends_with("notes.txt") && edits.len() == 1)
+            }
+            Before::Write { path, content } => {
+                assert!(path.ends_with("notes.txt") && content == "alpha")
+            }
+        }
+    }
 }

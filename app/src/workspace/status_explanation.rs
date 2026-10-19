@@ -271,7 +271,8 @@ fn asking(ask: &Ask, now: Instant, said: &mut Vec<Said>) {
         }
         AskRequest::Edit { path, .. } | AskRequest::Write { path, .. } => {
             let verb = match ask.request {
-                AskRequest::Write { .. } => "create or replace",
+                AskRequest::Write { replaces: None, .. } => "create",
+                AskRequest::Write { .. } => "replace",
                 _ => "edit",
             };
             said.push(Said::Sentence(format!(
@@ -280,12 +281,15 @@ fn asking(ask: &Ask, now: Instant, said: &mut Vec<Said>) {
             // On a line of its own, broken anywhere and never cut, as the
             // command is: the end of a path is the part that names the file.
             said.push(Said::Command(visible(path)));
-            if !crate::agent::request::lexically_inside(path, &ask.cwd) {
-                said.push(Said::Sentence(
-                    "Outside its working directory: the file is not under the directory the \
-                     agent works in."
-                        .to_owned(),
-                ));
+            if let AskRequest::Write { replaces, .. } = &ask.request {
+                said.push(Said::Sentence(super::answering::what_a_write_does(
+                    *replaces,
+                    ask.request.change_lines(),
+                    agent,
+                )));
+            }
+            if let Some(outside) = super::answering::outside_warning(&ask.request, &ask.cwd) {
+                said.push(Said::Sentence(outside.to_owned()));
             }
             super::answering::change_lines(&ask.request)
                 .into_iter()
@@ -650,6 +654,7 @@ mod tests {
                 new: "n1\nn2".to_owned(),
                 replace_all: false,
             }],
+            resolves_outside: false,
         };
         let edit = AgentAsk {
             request,
