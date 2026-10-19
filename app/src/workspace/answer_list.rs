@@ -294,7 +294,7 @@ pub(super) fn render(workspace: &Workspace, list: &AskList) -> Box<dyn Element> 
         body.add_child(divider());
         body.add_child(header("Earlier", ui));
         for outcome in earlier {
-            body.add_child(one_line(earlier_line(outcome, now), ui));
+            body.add_child(one_line(outcome_line(outcome, true, now), ui));
         }
     }
 
@@ -462,17 +462,17 @@ fn row(
     }
 }
 
-/// What the list says about a question that ended: how, who asked, the tab
-/// as it was called then, what it asked and how long ago, in that order, so
-/// that how it ended is the part a narrow list never cuts.
-fn earlier_line(outcome: &Outcome, now: Instant) -> String {
-    let how = match outcome.how {
-        How::Answered(Choice::Allow) => "Allow sent",
-        How::Answered(Choice::Deny) => "Deny sent",
-        How::Ended(cause) => ended(cause),
-    };
-    let mut line = format!("{how} · {}", outcome.agent.name());
-    if !outcome.tab_title.is_empty() {
+/// What is said about a question that ended, here and in "Why this
+/// status" alike: how it ended — [`Outcome::said`], the one wording of it —
+/// who asked, the tab as it was called then when `with_tab`, what it asked
+/// and how long ago, in that order, so that how it ended is the part a
+/// narrow list never cuts.
+///
+/// What it asked is the summary the row's line was — the tool, and the
+/// first line of the command or the file — never the request.
+pub(super) fn outcome_line(outcome: &Outcome, with_tab: bool, now: Instant) -> String {
+    let mut line = format!("{} · {}", outcome.said(), outcome.agent.name());
+    if with_tab && !outcome.tab_title.is_empty() {
         line.push_str(&format!(" · {}", visible(&outcome.tab_title)));
     }
     format!(
@@ -480,21 +480,6 @@ fn earlier_line(outcome: &Outcome, now: Instant) -> String {
         outcome.summary,
         duration(now.saturating_duration_since(outcome.ended_at))
     )
-}
-
-/// How a question nobody answered in Crook ended, in the fewest words.
-fn ended(cause: Cause) -> &'static str {
-    match cause {
-        Cause::AnsweredInAgent => "Answered in its tab",
-        Cause::HookGone => "Hook stopped waiting",
-        Cause::Expired => "Timed out",
-        Cause::PaneClosed => "Tab closed",
-        Cause::CommandEnded => "Agent exited",
-        Cause::TurnEnded => "Turn ended",
-        Cause::AskedAgain => "Asked again",
-        Cause::WindowClosed => "Window closed",
-        Cause::AnsweringOff => "Answering turned off",
-    }
 }
 
 /// A line that never wraps, cut with a mark where the list runs out.

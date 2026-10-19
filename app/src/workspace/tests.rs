@@ -44542,7 +44542,7 @@ mod answering_card {
     }
 
     #[test]
-    fn why_this_status_says_how_the_last_three_questions_ended() {
+    fn why_this_status_says_how_the_last_five_questions_ended() {
         let mut harness = Harness::new(1);
         let tab = harness.tab_ids()[0];
         let pane = harness.focused_pane_id().expect("a pane");
@@ -44551,13 +44551,15 @@ mod answering_card {
             ("s2", "two"),
             ("s3", "three"),
             ("s4", "four"),
+            ("s5", "five"),
+            ("s6", "six"),
         ] {
             let held = hold_request(&mut harness, pane, session, command(text, false), None);
             open(&mut harness);
             settle(&mut harness);
             press(
                 &mut harness,
-                if text == "four" { "Allow once" } else { "Deny" },
+                if text == "six" { "Allow once" } else { "Deny" },
             );
             assert!(held.sent().is_some());
         }
@@ -44572,11 +44574,15 @@ mod answering_card {
         harness.run_command("crook/tabs/explain-status");
         let text = explanation_text(&harness.frame()).expect("the panel is drawn");
         assert!(
-            text.contains("Allow sent to Claude Code") && text.contains("hook took it"),
+            text.contains("How its last 5 requests ended, newest first:"),
             "{text}"
         );
         assert!(
-            text.contains("Bash: three") && text.contains("Denied in Crook"),
+            text.contains("Allow sent, and its hook took it · Claude Code · Bash: six"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Deny sent · Claude Code · Bash: five"),
             "{text}"
         );
         assert!(text.contains("Bash: two"), "{text}");

@@ -37,7 +37,18 @@
 //! connection writes and the hook prints nothing for; a window that closes
 //! says `gone` instead. Each is a line in the log — the agent, the tool, how
 //! it ended and the first twelve hex digits of its digest, never the command
-//! — and an entry in [`Asks::history`], in memory only.
+//! — and an entry in [`Asks::history`], in memory only: the last
+//! [`HISTORY`], a line of each and never the request, which "Why this
+//! status" and the inbox both read and say in one wording, [`How::said`].
+//!
+//! # What a lead is told
+//!
+//! That its worker asks, and how that ended — `asked` and `answered` on
+//! the streams following the pane, by the lineage a status is told by: see
+//! [`Asks::take_told`]. The agent, the tool and how it ended, and never the
+//! command, the file, the directory, the digest or the fingerprint. A lead
+//! can see that a worker waits and ask its person; nothing it can send
+//! answers.
 //!
 //! A connection that gave up on the window before the window said it held
 //! the question — a frame that stalled past the connection's patience — has
@@ -67,7 +78,8 @@ use crookui_core::prelude::*;
 use serde_json::Value;
 
 use super::protocol::{
-    AgentAsk, Answered, Asker, AskingAgent, Decision, Refusal, Registered, Verdict, code,
+    AgentAsk, Answered, AnsweredBy, Asker, AskingAgent, Decision, PaneEvent, Refusal, Registered,
+    Verdict, code,
 };
 use super::watch::Feed;
 use super::{Inbox, Notice};
@@ -188,19 +200,33 @@ impl Cause {
         }
     }
 
-    /// How a person is told it ended, of a question `agent` asked.
-    #[cfg(test)]
-    pub fn said(self, agent: AskingAgent) -> String {
+    /// How a person is told it ended, in a few words: what the inbox's
+    /// "Earlier" and "Why this status" both say, so the two never tell one
+    /// ending two ways. See [`How::said`].
+    pub fn said(self) -> &'static str {
         match self {
-            Self::HookGone => "its hook went".to_owned(),
-            Self::Expired => "its time ran out".to_owned(),
-            Self::PaneClosed => "its pane closed".to_owned(),
-            Self::CommandEnded => format!("{} exited", agent.name()),
-            Self::TurnEnded => format!("{}'s turn ended", agent.name()),
-            Self::AskedAgain => format!("{} asked again", agent.name()),
-            Self::AnsweredInAgent => format!("answered in {}", agent.name()),
-            Self::WindowClosed => "the window closed".to_owned(),
-            Self::AnsweringOff => "answering in Crook was turned off".to_owned(),
+            Self::HookGone => "Its hook stopped waiting",
+            Self::Expired => "Timed out",
+            Self::PaneClosed => "Its pane closed",
+            Self::CommandEnded => "The agent exited",
+            Self::TurnEnded => "The agent's turn ended",
+            Self::AskedAgain => "A newer request replaced it",
+            Self::AnsweredInAgent => "Answered in the agent's own dialog",
+            Self::WindowClosed => "The window closed",
+            Self::AnsweringOff => "Answering in Crook was turned off",
+        }
+    }
+
+    /// How a lead following the pane is told it ended.
+    pub fn by(self) -> AnsweredBy {
+        match self {
+            Self::AnsweredInAgent => AnsweredBy::InAgent,
+            Self::Expired => AnsweredBy::Expired,
+            Self::AnsweringOff => AnsweredBy::Released,
+            Self::PaneClosed | Self::WindowClosed => AnsweredBy::Closed,
+            Self::HookGone | Self::CommandEnded | Self::TurnEnded | Self::AskedAgain => {
+                AnsweredBy::Withdrawn
+            }
         }
     }
 }
@@ -245,6 +271,27 @@ impl How {
             Self::Answered(Choice::Allow) => "allowed",
             Self::Answered(Choice::Deny) => "denied",
             Self::Ended(cause) => cause.word(),
+        }
+    }
+
+    /// How a person is told it ended, in a few words, the same wherever it
+    /// is said: what was sent for an answer — never that the agent did it —
+    /// and [`Cause::said`] for the rest.
+    pub fn said(self) -> &'static str {
+        match self {
+            Self::Answered(Choice::Allow) => "Allow sent",
+            Self::Answered(Choice::Deny) => "Deny sent",
+            Self::Ended(cause) => cause.said(),
+        }
+    }
+
+    /// What a lead following the pane is told: how it ended, and what was
+    /// sent when a person answered it here.
+    fn told(self) -> (AnsweredBy, Option<Decision>) {
+        match self {
+            Self::Answered(Choice::Allow) => (AnsweredBy::Here, Some(Decision::Allow)),
+            Self::Answered(Choice::Deny) => (AnsweredBy::Here, Some(Decision::Deny)),
+            Self::Ended(cause) => (cause.by(), None),
         }
     }
 }
@@ -316,6 +363,24 @@ pub struct Outcome {
     pub lost: bool,
 }
 
+impl Outcome {
+    /// How it ended, as a person is told it wherever that is said: see
+    /// [`How::said`], and, for an answer, what the hook said became of it.
+    pub fn said(&self) -> String {
+        let how = self.how.said();
+        if !matches!(self.how, How::Answered(_)) {
+            return how.to_owned();
+        }
+        if self.delivered {
+            format!("{how}, and its hook took it")
+        } else if self.lost {
+            format!("{how}, but its hook was gone")
+        } else {
+            how.to_owned()
+        }
+    }
+}
+
 /// What the window found out about a question before holding it, for
 /// [`Asks::add`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -340,6 +405,9 @@ pub struct Asks {
     live: Vec<Ask>,
     /// The questions ended, oldest first, at most [`HISTORY`].
     history: VecDeque<Outcome>,
+    /// What the leads following the panes have yet to be told, oldest first:
+    /// see [`Self::take_told`].
+    told: VecDeque<(PaneId, PaneEvent)>,
 }
 
 impl Asks {
@@ -385,6 +453,45 @@ impl Asks {
         self.live()
             .filter(|ask| ask.pane == pane && ask.cannot_answer.is_none())
             .max_by_key(|ask| ask.id)
+    }
+
+    /// Whether the agent in `pane` is asking through Crook: a question this
+    /// window could answer is held there. What `pane.list` says as
+    /// `asking`, and nothing more.
+    pub fn asking(&self, pane: PaneId) -> bool {
+        self.answerable_in(pane).is_some()
+    }
+
+    /// Takes what the leads following the panes have yet to be told: an
+    /// `asked` for every question held that this window could answer, and an
+    /// `answered` when it ends — the agent, the tool and how, never what it
+    /// asked. Who is told is the watches' to say, by the lineage they tell a
+    /// status by: see `Watches::told`.
+    ///
+    /// Only the answerable ones: a read-only question is one the window
+    /// cannot place, from some process that named the pane's terminal, and
+    /// a lead told its worker asks on the strength of one would be told
+    /// something nobody knows.
+    pub fn take_told(&mut self) -> Vec<(PaneId, PaneEvent)> {
+        self.told.drain(..).collect()
+    }
+
+    /// How many events [`Self::take_told`] has yet to take.
+    #[cfg(test)]
+    pub fn untold(&self) -> usize {
+        self.told.len()
+    }
+
+    /// Keeps `event` about `pane` for [`Self::take_told`].
+    ///
+    /// Bounded at [`HISTORY`], the oldest going first, for a window whose
+    /// workspace never asks — every road that changes a question takes them
+    /// within the same turn, so it never bites.
+    fn tell(&mut self, pane: PaneId, event: PaneEvent) {
+        if self.told.len() >= HISTORY {
+            self.told.pop_front();
+        }
+        self.told.push_back((pane, event));
     }
 
     /// How the questions that have ended went, oldest first.
@@ -471,6 +578,16 @@ impl Asks {
             request,
             ..
         } = asked;
+        if answerable {
+            self.tell(
+                found.pane,
+                PaneEvent::Asked {
+                    pane_id: found.pane.as_u64(),
+                    agent: agent.word().to_owned(),
+                    tool: agent.tool(&request).to_owned(),
+                },
+            );
+        }
         self.live.push(Ask {
             id,
             agent,
@@ -656,6 +773,17 @@ impl Asks {
     fn finish(&mut self, index: usize, how: How, now: Instant) {
         let ask = self.live.remove(index);
         log::info!("{}", log_line(&ask, how, now));
+        if ask.cannot_answer.is_none() {
+            let (by, decision) = how.told();
+            self.tell(
+                ask.pane,
+                PaneEvent::Answered {
+                    pane_id: ask.pane.as_u64(),
+                    by,
+                    decision,
+                },
+            );
+        }
         if self.history.len() >= HISTORY {
             self.history.pop_front();
         }

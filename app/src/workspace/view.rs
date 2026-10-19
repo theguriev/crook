@@ -3248,8 +3248,21 @@ impl Workspace {
     /// A newer question from the same session ends the one before; the card
     /// stays on what it showed, and never moves on to the new one.
     pub(crate) fn asks_changed(&mut self, ctx: &mut ViewContext<Self>) {
+        self.tell_watches_the_asks();
         self.withdraw_an_ended_ask_card(ctx);
         ctx.notify();
+    }
+
+    /// Tells the leads following a pane that its agent asked through Crook,
+    /// or how that ended — the agent, the tool and how, never what it asked
+    /// — once the questions have changed. See
+    /// [`Asks::take_told`](crate::control::ask::Asks::take_told).
+    ///
+    /// Called from every road a question is held or ended by, within the
+    /// same turn, so a stream hears of it in the order it happened.
+    fn tell_watches_the_asks(&mut self) {
+        let told = self.asks.take_told();
+        self.watches.told(&told);
     }
 
     /// Turns the card to say its question is over, when the window has
@@ -3396,7 +3409,9 @@ impl Workspace {
             self.withdraw_ask_card(Withdrawn::Changed, ctx);
             return;
         }
-        match self.asks.deliver(ask, &digest, decision) {
+        let delivered = self.asks.deliver(ask, &digest, decision);
+        self.tell_watches_the_asks();
+        match delivered {
             crate::control::ask::Delivery::Delivered => self.close_ask_card(ctx),
             crate::control::ask::Delivery::TooLate
             | crate::control::ask::Delivery::Stale
@@ -9837,6 +9852,7 @@ impl Workspace {
             self.start_breathing(ctx);
         }
         self.end_asks_a_report_ends(pane, status, source);
+        self.tell_watches_the_asks();
         // The card says the question may have been answered in the agent's
         // tab, a line that pushes its buttons down: they wait again, so a
         // pointer on its way to one does not land on what moved under it.
@@ -11168,9 +11184,12 @@ impl Workspace {
         // Every road a pane closes by, and every tab that opens, comes
         // through here: what the control socket is watching hears of both,
         // and a tab `tab.new` opened that closed is remembered for a wait
-        // asked after it. A question asked in a pane that closed is over.
-        self.watches.settled(&self.tabs);
+        // asked after it. A question asked in a pane that closed is over,
+        // and is told so before the pane is told closed: a stream anchored
+        // on the pane ends with that line.
         self.asks.forget_closed(&self.tabs);
+        self.tell_watches_the_asks();
+        self.watches.settled(&self.tabs);
         self.withdraw_an_ended_ask_card(ctx);
         self.follow_changes(ctx);
         // After the strip has moved, so "which pane is being looked at" is the
