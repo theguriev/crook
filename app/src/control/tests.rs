@@ -5669,7 +5669,7 @@ mod socket {
         assert_eq!(printed.text, "finished: exit 2");
     }
 
-    use super::super::ask::{CannotAnswer, Cause, How};
+    use super::super::ask::{CannotAnswer, Cause, Choice, How};
     use super::super::protocol::{AgentAsk, Answered};
 
     impl Client {
@@ -6521,6 +6521,107 @@ mod socket {
             served.ended(id.as_u64()),
             Some(How::Ended(Cause::TurnEnded))
         );
+    }
+
+    /// The whole road, end to end: a hook below a pane's shell asks over the
+    /// socket `Control::open_in` opened, a person opens the card, waits out
+    /// its second and presses Allow once, and the hook prints Claude Code's
+    /// allow, byte for byte, and says it did.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn allow_on_the_card_is_what_the_hook_prints() {
+        use std::os::unix::ffi::OsStrExt;
+
+        use crate::workspace::{AskAction, Pressed};
+
+        let root = TempDir::new();
+        let gate = root.0.join("gate");
+        let input = root.0.join("input.json");
+        let printed = root.0.join("printed");
+        fs::write(
+            &input,
+            json!({
+                "session_id": "4f1c2b7e-0d3a-4e5f-9a8b-7c6d5e4f3a2b",
+                "cwd": "/home/someone/work/crook",
+                "hook_event_name": "PermissionRequest",
+                "tool_name": "Bash",
+                "tool_input": {"command": "rm -rf build", "description": "Clean the build"},
+            })
+            .to_string(),
+        )
+        .expect("the input is written");
+        let binary = std::env::current_exe().expect("the test binary has a path");
+        let quoted = |path: &Path| {
+            let text = std::str::from_utf8(path.as_os_str().as_bytes()).expect("text");
+            assert!(!text.contains('\''), "a path the script can quote: {text}");
+            format!("'{text}'")
+        };
+        // Quiet, so that what the harness itself prints is a dot and a
+        // summary around the hook's one line rather than a line it shares.
+        let program = root.0.join("sh");
+        crate::process::write_program(
+            &program,
+            &format!(
+                "#!/bin/sh\n\
+                 while [ ! -e {gate} ]; do sleep 0.1; done\n\
+                 TMUX= STY= ZELLIJ= CLAUDE_CODE_ENTRYPOINT=cli {CHILD_ASKS}=1 {binary} --exact \
+                 control::tests::socket::asks_as_a_hook_below_a_panes_shell --ignored \
+                 --test-threads=1 -q < {input} > {printed}\n\
+                 exec cat\n",
+                gate = quoted(&gate),
+                binary = quoted(&binary),
+                input = quoted(&input),
+                printed = quoted(&printed),
+            ),
+        );
+        let shell = GatedShell { program, gate };
+        let mut served = Served::with(root, shell, |_, _, _| {});
+        let pane = first_pane(&served);
+        served.shell.open();
+
+        served.pump_until("the hook below the pane's shell never asked", |served| {
+            served.asks() == 1
+        });
+        let (id, digest) = served.read(|workspace, _| {
+            let ask = workspace.asks().in_pane(pane).expect("held in its pane");
+            assert_eq!(ask.cannot_answer, None);
+            (ask.id, ask.digest)
+        });
+        served.update(|workspace, ctx| {
+            workspace.answer_waiting_agent(ctx);
+            workspace.settle_the_ask_card(ctx);
+            // This window draws no frame, so nothing lays the command out:
+            // one line, and on screen, as a frame would have found it.
+            workspace.read_the_ask_card_to_its_end();
+            workspace.handle_action(
+                &AskAction::Answer {
+                    ask: id,
+                    digest,
+                    decision: Choice::Allow,
+                    by: Pressed::Pointer,
+                }
+                .into(),
+                ctx,
+            );
+        });
+        served.pump_until("the hook never said it printed the answer", |served| {
+            served.read(|workspace, _| {
+                workspace
+                    .asks()
+                    .outcome(id)
+                    .is_some_and(|outcome| outcome.delivered)
+            })
+        });
+        assert_eq!(
+            served.ended(id.as_u64()),
+            Some(How::Answered(Choice::Allow))
+        );
+        let out = fs::read_to_string(&printed).expect("the hook's output");
+        let lines: Vec<&str> = out
+            .split_inclusive('\n')
+            .filter(|line| line.starts_with('{'))
+            .collect();
+        assert_eq!(lines, [crate::agent::ask::ALLOW], "{out:?}");
     }
 
     #[test]

@@ -26,6 +26,11 @@
 //! reported: a status's message is whatever the agent said, and a command
 //! is shown only as it will run.
 //!
+//! Under it, how the pane's last three questions ended: what Crook sent and
+//! whether the agent's hook said it took it, or what ended one nobody
+//! answered here. Never that the agent did as it was told, which only its
+//! next report can say.
+//!
 //! # Where it hangs
 //!
 //! Off the tab menu's corner, where the worktree list hangs, and for the same
@@ -50,11 +55,12 @@ use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::prelude::*;
 
 use crate::agent::request::{AskRequest, visible};
-use crate::control::ask::Ask;
+use crate::control::ask::{Ask, Cause, Choice, How, Outcome};
 use crate::plugins::store::ago;
 use crate::tab::{AgentSession, AgentStatus, Attention, Pane, StatusSource};
 use crate::theme::theme;
 
+use super::answering::duration;
 use super::tab_menu::{LABEL_SIZE, MENU_WIDTH, PATH_SIZE, ROW_INSET};
 use super::view::Workspace;
 
@@ -87,6 +93,16 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
                 Said::Sentence(text) => sentence(text, ui),
                 Said::Command(text) => command(text, monospace),
             });
+        }
+    }
+    if let Some((_, pane)) = workspace.menu_target() {
+        let ended: Vec<&Outcome> = workspace
+            .asks()
+            .history()
+            .filter(|outcome| outcome.pane == pane)
+            .collect();
+        for line in answered(&ended, Instant::now()) {
+            column.add_child(sentence(line, ui));
         }
     }
 
@@ -315,13 +331,61 @@ const SHOWN_LINES: usize = 12;
 /// hundreds of rows of it. The rest is counted in words.
 const SHOWN_CHARACTERS: usize = 1024;
 
-/// "40 s", "2 min 5 s": a span short enough to say to the second.
-fn duration(span: Duration) -> String {
-    let seconds = span.as_secs();
-    match (seconds / 60, seconds % 60) {
-        (0, seconds) => format!("{seconds} s"),
-        (minutes, 0) => format!("{minutes} min"),
-        (minutes, seconds) => format!("{minutes} min {seconds} s"),
+/// How many of a pane's last questions the panel says the end of.
+const OUTCOMES: usize = 3;
+
+/// How the last [`OUTCOMES`] questions asked in a pane ended, newest first,
+/// one sentence each, given every one the window remembers of the pane's,
+/// oldest first.
+///
+/// What was sent and what became of it, and no more: the window knows the
+/// hook took an answer, never that the agent did as it said — a confined
+/// session drops a hook's allow — so the agent's next report is the truth
+/// about that, and nothing here claims it.
+pub(super) fn answered(ended: &[&Outcome], now: Instant) -> Vec<String> {
+    ended
+        .iter()
+        .rev()
+        .take(OUTCOMES)
+        .map(|outcome| {
+            let agent = outcome.agent.name();
+            let when = since(outcome.ended_at, now);
+            // Written out already, as the row's line is: see `ask::summary`.
+            let what = &outcome.summary;
+            let how = match outcome.how {
+                How::Answered(choice) => {
+                    let sent = match choice {
+                        Choice::Allow => format!("Allow sent to {agent}"),
+                        Choice::Deny => "Denied in Crook".to_owned(),
+                    };
+                    let after = if outcome.delivered {
+                        format!(", and {agent}'s hook took it")
+                    } else if outcome.lost {
+                        ", but the hook was gone before it could pass it on".to_owned()
+                    } else {
+                        String::new()
+                    };
+                    format!("{sent} {when}{after}")
+                }
+                How::Ended(cause) => format!("Not answered here: {} {when}", ended_by(cause)),
+            };
+            format!("{what} — {how}.")
+        })
+        .collect()
+}
+
+/// What ended a question nobody answered in Crook, as the panel says it.
+fn ended_by(cause: Cause) -> &'static str {
+    match cause {
+        Cause::AnsweredInAgent => "it was answered in the agent's own tab",
+        Cause::HookGone => "its hook stopped waiting",
+        Cause::Expired => "its time ran out",
+        Cause::PaneClosed => "its pane closed",
+        Cause::CommandEnded => "the agent's command ended",
+        Cause::TurnEnded => "the agent's turn ended",
+        Cause::AskedAgain => "a newer question replaced it",
+        Cause::WindowClosed => "the window closed",
+        Cause::AnsweringOff => "letting agents ask in Crook was turned off",
     }
 }
 

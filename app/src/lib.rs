@@ -1840,7 +1840,9 @@ OPTIONS:
                        print it as the hook\'s decision. Prints nothing, and
                        exits 0, whenever there is none — outside Crook, in
                        tmux, for `claude -p` or a subagent, and on Windows.
-                       Writes to no terminal, and no hook runs it yet
+                       Writes to no terminal. Claude Code runs it as its
+                       PermissionRequest hook, from Crook\'s plugin or
+                       `--agent-hooks claude`
     --agent-hooks <AGENT>
                        Print the hooks that make an agent say all of that by
                        itself, to merge into its settings: `claude` (Claude
@@ -4566,6 +4568,14 @@ impl WindowDelegate for Shell {
         // screen of them was printed in may have just closed, and then no
         // frame will draw one again to notice.
         inline_image::forget_the_gone();
+        // What the frame's paint learned and could not ask a frame for.
+        let workspace = &self.workspace;
+        if self
+            .app
+            .update(|ctx| workspace.update(ctx, |workspace, ctx| workspace.frame_drawn(ctx)))
+        {
+            self.proxy.request_redraw();
+        }
         if self.start_expected_terminals() {
             // The shells opened after a frame that had none: the next frame
             // is the first with a field to type into, and it is asked for
@@ -4652,13 +4662,14 @@ impl WindowDelegate for Shell {
             .read(|ctx| ctx.has_window_invalidations(self.window_id))
     }
 
-    /// The window took the keyboard, which the question a close asks has to
-    /// hear: the keys that follow may have been typed at another
-    /// application. See `workspace::closing`.
+    /// The window took the keyboard, which the question a close asks and the
+    /// card an agent's question is answered on have to hear: the keys that
+    /// follow may have been typed at another application. See
+    /// `workspace::closing` and `workspace::answering`.
     fn focused(&mut self) {
         let workspace = &self.workspace;
         self.app
-            .update(|ctx| workspace.update(ctx, |workspace, _| workspace.window_focused()));
+            .update(|ctx| workspace.update(ctx, |workspace, ctx| workspace.window_focused(ctx)));
     }
 }
 

@@ -471,6 +471,18 @@ impl Plugin for Tabs {
             },
         );
 
+        // The way to the card an agent's question is answered on: a gesture,
+        // and the only kind of thing that opens it. A question arriving puts
+        // nothing up and takes no focus. No chord of its own, by default: a
+        // chord pressed by habit is the gesture least like reading. The
+        // card's answers are not commands at all — see
+        // `workspace::answering`.
+        let answers = host.register_command(
+            action("answer-waiting"),
+            "Answer waiting agent",
+            |workspace, ctx| workspace.answer_waiting_agent(ctx),
+        );
+
         for color in TabColor::ALL.map(Some).into_iter().chain([None]) {
             let name = color.map_or("no-color".to_owned(), |color| {
                 format!("color-{}", color.name())
@@ -872,6 +884,26 @@ impl Plugin for Tabs {
                     workspace.tab_context_menu().is_explaining(),
                     WorkspaceAction::Run(explains),
                 ))
+            },
+        );
+        // Beside "Why this status", which says what the row's agent is
+        // asking, and only on a row whose agent's hook is waiting on a
+        // question: a row that offered to answer nothing would be a dead end
+        // on every other row.
+        host.contribute(
+            TAB_MENU_ENTRIES,
+            "answer-waiting",
+            3,
+            move |workspace, _| {
+                let (_, pane) = workspace.menu_target()?;
+                workspace.pane_is_asking(pane).then(|| {
+                    entry(
+                        workspace,
+                        "crook/tabs/answer-waiting",
+                        "Answer\u{2026}",
+                        WorkspaceAction::Run(answers),
+                    )
+                })
             },
         );
         contribute(host, "new-group-with-tab", 100, |workspace, _| {

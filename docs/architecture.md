@@ -1795,8 +1795,9 @@ of Stop. A StopFailure a subagent's turn ran, whose input carries an `agent_id`,
 the agent that started it is handed the error and works on. Nor does a needs-input take the
 place of a hook's failed with nothing run between — Claude Code's idle reminder a minute after
 the failed turn would otherwise wipe the error off the row — and nor does the same reminder sent
-down its notification channel as well, an OSC 9, 777 or 99. Not PermissionRequest, which Claude
-Code also runs in `claude -p` and for a background agent, where no dialog is drawn. Esc runs no
+down its notification channel as well, an OSC 9, 777 or 99. PermissionRequest reports no
+status: Claude Code also runs it in `claude -p` and for a background agent, where no dialog is
+drawn, and its hook is the one that asks the window instead — see "Answering an agent". Esc runs no
 hook at all, so there the title's `✳` takes a hook's running back, quietly: Claude Code draws
 the same `✳` the moment a permission dialog opens, six seconds before the notification that
 asks, so that idle asks for no look, posts no notice and answers no wait
@@ -1815,8 +1816,8 @@ of its own, `hooks/codex.json` or `hooks/copilot.json`, which is what that agent
 `--agent-hooks` prints. Without one, both run Claude Code's `hooks/hooks.json` under its event
 names: Codex has no Notification, so the plugin never said it had stopped for an approval, and
 those commands pass no `--session`, which would let Copilot's subagents rename the tab and end
-its turn. Claude Code reads `hooks/hooks.json` and nothing else, so neither file gives it the
-PermissionRequest it is kept out of. A hook runs in whatever `PATH` its agent was started
+its turn. Claude Code reads `hooks/hooks.json` and nothing else, so neither file gives it
+Codex's PermissionRequest, which says needs-input: its own runs the ask. A hook runs in whatever `PATH` its agent was started
 with, and a path written into the file goes stale — a moved Crook.app, a deleted build — while
 the file stays, so each calls `"$CROOK_BIN"`, the binary its pane names, and `crook` on `PATH`
 when a pane names none or the one it names has gone. Each is behind a guard that exits 0 unless
@@ -2500,14 +2501,17 @@ When Claude Code is about to ask a person whether it may run a command, it runs 
 `PermissionRequest` hook first, hands it the tool and the tool's input on stdin, and reads what
 the hook prints as the decision — or, when it prints nothing, goes on with the dialog it already
 has open. `crook --agent ask claude` is that hook. It hands the window the pane is in the whole
-request and waits on its connection for what a person says there. This is the first half: the
-window holds the question for as long as the hook waits, and shows it — on the row's second line
-while the pane needs input, and in "Why this status", in the terminal's family and wrapped at any
-character so that no line it shows is cut, the first twelve lines and 1,024 characters of it with
-what is left counted in words — and nothing in the window answers
-yet but with a pass. No hook entry runs it yet either. The card that answers, and the wiring, come
-next. The code is `app/src/agent/ask.rs` and `request.rs` on the hook's side and
-`app/src/control/ask.rs` on the window's.
+request and waits on its connection for what a person says there. The window holds the question
+for as long as the hook waits, and shows it — on the row's second line while the pane needs
+input, and in "Why this status", in the terminal's family and wrapped at any character so that no
+line it shows is cut, the first twelve lines and 1,024 characters of it with what is left counted
+in words — and a person who opens its card can answer it Allow once or Deny, while Claude Code's
+own dialog stays up beside it; whichever is answered first wins. Claude Code runs it as its
+`PermissionRequest` hook, from the plugin and from `crook --agent-hooks claude`, with a `timeout`
+of 330 seconds: Claude Code's timeout is the one that kills the hook, so it comes after the hook's
+own five minutes and a little more (`CLAUDE_ASKS` in `app/src/agent.rs`). The code is
+`app/src/agent/ask.rs` and `request.rs` on the hook's side, `app/src/control/ask.rs` on the
+window's, and `app/src/workspace/answering.rs` for the card.
 
 **Status stays on 6340.** The hook reports no status, and no status hook's command changes. The
 row still learns that Claude Code is asking from the notification hook and the title, exactly as
@@ -2555,8 +2559,11 @@ whose pane is working on another machine, is held and shown read-only. A read-on
 one the window cannot place, so it is counted apart from the answerable ones in the pane's four,
 never replaces an answerable one from the same session, comes after one in "Why this status", and
 is never the row's second line. A person who turns
-answering from Crook off (`answer_agents_from_crook`, on by default, with no switch on the page
-yet) has every question refused as `declined`, at once, before anything about the panes is said.
+answering from Crook off ("Let agents ask in Crook", under Tabs on Settings' Appearance page,
+`answer_agents_from_crook`, on by default) has every question refused as `declined`, at once,
+before anything about the panes is said — and every question the window already holds ended as a
+pass, `answering-off`, so the card up on one turns to say so and nothing held stays answerable;
+the press checks the switch again besides.
 
 **How a question ends.** A reader on the hook's half of the connection sees the hook go — Claude
 Code kills it once its dialog is answered No or Esc, or its parent dies — and tells the window
@@ -2605,6 +2612,35 @@ and every space but the plain one, as `⟨U+XXXX⟩`, so a
 command that hides `rm -rf ~` behind a carriage return or reorders itself with a right-to-left
 override shows the trick rather than doing it. A question's `Debug` prints the agent, the kind and
 a twelve-digit digest prefix.
+
+**The card.** A question arriving opens nothing and takes no focus. The card opens from a
+gesture only — the palette's "Answer waiting agent", which is the menu target's question, else the
+oldest the window holds, and a row menu's "Answer…", offered only on a row whose agent's hook is
+waiting — and it keeps the close question's rules (`workspace/closing.rs`): Not now is the filled
+default at the trailing edge, Escape, a press off it and Enter or Space on Not now close it
+answering nothing, and Allow, Deny and Go to tab — Go to too, since it hands the keyboard to a
+dialog whose own default is Yes — wait for the keyboard to have been still for a second after the
+card came up, its face changed or the window took the keyboard, with every key typed too soon or
+not the card's taken and the wait restarted; after Go to, the agent's tab is kept from the keyboard
+until it has been still that second too, so a held Enter does not repeat into the dialog. For the
+same second they are drawn with no handler,
+and one one-shot wait makes them live with mouse state of their own, so a press begun on an inert
+one cannot finish on a live one. A command longer than its twelve-line box, which builds only the
+lines on screen, keeps Allow inert until its last line has been shown. The focused pane hears no
+key while the card is up, ctrl-c included, and the close question beats the card: a close takes it
+down, and it does not open over one. Allow and Deny are typed actions only, never commands, names
+or answers the host knows, so no binding, palette row, `--action`, plugin, notification or socket
+reaches them. Every press carries the question's id and digest and is carried out in one place,
+`Workspace::answer_ask`, which checks again that the card is up on that question, the digest is
+the registry's, the question is held and answerable, the time gates have passed and an Allow's
+command was read to its end, and sends nothing otherwise. An answer sent closes the card, which
+never moves on to another question, and leaves the row's status alone: the agent's next report
+says what it did — a confined session drops a hook's allow. A deny's message is always "Denied in
+Crook by the person at the keyboard."; there is no "always", no change to the request and no
+interrupt. A question that ends under the card turns it to say Claude Code is no longer waiting
+on it and why, with only Go to tab and Close. "Why this status" says how the pane's last three
+questions ended — "Allow sent to Claude Code", "Denied in Crook", and whether the hook took it
+or was gone before it could pass it on.
 
 **What the hook prints.** One line Claude Code reads as its decision, or nothing, and it exits 0
 on every path, since a hook that fails can fail its agent. It opens and writes no terminal.

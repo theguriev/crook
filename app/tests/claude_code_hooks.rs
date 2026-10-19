@@ -35,6 +35,14 @@
 //! handed it after a Bash call, where the write that says `running` has to
 //! carry the question's done right behind it, with the fingerprint the
 //! window names that question by.
+//!
+//! One hook is held to the opposite everywhere: Claude Code's
+//! `PermissionRequest`, which asks the window rather than reporting to the
+//! pane. It never opens a terminal, so wherever the others report it writes
+//! nothing to the pty, prints nothing Claude Code would read as a decision,
+//! and exits 0 — with no window to ask, below an agent with no terminal,
+//! inside tmux, with the binary gone, and with an older binary that refuses
+//! `ask`.
 
 #![cfg(unix)]
 
@@ -87,6 +95,18 @@ const FAILURE: &str = r#"{"session_id": "test", "hook_event_name": "StopFailure"
 /// The same, for a subagent's turn: the subagent's `agent_id` and
 /// `agent_type`, which Claude Code puts in every hook it runs for one.
 const SUBAGENT_FAILURE: &str = r#"{"session_id": "test", "hook_event_name": "StopFailure", "agent_id": "a1b2c3", "agent_type": "general-purpose", "error": "overloaded", "last_assistant_message": "API Error: 529 Overloaded"}"#;
+
+/// What Claude Code 2.1.280 hands its PermissionRequest hook for a Bash
+/// command in an interactive session: the request the hook would ask the
+/// window about, had it a window to ask.
+const ASK_INPUT: &str = r#"{"session_id": "test", "transcript_path": "/home/someone/.claude/projects/p/test.jsonl", "cwd": "/home/someone/work", "permission_mode": "default", "hook_event_name": "PermissionRequest", "tool_name": "Bash", "tool_input": {"command": "touch probe", "description": "Create a file"}}"#;
+
+/// Whether `command` is the hook that asks the window rather than reporting
+/// to the pane: Claude Code's `PermissionRequest`. Codex's hook for its
+/// `PermissionRequest` is a report, so it is told apart by what it runs.
+fn asks(command: &str) -> bool {
+    command.contains("--agent ask ")
+}
 
 /// How long one hook is given before the test calls it a failure rather than
 /// hanging the suite.
@@ -400,6 +420,12 @@ fn run_as_a_hook_in(command: &str, agent: Agent, place: Pane, input: &str) -> Ra
         // started here would hand on to its panes and the hooks' guard would
         // let them through on, as though the server had been started in one.
         ("CROOK_PANE_ID", ""),
+        // Nor the window of that pane, which the permission hook would ask.
+        // And the session an interactive Claude Code says it is, so that
+        // the hook goes as far as it can before finding no window, rather
+        // than passing at the first rule, as it would for `claude -p`.
+        ("CROOK_SOCKET", ""),
+        ("CLAUDE_CODE_ENTRYPOINT", "cli"),
     ];
     let script = Program::command("/bin/sh", ["-c", SCRIPT]);
     let program = match place {
@@ -580,6 +606,43 @@ fn assert_reaches_nothing_from_a_detached_agent_in(event: &str, command: &str, p
     );
 }
 
+/// Asserts that the permission hook `command`, run with its agent where
+/// `agent` and `place` say, wrote nothing to the pty, printed nothing Claude
+/// Code would read as a decision, said nothing on stderr and exited 0.
+fn assert_asks_nothing(event: &str, command: &str, agent: Agent, place: Pane) {
+    let ran = run_as_a_hook_in(command, agent, place, ASK_INPUT);
+    assert_eq!(
+        "detached\n", ran.probe,
+        "{event}: a hook here has to be where Claude Code puts one, with no terminal of its own"
+    );
+    assert_quiet(event, &ran, place);
+    assert_eq!("", ran.stderr, "{event} said something");
+}
+
+/// Asserts that a run of the permission hook left the pty as the script
+/// alone left it, printed nothing and exited 0.
+fn assert_quiet(event: &str, ran: &Ran, place: Pane) {
+    assert!(
+        !ran.pane.contains("6340"),
+        "{event}: the permission hook wrote to the pane: {:?}",
+        ran.pane
+    );
+    // tmux draws a screen of its own on the pty; with nothing between, the
+    // script's last line is all the pty may carry.
+    if let Pane::Plain = place {
+        assert_eq!(
+            DONE,
+            ran.pane.trim(),
+            "{event}: the permission hook wrote to the pane"
+        );
+    }
+    assert_eq!("0\n", ran.status, "{event} failed: {}", ran.stderr);
+    assert_eq!(
+        "", ran.stdout,
+        "{event} printed what Claude Code would read as a decision"
+    );
+}
+
 #[test]
 fn every_plugin_hook_reaches_the_pane_from_a_session_with_no_terminal() {
     if !perl_is_here() {
@@ -592,7 +655,11 @@ fn every_plugin_hook_reaches_the_pane_from_a_session_with_no_terminal() {
         let command = groups[0]["hooks"][0]["command"]
             .as_str()
             .expect("a hook has a command");
-        assert_reaches_the_pane(event, command);
+        if asks(command) {
+            assert_asks_nothing(event, command, Agent::OnThePane, Pane::Plain);
+        } else {
+            assert_reaches_the_pane(event, command);
+        }
     }
 }
 
@@ -634,7 +701,11 @@ fn the_hooks_merged_by_hand_reach_the_pane_from_a_session_with_no_terminal() {
     }
     for agent in AGENTS_WITH_HOOKS {
         for (event, command) in printed_hooks(agent, CROOK) {
-            assert_reaches_the_pane(&event, &command);
+            if asks(&command) {
+                assert_asks_nothing(&event, &command, Agent::OnThePane, Pane::Plain);
+            } else {
+                assert_reaches_the_pane(&event, &command);
+            }
         }
     }
 }
@@ -649,7 +720,11 @@ fn no_hook_merged_by_hand_fails_its_agent_when_the_agent_has_no_terminal() {
     }
     for agent in AGENTS_WITH_HOOKS {
         for (event, command) in printed_hooks(agent, CROOK) {
-            assert_reaches_nothing_from_a_detached_agent(&event, &command);
+            if asks(&command) {
+                assert_asks_nothing(&event, &command, Agent::Detached, Pane::Plain);
+            } else {
+                assert_reaches_nothing_from_a_detached_agent(&event, &command);
+            }
         }
     }
 }
@@ -683,6 +758,84 @@ fn no_hook_merged_by_hand_fails_its_agent_once_crook_is_gone() {
     }
 }
 
+/// Waits, for a minute at most, until the script just written at `path`
+/// can be run.
+///
+/// The other tests here start processes all the while, and a child forked
+/// while the script was still open for writing holds that descriptor until
+/// it execs; until then the kernel refuses to run the file, `ETXTBSY`, and
+/// the hook's `|| exit 0` would pass for that rather than for the refusal
+/// the stand-in makes.
+fn wait_until_it_runs(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let ran = crook::process::command(&path.to_string_lossy())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        match ran {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("{} would not run: {error}", path.display()),
+            Ok(_) => return,
+        }
+    }
+}
+
+#[test]
+fn the_permission_hook_asks_nothing_once_crook_is_gone() {
+    // The plugin tracks `main`, and so outlives the binary the way a hook
+    // merged by hand does.
+    if !perl_is_here() {
+        return;
+    }
+    let command = with_crook_gone(&plugin_hook("PermissionRequest"));
+    assert_asks_nothing("PermissionRequest", &command, Agent::OnThePane, Pane::Plain);
+}
+
+#[test]
+fn the_permission_hook_asks_nothing_of_a_crook_that_cannot_ask() {
+    // A plugin newer than the binary: a Crook from before `--agent ask`
+    // takes `ask` for a status, refuses it on stderr and exits 1 before it
+    // reads stdin or opens a terminal. The hook must pass, not fail, or
+    // Claude Code would show the failure on every dialog.
+    if !perl_is_here() {
+        return;
+    }
+    let scratch = Scratch::new();
+    let older = scratch.0.join("crook-older");
+    fs::write(
+        &older,
+        "#!/bin/sh\n\
+         echo 'crook: `--agent` takes one of idle, running, needs-input, failed, not ask' >&2\n\
+         exit 1\n",
+    )
+    .expect("the stand-in should be writable");
+    let mut permissions = fs::metadata(&older)
+        .expect("the stand-in was written")
+        .permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    fs::set_permissions(&older, permissions).expect("the stand-in should be runnable");
+    wait_until_it_runs(&older);
+    let command = format!(
+        "CROOK_BIN='{}'; {}",
+        older.display(),
+        plugin_hook("PermissionRequest")
+    );
+    let ran = run_as_a_hook_given(&command, Agent::OnThePane, ASK_INPUT);
+    assert!(
+        ran.stderr.contains("not ask"),
+        "the older binary did not run: {:?}",
+        ran.stderr
+    );
+    assert_quiet("PermissionRequest", &ran, Pane::Plain);
+}
+
 #[test]
 fn no_plugin_hook_of_an_agent_with_no_terminal_reports_on_the_pane_above_it() {
     if !perl_is_here() {
@@ -695,7 +848,11 @@ fn no_plugin_hook_of_an_agent_with_no_terminal_reports_on_the_pane_above_it() {
         let command = groups[0]["hooks"][0]["command"]
             .as_str()
             .expect("a hook has a command");
-        assert_reaches_nothing_from_a_detached_agent(event, command);
+        if asks(command) {
+            assert_asks_nothing(event, command, Agent::Detached, Pane::Plain);
+        } else {
+            assert_reaches_nothing_from_a_detached_agent(event, command);
+        }
     }
 }
 
@@ -734,7 +891,11 @@ fn every_plugin_hook_reaches_the_pane_from_inside_tmux_in_it() {
         let Some(tmux) = Tmux::new("") else {
             return;
         };
-        assert_reaches_the_pane_from(&event, &command, Pane::Tmux(&tmux));
+        if asks(&command) {
+            assert_asks_nothing(&event, &command, Agent::OnThePane, Pane::Tmux(&tmux));
+        } else {
+            assert_reaches_the_pane_from(&event, &command, Pane::Tmux(&tmux));
+        }
     }
 }
 
@@ -772,7 +933,11 @@ fn no_plugin_hook_of_an_agent_with_no_terminal_inside_tmux_reports_on_the_pane()
         let Some(tmux) = Tmux::new("") else {
             return;
         };
-        assert_reaches_nothing_from_a_detached_agent_in(&event, &command, Pane::Tmux(&tmux));
+        if asks(&command) {
+            assert_asks_nothing(&event, &command, Agent::Detached, Pane::Tmux(&tmux));
+        } else {
+            assert_reaches_nothing_from_a_detached_agent_in(&event, &command, Pane::Tmux(&tmux));
+        }
     }
 }
 

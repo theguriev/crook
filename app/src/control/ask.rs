@@ -5,10 +5,11 @@
 //! claude`, see [`crate::agent::ask`] — hands the window the whole request
 //! and waits on its connection for an answer. This is the window's side: the
 //! questions held, which pane each belongs to, and what happened to each.
-//! Nothing here answers one. An answer is a person's press on a card the
-//! window draws, which is the next piece of work; until then every question
-//! ends with a pass, and the agent's own prompt — open beside the question
-//! the whole time — is the one a person answers.
+//! Nothing here answers one by itself. An answer is a person's press on the
+//! card the window draws — see `workspace::answering` — handed to
+//! [`Asks::deliver`]; every other way a question ends is a pass, and the
+//! agent's own prompt, open beside the question the whole time, is still
+//! the one a person can answer instead.
 //!
 //! # Which pane
 //!
@@ -65,9 +66,9 @@ use crook_terminal::agent::Fingerprint;
 use crookui_core::prelude::*;
 use serde_json::Value;
 
-use super::protocol::{AgentAsk, Answered, Asker, AskingAgent, Refusal, Registered, code};
-#[cfg(test)]
-use super::protocol::{Decision, Verdict};
+use super::protocol::{
+    AgentAsk, Answered, Asker, AskingAgent, Decision, Refusal, Registered, Verdict, code,
+};
 use super::watch::Feed;
 use super::{Inbox, Notice};
 use crate::agent::request::{self, AskRequest};
@@ -91,7 +92,6 @@ pub const HISTORY: usize = 64;
 pub const SUMMARY_CHARS: usize = 120;
 
 /// What a deny tells the agent: who said no, and where.
-#[cfg(test)]
 pub const DENIED: &str = "Denied in Crook by the person at the keyboard.";
 
 /// A question's number in this window: counted up from one, never handed to
@@ -168,6 +168,8 @@ pub enum Cause {
     AnsweredInAgent,
     /// The window closed.
     WindowClosed,
+    /// Answering agents from Crook was turned off while it waited.
+    AnsweringOff,
 }
 
 impl Cause {
@@ -182,6 +184,7 @@ impl Cause {
             Self::AskedAgain => "asked-again",
             Self::AnsweredInAgent => "answered-in-agent",
             Self::WindowClosed => "window-closed",
+            Self::AnsweringOff => "answering-off",
         }
     }
 
@@ -197,12 +200,12 @@ impl Cause {
             Self::AskedAgain => format!("{} asked again", agent.name()),
             Self::AnsweredInAgent => format!("answered in {}", agent.name()),
             Self::WindowClosed => "the window closed".to_owned(),
+            Self::AnsweringOff => "answering in Crook was turned off".to_owned(),
         }
     }
 }
 
 /// What a person can answer a question with.
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Choice {
     /// Run it, this once.
@@ -212,7 +215,6 @@ pub enum Choice {
 }
 
 /// What became of an answer handed to [`Asks::deliver`].
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Delivery {
     /// The hook's connection took it.
@@ -231,7 +233,6 @@ pub enum Delivery {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum How {
     /// A person answered it.
-    #[cfg(test)]
     Answered(Choice),
     /// It ended without an answer.
     Ended(Cause),
@@ -241,9 +242,7 @@ impl How {
     /// The word the log says.
     pub fn word(self) -> &'static str {
         match self {
-            #[cfg(test)]
             Self::Answered(Choice::Allow) => "allowed",
-            #[cfg(test)]
             Self::Answered(Choice::Deny) => "denied",
             Self::Ended(cause) => cause.word(),
         }
@@ -258,6 +257,8 @@ pub struct Ask {
     pub agent: AskingAgent,
     /// The agent's session.
     pub session: String,
+    /// Where the agent works.
+    pub cwd: String,
     /// What it asks to do, whole.
     pub request: AskRequest,
     /// What it asks in one line: see [`summary`].
@@ -292,6 +293,8 @@ impl Ask {
 pub struct Outcome {
     /// Its number.
     pub id: AskId,
+    /// The pane it was asked in.
+    pub pane: PaneId,
     /// When the window took it.
     pub asked_at: Instant,
     /// When it ended.
@@ -308,6 +311,9 @@ pub struct Outcome {
     pub how: How,
     /// Whether the hook said it printed the answer it was given.
     pub delivered: bool,
+    /// Whether the hook left without saying so: gone, or going, before it
+    /// could pass the answer on.
+    pub lost: bool,
 }
 
 /// What the window found out about a question before holding it, for
@@ -382,9 +388,19 @@ impl Asks {
     }
 
     /// How the questions that have ended went, oldest first.
-    #[cfg(test)]
     pub fn history(&self) -> impl Iterator<Item = &Outcome> {
         self.history.iter()
+    }
+
+    /// The question held as `id`, while its hook is still waiting on it.
+    pub fn get(&self, id: AskId) -> Option<&Ask> {
+        self.live().find(|ask| ask.id == id)
+    }
+
+    /// How the question held as `id` ended, once it has and while the window
+    /// remembers it.
+    pub fn outcome(&self, id: AskId) -> Option<&Outcome> {
+        self.history.iter().rev().find(|ended| ended.id == id)
     }
 
     /// Holds `asked`, in the pane `found` names, answering into `feed`.
@@ -451,6 +467,7 @@ impl Asks {
         let AgentAsk {
             agent,
             session,
+            cwd,
             request,
             ..
         } = asked;
@@ -461,6 +478,7 @@ impl Asks {
             fingerprint: request::fingerprint(&digest),
             digest,
             session,
+            cwd,
             request,
             pane: found.pane,
             cannot_answer: found.cannot_answer,
@@ -496,6 +514,14 @@ impl Asks {
             .filter(|ask| ask.pane == pane)
             .map(|ask| ask.id)
             .collect();
+        for id in ids {
+            self.end(id, cause);
+        }
+    }
+
+    /// Ends every question held, for `cause`.
+    pub fn end_all(&mut self, cause: Cause) {
+        let ids: Vec<AskId> = self.live.iter().map(|ask| ask.id).collect();
         for id in ids {
             self.end(id, cause);
         }
@@ -543,7 +569,6 @@ impl Asks {
     /// The answer is pushed into the question's feed under the lock its
     /// expiry is decided under, so it either reaches the hook's connection or
     /// is [`Delivery::TooLate`]: never taken and lost.
-    #[cfg(test)]
     pub fn deliver(&mut self, id: AskId, digest: &[u8; 32], choice: Choice) -> Delivery {
         let Some(index) = self.live.iter().position(|ask| ask.id == id) else {
             return Delivery::TooLate;
@@ -616,6 +641,13 @@ impl Asks {
             }
             Notice::Withdrawn(id) => self.end(id, Cause::HookGone),
             Notice::Expired(id) => self.end(id, Cause::Expired),
+            Notice::Undelivered(id) => {
+                if let Some(outcome) = self.history.iter_mut().rev().find(|ended| ended.id == id)
+                    && matches!(outcome.how, How::Answered(_))
+                {
+                    outcome.lost = true;
+                }
+            }
         }
     }
 
@@ -629,6 +661,7 @@ impl Asks {
         }
         self.history.push_back(Outcome {
             id: ask.id,
+            pane: ask.pane,
             asked_at: ask.asked_at,
             ended_at: now,
             tab_title: ask.tab_title,
@@ -637,6 +670,7 @@ impl Asks {
             summary: ask.summary,
             how,
             delivered: false,
+            lost: false,
         });
     }
 }
@@ -765,7 +799,7 @@ pub fn register(
     let id = workspace
         .asks_mut()
         .add(asked, found, feed, Instant::now())?;
-    ctx.notify();
+    workspace.asks_changed(ctx);
     Ok(encode(&Registered { asked: id.0 }))
 }
 
@@ -775,7 +809,7 @@ pub fn heard(workspace: &mut Workspace, notices: &[Notice], ctx: &mut ViewContex
     for notice in notices {
         workspace.asks_mut().heard(*notice);
     }
-    ctx.notify();
+    workspace.asks_changed(ctx);
 }
 
 /// Encodes something the wire carries.

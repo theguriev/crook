@@ -35,8 +35,8 @@ Each agent reads a manifest of its own here, and the manifest says which hooks a
 
 Without a manifest of its own, Codex or Copilot reads Claude Code's and runs `hooks/hooks.json`
 under Claude Code's event names: running and idle, but no approval from Codex and no session from
-Copilot. Claude Code reads only its own file, so the `PermissionRequest` it is kept out of stays
-out of it.
+Copilot. Claude Code reads only its own file, so Codex's `PermissionRequest`, which says
+needs-input, stays out of it.
 
 Every command calls `"$CROOK_BIN"` (the binary every pane is told it belongs to, or `crook` on
 `PATH` when a pane has none) and exits 0 without a word unless `TERM_PROGRAM` is `Crook` or
@@ -48,6 +48,20 @@ than a notice on every prompt and tool call, and never the reason Copilot refuse
 as it does when a `preToolUse` hook fails. The agents run each hook with no terminal of its own,
 and `crook --agent` reaches the pane through the terminal of the program that ran it, which
 needs a Crook newer than 0.1.13.
+
+One of Claude Code's hooks waits rather than reports: `PermissionRequest`, which Claude Code runs
+as it opens a permission dialog, runs `crook --agent ask claude` with a `timeout` of 330 seconds.
+For a Bash command it hands the Crook window the pane is in the whole command, and holds for up
+to five minutes while a person may open a card for it there — from the palette's "Answer waiting
+agent" or the tab menu's "Answer…" — and press Allow once or Deny. Claude Code's own dialog stays
+up the whole time, and whichever is answered first wins: Claude Code drops a later answer. Deny
+tells Claude "Denied in Crook by the person at the keyboard."; there is no "always allow", and
+the hook never changes the command or writes a permission rule. It reports no status, and passes
+at once, printing nothing, wherever nobody could be asked in Crook: under `claude -p` (unless
+`CLAUDE_CODE_ENTRYPOINT` is exactly `cli`), for a subagent, inside tmux, screen or zellij,
+outside a Crook pane, with "Let agents ask in Crook" turned off in Crook's settings, and on
+Windows. It needs Claude Code 2.1.280 or newer, and a Crook that knows `--agent ask`; an older
+one refuses it before reading anything, and the hook passes.
 
 `skills/crook/SKILL.md` is the skill `crook --skill` prints, and all three load it.
 
@@ -61,7 +75,10 @@ process on a pty, and fails unless the report arrives on that pty — and once m
 with no terminal, the way `claude -p` is when another agent runs it, and fails if anything
 arrives. Where tmux is installed it runs them again with the agent inside tmux on that pty, which
 keeps the sequence to itself unless `crook --agent` goes round it, and once with a second tmux
-client whose terminal nobody reads, which must not hold the hook. The commands
+client whose terminal nobody reads, which must not hold the hook. Claude Code's
+`PermissionRequest` hook is held to the opposite there: it writes nothing to the pty and prints
+nothing in every one of those places, with the binary gone, and with an older binary that
+refuses `ask`. The commands
 `--agent-hooks codex` and `copilot` print are run the same way, and once more with the binary
 gone.
 

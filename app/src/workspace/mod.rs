@@ -24,6 +24,7 @@
 //! lets the tab model stay a thing that can be tested with no window.
 
 mod action;
+mod answering;
 mod block_list;
 pub(crate) mod block_menu;
 mod body;
@@ -60,6 +61,8 @@ mod tests;
 
 use crate::theme::theme;
 
+#[cfg(all(test, unix))]
+pub use action::{AskAction, Pressed};
 #[cfg(test)]
 pub use action::{BlockAction, ChangesAction, EndingAction, EndingButton};
 pub use action::{
