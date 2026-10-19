@@ -184,6 +184,7 @@ impl ControlLayout {
 
 /// What the header must leave free on this platform, for a window with this
 /// chrome.
+#[cfg(test)]
 pub fn window_control_insets(chrome: WindowChrome, fullscreen: bool) -> WindowControlInsets {
     ControlLayout::host().insets(chrome, fullscreen)
 }
@@ -197,6 +198,7 @@ pub fn window_control_insets(chrome: WindowChrome, fullscreen: bool) -> WindowCo
 /// two calls itself — [`ControlLayout::insets`] then
 /// [`WindowControlInsets::split`] — because `--controls` lets it be asked
 /// about a platform that is not this one.
+#[cfg(test)]
 pub fn layout_insets(chrome: WindowChrome, fullscreen: bool) -> LayoutInsets {
     window_control_insets(chrome, fullscreen).split()
 }

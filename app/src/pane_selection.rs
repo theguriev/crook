@@ -189,11 +189,13 @@ impl PaneSelection {
     /// Whichever space it was made in, so this is for the caller that is about
     /// to resolve it in that space. Anything painting or copying against one
     /// surface asks [`Self::selection_in`] instead.
+    #[cfg(test)]
     pub fn selection(&self) -> Option<Selection> {
         self.0.borrow().selected
     }
 
     /// The space its rows are numbered in.
+    #[cfg(test)]
     pub fn cells(&self) -> Cells {
         self.0.borrow().cells
     }

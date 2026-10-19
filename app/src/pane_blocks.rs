@@ -321,6 +321,7 @@ impl PaneBlocks {
     }
 
     /// Where the list is scrolled to, as a mode.
+    #[cfg(test)]
     pub fn position(&self) -> ScrollPosition {
         self.0.borrow().position
     }

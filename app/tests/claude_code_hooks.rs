@@ -592,7 +592,7 @@ fn every_plugin_hook_reaches_the_pane_from_a_session_with_no_terminal() {
 /// the agent and the event it is for: under `command` in a matcher group for
 /// Claude Code, Codex and Gemini CLI, under `bash` for Copilot CLI.
 fn printed_hooks(agent: &str, binary: &str) -> Vec<(String, String)> {
-    let printed = crook::agent::hooks_text(agent, Path::new(binary))
+    let printed = crook::hooks_text(agent, Path::new(binary))
         .unwrap_or_else(|error| panic!("{agent} has no hooks: {error}"));
     let fragment: Value = serde_json::from_str(&printed.text)
         .unwrap_or_else(|error| panic!("{agent}'s fragment is not JSON: {error}"));

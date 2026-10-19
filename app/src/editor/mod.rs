@@ -197,12 +197,14 @@ impl Editor {
     /// How many lines the text occupies. Always at least one, and one more
     /// than the number of newlines — a trailing newline opens a line that the
     /// caret can sit on.
+    #[cfg(test)]
     pub fn line_count(&self) -> usize {
         self.text.matches('\n').count() + 1
     }
 
     /// The caret as a zero-based line and grapheme column, which is what a
     /// renderer needs to put a bar on screen.
+    #[cfg(test)]
     pub fn caret_line_column(&self) -> (usize, usize) {
         let caret = self.selection.head;
         (
@@ -214,6 +216,7 @@ impl Editor {
     /// The offset at a zero-based line and grapheme column, clamped into the
     /// text: what a click resolves to once the renderer has turned a point
     /// into a row and a column.
+    #[cfg(test)]
     pub fn offset_at(&self, line: usize, column: usize) -> usize {
         let start = if line == 0 {
             0
@@ -227,6 +230,7 @@ impl Editor {
     }
 
     /// The lines submitted this session, oldest first.
+    #[cfg(test)]
     pub fn history(&self) -> &[String] {
         self.history.entries()
     }

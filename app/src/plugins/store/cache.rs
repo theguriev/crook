@@ -64,6 +64,7 @@ impl Cache {
     }
 
     /// One at a named directory, which is what the tests use.
+    #[cfg(test)]
     pub fn at(directory: impl Into<PathBuf>) -> Self {
         Self {
             directory: directory.into(),

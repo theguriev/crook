@@ -55,7 +55,7 @@ use crate::plugins::tabs::{TAB_ROW_BADGE, TabRow};
 use crate::tab::AgentStatus;
 use crate::workspace::{BlockMenuState, Workspace, WorkspaceAction, block_menu};
 
-pub use install::{home, install, module, module_in, uninstall, uninstall_from, write};
+pub use install::{install, module_in, uninstall, uninstall_from, write};
 use picker::Held;
 use render::Placement;
 use runtime::{Gesture, Runtime};

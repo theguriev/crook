@@ -139,7 +139,6 @@ use crate::selection::{Anchor, Blocks, Cells, Item, Region, Selection, grid_firs
 use crate::tab::PaneId;
 use crate::terminal_font::{CellFont, CellMetrics};
 use crate::terminal_model::TerminalHandle;
-use crate::text_input::TextInput;
 use crate::theme::theme;
 
 use super::action::WorkspaceAction;
@@ -368,13 +367,6 @@ impl TerminalElement {
     /// drawn filled only while it does. See [`Output::draws_focus`].
     pub fn with_window_focused(mut self, focused: bool) -> Self {
         self.output = self.output.with_window_focused(focused);
-        self
-    }
-
-    /// Attaches the field under this grid, whose line decides what Ctrl-D
-    /// means.
-    pub fn with_input(mut self, input: TextInput) -> Self {
-        self.output = self.output.with_input(input);
         self
     }
 

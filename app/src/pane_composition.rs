@@ -57,11 +57,6 @@ pub struct Preedit {
 }
 
 impl Preedit {
-    /// The string being composed.
-    pub fn text(&self) -> &str {
-        &self.text
-    }
-
     /// The range the input method's caret or selection covers, in bytes, when
     /// it asked for one to be drawn.
     pub fn cursor(&self) -> Option<(usize, usize)> {

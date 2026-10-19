@@ -778,6 +778,7 @@ impl TerminalModel {
     }
 
     /// Whether shells are being opened at all.
+    #[cfg(test)]
     pub fn is_live(&self) -> bool {
         self.live
     }
@@ -822,6 +823,7 @@ impl TerminalModel {
     ///
     /// Only shells opened *after* this: the integration is installed when a
     /// shell starts and cannot be taken out of one that is already running.
+    #[cfg(test)]
     pub fn set_shell_marks(&mut self, enabled: bool) {
         self.shell_marks = enabled;
     }
@@ -846,6 +848,7 @@ impl TerminalModel {
     }
 
     /// Whether the next shell opened will be a login shell.
+    #[cfg(test)]
     pub fn shell_login(&self) -> bool {
         self.shell_login
     }
@@ -1108,6 +1111,7 @@ impl TerminalModel {
     ///
     /// Queued for the session's writer, so this works before the shell has
     /// finished starting: what is sent now is read when it gets there.
+    #[cfg(test)]
     pub fn type_into(&self, pane: PaneId, text: &str) {
         let Some(session) = self.sessions.get(&pane) else {
             log::warn!("nothing to type into: pane {pane:?} has no terminal");

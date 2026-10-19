@@ -179,6 +179,7 @@ pub struct Offer {
 
 impl Offer {
     /// Whether this build can install it at all.
+    #[cfg(test)]
     pub fn installable(&self) -> bool {
         self.release.is_some()
     }

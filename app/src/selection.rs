@@ -323,6 +323,7 @@ impl Region {
     /// by the terminal, not broken by the shell, so the two come back as the
     /// one line they are. And the blanks at the end of a row are the rest of a
     /// grid rather than anything anybody typed, so they stay behind.
+    #[cfg(any(test, doc))]
     pub fn text(&self, blocks: &Blocks<'_>) -> Option<String> {
         self.text_with(blocks, None)
     }
@@ -567,11 +568,6 @@ impl<'a> Blocks<'a> {
         }
     }
 
-    /// Whether there is nothing to select at all.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     /// One block by its position in the list.
     pub fn item(&self, index: usize) -> Option<Item<'a>> {
         match self {
@@ -642,6 +638,7 @@ impl<'a> Blocks<'a> {
     /// `grep` for `error` finds `Error`, and `ошибка` finds `Ошибка` — one
     /// character for one: see [`fold`]. Found one logical line at a time,
     /// folds and all, and never across two: see the module docs.
+    #[cfg(any(test, doc))]
     pub fn find_all(&self, needle: &str) -> Vec<Selection> {
         self.find_all_with(needle, FindOptions::default())
             .unwrap_or_default()
