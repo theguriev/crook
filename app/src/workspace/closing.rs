@@ -165,7 +165,7 @@ const NAMED: usize = 3;
 /// somebody who meant it is a Tab pressed inside that second doing nothing;
 /// the card says how many are working and names them, and that is worth the
 /// second it takes to read.
-const SETTLE: Duration = Duration::from_secs(1);
+pub(super) const SETTLE: Duration = Duration::from_secs(1);
 
 /// What a close that stopped to ask is waiting to do.
 #[derive(Copy, Clone, Debug, PartialEq)]

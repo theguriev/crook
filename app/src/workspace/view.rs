@@ -1,6 +1,6 @@
 //! [`Workspace`]: the state behind the window, and the one place it changes.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -73,10 +73,11 @@ use crate::window_controls::WindowHandle;
 use crate::{Channel, WINDOW_CHROME};
 
 use super::action::{
-    BlockAction, BlockEdge, BlockPart, ChangesAction, CrashNoteAction, CreatorField, EndingAction,
-    FindAction, OptionsAction, SearchAction, SettingsAction, Subject, TabMenuAction, ThemeAction,
-    WindowAction, WorkspaceAction, WorktreeAction,
+    AskAction, BlockAction, BlockEdge, BlockPart, ChangesAction, CrashNoteAction, CreatorField,
+    EndingAction, FindAction, OptionsAction, SearchAction, SettingsAction, Subject, TabMenuAction,
+    ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
 };
+use super::answering::{self, AskCard, Withdrawn};
 use super::block_list::block_text;
 use super::changes_panel::{ChangesPanelState, Editor, HunkRead};
 use super::closed::{Closed, Taking};
@@ -1215,6 +1216,16 @@ pub struct Workspace {
     /// showing in it, and a close from the palette, a chord or a row's × all
     /// wait on the same card.
     closing: Option<Question>,
+    /// The card an agent's question is answered on, while it is up. See
+    /// [`answering`].
+    ///
+    /// Beside the close question, which beats it: a close takes it down, and
+    /// it does not open over one.
+    ask_card: Option<AskCard>,
+    /// Until when the keys are kept from the pane Go to tab just focused:
+    /// [`closing::SETTLE`] after the card's Go to, and after every key that
+    /// came before then. See [`Self::go_to_asking_tab`].
+    keys_held_after_go_to: Cell<Option<Instant>>,
 }
 
 impl Workspace {
@@ -1437,6 +1448,8 @@ impl Workspace {
             window,
             control_layout: ControlLayout::host(),
             closing: None,
+            ask_card: None,
+            keys_held_after_go_to: Cell::new(None),
         };
         workspace.sync_interactions();
         workspace.sync_git(ctx);
@@ -2675,6 +2688,7 @@ impl Workspace {
             .with("blockMenuOpen", self.block_menu.is_open())
             .with("worktreeMenuOpen", self.tab_menu.is_open())
             .with("optionsMenuOpen", self.menu.open)
+            .with("askCardOpen", self.ask_card.is_some())
     }
 
     /// The block the keyboard is standing on in the focused pane, if it has
@@ -2927,11 +2941,281 @@ impl Workspace {
             || self.block_menu.is_open()
             || self.host.a_surface_is_up()
             || self.closing.is_some()
+            || self.ask_card.is_some()
     }
 
     /// The question a close is waiting on, if one is.
     pub(super) fn closing_question(&self) -> Option<&Question> {
         self.closing.as_ref()
+    }
+
+    /// The card an agent's question is answered on, while it is up.
+    pub(super) fn ask_card(&self) -> Option<&AskCard> {
+        self.ask_card.as_ref()
+    }
+
+    /// Lets the keyboard and the pointer reach the card's buttons, as a
+    /// second of it lying still would, and draws it so.
+    #[cfg(test)]
+    pub(crate) fn settle_the_ask_card(&mut self, ctx: &mut ViewContext<Self>) {
+        if let Some(card) = self.ask_card.as_mut() {
+            card.settle();
+            ctx.notify();
+        }
+    }
+
+    /// Says the card's command has been read to its end, for a window with
+    /// no frame to lay it out in.
+    #[cfg(all(test, unix))]
+    pub(crate) fn read_the_ask_card_to_its_end(&self) {
+        if let Some(card) = self.ask_card.as_ref() {
+            card.read_to_its_end();
+        }
+    }
+
+    /// Whether a pane holds a question its agent's hook is waiting on: what
+    /// a row's "Answer…" is offered for.
+    pub(crate) fn pane_is_asking(&self, pane: PaneId) -> bool {
+        self.asks.in_pane(pane).is_some()
+    }
+
+    /// Puts up the card for the question the tab menu's row — or, with no
+    /// menu up, the focused pane — is asking, else for the oldest question
+    /// the window holds, else nothing. What "Answer waiting agent" and a
+    /// row's "Answer…" do; never what a question arriving does.
+    pub(crate) fn answer_waiting_agent(&mut self, ctx: &mut ViewContext<Self>) {
+        let asked = self
+            .menu_target()
+            .and_then(|(_, pane)| self.asks.in_pane(pane))
+            .or_else(|| {
+                // The oldest the window could answer, else the oldest it can
+                // only show: a stranger's question never stands in front of
+                // an agent's own.
+                let mut live: Vec<_> = self.asks.live().collect();
+                live.sort_by_key(|ask| (ask.cannot_answer.is_some(), ask.id));
+                live.into_iter().next()
+            })
+            .map(|ask| ask.id);
+        self.close_tab_context_menu(ctx);
+        if let Some(asked) = asked {
+            self.open_ask_card(asked, ctx);
+        }
+    }
+
+    /// Puts up the card for question `asked`, while it is held.
+    ///
+    /// Not over the close question, which is about ending the agent that is
+    /// asking and has to be answered first. Two popups are never up at once,
+    /// so every menu and plugin panel goes, as for the close question.
+    fn open_ask_card(&mut self, asked: crate::control::ask::AskId, ctx: &mut ViewContext<Self>) {
+        if self.closing.is_some() {
+            return;
+        }
+        let Some(ask) = self.asks.get(asked) else {
+            return;
+        };
+        let card = AskCard::about(ask, Instant::now());
+        self.close_menu();
+        self.close_tab_context_menu(ctx);
+        self.close_tab_menu(ctx);
+        self.close_block_menu(ctx);
+        self.host.take_panels_down();
+        self.ask_card = Some(card);
+        self.hold_the_pointer(ctx);
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
+    /// Takes the card down, answering nothing.
+    fn close_ask_card(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.ask_card.take().is_some() {
+            self.sync_input_keys();
+            ctx.notify();
+        }
+    }
+
+    /// Makes the card's Allow, Deny and Go to wait out [`closing::SETTLE`]
+    /// for the pointer from now, and starts the one wait that makes them
+    /// live: one sleep on the pool, which comes home once and repaints, and
+    /// is let go of if the card has gone or is waiting on a later one.
+    fn hold_the_pointer(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(card) = self.ask_card.as_mut() else {
+            return;
+        };
+        let until = card.hold_the_pointer(Instant::now());
+        let waiting = ctx.background().spawn(async move {
+            std::thread::sleep(until.saturating_duration_since(Instant::now()));
+        });
+        ctx.spawn(waiting, move |workspace, (), ctx| {
+            if let Some(card) = workspace.ask_card.as_mut()
+                && card.free_the_pointer(until)
+            {
+                ctx.notify();
+            }
+        })
+        .detach();
+    }
+
+    /// Takes in that the questions the window holds have changed: one held,
+    /// or one ended by what its connection said.
+    ///
+    /// A question arriving puts nothing up and takes no focus — the card
+    /// opens only from a gesture — so all this does is redraw what shows
+    /// them, and turn a card up on a question that has just ended to say so.
+    /// A newer question from the same session ends the one before; the card
+    /// stays on what it showed, and never moves on to the new one.
+    pub(crate) fn asks_changed(&mut self, ctx: &mut ViewContext<Self>) {
+        self.withdraw_an_ended_ask_card(ctx);
+        ctx.notify();
+    }
+
+    /// Turns the card to say its question is over, when the window has
+    /// found it is: its hook gone, its time out, its pane closed, its turn
+    /// ended, or a newer one asked. Its buttons wait again, since what they
+    /// would do has changed under them.
+    fn withdraw_an_ended_ask_card(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(card) = self.ask_card.as_ref() else {
+            return;
+        };
+        if card.is_withdrawn() || self.asks.get(card.ask()).is_some() {
+            return;
+        }
+        let why = answering::ended(&self.asks, card.ask());
+        self.withdraw_ask_card(why, ctx);
+    }
+
+    /// Turns the card to the face of a question that is over, for `why`.
+    fn withdraw_ask_card(&mut self, why: Withdrawn, ctx: &mut ViewContext<Self>) {
+        let Some(card) = self.ask_card.as_mut() else {
+            return;
+        };
+        card.withdraw(why);
+        card.unsettle(Instant::now());
+        self.hold_the_pointer(ctx);
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
+    /// Takes in a press on the card, or a key it was asked about.
+    fn apply_ask_action(&mut self, action: AskAction, ctx: &mut ViewContext<Self>) {
+        match action {
+            AskAction::Choose(button) => {
+                if let Some(card) = self.ask_card.as_mut() {
+                    card.choose(button);
+                    ctx.notify();
+                }
+            }
+            // The wait it restarts was written down when the key was asked
+            // about, and nothing on the card changes.
+            AskAction::TooSoon => {}
+            AskAction::Scrolled => ctx.notify(),
+            AskAction::NotNow => self.close_ask_card(ctx),
+            AskAction::GoTo { ask, digest, by } => self.go_to_asking_tab(ask, digest, by, ctx),
+            AskAction::Answer {
+                ask,
+                digest,
+                decision,
+                by,
+            } => self.answer_ask(ask, digest, decision, by, ctx),
+        }
+    }
+
+    /// Whether a press `by` the keyboard or the pointer, on the card about
+    /// question `ask`, is one the card's time gates let through at `now`.
+    fn ask_card_lets_through(
+        &self,
+        ask: crate::control::ask::AskId,
+        by: super::action::Pressed,
+        now: Instant,
+    ) -> bool {
+        let Some(card) = self.ask_card.as_ref() else {
+            return false;
+        };
+        card.ask() == ask
+            && now >= card.pointer_live_at()
+            && match by {
+                super::action::Pressed::Keys => card.has_settled(now),
+                super::action::Pressed::Pointer => card.pointer_is_live(now),
+            }
+    }
+
+    /// Answers question `ask` with `decision`: **the one place an agent is
+    /// answered from.**
+    ///
+    /// Everything the card showed is looked at again, at the press: that the
+    /// card is up on this question, that `digest` is the question's own,
+    /// that it is still held with its hook waiting and is one this window may
+    /// answer, that the press came after the card's time gates, and, for
+    /// Allow, that the command was read to its end. Anything else sends
+    /// nothing and turns the card to say the request changed or ended.
+    ///
+    /// Sent, the card closes — and never moves on to another question — and
+    /// the row's status is left alone: the agent's next report says what it
+    /// did, which is more than a sent answer can. See [`answering`].
+    fn answer_ask(
+        &mut self,
+        ask: crate::control::ask::AskId,
+        digest: [u8; 32],
+        decision: crate::control::ask::Choice,
+        by: super::action::Pressed,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let now = Instant::now();
+        let Some(card) = self.ask_card.as_ref() else {
+            return;
+        };
+        let held = self.asks.get(ask).filter(|held| {
+            held.digest == digest && held.cannot_answer.is_none() && held.pane == card.pane()
+        });
+        let passes = held.is_some()
+            && card.digest() == digest
+            && !card.is_withdrawn()
+            && self.ask_card_lets_through(ask, by, now)
+            && (decision != crate::control::ask::Choice::Allow || card.body().read_to_end());
+        if !passes {
+            self.withdraw_ask_card(Withdrawn::Changed, ctx);
+            return;
+        }
+        match self.asks.deliver(ask, &digest, decision) {
+            crate::control::ask::Delivery::Delivered => self.close_ask_card(ctx),
+            crate::control::ask::Delivery::TooLate
+            | crate::control::ask::Delivery::Stale
+            | crate::control::ask::Delivery::ReadOnly => {
+                self.withdraw_ask_card(Withdrawn::Changed, ctx);
+            }
+        }
+    }
+
+    /// Goes to the tab question `ask` was asked in, the way "Next tab
+    /// waiting for you" goes to one, and takes the card down — once the
+    /// card's gates let it, since what it hands the keyboard to is the
+    /// agent's own dialog, whose default is Yes.
+    fn go_to_asking_tab(
+        &mut self,
+        ask: crate::control::ask::AskId,
+        digest: [u8; 32],
+        by: super::action::Pressed,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let now = Instant::now();
+        let Some(card) = self.ask_card.as_ref() else {
+            return;
+        };
+        let pane = card.pane();
+        if card.digest() != digest
+            || !self.ask_card_lets_through(ask, by, now)
+            || self.tabs.pane(pane).is_none()
+        {
+            return;
+        }
+        self.close_ask_card(ctx);
+        // The pane is the agent's, and its dialog is up with Yes as its
+        // default and a digit for each answer: the Enter that pressed Go to,
+        // held a moment too long, would repeat into it, and so would keys
+        // typed on. They are kept from it until the keyboard has been still.
+        self.keys_held_after_go_to.set(Some(now + closing::SETTLE));
+        self.handle_action(&WorkspaceAction::ShowSection(None), ctx);
+        self.handle_action(&WorkspaceAction::Tab(TabAction::FocusPane(pane)), ctx);
     }
 
     /// The window has just taken the keyboard.
@@ -2942,9 +3226,17 @@ impl Workspace {
     /// somebody's sentence in another application — so the question a close
     /// asks starts its wait before a key can reach End again. See
     /// [`closing`].
-    pub fn window_focused(&mut self) {
+    ///
+    /// The card an agent's question is answered on waits again too, for the
+    /// keyboard and for the pointer alike. See [`answering`].
+    pub fn window_focused(&mut self, ctx: &mut ViewContext<Self>) {
         if let Some(question) = self.closing.as_ref() {
             question.unsettle(Instant::now());
+        }
+        if let Some(card) = self.ask_card.as_ref() {
+            card.unsettle(Instant::now());
+            self.hold_the_pointer(ctx);
+            ctx.notify();
         }
     }
 
@@ -2975,7 +3267,10 @@ impl Workspace {
 
         // Two popups are never up at once. A plugin's floating surface is the
         // one this cannot take down — it is the plugin's to close — so the
-        // card is painted above it instead and claims its keys first.
+        // card is painted above it instead and claims its keys first. The
+        // card an agent's question is answered on goes first of all: a close
+        // is about ending the agent that is asking.
+        self.ask_card = None;
         self.close_menu();
         self.close_tab_context_menu(ctx);
         self.close_tab_menu(ctx);
@@ -9309,6 +9604,19 @@ impl Workspace {
             self.start_breathing(ctx);
         }
         self.end_asks_a_report_ends(pane, status, source);
+        // The card says the question may have been answered in the agent's
+        // tab, a line that pushes its buttons down: they wait again, so a
+        // pointer on its way to one does not land on what moved under it.
+        if status == AgentStatus::Running
+            && let Some(card) = self.ask_card.as_mut()
+            && card.pane() == pane
+            && card.back_to_work()
+        {
+            card.unsettle(Instant::now());
+            self.hold_the_pointer(ctx);
+            ctx.notify();
+        }
+        self.withdraw_an_ended_ask_card(ctx);
         reported
     }
 
@@ -10506,7 +10814,7 @@ impl Workspace {
         self.terminals.as_ref(app).tty_device(pane)
     }
 
-    /// Turns taking agents' questions on or off, as the setting will, for a
+    /// Turns taking agents' questions on or off, as the setting does, for a
     /// test that has no settings page to press.
     #[cfg(all(test, unix))]
     pub(crate) fn take_agents_questions(&mut self, on: bool, ctx: &mut ViewContext<Self>) {
@@ -10626,6 +10934,7 @@ impl Workspace {
         // asked after it. A question asked in a pane that closed is over.
         self.watches.settled(&self.tabs);
         self.asks.forget_closed(&self.tabs);
+        self.withdraw_an_ended_ask_card(ctx);
         self.follow_changes(ctx);
         // After the strip has moved, so "which pane is being looked at" is the
         // answer for the state the frame is about to draw. Every action comes
@@ -10685,6 +10994,36 @@ impl Workspace {
             && let Some(action) = closing::action_for(question, keystroke, Instant::now())
         {
             return Some(action);
+        }
+
+        // **The card an agent's question is answered on owns every key next,**
+        // for the same reasons, and one more: a key it let through to a
+        // palette or a pane under it could be the Enter that answers the
+        // agent's own dialog. Escape is Not now, and nothing that answers
+        // opens until the keyboard has been still. See [`answering`].
+        if let Some(card) = self.ask_card.as_ref()
+            && let Some(action) = answering::action_for(
+                card,
+                &self.asks,
+                self.tabs.pane(card.pane()).is_some(),
+                keystroke,
+                Instant::now(),
+            )
+        {
+            return Some(action);
+        }
+
+        // The pane Go to tab has just handed the keyboard to waits for it to
+        // be still, as the card did: see [`Self::go_to_asking_tab`].
+        if let Some(until) = self.keys_held_after_go_to.get() {
+            let now = Instant::now();
+            if now < until && !Recording::is_a_modifier(keystroke) {
+                self.keys_held_after_go_to.set(Some(now + closing::SETTLE));
+                return Some(super::action::AskAction::TooSoon.into());
+            }
+            if now >= until {
+                self.keys_held_after_go_to.set(None);
+            }
         }
 
         // **A binding being recorded owns the keyboard, before everything
@@ -12085,6 +12424,11 @@ impl Workspace {
                 general.ask_before_ending_agents = !general.ask_before_ending_agents;
                 self.set_general(general, ctx);
             }
+            SettingsAction::ToggleAgentsAsk => {
+                let mut general = self.general();
+                general.answer_agents_from_crook = !general.answer_agents_from_crook;
+                self.set_general(general, ctx);
+            }
             SettingsAction::ToggleNotification(occasion) => {
                 let general = self.general().toggled(occasion);
                 self.set_general(general, ctx);
@@ -12907,6 +13251,11 @@ impl View for Workspace {
         // palette that was open when the desktop asked the window to close
         // is under the question, and under its modal underlay, rather than
         // over them.
+        // After what a plugin floats and before the close question, which
+        // beats it.
+        if let Some(card) = self.ask_card() {
+            overlays.push(answering::render(self, card));
+        }
         if let Some(question) = self.closing_question() {
             overlays.push(closing::render(self, question));
         }
@@ -13285,6 +13634,7 @@ impl TypedActionView for Workspace {
             WorkspaceAction::Changes(action) => self.apply_changes_action(action, ctx),
             WorkspaceAction::Window(action) => self.apply_window_action(action, ctx),
             WorkspaceAction::Ending(answer) => self.answer_closing(answer, ctx),
+            WorkspaceAction::Asking(action) => self.apply_ask_action(action, ctx),
             WorkspaceAction::TabMenu(action) => self.apply_tab_menu(action, ctx),
             WorkspaceAction::Worktree(action) => self.apply_worktree(action, ctx),
             WorkspaceAction::Block(action) => self.apply_block(action, ctx),

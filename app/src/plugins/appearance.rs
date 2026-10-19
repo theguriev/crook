@@ -210,6 +210,28 @@ fn appearance(workspace: &Workspace) -> Vec<Category> {
         ui,
     );
 
+    // Beside the question a close asks, as the other thing the window asks a
+    // person on an agent's behalf. Off, the window refuses every question
+    // and each agent asks in its own tab alone, as before.
+    let agents_ask = widgets::row(
+        Words::new("Let agents ask in Crook")
+            .with_description(
+                "Claude Code's permission requests can be read whole and answered from Crook, \
+                 with \u{201c}Answer waiting agent\u{201d}, while its own dialog stays up in its tab.",
+            )
+            .with_keywords(&[
+                "permission", "allow", "deny", "approve", "answer", "agents", "hook", "request",
+                "claude",
+            ]),
+        true,
+        widgets::switch(
+            workspace.general().answer_agents_from_crook,
+            Some(SettingsAction::ToggleAgentsAsk.into()),
+            state.control(named("agents-ask")),
+        ),
+        ui,
+    );
+
     // The one control on the page that is a way back: the panel's own menu
     // cannot offer it, since a hidden panel has no menu, and this page is
     // reachable by its chord with the column gone.
@@ -236,7 +258,7 @@ fn appearance(workspace: &Workspace) -> Vec<Category> {
             [panel, granularity, density, restore, login]
                 .into_iter()
                 .chain(default_terminal)
-                .chain([ask])
+                .chain([ask, agents_ask])
                 .collect(),
         ),
         widgets::category("Rows", rows_category(workspace)),

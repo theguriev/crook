@@ -1063,9 +1063,10 @@ fn lineage(_: u32) -> Vec<u32> {
 }
 
 /// Starts the thread that reads what a hook says after its question, and
-/// tells the window: [`Notice::Delivered`] for its `{"delivered":true}`, and
+/// tells the window: [`Notice::Delivered`] for its `{"delivered":true}`,
 /// [`Notice::Withdrawn`] — once, and only while the question was still open
-/// — when it hangs up.
+/// — when it hangs up, and [`Notice::Undelivered`] when it hangs up after
+/// its question ended without having said it printed anything.
 ///
 /// One line at most, of at most [`MAX_ASKER_LINE`]: after it, everything the
 /// hook sends is read and let go until it leaves, so a client that sends line
@@ -1098,9 +1099,11 @@ fn hear_the_hook(stream: &UnixStream, feed: &Arc<Feed>, held: AskId) -> mpsc::Re
                 .read_until(b'\n', &mut line);
             // One line, and only a whole one: a hook says it printed its
             // answer once, and whatever else it sends is let go unheard.
+            let mut delivered = false;
             if read.is_ok_and(|read| read > 0 && read <= MAX_ASKER_LINE && line.ends_with(b"\n")) {
                 let said = serde_json::from_slice::<Delivered>(&line);
                 if said.is_ok_and(|said| said.delivered) {
+                    delivered = true;
                     feed.notice(Notice::Delivered(held));
                     let _ = heard.send(());
                 }
@@ -1112,6 +1115,10 @@ fn hear_the_hook(stream: &UnixStream, feed: &Arc<Feed>, held: AskId) -> mpsc::Re
             }
             if feed.hang_up() {
                 feed.notice(Notice::Withdrawn(held));
+            } else if !delivered {
+                // Ended before it hung up — answered, or passed — and gone
+                // without a word: what the card's history says of an answer.
+                feed.notice(Notice::Undelivered(held));
             }
             let _ = heard.send(());
         });

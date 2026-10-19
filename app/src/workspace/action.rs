@@ -11,6 +11,7 @@
 
 use crook_terminal::BlockId;
 
+use crate::control::ask::{AskId, Choice};
 use crate::notify::Occasion;
 use crate::plugin::{ActionId, PageId, SectionId};
 use crate::settings::{Density, Granularity, PrimaryInfo, StatusMarks, Subtitle};
@@ -35,6 +36,13 @@ pub enum WorkspaceAction {
     /// The question a close asks before it ends agents that are still
     /// working was answered. See [`closing`](super::closing).
     Ending(EndingAction),
+    /// The card an agent's question is answered on was used. See
+    /// [`answering`](super::answering).
+    ///
+    /// Typed, and only typed: none of it is a command, an answer or a name
+    /// the host knows, so no binding, palette row, `--action`, plugin or
+    /// socket can say it. What can is a press on the card itself.
+    Asking(AskAction),
     /// Something happened to the context menu a tab's secondary press opens.
     TabMenu(TabMenuAction),
     /// Something happened in the worktree menu, which is one entry of that one.
@@ -348,6 +356,80 @@ impl EndingButton {
 impl From<EndingAction> for WorkspaceAction {
     fn from(action: EndingAction) -> Self {
         Self::Ending(action)
+    }
+}
+
+/// What the card an agent's question is answered on was told.
+///
+/// The card opens from a gesture — the palette's "Answer waiting agent", a
+/// row menu's "Answer…" — and never from one of these. An answer and a move
+/// to the agent's tab carry the question they were given about, its number
+/// and its digest, so that the one place they are carried out can refuse a
+/// press about anything else. See [`answering`](super::answering).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AskAction {
+    /// Put the keyboard on one of the card's buttons. Tab and the arrows.
+    Choose(AskButton),
+    /// Nothing: a key that would have moved the keyboard or pressed a button
+    /// that waits, typed before the keyboard had been still long enough, or a
+    /// key the card has no use for. Taken, so that it reaches nothing under
+    /// the card.
+    TooSoon,
+    /// Take the card down and answer nothing. Its Not now, Escape, a press
+    /// off it, and Enter or Space while the keyboard is on Not now.
+    NotNow,
+    /// The command on the card was scrolled.
+    Scrolled,
+    /// Go to the tab the question was asked in, and take the card down.
+    GoTo {
+        /// The question the card was up on.
+        ask: AskId,
+        /// Its digest, as the card read it.
+        digest: [u8; 32],
+        /// What pressed it.
+        by: Pressed,
+    },
+    /// Answer the question.
+    Answer {
+        /// The question the card was up on.
+        ask: AskId,
+        /// Its digest, as the card read it.
+        digest: [u8; 32],
+        /// Allow once, or deny.
+        decision: Choice,
+        /// What pressed it.
+        by: Pressed,
+    },
+}
+
+/// What pressed one of the card's buttons, which is which of its two gates
+/// the press had to pass.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Pressed {
+    /// Enter or Space, once the keyboard had been still.
+    Keys,
+    /// The pointer, once the buttons had been live.
+    Pointer,
+}
+
+/// One of the buttons on the card an agent's question is answered on.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum AskButton {
+    /// Answer nothing and take the card down: where the keyboard starts,
+    /// and the button drawn filled. "Close" on a card whose question ended.
+    #[default]
+    NotNow,
+    /// Let it run, this once.
+    Allow,
+    /// Do not let it run.
+    Deny,
+    /// Go to the agent's tab.
+    GoTo,
+}
+
+impl From<AskAction> for WorkspaceAction {
+    fn from(action: AskAction) -> Self {
+        Self::Asking(action)
     }
 }
 
@@ -839,6 +921,9 @@ pub enum SettingsAction {
     /// "Ask before ending working agents": whether a close that would end
     /// something still working asks first.
     ToggleAskBeforeEnding,
+    /// "Let agents ask in Crook": whether the window takes the questions
+    /// agents' permission hooks hand it.
+    ToggleAgentsAsk,
     /// One of the Notifications page's switches: whether this occasion posts
     /// a desktop notification while the window is behind another.
     ToggleNotification(Occasion),

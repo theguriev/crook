@@ -519,9 +519,11 @@ pub struct GeneralOptions {
     /// the hook passes at once to the agent's own prompt.
     ///
     /// On, because a question taken changes nothing a person does not look
-    /// for: the agent's prompt is still up, and the window only shows the
-    /// command on the row. Off is the switch for a person who wants Crook
-    /// to have no part in what an agent is allowed to do.
+    /// for: the agent's prompt is still up, the window shows the command on
+    /// the row, and the card that answers it opens only when a person opens
+    /// it. Off — "Let agents ask in Crook" in Settings > General — is the
+    /// switch for a person who wants Crook to have no part in what an agent
+    /// is allowed to do.
     pub answer_agents_from_crook: bool,
     /// Whether a pane whose row turns to needs-input while the window is
     /// behind another one posts a desktop notification.

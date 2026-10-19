@@ -882,7 +882,12 @@ Twenty-two features, and the page that configures them:
   git branch, rename tab, rename pane, close tab, close other tabs, close tabs below, close tabs
   above, a row of colours, and — inside a repository — show changes and the worktree list, with
   Finish task and Discard task beside them on a tab in a checkout Crook made; open pull request
-  and check pull request join them on a row whose agent has named one. **Marking** a tab washes
+  and check pull request join them on a row whose agent has named one, and Answer… — the
+  palette's answer waiting agent — on a row whose agent is asking to run a command. **Answering**
+  puts up a card with the whole command Claude Code asks to run, its tab and directory, and
+  Allow once, Deny, Go to tab and Not now: Not now is the default, the other three wait a second
+  before a key or a press reaches them, and Claude Code's own dialog stays up in its tab, so
+  whichever is answered first wins. **Marking** a tab washes
   its row amber and counts it with the ones waiting for you, for a tab you mean to come back
   to: it stays until you arrive at the pane or clear it from the same entry, and it never
   answers for the agent. **Why this status** hangs a panel off the menu that says in words

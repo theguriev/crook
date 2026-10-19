@@ -264,6 +264,11 @@ pub enum Notice {
     Withdrawn(AskId),
     /// The question's time ran out, and the hook was told to pass.
     Expired(AskId),
+    /// The hook left without saying it printed what it was given: an
+    /// answer a person gave went to a hook that was gone, or going, before
+    /// it could pass it on. Sent for every question that ended so, answered
+    /// or not; only an answered one has anything to remember about it.
+    Undelivered(AskId),
 }
 
 /// One question, and where its answer goes.

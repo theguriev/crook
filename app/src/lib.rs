@@ -4652,13 +4652,14 @@ impl WindowDelegate for Shell {
             .read(|ctx| ctx.has_window_invalidations(self.window_id))
     }
 
-    /// The window took the keyboard, which the question a close asks has to
-    /// hear: the keys that follow may have been typed at another
-    /// application. See `workspace::closing`.
+    /// The window took the keyboard, which the question a close asks and the
+    /// card an agent's question is answered on have to hear: the keys that
+    /// follow may have been typed at another application. See
+    /// `workspace::closing` and `workspace::answering`.
     fn focused(&mut self) {
         let workspace = &self.workspace;
         self.app
-            .update(|ctx| workspace.update(ctx, |workspace, _| workspace.window_focused()));
+            .update(|ctx| workspace.update(ctx, |workspace, ctx| workspace.window_focused(ctx)));
     }
 }
 
