@@ -24,6 +24,7 @@
 //! lets the tab model stay a thing that can be tested with no window.
 
 mod action;
+mod answer_list;
 mod answering;
 mod block_list;
 pub(crate) mod block_menu;
@@ -35,6 +36,7 @@ mod closing;
 mod controls;
 mod crash_note;
 mod finish;
+mod header_chip;
 mod header_toolbar;
 mod held_locks;
 mod input_element;
@@ -61,14 +63,16 @@ mod tests;
 
 use crate::theme::theme;
 
+pub(crate) use action::AskAction;
 #[cfg(all(test, unix))]
-pub use action::{AskAction, Pressed};
+pub use action::Pressed;
 #[cfg(test)]
 pub use action::{BlockAction, ChangesAction, EndingAction, EndingButton};
 pub use action::{
     BlockEdge, BlockPart, OptionsAction, SettingsAction, TabMenuAction, ThemeAction, WindowAction,
     WorkspaceAction, WorktreeAction,
 };
+pub use answer_list::AskFixture;
 pub use held_locks::HeldLocks;
 pub(crate) use settings_page::widgets::Category;
 pub use text_field::TextField;

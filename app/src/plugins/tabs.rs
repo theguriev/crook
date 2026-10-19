@@ -108,7 +108,7 @@
 //! sensibly mean, and the same handler serves both without a branch.
 
 use crookui_core::elements::{MouseStateHandle, Padding};
-use crookui_core::fonts::{Properties, Weight};
+use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::icons::Lucide;
 use crookui_core::prelude::*;
 
@@ -130,7 +130,9 @@ use crate::theme::theme;
 use crate::workspace::tab_context_menu::{
     entry, field_entry, inert_entry, submenu_entry, swatch_entry,
 };
-use crate::workspace::{OptionsAction, TabMenuAction, Workspace, WorkspaceAction, status_color};
+use crate::workspace::{
+    AskAction, OptionsAction, TabMenuAction, Workspace, WorkspaceAction, status_color,
+};
 
 /// The mark at the head of a tab's row.
 pub const TAB_ROW_MARK: SlotId = SlotId::new("tab.row.mark");
@@ -358,11 +360,6 @@ impl Rename {
 #[derive(Default)]
 pub struct Tabs {
     rename: Rc<Rename>,
-    /// The pointer's relationship to the chip in the header, kept here for
-    /// the reason the rename state is: the contribution that draws the chip
-    /// is a closure that outlives `build`, and a fresh state on every frame
-    /// would be a chip that never knew it was hovered.
-    waiting: MouseStateHandle,
 }
 
 impl Tabs {
@@ -471,16 +468,28 @@ impl Plugin for Tabs {
             },
         );
 
-        // The way to the card an agent's question is answered on: a gesture,
-        // and the only kind of thing that opens it. A question arriving puts
-        // nothing up and takes no focus. No chord of its own, by default: a
-        // chord pressed by habit is the gesture least like reading. The
-        // card's answers are not commands at all — see
-        // `workspace::answering`.
+        // The way to the card an agent's question is answered on, and to the
+        // list of every one the window holds: a gesture, and the only kind of
+        // thing that opens either. A question arriving puts nothing up and
+        // takes no focus. The card's answers are not commands at all — see
+        // `workspace::answering` — and the list's rows only open a card.
         let answers = host.register_command(
             action("answer-waiting"),
             "Answer waiting agent",
             |workspace, ctx| workspace.answer_waiting_agent(ctx),
+        );
+        // A suggestion, as `next-waiting`'s is, and safe to press by habit
+        // for the reason a row is: it opens the list, or a card that waits
+        // a second before anything on it answers. `cmd-i` is nobody's on
+        // macOS — the field's own cmd chords are five letters, and I is not
+        // one — and off it, the field takes no Shifted ctrl letter but copy
+        // and undo's, and bare ctrl-i is Tab to the tty.
+        host.suggest_binding(
+            match Platform::current() {
+                Platform::Mac => "cmd+i",
+                Platform::Other => "ctrl+shift+i",
+            },
+            action("answer-waiting"),
         );
 
         for color in TabColor::ALL.map(Some).into_iter().chain([None]) {
@@ -725,9 +734,8 @@ impl Plugin for Tabs {
             },
             action("next-waiting"),
         );
-        host.contribute(HEADER_LEFT, "waiting", 0, {
-            let hover = self.waiting.clone();
-            move |workspace, _| Some(waiting_chip(workspace, hover.clone(), next_waiting))
+        host.contribute(HEADER_LEFT, "waiting", 0, move |workspace, _| {
+            Some(waiting_chip(workspace, [answers, next_waiting]))
         });
 
         // The field every rename is typed into. One, not two: only one of the
@@ -1321,56 +1329,124 @@ pub fn group_rollup(workspace: &Workspace, group: GroupId) -> Option<GroupRollup
         })
 }
 
-/// The chip in the header that counts the waiting panes and goes to the next
-/// one when pressed — or nothing at all, which is what the header shows
-/// while nobody is waiting. A count of zero is not information.
-fn waiting_chip(workspace: &Workspace, hover: MouseStateHandle, go: ActionId) -> Box<dyn Element> {
-    let count = waiting_count(workspace);
-    if count == 0 {
+/// How many questions agents' hooks are waiting on in this window, which is
+/// the number on the chip's "to answer".
+///
+/// Off the window's registry of questions, and not
+/// [`AgentSession::is_waiting`](crate::tab::AgentSession::is_waiting): a
+/// question asked in the pane being looked at is still a question nobody has
+/// answered. Every one held counts, read-only ones too — the list the press
+/// opens shows them, saying so.
+pub fn to_answer_count(workspace: &Workspace) -> usize {
+    workspace.asks().live().count()
+}
+
+/// The chip in the header: the questions held, whose press opens the list
+/// of them — or the card, when there is one — and after it the waiting
+/// panes, whose press goes to the next one. Each half is there only while it
+/// has something to count, and the chip is nothing at all while neither
+/// has: a count of zero is not information.
+///
+/// "To answer" first, because a half turning up shifts the one after it: a
+/// press aimed at where "to answer" was must not land on "N waiting", which
+/// hands the keyboard to a pane whose agent's dialog may be up with Yes as
+/// its default. And neither half takes a press for a second after the chip
+/// changes shape; see `workspace::header_chip`.
+///
+/// `go` is the two halves' actions, "to answer" first.
+fn waiting_chip(workspace: &Workspace, go: [ActionId; 2]) -> Box<dyn Element> {
+    let waiting = waiting_count(workspace);
+    let asked = to_answer_count(workspace);
+    let (live, [asked_hover, waiting_hover]) =
+        workspace
+            .header_chip()
+            .lay_out(asked, waiting, std::time::Instant::now());
+    if waiting == 0 && asked == 0 {
         return Empty::new().finish();
     }
     let ui = workspace.fonts().ui;
-    let label = if count == 1 {
-        "1 waiting".to_owned()
-    } else {
-        format!("{count} waiting")
-    };
+    let [answers, next] = go;
+    let mut chip = Flex::row()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(WAITING_GAP);
+    if asked > 0 {
+        chip.add_child(pill(
+            asked_hover,
+            false,
+            format!("{asked} to answer"),
+            live.then_some(vec![WorkspaceAction::Run(answers)]),
+            ui,
+        ));
+    }
+    if waiting > 0 {
+        // The pane it focuses may be an agent's with its dialog up, and the
+        // keys after a press are kept from it as after the card's Go to.
+        chip.add_child(pill(
+            waiting_hover,
+            true,
+            format!("{waiting} waiting"),
+            live.then_some(vec![WorkspaceAction::Run(next), AskAction::HoldKeys.into()]),
+            ui,
+        ));
+    }
+    chip.finish()
+}
 
-    Hoverable::new(hover, move |mouse| {
-        let ground = if mouse.is_hovered() {
+/// One half of the chip: a count, with the bell before it when `bell`, that
+/// dispatches `go` in turn when pressed — or, with none, is drawn unlit
+/// under the pointer and has no handler.
+fn pill(
+    hover: MouseStateHandle,
+    bell: bool,
+    label: String,
+    go: Option<Vec<WorkspaceAction>>,
+    ui: FamilyId,
+) -> Box<dyn Element> {
+    let live = go.is_some();
+    let drawn = Hoverable::new(hover, move |mouse| {
+        let ground = if live && mouse.is_hovered() {
             theme().overlay_2
         } else {
             theme().overlay_1
         };
-        Container::new(
-            Flex::row()
-                .with_main_axis_size(MainAxisSize::Min)
-                .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_spacing(WAITING_GAP)
-                .with_child(
-                    Icon::new(Lucide::Bell, WAITING_ICON)
-                        .with_color(theme().usage_high)
-                        .finish(),
-                )
-                .with_child(
-                    Text::new(label.clone(), ui, WAITING_TEXT)
-                        .with_color(theme().text_primary)
-                        .finish(),
-                )
+        let mut row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(WAITING_GAP);
+        if bell {
+            row.add_child(
+                Icon::new(Lucide::Bell, WAITING_ICON)
+                    .with_color(theme().usage_high)
+                    .finish(),
+            );
+        }
+        row.add_child(
+            Text::new(label.clone(), ui, WAITING_TEXT)
+                .with_color(theme().text_primary)
                 .finish(),
-        )
-        .with_background_color(ground)
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(WAITING_RADIUS)))
-        .with_padding(Padding {
-            top: 3.,
-            bottom: 3.,
-            left: 8.,
-            right: 9.,
-        })
-        .finish()
-    })
-    .on_click(move |_, ctx, _| ctx.dispatch_typed_action(WorkspaceAction::Run(go)))
-    .finish()
+        );
+        Container::new(row.finish())
+            .with_background_color(ground)
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(WAITING_RADIUS)))
+            .with_padding(Padding {
+                top: 3.,
+                bottom: 3.,
+                left: if bell { 8. } else { 9. },
+                right: 9.,
+            })
+            .finish()
+    });
+    match go {
+        Some(go) => drawn
+            .on_click(move |_, ctx, _| {
+                for action in &go {
+                    ctx.dispatch_typed_action(*action);
+                }
+            })
+            .finish(),
+        None => drawn.finish(),
+    }
 }
 
 /// The chip's type, the same size as a row's chips in the panel.

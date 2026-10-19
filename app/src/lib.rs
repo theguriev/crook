@@ -301,6 +301,11 @@ struct Overrides {
     /// CI, and this one draws a tree written down in the repository. See
     /// [`plugins::wasm::fixture`].
     fixture: Option<PathBuf>,
+    /// Questions to hold, for a picture of the list of them and the card one
+    /// is answered on that is the same on every machine. Read when the
+    /// arguments are, so a file that is not one is a line on stderr rather
+    /// than a picture of nothing. See [`workspace::AskFixture`].
+    ask_fixture: Option<workspace::AskFixture>,
     /// A module to run without installing it, and to run again every time it
     /// is built.
     ///
@@ -1204,6 +1209,13 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
                     .context("`--plugin-fixture` needs a path to a fixture")?;
                 overrides.fixture = Some(PathBuf::from(path));
             }
+            "--ask-fixture" => {
+                let path = args
+                    .next()
+                    .context("`--ask-fixture` needs a path to a fixture")?;
+                overrides.ask_fixture =
+                    Some(workspace::AskFixture::read(std::path::Path::new(&path))?);
+            }
             // Every one of these reaches the network, and every one of them
             // is somebody asking it to: see `update`'s first paragraph and
             // `store::fetch`'s. None of them opens a window — updating and
@@ -1450,6 +1462,13 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
     // both flags have been read, rather than in the arm for either.
     if overrides.search.is_some() && overrides.section.is_none() && overrides.settings.is_none() {
         overrides.settings = Some(None);
+    }
+
+    // Questions nobody asked, with no hook waiting on them, are a picture's
+    // and only a picture's: in a window, a press on one would be an answer
+    // to nobody that looked like an answer to somebody.
+    if overrides.ask_fixture.is_some() && snapshot.is_none() {
+        bail!("`--ask-fixture` holds questions for a picture; it goes with `--snapshot`");
     }
 
     // A picture has no launcher. Both of these are about how a window starts
@@ -1733,6 +1752,12 @@ OPTIONS:
                        every machine. A top-level `icon` names a PNG beside
                        the file, for a picture of the Plugins page with a face
                        on a row
+    --ask-fixture <PATH>
+                       Hold the questions a JSON file lists, as though agents in
+                       tabs it names had asked them, for a picture of the list
+                       of them and the card one is answered on that is the same
+                       on every machine; with --snapshot only, and opened with
+                       --action crook/tabs/answer-waiting
     --snapshot <PATH>  Render one frame of the real view tree to a PNG and exit
     --frames <N>       Draw N frames, then exit; for running unattended
     --run <COMMAND>    Type COMMAND into the first pane's input field at startup,
@@ -2216,6 +2241,9 @@ fn apply_overrides(
     }
     if overrides.hover {
         workspace.hover_first_row(ctx);
+    }
+    if let Some(fixture) = &overrides.ask_fixture {
+        fixture.seed(workspace, ctx);
     }
     if let Some(name) = overrides.section.clone() {
         // By the name on the button, because that is the only name a person
@@ -4984,6 +5012,31 @@ mod tests {
             1,
             "the name is said twice: {text}"
         );
+    }
+
+    #[test]
+    fn an_ask_fixture_is_read_with_the_arguments_and_only_for_a_picture() {
+        // The file `--ask-fixture` is documented with, which has to be one.
+        let kept = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("the workspace root")
+            .join("script/fixtures/asks.json");
+        let kept = kept.to_str().expect("a path in UTF-8");
+        let error = parse(&["--ask-fixture", kept]).expect_err("a window with questions");
+        assert!(format!("{error:#}").contains("--snapshot"), "{error:#}");
+
+        let Startup::Snapshot { overrides, .. } =
+            parse(&["--ask-fixture", kept, "--snapshot", "asks.png"]).expect("a picture")
+        else {
+            panic!("not a snapshot");
+        };
+        assert!(overrides.ask_fixture.is_some());
+
+        // A file that is not one is said at once, by name.
+        let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        let error = parse(&["--ask-fixture", manifest, "--snapshot", "asks.png"])
+            .expect_err("a manifest is no fixture");
+        assert!(format!("{error:#}").contains("Cargo.toml"), "{error:#}");
     }
 
     #[test]

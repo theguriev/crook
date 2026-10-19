@@ -109,7 +109,9 @@
 //! [`WorkspaceAction::Asking`] — so no binding, palette row, `--action`,
 //! plugin, notification or socket can say it.
 //!
-//! An answer sent closes the card. It never moves on to another question,
+//! An answer sent closes the card, back to the list of every question when
+//! it was opened from there — see [`answer_list`](super::answer_list). It
+//! never moves on to another question,
 //! and it never claims the agent did as it was told: the row's status is left
 //! to the agent's next report, which is the truth about what happened. A
 //! confined session, for one, drops a hook's allow and keeps its dialog up.

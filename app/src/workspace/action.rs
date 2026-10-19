@@ -361,8 +361,10 @@ impl From<EndingAction> for WorkspaceAction {
 
 /// What the card an agent's question is answered on was told.
 ///
-/// The card opens from a gesture — the palette's "Answer waiting agent", a
-/// row menu's "Answer…" — and never from one of these. An answer and a move
+/// The card opens from a gesture — the palette's "Answer waiting agent", the
+/// header's "to answer", a row menu's "Answer…", a row of the list of every
+/// question the window holds — and never from a question arriving. An
+/// answer and a move
 /// to the agent's tab carry the question they were given about, its number
 /// and its digest, so that the one place they are carried out can refuse a
 /// press about anything else. See [`answering`](super::answering).
@@ -376,10 +378,24 @@ pub enum AskAction {
     /// the card.
     TooSoon,
     /// Take the card down and answer nothing. Its Not now, Escape, a press
-    /// off it, and Enter or Space while the keyboard is on Not now.
+    /// off it, and Enter or Space while the keyboard is on Not now. A card
+    /// opened from the list goes back to the list, and the list closes.
     NotNow,
     /// The command on the card was scrolled.
     Scrolled,
+    /// Keep every key from whatever has the keyboard until it has been still
+    /// for a second, as after the card closes. What the header's "N waiting"
+    /// press does once it has focused the next waiting pane: the agent there
+    /// may have its dialog up with Yes as its default, and the Enter pressed
+    /// next was meant for the list the press missed.
+    HoldKeys,
+    /// Put the list's keyboard on the row of this question: Up and Down, on
+    /// the list of every question the window holds.
+    Pick(AskId),
+    /// Open the card about this question, from its row of the list: the
+    /// row's Enter or press, and all a row can do. It answers nothing, and
+    /// the card it opens waits, as every card does, before anything on it can.
+    Open(AskId),
     /// Go to the tab the question was asked in, and take the card down.
     GoTo {
         /// The question the card was up on.

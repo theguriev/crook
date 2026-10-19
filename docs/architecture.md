@@ -2636,9 +2636,21 @@ override shows the trick rather than doing it. A question's `Debug` prints the a
 a twelve-digit digest prefix.
 
 **The card.** A question arriving opens nothing and takes no focus. The card opens from a
-gesture only — the palette's "Answer waiting agent", which is the menu target's question, else the
-oldest the window holds, and a row menu's "Answer…", offered only on a row whose agent's hook is
-waiting — and it keeps the close question's rules (`workspace/closing.rs`): Not now is the filled
+gesture only — a row menu's "Answer…", offered only on a row whose agent's hook is waiting, and
+"Answer waiting agent" (the palette, the header's "M to answer" before "N waiting", and the
+suggested chord `cmd-i`, `ctrl-shift-i` off macOS) when the window holds one question; with more
+it opens the list in `workspace/answer_list.rs`, the popup's other face. Its rows, oldest first and
+appended at the end, open a card and nothing else, so the card's gates start fresh each time;
+Escape walks back from the card to the list to nothing, an answer sent brings the list back and
+opens no other card, the keys held after a card close are kept from the list too (but for
+Escape), and an emptied list closes. Its rows have no handler for a second after it comes back
+from a card or any row comes or goes, so the second press of a double click on Deny, or a press
+aimed at a row that has just moved, opens nothing. The header chip draws "to answer" first, so a
+"N waiting" turning up never takes its place; neither half takes a press for a second after the
+chip changes shape (`workspace/header_chip.rs`, one one-shot wait started from `frame_drawn`), and
+after "N waiting" focuses a pane the keys are kept from it for that second, as after Go to.
+Below the rows it shows the last twenty outcomes, read-only.
+The card keeps the close question's rules (`workspace/closing.rs`): Not now is the filled
 default at the trailing edge, Escape, a press off it and Enter or Space on Not now close it
 answering nothing, and Allow, Deny and Go to tab — Go to too, since it hands the keyboard to a
 dialog whose own default is Yes — wait for the keyboard to have been still for a second after the
