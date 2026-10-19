@@ -871,6 +871,8 @@ struct AgentArguments {
     message: Option<String>,
     /// `--pull-request`, when given.
     pull_request: Option<String>,
+    /// `--done`, when given.
+    done: Option<String>,
     /// `--session`, or `--session-start` for a session that starts, when
     /// given.
     session: Option<crook_terminal::agent::Session<String>>,
@@ -890,6 +892,7 @@ fn agent_arguments(
     let mut title = None;
     let mut message = None;
     let mut pull_request = None;
+    let mut done = None;
     let mut session = None;
     let mut session_start = None;
     // In any order, each at most once: a hook that names the
@@ -905,6 +908,10 @@ fn agent_arguments(
                 &mut pull_request,
                 "`--pull-request` needs the pull request's address, or `-` to read a hook's \
                  input from stdin",
+            ),
+            "--done" => (
+                &mut done,
+                "`--done` needs `-`, to read a hook's input from stdin",
             ),
             "--session" => (
                 &mut session,
@@ -934,7 +941,7 @@ fn agent_arguments(
     if let Some(extra) = args.peek().filter(|word| word.starts_with("--")) {
         bail!(
             "unrecognised argument {extra}; `--agent <status>` takes only \
-             --title, --message, --pull-request, --session and --session-start"
+             --title, --message, --pull-request, --done, --session and --session-start"
         );
     }
     let session = match (session, session_start) {
@@ -950,6 +957,7 @@ fn agent_arguments(
         title,
         message,
         pull_request,
+        done,
         session,
     })
 }
@@ -1068,6 +1076,7 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                     arguments.title.as_deref(),
                     arguments.message.as_deref(),
                     arguments.pull_request.as_deref(),
+                    arguments.done.as_deref(),
                     arguments
                         .session
                         .as_ref()
@@ -1099,6 +1108,7 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 overrides.app_id = Some(id);
             }
             "--pull-request" => bail!("`--pull-request` goes after `--agent <status>`"),
+            "--done" => bail!("`--done` goes after `--agent <status>`"),
             "--session" => bail!("`--session` goes after `--agent <status>`"),
             "--session-start" => bail!("`--session-start` goes after `--agent <status>`"),
             // Stdout is the fragment and stderr the lead and the note, so
@@ -5394,6 +5404,7 @@ mod tests {
                 title: None,
                 message: None,
                 pull_request: None,
+                done: None,
                 session: None,
             }
         );
@@ -5420,6 +5431,7 @@ mod tests {
                 title: Some("port the tab bar".to_owned()),
                 message: None,
                 pull_request: Some("https://github.com/o/r/pull/7".to_owned()),
+                done: None,
                 session: None,
             }
         );
@@ -5462,6 +5474,47 @@ mod tests {
     }
 
     #[test]
+    fn a_done_is_read_beside_any_status_and_takes_only_the_hooks_input() {
+        let mut given = ["running", "--done", "-"]
+            .map(str::to_owned)
+            .into_iter()
+            .peekable();
+        assert_eq!(
+            agent_arguments(&mut given).expect("valid"),
+            AgentArguments {
+                status: "running".to_owned(),
+                title: None,
+                message: None,
+                pull_request: None,
+                done: Some("-".to_owned()),
+                session: None,
+            }
+        );
+        for (args, complaint) in [
+            (&["--agent", "running", "--done"][..], "`--done` needs"),
+            (
+                &["--agent", "running", "--done", "-", "--done", "-"][..],
+                "was given twice",
+            ),
+            (&["--done", "-"][..], "goes after `--agent <status>`"),
+            // Refused by the report before it opens a terminal: a
+            // fingerprint is the window's to compute.
+            (
+                &[
+                    "--agent",
+                    "running",
+                    "--done",
+                    "0123456789abcdef0123456789abcdef",
+                ][..],
+                "takes only `-`",
+            ),
+        ] {
+            let said = format!("{:#}", parse(args).expect_err("refused"));
+            assert!(said.contains(complaint), "{args:?}: {said}");
+        }
+    }
+
+    #[test]
     fn a_session_is_read_beside_any_status_and_nowhere_else() {
         let mut given = ["idle", "--session", "-", "--title", "port"]
             .map(str::to_owned)
@@ -5474,6 +5527,7 @@ mod tests {
                 title: Some("port".to_owned()),
                 message: None,
                 pull_request: None,
+                done: None,
                 session: Some(crook_terminal::agent::Session::Of("-".to_owned())),
             }
         );
@@ -5488,6 +5542,7 @@ mod tests {
                 title: Some("-".to_owned()),
                 message: None,
                 pull_request: None,
+                done: None,
                 session: Some(crook_terminal::agent::Session::Starts("-".to_owned())),
             }
         );

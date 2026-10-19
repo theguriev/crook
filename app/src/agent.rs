@@ -181,16 +181,17 @@ const MESSAGE_CHARS: usize = 200;
 /// error either: Claude Code runs `StopFailure` for a subagent too, and that
 /// failure is not the pane's — see `said_for_a_subagent`.
 ///
-/// With `--pull-request -`, a hook input that says a `Bash` command ran adds
-/// the done for the question it may have been asked with, after the status
-/// and in the same write — see `done_from_hook` — and one that says a
-/// person interrupted the tool writes that done alone, or nothing — see
-/// `interrupted_a_tool`.
+/// With `--pull-request -`, or `done` — `--done -`, which takes nothing but
+/// `-` — a hook input that says a `Bash` command ran adds the done for the
+/// question it may have been asked with, after the status and in the same
+/// write — see `done_from_hook` — and one that says a person interrupted the
+/// tool writes that done alone, or nothing — see `interrupted_a_tool`.
 pub fn report(
     status: &str,
     title: Option<&str>,
     message: Option<&str>,
     pull_request: Option<&str>,
+    done: Option<&str>,
     session: Option<Session<&str>>,
 ) -> Result<()> {
     let status = AgentReport::parse(status).with_context(|| {
@@ -208,12 +209,17 @@ pub fn report(
         None | Some(Session::Of("-") | Session::Starts("-")) => None,
         Some(said) => Some(given_session(said)?),
     };
+    // A fingerprint is the window's to compute, from what it was asked; one
+    // typed on a command line would be a done for nothing anybody checked.
+    if let Some(given) = done.filter(|given| *given != "-") {
+        bail!("`--done` takes only `-`, to read the hook's input from stdin, not {given}");
+    }
 
     // Read once, whichever of them asked for it: stdin has one reading in
     // it, and `--title - --message -` would otherwise hand the second an
     // empty string.
     let session_id = session.map(|said| *said.id());
-    let input = if [title, message, pull_request, session_id].contains(&Some("-")) {
+    let input = if [title, message, pull_request, done, session_id].contains(&Some("-")) {
         let mut input = String::new();
         io::stdin()
             .read_to_string(&mut input)
@@ -225,10 +231,10 @@ pub fn report(
     if status == AgentReport::Failed && input.as_deref().is_some_and(said_for_a_subagent) {
         return Ok(());
     }
-    // Only the input `--pull-request -` read: that is the hook after a tool,
-    // and the one that knows which tool ran.
-    let done = match pull_request {
-        Some("-") => input.as_deref().and_then(done_from_hook),
+    // Only an input `--pull-request -` or `--done -` read: that is the hook
+    // after a tool, and the one that knows which tool ran.
+    let done = match (pull_request, done) {
+        (Some("-"), _) | (_, Some("-")) => input.as_deref().and_then(done_from_hook),
         _ => None,
     };
     let interrupted = input.as_deref().is_some_and(interrupted_a_tool);
@@ -874,15 +880,20 @@ enum Fragment {
 /// It is also what tells the window that a question it holds was answered
 /// in Claude Code's own dialog, which says nothing to the question's hook:
 /// the tool ran, so somebody said yes — see [`done_from_hook`]. A tool that
-/// failed runs `PostToolUseFailure` instead, with the same input, so that
-/// event runs the same command: the work goes on after a failed command as
-/// after one that worked, and the question it was asked with is as answered.
-/// A Crook older than the done reads that input as it reads `PostToolUse`'s.
+/// failed runs `PostToolUseFailure` instead, with the same input, and the
+/// question it was asked with is as answered. That event runs a command of
+/// its own, `--done -`, rather than PostToolUse's: a tool a person
+/// interrupted with Esc runs it too, and ends the turn, so a `running` from
+/// it would keep the row running after the turn was over. A Crook that
+/// knows the done writes the done alone for that one — see
+/// `interrupted_a_tool` — and one older than the done refuses a flag it does
+/// not know before it writes anything, every release since 0.1.13 having
+/// done so, where PostToolUse's command would have had it say `running`.
 const CLAUDE_EVENTS: &[(&str, &str)] = &[
     ("UserPromptSubmit", "running --title -"),
     ("PreToolUse", "running"),
     ("PostToolUse", "running --pull-request -"),
-    ("PostToolUseFailure", "running --pull-request -"),
+    ("PostToolUseFailure", "running --done -"),
     ("Notification", "needs-input --message -"),
     ("Stop", "idle"),
     ("StopFailure", "failed --message -"),
@@ -3160,6 +3171,37 @@ process.stdout.write(JSON.stringify({ ran, asked }))
     }
 
     #[test]
+    fn the_hook_after_a_failed_tool_is_one_a_crook_older_than_the_done_refuses() {
+        // An interrupted tool runs PostToolUseFailure and ends the turn, so
+        // a `running` from it keeps the row running. A Crook that knows the
+        // done writes none there; one that does not has to be handed a
+        // command it refuses, and from 0.1.13 through 0.1.28 `--agent` read
+        // exactly these flags and refused any other `--` word before it
+        // wrote a thing.
+        const OLDER: [&str; 5] = [
+            "--title",
+            "--message",
+            "--pull-request",
+            "--session",
+            "--session-start",
+        ];
+        let arguments = CLAUDE_EVENTS
+            .iter()
+            .find_map(|(event, arguments)| (*event == "PostToolUseFailure").then_some(*arguments))
+            .expect("Claude Code's hooks run after a failed tool");
+        assert!(
+            arguments
+                .split_whitespace()
+                .any(|word| word.starts_with("--") && !OLDER.contains(&word)),
+            "an older Crook reads `{arguments}` and says running after an interrupt"
+        );
+        // And this one reads it, for the done and nothing it cannot have.
+        let interrupted = with(FAILED, "is_interrupt", json!(true));
+        assert!(done_from_hook(&interrupted).is_some());
+        assert!(interrupted_a_tool(&interrupted));
+    }
+
+    #[test]
     fn every_status_hook_command_is_unchanged() {
         // Codex keeps a hash of every hook it was told to trust, and holds a
         // changed one back for review: a hook command is never changed, only
@@ -3174,7 +3216,7 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
                     ("UserPromptSubmit", "running --title -"),
                     ("PreToolUse", "running"),
                     ("PostToolUse", "running --pull-request -"),
-                    ("PostToolUseFailure", "running --pull-request -"),
+                    ("PostToolUseFailure", "running --done -"),
                     ("Notification", "needs-input --message -"),
                     ("Stop", "idle"),
                     ("StopFailure", "failed --message -"),
@@ -3368,7 +3410,7 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
             "https://github.com/o/r/pull/1\x07",
             "not a link",
         ] {
-            let error = report("running", None, None, Some(refused), None)
+            let error = report("running", None, None, Some(refused), None, None)
                 .expect_err("an address the wire refuses is an error")
                 .to_string();
             assert!(error.contains("--pull-request"), "{error}");
@@ -4546,7 +4588,7 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
 
     #[test]
     fn a_word_that_is_not_a_status_is_refused_with_the_words_that_are() {
-        let error = report("sleeping", None, None, None, None).unwrap_err();
+        let error = report("sleeping", None, None, None, None, None).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("sleeping"));
         assert!(message.contains("needs-input"));

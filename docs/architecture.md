@@ -2573,8 +2573,11 @@ ends the questions held in that pane with that fingerprint as `answered-in-agent
 history says as "answered in Claude Code". A tool a person interrupts runs PostToolUseFailure
 with `is_interrupt`, and ends the turn with no Stop, so that one writes the done alone: a
 `running` after the title's `✳` would leave the row running. No hook's command changes for it;
-PostToolUseFailure is a new hook running PostToolUse's command, which a Crook older than the done
-reads as it reads PostToolUse. The emulator hands every done in a read over, eight at most and
+PostToolUseFailure is a new hook with a command of its own, `running --done -`, which reads the
+input for the done alone and finds no pull request in it. Not PostToolUse's command, because a
+Crook older than the done would read that as PostToolUse and say `running` after the interrupt;
+every release since 0.1.13 refuses a flag it does not know before it writes anything, so an older
+binary handed `--done` writes nothing, and the hook's `|| exit 0` keeps that quiet. The emulator hands every done in a read over, eight at most and
 never as a repeat dropped, ahead of the status from the same read, so a question has gone before
 the running that answered it arrives. Only an id ever travels on 6341, never the request, and
 anything that is not exactly the three pieces — another word, a capital, a digit short or over, a

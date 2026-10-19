@@ -508,6 +508,9 @@ fn expected_report(command: &str) -> String {
             // such call's: the report is the status alone, as it is for
             // every tool that opens no pull request.
             "--pull-request" => {}
+            // Read for the done of a Bash call, and INPUT is no tool's: the
+            // status alone again.
+            "--done" => {}
             "--session" => session = Some(Session::Of(SESSION)),
             "--session-start" => session = Some(Session::Starts(SESSION)),
             other => panic!("{command}: {other} is not a flag `--agent` takes"),
