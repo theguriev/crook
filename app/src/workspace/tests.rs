@@ -41481,6 +41481,170 @@ fn the_menu_offers_every_close_and_below_takes_nothing_from_the_bottom_tab() {
     );
 }
 
+mod opening_files {
+    //! Files the desktop asks Crook to open — a script double-clicked in
+    //! Finder once Crook is the terminal that runs them — from the moment the
+    //! window hands the workspace their paths: a tab for each, where it
+    //! starts, and what it runs there.
+
+    #[cfg(unix)]
+    use super::shells::a_shell_these_tests_speak;
+    use super::*;
+
+    /// Asks the workspace to open `files`, the way the window delegate hands
+    /// them on.
+    fn open(harness: &mut Harness, files: &[PathBuf]) {
+        let workspace = &harness.workspace;
+        harness
+            .app
+            .update(|ctx| workspace.update(ctx, |workspace, ctx| workspace.open_files(files, ctx)));
+    }
+
+    /// Where a pane's shell starts.
+    #[cfg(unix)]
+    fn directory_of(harness: &Harness, pane: PaneId) -> Option<PathBuf> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .pane(pane)
+                .and_then(|pane| pane.session().working_directory.clone())
+        })
+    }
+
+    /// Whether a pane holds a line it will send at its shell's first prompt.
+    #[cfg(unix)]
+    fn waits_for_its_prompt(harness: &Harness, pane: PaneId) -> bool {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.waits_for_first_prompt(pane)
+        })
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn each_file_opens_a_tab_of_its_own_started_in_its_folder() {
+        let mut harness = Harness::new(1);
+        let first = harness.active_id();
+        // A folder that is there, since whether a path is one is asked of
+        // the disk; the script need not be.
+        let folder = std::env::temp_dir();
+        open(
+            &mut harness,
+            &[
+                PathBuf::from("/Users/someone/bin/deploy"),
+                folder.clone(),
+                PathBuf::from("/Users/someone/two\nlines"),
+            ],
+        );
+
+        let tabs = harness.tab_ids();
+        let [kept, script, there] = tabs[..] else {
+            panic!(
+                "one tab for each file that can be opened, and none for one that cannot: {tabs:?}"
+            );
+        };
+        assert_eq!(kept, first);
+
+        let script = harness.panes_of(script)[0];
+        assert_eq!(
+            directory_of(&harness, script),
+            Some(PathBuf::from("/Users/someone/bin"))
+        );
+        assert_eq!(harness.field_text(script), " /Users/someone/bin/deploy");
+        assert!(
+            waits_for_its_prompt(&harness, script),
+            "the script's line is not sent when its shell is ready"
+        );
+
+        let there = harness.panes_of(there)[0];
+        assert_eq!(directory_of(&harness, there), Some(folder));
+        assert_eq!(harness.field_text(there), "", "a folder has nothing to run");
+        assert!(!waits_for_its_prompt(&harness, there));
+
+        assert_eq!(
+            harness.focused_pane_id(),
+            Some(there),
+            "the last file asked for is not the tab in front"
+        );
+        assert_eq!(harness.window_requests(), [Request::BringForward]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_file_opened_over_the_settings_is_shown_rather_than_run_behind_them() {
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        open(&mut harness, &[PathBuf::from("/Users/someone/bin/deploy")]);
+        assert_eq!(
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.showing_section()),
+            None,
+            "the settings stayed over the tab the script runs in"
+        );
+        let pane = harness.focused_pane_id().expect("the script's tab");
+        assert_eq!(harness.field_text(pane), " /Users/someone/bin/deploy");
+    }
+
+    #[test]
+    fn a_request_with_nothing_that_can_be_opened_leaves_the_window_as_it_was() {
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        let tabs = harness.tab_ids();
+        let section = harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.showing_section());
+        open(&mut harness, &[PathBuf::from("bin/deploy")]);
+        assert_eq!(harness.tab_ids(), tabs);
+        assert_eq!(
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.showing_section()),
+            section,
+            "the settings were closed over nothing"
+        );
+        assert!(
+            harness.window_requests().is_empty(),
+            "the window was brought forward over nothing"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_script_asked_for_before_the_shells_open_runs_at_its_first_prompt_in_its_folder() {
+        // How Crook is launched by a double-click: the request comes before
+        // the window's first frame, which is when the shells open.
+        let mut harness = Harness::new(1);
+        if !a_shell_these_tests_speak() {
+            return;
+        }
+        let scratch = Scratch::new();
+        let folder = scratch.path().join("my scripts");
+        fs::create_dir_all(&folder).expect("the folder is made");
+        let script = folder.join("say where");
+        crate::process::write_program(&script, "#!/bin/sh\nprintf 'ran in %s\\n' \"$(pwd -P)\"\n");
+        let expected = format!(
+            "ran in {}",
+            fs::canonicalize(&folder)
+                .expect("the folder is there")
+                .display()
+        );
+
+        open(&mut harness, std::slice::from_ref(&script));
+        let pane = harness.focused_pane_id().expect("the script's tab");
+        if !harness.start_terminals_with_marks() {
+            return;
+        }
+        harness.wait_for("the script never ran", |harness| {
+            harness
+                .workspace
+                .read(&harness.app, |workspace, app| {
+                    workspace.newest_block_output(pane, app)
+                })
+                .is_some_and(|output| output.contains(&expected))
+        });
+    }
+}
+
 mod dropping_files {
     //! Files dropped on the window, from the moment the window hands the
     //! workspace their paths: which pane they go to, and what reaches it.
