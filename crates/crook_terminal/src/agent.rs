@@ -167,8 +167,7 @@
 //! the row and nothing worse"; a number it does not know is a link that is
 //! not there, which is better. And an address is not a status: it arrives
 //! once, when the pull request is made, and a report on 6340 would have to
-//! carry a word the agent did not mean to say again. `6341` is spoken for,
-//! by the question an agent that stopped to ask is waiting on.
+//! carry a word the agent did not mean to say again.
 //!
 //! An address holds `:` and `/` always and `;` almost never, and `vte`
 //! splits on nothing but `;` — so the pieces after the word are joined back
@@ -177,7 +176,33 @@
 //! is a link to somewhere else. So the writer refuses an address that would
 //! fill the list, and the reader takes a list that is full as one that was
 //! cut. [`pull_request_url`] is the whole of what either end accepts.
+//!
+//! # The question's channel
+//!
+//! `6341` is the question's: the permission request an agent's hook handed
+//! the window over its socket, which the window holds until something says
+//! it is over. Only an id ever travels on it, never the request — the
+//! command a question is about goes to the window over the socket alone, and
+//! a pane's output is something anything in the pane can write. Today that
+//! is one sequence, `OSC 6341 ; done ; <fingerprint> BEL`: the tool a
+//! question was about has run, so the person answered it in the agent's own
+//! dialog, and the window can stop holding it. The [`Fingerprint`] is the 32
+//! lowercase hex digits the window already names that question by, and
+//! nothing else is one: another word, a capital, a digit short or over, or a
+//! fourth piece is no sequence at all — see [`parse_ask_wire`].
+//!
+//! A forged one is harmless in the one way that matters. A done can only
+//! withdraw a question from the window, which leaves the agent's own dialog
+//! as the place to answer it, as it always was; it can never answer one. And
+//! to withdraw anything it has to name the fingerprint of a question held in
+//! that very pane, which only something that knows the session and the whole
+//! request can compute.
+//!
+//! A word after the number, as the pull request has, so that the channel can
+//! carry another fact about a question later and a Crook that does not know
+//! the word ignores it.
 
+use std::fmt;
 use std::str;
 
 /// The OSC number the report arrives on.
@@ -702,6 +727,89 @@ pub(crate) fn parse_pull_request(parameters: &[&[u8]]) -> Option<String> {
         .collect::<Option<Vec<_>>>()?;
     let url = pieces.join(";");
     pull_request_url(&url).map(str::to_owned)
+}
+
+/// The OSC number a question's sequences arrive on — see "The question's
+/// channel" in the module docs.
+pub const ASK_OSC: &str = "6341";
+
+/// The word that says the tool a question was about has run.
+const DONE_WORD: &str = "done";
+
+/// How many hex digits a [`Fingerprint`] is.
+pub const FINGERPRINT_DIGITS: usize = 32;
+
+/// What names one question an agent's hook asked the window: the first half
+/// of its digest, as [`FINGERPRINT_DIGITS`] lowercase hex digits.
+///
+/// Made only by [`Fingerprint::parse`], so that a fingerprint is always one
+/// the wire would carry.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct Fingerprint(String);
+
+impl Fingerprint {
+    /// `text` as a fingerprint, or `None` when it is not exactly
+    /// [`FINGERPRINT_DIGITS`] of `0-9` and `a-f`.
+    ///
+    /// Lowercase only, because the window compares fingerprints byte for
+    /// byte: a capital is another fingerprint, and one that matched nothing
+    /// would say nothing went wrong.
+    pub fn parse(text: &str) -> Option<Self> {
+        let hex = text.len() == FINGERPRINT_DIGITS
+            && text
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
+        hex.then(|| Self(text.to_owned()))
+    }
+
+    /// The digits.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The first twelve digits, as the log names a question by: a fingerprint is
+/// a hash of what an agent asked to run, and a whole one in a log or a panic
+/// is more of that hash than anything needs to tell two apart.
+impl fmt::Debug for Fingerprint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "Fingerprint({}…)", &self.0[..12])
+    }
+}
+
+/// What a program in a pane said on [`ASK_OSC`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AskWire {
+    /// The tool the question with this fingerprint was about has run.
+    Done(Fingerprint),
+}
+
+/// The bytes that say the tool the question `fingerprint` names has run.
+pub fn done_sequence(fingerprint: &Fingerprint) -> String {
+    format!("\x1b]{ASK_OSC};{DONE_WORD};{}\x07", fingerprint.as_str())
+}
+
+/// Reads a question's sequence out of the parameters of an OSC, or returns
+/// `None` when they are not exactly one.
+///
+/// Exactly three pieces — the number, a word this knows, and what that word
+/// takes — since a fourth is something the writer never sends, and a reader
+/// that took the first three of it would be reading a sequence nobody wrote.
+pub fn parse_ask_wire(parameters: &[&[u8]]) -> Option<AskWire> {
+    let [number, word, fingerprint] = parameters else {
+        return None;
+    };
+    if *number != ASK_OSC.as_bytes() {
+        return None;
+    }
+    match *word {
+        word if word == DONE_WORD.as_bytes() => {
+            let fingerprint = str::from_utf8(fingerprint).ok()?;
+            Fingerprint::parse(fingerprint).map(AskWire::Done)
+        }
+        _ => None,
+    }
 }
 
 /// `pieces` as the one text `vte` cut them out of, [`capped`] at `bytes`, or
@@ -1448,5 +1556,83 @@ mod tests {
         assert_eq!(None, pull_request_read("\x1b]6342;pr\x07"));
         assert_eq!(None, pull_request_read(&format!("\x1b]6343;pr;{PR}\x07")));
         assert_eq!(None, parse_pull_request(&[b"6342"]));
+    }
+
+    /// A fingerprint the way the window writes one: 32 lowercase hex digits.
+    const FINGERPRINT: &str = "0123456789abcdef0f1e2d3c4b5a6978";
+
+    /// What the reader makes of `sequence`, through the same cut `vte` makes.
+    fn ask_read(sequence: &str) -> Option<AskWire> {
+        let pieces = split(sequence);
+        let parameters: Vec<&[u8]> = pieces.iter().map(Vec::as_slice).collect();
+        parse_ask_wire(&parameters)
+    }
+
+    #[test]
+    fn a_done_is_read_with_its_fingerprint() {
+        let fingerprint = Fingerprint::parse(FINGERPRINT).expect("32 lowercase hex digits");
+        assert_eq!(FINGERPRINT, fingerprint.as_str());
+        assert_eq!(
+            Some(AskWire::Done(fingerprint)),
+            ask_read(&format!("\x1b]6341;done;{FINGERPRINT}\x07"))
+        );
+        // And it is no status and no pull request, so neither of the other
+        // readers in the same watcher takes it for one.
+        assert_eq!(None, parsed(&format!("\x1b]6341;done;{FINGERPRINT}\x07")));
+        assert_eq!(
+            None,
+            pull_request_read(&format!("\x1b]6341;done;{FINGERPRINT}\x07"))
+        );
+    }
+
+    #[test]
+    fn a_6341_with_another_word_length_case_or_piece_is_nothing() {
+        let upper = FINGERPRINT.to_uppercase();
+        let short = &FINGERPRINT[..31];
+        let long = format!("{FINGERPRINT}0");
+        let not_hex = format!("{}g", &FINGERPRINT[..31]);
+        for sequence in [
+            format!("\x1b]6341;answered;{FINGERPRINT}\x07"),
+            format!("\x1b]6341;Done;{FINGERPRINT}\x07"),
+            format!("\x1b]6341;done;{upper}\x07"),
+            format!("\x1b]6341;done;{short}\x07"),
+            format!("\x1b]6341;done;{long}\x07"),
+            format!("\x1b]6341;done;{not_hex}\x07"),
+            format!("\x1b]6341;done;{FINGERPRINT};{FINGERPRINT}\x07"),
+            format!("\x1b]6341;done;{FINGERPRINT};\x07"),
+            format!("\x1b]6341;done; {FINGERPRINT}\x07"),
+            "\x1b]6341;done;\x07".to_owned(),
+            "\x1b]6341;done\x07".to_owned(),
+            format!("\x1b]6340;done;{FINGERPRINT}\x07"),
+            format!("\x1b]6343;done;{FINGERPRINT}\x07"),
+        ] {
+            assert_eq!(None, ask_read(&sequence), "{sequence:?}");
+        }
+        assert_eq!(None, parse_ask_wire(&[b"6341"]));
+        assert_eq!(None, parse_ask_wire(&[b"6341", b"done", b"\xff"]));
+        for text in [upper.as_str(), short, long.as_str(), not_hex.as_str(), ""] {
+            assert_eq!(None, Fingerprint::parse(text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn the_writer_and_the_reader_agree() {
+        for text in [
+            FINGERPRINT,
+            "00000000000000000000000000000000",
+            "ffffffffffffffffffffffffffffffff",
+        ] {
+            let fingerprint = Fingerprint::parse(text).unwrap();
+            let sequence = done_sequence(&fingerprint);
+            assert_eq!(format!("\x1b]6341;done;{text}\x07"), sequence);
+            assert_eq!(Some(AskWire::Done(fingerprint)), ask_read(&sequence));
+        }
+    }
+
+    #[test]
+    fn a_fingerprint_in_a_log_is_cut_to_twelve_digits() {
+        let printed = format!("{:?}", Fingerprint::parse(FINGERPRINT).unwrap());
+        assert!(printed.contains(&FINGERPRINT[..12]), "{printed}");
+        assert!(!printed.contains(&FINGERPRINT[..13]), "{printed}");
     }
 }

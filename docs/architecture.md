@@ -1789,7 +1789,7 @@ reads it from standard input, the `message` of a hook's JSON when the input is o
 `last_assistant_message` or the `error` of a StopFailure, else the tool Codex's permission
 request names — and the whole input otherwise. `crook --agent-hooks claude` prints the fragment of
 Claude Code's settings that makes it say all of this by itself — running on a prompt and around
-every tool, needing input on every notification with the notification's text piped in as the
+every tool, after one that failed (PostToolUseFailure) as after one that worked, needing input on every notification with the notification's text piped in as the
 message, idle on stop, failed with the error on a StopFailure, which an API error runs in place
 of Stop. A StopFailure a subagent's turn ran, whose input carries an `agent_id`, writes nothing:
 the agent that started it is handed the error and works on. Nor does a needs-input take the
@@ -1921,7 +1921,7 @@ and written by `crook --agent <status> --pull-request <url>` in the same write a
 A sibling number rather than a field on 6340, because 6340's tail is already cut — on `vte`'s
 `;` and on the `;;` before a message and before a session — and an older Crook reads that tail
 as the title, where a number it does not know is simply a link that is not there; 6341 is the
-question an agent that stopped to ask is waiting on. An address holds `:` and `/` always and
+question's channel, and only an id ever travels on it — see "Answering an agent". An address holds `:` and `/` always and
 `;` almost never, so the pieces after the word are joined back as a title's are, and the one
 thing that cannot be undone — `vte` keeping sixteen pieces and dropping the rest without a
 word — is refused at both ends: the writer will not send an address that fills the list, and
@@ -2559,8 +2559,34 @@ answering from Crook off (`answer_agents_from_crook`, on by default, with no swi
 yet) has every question refused as `declined`, at once, before anything about the panes is said.
 
 **How a question ends.** A reader on the hook's half of the connection sees the hook go — Claude
-Code kills it once its dialog is answered, or its parent dies — and tells the window through a
-notice that wakes it, so the question leaves the row the moment the hook does. Its time running
+Code kills it once its dialog is answered No or Esc, or its parent dies — and tells the window
+through a notice that wakes it, so the question leaves the row the moment the hook does. A Yes in
+Claude Code's own dialog tells the hook nothing, and it would hold on, the window with it, until
+the turn ended; what follows a Yes is the tool running and then its PostToolUse, or its
+PostToolUseFailure, whose `tool_input` is the request's byte for byte (C11 and C15 in
+`docs/answering.md`). So the hook after every tool, the one that already says `running` and looks
+for a pull request, also writes `OSC 6341 ; done ; <fingerprint> BEL` after the status, in the
+same write — for a `Bash` call of the main thread with a session the wire takes and an input the
+allowlist reads whole, the fingerprint being the first half of the digest in 32 lowercase hex
+digits, computed from that input as the window computed it from the question — and the window
+ends the questions held in that pane with that fingerprint as `answered-in-agent`, which its
+history says as "answered in Claude Code". A tool a person interrupts runs PostToolUseFailure
+with `is_interrupt`, and ends the turn with no Stop, so that one writes the done alone: a
+`running` after the title's `✳` would leave the row running. No hook's command changes for it;
+PostToolUseFailure is a new hook with a command of its own, `running --done -`, which reads the
+input for the done alone and finds no pull request in it. Not PostToolUse's command, because a
+Crook older than the done would read that as PostToolUse and say `running` after the interrupt;
+every release since 0.1.13 refuses a flag it does not know before it writes anything, so an older
+binary handed `--done` writes nothing, and the hook's `|| exit 0` keeps that quiet. The emulator hands every done in a read over, eight at most and
+never as a repeat dropped, ahead of the status from the same read, so a question has gone before
+the running that answered it arrives. Only an id ever travels on 6341, never the request, and
+anything that is not exactly the three pieces — another word, a capital, a digit short or over, a
+fourth piece — is no sequence. Anything in the pane can write one, and that is safe: a done can
+only withdraw a question from the window, never answer one, it names only a question in the pane
+it was written in, and a withdrawn question leaves the agent's own dialog the place to answer, as
+it is for a question the window never held. A "No, and tell Claude what to do differently"
+runs no tool and no PostToolUse, so its question still waits for the turn to end or a newer one
+to replace it. Its time running
 out (its wait and five seconds) is a pass, `expired`. Its pane closing, the agent's command
 ending, the agent's own hook saying the turn is over or failed, and a newer question from the same
 session in the same pane are each a pass, with the reason as `why`. A window that closes tells

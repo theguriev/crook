@@ -194,6 +194,18 @@ pub enum TerminalEvent {
     /// it go since — the pane moved to another branch — and an agent saying
     /// it again is putting it back.
     PullRequest(String),
+    /// A program in the pane said the tools the questions with these
+    /// fingerprints were about have run, on the question's channel
+    /// [`crate::agent`] describes: the person answered each in the agent's
+    /// own dialog.
+    ///
+    /// Every one said in a read, in the order said, up to eight, and never
+    /// on change only: each is about a question of its own. Handed over
+    /// ahead of the [`Self::Agent`] the same read carries, since the hook
+    /// that says a tool has run says `running` in the same write, and the
+    /// question has to be gone before the running it was answered by
+    /// arrives.
+    AskDone(Vec<agent::Fingerprint>),
     /// A program in the pane asked for a look, in one of the notification
     /// sequences other terminals read — OSC 9, 777 or 99; see
     /// [`crate::notify`].
@@ -281,6 +293,12 @@ struct OscWatcher {
     /// that it does.
     sessions: agent::Sessions,
     pull_request: Option<String>,
+    /// The questions said done since the last hand-over, oldest first.
+    asks_done: Vec<agent::Fingerprint>,
+    /// How many dones this read has taken, which [`ASK_DONES_PER_READ`]
+    /// bounds: a read is where the window spends what the pane wrote, and a
+    /// pane full of them is a pane writing them on purpose.
+    asks_done_read: usize,
     /// Keeps a kitty notification that is arriving in chunks.
     notifications: notify::Reader,
     notification: Option<Notification>,
@@ -392,6 +410,16 @@ impl Perform for OscWatcher {
                 self.background_set |= params.get(1).is_some_and(|colour| *colour != b"?");
             }
             Some(&b"111") => self.background_set = true,
+            // The question's channel, ahead of the status's arm below, which
+            // would only look for a report in it and find none.
+            Some(&b"6341") => {
+                if let Some(agent::AskWire::Done(fingerprint)) = agent::parse_ask_wire(params)
+                    && self.asks_done_read < ASK_DONES_PER_READ
+                {
+                    self.asks_done_read += 1;
+                    self.asks_done.push(fingerprint);
+                }
+            }
             // Crook's own, and the number is deliberately far from anything
             // standardised: nothing but a shell Crook itself set up emits it,
             // and a stream that happens to contain one costs a caller a look
@@ -479,6 +507,14 @@ impl Perform for OscWatcher {
             || self.background_set
     }
 }
+
+/// The most questions one read of a pane's output can say are done; the
+/// rest are dropped.
+///
+/// Eight: Claude Code shows one dialog at a time, so a hook says one done in
+/// a write, and a read that held more than a few is one a pty saved up from
+/// several hooks, or a pane writing them on purpose.
+pub const ASK_DONES_PER_READ: usize = 8;
 
 /// The OSC number a shell answers a completion request on.
 ///
@@ -844,6 +880,7 @@ impl Emulator {
         if bytes.is_empty() {
             return;
         }
+        self.osc_watcher.asks_done_read = 0;
 
         let view = self.view();
         let mut exited = None;
@@ -1902,7 +1939,15 @@ impl Emulator {
     /// status change after one takes its place. Handing them over in a fixed
     /// order would make the same bytes settle one way in one read and another
     /// way split across two. Idempotent, like [`Self::apply_agent_report`].
+    ///
+    /// The questions said done go first of all, though the hook that says
+    /// one writes its `running` just before it: the question has to be gone
+    /// by the time the running is taken in.
     fn apply_reports(&mut self) {
+        if !self.osc_watcher.asks_done.is_empty() {
+            let done = std::mem::take(&mut self.osc_watcher.asks_done);
+            self.events.push(TerminalEvent::AskDone(done));
+        }
         let notified_last = std::mem::take(&mut self.osc_watcher.notified_last);
         if !notified_last {
             self.apply_notification();

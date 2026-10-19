@@ -30,6 +30,11 @@
 //! is the pane Crook draws. And once with tmux only named in the environment,
 //! the way every pane of a Crook started from inside tmux names it, where the
 //! report has to stay on the pane rather than go to that tmux's client.
+//!
+//! And the hook after a tool once more, handed what Claude Code 2.1.280
+//! handed it after a Bash call, where the write that says `running` has to
+//! carry the question's done right behind it, with the fingerprint the
+//! window names that question by.
 
 #![cfg(unix)]
 
@@ -503,6 +508,9 @@ fn expected_report(command: &str) -> String {
             // such call's: the report is the status alone, as it is for
             // every tool that opens no pull request.
             "--pull-request" => {}
+            // Read for the done of a Bash call, and INPUT is no tool's: the
+            // status alone again.
+            "--done" => {}
             "--session" => session = Some(Session::Of(SESSION)),
             "--session-start" => session = Some(Session::Starts(SESSION)),
             other => panic!("{command}: {other} is not a flag `--agent` takes"),
@@ -1010,4 +1018,75 @@ fn a_failure_reaches_the_pane_and_a_subagents_does_not() {
         ),
         "a subagent's failure is no error to report"
     );
+}
+
+/// Claude Code 2.1.280's PostToolUse after a yes in its own dialog, and a
+/// PostToolUseFailure, as the probe in `docs/answering.md` recorded them.
+const RAN: &str = include_str!("fixtures/asks/claude-2.1.280-bash-posttooluse.json");
+const FAILED: &str = include_str!("fixtures/asks/claude-2.1.280-bash-posttoolusefailure.json");
+
+/// The done the window waits for after the call `input` is the hook input
+/// of: the fingerprint `request.rs` computes from its session and its tool
+/// input, as the window computed it from the question.
+fn expected_done(input: &str) -> String {
+    let hook: Value = serde_json::from_str(input).expect("the fixture is JSON");
+    let session = hook["session_id"]
+        .as_str()
+        .expect("the fixture has a session");
+    let request = crook::from_claude_bash(&hook["tool_input"])
+        .expect("the fixture's input is one the allowlist reads");
+    let digest = crook::digest(session, "Bash", &request);
+    let fingerprint = crook::fingerprint(&digest);
+    crook_terminal::agent::done_sequence(
+        &crook_terminal::agent::Fingerprint::parse(&fingerprint).expect("32 lowercase hex digits"),
+    )
+}
+
+#[test]
+fn the_hook_after_a_tool_says_its_running_and_then_its_question_done_in_one_write() {
+    if !perl_is_here() {
+        return;
+    }
+    let running = crook_terminal::agent::report(AgentReport::Running, None, None, None);
+    for (event, input) in [("PostToolUse", RAN), ("PostToolUseFailure", FAILED)] {
+        let ran = run_as_a_hook_given(&plugin_hook(event), Agent::OnThePane, input);
+        assert_eq!(
+            "detached\n", ran.probe,
+            "{event}: a hook here has to be where Claude Code puts one, with no terminal of its own"
+        );
+        // Back to back: one write, the status first, and nothing between.
+        let written = format!("{running}{}", expected_done(input));
+        assert!(
+            ran.pane.contains(&written),
+            "{event}: the pane never got {written:?}; it got {:?}, and the hook said {:?}",
+            ran.pane,
+            ran.stderr
+        );
+        assert_eq!(1, ran.pane.matches("\x1b]6341;").count(), "{:?}", ran.pane);
+        assert_eq!(
+            ("0\n", ""),
+            (ran.status.as_str(), ran.stdout.as_str()),
+            "{event}: {}",
+            ran.stderr
+        );
+    }
+
+    // A tool a person interrupted ends the turn, with no Stop after it: the
+    // done goes alone, and no running comes after the title's `✳`.
+    let mut interrupted: Value = serde_json::from_str(FAILED).unwrap();
+    interrupted["is_interrupt"] = Value::Bool(true);
+    let interrupted = interrupted.to_string();
+    let ran = run_as_a_hook_given(
+        &plugin_hook("PostToolUseFailure"),
+        Agent::OnThePane,
+        &interrupted,
+    );
+    assert!(
+        ran.pane.contains(&expected_done(&interrupted)),
+        "the pane never got the done; it got {:?}, and the hook said {:?}",
+        ran.pane,
+        ran.stderr
+    );
+    assert!(!ran.pane.contains("\x1b]6340;"), "{:?}", ran.pane);
+    assert_eq!("0\n", ran.status, "{}", ran.stderr);
 }

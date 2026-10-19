@@ -70,7 +70,10 @@
 //! reports `running`, so `--pull-request -` there finds the address a
 //! `gh pr create` printed without a second process after every command.
 //! Crook asks no forge for it: the agent just made the pull request, and
-//! knows.
+//! knows. The same hook, reading the same input, says the question a `Bash`
+//! command was asked with is done once the command has run — see
+//! `done_from_hook` — since a yes in Claude Code's own dialog tells the
+//! question's hook nothing.
 //!
 //! `--session <id>` says which of the agent's sessions the report is from,
 //! and `--session -` reads the id out of the hook's input. A subagent runs in
@@ -177,11 +180,18 @@ const MESSAGE_CHARS: usize = 200;
 /// A `failed` whose hook input is a subagent's is written nowhere, and is no
 /// error either: Claude Code runs `StopFailure` for a subagent too, and that
 /// failure is not the pane's — see `said_for_a_subagent`.
+///
+/// With `--pull-request -`, or `done` — `--done -`, which takes nothing but
+/// `-` — a hook input that says a `Bash` command ran adds the done for the
+/// question it may have been asked with, after the status and in the same
+/// write — see `done_from_hook` — and one that says a person interrupted the
+/// tool writes that done alone, or nothing — see `interrupted_a_tool`.
 pub fn report(
     status: &str,
     title: Option<&str>,
     message: Option<&str>,
     pull_request: Option<&str>,
+    done: Option<&str>,
     session: Option<Session<&str>>,
 ) -> Result<()> {
     let status = AgentReport::parse(status).with_context(|| {
@@ -199,12 +209,17 @@ pub fn report(
         None | Some(Session::Of("-") | Session::Starts("-")) => None,
         Some(said) => Some(given_session(said)?),
     };
+    // A fingerprint is the window's to compute, from what it was asked; one
+    // typed on a command line would be a done for nothing anybody checked.
+    if let Some(given) = done.filter(|given| *given != "-") {
+        bail!("`--done` takes only `-`, to read the hook's input from stdin, not {given}");
+    }
 
     // Read once, whichever of them asked for it: stdin has one reading in
     // it, and `--title - --message -` would otherwise hand the second an
     // empty string.
     let session_id = session.map(|said| *said.id());
-    let input = if [title, message, pull_request, session_id].contains(&Some("-")) {
+    let input = if [title, message, pull_request, done, session_id].contains(&Some("-")) {
         let mut input = String::new();
         io::stdin()
             .read_to_string(&mut input)
@@ -214,6 +229,16 @@ pub fn report(
         None
     };
     if status == AgentReport::Failed && input.as_deref().is_some_and(said_for_a_subagent) {
+        return Ok(());
+    }
+    // Only an input `--pull-request -` or `--done -` read: that is the hook
+    // after a tool, and the one that knows which tool ran.
+    let done = match (pull_request, done) {
+        (Some("-"), _) | (_, Some("-")) => input.as_deref().and_then(done_from_hook),
+        _ => None,
+    };
+    let interrupted = input.as_deref().is_some_and(interrupted_a_tool);
+    if interrupted && done.is_none() {
         return Ok(());
     }
     let title = match title {
@@ -238,15 +263,24 @@ pub fn report(
         Some(said.map(|_| id))
     });
 
-    let written = sequence(
-        status,
-        title.as_deref(),
-        message.as_deref(),
-        pull_request.as_deref(),
-        session
-            .as_ref()
-            .map(|said| said.as_ref().map(String::as_str)),
-    );
+    let mut written = if interrupted {
+        String::new()
+    } else {
+        sequence(
+            status,
+            title.as_deref(),
+            message.as_deref(),
+            pull_request.as_deref(),
+            session
+                .as_ref()
+                .map(|said| said.as_ref().map(String::as_str)),
+        )
+    };
+    // After the status, in the same write, so that no hook running beside
+    // this one can come between them; the window takes the done in first.
+    if let Some(done) = &done {
+        written.push_str(&crook_terminal::agent::done_sequence(done));
+    }
     // Inside tmux the terminal this has is one of tmux's panes, and tmux keeps
     // the sequence to itself; see `tmux`.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -282,6 +316,65 @@ fn sequence(
         written.push_str(&pull_request);
     }
     written
+}
+
+/// The question a hook's input says has been answered in Claude Code's own
+/// dialog, or `None` when it says nothing about one.
+///
+/// Claude Code tells a `PermissionRequest` hook nothing when a person says
+/// yes in the dialog beside it: the hook holds on, and the window with it,
+/// until the turn ends. What does follow a yes is the tool running, and then
+/// its `PostToolUse` — or `PostToolUseFailure`, when the tool failed — with
+/// the same `tool_input`, byte for byte, as the request had. So the
+/// question's fingerprint is computed here from that input exactly as the
+/// window computed it from the request ([`request::digest`] over the
+/// session, the tool and what [`request::from_claude_bash`] reads), and the
+/// window lets go of the question that has it.
+///
+/// Only for what a question could have been asked about: `Bash`, with a
+/// session the wire takes, an input the allowlist reads whole, and not a
+/// subagent's, which [`ask`] asks nothing for — a subagent that ran the
+/// command its parent is still being asked about would otherwise withdraw
+/// the parent's question.
+///
+/// A tool a person interrupted is said done all the same: it ran, so it was
+/// allowed.
+fn done_from_hook(input: &str) -> Option<crook_terminal::agent::Fingerprint> {
+    let hook: Value = serde_json::from_str(input).ok()?;
+    let said = |key: &str| hook.get(key).and_then(Value::as_str);
+    if !matches!(
+        said("hook_event_name"),
+        Some("PostToolUse" | "PostToolUseFailure")
+    ) || said("tool_name") != Some("Bash")
+    {
+        return None;
+    }
+    match hook.get("agent_id") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(id)) if id.trim().is_empty() => {}
+        Some(_) => return None,
+    }
+    let session = said("session_id").and_then(crook_terminal::agent::session_id)?;
+    let request = request::from_claude_bash(hook.get("tool_input")?)?;
+    let tool = crate::control::protocol::AskingAgent::Claude.tool(&request);
+    let digest = request::digest(session, tool, &request);
+    let fingerprint = crook_terminal::agent::Fingerprint::parse(&request::fingerprint(&digest))
+        .expect("a digest's first half in lowercase hex is a fingerprint");
+    Some(fingerprint)
+}
+
+/// Whether a hook's input is Claude Code's `PostToolUseFailure` for a tool a
+/// person interrupted, with Esc, for which [`report`] writes no status.
+///
+/// An interrupt ends the turn, and Claude Code runs no `Stop` for it; what
+/// says the turn is over is the `✳` it draws in the title — see
+/// `Workspace::title_reported` — and a `running` arriving after that would
+/// keep the row running, breathing, until the next prompt.
+fn interrupted_a_tool(input: &str) -> bool {
+    serde_json::from_str::<Value>(input).is_ok_and(|hook| {
+        hook.get("hook_event_name").and_then(Value::as_str) == Some("PostToolUseFailure")
+            && hook.get("is_interrupt") == Some(&Value::Bool(true))
+    })
 }
 
 /// An address given on the command line, as the wire will take it.
@@ -783,10 +876,24 @@ enum Fragment {
 /// after any other tool. That hook rather than a second one matched to
 /// `Bash`, because a second would be a second process after every shell
 /// command the agent runs, to report a `running` the first already had.
+///
+/// It is also what tells the window that a question it holds was answered
+/// in Claude Code's own dialog, which says nothing to the question's hook:
+/// the tool ran, so somebody said yes — see [`done_from_hook`]. A tool that
+/// failed runs `PostToolUseFailure` instead, with the same input, and the
+/// question it was asked with is as answered. That event runs a command of
+/// its own, `--done -`, rather than PostToolUse's: a tool a person
+/// interrupted with Esc runs it too, and ends the turn, so a `running` from
+/// it would keep the row running after the turn was over. A Crook that
+/// knows the done writes the done alone for that one — see
+/// `interrupted_a_tool` — and one older than the done refuses a flag it does
+/// not know before it writes anything, every release since 0.1.13 having
+/// done so, where PostToolUse's command would have had it say `running`.
 const CLAUDE_EVENTS: &[(&str, &str)] = &[
     ("UserPromptSubmit", "running --title -"),
     ("PreToolUse", "running"),
     ("PostToolUse", "running --pull-request -"),
+    ("PostToolUseFailure", "running --done -"),
     ("Notification", "needs-input --message -"),
     ("Stop", "idle"),
     ("StopFailure", "failed --message -"),
@@ -2331,6 +2438,7 @@ mod tests {
             "UserPromptSubmit",
             "PreToolUse",
             "PostToolUse",
+            "PostToolUseFailure",
             "Notification",
             "Stop",
             "StopFailure",
@@ -2909,7 +3017,7 @@ process.stdout.write(JSON.stringify({ ran, asked }))
         let claude = hooks_text("claude", Path::new("/usr/bin/crook")).unwrap();
         let parsed: Value = serde_json::from_str(&claude.text).unwrap();
         let hooks = parsed["hooks"].as_object().unwrap();
-        assert_eq!(7, hooks.len(), "a hook was added or dropped: {hooks:?}");
+        assert_eq!(8, hooks.len(), "a hook was added or dropped: {hooks:?}");
     }
 
     #[test]
@@ -2955,6 +3063,219 @@ process.stdout.write(JSON.stringify({ ran, asked }))
             "\x1b]6340;idle\x07",
             sequence(AgentReport::Idle, None, None, None, None)
         );
+    }
+
+    /// Claude Code 2.1.280's PermissionRequest for one Bash call, and the
+    /// PostToolUse that followed the yes given in its own dialog: one call,
+    /// from the probe recorded in `docs/answering.md` (C11).
+    const ASKED: &str = include_str!("../tests/fixtures/asks/claude-2.1.280-bash.json");
+    const RAN: &str = include_str!("../tests/fixtures/asks/claude-2.1.280-bash-posttooluse.json");
+    /// A PostToolUseFailure, of another call (C15).
+    const FAILED: &str =
+        include_str!("../tests/fixtures/asks/claude-2.1.280-bash-posttoolusefailure.json");
+
+    /// The fingerprint the window names the question in `input` by, the way
+    /// it computes it: from what the permission hook asked it.
+    fn fingerprint_the_window_holds(input: &str) -> String {
+        let environment = ask::Environment {
+            socket: Some(PathBuf::from("/run/crook/socket")),
+            entrypoint: Some("cli".to_owned()),
+            ..ask::Environment::default()
+        };
+        let question = ask::question(input.as_bytes(), &environment, || Some(1))
+            .expect("the fixture is a question the hook asks");
+        request::fingerprint(&question.asked.digest())
+    }
+
+    /// `input` with `key` set to `value`.
+    fn with(input: &str, key: &str, value: Value) -> String {
+        let mut hook: Value = serde_json::from_str(input).unwrap();
+        hook[key] = value;
+        hook.to_string()
+    }
+
+    #[test]
+    fn the_fingerprint_matches_between_permission_request_and_post_tool_use() {
+        // The gate the whole done stands on: the tool's input after it ran
+        // is the request's, byte for byte, in what Claude Code hands over.
+        let input_of = |fixture: &str| {
+            let at = fixture.find(r#""tool_input":"#).unwrap();
+            let rest = &fixture[at..];
+            rest[..rest.find('}').unwrap() + 1].to_owned()
+        };
+        assert_eq!(input_of(ASKED), input_of(RAN));
+
+        let held = fingerprint_the_window_holds(ASKED);
+        let done = done_from_hook(RAN).expect("a Bash call that ran says it is done");
+        assert_eq!(held, done.as_str());
+
+        // A failed call is as done, with the fingerprint its own input makes.
+        let failed = done_from_hook(FAILED).expect("a Bash call that failed is done too");
+        let asked = with(FAILED, "hook_event_name", json!("PermissionRequest"));
+        assert_eq!(fingerprint_the_window_holds(&asked), failed.as_str());
+        assert_ne!(held, failed.as_str());
+    }
+
+    #[test]
+    fn a_done_is_said_only_for_what_a_question_could_have_been_about() {
+        assert!(done_from_hook(RAN).is_some());
+        for refused in [
+            // Not the hook after a tool.
+            ASKED.to_owned(),
+            with(RAN, "hook_event_name", json!("PreToolUse")),
+            // Another tool, or none.
+            with(RAN, "tool_name", json!("Write")),
+            with(RAN, "tool_name", Value::Null),
+            // A subagent's, which the window was never asked about.
+            with(RAN, "agent_id", json!("ac87da6c09324f43e")),
+            // A session the wire would not take, or none.
+            with(RAN, "session_id", json!("two words")),
+            with(RAN, "session_id", Value::Null),
+            // An input the allowlist would not have asked about.
+            with(
+                RAN,
+                "tool_input",
+                json!({ "command": "touch probe-c9a", "sandbox": "off" }),
+            ),
+            with(RAN, "tool_input", json!({ "command": "" })),
+            // And text that is not a hook's input at all.
+            "https://github.com/o/r/pull/1".to_owned(),
+        ] {
+            assert_eq!(None, done_from_hook(&refused), "{refused}");
+        }
+        // A blank agent id is the main thread's, as the question reads it.
+        assert!(done_from_hook(&with(RAN, "agent_id", json!(""))).is_some());
+        // And the session is what makes it this question and no other.
+        assert_ne!(
+            done_from_hook(RAN),
+            done_from_hook(&with(RAN, "session_id", json!("another")))
+        );
+    }
+
+    #[test]
+    fn an_interrupted_tool_says_its_done_and_no_running() {
+        let interrupted = with(FAILED, "is_interrupt", json!(true));
+        assert!(interrupted_a_tool(&interrupted));
+        assert!(
+            done_from_hook(&interrupted).is_some(),
+            "it ran, so it was allowed"
+        );
+        assert!(!interrupted_a_tool(FAILED));
+        assert!(!interrupted_a_tool(RAN));
+        assert!(!interrupted_a_tool(&with(RAN, "is_interrupt", json!(true))));
+        assert!(!interrupted_a_tool(&with(
+            FAILED,
+            "is_interrupt",
+            json!("true")
+        )));
+    }
+
+    #[test]
+    fn the_hook_after_a_failed_tool_is_one_a_crook_older_than_the_done_refuses() {
+        // An interrupted tool runs PostToolUseFailure and ends the turn, so
+        // a `running` from it keeps the row running. A Crook that knows the
+        // done writes none there; one that does not has to be handed a
+        // command it refuses, and from 0.1.13 through 0.1.28 `--agent` read
+        // exactly these flags and refused any other `--` word before it
+        // wrote a thing.
+        const OLDER: [&str; 5] = [
+            "--title",
+            "--message",
+            "--pull-request",
+            "--session",
+            "--session-start",
+        ];
+        let arguments = CLAUDE_EVENTS
+            .iter()
+            .find_map(|(event, arguments)| (*event == "PostToolUseFailure").then_some(*arguments))
+            .expect("Claude Code's hooks run after a failed tool");
+        assert!(
+            arguments
+                .split_whitespace()
+                .any(|word| word.starts_with("--") && !OLDER.contains(&word)),
+            "an older Crook reads `{arguments}` and says running after an interrupt"
+        );
+        // And this one reads it, for the done and nothing it cannot have.
+        let interrupted = with(FAILED, "is_interrupt", json!(true));
+        assert!(done_from_hook(&interrupted).is_some());
+        assert!(interrupted_a_tool(&interrupted));
+    }
+
+    #[test]
+    fn every_status_hook_command_is_unchanged() {
+        // Codex keeps a hash of every hook it was told to trust, and holds a
+        // changed one back for review: a hook command is never changed, only
+        // added. And an older binary reads every one of these as it always
+        // has. Pinned whole, the guard and all, for every agent.
+        let guard = "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || [ -n \"$TMUX\" ] || exit 0; \
+crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent ";
+        let pinned: &[(&str, &[(&str, &str)])] = &[
+            (
+                "claude",
+                &[
+                    ("UserPromptSubmit", "running --title -"),
+                    ("PreToolUse", "running"),
+                    ("PostToolUse", "running --pull-request -"),
+                    ("PostToolUseFailure", "running --done -"),
+                    ("Notification", "needs-input --message -"),
+                    ("Stop", "idle"),
+                    ("StopFailure", "failed --message -"),
+                    ("SessionEnd", "idle"),
+                ],
+            ),
+            (
+                "codex",
+                &[
+                    ("UserPromptSubmit", "running --title -"),
+                    ("PreToolUse", "running"),
+                    ("PostToolUse", "running --pull-request -"),
+                    ("PermissionRequest", "needs-input --message -"),
+                    ("Stop", "idle"),
+                    ("SessionEnd", "idle"),
+                ],
+            ),
+            (
+                "gemini",
+                &[
+                    ("BeforeAgent", "running --title -"),
+                    ("BeforeTool", "running"),
+                    ("AfterTool", "running"),
+                    ("Notification", "needs-input --message -"),
+                    ("AfterAgent", "idle"),
+                    ("SessionEnd", "idle"),
+                ],
+            ),
+            (
+                "copilot",
+                &[
+                    ("sessionStart", "running --title - --session-start -"),
+                    ("userPromptSubmitted", "running --title - --session -"),
+                    ("preToolUse", "running --session -"),
+                    ("postToolUse", "running --session -"),
+                    ("notification", "needs-input --message - --session -"),
+                    ("agentStop", "idle --session -"),
+                    ("sessionEnd", "idle --session -"),
+                ],
+            ),
+        ];
+        for (agent, events) in pinned {
+            let printed = hooks_text(agent, Path::new("/usr/bin/crook")).unwrap();
+            let parsed: Value = serde_json::from_str(&printed.text).unwrap();
+            let hooks = parsed["hooks"].as_object().unwrap();
+            assert_eq!(events.len(), hooks.len(), "{agent}: {hooks:?}");
+            for (event, arguments) in *events {
+                let hook = &hooks[*event][0];
+                let command = hook["hooks"][0]["command"]
+                    .as_str()
+                    .or_else(|| hook["bash"].as_str())
+                    .unwrap_or_else(|| panic!("{agent} has no {event} hook"));
+                assert_eq!(
+                    format!("{guard}{arguments} || exit 0"),
+                    command,
+                    "{agent} {event}"
+                );
+            }
+        }
     }
 
     /// Copilot CLI's subagent in the capture the session rule was made from.
@@ -3089,7 +3410,7 @@ process.stdout.write(JSON.stringify({ ran, asked }))
             "https://github.com/o/r/pull/1\x07",
             "not a link",
         ] {
-            let error = report("running", None, None, Some(refused), None)
+            let error = report("running", None, None, Some(refused), None, None)
                 .expect_err("an address the wire refuses is an error")
                 .to_string();
             assert!(error.contains("--pull-request"), "{error}");
@@ -4267,7 +4588,7 @@ process.stdout.write(JSON.stringify({ ran, asked }))
 
     #[test]
     fn a_word_that_is_not_a_status_is_refused_with_the_words_that_are() {
-        let error = report("sleeping", None, None, None, None).unwrap_err();
+        let error = report("sleeping", None, None, None, None, None).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("sleeping"));
         assert!(message.contains("needs-input"));

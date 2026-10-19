@@ -29,7 +29,9 @@
 //! With the hook going ([`Cause::HookGone`], which the connection tells the
 //! window through a [`Notice`] the moment it sees it), its time running out,
 //! its pane closing, the agent's command ending, the agent saying its turn is
-//! over or failed, the same session asking again, or the window closing.
+//! over or failed, the same session asking again, the tool it was about
+//! having run ([`Cause::AnsweredInAgent`]: a person said yes in the agent's
+//! own dialog, which tells the hook nothing), or the window closing.
 //! Each but the last pushes a pass into the question's feed, which the
 //! connection writes and the hook prints nothing for; a window that closes
 //! says `gone` instead. Each is a line in the log — the agent, the tool, how
@@ -59,6 +61,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crook_terminal::agent::Fingerprint;
 use crookui_core::prelude::*;
 use serde_json::Value;
 
@@ -159,6 +162,10 @@ pub enum Cause {
     TurnEnded,
     /// The same session in the same pane asked a newer question.
     AskedAgain,
+    /// The tool it was about has run, so a person answered it in the agent's
+    /// own dialog: the hook that runs after the tool said so, on the pane —
+    /// see [`Asks::answered_in_agent`].
+    AnsweredInAgent,
     /// The window closed.
     WindowClosed,
 }
@@ -173,7 +180,23 @@ impl Cause {
             Self::CommandEnded => "command-ended",
             Self::TurnEnded => "turn-ended",
             Self::AskedAgain => "asked-again",
+            Self::AnsweredInAgent => "answered-in-agent",
             Self::WindowClosed => "window-closed",
+        }
+    }
+
+    /// How a person is told it ended, of a question `agent` asked.
+    #[cfg(test)]
+    pub fn said(self, agent: AskingAgent) -> String {
+        match self {
+            Self::HookGone => "its hook went".to_owned(),
+            Self::Expired => "its time ran out".to_owned(),
+            Self::PaneClosed => "its pane closed".to_owned(),
+            Self::CommandEnded => format!("{} exited", agent.name()),
+            Self::TurnEnded => format!("{}'s turn ended", agent.name()),
+            Self::AskedAgain => format!("{} asked again", agent.name()),
+            Self::AnsweredInAgent => format!("answered in {}", agent.name()),
+            Self::WindowClosed => "the window closed".to_owned(),
         }
     }
 }
@@ -243,7 +266,6 @@ pub struct Ask {
     /// carries, so an answer can only reach the question it was given about.
     pub digest: [u8; 32],
     /// The digest's first half in hex: see [`request::fingerprint`].
-    #[cfg(test)]
     pub fingerprint: String,
     /// The pane whose terminal it named.
     pub pane: PaneId,
@@ -436,7 +458,6 @@ impl Asks {
             id,
             agent,
             summary: summary(agent.tool(&request), &request),
-            #[cfg(test)]
             fingerprint: request::fingerprint(&digest),
             digest,
             session,
@@ -554,6 +575,35 @@ impl Asks {
         ask.feed.end();
         self.finish(index, How::Answered(choice), Instant::now());
         Delivery::Delivered
+    }
+
+    /// Ends every question held in `pane` whose fingerprint is one of
+    /// `fingerprints`, as [`Cause::AnsweredInAgent`], and says whether any
+    /// was.
+    ///
+    /// The pane's own output says this — the hook after a tool writes it
+    /// where it writes its status — so anything in the pane can say it of
+    /// any question there whose fingerprint it knows. All it can do is
+    /// withdraw: the hook is told to pass, which leaves the agent's own
+    /// dialog the place to answer, as it is for a question the window never
+    /// held. A question in another pane is never touched, whatever the
+    /// fingerprint, and nothing is answered.
+    pub fn answered_in_agent(&mut self, pane: PaneId, fingerprints: &[Fingerprint]) -> bool {
+        let answered: Vec<AskId> = self
+            .live
+            .iter()
+            .filter(|ask| {
+                ask.pane == pane
+                    && fingerprints
+                        .iter()
+                        .any(|done| done.as_str() == ask.fingerprint)
+            })
+            .map(|ask| ask.id)
+            .collect();
+        for &id in &answered {
+            self.end(id, Cause::AnsweredInAgent);
+        }
+        !answered.is_empty()
     }
 
     /// Takes in what a question's connection said happened to it.

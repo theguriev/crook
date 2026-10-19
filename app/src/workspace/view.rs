@@ -10020,6 +10020,12 @@ impl Workspace {
             TerminalUpdate::PullRequest { pane, url } => {
                 self.pull_request_reported(*pane, url.clone(), ctx)
             }
+            TerminalUpdate::AskDone { pane, fingerprints } => {
+                if self.asks.answered_in_agent(*pane, fingerprints) {
+                    ctx.notify();
+                }
+                self.tabs.pane(*pane).is_some()
+            }
         };
 
         if !reported {
