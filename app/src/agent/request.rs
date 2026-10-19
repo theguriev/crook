@@ -193,19 +193,7 @@ pub fn canonical(value: &Value) -> String {
 
 fn write_canonical(value: &Value, into: &mut String) {
     match value {
-        Value::Object(fields) => {
-            let sorted: BTreeMap<&String, &Value> = fields.iter().collect();
-            into.push('{');
-            for (index, (key, field)) in sorted.into_iter().enumerate() {
-                if index > 0 {
-                    into.push(',');
-                }
-                into.push_str(&Value::String(key.clone()).to_string());
-                into.push(':');
-                write_canonical(field, into);
-            }
-            into.push('}');
-        }
+        Value::Object(fields) => write_object(fields, into),
         Value::Array(items) => {
             into.push('[');
             for (index, item) in items.iter().enumerate() {
@@ -218,6 +206,27 @@ fn write_canonical(value: &Value, into: &mut String) {
         }
         scalar => into.push_str(&scalar.to_string()),
     }
+}
+
+/// An object's `fields`, in whatever order they come, written with their
+/// keys sorted.
+///
+/// Taking the fields rather than a map is what lets a test hand it fields
+/// out of order, which no `serde_json` map built without `preserve_order`
+/// can hold: the sort is the thing that has to work the day the map stops
+/// doing it.
+fn write_object<'a>(fields: impl IntoIterator<Item = (&'a String, &'a Value)>, into: &mut String) {
+    let sorted: BTreeMap<&String, &Value> = fields.into_iter().collect();
+    into.push('{');
+    for (index, (key, field)) in sorted.into_iter().enumerate() {
+        if index > 0 {
+            into.push(',');
+        }
+        into.push_str(&Value::String(key.clone()).to_string());
+        into.push(':');
+        write_canonical(field, into);
+    }
+    into.push('}');
 }
 
 /// SHA-256 over [`DOMAIN`], `session`, `tool` and the request's
@@ -259,8 +268,8 @@ pub fn hex(bytes: &[u8]) -> String {
 /// reads as the lines it is. Everything else that would not print as itself
 /// is written out where it is: a carriage return — which on a terminal
 /// rewrites the line it ends — as `␍`, and every other C0 control, DEL, C1
-/// control, bidirectional control and zero-width or format character as
-/// `⟨U+XXXX⟩`. A command that hid `rm -rf ~` behind a carriage return, or
+/// control, bidirectional control, zero-width, format or other
+/// default-ignorable character, and every space but U+0020, as `⟨U+XXXX⟩`. A command that hid `rm -rf ~` behind a carriage return, or
 /// reordered itself with a right-to-left override, shows the trick instead
 /// of doing it.
 pub fn visible(text: &str) -> String {
@@ -298,9 +307,47 @@ pub fn visible(text: &str) -> String {
 /// Whether `character` would not print as itself: a control character, a
 /// bidirectional control, or a zero-width or format character — Unicode's
 /// general category `Cf`, which every one of those is but the controls —
-/// and the two separators a renderer may break a line at.
+/// any other character Unicode says a renderer may draw as nothing, the two
+/// separators a renderer may break a line at, and every space but the
+/// plain one.
 fn hidden(character: char) -> bool {
-    character.is_control() || format(character) || matches!(character, '\u{2028}' | '\u{2029}')
+    character.is_control()
+        || format(character)
+        || ignorable(character)
+        || spacing(character)
+        || matches!(character, '\u{2028}' | '\u{2029}')
+}
+
+/// Whether `character` is `Default_Ignorable_Code_Point` and outside `Cf`,
+/// as of Unicode 16: a combining grapheme joiner, the Hangul fillers, the
+/// Khmer inherent vowels, the Mongolian and the other variation selectors,
+/// and the reserved runs, all of which a font may draw as nothing at all.
+/// `rm ./build` with a variation selector after it is another file than
+/// the one it reads as.
+fn ignorable(character: char) -> bool {
+    matches!(
+        u32::from(character),
+        0x034F
+            | 0x115F..=0x1160
+            | 0x17B4..=0x17B5
+            | 0x180B..=0x180F
+            | 0x3164
+            | 0xFE00..=0xFE0F
+            | 0xFFA0
+            | 0xFFF0..=0xFFF8
+            | 0xE0080..=0xE0FFF
+    )
+}
+
+/// Whether `character` is a space that is not U+0020: a no-break space, the
+/// sized spaces of U+2000 to U+200A, and the narrow, mathematical and
+/// ideographic ones. Each looks like the space a shell splits words at, and
+/// none of them is one, so `rm\u{a0}-rf` is one word that reads as two.
+fn spacing(character: char) -> bool {
+    matches!(
+        u32::from(character),
+        0x00A0 | 0x1680 | 0x2000..=0x200A | 0x202F | 0x205F | 0x3000
+    )
 }
 
 /// Whether `character` is in Unicode's general category `Cf`, format

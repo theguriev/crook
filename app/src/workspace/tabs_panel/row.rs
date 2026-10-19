@@ -194,11 +194,15 @@ pub(super) fn render(
         Granularity::Tabs => TabAction::Close(tab),
     };
 
+    // Only a question this window could answer: one it cannot is from some
+    // process that named the pane's terminal, and the row would be saying
+    // in the agent's place what that process asked. "Why this status" shows
+    // it, with why it cannot be answered.
     let facts = RowFacts::resolve(session, git, home).asking(
         session,
         workspace
             .asks()
-            .in_pane(pane)
+            .answerable_in(pane)
             .map(|ask| ask.summary.as_str()),
     );
     // One-based, because it is what the chord's key says: `cmd-1` is the

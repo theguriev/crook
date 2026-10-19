@@ -37,7 +37,9 @@
 //! And while the agent's permission hook is waiting on a question the
 //! window holds, the line is that question — "Bash: rm -rf build", read off
 //! what the hook handed the window rather than anything the agent said —
-//! for as long as the pane needs input. See [`RowFacts::asking`].
+//! for as long as the pane needs input. Only a question the window could
+//! answer: one it cannot, from a process it cannot place, never speaks for
+//! the agent on its row. See [`RowFacts::asking`].
 
 use std::path::Path;
 

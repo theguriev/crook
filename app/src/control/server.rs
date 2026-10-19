@@ -690,6 +690,20 @@ impl Drop for Place {
 /// said all it had to say and closed its half. Closing it is no hang-up, on
 /// Linux, for a verb that keeps the connection either — see the module docs.
 pub fn converse(stream: &UnixStream, deadline: Instant, answer: &Ask, place: &mut Place) {
+    converse_as(stream, deadline, answer, place, euid());
+}
+
+/// [`converse`], with the uid an agent's question must come from given
+/// rather than taken from [`euid`], so that a test can be the stranger no
+/// test can connect as: the way [`check`] and the client's checks take
+/// theirs.
+pub(crate) fn converse_as(
+    stream: &UnixStream,
+    deadline: Instant,
+    answer: &Ask,
+    place: &mut Place,
+    uid: u32,
+) {
     let mut reader = BufReader::new(Timed { stream, deadline });
     loop {
         let mut line = Vec::new();
@@ -723,7 +737,7 @@ pub fn converse(stream: &UnixStream, deadline: Instant, answer: &Ask, place: &mu
             {
                 match request.verb {
                     Verb::AgentAsk(_) => {
-                        ask_on(stream, id, request.clone(), deadline, answer, place);
+                        ask_on(stream, id, request.clone(), deadline, answer, place, uid);
                     }
                     _ => keep(stream, id, request.clone(), deadline, answer, place),
                 }
@@ -914,6 +928,7 @@ fn ask_on(
     deadline: Instant,
     answer: &Ask,
     place: &mut Place,
+    uid: u32,
 ) {
     let asked_at = Instant::now();
     let refuse = |refusal: Refusal| {
@@ -929,7 +944,7 @@ fn ask_on(
         ));
         return;
     }
-    let asker = match asker(stream, euid()) {
+    let asker = match asker(stream, uid) {
         Ok(asker) => asker,
         Err(refusal) => {
             refuse(refusal);
@@ -1052,6 +1067,11 @@ fn lineage(_: u32) -> Vec<u32> {
 /// [`Notice::Withdrawn`] — once, and only while the question was still open
 /// — when it hangs up.
 ///
+/// One line at most, of at most [`MAX_ASKER_LINE`]: after it, everything the
+/// hook sends is read and let go until it leaves, so a client that sends line
+/// after line wakes the window once at most rather than once a line. A line
+/// too long, or one cut off by the end, is taken for the hook leaving.
+///
 /// Not [`watch_for_hangup`]: that one reads and lets go, and would race this
 /// for the line. Whatever this hears — a delivery or the end — is sent on
 /// the channel it hands back, which the connection's thread waits on after
@@ -1072,21 +1092,23 @@ fn hear_the_hook(stream: &UnixStream, feed: &Arc<Feed>, held: AskId) -> mpsc::Re
         .name("crook-control-asker".to_owned())
         .spawn(move || {
             let mut lines = BufReader::new(&reading);
-            loop {
-                let mut line = Vec::new();
-                match (&mut lines)
-                    .take(MAX_ASKER_LINE as u64 + 1)
-                    .read_until(b'\n', &mut line)
-                {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) if line.len() > MAX_ASKER_LINE => break,
-                    Ok(_) => {}
-                }
+            let mut line = Vec::new();
+            let read = (&mut lines)
+                .take(MAX_ASKER_LINE as u64 + 1)
+                .read_until(b'\n', &mut line);
+            // One line, and only a whole one: a hook says it printed its
+            // answer once, and whatever else it sends is let go unheard.
+            if read.is_ok_and(|read| read > 0 && read <= MAX_ASKER_LINE && line.ends_with(b"\n")) {
                 let said = serde_json::from_slice::<Delivered>(&line);
                 if said.is_ok_and(|said| said.delivered) {
                     feed.notice(Notice::Delivered(held));
                     let _ = heard.send(());
                 }
+                // Then only its leaving, read for and let go in a buffer of
+                // its own, so that nothing a hook sends after its one line
+                // reaches the window or costs it memory.
+                let mut rest = [0; 512];
+                while matches!(lines.read(&mut rest), Ok(read) if read > 0) {}
             }
             if feed.hang_up() {
                 feed.notice(Notice::Withdrawn(held));

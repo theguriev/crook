@@ -2502,7 +2502,9 @@ the hook prints as the decision — or, when it prints nothing, goes on with the
 has open. `crook --agent ask claude` is that hook. It hands the window the pane is in the whole
 request and waits on its connection for what a person says there. This is the first half: the
 window holds the question for as long as the hook waits, and shows it — on the row's second line
-while the pane needs input, and whole in "Why this status" — and nothing in the window answers
+while the pane needs input, and in "Why this status", in the terminal's family and wrapped at any
+character so that no line it shows is cut, the first twelve lines and 1,024 characters of it with
+what is left counted in words — and nothing in the window answers
 yet but with a pass. No hook entry runs it yet either. The card that answers, and the wiring, come
 next. The code is `app/src/agent/ask.rs` and `request.rs` on the hook's side and
 `app/src/control/ask.rs` on the window's.
@@ -2523,7 +2525,9 @@ KiB, and a line over 64 KiB is not asked. Questions have a lane of their own, si
 four in a pane, counted apart from the thirty-two waits and streams. The window answers
 `{"asked":<id>}` within a second; later it writes exactly one
 `{"answer":{"decision":"allow"|"deny"|"pass","message"?:…,"why"?:…}}`, or a `gone` refusal; the
-hook sends back at most one line, `{"delivered":true}`, once it has printed an answer. A
+hook sends back at most one line, `{"delivered":true}`, once it has printed an answer, and the
+window reads no more than that one line: anything after it is let go unheard until the hook
+leaves. A
 question's id is never handed to another, and its digest — SHA-256 over `crook-ask-v1`, the
 session, the tool and the request as JSON with its keys sorted by hand — is what an answer will be
 checked against, so a press can only ever reach the question it was given about.
@@ -2547,7 +2551,10 @@ emulator and a deadline, and which anything that prints can replay.
 **What the window checks.** The kernel must say the process at the other end is this user's, or
 the question is refused as `unauthorized`. On the connection's thread the window reads that
 process's ancestors, at most 64, and a question whose asker is not below the pane's shell, or
-whose pane is working on another machine, is held and shown read-only. A person who turns
+whose pane is working on another machine, is held and shown read-only. A read-only question is
+one the window cannot place, so it is counted apart from the answerable ones in the pane's four,
+never replaces an answerable one from the same session, comes after one in "Why this status", and
+is never the row's second line. A person who turns
 answering from Crook off (`answer_agents_from_crook`, on by default, with no switch on the page
 yet) has every question refused as `declined`, at once, before anything about the panes is said.
 
@@ -2557,7 +2564,9 @@ notice that wakes it, so the question leaves the row the moment the hook does. I
 out (its wait and five seconds) is a pass, `expired`. Its pane closing, the agent's command
 ending, the agent's own hook saying the turn is over or failed, and a newer question from the same
 session in the same pane are each a pass, with the reason as `why`. A window that closes tells
-every waiting hook `gone`. The title's `✳`, which Claude Code draws as the dialog opens, and a
+every waiting hook `gone`. A connection that stopped waiting for the window to say it held the
+question — a frame stalled past the connection's patience — has its question refused if the window
+has yet to hold it, and hidden and then dropped if it has. The title's `✳`, which Claude Code draws as the dialog opens, and a
 hook's `running`, which parallel tools and subagents say while the dialog is up, end nothing.
 Each ending is one line in the log — `ask 3 claude Bash: turn-ended after 4210 ms (sha256
 1f2e3d4c5b6a)` — and an entry in a history of the last 64, in memory only.
@@ -2565,7 +2574,8 @@ Each ending is one line in the log — `ask 3 claude Bash: turn-ended after 4210
 **What never carries the command.** `pane.list`, `events.follow`, `pane.wait`, `session.json`,
 desktop notifications and the log. The row's second line says it in a line, through the same
 writing-out "Why this status" uses: newlines kept, tabs expanded, a carriage return as `␍`, and
-every other control, DEL, C1, bidirectional, zero-width and format character as `⟨U+XXXX⟩`, so a
+every other control, DEL, C1, bidirectional, zero-width, format and default-ignorable character,
+and every space but the plain one, as `⟨U+XXXX⟩`, so a
 command that hides `rm -rf ~` behind a carriage return or reorders itself with a right-to-left
 override shows the trick rather than doing it. A question's `Debug` prints the agent, the kind and
 a twelve-digit digest prefix.

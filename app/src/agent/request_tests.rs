@@ -100,6 +100,18 @@ fn canonical_json_does_not_depend_on_key_order() {
     );
     // An array is a sequence, and its order is what it says.
     assert_ne!(canonical(&json!([1, 2])), canonical(&json!([2, 1])));
+
+    // Fields handed over out of order, as a map that keeps the order keys
+    // came in would hand them: the order this build's maps never have, so
+    // the one way to see the sort do its work here. A `canonical` that left
+    // the sort to `Value::to_string` would leave `write_object` with no
+    // caller outside this test, which the gate's dead-code lint refuses.
+    let (a, b, z) = ("a".to_owned(), "b".to_owned(), "z".to_owned());
+    let inner = json!({"y": 2, "x": 1});
+    let (one, two) = (json!(1), json!("é\n"));
+    let mut written = String::new();
+    write_object([(&z, &inner), (&b, &one), (&a, &two)], &mut written);
+    assert_eq!(written, r#"{"a":"é\n","b":1,"z":{"x":1,"y":2}}"#);
 }
 
 #[test]
@@ -179,6 +191,41 @@ fn visible_writes_out_esc_cr_bidi_and_zero_width() {
             format!("a⟨U+{:04X}⟩b", u32::from(hidden)),
             "{:04X}",
             u32::from(hidden)
+        );
+    }
+
+    // What a font may draw as nothing though it is not `Cf`: a variation
+    // selector makes `./build` another file than the one it reads as.
+    assert_eq!(visible("rm ./build\u{FE0F}"), "rm ./build⟨U+FE0F⟩");
+    for ignorable in [
+        '\u{034f}',
+        '\u{115f}',
+        '\u{1160}',
+        '\u{17b4}',
+        '\u{17b5}',
+        '\u{180b}',
+        '\u{180d}',
+        '\u{180f}',
+        '\u{3164}',
+        '\u{fe00}',
+        '\u{ffa0}',
+        '\u{e0100}',
+        '\u{e01ef}',
+    ] {
+        assert_eq!(
+            visible(&format!("a{ignorable}b")),
+            format!("a⟨U+{:04X}⟩b", u32::from(ignorable)),
+            "{:04X}",
+            u32::from(ignorable)
+        );
+    }
+    // A space that is not the one a shell splits at reads as one all the
+    // same.
+    assert_eq!(visible("rm\u{a0}-rf"), "rm⟨U+00A0⟩-rf");
+    for space in ['\u{2000}', '\u{200a}', '\u{202f}', '\u{3000}'] {
+        assert_eq!(
+            visible(&format!("a{space}b")),
+            format!("a⟨U+{:04X}⟩b", u32::from(space))
         );
     }
 

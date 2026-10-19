@@ -36,6 +36,18 @@
 //! it ended and the first twelve hex digits of its digest, never the command
 //! — and an entry in [`Asks::history`], in memory only.
 //!
+//! A connection that gave up on the window before the window said it held
+//! the question — a frame that stalled past the connection's patience — has
+//! closed the question's feed and its hook has passed. Such a question is
+//! refused if it has not been held yet, is never shown if it has, and is
+//! ended as [`Cause::HookGone`] the next time a question is held or a pane
+//! closes.
+//!
+//! Then which of them a pane shows: a question this window could answer
+//! comes before one it cannot, a read-only question never takes an
+//! answerable one's place or its room, and only an answerable one is ever
+//! the row's second line.
+//!
 //! # What it costs
 //!
 //! Nothing while nobody asks. A question is a struct and a feed, at most
@@ -299,23 +311,45 @@ pub struct Asks {
 impl Asks {
     /// Whether no question is held.
     pub fn is_empty(&self) -> bool {
-        self.live.is_empty()
+        self.live().next().is_none()
     }
 
     /// How many questions are held.
     pub fn len(&self) -> usize {
-        self.live.len()
+        self.live().count()
     }
 
     /// Every question held, oldest first.
+    ///
+    /// Only those whose hook is still waiting: a connection that gave up on
+    /// the window — its hook gone, or the window too slow to say it held the
+    /// question — has closed the feed, and a question nobody waits on is not
+    /// one to show. It is dropped the next time a question is held or a pane
+    /// closes; see [`Self::drop_abandoned`].
     pub fn live(&self) -> impl Iterator<Item = &Ask> {
-        self.live.iter()
+        self.live.iter().filter(|ask| ask.feed.is_open())
     }
 
-    /// The newest question held in `pane`, which is the one its agent's
-    /// dialog is showing.
+    /// The question held in `pane` that a person looking at it most wants to
+    /// see: the newest this window could answer, else the newest it cannot.
+    ///
+    /// Answerable first, so that a process elsewhere naming the pane's
+    /// terminal — which is all a read-only question is known to be — can
+    /// never stand in front of the agent's own.
     pub fn in_pane(&self, pane: PaneId) -> Option<&Ask> {
-        self.live.iter().rev().find(|ask| ask.pane == pane)
+        self.answerable_in(pane).or_else(|| {
+            self.live()
+                .filter(|ask| ask.pane == pane)
+                .max_by_key(|ask| ask.id)
+        })
+    }
+
+    /// The newest question held in `pane` that this window could answer:
+    /// the one its agent's dialog is showing, as far as the window can tell.
+    pub fn answerable_in(&self, pane: PaneId) -> Option<&Ask> {
+        self.live()
+            .filter(|ask| ask.pane == pane && ask.cannot_answer.is_none())
+            .max_by_key(|ask| ask.id)
     }
 
     /// How the questions that have ended went, oldest first.
@@ -325,11 +359,19 @@ impl Asks {
 
     /// Holds `asked`, in the pane `found` names, answering into `feed`.
     ///
-    /// Refused as `busy` when the pane already holds [`MAX_PER_PANE`] that
-    /// it would keep. A question held from the same session in the same
-    /// pane is one its agent is no longer asking — Claude Code shows one
-    /// dialog at a time — and ends as [`Cause::AskedAgain`], and is not
-    /// counted.
+    /// Refused as `gone` when the feed is already closed: the connection
+    /// stopped waiting for the window to say it held the question, and its
+    /// hook has passed. Refused as `busy` when the pane already holds
+    /// [`MAX_PER_PANE`] that it would keep. A question held from the same
+    /// session in the same pane is one its agent is no longer asking —
+    /// Claude Code shows one dialog at a time — and ends as
+    /// [`Cause::AskedAgain`], and is not counted.
+    ///
+    /// Answerable and read-only questions are counted apart, and a read-only
+    /// one ends only another read-only one: a question this window cannot
+    /// answer is one it cannot place, from some process that named the
+    /// pane's terminal, and it must neither take the agent's own question
+    /// away nor fill the room the agent's next one needs.
     pub fn add(
         &mut self,
         asked: AgentAsk,
@@ -337,11 +379,19 @@ impl Asks {
         feed: Arc<Feed>,
         now: Instant,
     ) -> Result<AskId, Refusal> {
+        if !feed.is_open() {
+            return Err(Refusal::new(
+                code::GONE,
+                "the question's connection stopped waiting before the window could hold it",
+            ));
+        }
+        self.drop_abandoned();
+        let answerable = found.cannot_answer.is_none();
+        let alike = |ask: &Ask| ask.pane == found.pane && ask.cannot_answer.is_none() == answerable;
         let held = self
             .live
             .iter()
-            .filter(|ask| ask.pane == found.pane && ask.session != asked.session)
-            .filter(|ask| ask.feed.is_open())
+            .filter(|ask| alike(ask) && ask.session != asked.session)
             .count();
         if held >= MAX_PER_PANE {
             return Err(Refusal::new(
@@ -352,10 +402,13 @@ impl Asks {
                 ),
             ));
         }
+        // An answerable question replaces the session's read-only ones as
+        // well as its own; a read-only one replaces only read-only ones.
         let replaced: Vec<AskId> = self
             .live
             .iter()
             .filter(|ask| ask.pane == found.pane && ask.session == asked.session)
+            .filter(|ask| answerable || ask.cannot_answer.is_some())
             .map(|ask| ask.id)
             .collect();
         for id in replaced {
@@ -420,11 +473,31 @@ impl Asks {
         }
     }
 
-    /// Ends every question whose pane `strip` no longer has.
+    /// Ends every question whose connection has stopped waiting on it
+    /// without the window hearing so — one whose connection gave up on the
+    /// window before it said it held the question — as [`Cause::HookGone`].
+    ///
+    /// A hook that hangs up after that is heard through its [`Notice`], and
+    /// is ended then; this is for the one road no notice comes down.
+    pub fn drop_abandoned(&mut self) {
+        let abandoned: Vec<AskId> = self
+            .live
+            .iter()
+            .filter(|ask| !ask.feed.is_open())
+            .map(|ask| ask.id)
+            .collect();
+        for id in abandoned {
+            self.end(id, Cause::HookGone);
+        }
+    }
+
+    /// Ends every question whose pane `strip` no longer has, and every one
+    /// nobody waits on any more: see [`Self::drop_abandoned`].
     pub fn forget_closed(&mut self, strip: &TabStrip) {
         if self.live.is_empty() {
             return;
         }
+        self.drop_abandoned();
         let closed: Vec<AskId> = self
             .live
             .iter()
@@ -627,7 +700,9 @@ pub fn register(
             .unwrap_or_default(),
     };
     // Before the question is held, so before the connection hears it is and
-    // can see anything happen to it.
+    // can see anything happen to it. A window slower than the connection's
+    // patience is handed a question its connection has given up on, which
+    // `add` refuses: see its docs.
     feed.tell(Arc::downgrade(inbox));
     let id = workspace
         .asks_mut()

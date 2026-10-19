@@ -374,9 +374,12 @@ fn unknown_verb_eof_garbage_and_timeout_print_nothing() {
         );
     }
 
-    // A parent that has gone ends the wait, with the answer still to come.
+    // A parent that has gone ends the wait, with the answer still to come:
+    // at the fourth look, a few polls in, and nowhere near the minute the
+    // answer has, which is how long a hook that never looked would take.
     let window = Window::saying([held(), Says::Nothing]);
     let looks = Cell::new(0);
+    let started = Instant::now();
     let decided = decide(
         input().to_string().as_bytes(),
         &environment(),
@@ -392,6 +395,16 @@ fn unknown_verb_eof_garbage_and_timeout_print_nothing() {
         },
     );
     assert!(decided.is_none());
+    assert_eq!(
+        looks.get(),
+        4,
+        "it stopped at the look that saw the parent gone"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the wait ran on past the parent: {:?}",
+        started.elapsed()
+    );
 }
 
 #[test]
