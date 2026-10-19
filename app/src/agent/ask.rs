@@ -55,9 +55,9 @@
 //! And no window is told what the agent asks until it has said it holds one
 //! of those terminals: `pane.find`, which carries the terminals and nothing
 //! else, is asked first of `CROOK_SOCKET`'s window, and, when that one is
-//! gone or holds none, of at most [`MAX_OTHER_WINDOWS`] others listening in
-//! this user's checked control directory, all within
-//! [`Patience::find`]. The question goes to the first that says yes, on the
+//! gone or holds none, of at most four others listening in this user's
+//! checked control directory, all within two seconds — see `find`, which
+//! only Unix has. The question goes to the first that says yes, on the
 //! connection it said it on, and to no other. screen and zellij cannot be
 //! asked where their clients are, and a hook inside one asks nothing.
 //!
