@@ -5,6 +5,19 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.30
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.29...v0.1.30)
+
+### Features
+
+- **agent:** Answer Claude Code's Edit, MultiEdit and Write requests with the change drawn as a diff ([#549](https://github.com/theguriev/crook/pull/549))
+- **agent:** List every waiting request from a second target on the header chip ([#550](https://github.com/theguriev/crook/pull/550))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.29
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.28...v0.1.29)
