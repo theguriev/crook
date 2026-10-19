@@ -24,6 +24,18 @@
 //! one, and several are refused by name: every window is its own process, and
 //! the newest is a guess that hands a script another window's panes.
 //!
+//! # Whose socket
+//!
+//! A socket is asked only once it has been checked, however it was found:
+//! `CROOK_SOCKET` is inherited, and a variable saying where a window is
+//! proves nothing about what is at that name now. The path must be absolute;
+//! the directory it is in must pass the window's own check, a real directory
+//! of this user's that nobody else can enter; the socket must be a socket
+//! rather than a link to one, this user's, and open to nobody else; and once
+//! connected, the kernel must say that the process listening is this user's,
+//! since a name can be swapped between a look at it and a connect to it. A
+//! socket that fails is not connected to, and the refusal names the rule.
+//!
 //! # Which pane
 //!
 //! Every request carries the pane's `CROOK_TOKEN` when the environment has
@@ -633,7 +645,7 @@ pub mod unix {
     use std::ffi::OsString;
     use std::fs;
     use std::io::{self, BufRead, BufReader, Read, Write};
-    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
     use std::os::unix::net::UnixStream;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
@@ -687,7 +699,7 @@ pub mod unix {
         directory: &Path,
     ) -> Result<PathBuf> {
         match socket {
-            Some(socket) if !socket.is_empty() => return Ok(PathBuf::from(socket)),
+            Some(socket) if !socket.is_empty() => return checked_socket(Path::new(&socket)),
             Some(_) => bail!(
                 "the Crook this pane is in has no control socket, so it cannot be asked; its log \
                  says why"
@@ -834,7 +846,7 @@ pub mod unix {
         asked: Follow,
         out: &mut impl Write,
     ) -> Result<()> {
-        let stream = connect(socket)?;
+        let stream = connect_checked(socket)?;
         let mut replies = BufReader::new(&stream);
         let verb = Verb::EventsFollow(asked);
         request(&stream, &verb, token)?;
@@ -861,15 +873,115 @@ pub mod unix {
         }
     }
 
-    /// Connects to the window at `socket`.
-    fn connect(socket: &Path) -> Result<UnixStream> {
-        UnixStream::connect(socket).map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => anyhow!(
-                "nothing is answering on {}: the Crook that opened it has closed",
-                socket.display()
-            ),
+    /// `path`, when it names a socket only this user could have left there:
+    /// an absolute path, in a directory that passes the window's own
+    /// [`server::check`], to a socket — not a link to one — that is this
+    /// user's and open to nobody else. Refused otherwise, by the rule that
+    /// failed.
+    ///
+    /// What a window binds passes every rule, so whatever fails one was put
+    /// at the name by somebody else, or loosened since, and a socket that
+    /// answers can answer anything. Read with `lstat`, like the directory,
+    /// so that a link is judged as the link it is and not as what it points
+    /// at.
+    pub fn checked_socket(path: &Path) -> Result<PathBuf> {
+        let uid = server::euid();
+        let refuse = |why: String| anyhow!("not asking {}: {why}", path.display());
+        if !path.is_absolute() {
+            return Err(refuse(
+                "a socket is asked by its absolute path, and this one is relative".to_owned(),
+            ));
+        }
+        let (Some(directory), Some(_)) = (path.parent(), path.file_name()) else {
+            return Err(refuse("the path names no socket".to_owned()));
+        };
+        match server::check(directory, uid) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(gone(path)),
+            Err(error) => return Err(refuse(error.to_string())),
+        }
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(gone(path)),
+            Err(error) => {
+                return Err(anyhow!(error).context(format!("not asking {}", path.display())));
+            }
+        };
+        match fault(&metadata, uid) {
+            Some(why) => Err(refuse(why)),
+            None => Ok(path.to_path_buf()),
+        }
+    }
+
+    /// What is wrong with the socket an `lstat` described as `metadata`, for
+    /// a client running as `uid`, or `None` when nothing is: a link, not a
+    /// socket, somebody else's, or open to other users.
+    ///
+    /// Apart from [`checked_socket`], and given the uid rather than taking
+    /// it, the way [`server::check`] is, so that a test can ask as a user it
+    /// is not: no test can leave a socket that belongs to anybody else.
+    pub(crate) fn fault(metadata: &fs::Metadata, uid: u32) -> Option<String> {
+        if metadata.file_type().is_symlink() {
+            return Some("it is a link".to_owned());
+        }
+        if !metadata.file_type().is_socket() {
+            return Some("it is not a socket".to_owned());
+        }
+        if metadata.uid() != uid {
+            return Some(format!("it belongs to uid {}, not {uid}", metadata.uid()));
+        }
+        let mode = metadata.mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Some(format!("it is open to other users (mode {mode:o})"));
+        }
+        None
+    }
+
+    /// A connection to the window at `path`, once the path has passed
+    /// [`checked_socket`] and whoever is listening there has turned out to be
+    /// this user.
+    ///
+    /// The path is checked before anything connects, so a socket that fails
+    /// it is not sent a request, nor connected to at all. The listener is
+    /// checked after: a name can be swapped between a look at it and a
+    /// connect to it, and the kernel's record of who bound the socket is the
+    /// one thing about it nobody else can set.
+    pub fn connect_checked(path: &Path) -> Result<UnixStream> {
+        connect_checked_for(path, server::euid())
+    }
+
+    /// [`connect_checked`], with the uid the listener must have given rather
+    /// than taken from [`server::euid`], so that a test can ask for a
+    /// listener no test can make: one that is somebody else's. The path is
+    /// checked as this user's either way.
+    pub(crate) fn connect_checked_for(path: &Path, uid: u32) -> Result<UnixStream> {
+        let socket = checked_socket(path)?;
+        let stream = UnixStream::connect(&socket).map_err(|error| match error.kind() {
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => gone(&socket),
             _ => anyhow!(error).context(format!("could not connect to {}", socket.display())),
-        })
+        })?;
+        let peer = server::peer_credentials(&stream).with_context(|| {
+            format!(
+                "not asking {}: the kernel would not say who is listening there",
+                socket.display()
+            )
+        })?;
+        if peer.uid != uid {
+            bail!(
+                "not asking {}: the process listening there is uid {}, not {uid}",
+                socket.display(),
+                peer.uid
+            );
+        }
+        Ok(stream)
+    }
+
+    /// The refusal for a socket nothing is listening on, or that is not there.
+    fn gone(socket: &Path) -> anyhow::Error {
+        anyhow!(
+            "nothing is answering on {}: the Crook that opened it has closed",
+            socket.display()
+        )
     }
 
     /// Sends one request, with time for the window to answer it.
@@ -904,7 +1016,7 @@ pub mod unix {
 
     /// Asks the window at `socket` one verb, and hands back its answer.
     fn ask(socket: &Path, verb: &Verb, token: Option<&str>) -> Result<Value> {
-        let stream = connect(socket)?;
+        let stream = connect_checked(socket)?;
         request(&stream, verb, token)?;
         answer(&mut BufReader::new(&stream))
     }
