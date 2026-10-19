@@ -1102,8 +1102,10 @@ impl TerminalModel {
     /// to it when its shell started, so a theme change has to reach every
     /// terminal that is already running. Each one is given the new palette and
     /// asked to publish a fresh snapshot — the emulator has not changed, only
-    /// what its cells resolve to, so nothing is reparsed and the shell is not
-    /// told anything.
+    /// what its cells resolve to, so nothing is reparsed. A program is told
+    /// only when it asked to be and the background went from dark to light
+    /// or back: an agent that chose its colours for one keeps them on the
+    /// other, hard to read, until it hears.
     pub fn set_palette(&mut self, palette: Palette, ctx: &mut ModelContext<Self>) {
         if self.palette == palette {
             return;
@@ -3059,8 +3061,14 @@ impl Shared {
     /// shell writes nothing, so nothing would ever come along to carry the new
     /// colours to the screen, and a theme that only applied to panes with a
     /// command running would be a theme nobody could see themselves choose.
+    ///
+    /// What the new palette owes a program that asked to hear of a change of
+    /// colour scheme goes onto the writer's queue under the same lock, which
+    /// writes nothing itself: see "The writer".
     fn repaint_in(&self, palette: Palette) {
-        self.lock().set_palette(palette);
+        if let Err(error) = self.lock().set_palette(palette) {
+            log::debug!("could not tell a shell its colour scheme changed: {error}");
+        }
         self.publish();
     }
 

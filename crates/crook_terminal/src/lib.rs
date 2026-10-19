@@ -283,6 +283,11 @@ impl Terminal {
     /// rather than kept without end — see [`PtyWriter`].
     pub fn feed(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.emulator.advance(bytes);
+        self.send_replies()
+    }
+
+    /// Writes, or queues, what the emulator owes the child.
+    fn send_replies(&mut self) -> io::Result<()> {
         let replies = self.emulator.take_replies();
         if replies.is_empty() {
             return Ok(());
@@ -557,17 +562,26 @@ impl Terminal {
     /// Repaints the grid in a new palette.
     ///
     /// What applying a theme to a shell that is already running comes down to.
-    /// The child is not told and does not need to be: a palette is how the
+    /// A program does not need telling to be drawn in it: a palette is how the
     /// *renderer* resolves the colours a program asked for by name or by
     /// number, so every cell already on screen is re-resolved and everything
-    /// the program writes next lands in the new colours too.
+    /// the program writes next lands in the new colours too. What it cannot
+    /// know is that the background went from dark to light, or back, under
+    /// colours it chose to read well on the old one; so a program that asked
+    /// to be told, with mode 2031, is — see [`Emulator::set_palette`] —
+    /// through the pty, or through the writer's queue once that has been
+    /// taken, behind every answer already on its way, as [`Self::feed`]
+    /// sends one. Or by the feed that ends a synchronized update setting a
+    /// background of the program's own, when one is held: whether the
+    /// switch moved what it is drawn on is known only then.
     ///
     /// The overrides a program set for itself with OSC 4, 10, 11 and 12 are
     /// not touched, and that is the contract those escapes carry: a program
     /// that asked for a specific background keeps it until it resets it,
     /// whatever the theme underneath has become.
-    pub fn set_palette(&mut self, palette: Palette) {
+    pub fn set_palette(&mut self, palette: Palette) -> io::Result<()> {
         self.emulator.set_palette(palette);
+        self.send_replies()
     }
 
     /// Moves the viewport through the scrollback: a positive `delta` moves it

@@ -1555,6 +1555,47 @@ fn a_program_that_floods_queries_and_never_reads_does_not_stop_another_pane_draw
     flusher.stop();
 }
 
+#[test]
+fn a_program_that_asked_to_hear_of_a_change_of_colour_scheme_hears_of_a_light_theme() {
+    // What Claude Code does with the report: asks OSC 11 again, and draws in
+    // colours meant for the new background. The report arrives as input, so
+    // the program stops its tty echoing it and holding it for a newline,
+    // reads exactly its length, and prints it with the escape made visible.
+    let told = ".[?997;2n";
+    let Some(program) = sh(
+        &format!(
+            "stty -echo -icanon; printf '\\033[?2031h'; echo subscribed; \
+             dd bs=1 count={} 2>/dev/null | tr -c '[:print:]' .; exec sleep 60",
+            told.len()
+        ),
+        &[],
+    ) else {
+        return;
+    };
+    let flusher = repainting();
+    let Some(shared) = started(program, &flusher) else {
+        eprintln!("skipped: no shell could be started here");
+        return;
+    };
+    // Printed after the subscription, so once it is on the grid the
+    // emulator has read that too.
+    assert!(
+        comes_to_show(&shared, "subscribed"),
+        "the program never got as far as subscribing"
+    );
+
+    shared.repaint_in(Palette {
+        background: Rgb::new(255, 255, 255),
+        ..Palette::default()
+    });
+    assert!(
+        comes_to_show(&shared, told),
+        "a switch from a dark theme to a light one was never reported, got: {:?}",
+        shared.snapshot().text()
+    );
+    flusher.stop();
+}
+
 /// The longest closing a handful of panes may hold the thread that draws.
 ///
 /// A fifth of what the four closes in the first test below took there when

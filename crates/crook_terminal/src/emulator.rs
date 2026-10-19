@@ -16,9 +16,13 @@
 //! is index 4?", "how big is the text area?", a device attributes request. The
 //! emulator answers those into [`Emulator::take_replies`], and it is the
 //! caller's job to put those bytes back on the pty; a caller that drops them
-//! will hang any program that waits for an answer. The one caller that must
-//! not answer is a mirror — an emulator following a stream that another one
-//! is already answering — and [`Emulator::advance_mirrored`] is its feed.
+//! will hang any program that waits for an answer. One answer has no question
+//! in front of it: a program that asked to be told of a change of colour
+//! scheme is told when a new palette turns the background from dark to light
+//! or back, so [`Emulator::set_palette`] can owe replies too. The one caller
+//! that must not answer is a mirror — an emulator following a stream that
+//! another one is already answering — and [`Emulator::advance_mirrored`] is
+//! its feed.
 //!
 //! **Nothing here knows what the pointer has selected.** A pane's output is a
 //! list of blocks, and all but the last of them were harvested out of this
@@ -37,7 +41,7 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Handler, Processor};
+use alacritty_terminal::vte::ansi::{Handler, NamedColor, Processor};
 use alacritty_terminal::vte::{Params, Parser, Perform};
 use parking_lot::Mutex;
 
@@ -52,7 +56,7 @@ use crate::marks::ShellMark;
 use crate::mouse::MouseModes;
 use crate::notify::{self, Notification};
 use crate::pty::ChildExit;
-use crate::snapshot::{self, Palette, Snapshot, TerminalSize};
+use crate::snapshot::{self, Palette, Rgb, Snapshot, TerminalSize};
 
 /// One item of a stream fed to a mirror, in the order it happened.
 ///
@@ -233,9 +237,18 @@ impl EventListener for EventProxy {
 /// deliberately does not have — and OSC 133 because `vte::ansi::Handler` has no
 /// hook for it at all, so no amount of implementing that trait can see one.
 /// The notifications other terminals read — OSC 9, 99 and 777 — reach no hook
-/// either, and are logged as unhandled. So does one question: XTVERSION,
+/// either, and are logged as unhandled. So do two questions: XTVERSION,
 /// `CSI > q`, which asks for the terminal's name and version, and which `vte`
-/// does not tell apart from the `q`s it has no use for.
+/// does not tell apart from the `q`s it has no use for; and the colour scheme,
+/// `CSI ? 996 n`, which asks whether the background is dark or light. A third
+/// reaches `Term` and is answered wrongly: DECRQM about mode 2031, `CSI ? 2031
+/// $ p`, which `Term` calls not recognised, as it does every mode it does not
+/// know. 2031 is the colour scheme's subscription, and the watcher keeps it:
+/// a program that turns it on is told whenever a new palette moves the
+/// background from dark to light or back, by [`Emulator::set_palette`]. And
+/// it stops on what sets the background — OSC 10, 11 and 111 — because a
+/// synchronized update holds that past `Term`, which the answer is read
+/// from: see [`Emulator::background_held`].
 ///
 /// So the bytes get a second pass through `vte`'s own parser with a `Perform`
 /// that implements little but `osc_dispatch`. That costs one extra walk of the
@@ -286,6 +299,26 @@ struct OscWatcher {
     /// Whether the program asked which terminal this is, with XTVERSION —
     /// `CSI > q`, which is where the watcher stops.
     version_asked: bool,
+    /// Whether the program asked whether the background is dark or light —
+    /// `CSI ? 996 n`, which is where the watcher stops.
+    scheme_asked: bool,
+    /// Whether the program asked whether colour-scheme reports are on —
+    /// DECRQM about mode 2031, which is where the watcher stops.
+    scheme_reports_asked: bool,
+    /// Whether the program in the pane is told of a change of colour scheme:
+    /// mode 2031, which it sets with `CSI ? 2031 h` and resets with `l`. Not
+    /// a stop: it is read only where the watcher already stands still, at a
+    /// question about it and between feeds, when the palette changes.
+    scheme_reports: bool,
+    /// Whether the program set or gave back the background OSC 11 answers
+    /// with: OSC 11 with a colour, OSC 10 with one after the foreground's,
+    /// or OSC 111. Which is where the watcher stops, because what matters
+    /// is whether that escape is in a synchronized update `vte` is still
+    /// holding, and that is whether one is held right after it: anywhere
+    /// earlier in a piece, the escape could be ahead of the update's
+    /// opening, or in one that ended before it. [`Emulator::advance`] reads
+    /// that off into [`Emulator::background_held`].
+    background_set: bool,
     /// Whether the program switched screens — `CSI ? 1049 h` or `l`, the one
     /// switch alacritty makes — which is where the watcher stops.
     screen_switched: bool,
@@ -303,11 +336,16 @@ impl Perform for OscWatcher {
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
         if intermediates.is_empty() && byte == b'c' {
             self.reset = true;
+            // `Term` resets every mode it keeps, and this one goes with them.
+            self.scheme_reports = false;
         }
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         let first = params.iter().next();
+        // What `vte` reads a mode or a report's number from: the first
+        // parameter, less any subparameters after it.
+        let number = first.and_then(|param| param.first()).copied();
         match (action, intermediates) {
             // Only the plain form: `CSI ? 3 J` is the selective erase, which
             // leaves the history alone.
@@ -320,9 +358,17 @@ impl Perform for OscWatcher {
                 self.version_asked = true;
             }
             // Among other modes, maybe: `Term` sets each one in turn.
-            ('h' | 'l', [b'?']) if params.iter().any(|param| param.first() == Some(&1049)) => {
-                self.screen_switched = true;
+            ('h' | 'l', [b'?']) => {
+                for mode in params.iter().filter_map(|param| param.first()) {
+                    match mode {
+                        1049 => self.screen_switched = true,
+                        2031 => self.scheme_reports = action == 'h',
+                        _ => {}
+                    }
+                }
             }
+            ('n', [b'?']) if number == Some(996) => self.scheme_asked = true,
+            ('p', [b'?', b'$']) if number == Some(2031) => self.scheme_reports_asked = true,
             _ => {}
         }
     }
@@ -336,6 +382,16 @@ impl Perform for OscWatcher {
             }
             Some(&b"133") => self.mark = ShellMark::parse(params),
             Some(&b"1337") => self.image = self.images.read(params),
+            // `vte` sets the dynamic colours from the number up, one to a
+            // parameter, so the background is OSC 10's second and OSC 11's
+            // first. A `?` there asks for it and changes nothing.
+            Some(&b"10") => {
+                self.background_set |= params.get(2).is_some_and(|colour| *colour != b"?");
+            }
+            Some(&b"11") => {
+                self.background_set |= params.get(1).is_some_and(|colour| *colour != b"?");
+            }
+            Some(&b"111") => self.background_set = true,
             // Crook's own, and the number is deliberately far from anything
             // standardised: nothing but a shell Crook itself set up emits it,
             // and a stream that happens to contain one costs a caller a look
@@ -396,20 +452,31 @@ impl Perform for OscWatcher {
     /// And on XTVERSION, whose answer [`Emulator::advance`] makes from here:
     /// `Term` queues its own answers as it parses, so the version has to be
     /// answered once everything before the query is parsed and nothing after
-    /// it, or it goes out of order with the answers either side of it.
+    /// it, or it goes out of order with the answers either side of it. The
+    /// two questions about the colour scheme are answered from here for the
+    /// same reason, and the one about its subscription for another as well:
+    /// it is answered as the mode stood when it was asked, and the rest of
+    /// the read can change it.
     ///
     /// And on a title longer than [`agent::TITLE_BYTES`], so that the grid's
     /// own copy of it can be cut before the rest of the read pushes it.
     ///
     /// And on a switch of screens, so that [`Emulator::switch_screens`] can
     /// feed it apart from the output before it.
+    ///
+    /// And on a background set or given back, so that whether a synchronized
+    /// update holds it can be read off the parser right after it: see
+    /// [`Self::background_set`].
     fn terminated(&self) -> bool {
         self.mark.is_some()
             || self.image.is_some()
             || (self.agent.is_some() && self.notification.is_some())
             || self.version_asked
+            || self.scheme_asked
+            || self.scheme_reports_asked
             || self.long_title.is_some()
             || self.screen_switched
+            || self.background_set
     }
 }
 
@@ -419,6 +486,48 @@ impl Perform for OscWatcher {
 /// is far enough away from every number anything standardised uses that a
 /// stream carrying one came from a shell Crook set up.
 const COMPLETIONS_OSC: &[u8] = b"6339";
+
+/// What `Term` answers DECRQM about mode 2031 with: 0, not recognised, which
+/// it says of every mode it does not know. [`Emulator::advance`] answers that
+/// question itself, from the watcher, and this answer goes nowhere.
+const SCHEME_REPORTS_UNRECOGNISED: &str = "\x1b[?2031;0$y";
+
+/// Whether a background is dark or light, which is all a program asking for
+/// the colour scheme is told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scheme {
+    Dark,
+    Light,
+}
+
+impl Scheme {
+    /// Which side of the middle `background` is on, with Rec. 709's weights
+    /// on the channels as they are: the arithmetic the window's theme weighs
+    /// a colour's brightness with. A program told picks a whole theme on the
+    /// answer, and its themes are drawn for backgrounds far from the middle,
+    /// so nothing finer would change what it picks.
+    fn of(background: Rgb) -> Self {
+        let luma = 2126 * u32::from(background.r)
+            + 7152 * u32::from(background.g)
+            + 722 * u32::from(background.b);
+        if luma < 128 * 10_000 {
+            Self::Dark
+        } else {
+            Self::Light
+        }
+    }
+
+    /// `CSI ? 997 ; 1 n` for dark and `CSI ? 997 ; 2 n` for light: the
+    /// answer to `CSI ? 996 n`, and what a program that turned the reports
+    /// on is sent unasked.
+    fn report(self) -> String {
+        let code = match self {
+            Self::Dark => 1,
+            Self::Light => 2,
+        };
+        format!("\x1b[?997;{code}n")
+    }
+}
 
 /// The longest working directory OSC 7 is believed for, in bytes.
 ///
@@ -602,6 +711,18 @@ pub struct Emulator {
     /// Whether the synchronized update `parser` is holding switches screens,
     /// which the watcher saw go by: see [`Self::switch_screens`].
     switch_held: bool,
+    /// Whether the synchronized update `parser` is holding sets or gives
+    /// back the program's own background, which the watcher saw go by and
+    /// `Term` has not: what the background is, dark or light, is not known
+    /// until the update is let go of. See [`Self::scheme`]. One `vte` opens
+    /// behind that one's end, in the slice that ends it, holds none of its
+    /// bytes, and starts with this unset: see [`Self::feed`].
+    background_held: bool,
+    /// The palette's background from before a theme switch that came while
+    /// [`Self::background_held`], which a program that turned colour-scheme
+    /// reports on is told about once the update is let go of: see
+    /// [`Self::set_palette`].
+    switched_from: Option<Rgb>,
     title: Option<String>,
     working_directory: Option<PathBuf>,
     /// The host the last OSC 7 named, beside [`Self::working_directory`]:
@@ -675,6 +796,8 @@ impl Emulator {
             size,
             scrollback_lines,
             switch_held: false,
+            background_held: false,
+            switched_from: None,
             title: None,
             working_directory: None,
             working_host: None,
@@ -739,6 +862,11 @@ impl Emulator {
             } else {
                 self.feed(piece);
             }
+            // Before anything answers from the background. The piece ends on
+            // the escape that set it, so an update held now holds that
+            // escape, past `Term`.
+            self.background_held |=
+                std::mem::take(&mut self.osc_watcher.background_set) && self.updating();
             // Before anything else reads the anchor: a piece that took a
             // full-screen program down is the moment a reflow made under it
             // can be done on the screen it was for.
@@ -766,6 +894,33 @@ impl Emulator {
                 && let Some(reply) = &self.version_reply
             {
                 self.proxy.send_event(Event::PtyWrite(reply.clone()));
+            }
+            // The colour scheme's two questions, in the same place for the
+            // same reason. `Term` has answered the second already, wrongly,
+            // and that answer is dropped on its way out of the proxy.
+            if std::mem::take(&mut self.osc_watcher.scheme_asked) {
+                // Answered from `Term`'s background, which an update `vte`
+                // is holding may be about to change, and the OSC 11 query
+                // after it is answered from the changed one. So that update
+                // reaches the grid first, as one nobody ended does, and the
+                // rest of its frame is drawn as it arrives: its answers go
+                // out ahead of this one, which is the order they were asked
+                // in. An update that leaves the background alone stays one.
+                if self.background_held {
+                    self.parser.stop_sync(&mut self.term);
+                    self.update_let_go(true);
+                }
+                self.proxy
+                    .send_event(Event::PtyWrite(self.scheme().report()));
+            }
+            if std::mem::take(&mut self.osc_watcher.scheme_reports_asked) {
+                let state = if self.osc_watcher.scheme_reports {
+                    1
+                } else {
+                    2
+                };
+                self.proxy
+                    .send_event(Event::PtyWrite(format!("\x1b[?2031;{state}$y")));
             }
             // Wherever the watcher stopped, what it holds was written before
             // the stop and goes out now. A report earlier in this same read
@@ -911,9 +1066,16 @@ impl Emulator {
         while !rest.is_empty() {
             let (slice, after) = rest.split_at(self.history_room().min(rest.len()));
             let held = self.updating();
+            let buffered = self.parser.sync_bytes_count();
             self.parser.advance(&mut self.term, slice);
             if held {
-                self.update_let_go();
+                // `vte` adds the whole slice to the update it holds, unless
+                // the slice ends it. Then it plays the update to `Term`, and
+                // keeps nothing, or, when one opens again behind the end,
+                // the bytes from that opening on, and is holding one still.
+                let played =
+                    !self.updating() || self.parser.sync_bytes_count() < buffered + slice.len();
+                self.update_let_go(played);
             }
             self.blocks
                 .trim_history(&mut self.term, self.scrollback_lines);
@@ -956,10 +1118,21 @@ impl Emulator {
     /// one that switched screens may have scrolled the shell's history out of
     /// sight, where nothing could cut it back. See
     /// [`BlockTracker::update_switched_screens`].
-    fn update_let_go(&mut self) {
+    ///
+    /// And one that changed the program's own background has now changed
+    /// `Term`'s, so a theme switch that came while it was held can be
+    /// weighed: what it owes goes onto the proxy behind the update's own
+    /// answers. See [`Self::set_palette`]. That is once it was `played`, its
+    /// bytes handed to `Term`, whether or not `vte` is holding another that
+    /// opened behind its end.
+    fn update_let_go(&mut self, played: bool) {
         if self.switch_held {
             self.blocks.update_switched_screens(&self.term);
             self.switch_held = self.updating();
+        }
+        self.background_held &= !played;
+        if let Some(report) = self.settle_scheme() {
+            self.proxy.send_event(Event::PtyWrite(report));
         }
     }
 
@@ -1479,9 +1652,65 @@ impl Emulator {
 
     /// Redraws the grid in a different set of colours, which is how a theme
     /// change reaches an already-running session.
+    ///
+    /// And tells a program that turned colour-scheme reports on, with mode
+    /// 2031, when the new palette moves the background from dark to light or
+    /// back: the report that answers `CSI ? 996 n` goes into
+    /// [`Self::take_replies`]. Only then, because a program told picks a dark
+    /// or a light theme of its own on it — Claude Code asks OSC 11 for the
+    /// new colour — and from one dark palette to another there is nothing to
+    /// pick. Nor under a background the program set itself with OSC 11, which
+    /// a new palette leaves where it is.
+    ///
+    /// Which background that is can be held up: a synchronized update `vte`
+    /// is holding may set the program's own, or give it back, and `Term`
+    /// does not know until the update is let go of. A switch that lands
+    /// then is weighed then, against the palette from before it, and what
+    /// it owes goes out behind the update's own answers. A switch under an
+    /// update that leaves the background alone is weighed at once.
     pub fn set_palette(&mut self, palette: Palette) {
+        let before = self.palette.background;
         self.palette = palette;
         self.dirty = true;
+        if self.osc_watcher.scheme_reports && !self.mirrored {
+            self.switched_from.get_or_insert(before);
+        }
+        if let Some(report) = self.settle_scheme() {
+            self.replies.extend_from_slice(report.as_bytes());
+        }
+    }
+
+    /// The report the theme switches since [`Self::switched_from`] owe a
+    /// program that turned colour-scheme reports on, once `Term` holds the
+    /// background they are weighed against: nothing when dark and light did
+    /// not trade places, and nothing yet while an update that changes it is
+    /// held.
+    fn settle_scheme(&mut self) -> Option<String> {
+        if self.background_held {
+            return None;
+        }
+        let before = self.switched_from.take()?;
+        let now = self.scheme();
+        let owed =
+            self.osc_watcher.scheme_reports && !self.mirrored && self.scheme_over(before) != now;
+        owed.then(|| now.report())
+    }
+
+    /// Whether the background drawn now is dark or light: the palette's, or
+    /// the one the program set with OSC 11, which is the colour OSC 11
+    /// answers with, so a program that asks both is told one story — inside
+    /// a synchronized update too, where `vte` holds both and answers the
+    /// second only when the update ends: see [`Self::background_held`].
+    fn scheme(&self) -> Scheme {
+        self.scheme_over(self.palette.background)
+    }
+
+    /// Whether the background is dark or light over a palette's
+    /// `background`: the program's own if it set one, which no palette
+    /// moves.
+    fn scheme_over(&self, background: Rgb) -> Scheme {
+        let own = self.term.colors()[NamedColor::Background];
+        Scheme::of(own.map_or(background, Rgb::from))
     }
 
     /// Sets what this answers a program that asks which terminal it is,
@@ -1526,7 +1755,7 @@ impl Emulator {
         // any other.
         let view = self.view();
         self.parser.stop_sync(&mut self.term);
-        self.update_let_go();
+        self.update_let_go(true);
         self.settle_history();
         self.keep_view(view);
         self.dirty = true;
@@ -1636,6 +1865,7 @@ impl Emulator {
                 Event::ClipboardStore(_, text) => {
                     self.events.push(TerminalEvent::ClipboardStore(text));
                 }
+                Event::PtyWrite(text) if text == SCHEME_REPORTS_UNRECOGNISED => {}
                 Event::PtyWrite(text) => self.replies.extend_from_slice(text.as_bytes()),
                 Event::ColorRequest(index, format) => {
                     let color = self.palette.color_at(index, self.term.colors());
@@ -1811,7 +2041,7 @@ impl Emulator {
                 return None;
             }
             self.parser.stop_sync(&mut self.term);
-            self.update_let_go();
+            self.update_let_go(true);
         }
         let exited = self.hand_over_term_events();
         if let Some(title) = &self.title {
