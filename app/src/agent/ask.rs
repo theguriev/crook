@@ -5,9 +5,10 @@
 //! reads what the hook prints on standard output as the decision — or, when
 //! it prints nothing, goes on with the dialog it already has open. This is
 //! that hook: it hands the window the pane is in the whole request, waits on
-//! the connection for what a person says there, and prints it. Nothing has
-//! wired it into Claude Code's hooks yet, and nothing in the window answers
-//! yet but with a pass; see [`crate::control::ask`].
+//! the connection for what a person says there, and prints it. Claude Code
+//! runs it as its `PermissionRequest` hook — see `CLAUDE_ASKS` in
+//! [`crate::agent`] — and a person answers it by pressing Allow once or Deny
+//! on the window's card; see [`crate::control::ask`].
 //!
 //! # What it promises
 //!

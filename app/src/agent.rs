@@ -806,6 +806,9 @@ enum Fragment {
         file: &'static str,
         /// Each event and the `--agent` arguments its hook runs.
         events: &'static [(&'static str, &'static str)],
+        /// Each event whose hook waits for a person, the `--agent` arguments
+        /// it runs and its timeout in seconds. See [`CLAUDE_ASKS`].
+        asks: &'static [(&'static str, &'static str, u64)],
         /// What the events cannot say, for the note.
         missing: &'static str,
         /// What the agent asks of the person before it runs hooks merged
@@ -846,16 +849,16 @@ enum Fragment {
 /// that wants a person — a permission to give, a question to answer, a long
 /// idle at its prompt — and its text says which, so the row says it.
 ///
-/// Not `PermissionRequest`, though Claude Code runs it as a permission
-/// dialog opens, six seconds before the notification that asks. It runs the
-/// same hook where there is no dialog and nobody to answer one — in `claude
-/// -p` with no prompt tool, and for a background agent — just before it
-/// refuses the tool, which would turn a worker's row amber over a question
-/// nobody was asked. And no hook says the dialog was answered until the
-/// tool is done, so a command the person allowed would wait out its whole
-/// run on an amber row. What the row needs at that moment it has without
-/// it: the `✳` Claude Code draws as the dialog opens takes the running back
-/// — see `Workspace::title_reported` — and the notification says the rest.
+/// Not `PermissionRequest`. Its hook is Claude Code's ask — see
+/// [`CLAUDE_ASKS`] — and says no status, because a report from it would be
+/// wrong twice. Claude Code runs the same hook where there is no dialog
+/// and nobody to answer one — in `claude -p`, and for a background subagent
+/// — which would turn a worker's row amber over a question nobody was
+/// asked. And no hook says the dialog was answered until the tool is done,
+/// so a command the person allowed would wait out its whole run on an amber
+/// row. What the row needs at that moment it has without it: the `✳` Claude
+/// Code draws as the dialog opens takes the running back — see
+/// `Workspace::title_reported` — and the notification says the rest.
 ///
 /// A turn an API error ends runs no `Stop`. It runs `StopFailure` instead,
 /// and its input carries the error as Claude Code showed it — a usage limit
@@ -899,6 +902,32 @@ const CLAUDE_EVENTS: &[(&str, &str)] = &[
     ("StopFailure", "failed --message -"),
     ("SessionEnd", "idle"),
 ];
+
+/// The Claude Code hook that waits for a person: `PermissionRequest`, which
+/// Claude Code runs as a permission dialog opens and beside it, the dialog
+/// staying up the while. It hands the window the request and prints the
+/// Allow or Deny a person gives on the window's card — see [`ask`] — and
+/// whichever of the card and the dialog is answered first wins, since
+/// Claude Code drops an answer that comes after the dialog's (measured in
+/// `docs/answering.md`, C3 and C5).
+///
+/// It reports no status, for the reasons [`CLAUDE_EVENTS`] gives, and it
+/// passes at once, printing nothing, wherever nobody could be asked in
+/// Crook: unless `CLAUDE_CODE_ENTRYPOINT` is exactly `cli`, since under
+/// `claude -p` an empty answer is Claude Code's own immediate deny and
+/// holding it would turn a refusal into a wait; for a subagent, whose
+/// dialog waits for the hook rather than opening beside it; and inside
+/// tmux, screen or zellij, where the terminal it names is the
+/// multiplexer's and no pane's.
+///
+/// 330 seconds, because Claude Code's timeout is the one that kills the
+/// hook — it honours it (C10) — and it has to come after the hook's own
+/// wait, `ask::CLAUDE_AWAIT` and a little more, or a question would end
+/// in a SIGTERM rather than with the window saying so. The command is the
+/// same guard and lookup as every other hook's. An older binary refuses
+/// `ask` as a status before it reads stdin or opens a terminal, and the
+/// guard's `|| exit 0` makes that a pass.
+const CLAUDE_ASKS: &[(&str, &str, u64)] = &[("PermissionRequest", "ask claude", 330)];
 
 /// What Claude Code can say with neither the plugin nor the hooks: a
 /// notification in one of the three forms Crook reads, once it is told which.
@@ -1206,6 +1235,7 @@ const AGENTS: &[Agent] = &[
         fragment: Fragment::Hooks {
             file: "~/.claude/settings.json, or a project's .claude/settings.json",
             events: CLAUDE_EVENTS,
+            asks: CLAUDE_ASKS,
             missing: "",
             trust: "",
             without: CLAUDE_WITHOUT_HOOKS,
@@ -1222,6 +1252,7 @@ const AGENTS: &[Agent] = &[
         fragment: Fragment::Hooks {
             file: "~/.codex/hooks.json, or a project's .codex/hooks.json",
             events: CODEX_EVENTS,
+            asks: &[],
             missing: " Codex has no notification hook: the row says needs-input for a \
 permission, a question the model asks in its reply ends its turn as idle, and one it asks \
 in Plan mode, in its question dialog, keeps the row running until it is answered.",
@@ -1240,6 +1271,7 @@ in Plan mode, in its question dialog, keeps the row running until it is answered
         fragment: Fragment::Hooks {
             file: "~/.gemini/settings.json, or a project's .gemini/settings.json",
             events: GEMINI_EVENTS,
+            asks: &[],
             missing: " Gemini CLI notifies whenever a tool waits for confirmation, its \
 ask_user questions included, which the row says as needs-input: a question the model asks \
 in its reply ends its turn as idle.",
@@ -2101,11 +2133,12 @@ pub fn hooks_text(agent: &str, binary: &Path) -> Result<Hooks> {
         Fragment::Hooks {
             file,
             events,
+            asks,
             missing,
             trust,
             without,
         } => {
-            let hooks = hooks_object(events);
+            let hooks = hooks_object(events, asks);
             let text = serde_json::to_string_pretty(&json!({ "hooks": hooks }))
                 .context("could not write the hooks as JSON")?;
             let note = format!(
@@ -2171,17 +2204,29 @@ doing.",
 /// each event over one matcher group, with no matcher so it fires every
 /// time, running the [`hook_command`] for its `--agent` arguments.
 ///
+/// An event in `asks` gets the same command with its timeout beside it,
+/// since it is the one kind of hook that waits.
+///
 /// The Claude Code plugin's `hooks/hooks.json` is this object for
-/// [`CLAUDE_EVENTS`], and the tests hold the file to it.
-fn hooks_object(events: &[(&str, &str)]) -> serde_json::Map<String, Value> {
-    events
-        .iter()
-        .map(|(event, arguments)| {
-            let hook =
-                json!([{ "hooks": [{ "type": "command", "command": hook_command(arguments) }] }]);
-            ((*event).to_owned(), hook)
-        })
-        .collect()
+/// [`CLAUDE_EVENTS`] and [`CLAUDE_ASKS`], and the tests hold the file to it.
+fn hooks_object(
+    events: &[(&str, &str)],
+    asks: &[(&str, &str, u64)],
+) -> serde_json::Map<String, Value> {
+    let reports = events.iter().map(|(event, arguments)| {
+        let hook =
+            json!([{ "hooks": [{ "type": "command", "command": hook_command(arguments) }] }]);
+        ((*event).to_owned(), hook)
+    });
+    let asks = asks.iter().map(|(event, arguments, timeout)| {
+        let hook = json!([{ "hooks": [{
+            "type": "command",
+            "command": hook_command(arguments),
+            "timeout": timeout,
+        }] }]);
+        ((*event).to_owned(), hook)
+    });
+    reports.chain(asks).collect()
 }
 
 /// What a hook runs to report `arguments`: `crook --agent <arguments>`,
@@ -2468,9 +2513,6 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
             let command = hooks[event][0]["hooks"][0]["command"].as_str().unwrap();
             assert!(command.ends_with(reports), "{event} runs {command}");
         }
-        // Not PermissionRequest, which Claude Code runs where no dialog is
-        // drawn — `claude -p`, a background agent — as well as where one is.
-        assert!(hooks.get("PermissionRequest").is_none(), "{hooks:?}");
         assert!(
             hooks["UserPromptSubmit"][0]["hooks"][0]["command"]
                 .as_str()
@@ -2481,6 +2523,56 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
             printed.note.unwrap().contains("~/.claude/settings.json"),
             "a person merging the fragment has to be told where it goes"
         );
+    }
+
+    #[test]
+    fn the_claude_fragment_asks_on_permission_request_with_a_timeout() {
+        // The one hook that waits for a person, so the one with a timeout of
+        // its own: Claude Code's default would kill it before the window's
+        // five minutes were up. It says no status: the `✳` Claude Code draws
+        // as the dialog opens and the notification after it are what the row
+        // hears, and a status from here would also come where nobody is
+        // asked — `claude -p`, a subagent — which this hook passes on at once.
+        let printed = hooks_text("claude", Path::new("/usr/bin/crook")).unwrap();
+        let parsed: Value = serde_json::from_str(&printed.text).expect("the fragment is JSON");
+        let groups = parsed["hooks"]["PermissionRequest"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no PermissionRequest hook: {parsed}"));
+        assert_eq!(1, groups.len(), "{groups:?}");
+        let hooks = groups[0]["hooks"].as_array().unwrap();
+        assert_eq!(1, hooks.len(), "{hooks:?}");
+        let hook = &hooks[0];
+        assert_eq!(Some("command"), hook["type"].as_str());
+        assert_eq!(Some(330), hook["timeout"].as_u64(), "{hook}");
+        let command = hook["command"].as_str().unwrap();
+        assert_eq!(hook_command("ask claude"), command);
+        let (_, arguments) = command.split_once("--agent ").unwrap();
+        assert_eq!("ask claude || exit 0", arguments);
+        for status in AgentReport::ALL.iter().map(|status| status.word()).chain([
+            "--message",
+            "--title",
+            "--pull-request",
+            "--session",
+        ]) {
+            assert!(
+                !arguments.split_whitespace().any(|word| word == status),
+                "the ask hook says {status}: {command}"
+            );
+        }
+        // After the hook's own wait, so the window is the side that ends it:
+        // the hook that waits is the Unix one, and only it has a patience.
+        #[cfg(unix)]
+        assert!(
+            std::time::Duration::from_secs(330) > ask::Patience::CLAUDE.answer,
+            "Claude Code would kill the hook before it gave up waiting"
+        );
+        // Only that one: a status hook that waited would hold its agent up,
+        // so none is given a timeout that would let it.
+        for (event, groups) in parsed["hooks"].as_object().unwrap() {
+            if event != "PermissionRequest" {
+                assert!(groups[0]["hooks"][0].get("timeout").is_none(), "{event}");
+            }
+        }
     }
 
     #[test]
@@ -2716,8 +2808,18 @@ answered"
         let mut checked = Vec::new();
         for agent in AGENTS {
             let (events, copilot) = match agent.fragment {
-                Fragment::Hooks { events, .. } => (events, false),
-                Fragment::Copilot { events, .. } => (events, true),
+                Fragment::Hooks { events, asks, .. } => (
+                    events
+                        .iter()
+                        .copied()
+                        .chain(
+                            asks.iter()
+                                .map(|(event, arguments, _)| (*event, *arguments)),
+                        )
+                        .collect::<Vec<_>>(),
+                    false,
+                ),
+                Fragment::Copilot { events, .. } => (events.to_vec(), true),
                 Fragment::Plugin { .. } | Fragment::None(_) => continue,
             };
             let printed = hooks_text(agent.name, binary).unwrap().text;
@@ -3006,7 +3108,10 @@ process.stdout.write(JSON.stringify({ ran, asked }))
             });
             let statuses = [word_after("--agent "), reported.collect()].concat();
             assert!(!statuses.is_empty(), "{} runs no `--agent`", agent.name);
-            for status in statuses {
+            // Claude Code's permission hook, which asks rather than reports:
+            // the binary reads `ask` before any status, and an older one
+            // refuses it as one — see `CLAUDE_ASKS`.
+            for status in statuses.into_iter().filter(|word| *word != "ask") {
                 assert!(
                     AgentReport::parse(status).is_some(),
                     "{} reports {status:?}, which is not a status the wire reads",
@@ -3017,7 +3122,7 @@ process.stdout.write(JSON.stringify({ ran, asked }))
         let claude = hooks_text("claude", Path::new("/usr/bin/crook")).unwrap();
         let parsed: Value = serde_json::from_str(&claude.text).unwrap();
         let hooks = parsed["hooks"].as_object().unwrap();
-        assert_eq!(8, hooks.len(), "a hook was added or dropped: {hooks:?}");
+        assert_eq!(9, hooks.len(), "a hook was added or dropped: {hooks:?}");
     }
 
     #[test]
@@ -3221,6 +3326,7 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
                     ("Stop", "idle"),
                     ("StopFailure", "failed --message -"),
                     ("SessionEnd", "idle"),
+                    ("PermissionRequest", "ask claude"),
                 ],
             ),
             (
@@ -3776,11 +3882,22 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
         let input = r#"{"hook_event_name": "Stop", "prompt": "port the tab bar"}"#;
         for (event, groups) in events {
             let command = groups[0]["hooks"][0]["command"].as_str().unwrap();
+            // The ask hook's command is the same guard around the same
+            // lookup; what the binary does with `ask` is the integration
+            // tests' to show, against the real one.
             let arguments = CLAUDE_EVENTS
                 .iter()
                 .find(|(name, _)| name == event)
                 .map(|(_, arguments)| *arguments)
-                .unwrap();
+                .or_else(|| {
+                    CLAUDE_ASKS
+                        .iter()
+                        .find(|(name, _, _)| name == event)
+                        .map(|(_, arguments, _)| *arguments)
+                })
+                .unwrap_or_else(|| {
+                    panic!("the plugin hooks {event}, which Crook prints nothing for")
+                });
             // What `sh -c` makes of the command in an environment that holds
             // only `variables`: its exit, its stdout and stderr, and what the
             // stand-in was run with, if it was.

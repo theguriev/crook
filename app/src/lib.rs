@@ -1840,7 +1840,9 @@ OPTIONS:
                        print it as the hook\'s decision. Prints nothing, and
                        exits 0, whenever there is none — outside Crook, in
                        tmux, for `claude -p` or a subagent, and on Windows.
-                       Writes to no terminal, and no hook runs it yet
+                       Writes to no terminal. Claude Code runs it as its
+                       PermissionRequest hook, from Crook\'s plugin or
+                       `--agent-hooks claude`
     --agent-hooks <AGENT>
                        Print the hooks that make an agent say all of that by
                        itself, to merge into its settings: `claude` (Claude
