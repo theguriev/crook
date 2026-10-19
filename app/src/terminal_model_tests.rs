@@ -777,6 +777,8 @@ impl Batches {
                         marks,
                         prompted: false,
                         shell: model.shell(),
+                        tty_device: None,
+                        shell_pid: None,
                     },
                 );
                 model.watch(pane, ctx);
@@ -2129,6 +2131,8 @@ fn deaf_shell(flusher: &Arc<Flusher>) -> Option<Opened> {
         token: None,
         shell: PathBuf::from("/bin/sh"),
         palette: Palette::default(),
+        tty_device: None,
+        shell_pid: None,
     })
 }
 

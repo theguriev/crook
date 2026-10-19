@@ -2452,8 +2452,8 @@ than handed a half-understood answer. A verb is a promise that is hard to take b
 version verbs and fields are only ever added, and a field that changes meaning is a new version.
 The codes are `bad-request`, `too-long`, `unknown-verb`, `version`, `busy`, `timeout`, `gone`,
 `unauthorized`, `budget`, `too-many-refusals`, `unsupported-shell`, `failed`, `no-such-pane`,
-`needs-grant` and `no-blocks`. An `events.follow` stream's lines after the first reply are
-events, `{"event":"status","pane_id":7,"status":"needs-input","message":"…"}`, not replies.
+`needs-grant`, `no-blocks` and `declined`. An `events.follow` stream's lines after the first reply
+are events, `{"event":"status","pane_id":7,"status":"needs-input","message":"…"}`, not replies.
 
 **The CLI is the other end.** `crook pane list` prints a table, and `--json` prints the window's
 own array with every field in it, so a field a newer window adds reaches a script through an
@@ -2493,6 +2493,123 @@ would replay a pane's escape sequence into the terminal the listing runs in; the
 every control character out as its escape, and `--json` escapes the DEL and C1 characters a JSON
 encoder leaves as they are. A block's output printed as text keeps its newlines and writes out
 every other control character the same way, and an event line is escaped as `--json` is.
+
+### Answering an agent
+
+When Claude Code is about to ask a person whether it may run a command, it runs its
+`PermissionRequest` hook first, hands it the tool and the tool's input on stdin, and reads what
+the hook prints as the decision — or, when it prints nothing, goes on with the dialog it already
+has open. `crook --agent ask claude` is that hook. It hands the window the pane is in the whole
+request and waits on its connection for what a person says there. This is the first half: the
+window holds the question for as long as the hook waits, and shows it — on the row's second line
+while the pane needs input, and in "Why this status", in the terminal's family and wrapped at any
+character so that no line it shows is cut, the first twelve lines and 1,024 characters of it with
+what is left counted in words — and nothing in the window answers
+yet but with a pass. No hook entry runs it yet either. The card that answers, and the wiring, come
+next. The code is `app/src/agent/ask.rs` and `request.rs` on the hook's side and
+`app/src/control/ask.rs` on the window's.
+
+**Status stays on 6340.** The hook reports no status, and no status hook's command changes. The
+row still learns that Claude Code is asking from the notification hook and the title, exactly as
+before; the question is a record beside the status, never a rewrite of it.
+
+**The question rides the socket, as a kept verb.** `agent.ask` carries
+`{agent, session, cwd, tty, wait, request}` — the request
+`{"kind":"command","command":…,"note":…,"timeout_ms":…,"background":…,"outside_sandbox":…}` —
+with every unknown field refused at every level, so a window never shows less than will happen. The
+request is what the hook read through an allowlist of Claude Code's `Bash` keys (`command`,
+`description`, `timeout`, `run_in_background`, `dangerouslyDisableSandbox`), each with its type: a
+key Crook has never heard of may change what runs, so it means no question at all, and the
+agent's own prompt is the only one. A command is 1 byte to 48 KiB with no NUL, a note at most 1
+KiB, and a line over 64 KiB is not asked. Questions have a lane of their own, sixteen at once and
+four in a pane, counted apart from the thirty-two waits and streams. The window answers
+`{"asked":<id>}` within a second; later it writes exactly one
+`{"answer":{"decision":"allow"|"deny"|"pass","message"?:…,"why"?:…}}`, or a `gone` refusal; the
+hook sends back at most one line, `{"delivered":true}`, once it has printed an answer, and the
+window reads no more than that one line: anything after it is let go unheard until the hook
+leaves. A
+question's id is never handed to another, and its digest — SHA-256 over `crook-ask-v1`, the
+session, the tool and the request as JSON with its keys sorted by hand — is what an answer will be
+checked against, so a press can only ever reach the question it was given about.
+
+**The binding is the terminal a status would be written to.** The hook's controlling terminal,
+or, when it has none — Claude Code starts every hook in a session of its own — the terminal of
+the first process outside its session, which is the program that ran it: the walk `--agent`
+already takes to find the pane (#388), returning the device number it reads rather than opening
+anything. The window matches that number against each pane's pty, whose slave's `st_rdev` it read
+when the shell started, in the low 32 bits Linux's `tty_nr` and macOS's `e_tdev` carry. So a
+question reaches the pane its agent's status reaches, and no other: a `claude -p` that another
+agent's Bash tool runs is in a session with no terminal and reaches no pane, as its status does.
+Not the token, which every process a pane starts inherits — a nested agent, and a tmux server
+started in a pane together with every window of it — and which would put the inner agent's
+question on the outer pane; the token is only a hint, and one naming another pane makes the
+question read-only. Not files in `CROOK_SCRATCH`, which only a marked shell has, which go stale
+inside tmux, which tell the window nothing when the hook is killed, and which a killed hook leaves
+behind. Not a nonce printed as an OSC and read back, which costs a round trip through the
+emulator and a deadline, and which anything that prints can replay.
+
+**What the window checks.** The kernel must say the process at the other end is this user's, or
+the question is refused as `unauthorized`. On the connection's thread the window reads that
+process's ancestors, at most 64, and a question whose asker is not below the pane's shell, or
+whose pane is working on another machine, is held and shown read-only. A read-only question is
+one the window cannot place, so it is counted apart from the answerable ones in the pane's four,
+never replaces an answerable one from the same session, comes after one in "Why this status", and
+is never the row's second line. A person who turns
+answering from Crook off (`answer_agents_from_crook`, on by default, with no switch on the page
+yet) has every question refused as `declined`, at once, before anything about the panes is said.
+
+**How a question ends.** A reader on the hook's half of the connection sees the hook go — Claude
+Code kills it once its dialog is answered, or its parent dies — and tells the window through a
+notice that wakes it, so the question leaves the row the moment the hook does. Its time running
+out (its wait and five seconds) is a pass, `expired`. Its pane closing, the agent's command
+ending, the agent's own hook saying the turn is over or failed, and a newer question from the same
+session in the same pane are each a pass, with the reason as `why`. A window that closes tells
+every waiting hook `gone`. A connection that stopped waiting for the window to say it held the
+question — a frame stalled past the connection's patience — has its question refused if the window
+has yet to hold it, and hidden and then dropped if it has. The title's `✳`, which Claude Code draws as the dialog opens, and a
+hook's `running`, which parallel tools and subagents say while the dialog is up, end nothing.
+Each ending is one line in the log — `ask 3 claude Bash: turn-ended after 4210 ms (sha256
+1f2e3d4c5b6a)` — and an entry in a history of the last 64, in memory only.
+
+**What never carries the command.** `pane.list`, `events.follow`, `pane.wait`, `session.json`,
+desktop notifications and the log. The row's second line says it in a line, through the same
+writing-out "Why this status" uses: newlines kept, tabs expanded, a carriage return as `␍`, and
+every other control, DEL, C1, bidirectional, zero-width, format and default-ignorable character,
+and every space but the plain one, as `⟨U+XXXX⟩`, so a
+command that hides `rm -rf ~` behind a carriage return or reorders itself with a right-to-left
+override shows the trick rather than doing it. A question's `Debug` prints the agent, the kind and
+a twelve-digit digest prefix.
+
+**What the hook prints.** One line Claude Code reads as its decision, or nothing, and it exits 0
+on every path, since a hook that fails can fail its agent. It opens and writes no terminal.
+
+| What happens | What the hook does |
+|---|---|
+| `CROOK_SOCKET` empty or unset | prints nothing, connects to nothing |
+| `TMUX`, `STY` or `ZELLIJ` set | prints nothing, connects to nothing |
+| not `PermissionRequest` for `Bash`, a subagent's `agent_id`, no session or no absolute `cwd` | prints nothing, connects to nothing |
+| `CLAUDE_CODE_ENTRYPOINT` not exactly `cli`, unset included | prints nothing, connects to nothing: under `claude -p` an empty answer is Claude Code's own deny |
+| a tool input the allowlist does not read whole, a line over 64 KiB, stdin over 1 MiB | prints nothing, connects to nothing |
+| no terminal found | prints nothing, connects to nothing |
+| a socket that fails the CLI's checks | prints nothing, connects to nothing |
+| an older window (`unknown-verb`), `busy`, `declined`, `no-such-pane`, `unauthorized`, any refusal | prints nothing |
+| no `{"asked"}` within a second | prints nothing |
+| a pass, `gone`, an answer with a field it does not know, garbage, the connection closing | prints nothing |
+| its parent gone | prints nothing, within half a second |
+| nothing after 315 s | prints nothing |
+| `allow` | `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}` |
+| `deny` | the same with `{"behavior":"deny","message":…}` |
+| stdout gone (EPIPE) | nothing more |
+| Windows | prints nothing, at once |
+
+Never `updatedInput`, `updatedPermissions`, `interrupt` or anything that would write a rule. An
+unknown agent after `ask`, or a word after the agent, is one line on stderr, nothing on stdout,
+and exit 0, which is how a hook a newer Crook writes reaches an older binary.
+
+**No verb answers.** An answer will be a person's press on a card in the window, and it goes down
+the asking hook's own connection and no other. A verb any process of this user could send would
+be a way round the press, so there is none: `agent.answer` is an unknown verb, and a test holds
+it to that. A process that makes a question up is answered about the question it made up.
 
 ### The command line is an input field
 

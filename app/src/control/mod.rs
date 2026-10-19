@@ -8,11 +8,13 @@
 //! `cat` of a file. So the window listens on a Unix socket only this user can
 //! reach, tells every pane where it is in [`SOCKET_VARIABLE`], and answers:
 //! `pane.list`, which only reads; `tab.new`, which opens a tab beside the pane
-//! that asked and runs a command in it; and `pane.wait`, `pane.blocks` and
+//! that asked and runs a command in it; `pane.wait`, `pane.blocks` and
 //! `events.follow`, which watch the panes the asker may watch — itself, and
-//! the tabs it opened. "The window answers" in `docs/architecture.md` is the
-//! whole argument: the threat model, the protocol, and what the verbs after
-//! these will need.
+//! the tabs it opened; and `agent.ask`, which an agent's permission hook
+//! hands its question to and waits on, and which no verb answers — see
+//! [`ask`]. "The window answers" in `docs/architecture.md` is the whole
+//! argument: the threat model, the protocol, and what the verbs after these
+//! will need; "Answering an agent" is the question's.
 //!
 //! # Who may open a tab, and watch one
 //!
@@ -40,9 +42,12 @@
 //!   may watch which pane, and the bounded feeds a kept connection waits on.
 //! * [`blocks`] is the window's side of `pane.blocks`: a pane's finished
 //!   commands and what they printed, capped.
+//! * [`ask`] is the window's side of `agent.ask`: the questions agents'
+//!   hooks are waiting on, which pane each is in, and how each ended.
 //! * This file is the window's side of the rest: the [`Inbox`] a connection
-//!   leaves its question in, the chain that answers it on the main thread,
-//!   and [`panes`], which is what `pane.list` says.
+//!   leaves its question in — and what happened to an agent's question since,
+//!   as a [`Notice`] — the chain that answers it on the main thread, and
+//!   [`panes`], which is what `pane.list` says.
 //!
 //! # Never on the UI thread
 //!
@@ -66,6 +71,7 @@
 //! every command of [`cli`]'s says it is not available on this platform. An
 //! owner-only named pipe is the route when it comes.
 
+pub mod ask;
 pub mod blocks;
 pub mod cli;
 pub mod protocol;
@@ -83,7 +89,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Context as TaskContext, Poll, Waker};
 use std::time::Instant;
 
@@ -94,6 +100,7 @@ use serde_json::Value;
 use crate::tab::{AgentSession, AgentStatus};
 use crate::workspace::Workspace;
 
+use self::ask::AskId;
 use self::protocol::{PaneEntry, Refusal, Request, Verb, code};
 use self::spawn::Spawns;
 use self::watch::Feed;
@@ -229,10 +236,34 @@ pub struct Inbox {
 #[derive(Default)]
 struct Asked {
     questions: Vec<Question>,
+    /// What happened to agents' questions the window holds, since it last
+    /// looked.
+    notices: Vec<Notice>,
+    /// The feed of every agent's question asked here, for [`Inbox::close`]
+    /// to end. Weak, so a question that is over is not kept by this.
+    asks: Vec<Weak<Feed>>,
     /// The window's chain, parked until there is something to answer.
     waker: Option<Waker>,
     /// The window has closed, and nothing will answer again.
     closed: bool,
+}
+
+/// Something that happened to an agent's question on its connection, for
+/// the window to hear between two frames.
+///
+/// The one way a connection's thread tells the window anything it did not
+/// ask: before these, a hook hanging up only flipped a flag on its feed,
+/// and nothing woke the window to look, so a question whose hook had gone
+/// went on being shown as one somebody was waiting on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Notice {
+    /// The hook read its answer and printed it for its agent.
+    Delivered(AskId),
+    /// The hook hung up before it had an answer: its agent killed it, the
+    /// person answered in the agent's own prompt, or its parent went.
+    Withdrawn(AskId),
+    /// The question's time ran out, and the hook was told to pass.
+    Expired(AskId),
 }
 
 /// One question, and where its answer goes.
@@ -285,6 +316,10 @@ impl Inbox {
             if asked.closed {
                 return Err(gone());
             }
+            if let (Verb::AgentAsk(_), Some(feed)) = (&request.verb, &feed) {
+                asked.asks.retain(|ask| ask.strong_count() > 0);
+                asked.asks.push(Arc::downgrade(feed));
+            }
             asked.questions.push(Question {
                 request,
                 feed,
@@ -308,20 +343,49 @@ impl Inbox {
         }
     }
 
-    /// Refuses every question waiting, and every one asked from now on.
+    /// Leaves `notice` for the window, and wakes it to hear it.
+    ///
+    /// Called on a connection's thread. Nothing, once the window has closed:
+    /// there is nobody left to hear it.
+    pub fn notice(&self, notice: Notice) {
+        let waker = {
+            let mut asked = self.lock();
+            if asked.closed {
+                return;
+            }
+            asked.notices.push(notice);
+            asked.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    /// Refuses every question waiting, and every one asked from now on, and
+    /// tells every agent's hook still waiting that the window has gone.
     ///
     /// Without it a question asked of a window that has closed would sit in a
     /// queue nothing reads until its connection gave up on it, and a script
-    /// would be told "timeout" about a window that is not there.
+    /// would be told "timeout" about a window that is not there; and a hook
+    /// would hold its agent for the rest of its wait on a card nobody can
+    /// ever see.
     pub fn close(&self) {
-        let mut asked = self.lock();
-        asked.closed = true;
-        // Dropping each question drops its sender, which is what tells the
-        // thread waiting on it.
-        asked.questions.clear();
+        let asks = {
+            let mut asked = self.lock();
+            asked.closed = true;
+            // Dropping each question drops its sender, which is what tells
+            // the thread waiting on it.
+            asked.questions.clear();
+            asked.notices.clear();
+            std::mem::take(&mut asked.asks)
+        };
+        for feed in asks.iter().filter_map(Weak::upgrade) {
+            feed.end();
+        }
     }
 
-    /// Resolves with every question asked since the last time it resolved.
+    /// Resolves with every question asked, and every notice left, since the
+    /// last time it resolved.
     fn asked(self: &Arc<Self>) -> Questions {
         Questions {
             inbox: self.clone(),
@@ -329,21 +393,25 @@ impl Inbox {
     }
 }
 
-/// The future the window's chain parks on until a question arrives.
+/// The future the window's chain parks on until a question or a notice
+/// arrives.
 struct Questions {
     inbox: Arc<Inbox>,
 }
 
 impl Future for Questions {
-    type Output = Vec<Question>;
+    type Output = (Vec<Question>, Vec<Notice>);
 
     fn poll(self: Pin<&mut Self>, ctx: &mut TaskContext<'_>) -> Poll<Self::Output> {
         let mut asked = self.inbox.lock();
-        if asked.questions.is_empty() {
+        if asked.questions.is_empty() && asked.notices.is_empty() {
             asked.waker = Some(ctx.waker().clone());
             return Poll::Pending;
         }
-        Poll::Ready(std::mem::take(&mut asked.questions))
+        Poll::Ready((
+            std::mem::take(&mut asked.questions),
+            std::mem::take(&mut asked.notices),
+        ))
     }
 }
 
@@ -362,9 +430,12 @@ fn gone() -> Refusal {
 /// this chain and the answers it hands to the pool ever touch.
 fn serve(inbox: Arc<Inbox>, spawns: Rc<RefCell<Spawns>>, ctx: &mut ViewContext<Workspace>) {
     let questions = inbox.asked();
-    ctx.spawn(questions, move |workspace, questions, ctx| {
+    ctx.spawn(questions, move |workspace, (questions, notices), ctx| {
         for question in questions {
-            answer(workspace, question, &spawns, ctx);
+            answer(workspace, question, &inbox, &spawns, ctx);
+        }
+        if !notices.is_empty() {
+            ask::heard(workspace, &notices, ctx);
         }
         serve(inbox, spawns, ctx);
     })
@@ -375,6 +446,7 @@ fn serve(inbox: Arc<Inbox>, spawns: Rc<RefCell<Spawns>>, ctx: &mut ViewContext<W
 fn answer(
     workspace: &mut Workspace,
     question: Question,
+    inbox: &Arc<Inbox>,
     spawns: &Rc<RefCell<Spawns>>,
     ctx: &mut ViewContext<Workspace>,
 ) {
@@ -394,6 +466,12 @@ fn answer(
         Verb::PaneBlocks(asked) => answer.send(blocks::read(workspace, &asked, token, ctx)),
         Verb::EventsFollow(asked) => {
             answer.send(watch::follow(workspace, &asked, token, feed, ctx));
+        }
+        Verb::AgentAsk(asked) => {
+            let asker = request.asker.unwrap_or_default();
+            answer.send(ask::register(
+                workspace, asked, token, &asker, feed, inbox, ctx,
+            ));
         }
     }
 }

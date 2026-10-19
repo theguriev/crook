@@ -32,6 +32,7 @@ use crookui_core::geometry::{RectF, vec2f};
 use crookui_core::prelude::*;
 
 use crate::clipboard::Clipboard;
+use crate::control::ask::{Asks, Cause};
 use crate::control::watch::{self, Watches};
 use crate::editor::Selection;
 use crate::file_drop;
@@ -734,6 +735,11 @@ pub struct Workspace {
     /// [`Self::apply_terminal_update`] and [`Self::settle`]. Empty while
     /// nobody watches, but for who opened the closed tabs `tab.new` opened.
     watches: Watches,
+    /// The questions agents' permission hooks are waiting on, and how the
+    /// last ones ended. Ended here when what they were asked in is over —
+    /// see [`Self::agent_reported`] and [`Self::settle`]. See
+    /// [`crate::control::ask`].
+    asks: Asks,
     /// The resume line a restore typed into each pane's field, while nothing
     /// has run in that pane since.
     ///
@@ -1335,6 +1341,7 @@ impl Workspace {
             first_lines: HashMap::new(),
             cleared_exits: HashMap::new(),
             watches: Watches::default(),
+            asks: Asks::default(),
             resume_offers: HashMap::new(),
             closed: Closed::default(),
             filter_cache: RefCell::new(None),
@@ -9301,7 +9308,27 @@ impl Workspace {
         if status == AgentStatus::Running {
             self.start_breathing(ctx);
         }
+        self.end_asks_a_report_ends(pane, status, source);
         reported
+    }
+
+    /// Ends the questions held in `pane` when what its agent just reported
+    /// says the turn they were asked in is over: an idle or a failure its
+    /// hook said, or the end of the command it ran.
+    ///
+    /// Not the title's: the `✳` Claude Code draws as a permission dialog
+    /// opens is the moment it asks, not the turn ending. Nor a running, which
+    /// parallel tools and subagents say while the dialog is still up.
+    fn end_asks_a_report_ends(&mut self, pane: PaneId, status: AgentStatus, source: StatusSource) {
+        if self.asks.is_empty() || !matches!(status, AgentStatus::Idle | AgentStatus::Failed) {
+            return;
+        }
+        let cause = match source {
+            StatusSource::Agent(_) => Cause::TurnEnded,
+            StatusSource::CommandEnded(_) => Cause::CommandEnded,
+            _ => return,
+        };
+        self.asks.end_in(pane, cause);
     }
 
     /// What a pane's agent has said so far — its status, its question, and
@@ -10441,6 +10468,49 @@ impl Workspace {
         &mut self.watches
     }
 
+    /// The questions agents' hooks are waiting on. See
+    /// [`crate::control::ask`].
+    pub(crate) fn asks(&self) -> &Asks {
+        &self.asks
+    }
+
+    /// The questions agents' hooks are waiting on, to hold or end one in.
+    pub(crate) fn asks_mut(&mut self) -> &mut Asks {
+        &mut self.asks
+    }
+
+    /// The open pane whose shell runs on the terminal numbered `device`. See
+    /// [`TerminalModel::pane_with_tty`].
+    pub(crate) fn pane_with_tty(&self, device: u32, app: &AppContext) -> Option<PaneId> {
+        self.terminals
+            .as_ref(app)
+            .pane_with_tty(device)
+            .filter(|pane| self.tabs.pane(*pane).is_some())
+    }
+
+    /// The process id of a pane's shell, while it runs.
+    pub(crate) fn shell_pid(&self, pane: PaneId, app: &AppContext) -> Option<u32> {
+        self.terminals.as_ref(app).shell_pid(pane)
+    }
+
+    /// The device number of the terminal a pane's shell runs on, for a test
+    /// that has to ask as a program in it.
+    #[cfg(all(test, unix))]
+    pub(crate) fn tty_of(&self, pane: PaneId, app: &AppContext) -> Option<u32> {
+        self.terminals.as_ref(app).tty_device(pane)
+    }
+
+    /// Turns taking agents' questions on or off, as the setting will, for a
+    /// test that has no settings page to press.
+    #[cfg(all(test, unix))]
+    pub(crate) fn take_agents_questions(&mut self, on: bool, ctx: &mut ViewContext<Self>) {
+        let general = GeneralOptions {
+            answer_agents_from_crook: on,
+            ..self.general()
+        };
+        self.set_general(general, ctx);
+    }
+
     /// Whether a pane opened by `crook tab new` still has its line waiting
     /// for the shell's first prompt: the command it was opened for has not
     /// been sent yet. See [`Self::run_at_first_prompt`].
@@ -10547,8 +10617,9 @@ impl Workspace {
         // Every road a pane closes by, and every tab that opens, comes
         // through here: what the control socket is watching hears of both,
         // and a tab `tab.new` opened that closed is remembered for a wait
-        // asked after it.
+        // asked after it. A question asked in a pane that closed is over.
         self.watches.settled(&self.tabs);
+        self.asks.forget_closed(&self.tabs);
         self.follow_changes(ctx);
         // After the strip has moved, so "which pane is being looked at" is the
         // answer for the state the frame is about to draw. Every action comes

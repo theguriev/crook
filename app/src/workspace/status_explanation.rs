@@ -13,6 +13,19 @@
 //! opened says so here too, since who started the work is the first thing a
 //! person asks about a row they did not open.
 //!
+//! # What an agent asks
+//!
+//! When the agent's permission hook is waiting on a question the window
+//! holds — see [`crate::control::ask`] — the panel says what it asks to run,
+//! written out the way [`visible`] writes it, in the terminal's family and
+//! wrapped at any character so that no part of a line it shows is cut, and
+//! what goes with it. A command longer than a menu has room for is shown up
+//! to [`SHOWN_LINES`] lines and [`SHOWN_CHARACTERS`] characters, and what is
+//! left is counted in words where it stops. All of that comes from the
+//! question the hook handed the window and none of it from what the agent
+//! reported: a status's message is whatever the agent said, and a command
+//! is shown only as it will run.
+//!
 //! # Where it hangs
 //!
 //! Off the tab menu's corner, where the worktree list hangs, and for the same
@@ -30,12 +43,14 @@
 //! reads the age it had when they opened it — which is what they asked, and
 //! what keeps a timer out of a window that has none.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crookui_core::elements::Paragraph;
 use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::prelude::*;
 
+use crate::agent::request::{AskRequest, visible};
+use crate::control::ask::Ask;
 use crate::plugins::store::ago;
 use crate::tab::{AgentSession, AgentStatus, Attention, Pane, StatusSource};
 use crate::theme::theme;
@@ -59,11 +74,19 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
         .with_child(heading("Why this status", ui));
 
+    let ask = workspace
+        .menu_target()
+        .and_then(|(_, pane)| workspace.asks().in_pane(pane));
+
     // A menu is only ever up on a row that exists, so the branch with no
     // session is a frame between a pane closing and the menu hearing of it.
     if let Some(session) = session {
-        for line in lines(session, Instant::now()) {
-            column.add_child(sentence(line, ui));
+        let monospace = workspace.fonts().monospace;
+        for line in lines(session, ask, Instant::now()) {
+            column.add_child(match line {
+                Said::Sentence(text) => sentence(text, ui),
+                Said::Command(text) => command(text, monospace),
+            });
         }
     }
 
@@ -79,14 +102,46 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
     .finish()
 }
 
-/// What the panel says about a session, one sentence per line, at `now`.
+/// One line of the panel: a sentence, or a line of a command an agent asks
+/// to run, which is drawn as the terminal would and never cut.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Said {
+    /// A sentence, wrapped between words.
+    Sentence(String),
+    /// A line of a command, as [`visible`] writes it.
+    Command(String),
+}
+
+impl Said {
+    /// What the line says.
+    #[cfg(test)]
+    pub(super) fn text(&self) -> &str {
+        match self {
+            Self::Sentence(text) | Self::Command(text) => text,
+        }
+    }
+}
+
+/// What the panel says about a session, one line each, at `now`, with the
+/// question its agent's hook is waiting on when there is one.
 ///
 /// Separated from the drawing so that the words can be read without a frame:
 /// the sentences are the feature, and the elements around them are the
 /// worktree menu's. The order is the order a person asks — what the dot
-/// says and who said it, then what the agent is doing, then who asked for a
-/// look, then what the shell is up to.
-pub(super) fn lines(session: &AgentSession, now: Instant) -> Vec<String> {
+/// says and who said it, then what the agent is asking to do, then what the
+/// agent is doing, then who asked for a look, then what the shell is up to.
+pub(super) fn lines(session: &AgentSession, ask: Option<&Ask>, now: Instant) -> Vec<Said> {
+    let mut sentences = about(session, now).into_iter().map(Said::Sentence);
+    let mut said: Vec<Said> = sentences.next().into_iter().collect();
+    if let Some(ask) = ask {
+        asking(ask, now, &mut said);
+    }
+    said.extend(sentences);
+    said
+}
+
+/// What the panel says about the session itself, the status first.
+fn about(session: &AgentSession, now: Instant) -> Vec<String> {
     let status = session.status.label();
     let mut lines = vec![match session.source {
         StatusSource::NoReport => format!("Status: {status} — no report yet."),
@@ -177,6 +232,99 @@ pub(super) fn lines(session: &AgentSession, now: Instant) -> Vec<String> {
     lines
 }
 
+/// The question the agent's hook is waiting on, written out: what the hook
+/// handed the window, and nothing the agent reported about it.
+///
+/// The command line by line, through [`visible`], so that a carriage return,
+/// an escape or a right-to-left override reads as the mark it is rather than
+/// rewriting what is shown; the first [`SHOWN_LINES`] of it and at most
+/// [`SHOWN_CHARACTERS`] of those, each drawn whole, and how much more there
+/// is, said in words wherever it stops — never an ellipsis a person could
+/// take for the end of it.
+fn asking(ask: &Ask, now: Instant, said: &mut Vec<Said>) {
+    let AskRequest::Command {
+        command,
+        note,
+        timeout_ms,
+        background,
+        outside_sandbox,
+    } = &ask.request;
+    let agent = ask.agent.name();
+    said.push(Said::Sentence(format!(
+        "It asks Crook, through {agent}'s PermissionRequest hook, to run:"
+    )));
+    let shown = visible(command);
+    let all: Vec<&str> = shown.split('\n').collect();
+    let mut room = SHOWN_CHARACTERS;
+    let mut lines = 0;
+    for line in all.iter().take(SHOWN_LINES) {
+        lines += 1;
+        let length = line.chars().count();
+        if length <= room {
+            room -= length;
+            said.push(Said::Command((*line).to_owned()));
+            continue;
+        }
+        said.push(Said::Command(line.chars().take(room).collect()));
+        said.push(Said::Sentence(match length - room {
+            1 => "and 1 more character on that line".to_owned(),
+            more => format!("and {more} more characters on that line"),
+        }));
+        break;
+    }
+    match all.len() - lines {
+        0 => {}
+        1 => said.push(Said::Sentence("and 1 more line".to_owned())),
+        more => said.push(Said::Sentence(format!("and {more} more lines"))),
+    }
+    if let Some(note) = note {
+        said.push(Said::Sentence(format!("{agent} says: {}", visible(note))));
+    }
+    if *outside_sandbox {
+        said.push(Said::Sentence(format!(
+            "Outside {agent}'s sandbox: it asks to run with none of the sandbox's limits."
+        )));
+    }
+    if *background {
+        said.push(Said::Sentence(
+            "In the background: the agent goes on without waiting for it.".to_owned(),
+        ));
+    }
+    if let Some(timeout) = timeout_ms {
+        said.push(Said::Sentence(format!(
+            "With a time limit of {}.",
+            duration(Duration::from_millis(*timeout))
+        )));
+    }
+    said.push(Said::Sentence(format!(
+        "Asked {} ago.",
+        duration(now.saturating_duration_since(ask.asked_at))
+    )));
+    if let Some(cannot) = ask.cannot_answer {
+        said.push(Said::Sentence(cannot.sentence().to_owned()));
+    }
+}
+
+/// How many lines of a command the panel shows before saying how many more
+/// there are.
+const SHOWN_LINES: usize = 12;
+
+/// How many characters of a command, as [`visible`] writes it, the panel
+/// shows at most, over all the lines it shows: a menu is a few hundred
+/// pixels tall, and a command as long as the socket carries would be
+/// hundreds of rows of it. The rest is counted in words.
+const SHOWN_CHARACTERS: usize = 1024;
+
+/// "40 s", "2 min 5 s": a span short enough to say to the second.
+fn duration(span: Duration) -> String {
+    let seconds = span.as_secs();
+    match (seconds / 60, seconds % 60) {
+        (0, seconds) => format!("{seconds} s"),
+        (minutes, 0) => format!("{minutes} min"),
+        (minutes, seconds) => format!("{minutes} min {seconds} s"),
+    }
+}
+
 /// "just now", "2 minutes ago": how long before `now` the instant was.
 ///
 /// Saturating, because an `Instant` written on one thread and read on
@@ -203,6 +351,23 @@ fn heading(title: &'static str, ui: FamilyId) -> Box<dyn Element> {
     .finish()
 }
 
+/// One line of a command, in the terminal's family, wrapped at whichever
+/// character the panel's width runs out at: every space where it was, and
+/// nothing cut — a command with no spaces in it is as likely as one with
+/// many, and the end of it is the part that does the damage.
+fn command(text: String, monospace: FamilyId) -> Box<dyn Element> {
+    Container::new(
+        Paragraph::new(text, monospace, LABEL_SIZE)
+            .breaking_anywhere()
+            .with_color(theme().text_primary)
+            .with_line_height_ratio(1.4)
+            .finish(),
+    )
+    .with_horizontal_padding(ROW_INSET)
+    .with_margin_bottom(4.)
+    .finish()
+}
+
 /// One fact, wrapped to the panel's width.
 fn sentence(text: String, ui: FamilyId) -> Box<dyn Element> {
     Container::new(
@@ -214,4 +379,149 @@ fn sentence(text: String, ui: FamilyId) -> Box<dyn Element> {
     .with_horizontal_padding(ROW_INSET)
     .with_margin_bottom(4.)
     .finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::control::ask::{Asks, CannotAnswer, Found};
+    use crate::control::protocol::{AgentAsk, AskingAgent, Verb};
+    use crate::control::watch::Feed;
+    use crate::tab::PaneId;
+
+    /// A question as a Claude Code hook hands it to the window, about
+    /// `command`.
+    fn asked(command: &str) -> AgentAsk {
+        AgentAsk {
+            agent: AskingAgent::Claude,
+            session: "4f1c2b7e".to_owned(),
+            cwd: "/home/someone/work/crook".to_owned(),
+            tty: 34819,
+            wait: 300,
+            request: AskRequest::Command {
+                command: command.to_owned(),
+                note: Some("Clean \u{202e}up".to_owned()),
+                timeout_ms: Some(120_000),
+                background: true,
+                outside_sandbox: true,
+            },
+        }
+    }
+
+    #[test]
+    fn why_this_status_shows_the_whole_command_written_out() {
+        let mut session = AgentSession::new("agent 1");
+        session.status = AgentStatus::NeedsInput;
+        // What the agent said, which is not what is shown as the command.
+        session.message = Some("Claude needs your permission to use Bash".to_owned());
+
+        let command: String = ["echo safe\rrm -rf ~", "printf '\u{1b}[2J'"]
+            .into_iter()
+            .chain((1..=14).map(|line| if line == 5 { "\u{200b}ls" } else { "true" }))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut asks = Asks::default();
+        let asked_at = Instant::now();
+        asks.add(
+            asked(&command),
+            Found {
+                pane: PaneId::next(),
+                cannot_answer: Some(CannotAnswer::OtherTab),
+                tab_title: "crook".to_owned(),
+            },
+            Arc::new(Feed::for_verb(&Verb::AgentAsk(asked("ls")))),
+            asked_at,
+        )
+        .expect("held");
+        let ask = asks.live().next().expect("held");
+
+        let lines_said = lines(&session, Some(ask), asked_at + Duration::from_secs(40));
+        let said: Vec<&str> = lines_said.iter().map(Said::text).collect();
+        let from = said
+            .iter()
+            .position(|line| {
+                *line == "It asks Crook, through Claude Code's PermissionRequest hook, to run:"
+            })
+            .expect("the panel says what it asks");
+        assert_eq!(from, 1, "right after the status: {said:#?}");
+        let shown = &said[from + 1..];
+        assert_eq!(shown[0], "echo safe␍rm -rf ~", "{said:#?}");
+        // The twelve lines of the command are drawn as a command, and what
+        // follows them as sentences.
+        let kinds = &lines_said[from + 1..];
+        assert!(
+            kinds[..12]
+                .iter()
+                .all(|line| matches!(line, Said::Command(_))),
+            "{kinds:#?}"
+        );
+        assert!(matches!(kinds[12], Said::Sentence(_)), "{kinds:#?}");
+        assert_eq!(shown[1], "printf '⟨U+001B⟩[2J'");
+        assert_eq!(shown[6], "⟨U+200B⟩ls");
+        assert_eq!(shown[11], "true", "the twelfth line");
+        assert_eq!(shown[12], "and 4 more lines");
+        assert_eq!(shown[13], "Claude Code says: Clean ⟨U+202E⟩up");
+        let rest = shown[14..].join("\n");
+        assert!(rest.contains("Outside Claude Code's sandbox"), "{rest}");
+        assert!(rest.contains("In the background"), "{rest}");
+        assert!(rest.contains("2 min"), "{rest}");
+        assert!(rest.contains("Asked 40 s ago."), "{rest}");
+        assert!(rest.contains(CannotAnswer::OtherTab.sentence()), "{rest}");
+        // Still the session's own sentences after it.
+        assert!(
+            said.contains(&"It asks: Claude needs your permission to use Bash"),
+            "{said:#?}"
+        );
+
+        // Without a question, none of it.
+        let without = lines(&session, None, asked_at);
+        assert!(
+            !without
+                .iter()
+                .any(|line| line.text().contains("PermissionRequest")),
+            "{without:#?}"
+        );
+    }
+
+    /// A command longer than the panel has room for is shown as far as the
+    /// room goes and the rest counted, so that where it stops is never taken
+    /// for where it ends.
+    #[test]
+    fn a_command_too_long_for_the_panel_says_how_much_is_left() {
+        let session = AgentSession::new("agent 1");
+        let long = "A".repeat(SHOWN_CHARACTERS - 8);
+        let command = format!("cd /srv\n{long}\nrm -rf ~\nls");
+        let mut asks = Asks::default();
+        let asked_at = Instant::now();
+        asks.add(
+            asked(&command),
+            Found {
+                pane: PaneId::next(),
+                cannot_answer: None,
+                tab_title: "crook".to_owned(),
+            },
+            Arc::new(Feed::for_verb(&Verb::AgentAsk(asked("ls")))),
+            asked_at,
+        )
+        .expect("held");
+        let ask = asks.live().next().expect("held");
+
+        let said = lines(&session, Some(ask), asked_at);
+        let from = said
+            .iter()
+            .position(|line| matches!(line, Said::Command(_)))
+            .expect("the command is shown");
+        assert_eq!(said[from], Said::Command("cd /srv".to_owned()));
+        assert_eq!(said[from + 1], Said::Command(long));
+        // The first two lines leave room for one character of the third.
+        assert_eq!(said[from + 2], Said::Command("r".to_owned()));
+        assert_eq!(
+            said[from + 3],
+            Said::Sentence("and 7 more characters on that line".to_owned())
+        );
+        assert_eq!(said[from + 4], Said::Sentence("and 1 more line".to_owned()));
+    }
 }
