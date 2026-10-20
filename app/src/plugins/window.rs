@@ -140,8 +140,8 @@ pub const COMMANDS: [(&str, &str, Binding); 60] = [
         Binding::SelectLastTab,
     ),
     // The four directions a split can be walked, and the two ways round it.
-    // A group is one vector along one axis, so two of the four always decline
-    // — which is what leaves the other two keys to the shell.
+    // A direction with no pane on that side declines — which is what leaves
+    // the key to the shell at the edge of the tab.
     (
         "focus-pane-left",
         "Focus the pane to the left",

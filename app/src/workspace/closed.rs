@@ -38,7 +38,7 @@
 //! went goes back into the tab.
 
 use crate::session::{PaneSnapshot, TabSnapshot};
-use crate::tab::{GroupId, Pane, PaneId, SplitAxis, Tab, TabAction, TabEffect, TabId, TabStrip};
+use crate::tab::{GroupId, Pane, PaneId, PanePlace, Tab, TabAction, TabEffect, TabId, TabStrip};
 
 /// How many closes "Reopen the closed tab" can bring back, newest first.
 ///
@@ -56,6 +56,10 @@ enum Taken {
         /// The id it had, which a pane closed out of it before it went names.
         id: TabId,
         snapshot: TabSnapshot,
+        /// The ids its panes had, in render order — the order the tab that
+        /// comes back has them in — for the panes closed out of it before it
+        /// went, whose kept places name them.
+        panes: Vec<PaneId>,
         /// Its place in the strip.
         index: usize,
         /// The group it was in, which it goes back into if that is still here.
@@ -69,8 +73,9 @@ enum Taken {
         name: String,
         /// Whether its tabs were folded away.
         collapsed: bool,
-        /// Its tabs in strip order, each with the id it had.
-        tabs: Vec<(TabId, TabSnapshot)>,
+        /// Its tabs in strip order, each with the id it had and the ids its
+        /// panes had, in render order.
+        tabs: Vec<(TabId, TabSnapshot, Vec<PaneId>)>,
         /// The place in the strip of its first tab.
         index: usize,
         /// Which of `tabs` was used most recently, which is the one selected
@@ -84,10 +89,8 @@ enum Taken {
         /// The tab it was in.
         tab: TabId,
         snapshot: PaneSnapshot,
-        /// Its place in the split.
-        index: usize,
-        /// Which way the split went, for a tab left with one pane since.
-        axis: SplitAxis,
+        /// Where it was in the split, at every depth of it.
+        at: PanePlace,
         /// Its tab's place in the strip, where it comes back as a tab of its
         /// own if that tab is not here any more.
         place: usize,
@@ -141,6 +144,7 @@ impl Taking {
                         taken.push(Taken::Tab {
                             id: *id,
                             snapshot,
+                            panes: panes_of(tab),
                             index,
                             group,
                         });
@@ -166,8 +170,7 @@ fn pane_taken(strip: &TabStrip, tab: TabId, pane: PaneId) -> Option<Taken> {
         id: pane,
         tab,
         snapshot: PaneSnapshot::of(panes.get(pane)?),
-        index: panes.index_of(pane)?,
-        axis: panes.axis(),
+        at: panes.place_of(pane)?,
         place: strip.index_of(tab)?,
     })
 }
@@ -175,14 +178,14 @@ fn pane_taken(strip: &TabStrip, tab: TabId, pane: PaneId) -> Option<Taken> {
 /// A whole group, from `index`, where its first tab is.
 fn group_taken(strip: &TabStrip, group: GroupId, index: usize) -> Option<Taken> {
     let heading = strip.group(group)?;
-    let tabs: Vec<(TabId, TabSnapshot)> = strip
+    let tabs: Vec<(TabId, TabSnapshot, Vec<PaneId>)> = strip
         .members(group)
-        .filter_map(|tab| Some((tab.id(), TabSnapshot::of(tab)?)))
+        .filter_map(|tab| Some((tab.id(), TabSnapshot::of(tab)?, panes_of(tab))))
         .collect();
     let selected = strip
         .mru()
         .iter()
-        .find_map(|used| tabs.iter().position(|(id, _)| id == used))
+        .find_map(|used| tabs.iter().position(|(id, _, _)| id == used))
         .unwrap_or(0);
     Some(Taken::Group {
         id: group,
@@ -213,7 +216,7 @@ impl Closed {
         for taken in taking.0 {
             let went = match &taken {
                 Taken::Tab { id, .. } => strip.get(*id).is_none(),
-                Taken::Group { tabs, .. } => tabs.iter().all(|(id, _)| strip.get(*id).is_none()),
+                Taken::Group { tabs, .. } => tabs.iter().all(|(id, _, _)| strip.get(*id).is_none()),
                 Taken::Pane { id, .. } => strip.pane(*id).is_none(),
             };
             if !went {
@@ -234,6 +237,7 @@ impl Closed {
             Taken::Tab {
                 id,
                 snapshot,
+                panes,
                 index,
                 group,
             } => {
@@ -241,6 +245,7 @@ impl Closed {
                 let back = (tab.id(), panes_of(&tab));
                 let effect = strip.reopen(tab, index, group);
                 self.renamed_tab(id, back.0);
+                self.renamed_panes(&panes, &back.1);
                 Some((effect, back.1))
             }
             Taken::Group {
@@ -251,31 +256,33 @@ impl Closed {
                 index,
                 selected,
             } => {
-                let (was, tabs): (Vec<TabId>, Vec<Tab>) = tabs
+                let (was, tabs): (Vec<(TabId, &Vec<PaneId>)>, Vec<Tab>) = tabs
                     .iter()
-                    .filter_map(|(id, snapshot)| Some((*id, snapshot.restore()?)))
+                    .filter_map(|(id, snapshot, panes)| Some(((*id, panes), snapshot.restore()?)))
                     .unzip();
-                let is: Vec<TabId> = tabs.iter().map(Tab::id).collect();
-                let panes = tabs.iter().flat_map(panes_of).collect();
+                let is: Vec<(TabId, Vec<PaneId>)> =
+                    tabs.iter().map(|tab| (tab.id(), panes_of(tab))).collect();
+                let panes = is.iter().flat_map(|(_, panes)| panes.clone()).collect();
                 let group = strip.reopen_group(name, collapsed, tabs, index, selected)?;
-                for (was, is) in was.into_iter().zip(is) {
+                for ((was, had), (is, has)) in was.into_iter().zip(is) {
                     self.renamed_tab(was, is);
+                    self.renamed_panes(had, &has);
                 }
                 self.renamed_group(id, group);
                 Some((TabEffect::Changed, panes))
             }
             Taken::Pane {
+                id,
                 tab,
                 snapshot,
-                index,
-                axis,
+                at,
                 place,
-                ..
             } => {
                 if strip.get(tab).is_some() {
                     let pane = snapshot.restore();
                     let back = vec![pane.id()];
-                    Some((strip.reopen_pane(tab, pane, index, axis), back))
+                    self.renamed_pane(id, pane.id());
+                    Some((strip.reopen_pane(tab, pane, &at), back))
                 } else {
                     // Its tab went without being kept, so there is no tab to
                     // put it back into: it comes back a tab of its own, where
@@ -299,6 +306,25 @@ impl Closed {
                 && *tab == was
             {
                 *tab = is;
+            }
+        }
+    }
+
+    /// Hands every pane of a tab that came back its new id in the places
+    /// kept, position by position: the tab restores its panes in the render
+    /// order `had` was taken in.
+    fn renamed_panes(&mut self, had: &[PaneId], has: &[PaneId]) {
+        for (was, is) in had.iter().zip(has) {
+            self.renamed_pane(*was, *is);
+        }
+    }
+
+    /// Hands a pane's new id to the places kept for the panes closed before
+    /// it, which name it in the splits they went out of.
+    fn renamed_pane(&mut self, was: PaneId, is: PaneId) {
+        for taken in &mut self.0 {
+            if let Taken::Pane { at, .. } = taken {
+                at.renamed(was, is);
             }
         }
     }

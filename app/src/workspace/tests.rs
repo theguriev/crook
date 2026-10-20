@@ -2770,6 +2770,91 @@ fn a_divider_between_panes_above_and_below_shows_the_up_and_down_arrows() {
     }
 }
 
+/// A 2×2 made the way a person makes one, and its four boxes in render order:
+/// top left, bottom left, top right, bottom right.
+fn two_by_two(harness: &mut Harness) -> Vec<RectF> {
+    let left = harness.focused_pane_id().expect("a pane");
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    harness.dispatch_action(TabAction::Split(Direction::Down));
+    harness.dispatch_action(TabAction::FocusPane(left));
+    harness.dispatch_action(TabAction::Split(Direction::Down));
+    let boxes = panel_boxes(&harness.frame());
+    assert_eq!(boxes.len(), 4, "four panes drawn: {boxes:?}");
+    boxes
+}
+
+#[test]
+fn dragging_the_divider_inside_one_column_moves_that_column_alone() {
+    // The press lands on a divider nested in the right column — which is
+    // also inside the grab-declining wrapper of that column — and must
+    // reach it.
+    let mut harness = Harness::new(1);
+    let before = two_by_two(&mut harness);
+    let line = (before[2].max_y() + before[3].min_y()) / 2.;
+    let x = center(before[2]).x();
+
+    harness.hold(vec2f(x, line), 1);
+    harness.drag_to(vec2f(x, line + 80.));
+    harness.let_go(vec2f(x, line + 80.));
+    let after = panel_boxes(&harness.frame());
+
+    assert!(
+        after[2].height() > before[2].height() + 40.,
+        "the right column's divider did not move: {} then {}",
+        before[2].height(),
+        after[2].height()
+    );
+    assert_eq!(after[0], before[0], "the left column moved with it");
+    assert_eq!(after[1], before[1]);
+}
+
+#[test]
+fn dragging_the_divider_between_the_columns_moves_both_halves_of_each() {
+    let mut harness = Harness::new(1);
+    let before = two_by_two(&mut harness);
+    let line = (before[0].max_x() + before[2].min_x()) / 2.;
+    let y = center(before[0]).y();
+
+    harness.hold(vec2f(line, y), 1);
+    harness.drag_to(vec2f(line + 80., y));
+    harness.let_go(vec2f(line + 80., y));
+    let after = panel_boxes(&harness.frame());
+
+    for pane in [0, 1] {
+        assert!(
+            after[pane].width() > before[pane].width() + 40.,
+            "pane {pane} did not widen: {:?} then {:?}",
+            before[pane],
+            after[pane]
+        );
+    }
+    assert_eq!(after[0].height(), before[0].height(), "the rows stayed");
+    assert_eq!(after[2].height(), before[2].height());
+}
+
+#[test]
+fn each_divider_of_a_two_by_two_shows_the_arrows_of_its_own_direction() {
+    let mut harness = Harness::new(1);
+    let boxes = two_by_two(&mut harness);
+    let scene = harness.frame();
+
+    let between_columns = vec2f(
+        (boxes[0].max_x() + boxes[2].min_x()) / 2.,
+        center(boxes[0]).y(),
+    );
+    assert_eq!(
+        scene.pointer_at(between_columns),
+        PointerShape::ColumnResize
+    );
+    for (upper, lower) in [(0, 1), (2, 3)] {
+        let between_rows = vec2f(
+            center(boxes[upper]).x(),
+            (boxes[upper].max_y() + boxes[lower].min_y()) / 2.,
+        );
+        assert_eq!(scene.pointer_at(between_rows), PointerShape::RowResize);
+    }
+}
+
 #[test]
 fn a_divider_s_grab_goes_with_it_when_the_window_is_resized() {
     // A resize lays the same tree out again without rendering it, and the
@@ -32777,6 +32862,46 @@ fn a_pane_closed_out_of_a_split_goes_back_into_its_tab() {
 }
 
 #[test]
+fn two_corners_of_a_two_by_two_closed_one_after_the_other_both_go_back_where_they_were() {
+    // The second pane closed comes back first, under a new id; the first
+    // one's kept place still named the old one, saw a pane it did not know,
+    // and put the first pane back to the right of whatever had the keyboard.
+    let mut harness = Harness::new(1);
+    let tab = harness.active_id();
+    two_by_two(&mut harness);
+    let shape = |harness: &Harness| {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            let group = workspace.tabs().get(tab).expect("open").panes();
+            let mut shape = format!("{:?}", group.layout());
+            for (position, pane) in group.iter().enumerate() {
+                shape = shape.replace(&format!("{:?})", pane.id()), &format!("#{position})"));
+            }
+            let shares: Vec<f32> = group.iter().map(Pane::flex).collect();
+            (shape, shares)
+        })
+    };
+    let panes = harness.panes_of(tab);
+    harness.dispatch_action(TabAction::ResizePanes {
+        before: panes[2],
+        after: panes[3],
+        leading: 0.7,
+    });
+    harness.dispatch_action(TabAction::ResizePanes {
+        before: panes[0],
+        after: panes[1],
+        leading: 0.3,
+    });
+    let before = shape(&harness);
+
+    harness.dispatch_action(TabAction::ClosePane(panes[1]));
+    harness.dispatch_action(TabAction::ClosePane(panes[3]));
+    harness.run_command("crook/window/reopen-closed-tab");
+    harness.run_command("crook/window/reopen-closed-tab");
+
+    assert_eq!(shape(&harness), before);
+}
+
+#[test]
 fn a_pane_closed_before_its_tab_goes_back_into_that_tab_once_it_is_back() {
     // The pane names the tab it went out of, and the tab that comes back is a
     // new one. Brought back as a tab of its own, the pane would leave the
@@ -32802,6 +32927,78 @@ fn a_pane_closed_before_its_tab_goes_back_into_that_tab_once_it_is_back() {
     let back = harness.active_pane_ids();
     let back: Vec<String> = back.iter().map(|pane| harness.pane_title(*pane)).collect();
     assert_eq!(back, titles, "the pane did not go back into its tab");
+}
+
+/// A tab's split with every pane named by its place in render order, and
+/// its titles in that order, so a tab and the one that came back for it can
+/// be compared.
+fn split_of(harness: &Harness, tab: TabId) -> (String, Vec<String>) {
+    harness.workspace.read(&harness.app, |workspace, _| {
+        let group = workspace.tabs().get(tab).expect("open").panes();
+        let mut shape = format!("{:?}", group.layout());
+        for (position, pane) in group.iter().enumerate() {
+            shape = shape.replace(&format!("{:?})", pane.id()), &format!("#{position})"));
+        }
+        let titles = group.iter().map(|pane| pane.title().to_owned()).collect();
+        (shape, titles)
+    })
+}
+
+/// Splits the active tab, closes the pane at `closed` in render order, then
+/// the tab — or its whole group — and brings both back.
+fn close_a_pane_then_its_tab_and_reopen_both(
+    harness: &mut Harness,
+    direction: Direction,
+    panes: usize,
+    closed: usize,
+    as_a_group: bool,
+) -> ((String, Vec<String>), (String, Vec<String>)) {
+    let tab = harness.active_id();
+    for _ in 1..panes {
+        harness.dispatch_action(TabAction::Split(direction));
+    }
+    let before = split_of(harness, tab);
+    let pane = harness.panes_of(tab)[closed];
+
+    harness.dispatch_action(TabAction::ClosePane(pane));
+    match harness.group_of(tab).filter(|_| as_a_group) {
+        Some(group) => harness.dispatch_action(TabAction::CloseGroup(group)),
+        None => harness.dispatch_action(TabAction::Close(tab)),
+    }
+    harness.run_command("crook/window/reopen-closed-tab");
+    harness.run_command("crook/window/reopen-closed-tab");
+
+    (before, split_of(harness, harness.active_id()))
+}
+
+#[test]
+fn a_pane_closed_out_of_a_column_before_its_tab_goes_back_into_the_column() {
+    // The tab comes back with new pane ids, and the place kept for the pane
+    // named the old ones: it took the panes there for strangers and put the
+    // pane to the right of the focused one, a row where the column had been.
+    let mut harness = Harness::new(2);
+    let (before, after) =
+        close_a_pane_then_its_tab_and_reopen_both(&mut harness, Direction::Down, 2, 1, false);
+    assert_eq!(after, before);
+}
+
+#[test]
+fn a_pane_closed_out_of_the_middle_of_a_row_before_its_tab_goes_back_in_the_middle() {
+    let mut harness = Harness::new(2);
+    let (before, after) =
+        close_a_pane_then_its_tab_and_reopen_both(&mut harness, Direction::Right, 3, 1, false);
+    assert_eq!(after, before);
+}
+
+#[test]
+fn a_pane_closed_before_its_whole_group_goes_back_where_it_was() {
+    let mut harness = Harness::new(2);
+    let tab = harness.active_id();
+    harness.dispatch_action(TabAction::NewInGroupOf(tab));
+    harness.dispatch_action(TabAction::Select(tab));
+    let (before, after) =
+        close_a_pane_then_its_tab_and_reopen_both(&mut harness, Direction::Right, 3, 1, true);
+    assert_eq!(after, before);
 }
 
 #[test]
@@ -38014,6 +38211,44 @@ mod from_the_keyboard {
         assert_eq!(focused(&harness), panes[0]);
         harness.run_command("crook/window/focus-pane-right");
         assert_eq!(focused(&harness), panes[1]);
+    }
+
+    #[test]
+    fn split_down_in_a_row_splits_the_focused_pane_and_the_keys_walk_the_two_by_two() {
+        // "Split downwards" on the right half of a row used to add a third
+        // column. It stacks two panes in that half now, and the same again on
+        // the left half makes a 2×2 the four directions walk round.
+        let mut harness = Harness::panel(1);
+        let top_left = focused(&harness);
+        harness.run_command("crook/window/split-right");
+        let top_right = focused(&harness);
+        harness.run_command("crook/window/split-down");
+        let bottom_right = focused(&harness);
+        harness.run_command("crook/window/focus-pane-left");
+        assert_eq!(focused(&harness), top_left, "left of the lower right half");
+        harness.run_command("crook/window/split-down");
+        let bottom_left = focused(&harness);
+
+        let scene = harness.frame();
+        let boxes = panel_boxes(&scene);
+        assert_eq!(boxes.len(), 4, "four panes drawn");
+        // Render order is down the first column, then down the second.
+        assert!(boxes[0].max_y() <= boxes[1].min_y() + 1., "{boxes:?}");
+        assert!(boxes[1].max_x() <= boxes[2].min_x() + 1., "{boxes:?}");
+        assert!(boxes[2].max_y() <= boxes[3].min_y() + 1., "{boxes:?}");
+        assert!(
+            (boxes[0].min_y() - boxes[2].min_y()).abs() < 1.,
+            "{boxes:?}"
+        );
+
+        harness.run_command("crook/window/focus-pane-right");
+        assert_eq!(focused(&harness), bottom_right);
+        harness.run_command("crook/window/focus-pane-up");
+        assert_eq!(focused(&harness), top_right);
+        harness.run_command("crook/window/focus-pane-left");
+        assert_eq!(focused(&harness), top_left);
+        harness.run_command("crook/window/focus-pane-down");
+        assert_eq!(focused(&harness), bottom_left);
     }
 
     #[test]

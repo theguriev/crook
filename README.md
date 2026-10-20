@@ -247,7 +247,8 @@ Twenty-two features, and the page that configures them:
   it was and in the group it was in, with its name, colour and split, each shell in the
   directory it was in, and each agent that was running offered its resume line, unsent, the
   way a restart offers it. A group closed from its heading comes back whole in one press,
-  under the same heading, and a pane closed out of a split goes back into its tab. The last
+  under the same heading, and a pane closed out of a split goes back into its tab, where it
+  was — the corner of a 2×2 back in its corner, with the shares it had. The last
   ten closes are kept, for as long as the window is open.
   They live in a panel down the left edge, and a **View options** menu — the panel's own
   secondary click, on the empty space the list leaves — says what a row of them shows: which
@@ -646,9 +647,17 @@ Twenty-two features, and the page that configures them:
   lines of scrollback, `SIGWINCH` on resize, and titles and working directories the shell
   reports with OSC 0, 2 and 7 — which is what makes a tab rename itself and its git chips
   follow a `cd`. A tab splits into panes with `cmd-d` and `cmd-shift-d` (`ctrl-shift-d` and
-  `ctrl-shift-e` off macOS), `cmd-shift-m` (`ctrl-shift-m`) gives the focused pane the whole
-  tab and the split back on the next press, tmux's zoom, and a shell that exits closes its
-  pane, its tab, and with the last tab the window. With shell integration the scrollback
+  `ctrl-shift-e` off macOS), to the right and downwards, and a split always divides the
+  *focused* pane the way it was asked: split right and then down, and the right half is two
+  panes stacked beside a left one the full height of the tab — an agent with two watchers —
+  and the same on the left half makes a 2×2. Splitting again the way a pane's own split
+  already goes adds a pane to that row or column rather than halving the pane, tmux's rule,
+  so three splits right are four even columns. Every divider drags, at every depth, moving
+  only the two panes or columns either side of it, and a double click evens the whole tab
+  out; closing a pane gives its room to the pane or column beside it. `cmd-shift-m`
+  (`ctrl-shift-m`) gives the focused pane the whole tab and the split back on the next press,
+  tmux's zoom, and a shell that exits closes its pane, its tab, and with the last tab the
+  window. With shell integration the scrollback
   moves into the blocks: each finished command owns its rows, so ten thousand *commands*
   survive a `clear`, a resize, and the emulator's own history evicting anything. What empties
   a pane is **Clear blocks** — `ctrl-l` at the prompt, or `shift-cmd-k` (`ctrl-shift-l` off
@@ -1081,7 +1090,7 @@ Twenty-two features, and the page that configures them:
   |---|---|---|
   | Tab by position, and the last one | `cmd-1`…`cmd-8`, `cmd-9` | `alt-1`…`alt-8`, `alt-9` |
   | Back to the tab you were on, and again to return | `shift-cmd-j` | `ctrl-shift-alt-j` |
-  | Move between the panes of a split | `ctrl-shift-←↑↓→` | `alt-←↑↓→` |
+  | Move to the pane beside this one on that side | `ctrl-shift-←↑↓→` | `alt-←↑↓→` |
   | The next pane, the previous one | `cmd-]`, `cmd-[` | `ctrl-shift-]`, `ctrl-shift-[` |
   | Page the output | `shift-PageUp`, `shift-PageDown` | the same |
   | The ends of the scrollback | `shift-cmd-PageUp`, `shift-cmd-PageDown` | `alt-Home`, `alt-End` |
@@ -1092,9 +1101,13 @@ Twenty-two features, and the page that configures them:
   emulator's history. The bare page keys are left to the program — Shift has always been what
   takes the scrollback back from whatever is running.
 
+  The arrows go by where the panes are on screen, not by the order they were made in: up from
+  the bottom right of a 2×2 is the top right, and of two panes beside the focused one — the
+  watchers stacked beside an agent — the one you were in last.
+
   A chord that cannot do anything **declines**, and the keystroke goes on to the shell. There
-  is nothing above a row of panes, so `ctrl-shift-↑` over one still means whatever it means in
-  vim; a digit past the end of the strip selects nothing; and the commands about a block do
+  is nothing above a pane along the top of the tab, so `ctrl-shift-↑` over one still means
+  whatever it means in vim; a digit past the end of the strip selects nothing; and the commands about a block do
   nothing at the prompt, where none is selected. A chord is never silently swallowed.
 
   Without a chord, by name: `split-left` and `split-up`, `grow-pane`, `shrink-pane` and

@@ -43,7 +43,10 @@ mod remote;
 mod tests;
 
 pub use group::{GroupId, TabGroup};
-pub use pane::{Direction, Pane, PaneEffect, PaneGroup, PaneId, SplitAxis};
+pub use pane::{
+    DEFAULT_FLEX, Direction, Layout, Node, Pane, PaneEffect, PaneGroup, PaneId, PanePlace,
+    SplitAxis,
+};
 pub use remote::{Remote, on_this_machine};
 
 /// A tab's identity, stable for as long as the tab exists.
@@ -1598,22 +1601,14 @@ impl TabStrip {
         Some(id)
     }
 
-    /// Puts a closed pane back into `tab` at `index` in its split, focused,
-    /// and selects the tab. `Unchanged` for a tab that is not here.
-    ///
-    /// `axis` is the way the split went when the pane was closed — see
-    /// [`PaneGroup::reopen`].
-    pub(crate) fn reopen_pane(
-        &mut self,
-        tab: TabId,
-        pane: Pane,
-        index: usize,
-        axis: SplitAxis,
-    ) -> TabEffect {
+    /// Puts a closed pane back into `tab` where `place` says it was in the
+    /// split, focused, and selects the tab. `Unchanged` for a tab that is not
+    /// here. See [`PaneGroup::reopen`].
+    pub(crate) fn reopen_pane(&mut self, tab: TabId, pane: Pane, place: &PanePlace) -> TabEffect {
         let Some(holder) = self.get_mut(tab) else {
             return TabEffect::Unchanged;
         };
-        holder.panes_mut().reopen(pane, index, axis);
+        holder.panes_mut().reopen(pane, place);
         self.repair(Some(tab));
         TabEffect::Changed
     }
