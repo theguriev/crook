@@ -520,6 +520,7 @@ pub fn panes(workspace: &Workspace, app: &AppContext) -> Vec<PaneEntry> {
                     .and_then(|directory| facts.facts(directory))
                     .and_then(|facts| facts.branch.as_ref())
                     .map(|head| head.label().to_owned()),
+                asking: workspace.asks().asking(pane.id()),
             });
         }
     }

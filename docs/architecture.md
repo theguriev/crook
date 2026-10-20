@@ -2237,7 +2237,9 @@ close-on-exec, so no shell a pane starts inherits them.
 
 **What it exposes.** What the panel shows, per pane: its number and its tab's, its title and
 its tab's, its group, whether it is the focused one, the agent's status and message, its
-directory and its branch — nothing of a pane's scrollback and nothing of its input. All of that
+directory and its branch, and `asking: true` while its agent waits on a question it asked
+through Crook that the window could answer — left out otherwise, and never what it asks, which
+the row and the card already show — and nothing of a pane's scrollback and nothing of its input. All of that
 is already on the screen, in the session file, and in the shells' own process entries, every one
 of them this user's to read, so a socket only this user can reach that only reads gives nobody
 anything new. That is why `pane.list` needs no token: a listing any process of this user can
@@ -2383,7 +2385,8 @@ the client hangs up: `status` (only when the status or the message changed, or a
 one `pane.wait` takes — an agent reports `running` around every tool it calls — and never an
 idle `pane.wait` would not take, so a question a title stopped asking is not told as a turn that
 ended until its command ends), `started`, `finished` with the command line, exit and duration,
-`opened` for a tab the caller opens later, `closed`, and `lagged`. `started` is read
+`opened` for a tab the caller opens later, `closed`, `lagged`, and `asked` and `answered` for
+the questions its agent asks through Crook (see "Answering an agent"). `started` is read
 off a frame the pane's terminal published, since there is no event for a command running: one
 that starts and ends between two frames — `true`, `git status` — is never seen running, and its
 `finished` is what names it. With `pane` it follows that one pane,
@@ -2599,7 +2602,7 @@ same write — for a `Bash`, `Edit`, `MultiEdit` or `Write` call of the main thr
 the wire takes and an input the allowlist reads whole, the fingerprint being the first half of the digest in 32 lowercase hex
 digits, computed from that input as the window computed it from the question — and the window
 ends the questions held in that pane with that fingerprint as `answered-in-agent`, which its
-history says as "answered in Claude Code". A tool a person interrupts runs PostToolUseFailure
+history says as "Answered in the agent's own dialog". A tool a person interrupts runs PostToolUseFailure
 with `is_interrupt`, and ends the turn with no Stop, so that one writes the done alone: a
 `running` after the title's `✳` would leave the row running. No hook's command changes for it;
 PostToolUseFailure is a new hook with a command of its own, `running --done -`, which reads the
@@ -2672,9 +2675,27 @@ never moves on to another question, and leaves the row's status alone: the agent
 says what it did — a confined session drops a hook's allow. A deny's message is always "Denied in
 Crook by the person at the keyboard."; there is no "always", no change to the request and no
 interrupt. A question that ends under the card turns it to say Claude Code is no longer waiting
-on it and why, with only Go to tab and Close. "Why this status" says how the pane's last three
-questions ended — "Allow sent to Claude Code", "Denied in Crook", and whether the hook took it
-or was gone before it could pass it on.
+on it and why, with only Go to tab and Close.
+
+**What was answered, and how.** The window remembers the last 64 questions that ended, in memory
+and per window, as metadata and the line the row said them in — when, the agent, the tool, the
+first line of the command or the file, and how each ended — never the request, and nothing of it
+is written to disk. "Why this status" lists the pane's last five, newest first, and the inbox's
+"Earlier" the window's last twenty, in one wording, `How::said` in `control/ask.rs`: "Allow
+sent" or "Deny sent", then "and its hook took it" or "but its hook was gone", or what ended one
+nobody answered here — "Timed out", "Answered in the agent's own dialog", "The agent's turn
+ended". Never that the agent did it. A lead following the pane — the caller's own and the tabs
+it opened, by the lineage a status is told by, through the same `Watches` — is told two lines
+more: `{"event":"asked","pane_id":7,"agent":"claude","tool":"Bash"}` when a question the window
+could answer is held, and `{"event":"answered","pane_id":7,"by":…,"decision"?:…}` when it ends,
+with `by` one of `here` (a person pressed Allow or Deny on the card, and `decision` says which),
+`in-agent`, `released` (answering from Crook was turned off), `expired`, `withdrawn` (the hook
+went, the turn or the command ended, a newer question replaced it) and `closed`, told before the
+pane's `closed`. Neither carries the command, the tool's input, the path, the directory, the
+digest or the fingerprint, nor anything about a read-only question, which the window cannot
+place. A lead sees that a worker waits, and must ask its person: no verb answers, and nothing a
+lead sends types into the worker. `crook events --follow` prints each line as the window sent
+it, so a client from before them prints them unchanged.
 
 **What the hook prints.** One line Claude Code reads as its decision, or nothing, and it exits 0
 on every path, since a hook that fails can fail its agent. It opens and writes no terminal.

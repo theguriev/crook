@@ -180,7 +180,8 @@ crook pane list --json   # the same as a JSON array, for a script
 It asks the window your shell runs in, over the local socket `CROOK_SOCKET` names, and only
 reads. Each entry has `pane_id` — the one equal to `$CROOK_PANE_ID` is your own — `tab_id`,
 `title`, `tab_title`, `group`, `focused`, `status` (one of the four words above), `message`,
-`cwd` and `branch`. Use it to see what the other agents in the window are doing — which one is
+`cwd` and `branch`, and `asking: true` while the pane's agent waits on a question it asked its
+person through Crook (left out otherwise). Use it to see what the other agents in the window are doing — which one is
 waiting and on what, which branch each is on — rather than guessing. It works on this machine
 only: not from the far side of `ssh`, and not on Windows yet. When it says the window has no
 socket, or that it is older than the command, there is nothing to ask; say so and go on.
@@ -293,7 +294,16 @@ and the tabs it opened (`--pane <id>` for one), until you stop it. It sends `idl
 `--until idle` would take it, so the end of a question a title asked comes as `idle` once the
 title says the turn is over or the command ends, and not before. A command is also sent as
 `started` when it runs long enough to be seen running; a quick one comes only as `finished`. A
-reader that falls behind is sent a `lagged` line saying how many events it missed. Since it
+reader that falls behind is sent a `lagged` line saying how many events it missed.
+
+When a worker's agent asks its person for a permission through Crook — Claude Code does, under
+Crook's plugin — the stream sends `asked`, with the agent and the tool:
+`{"event":"asked","pane_id":7,"agent":"claude","tool":"Bash"}`. When that is over it sends
+`answered`, with `by` saying how: `here` (the person answered on Crook's card, and `decision` is
+`allow` or `deny`), `in-agent` (in the agent's own dialog), `released`, `expired`, `withdrawn`
+(the agent stopped asking) or `closed`. Neither says what was asked, and nothing you can send
+answers it: tell the person which tab is waiting, and let them answer it. An `allow` is what
+Crook sent, not what the agent did; its next status says that. Since it
 runs until it is stopped, a tool that cuts a command off after a couple of minutes will cut it
 off: run it in the background, or as `timeout 100 crook events --follow` where there is a
 `timeout` (macOS has none of its own).
@@ -358,5 +368,7 @@ built in and runs it again on every build; nothing is installed and nothing is l
   another agent's hooks file, and do not install the plugin yourself. Print the hooks with
   `crook --agent-hooks <agent>`, and let the person install the plugin or merge them.
 - Do not claim a feature this file does not list. `crook --help` is the whole command line.
+- A worker that is `asking`, or `needs-input`, is waiting for its person. Tell them which tab,
+  and never try to answer it yourself: not by typing into its pane, and not by any other way.
 - Report only what is true: `running` when the work starts, `needs-input` only when you have
   actually stopped for a person, `failed` when the work failed, `idle` when it is done.

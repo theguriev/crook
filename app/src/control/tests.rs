@@ -40,6 +40,7 @@ fn two_panes() -> Vec<PaneEntry> {
             message: None,
             cwd: Some("/home/someone/work/crook".to_owned()),
             branch: Some("main".to_owned()),
+            asking: false,
         },
         PaneEntry {
             pane_id: 7,
@@ -52,6 +53,7 @@ fn two_panes() -> Vec<PaneEntry> {
             message: Some("run rm -rf build?".to_owned()),
             cwd: None,
             branch: None,
+            asking: false,
         },
     ]
 }
@@ -1770,6 +1772,52 @@ fn the_window_remembers_the_last_sixty_four_questions_and_no_more() {
     assert_eq!(history[0].id.as_u64(), 11, "the oldest went first");
     assert_eq!(history[0].tool, "Bash");
     assert_eq!(history[0].summary, "Bash: ls");
+}
+
+/// The trail a pane's "Why this status" and the inbox read is the window's
+/// last sixty-four outcomes, and what is kept for the leads following the
+/// panes is bounded as well, for a window that never takes it.
+#[test]
+fn the_trail_keeps_sixty_four() {
+    use super::ask::{Asks, Cause, Found, HISTORY, How};
+
+    let pane = crate::tab::PaneId::next();
+    let mut asks = Asks::default();
+    for number in 0..HISTORY * 3 {
+        let asked = protocol::AgentAsk {
+            session: format!("s{number}"),
+            ..agent_ask(&format!("echo {number}"))
+        };
+        let id = asks
+            .add(
+                asked,
+                Found {
+                    pane,
+                    cannot_answer: None,
+                    tab_title: "crook".to_owned(),
+                },
+                Arc::new(watch::Feed::for_verb(&Verb::AgentAsk(agent_ask("ls")))),
+                Instant::now(),
+            )
+            .expect("held");
+        asks.end(id, Cause::Expired);
+        assert!(asks.untold() <= HISTORY, "{}", asks.untold());
+    }
+    let history: Vec<_> = asks.history().collect();
+    assert_eq!(history.len(), HISTORY);
+    assert_eq!(
+        history.last().map(|outcome| outcome.summary.as_str()),
+        Some(format!("Bash: echo {}", HISTORY * 3 - 1).as_str()),
+        "the newest is kept"
+    );
+    assert!(
+        history
+            .iter()
+            .all(|outcome| outcome.how == How::Ended(Cause::Expired))
+    );
+    let told = asks.take_told();
+    assert_eq!(told.len(), HISTORY);
+    assert_eq!(asks.untold(), 0, "taken once");
 }
 
 #[test]
@@ -6226,7 +6274,7 @@ mod socket {
             let How::Ended(cause) = outcome.how else {
                 panic!("{:?}", outcome.how);
             };
-            assert_eq!(cause.said(outcome.agent), "answered in Claude Code");
+            assert_eq!(cause.said(), "Answered in the agent's own dialog");
         });
     }
 
@@ -6779,5 +6827,386 @@ mod socket {
                 .any(|event| matches!(event, PaneEvent::Status { .. })),
             "the stream did hear the pane: {said}"
         );
+    }
+
+    impl Served {
+        /// Holds a question about `command` from `session` in `pane` as one
+        /// this window could answer — as a hook below the pane's shell would
+        /// have it held, without the shell — and hands back its number and
+        /// its digest.
+        fn hold_answerable(
+            &mut self,
+            pane: PaneId,
+            session: &str,
+            command: &str,
+        ) -> (super::super::ask::AskId, [u8; 32]) {
+            self.hold_found(pane, session, command, None)
+        }
+
+        /// The same, with `cannot_answer` as the window found it.
+        fn hold_found(
+            &mut self,
+            pane: PaneId,
+            session: &str,
+            command: &str,
+            cannot_answer: Option<super::super::ask::CannotAnswer>,
+        ) -> (super::super::ask::AskId, [u8; 32]) {
+            let asked = question(session, 0, command);
+            let digest = asked.digest();
+            let feed = Arc::new(Feed::for_verb(&Verb::AgentAsk(asked.clone())));
+            let id = self.update(move |workspace, ctx| {
+                let id = workspace
+                    .asks_mut()
+                    .add(
+                        asked,
+                        super::super::ask::Found {
+                            pane,
+                            cannot_answer,
+                            tab_title: "worker".to_owned(),
+                        },
+                        feed,
+                        Instant::now(),
+                    )
+                    .expect("held");
+                workspace.asks_changed(ctx);
+                id
+            });
+            (id, digest)
+        }
+    }
+
+    /// The `asked` and `answered` lines of a stream, in order.
+    fn asking_events(events: &[PaneEvent]) -> Vec<PaneEvent> {
+        events
+            .iter()
+            .filter(|event| matches!(event, PaneEvent::Asked { .. } | PaneEvent::Answered { .. }))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_lead_following_its_worker_is_told_it_asks_and_how_it_was_answered_and_never_the_command() {
+        use super::super::protocol::{AnsweredBy, Decision};
+        use crate::workspace::{AskAction, Pressed};
+
+        const MARKER: &str = "crook-marker-5b8e1d";
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["make", "test"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+        let following = served.start(follow(Some(&token), None));
+        served.pump_until("the stream never began", |served| served.following() == 1);
+
+        // Answered on its card, Allow.
+        let (first, digest) = served.hold_answerable(worker, "s1", &format!("echo {MARKER}"));
+        served.update(|workspace, ctx| {
+            workspace.answer_waiting_agent(ctx);
+            workspace.settle_the_ask_card(ctx);
+            workspace.read_the_ask_card_to_its_end();
+            workspace.handle_action(
+                &AskAction::Answer {
+                    ask: first,
+                    digest,
+                    decision: Choice::Allow,
+                    by: Pressed::Pointer,
+                }
+                .into(),
+                ctx,
+            );
+        });
+        assert_eq!(
+            served.ended(first.as_u64()),
+            Some(How::Answered(Choice::Allow))
+        );
+        let untold = |served: &Served| served.read(|workspace, _| workspace.asks().untold());
+        assert_eq!(untold(&served), 0, "told within the turn that answered it");
+
+        // Withdrawn, when the agent's turn ends under it.
+        served.hold_answerable(worker, "s2", &format!("cat /home/someone/{MARKER}"));
+        served.report(worker, AgentStatus::Idle, None);
+        assert_eq!(untold(&served), 0, "told within the turn that ended it");
+
+        // One this window can only show is no news to a lead.
+        served.hold_found(
+            worker,
+            "s3",
+            &format!("echo {MARKER}"),
+            Some(super::super::ask::CannotAnswer::NotFromThisTab),
+        );
+
+        // Closed, with its pane, and told before the pane is.
+        let (_, digest) = served.hold_answerable(worker, "s4", &format!("rm -rf {MARKER}"));
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::ClosePane(worker), ctx);
+        });
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::New, ctx);
+        });
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::ClosePane(lead), ctx);
+        });
+
+        let events = served
+            .finish(following)
+            .expect("followed until the lead closed");
+        let pane_id = opened.pane_id;
+        let asked = PaneEvent::Asked {
+            pane_id,
+            agent: "claude".to_owned(),
+            tool: "Bash".to_owned(),
+        };
+        let answered = |by, decision| PaneEvent::Answered {
+            pane_id,
+            by,
+            decision,
+        };
+        assert_eq!(
+            asking_events(&events),
+            vec![
+                asked.clone(),
+                answered(AnsweredBy::Here, Some(Decision::Allow)),
+                asked.clone(),
+                answered(AnsweredBy::Withdrawn, None),
+                asked,
+                answered(AnsweredBy::Closed, None),
+            ],
+            "{events:#?}"
+        );
+        let closed_at = events
+            .iter()
+            .position(|event| *event == PaneEvent::Closed { pane_id })
+            .expect("the worker is told closed");
+        let answered_at = events
+            .iter()
+            .position(|event| *event == answered(AnsweredBy::Closed, None))
+            .expect("its question is told over");
+        assert!(answered_at < closed_at, "{events:#?}");
+
+        // Never the command, its directory, its digest or its fingerprint,
+        // and never more than the three fields and the event's name.
+        let said = events
+            .iter()
+            .map(|event| serde_json::to_string(event).expect("encodes"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let fingerprint = crate::agent::request::fingerprint(&digest);
+        for secret in [
+            MARKER,
+            "/home/someone/work/crook",
+            &fingerprint[..12],
+            "Remove the build directory",
+        ] {
+            assert!(!said.contains(secret), "{secret:?} in {said}");
+        }
+        for event in asking_events(&events) {
+            let encoded = serde_json::to_value(&event).expect("encodes");
+            let mut keys: Vec<&str> = encoded
+                .as_object()
+                .expect("an object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert!(
+                keys == ["agent", "event", "pane_id", "tool"]
+                    || keys == ["by", "event", "pane_id"]
+                    || keys == ["by", "decision", "event", "pane_id"],
+                "{keys:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pane_the_caller_may_not_watch_tells_it_nothing() {
+        let mut served = Served::new(|workspace, ctx, _| {
+            workspace.apply(TabAction::New, ctx);
+        });
+        let (lead, person) = served.read(|workspace, _| {
+            let mut panes = workspace.tabs().panes().map(|(_, pane)| pane.id());
+            (panes.next().expect("a pane"), panes.next().expect("two"))
+        });
+        let token = served.token(lead);
+        let refused = served
+            .ask(follow(Some(&token), Some(person)))
+            .expect_err("a person's pane is theirs to open up");
+        assert!(refused.contains("needs-grant"), "{refused}");
+
+        let following = served.start(follow(Some(&token), None));
+        served.pump_until("the stream never began", |served| served.following() == 1);
+        let (id, _) = served.hold_answerable(person, "s1", "echo hello");
+        served.update(|workspace, ctx| {
+            workspace.asks_mut().end(id, Cause::Expired);
+            workspace.asks_changed(ctx);
+        });
+        served.hold_answerable(person, "s2", "echo again");
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::ClosePane(person), ctx);
+        });
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::New, ctx);
+        });
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::ClosePane(lead), ctx);
+        });
+
+        let events = served
+            .finish(following)
+            .expect("followed until the lead closed");
+        let person_id = person.as_u64();
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                PaneEvent::Asked { pane_id, .. } | PaneEvent::Answered { pane_id, .. }
+                    if *pane_id == person_id
+            )),
+            "{events:#?}"
+        );
+        assert_eq!(asking_events(&events), vec![], "{events:#?}");
+        assert!(
+            events.iter().any(|event| *event
+                == PaneEvent::Closed {
+                    pane_id: lead.as_u64()
+                }),
+            "the stream did run to the end: {events:#?}"
+        );
+    }
+
+    #[test]
+    fn a_question_refused_as_busy_still_tells_the_leads_what_it_ended_on_the_way() {
+        let mut served = Served::new(|_, _, _| {});
+        let pane = first_pane(&served);
+        let token = served.token(pane);
+        // A question whose hook gave up without the window hearing, which
+        // the next question held ends as its hook having gone.
+        let abandoned = question("gone", 0, "echo gone");
+        let feed = Arc::new(Feed::for_verb(&Verb::AgentAsk(abandoned.clone())));
+        let held_feed = Arc::clone(&feed);
+        let id = served.update(move |workspace, ctx| {
+            let id = workspace
+                .asks_mut()
+                .add(
+                    abandoned,
+                    super::super::ask::Found {
+                        pane,
+                        cannot_answer: None,
+                        tab_title: "worker".to_owned(),
+                    },
+                    held_feed,
+                    Instant::now(),
+                )
+                .expect("held");
+            workspace.asks_changed(ctx);
+            id
+        });
+        // The pane is full of the questions a hook asking from here is
+        // counted among, so the next is refused.
+        for session in ["r1", "r2", "r3", "r4"] {
+            served.hold_found(
+                pane,
+                session,
+                "ls",
+                Some(super::super::ask::CannotAnswer::NotFromThisTab),
+            );
+        }
+        let following = served.start(follow(Some(&token), Some(pane)));
+        served.pump_until("the stream never began", |served| served.following() == 1);
+        feed.hang_up();
+
+        let (_client, reply) =
+            served.ask_as(question("r5", served.tty(pane), "ls"), Some(token.clone()));
+        assert_eq!(refused(&reply), code::BUSY);
+        assert_eq!(served.ended(id.as_u64()), Some(How::Ended(Cause::HookGone)));
+        assert_eq!(
+            served.read(|workspace, _| workspace.asks().untold()),
+            0,
+            "told within the turn that refused"
+        );
+
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::New, ctx);
+        });
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::ClosePane(pane), ctx);
+        });
+        let events = served.finish(following).expect("followed until it closed");
+        let withdrawn = PaneEvent::Answered {
+            pane_id: pane.as_u64(),
+            by: super::super::protocol::AnsweredBy::Withdrawn,
+            decision: None,
+        };
+        assert_eq!(
+            asking_events(&events).first(),
+            Some(&withdrawn),
+            "{events:#?}"
+        );
+    }
+
+    #[test]
+    fn pane_list_says_asking_and_nothing_more() {
+        const MARKER: &str = "crook-marker-0c4d2a";
+        let mut served = Served::new(|workspace, ctx, _| {
+            workspace.apply(TabAction::New, ctx);
+        });
+        let (asking, other) = served.read(|workspace, _| {
+            let mut panes = workspace.tabs().panes().map(|(_, pane)| pane.id());
+            (panes.next().expect("a pane"), panes.next().expect("two"))
+        });
+        let listed = |served: &mut Served| -> Vec<Value> {
+            let json = served
+                .ask(|socket| cli::unix::listing(&socket, None, true, None))
+                .expect("listed");
+            assert!(!json.contains(MARKER), "{json}");
+            serde_json::from_str(&json).expect("a JSON array")
+        };
+        let entry = |list: &[Value], pane: PaneId| -> Value {
+            list.iter()
+                .find(|entry| entry["pane_id"] == pane.as_u64())
+                .cloned()
+                .expect("listed")
+        };
+        let keys = |entry: &Value| -> Vec<String> {
+            let mut keys: Vec<String> = entry
+                .as_object()
+                .expect("an object")
+                .keys()
+                .cloned()
+                .collect();
+            keys.sort_unstable();
+            keys
+        };
+
+        let before = listed(&mut served);
+        let quiet = keys(&entry(&before, asking));
+        assert!(!quiet.contains(&"asking".to_owned()), "{quiet:?}");
+
+        let (id, _) = served.hold_answerable(asking, "s1", &format!("echo {MARKER}"));
+        // A question this window can only show is not one its pane asks.
+        served.hold_found(
+            other,
+            "s2",
+            &format!("echo {MARKER}"),
+            Some(super::super::ask::CannotAnswer::OtherTab),
+        );
+        let during = listed(&mut served);
+        let held = entry(&during, asking);
+        assert_eq!(held["asking"], true, "{held}");
+        let mut expected = quiet.clone();
+        expected.push("asking".to_owned());
+        expected.sort_unstable();
+        assert_eq!(keys(&held), expected, "asking, and nothing more: {held}");
+        assert!(
+            !keys(&entry(&during, other)).contains(&"asking".to_owned()),
+            "{during:?}"
+        );
+
+        served.update(|workspace, ctx| {
+            workspace.asks_mut().end(id, Cause::Expired);
+            workspace.asks_changed(ctx);
+        });
+        let after = listed(&mut served);
+        assert_eq!(keys(&entry(&after, asking)), quiet, "{after:?}");
     }
 }

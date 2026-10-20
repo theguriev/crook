@@ -7,8 +7,9 @@
 //! of minutes an agent's tool gives a command before cutting it off, so the
 //! lead waits again rather than losing the wait with nothing learned; `crook
 //! events --follow` is a line for every status, every command finished —
-//! named, as one too quick to be seen running is told only there — and every
-//! pane closed, for as long as it is left running.
+//! named, as one too quick to be seen running is told only there — every
+//! question its agent asks through Crook and how it ended, without what it
+//! asks, and every pane closed, for as long as it is left running.
 //!
 //! # Who may watch what
 //!
@@ -508,6 +509,30 @@ impl Watches {
         for follower in &self.followers {
             if follower.following.contains(&pane) {
                 follower.feed.push(event.clone());
+            }
+        }
+    }
+
+    /// Tells every stream following `pane` that its agent asked through
+    /// Crook, or how what it asked ended: `events`, from
+    /// [`Asks::take_told`](super::ask::Asks::take_told).
+    ///
+    /// The streams a status in `pane` would reach and no other — the
+    /// caller's own pane and the tabs it opened, by the same lineage — so a
+    /// pane the caller may not watch tells it nothing of this either. No
+    /// wait is answered by one: a question is no state `--until` names, and
+    /// the `needs-input` its agent reports is still the one a wait hears.
+    pub fn told(&mut self, events: &[(PaneId, PaneEvent)]) {
+        if events.is_empty() || self.followers.is_empty() {
+            return;
+        }
+        self.prune();
+        for (pane, event) in events {
+            let event = encode(event);
+            for follower in &self.followers {
+                if follower.following.contains(pane) {
+                    follower.feed.push(event.clone());
+                }
             }
         }
     }

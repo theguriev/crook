@@ -439,6 +439,37 @@ pub enum PaneEvent {
         #[serde(default)]
         duration_ms: Option<u64>,
     },
+    /// The agent in a pane has asked a person through Crook: its permission
+    /// hook handed the window a question it could answer, and waits.
+    ///
+    /// Which agent and which tool, and nothing of what it asks: never the
+    /// command, the file, the input or the digest. A lead is told that its
+    /// worker waits so that it can say so to its person; there is no verb
+    /// that answers, and the question is only ever answered on the card.
+    Asked {
+        /// The pane.
+        pane_id: u64,
+        /// The agent, as `crook --agent ask` names it: `claude`.
+        agent: String,
+        /// The agent's own name for the tool it asks to use: `Bash`, `Edit`,
+        /// `MultiEdit` or `Write`.
+        tool: String,
+    },
+    /// A question a pane's agent asked through Crook is over: see
+    /// [`AnsweredBy`] for how. Told for every question told as
+    /// [`Self::Asked`], once, and never with what it asked.
+    ///
+    /// Never that the agent did what it was told: a hook's allow is one the
+    /// agent may still drop, and only its next status says what it did.
+    Answered {
+        /// The pane.
+        pane_id: u64,
+        /// How it ended.
+        by: AnsweredBy,
+        /// What a person sent, when it was answered [`AnsweredBy::Here`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision: Option<Decision>,
+    },
     /// A pane closed. When it is the pane the stream was asked about — the
     /// caller's own, or the one named — it is the last line.
     Closed {
@@ -451,6 +482,29 @@ pub enum PaneEvent {
         /// How many.
         dropped: u64,
     },
+}
+
+/// How a question a lead was told of with [`PaneEvent::Asked`] ended, in
+/// one of six words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AnsweredBy {
+    /// A person answered it on its card in Crook: the event's `decision`
+    /// says which way.
+    Here,
+    /// A person answered it in the agent's own dialog: the tool it was about
+    /// has run.
+    InAgent,
+    /// The window let it go to the agent's own dialog unanswered: answering
+    /// from Crook was turned off.
+    Released,
+    /// Its time ran out, and the agent's own dialog is the one left.
+    Expired,
+    /// The agent stopped asking: its hook went, its turn or its command
+    /// ended, or it asked a newer question in its place.
+    Withdrawn,
+    /// Its pane, or the window, closed.
+    Closed,
 }
 
 impl PaneEvent {
@@ -854,6 +908,15 @@ pub struct PaneEntry {
     /// been asked.
     #[serde(default)]
     pub branch: Option<String>,
+    /// Whether the agent in it is asking a person through Crook right now:
+    /// its permission hook is waiting on a question this window could
+    /// answer. Only that: what it asks is the person's to read on the card.
+    ///
+    /// Left out while it is not, so an entry is what it always was until a
+    /// question is held; and read with a default, so a `crook` this new
+    /// reads an older window's list.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub asking: bool,
 }
 
 /// The line a client sends to ask `verb`, carrying `token` when it has one.

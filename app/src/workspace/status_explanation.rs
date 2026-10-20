@@ -26,10 +26,12 @@
 //! reported: a status's message is whatever the agent said, and a command
 //! is shown only as it will run.
 //!
-//! Under it, how the pane's last three questions ended: what Crook sent and
+//! Under it, how the pane's last five questions ended, each with when, the
+//! agent, the tool and the line the row said it in: what Crook sent and
 //! whether the agent's hook said it took it, or what ended one nobody
-//! answered here. Never that the agent did as it was told, which only its
-//! next report can say.
+//! answered here, in the words the inbox's "Earlier" uses. Never that the
+//! agent did as it was told, which only its next report can say, and never
+//! the request: the window remembers a line of each, in memory, and no more.
 //!
 //! # Where it hangs
 //!
@@ -55,7 +57,7 @@ use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::prelude::*;
 
 use crate::agent::request::{AskRequest, visible};
-use crate::control::ask::{Ask, Cause, Choice, How, Outcome};
+use crate::control::ask::{Ask, Outcome};
 use crate::plugins::store::ago;
 use crate::tab::{AgentSession, AgentStatus, Attention, Pane, StatusSource};
 use crate::theme::theme;
@@ -386,61 +388,36 @@ const SHOWN_LINES: usize = 12;
 const SHOWN_CHARACTERS: usize = 1024;
 
 /// How many of a pane's last questions the panel says the end of.
-const OUTCOMES: usize = 3;
+pub(super) const OUTCOMES: usize = 5;
 
 /// How the last [`OUTCOMES`] questions asked in a pane ended, newest first,
-/// one sentence each, given every one the window remembers of the pane's,
-/// oldest first.
+/// given every one the window remembers of the pane's, oldest first: a
+/// sentence saying what follows, then one line each, in the words the
+/// inbox's "Earlier" says them in — see
+/// [`outcome_line`](super::answer_list::outcome_line) — without the tab,
+/// which is this row's.
 ///
 /// What was sent and what became of it, and no more: the window knows the
 /// hook took an answer, never that the agent did as it said — a confined
 /// session drops a hook's allow — so the agent's next report is the truth
-/// about that, and nothing here claims it.
+/// about that, and nothing here claims it. The window remembers a line of
+/// each and never the request, so neither does this.
 pub(super) fn answered(ended: &[&Outcome], now: Instant) -> Vec<String> {
-    ended
-        .iter()
-        .rev()
-        .take(OUTCOMES)
-        .map(|outcome| {
-            let agent = outcome.agent.name();
-            let when = since(outcome.ended_at, now);
-            // Written out already, as the row's line is: see `ask::summary`.
-            let what = &outcome.summary;
-            let how = match outcome.how {
-                How::Answered(choice) => {
-                    let sent = match choice {
-                        Choice::Allow => format!("Allow sent to {agent}"),
-                        Choice::Deny => "Denied in Crook".to_owned(),
-                    };
-                    let after = if outcome.delivered {
-                        format!(", and {agent}'s hook took it")
-                    } else if outcome.lost {
-                        ", but the hook was gone before it could pass it on".to_owned()
-                    } else {
-                        String::new()
-                    };
-                    format!("{sent} {when}{after}")
-                }
-                How::Ended(cause) => format!("Not answered here: {} {when}", ended_by(cause)),
-            };
-            format!("{what} — {how}.")
-        })
-        .collect()
-}
-
-/// What ended a question nobody answered in Crook, as the panel says it.
-fn ended_by(cause: Cause) -> &'static str {
-    match cause {
-        Cause::AnsweredInAgent => "it was answered in the agent's own tab",
-        Cause::HookGone => "its hook stopped waiting",
-        Cause::Expired => "its time ran out",
-        Cause::PaneClosed => "its pane closed",
-        Cause::CommandEnded => "the agent's command ended",
-        Cause::TurnEnded => "the agent's turn ended",
-        Cause::AskedAgain => "a newer question replaced it",
-        Cause::WindowClosed => "the window closed",
-        Cause::AnsweringOff => "letting agents ask in Crook was turned off",
+    if ended.is_empty() {
+        return Vec::new();
     }
+    let mut said = vec![match ended.len().min(OUTCOMES) {
+        1 => "How its last request ended:".to_owned(),
+        shown => format!("How its last {shown} requests ended, newest first:"),
+    }];
+    said.extend(
+        ended
+            .iter()
+            .rev()
+            .take(OUTCOMES)
+            .map(|outcome| super::answer_list::outcome_line(outcome, false, now)),
+    );
+    said
 }
 
 /// "just now", "2 minutes ago": how long before `now` the instant was.
@@ -714,5 +691,159 @@ mod tests {
             !said.iter().any(|line| line.text().contains("sandbox")),
             "{said:#?}"
         );
+    }
+
+    /// Holds a question about `command` from `session` in `pane`, as one
+    /// this window could answer, and hands back its number and digest.
+    fn hold(
+        asks: &mut Asks,
+        pane: PaneId,
+        session: &str,
+        command: &str,
+        at: Instant,
+    ) -> (crate::control::ask::AskId, [u8; 32]) {
+        let question = AgentAsk {
+            session: session.to_owned(),
+            ..asked(command)
+        };
+        let digest = question.digest();
+        let feed = Arc::new(Feed::for_verb(&Verb::AgentAsk(question.clone())));
+        let id = asks
+            .add(
+                question,
+                Found {
+                    pane,
+                    cannot_answer: None,
+                    tab_title: "worker".to_owned(),
+                },
+                feed,
+                at,
+            )
+            .expect("held");
+        (id, digest)
+    }
+
+    #[test]
+    fn why_this_status_lists_the_last_five() {
+        use crate::control::Notice;
+        use crate::control::ask::{Cause, Choice, Delivery};
+
+        let pane = PaneId::next();
+        let elsewhere = PaneId::next();
+        let mut asks = Asks::default();
+        let at = Instant::now();
+        for number in 0..7 {
+            let (id, digest) = hold(
+                &mut asks,
+                pane,
+                &format!("s{number}"),
+                &format!("echo {number}"),
+                at,
+            );
+            match number {
+                5 => {
+                    assert_eq!(
+                        asks.deliver(id, &digest, Choice::Allow),
+                        Delivery::Delivered
+                    );
+                    asks.heard(Notice::Delivered(id));
+                }
+                6 => assert_eq!(asks.deliver(id, &digest, Choice::Deny), Delivery::Delivered),
+                _ => asks.end(id, Cause::Expired),
+            }
+        }
+        let (id, _) = hold(&mut asks, elsewhere, "other", "echo elsewhere", at);
+        asks.end(id, Cause::TurnEnded);
+
+        let ended: Vec<&Outcome> = asks
+            .history()
+            .filter(|outcome| outcome.pane == pane)
+            .collect();
+        let said = answered(&ended, Instant::now());
+        assert_eq!(said.len(), 1 + OUTCOMES, "{said:#?}");
+        assert_eq!(said[0], "How its last 5 requests ended, newest first:");
+        // Newest first: what was sent, who asked, the tool and the line,
+        // and how long ago.
+        assert!(
+            said[1].starts_with("Deny sent · Claude Code · Bash: echo 6 · "),
+            "{said:#?}"
+        );
+        assert!(
+            said[2].starts_with("Allow sent, and its hook took it · Claude Code · Bash: echo 5 · "),
+            "{said:#?}"
+        );
+        for (line, number) in said[3..].iter().zip([4, 3, 2]) {
+            assert!(
+                line.starts_with(&format!("Timed out · Claude Code · Bash: echo {number} · ")),
+                "{said:#?}"
+            );
+        }
+        assert!(
+            said.iter().skip(1).all(|line| line.ends_with(" ago")),
+            "{said:#?}"
+        );
+        let all = said.join("\n");
+        assert!(
+            !all.contains("echo 1") && !all.contains("elsewhere"),
+            "{all}"
+        );
+        // A line of each, never the request: no note, no directory.
+        assert!(
+            !all.contains("/home/someone") && !all.contains("Clean"),
+            "{all}"
+        );
+
+        // Nothing at all for a pane nobody asked in.
+        assert!(answered(&[], Instant::now()).is_empty());
+    }
+
+    /// The inbox's "Earlier" and "Why this status" say how a question ended
+    /// in one wording, for every way one can.
+    #[test]
+    fn the_inbox_and_why_this_status_say_how_it_ended_in_the_same_words() {
+        use crate::control::ask::{Cause, Choice, How};
+
+        let pane = PaneId::next();
+        let mut asks = Asks::default();
+        let causes = [
+            Cause::HookGone,
+            Cause::Expired,
+            Cause::PaneClosed,
+            Cause::CommandEnded,
+            Cause::TurnEnded,
+            Cause::AskedAgain,
+            Cause::AnsweredInAgent,
+            Cause::WindowClosed,
+            Cause::AnsweringOff,
+        ];
+        let at = Instant::now();
+        for (number, cause) in causes.into_iter().enumerate() {
+            let (id, _) = hold(&mut asks, pane, &format!("s{number}"), "ls", at);
+            asks.end(id, cause);
+        }
+        let (id, digest) = hold(&mut asks, pane, "allowed", "ls", at);
+        asks.deliver(id, &digest, Choice::Allow);
+        let now = Instant::now();
+        let mut words: Vec<&str> = Vec::new();
+        for outcome in asks.history() {
+            let why = answered(&[outcome], now);
+            let inbox = super::super::answer_list::outcome_line(outcome, true, now);
+            assert_eq!(
+                why[1],
+                super::super::answer_list::outcome_line(outcome, false, now)
+            );
+            assert!(inbox.starts_with(&format!("{} · Claude Code · worker · ", outcome.said())));
+            assert!(why[1].starts_with(&format!("{} · Claude Code · Bash: ls · ", outcome.said())));
+            words.push(outcome.how.said());
+        }
+        assert_eq!(words.len(), causes.len() + 1);
+        words.sort_unstable();
+        words.dedup();
+        assert_eq!(
+            words.len(),
+            causes.len() + 1,
+            "one ending, one wording: {words:?}"
+        );
+        assert!(words.contains(&How::Answered(Choice::Allow).said()));
     }
 }
