@@ -5,6 +5,19 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.31
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.30...v0.1.31)
+
+### Features
+
+- **agent:** Tell a lead when its worker asks and how it was answered, never what ([#551](https://github.com/theguriev/crook/pull/551))
+- **agent:** Answer a Claude Code inside tmux from the Crook pane that holds tmux's client ([#552](https://github.com/theguriev/crook/pull/552))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.30
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.29...v0.1.30)
