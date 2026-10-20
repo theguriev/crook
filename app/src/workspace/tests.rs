@@ -46235,3 +46235,533 @@ mod answering_card {
         }
     }
 }
+
+/// The settings page without a pointer: every control reached, changed and
+/// left from the keyboard. See `settings_page::focus`.
+mod keyboard_settings {
+    use super::*;
+    use crate::settings::FONT_SIZE_STEP;
+    use crate::workspace::settings_page::focus::Place;
+
+    fn shift() -> Modifiers {
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+
+    /// Presses one bare key the way the window does, and draws what follows.
+    fn key(harness: &mut Harness, key: &str) {
+        let chars = if key == "space" { " " } else { "" };
+        harness.press(key, Modifiers::default(), chars);
+        harness.frame();
+    }
+
+    fn shift_tab(harness: &mut Harness) {
+        harness.press("tab", shift(), "");
+        harness.frame();
+    }
+
+    /// The settings, open, with a frame drawn.
+    fn settings() -> Harness {
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        harness.frame();
+        harness
+    }
+
+    /// The box narrowed to `query`, and a frame drawn of what it found.
+    fn searched(query: &str) -> Harness {
+        let mut harness = settings();
+        harness.type_text(query);
+        harness.frame();
+        harness
+    }
+
+    fn place(harness: &Harness) -> Place {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.settings_page().focus.place()
+        })
+    }
+
+    /// Every focus ring the frame draws: a stroke of two in the accent with
+    /// nothing inside it.
+    fn rings(scene: &Scene) -> Vec<RectF> {
+        visible_rects(scene)
+            .filter(|(rect, _)| {
+                rect.background == Fill::None
+                    && rect.border.width == 2.
+                    && rect.border.color == Fill::Solid(theme().accent)
+            })
+            .map(|(_, bounds)| bounds)
+            .collect()
+    }
+
+    /// The one ring there is.
+    fn the_ring(scene: &Scene) -> RectF {
+        let rings = rings(scene);
+        assert_eq!(
+            rings.len(),
+            1,
+            "one ring, not {rings:?}: {}",
+            frame_text(scene)
+        );
+        rings[0]
+    }
+
+    /// Whether the ring is on the row whose label says `phrase`: around the
+    /// control on that row's line, or around the line itself for a choice.
+    fn ring_is_on(scene: &Scene, phrase: &str) -> bool {
+        let ring = the_ring(scene);
+        let (at, _) = page_line(scene, phrase);
+        ring.min_y() <= at.y() && at.y() <= ring.max_y()
+    }
+
+    /// Whether the ring is around the current-theme row, the page's first
+    /// control.
+    fn ring_is_on_theme_row(scene: &Scene) -> bool {
+        // By its words: the ring is drawn on the row's own edge, which is the
+        // shape `settings_theme_row` looks for.
+        the_ring(scene).contains_point(page_line(scene, "Choose another").0)
+    }
+
+    #[test]
+    fn tab_walks_from_the_box_to_the_rail_to_the_controls_and_shift_tab_walks_back() {
+        let mut harness = settings();
+        assert_eq!(place(&harness), Place::Search);
+        assert!(rings(&harness.frame()).is_empty(), "a ring before any key");
+
+        key(&mut harness, "tab");
+        assert_eq!(place(&harness), Place::Rail);
+        let scene = harness.frame();
+        let ring = the_ring(&scene);
+        assert!(
+            center(ring).x() < panel_box(&scene).max_x(),
+            "the rail's ring is not in the sidebar: {ring:?}"
+        );
+        assert!(
+            ring.contains_point(center(settings_rail_boxes(&scene)[0])),
+            "the ring is not on the page that is showing"
+        );
+
+        key(&mut harness, "tab");
+        assert_eq!(place(&harness), Place::Control);
+        assert!(ring_is_on_theme_row(&harness.frame()), "the first control");
+        key(&mut harness, "tab");
+        assert!(
+            ring_is_on(&harness.frame(), "Follow the desktop"),
+            "the second"
+        );
+
+        // Back the same way, one stop at a time, and no further than the box.
+        shift_tab(&mut harness);
+        assert!(ring_is_on_theme_row(&harness.frame()));
+        shift_tab(&mut harness);
+        assert_eq!(place(&harness), Place::Rail);
+        shift_tab(&mut harness);
+        assert_eq!(place(&harness), Place::Search);
+        shift_tab(&mut harness);
+        assert_eq!(place(&harness), Place::Search);
+
+        // And typing reaches the box again, which it did not on the way.
+        harness.type_text("chip");
+        assert_eq!(harness.search_text(), "chip");
+    }
+
+    #[test]
+    fn a_walk_to_the_end_stops_there_rather_than_coming_round() {
+        // Three switches say "show"; the two chips between the last two are
+        // greyed while the rows are compact, and the keyboard skips them.
+        let mut harness = searched("show");
+        key(&mut harness, "down");
+        assert!(ring_is_on(&harness.frame(), "Show the tabs panel"));
+        key(&mut harness, "down");
+        assert!(ring_is_on(&harness.frame(), "Show tab numbers"));
+        key(&mut harness, "down");
+        assert!(
+            ring_is_on(&harness.frame(), "Show details on hover"),
+            "an inert switch"
+        );
+        for _ in 0..5 {
+            key(&mut harness, "down");
+        }
+        assert!(ring_is_on(&harness.frame(), "Show details on hover"));
+        for _ in 0..5 {
+            key(&mut harness, "up");
+        }
+        assert!(ring_is_on(&harness.frame(), "Show the tabs panel"));
+        assert_eq!(
+            place(&harness),
+            Place::Control,
+            "Up off the top left the page"
+        );
+    }
+
+    #[test]
+    fn down_from_the_box_lands_on_what_was_found_and_space_flips_the_switch() {
+        let mut harness = searched("bring the tabs back");
+        let before = page_line(&harness.frame(), "Bring the tabs back").0;
+        let was = harness.general().restore_session;
+
+        key(&mut harness, "down");
+        let scene = harness.frame();
+        assert!(ring_is_on(&scene, "Bring the tabs back"));
+        assert_eq!(
+            page_line(&scene, "Bring the tabs back").0,
+            before,
+            "the ring moved the row it is drawn on"
+        );
+        // The box gave the keyboard up: no caret beside the ring.
+        assert!(
+            harness.workspace.read(&harness.app, |workspace, _| {
+                !workspace
+                    .field(crate::plugins::settings::SETTINGS_SECTION, "search")
+                    .1
+                    .has_keys()
+            }),
+            "the box kept the keyboard"
+        );
+
+        key(&mut harness, "space");
+        assert_eq!(harness.general().restore_session, !was, "Space");
+        assert!(
+            ring_is_on(&harness.frame(), "Bring the tabs back"),
+            "the change lost the keyboard"
+        );
+        key(&mut harness, "enter");
+        assert_eq!(harness.general().restore_session, was, "Enter");
+
+        // Left and Right push the knob the way they point.
+        key(&mut harness, "right");
+        assert!(harness.general().restore_session, "Right is on");
+        key(&mut harness, "right");
+        assert!(harness.general().restore_session, "Right again stays on");
+        key(&mut harness, "left");
+        assert!(!harness.general().restore_session, "Left is off");
+    }
+
+    #[test]
+    fn the_arrows_choose_a_segment_and_enter_comes_round() {
+        let mut harness = searched("view as");
+        key(&mut harness, "down");
+        assert!(ring_is_on(&harness.frame(), "View as"));
+        assert_eq!(harness.options().granularity, Granularity::Panes);
+
+        key(&mut harness, "right");
+        assert_eq!(harness.options().granularity, Granularity::Tabs);
+        key(&mut harness, "right");
+        assert_eq!(
+            harness.options().granularity,
+            Granularity::Tabs,
+            "past the end"
+        );
+        key(&mut harness, "left");
+        assert_eq!(harness.options().granularity, Granularity::Panes);
+        key(&mut harness, "enter");
+        assert_eq!(harness.options().granularity, Granularity::Tabs);
+        key(&mut harness, "space");
+        assert_eq!(harness.options().granularity, Granularity::Panes, "round");
+        assert!(ring_is_on(&harness.frame(), "View as"));
+    }
+
+    #[test]
+    fn left_and_right_step_the_text_size_as_one_control() {
+        let mut harness = searched("text size");
+        key(&mut harness, "down");
+        assert!(ring_is_on(&harness.frame(), "Text size"));
+        let size = harness.general().font_size;
+
+        key(&mut harness, "right");
+        assert_eq!(harness.general().font_size, size + FONT_SIZE_STEP);
+        key(&mut harness, "left");
+        key(&mut harness, "left");
+        assert_eq!(harness.general().font_size, size - FONT_SIZE_STEP);
+        // One stop for both buttons, so stepping never walks the keyboard
+        // from one to the other.
+        assert!(ring_is_on(&harness.frame(), "Text size"));
+    }
+
+    #[test]
+    fn the_arrows_walk_a_list_of_choices_and_enter_picks_one() {
+        let mut harness = searched("pane title as");
+        key(&mut harness, "down");
+        let label = PrimaryInfo::WorkingDirectory.label();
+        key(&mut harness, "down");
+        let scene = harness.frame();
+        let (at, _) = page_line(&scene, label);
+        assert!(
+            the_ring(&scene).contains_point(at),
+            "the ring is not on {label}"
+        );
+
+        key(&mut harness, "enter");
+        assert_eq!(
+            harness.options().primary_info,
+            PrimaryInfo::WorkingDirectory
+        );
+    }
+
+    #[test]
+    fn enter_on_the_current_theme_opens_the_themes_panel() {
+        let mut harness = Harness::new(1);
+        let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+        let themes = Scratch::new();
+        harness.set_themes_directory(themes.path().to_owned());
+        harness.open_settings_page();
+        harness.type_text("current theme");
+        harness.frame();
+
+        key(&mut harness, "down");
+        assert!(ring_is_on_theme_row(&harness.frame()));
+        key(&mut harness, "enter");
+        assert!(harness.is_theme_panel_open());
+    }
+
+    #[test]
+    fn enter_on_a_chord_records_one_and_escape_leaves_the_binding_alone() {
+        // A file to write to, without which the page's controls are inert.
+        let mut harness = Harness::new(1);
+        let scratch = Scratch::new();
+        keybindings_in(&mut harness, &scratch);
+        harness.open_settings_page();
+        harness.type_text("split downwards");
+        harness.frame();
+        key(&mut harness, "down");
+        assert!(ring_is_on(&harness.frame(), "Split downwards"));
+
+        key(&mut harness, "enter");
+        assert!(
+            harness.recording().is_some(),
+            "Enter did not start recording"
+        );
+        // The recorder owns the keys now, Tab included.
+        key(&mut harness, "tab");
+        assert!(harness.recording().is_some());
+        key(&mut harness, "escape");
+        assert!(harness.recording().is_none());
+        assert_eq!(
+            place(&harness),
+            Place::Control,
+            "the recorder's Escape walked out"
+        );
+        assert!(ring_is_on(&harness.frame(), "Split downwards"));
+
+        // The button beside the chord is the next stop.
+        key(&mut harness, "tab");
+        let scene = harness.frame();
+        let buttons = settings_page_button_boxes(&scene);
+        assert!(
+            the_ring(&scene).contains_point(center(buttons[1])),
+            "the ring is not on the button beside the chord"
+        );
+    }
+
+    #[test]
+    fn a_button_that_greys_when_pressed_hands_the_keyboard_to_its_neighbour() {
+        // The reset button is the one before the page's last control.
+        let mut harness = Harness::new(1);
+        harness.set_granularity(Granularity::Tabs);
+        harness.open_settings_page();
+        key(&mut harness, "tab");
+        key(&mut harness, "tab");
+        key(&mut harness, "end");
+        key(&mut harness, "up");
+        assert!(ring_is_on(&harness.frame(), "Tab options"));
+
+        key(&mut harness, "enter");
+        assert_eq!(harness.options().granularity, Granularity::Panes, "reset");
+        // Pressing it left nothing to reset, so it is no longer a stop — and
+        // the keyboard is on what took its place rather than nowhere.
+        assert_eq!(place(&harness), Place::Control);
+        assert!(ring_is_on(&harness.frame(), "Reduced"), "Motion's control");
+    }
+
+    #[test]
+    fn up_and_down_on_the_rail_change_the_page() {
+        let mut harness = settings();
+        key(&mut harness, "tab");
+        key(&mut harness, "down");
+        assert_eq!(harness.settings_section(), "Shell");
+        assert_eq!(place(&harness), Place::Rail);
+        let scene = harness.frame();
+        assert!(the_ring(&scene).contains_point(center(settings_rail_boxes(&scene)[1])));
+
+        key(&mut harness, "end");
+        assert_eq!(harness.settings_section(), "About");
+        key(&mut harness, "down");
+        assert_eq!(harness.settings_section(), "About", "past the end");
+        key(&mut harness, "home");
+        key(&mut harness, "up");
+        assert_eq!(harness.settings_section(), "Appearance");
+
+        // Into the page it shows.
+        key(&mut harness, "enter");
+        assert!(ring_is_on_theme_row(&harness.frame()));
+    }
+
+    #[test]
+    fn escape_walks_back_to_the_box_then_empties_it_then_leaves() {
+        let mut harness = searched("chip");
+        key(&mut harness, "down");
+        assert_eq!(place(&harness), Place::Control);
+
+        key(&mut harness, "escape");
+        assert_eq!(place(&harness), Place::Search);
+        assert_eq!(
+            harness.search_text(),
+            "chip",
+            "the query went with the control"
+        );
+        assert!(rings(&harness.frame()).is_empty());
+
+        key(&mut harness, "escape");
+        assert_eq!(harness.search_text(), "");
+        assert!(harness.is_settings_page_open());
+
+        key(&mut harness, "escape");
+        assert!(!harness.is_settings_page_open(), "an empty box's Escape");
+    }
+
+    #[test]
+    fn keys_aimed_at_the_page_reach_no_pane_behind_it() {
+        let mut harness = Harness::new(1);
+        if !harness.start_terminals() {
+            return;
+        }
+        let pane = harness.focused_pane_id().expect("a pane");
+        // A find bar on the pane the settings cover, which takes Escape and
+        // Enter whenever they reach it.
+        harness.dispatch_workspace_action(WorkspaceAction::Find {
+            pane,
+            action: crate::workspace::action::FindAction::Open,
+        });
+        harness.frame();
+        let find_is_open = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .find(pane)
+                    .is_some_and(crate::pane_find::PaneFind::is_open)
+            })
+        };
+        assert!(find_is_open(&harness));
+
+        harness.open_settings_page();
+        harness.frame();
+        // The keys the page has no use for in its box are not the bar's
+        // either: it is over a pane the section covers.
+        assert_eq!(
+            harness.action_for("enter", shift()),
+            None,
+            "Shift-Enter stepped the bar"
+        );
+        for each in [
+            "tab", "tab", "space", "enter", "down", "left", "right", "up",
+        ] {
+            key(&mut harness, each);
+        }
+        key(&mut harness, "escape");
+        assert_eq!(place(&harness), Place::Search, "Escape went past the page");
+
+        harness.show_tabs();
+        assert!(
+            find_is_open(&harness),
+            "a key on the page closed the pane's find bar"
+        );
+        assert_eq!(
+            harness.field_text(pane),
+            "",
+            "the pane heard the page's keys"
+        );
+    }
+
+    #[test]
+    fn a_walk_down_a_long_page_brings_each_control_on_screen() {
+        let window = vec2f(760., 360.);
+        let mut harness = settings();
+        harness.frame_sized(window);
+        harness.press("tab", Modifiers::default(), "");
+        harness.frame_sized(window);
+        harness.press("tab", Modifiers::default(), "");
+        harness.frame_sized(window);
+        harness.press("end", Modifiers::default(), "");
+        let scene = harness.frame_sized(window);
+
+        let ring = the_ring(&scene);
+        let pane = settings_pane_box(&scene);
+        assert!(
+            ring.max_y() <= pane.max_y() && ring.min_y() >= pane.min_y(),
+            "the last control's ring {ring:?} is off the page {pane:?}"
+        );
+        // Whole: what the scroll's clip leaves of it is all of it.
+        let (whole, shown) = visible_rects(&scene)
+            .find(|(_, visible)| *visible == ring)
+            .map(|(rect, visible)| (rect.bounds, visible))
+            .expect("the ring is drawn");
+        assert!(
+            (whole.height() - shown.height()).abs() < 0.01,
+            "the ring is cut by the scroll: {whole:?} shows as {shown:?}"
+        );
+    }
+
+    #[test]
+    fn a_setting_chosen_in_the_palette_arrives_with_the_keyboard_on_it() {
+        let mut harness = Harness::new(1);
+        let was = harness.general().login_shell;
+        open_palette(&mut harness, "login shell");
+        harness.frame();
+        harness.press("enter", Modifiers::default(), "");
+        harness.frame();
+        assert!(ring_is_on(&harness.frame(), "Start a login shell"));
+
+        key(&mut harness, "space");
+        assert_eq!(harness.general().login_shell, !was);
+    }
+
+    #[test]
+    fn typing_on_a_control_types_into_the_box_and_takes_the_keyboard_there() {
+        let mut harness = searched("show");
+        key(&mut harness, "down");
+        assert_eq!(place(&harness), Place::Control);
+
+        harness.type_text("n");
+        assert_eq!(place(&harness), Place::Search);
+        assert_eq!(harness.search_text(), "shown");
+        assert!(rings(&harness.frame()).is_empty(), "the ring stayed behind");
+        harness.type_text("s");
+        assert_eq!(harness.search_text(), "showns");
+    }
+
+    #[test]
+    fn a_palette_row_with_nothing_to_press_leaves_the_keyboard_in_the_box() {
+        // The About page's settings file is a fact: the page it arrives on
+        // has no control for the keyboard to stand on.
+        let mut harness = Harness::new(1);
+        open_palette(&mut harness, "settings file");
+        harness.frame();
+        harness.press("enter", Modifiers::default(), "");
+        harness.frame();
+        harness.frame();
+        assert_eq!(place(&harness), Place::Search);
+        let typed = harness.search_text();
+        harness.type_text("s");
+        assert_eq!(
+            harness.search_text(),
+            format!("{typed}s"),
+            "typing went nowhere"
+        );
+    }
+
+    #[test]
+    fn a_click_in_the_box_takes_the_keyboard_back_from_a_control() {
+        let mut harness = searched("chip");
+        key(&mut harness, "down");
+        assert_eq!(place(&harness), Place::Control);
+
+        let field = settings_field_boxes(&harness.frame())[0];
+        harness.click(center(field), MouseButton::Left);
+        harness.frame();
+        assert_eq!(place(&harness), Place::Search);
+        harness.type_text("s");
+        assert_eq!(harness.search_text(), "chips");
+    }
+}

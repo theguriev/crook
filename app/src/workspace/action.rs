@@ -893,6 +893,13 @@ pub enum SettingsAction {
     /// By index rather than by name, because this enum is `Copy`; see
     /// [`Workspace::field`](crate::workspace::Workspace::field).
     FocusField(Option<usize>),
+    /// A key the page's keyboard handling took: a step between the search
+    /// box, the rail and the controls, or a press of the control it is on.
+    ///
+    /// The key rather than what it does, because what it does is read off the
+    /// controls the last frame drew; see
+    /// [`settings_page::focus`](crate::workspace::settings_page::focus).
+    Key(crate::workspace::settings_page::focus::Key),
     /// Put every tab option back to the value a fresh install opens with.
     ResetTabOptions,
     /// Set the terminal's type size, in logical pixels.

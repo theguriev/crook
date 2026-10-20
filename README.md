@@ -1051,8 +1051,15 @@ Twenty-two features, and the page that configures them:
   afresh each time the page is shown, and not offered on Windows, which has no such setting.
   The type size is also on `cmd/ctrl-plus`, `-minus` and `-0`, and every pane resizes with it:
   a pane's columns and rows are its box divided by a cell, so the ptys follow.
-  There is no shell under it, and nothing on it takes the keyboard but the search below and a
-  chord being recorded on Keyboard Shortcuts: every other control on it is a click.
+  There is no shell under it, and every control on it is reachable from the keyboard as well
+  as by a click. The keyboard starts in the search box below; **Tab** walks from it to the rail
+  and on through the page's controls in the order they are drawn, **Shift-Tab** walks back,
+  and neither comes round from the end. **Down** from the box goes straight to the first row
+  it found, the arrows move between pages on the rail and between controls on the page, and
+  **Enter** or **Space** presses the control with the ring around it. **Left** and **Right**
+  push a switch's knob, choose a segment and step the type size. **Escape** walks back out:
+  from a control to the box, then empties the box, then puts the tabs back. A letter typed on
+  a control goes into the box. Choosing a setting in the palette lands the keyboard on its row.
 
   At the top of its rail is a **search box**, and it narrows both halves of the page at once:
   the rail keeps only the pages that hold an answer and says how many each of them holds, and
@@ -1142,7 +1149,8 @@ Twenty-two features, and the page that configures them:
   the commands answer is the flat launcher it has always been. A tab's row says what its row
   in the sidebar says and where it is working, and Enter goes there; a settings row says which
   page and category it lives on, and Enter opens that page with the row's own words in the
-  rail's search box, which is what puts a row somewhere in the middle of a long page on screen.
+  rail's search box, which is what puts a row somewhere in the middle of a long page on screen,
+  and the keyboard on the row, so Space changes it.
 
   A sigil at the front narrows the box to one list, and `tab` walks between them without
   retyping the query: `>` the commands, `@` the tabs, `#` the settings, and `?` **what is

@@ -60,6 +60,7 @@ use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::image::Bitmap;
 use crookui_core::prelude::*;
 
+use super::focus::{self, Keys, Stop};
 use super::search::{Query, Words};
 use crate::plugin::Face;
 use crate::plugins::pictures::Picture;
@@ -533,6 +534,14 @@ pub(crate) fn choice_group(
 /// is, and it says the same thing in the one vocabulary the box protocol has.
 pub(crate) fn switch(on: bool, command: Command, state: MouseStateHandle) -> Box<dyn Element> {
     let enabled = command.is_some();
+    // Left and Right push the knob the way they point, and do nothing when it
+    // is already there; Enter and Space flip it.
+    let keys = Keys {
+        press: command,
+        left: command.filter(|_| on),
+        right: command.filter(|_| !on),
+    };
+    let stop = state.clone();
 
     let control = Hoverable::new(state, move |mouse| {
         let track = match (on, enabled) {
@@ -580,7 +589,12 @@ pub(crate) fn switch(on: bool, command: Command, state: MouseStateHandle) -> Box
         .finish()
     });
 
-    with_command(control, command)
+    Stop::control(
+        &stop,
+        keys,
+        Radius::Percentage(50.),
+        with_command(control, command),
+    )
 }
 
 /// One half of a segmented control.
@@ -598,6 +612,8 @@ pub(crate) struct Segment {
 /// A track holding two or more segments, of which exactly one is lit.
 pub(crate) fn segmented(segments: Vec<Segment>, ui: FamilyId) -> Box<dyn Element> {
     let mut row = Flex::row().with_main_axis_size(MainAxisSize::Min);
+    let keys = segment_keys(&segments);
+    let stop = segments.first().map(|segment| segment.state.clone());
 
     for segment in segments {
         let selected = segment.selected;
@@ -628,11 +644,46 @@ pub(crate) fn segmented(segments: Vec<Segment>, ui: FamilyId) -> Box<dyn Element
         row.add_child(with_command(pill, segment.command));
     }
 
-    Container::new(row.finish())
+    let track = Container::new(row.finish())
         .with_background_color(theme().overlay_2)
         .with_uniform_padding(2.)
         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CONTROL_RADIUS)))
-        .finish()
+        .finish();
+    match stop {
+        Some(state) => Stop::control(&state, keys, focus::ring_radius(CONTROL_RADIUS), track),
+        None => track,
+    }
+}
+
+/// What the keys do to a segmented control, which is one stop however many
+/// segments it has: Left and Right choose the segment beside the lit one, and
+/// stop at the ends; Enter and Space choose the next, coming round from the
+/// last — a two-way choice is then the switch it looks like.
+fn segment_keys(segments: &[Segment]) -> Keys {
+    let Some(lit) = segments.iter().position(|segment| segment.selected) else {
+        // Nothing lit is nothing to step from: the first segment is the one
+        // every key means.
+        let first = segments.iter().find_map(|segment| segment.command);
+        return Keys {
+            press: first,
+            left: None,
+            right: first,
+        };
+    };
+    let count = segments.len();
+    let next = (1..count)
+        .map(|by| &segments[(lit + by) % count])
+        .find_map(|segment| segment.command);
+    Keys {
+        press: next,
+        left: segments[..lit]
+            .iter()
+            .rev()
+            .find_map(|segment| segment.command),
+        right: segments[lit + 1..]
+            .iter()
+            .find_map(|segment| segment.command),
+    }
 }
 
 /// A full-width row that names one value of a several-valued option, with a
@@ -649,6 +700,7 @@ pub(crate) fn choice(
     ui: FamilyId,
 ) -> Box<dyn Element> {
     let enabled = command.is_some();
+    let stop = state.clone();
 
     let control = Hoverable::new(state, move |mouse| {
         let background = if enabled && mouse.is_hovered() {
@@ -690,13 +742,25 @@ pub(crate) fn choice(
             right: 8.,
         })
         .with_background_color(background)
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
-        .with_margin_bottom(2.)
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CHOICE_RADIUS)))
         .finish()
     });
 
-    with_command(control, command)
+    // The gap under the row goes outside the ring, for the reason it goes
+    // outside the theme row's hover: inside, it would be part of the box the
+    // ring is drawn on.
+    Container::new(Stop::row(
+        &stop,
+        Keys::press(command),
+        CHOICE_RADIUS,
+        with_command(control, command),
+    ))
+    .with_margin_bottom(2.)
+    .finish()
 }
+
+/// The corner of a choice row's hover.
+const CHOICE_RADIUS: f32 = 4.;
 
 /// The corner of the box a control that answers a question sits in.
 ///
@@ -1278,6 +1342,23 @@ pub(crate) fn text_button(
     state: MouseStateHandle,
     ui: FamilyId,
 ) -> Box<dyn Element> {
+    let stop = state.clone();
+    Stop::control(
+        &stop,
+        Keys::press(command),
+        focus::ring_radius(CONTROL_RADIUS),
+        button(label, command, state, ui),
+    )
+}
+
+/// A [`text_button`] the keyboard does not stand on by itself: one half of a
+/// control that is a single stop, the stepper.
+fn button(
+    label: impl Into<String>,
+    command: Command,
+    state: MouseStateHandle,
+    ui: FamilyId,
+) -> Box<dyn Element> {
     let enabled = command.is_some();
     // Owned rather than `&'static str`, for the reason a row's words are: the
     // Keyboard Shortcuts page puts a chord on a button, and a chord is
@@ -1343,6 +1424,7 @@ pub(crate) fn chord_button(
 ) -> Box<dyn Element> {
     let enabled = command.is_some();
     let chord = chord.into();
+    let stop = state.clone();
 
     let control = Hoverable::new(state, move |mouse| {
         // `overlay_3` for the outline, as on [`text_button`], and for the same
@@ -1377,7 +1459,12 @@ pub(crate) fn chord_button(
         .finish()
     });
 
-    with_command(control, command)
+    Stop::control(
+        &stop,
+        Keys::press(command),
+        focus::ring_radius(CONTROL_RADIUS),
+        with_command(control, command),
+    )
 }
 
 /// The room the second control of a [`pair`] is given, whatever is in it.
@@ -1432,10 +1519,19 @@ pub(crate) fn stepper(
     increase_state: MouseStateHandle,
     ui: FamilyId,
 ) -> Box<dyn Element> {
-    Flex::row()
+    // One stop for the pair, which Left and Right step: the keyboard on the
+    // minus alone would be lost the moment the minus went grey at the end of
+    // the range.
+    let stop = decrease_state.clone();
+    let keys = Keys {
+        press: None,
+        left: decrease,
+        right: increase,
+    };
+    let stepper = Flex::row()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
-        .with_child(text_button("\u{2212}", decrease, decrease_state, ui))
+        .with_child(button("\u{2212}", decrease, decrease_state, ui))
         .with_child(
             Container::new(
                 Text::new(value, ui, DESCRIPTION_SIZE)
@@ -1448,8 +1544,9 @@ pub(crate) fn stepper(
             .with_horizontal_padding(12.)
             .finish(),
         )
-        .with_child(text_button("+", increase, increase_state, ui))
-        .finish()
+        .with_child(button("+", increase, increase_state, ui))
+        .finish();
+    Stop::control(&stop, keys, focus::ring_radius(CONTROL_RADIUS), stepper)
 }
 
 /// The row that says which theme is in force, and opens the panel.
@@ -1469,6 +1566,7 @@ pub(crate) fn current_theme_row(
     let name_text = name.clone();
     let mut card = Some(card);
     let mut name = Some(name);
+    let stop = state.clone();
 
     let row = Hoverable::new(state, move |mouse| {
         let border = if mouse.is_hovered() {
@@ -1529,7 +1627,7 @@ pub(crate) fn current_theme_row(
         // frame by exactly that radius. A settings row that answered to
         // `tab_boxes` would not fail a test, it would quietly become one of
         // the tabs those tests reason about.
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(10.)))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(THEME_ROW_RADIUS)))
         .with_uniform_padding(8.)
         .finish()
     })
@@ -1539,12 +1637,17 @@ pub(crate) fn current_theme_row(
     // The gap under the row goes *outside* the `Hoverable`: a margin inside it
     // is part of the box the hit test is resolved against, so the row lit up —
     // and opened the panel — from ten pixels below where it is drawn.
+    let row = Stop::row(&stop, Keys::press(Some(action)), THEME_ROW_RADIUS, row);
+
     Entry {
         words: Some(words),
         value: Some(name_text),
         element: Container::new(row).with_margin_bottom(10.).finish(),
     }
 }
+
+/// The corner of the current-theme row.
+const THEME_ROW_RADIUS: f32 = 10.;
 
 /// The least air between a fact's label and its value.
 ///

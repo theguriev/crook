@@ -16,9 +16,11 @@
 //! the reason [`section`] exists: the Plugins section is the
 //! same two halves, and it was drawing them differently.
 //!
-//! There is no close button in the corner and no Escape binding. Both would be
-//! a second way to do what the section buttons already do, and the settings
-//! are not special enough among the sections to have their own.
+//! There is no close button in the corner: it would be a second way to do
+//! what the section buttons already do. There is an Escape, because a page a
+//! person can walk with the keyboard needs a key to walk out of it with —
+//! from a control back to the box, from words in the box to an empty box,
+//! and from an empty box back to the tabs. See [`focus`].
 //!
 //! # Search
 //!
@@ -64,6 +66,7 @@
 //! so there is nothing to alert about, and the path is on the About page for
 //! anyone who wants to open it themselves.
 
+pub(crate) mod focus;
 pub(crate) mod search;
 pub(crate) mod widgets;
 
@@ -167,6 +170,14 @@ pub(crate) struct SettingsState {
     /// holds `&Workspace` — ask for the handle of a control it is about to
     /// draw for the first time.
     controls: std::cell::RefCell<HashMap<Control, MouseStateHandle>>,
+    /// Where the keyboard is on the page, and the controls the last frame
+    /// offered it. See [`focus`].
+    pub(crate) focus: focus::Focus,
+    /// The pages the rail drew on the last frame, in order, and the one it
+    /// showed — which is what Up and Down on the rail step through, for the
+    /// reason the controls are written down while they are drawn: which
+    /// pages the search has left in is a frame's to say.
+    rail: std::cell::RefCell<(Vec<PageId>, Option<PageId>)>,
 }
 
 impl SettingsState {
@@ -187,6 +198,11 @@ impl SettingsState {
             .as_deref()
             .and_then(|key| host.settings_page_id(key));
         chosen.or_else(|| host.settings_pages().first().map(|(id, _)| *id))
+    }
+
+    /// The pages the rail drew on the last frame, and the one it showed.
+    pub(crate) fn rail(&self) -> (Vec<PageId>, Option<PageId>) {
+        self.rail.borrow().clone()
     }
 
     /// The mouse state for one control, creating it if this is its first
@@ -270,6 +286,14 @@ pub(crate) fn render(
 
     let showing = showing(selected, &counts, &query);
     let body = host.build_settings_page(showing, workspace, app);
+    *state.rail.borrow_mut() = (
+        pages
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| on_the_rail(*id, &counts, &query))
+            .collect(),
+        Some(showing),
+    );
 
     (
         rail(workspace, &pages, showing, &counts, &query),
@@ -345,10 +369,7 @@ fn rail(
             .find(|(page, _)| page == id)
             .map(|(_, found)| *found);
 
-        // A page with nothing in it is not listed at all while something is
-        // being searched for. Warp drops it too, and the alternative — a row
-        // that says "(0)" — is a row whose only purpose is to be declined.
-        if !query.is_empty() && found.unwrap_or(0) == 0 {
+        if !on_the_rail(*id, counts, query) {
             continue;
         }
         rows.add_child(rail_row(
@@ -381,6 +402,15 @@ fn rail(
         state.scroll_named(RAIL_SCROLL),
         Some(build_line(workspace, ui)),
     )
+}
+
+/// Whether the rail lists a page.
+///
+/// A page with nothing in it is not listed at all while something is being
+/// searched for. Warp drops it too, and the alternative — a row that says
+/// "(0)" — is a row whose only purpose is to be declined.
+fn on_the_rail(id: PageId, counts: &[(PageId, usize)], query: &Query) -> bool {
+    query.is_empty() || counts.iter().any(|(page, found)| *page == id && *found > 0)
 }
 
 /// What the rail ends in.
@@ -418,7 +448,10 @@ fn rail_row(
     found: Option<usize>,
     ui: crookui_core::fonts::FamilyId,
 ) -> Box<dyn Element> {
-    let state = workspace.settings_page().control(keyed("page", id));
+    let settings = workspace.settings_page();
+    let state = settings.control(keyed("page", id));
+    // The rail is one stop, and the ring is around the page it is showing.
+    let lit = selected && settings.focus.place() == focus::Place::Rail;
     // Warp's `Features (3)`: the count is part of the label rather than a
     // badge beside it, which is what keeps a rail of counted and uncounted
     // rows from having two different shapes.
@@ -427,7 +460,7 @@ fn rail_row(
         None => title.to_owned(),
     };
 
-    section::row(
+    let row = section::row(
         section::Row {
             label,
             // No mark and no word at the end: every page in the rail is a
@@ -444,7 +477,8 @@ fn rail_row(
             command: Some(WorkspaceAction::Settings(SettingsAction::Select(id))),
         },
         ui,
-    )
+    );
+    focus::Stop::fixed(lit, section::ROW_RADIUS, row)
 }
 
 /// The page beside the rail.
@@ -472,6 +506,11 @@ fn content(
             .finish(),
         None => rows,
     };
+
+    // Around the rows and inside the scroll, so the keyboard's list is the
+    // rows that are drawn and a control's place is measured from the top of
+    // what scrolls. See [`focus`].
+    let rows = Box::new(focus::Page::new(settings.focus.clone(), rows));
 
     section::content(title, None, rows, settings.scroll.clone(), ui)
 }
