@@ -654,7 +654,7 @@ impl AskFixture {
 
 /// How a question ended, by the word a fixture says it with.
 fn how(word: &str) -> Option<How> {
-    const CAUSES: [Cause; 9] = [
+    const CAUSES: [Cause; 10] = [
         Cause::HookGone,
         Cause::Expired,
         Cause::PaneClosed,
@@ -662,6 +662,7 @@ fn how(word: &str) -> Option<How> {
         Cause::TurnEnded,
         Cause::AskedAgain,
         Cause::AnsweredInAgent,
+        Cause::AtWorkAgain,
         Cause::WindowClosed,
         Cause::AnsweringOff,
     ];

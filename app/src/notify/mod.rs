@@ -153,7 +153,18 @@ impl Notice {
     /// the row's "Why this status" would say turned it amber: the agent
     /// stopped to ask without saying what, the bell rang, the agent said it
     /// was done, or the command it was running ended without its saying so.
+    ///
+    /// But for a question the agent's hook is waiting on ([`AgentSession::asking`]),
+    /// which says only which agent asks to use which tool. The row says the
+    /// command; a banner is read on a desktop, in a tray and on a lock screen
+    /// by whoever is near it, and the command is nobody's business there.
     pub fn needs_input(name: &str, session: &AgentSession) -> Self {
+        if let Some(asking) = &session.asking {
+            return Self {
+                title: title(name),
+                body: format!("{} asks to use {}", asking.agent, asking.tool),
+            };
+        }
         let said = match &session.attention {
             Some(Attention::Notification(text)) => Some(text.as_str()),
             _ => session.message.as_deref(),
