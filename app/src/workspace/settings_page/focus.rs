@@ -120,10 +120,6 @@ pub enum Key {
     /// Enter or Space.
     Press,
     Escape,
-    /// A character typed while the keyboard was off the box: it goes back to
-    /// the box, and the character with it, so typing to search works from
-    /// anywhere on the page.
-    Type(char),
 }
 
 /// What a keystroke means where the keyboard is, if it means anything.
@@ -136,8 +132,15 @@ pub enum Key {
 ///
 /// Everywhere else every one of them is taken, whether or not it moves
 /// anything: an arrow at the end of the list must not fall through to a
-/// binding or a pane any more than the close question's may. And so is a
-/// character, which goes back to the box — see [`Key::Type`].
+/// binding or a pane any more than the close question's may.
+///
+/// A character is never taken here, wherever the keyboard is. The box keeps
+/// the keys for text the whole time the page has them — it is only drawn as
+/// though it had not while the ring is elsewhere — so a letter, a shifted
+/// one, a numpad digit, an AltGr character and an input method's word all
+/// reach it as they would any field, with the text the key really typed,
+/// and the edit puts the keyboard back in it. See
+/// [`SettingsAction::SearchEdited`](crate::workspace::SettingsAction::SearchEdited).
 pub(crate) fn key_for(place: Place, keystroke: &Keystroke) -> Option<Key> {
     let modifiers = keystroke.modifiers;
     let bare = modifiers.is_empty();
@@ -146,15 +149,6 @@ pub(crate) fn key_for(place: Place, keystroke: &Keystroke) -> Option<Key> {
             shift: true,
             ..Modifiers::default()
         };
-    let typing = !modifiers.ctrl && !modifiers.cmd && !modifiers.alt;
-    let mut chars = keystroke.key.chars();
-    if let (Some(character), None) = (chars.next(), chars.next())
-        && typing
-        && !character.is_control()
-    {
-        // In the box the field types it itself.
-        return (place != Place::Search).then_some(Key::Type(character));
-    }
     let key = match keystroke.key.as_str() {
         "tab" if bare => Key::Next,
         "tab" if shifted => Key::Previous,
@@ -246,6 +240,20 @@ struct Inner {
     /// Where the page's content began on the last paint, in window
     /// coordinates.
     content_top: f32,
+    /// Whether something has changed the page since `stops` was recorded.
+    ///
+    /// Keys can arrive faster than frames, and a key read against a list
+    /// that no longer matches the page would press what the page *was*: a
+    /// switch's Right recorded while it was off, pressed a second time once
+    /// it is on, turns it back off; Enter after Down on the rail presses the
+    /// control of the page that was showing before. So once anything has
+    /// changed the page, presses do nothing and moves count places, until the
+    /// next layout writes the list down again.
+    stale: bool,
+    /// Whether the page holds the keyboard at all: not while the Themes
+    /// panel, a popup or the Changes column's comment field has it. The ring
+    /// is drawn only while it does.
+    holds_keys: bool,
 }
 
 impl Inner {
@@ -253,7 +261,7 @@ impl Inner {
     /// layout recorded: the one it was on if that is still there, or
     /// whatever has taken its place.
     fn resolve(&mut self) {
-        if self.place != Place::Control {
+        if self.place != Place::Control || self.stale {
             return;
         }
         if let Some(at) = self
@@ -327,13 +335,42 @@ impl Focus {
     pub(crate) fn is_on_first(&self) -> bool {
         let mut inner = self.0.borrow_mut();
         inner.resolve();
-        inner.on.is_none() || inner.index == 0
+        inner.index == 0 || (inner.on.is_none() && !inner.stale)
+    }
+
+    /// Says the page has changed since its controls were written down. See
+    /// `Inner::stale`.
+    pub(crate) fn changed(&self) {
+        self.0.borrow_mut().stale = true;
+    }
+
+    /// Says whether the page holds the keyboard, for the frame being built.
+    pub(crate) fn set_holds_keys(&self, holds: bool) {
+        self.0.borrow_mut().holds_keys = holds;
+    }
+
+    /// Whether the ring around the rail is drawn: the keyboard is on it and
+    /// the page holds the keyboard.
+    pub(crate) fn rail_is_lit(&self) -> bool {
+        let inner = self.0.borrow();
+        inner.place == Place::Rail && inner.holds_keys
     }
 
     /// Steps the keyboard `by` controls, clamped to the ends, and reports
     /// whether it moved.
     pub(crate) fn step(&self, by: isize) -> bool {
         let mut inner = self.0.borrow_mut();
+        if inner.stale {
+            // By place: the controls under the old list's names may not be
+            // the ones the page will draw, and the place is settled against
+            // what it does draw when it next lays out.
+            let last = inner.stops.len().saturating_sub(1) as isize;
+            let next = (inner.index as isize + by).clamp(0, last) as usize;
+            let moved = next != inner.index;
+            inner.index = next;
+            inner.on = None;
+            return moved;
+        }
         inner.resolve();
         let Some(on) = inner.on else {
             return false;
@@ -348,6 +385,9 @@ impl Focus {
     /// What the keys do to the control the keyboard is on.
     pub(crate) fn keys(&self) -> Option<Keys> {
         let mut inner = self.0.borrow_mut();
+        if inner.stale {
+            return None;
+        }
         inner.resolve();
         let on = inner.on?;
         inner
@@ -361,6 +401,9 @@ impl Focus {
     /// page's content, with its ring.
     pub(crate) fn box_of_focused(&self) -> Option<(f32, f32)> {
         let inner = self.0.borrow();
+        if inner.stale {
+            return None;
+        }
         let on = inner.on?;
         let stop = inner.stops.iter().find(|stop| stop.id == on)?;
         Some((stop.top? - RING_REACH, stop.height + 2. * RING_REACH))
@@ -369,12 +412,14 @@ impl Focus {
     /// Whether the keyboard is on this control.
     fn is_on(&self, id: StopId) -> bool {
         let inner = self.0.borrow();
-        inner.place == Place::Control && inner.on == Some(id)
+        inner.place == Place::Control && inner.holds_keys && inner.on == Some(id)
     }
 
-    /// Starts a layout's list.
+    /// Starts a layout's list, which is the page as it is now.
     fn begin(&self) {
-        self.0.borrow_mut().stops.clear();
+        let mut inner = self.0.borrow_mut();
+        inner.stops.clear();
+        inner.stale = false;
     }
 
     /// Adds one control to it, in the order it was laid out.
@@ -670,28 +715,19 @@ mod tests {
     }
 
     #[test]
-    fn a_character_off_the_box_is_typed_into_it_and_in_the_box_is_the_box_s() {
+    fn a_character_is_the_box_s_wherever_the_keyboard_is() {
         let shift = Modifiers {
             shift: true,
             ..Modifiers::default()
         };
-        assert_eq!(
-            key_for(Place::Search, &stroke("a", Modifiers::default())),
-            None
-        );
-        assert_eq!(
-            key_for(Place::Control, &stroke("a", Modifiers::default())),
-            Some(Key::Type('a'))
-        );
-        assert_eq!(
-            key_for(Place::Rail, &stroke("A", shift)),
-            Some(Key::Type('A'))
-        );
-        let ctrl = Modifiers {
-            ctrl: true,
-            ..Modifiers::default()
-        };
-        assert_eq!(key_for(Place::Control, &stroke("a", ctrl)), None, "a chord");
+        for place in [Place::Search, Place::Rail, Place::Control] {
+            assert_eq!(key_for(place, &stroke("a", Modifiers::default())), None);
+            assert_eq!(key_for(place, &stroke("a", shift)), None);
+            assert_eq!(
+                key_for(place, &stroke("backspace", Modifiers::default())),
+                None
+            );
+        }
     }
 
     #[test]

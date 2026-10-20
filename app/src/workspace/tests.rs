@@ -46325,6 +46325,130 @@ mod keyboard_settings {
         the_ring(scene).contains_point(page_line(scene, "Choose another").0)
     }
 
+    /// Whether the search box is outlined in the accent, which is how a field
+    /// with the keyboard is drawn.
+    fn box_is_lit(scene: &Scene) -> bool {
+        let field = settings_field_boxes(scene)[0];
+        visible_rects(scene).any(|(rect, bounds)| {
+            bounds == field && rect.border.color == Fill::Solid(theme().accent)
+        })
+    }
+
+    /// Presses a key without drawing a frame after it, as a key that comes
+    /// before the window has redrawn does.
+    fn quick(harness: &mut Harness, key: &str) {
+        harness.press(key, Modifiers::default(), "");
+    }
+
+    #[test]
+    fn two_presses_before_a_frame_do_not_undo_each_other() {
+        let mut harness = searched("bring the tabs back");
+        if harness.general().restore_session {
+            harness.dispatch_workspace_action(SettingsAction::ToggleRestoreSession.into());
+        }
+        key(&mut harness, "down");
+        assert!(!harness.general().restore_session);
+
+        // Two Rights in one frame: on, and on.
+        quick(&mut harness, "right");
+        quick(&mut harness, "right");
+        harness.frame();
+        assert!(
+            harness.general().restore_session,
+            "the second Right turned it back off"
+        );
+        // And once drawn, the keys read the page as it is now.
+        key(&mut harness, "left");
+        assert!(!harness.general().restore_session);
+    }
+
+    #[test]
+    fn keys_before_a_frame_act_on_the_page_that_is_coming_not_the_one_that_was() {
+        let mut harness = Harness::new(1);
+        let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+        let themes = Scratch::new();
+        harness.set_themes_directory(themes.path().to_owned());
+        harness.open_settings_page();
+        key(&mut harness, "tab");
+        assert_eq!(place(&harness), Place::Rail);
+
+        // Down to Shell, into it, and Enter, all before a frame: the Enter
+        // must not press Appearance's theme row, which the last frame drew.
+        quick(&mut harness, "down");
+        quick(&mut harness, "tab");
+        quick(&mut harness, "enter");
+        harness.frame();
+        assert_eq!(harness.settings_section(), "Shell");
+        assert!(
+            !harness.is_theme_panel_open(),
+            "Enter pressed a control of the page that went"
+        );
+        assert_eq!(place(&harness), Place::Control);
+        assert_eq!(
+            rings(&harness.frame()).len(),
+            1,
+            "the keyboard is on Shell's first control"
+        );
+    }
+
+    #[test]
+    fn two_downs_on_the_rail_before_a_frame_go_two_pages() {
+        let mut harness = settings();
+        key(&mut harness, "tab");
+        quick(&mut harness, "down");
+        quick(&mut harness, "down");
+        harness.frame();
+        assert_eq!(harness.settings_section(), "Notifications");
+    }
+
+    #[test]
+    fn a_shifted_letter_typed_on_a_control_reaches_the_box_as_typed() {
+        let mut harness = searched("show");
+        key(&mut harness, "down");
+        harness.press("n", shift(), "N");
+        // Before a frame: a query that finds nothing hands the keyboard back
+        // to the box on its own, after the frame that shows it.
+        assert_eq!(place(&harness), Place::Search);
+        assert_eq!(harness.search_text(), "showN");
+        assert!(box_is_lit(&harness.frame()));
+    }
+
+    #[test]
+    fn a_word_an_input_method_composes_on_a_control_lands_in_the_box() {
+        let mut harness = searched("show");
+        key(&mut harness, "down");
+        harness.dispatch(Event::Ime(crookui_core::event::Ime::Commit(
+            "\u{e9}".to_owned(),
+        )));
+        assert_eq!(place(&harness), Place::Search);
+        assert_eq!(harness.search_text(), "show\u{e9}");
+    }
+
+    #[test]
+    fn the_ring_goes_while_the_themes_panel_has_the_keyboard() {
+        let mut harness = Harness::new(1);
+        let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+        let themes = Scratch::new();
+        harness.set_themes_directory(themes.path().to_owned());
+        harness.open_settings_page();
+        key(&mut harness, "tab");
+        key(&mut harness, "tab");
+        assert!(ring_is_on_theme_row(&harness.frame()));
+
+        key(&mut harness, "enter");
+        assert!(harness.is_theme_panel_open());
+        assert!(
+            rings(&harness.frame()).is_empty(),
+            "a ring on a page without the keyboard"
+        );
+
+        harness.close_theme_panel();
+        assert!(
+            ring_is_on_theme_row(&harness.frame()),
+            "the ring did not come back"
+        );
+    }
+
     #[test]
     fn tab_walks_from_the_box_to_the_rail_to_the_controls_and_shift_tab_walks_back() {
         let mut harness = settings();
@@ -46405,21 +46529,21 @@ mod keyboard_settings {
 
         key(&mut harness, "down");
         let scene = harness.frame();
+        assert!(
+            box_is_lit(&settings().frame()),
+            "the box is lit while it has the keyboard"
+        );
         assert!(ring_is_on(&scene, "Bring the tabs back"));
         assert_eq!(
             page_line(&scene, "Bring the tabs back").0,
             before,
             "the ring moved the row it is drawn on"
         );
-        // The box gave the keyboard up: no caret beside the ring.
+        // The box is drawn as one without the keys: no accent outline beside
+        // the ring.
         assert!(
-            harness.workspace.read(&harness.app, |workspace, _| {
-                !workspace
-                    .field(crate::plugins::settings::SETTINGS_SECTION, "search")
-                    .1
-                    .has_keys()
-            }),
-            "the box kept the keyboard"
+            !box_is_lit(&scene),
+            "the box still looks like it has the keyboard"
         );
 
         key(&mut harness, "space");

@@ -285,6 +285,7 @@ pub(crate) fn render(
         .collect();
 
     let showing = showing(selected, &counts, &query);
+    state.focus.set_holds_keys(workspace.settings_hold_keys());
     let body = host.build_settings_page(showing, workspace, app);
     *state.rail.borrow_mut() = (
         pages
@@ -390,10 +391,15 @@ fn rail(
         SEARCH_PLACEHOLDER,
     )
     .with_icon(Lucide::Search)
-    .with_window_focused(workspace.is_window_focused())
+    // Drawn as a box without the keys while the ring is on the rail or a
+    // control, though it keeps them for text: see `focus::key_for`.
+    .with_window_focused(
+        workspace.is_window_focused() && state.focus.place() == focus::Place::Search,
+    )
     .with_focus(WorkspaceAction::Settings(SettingsAction::FocusField(Some(
         field,
     ))))
+    .with_edit(WorkspaceAction::Settings(SettingsAction::SearchEdited))
     .finish();
 
     section::sidebar(
@@ -451,7 +457,7 @@ fn rail_row(
     let settings = workspace.settings_page();
     let state = settings.control(keyed("page", id));
     // The rail is one stop, and the ring is around the page it is showing.
-    let lit = selected && settings.focus.place() == focus::Place::Rail;
+    let lit = selected && settings.focus.rail_is_lit();
     // Warp's `Features (3)`: the count is part of the label rather than a
     // badge beside it, which is what keeps a rail of counted and uncounted
     // rows from having two different shapes.

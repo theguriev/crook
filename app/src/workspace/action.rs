@@ -900,6 +900,9 @@ pub enum SettingsAction {
     /// controls the last frame drew; see
     /// [`settings_page::focus`](crate::workspace::settings_page::focus).
     Key(crate::workspace::settings_page::focus::Key),
+    /// The settings' search box was edited: typed into from wherever the
+    /// keyboard was on the page, which puts it back in the box.
+    SearchEdited,
     /// Put every tab option back to the value a fresh install opens with.
     ResetTabOptions,
     /// Set the terminal's type size, in logical pixels.

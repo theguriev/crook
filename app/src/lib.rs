@@ -1809,7 +1809,8 @@ OPTIONS:
     --search <TEXT>    Type TEXT into the settings page\'s search box, opening it;
                        with --section, into that section\'s box instead — the
                        Store\'s registry search, the Plugins page\'s
-    --focus-setting [N] Start with the keyboard on the settings page's Nth control
+    --focus-setting [N]
+                       Start with the keyboard on the settings page's Nth control
                        (0, the first, when N is left out), its focus ring drawn
     --record <COMMAND> Start with the Keyboard Shortcuts page recording a chord for
                        COMMAND, which is an action name like `crook/window/new-tab`

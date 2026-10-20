@@ -5116,12 +5116,6 @@ impl Workspace {
     /// clicked.
     fn field_with_keys(&self) -> Option<String> {
         let showing = self.section.clone()?;
-        // The settings' box lets go of the keyboard while it is on the rail
-        // or on a control: a caret blinking in the box beside a ring around a
-        // switch would be two answers to where typing goes.
-        if showing == SETTINGS_SECTION && self.page.focus.place() != Place::Search {
-            return None;
-        }
         let recorded = self.focused_field.borrow().get(&showing).cloned();
         recorded.or_else(|| {
             self.fields
@@ -11553,15 +11547,22 @@ impl Workspace {
     /// it, the Themes panel beside it is shut — it takes every key while it is
     /// up — and no comment is being typed in the Changes column.
     fn settings_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
-        if !self.is_settings_page_open()
-            || self.panel.open
-            || self.a_popup_is_open()
-            || self.changes_takes_keys()
-        {
+        if !self.settings_hold_keys() {
             return None;
         }
         let key = settings_page::focus::key_for(self.page.focus.place(), keystroke)?;
         Some(SettingsAction::Key(key).into())
+    }
+
+    /// Whether the settings page is what the keyboard reaches: it is showing,
+    /// nothing is up over it, the Themes panel beside it is shut — it takes
+    /// every key while it is up — and no comment is being typed in the
+    /// Changes column.
+    pub(super) fn settings_hold_keys(&self) -> bool {
+        self.is_settings_page_open()
+            && !self.panel.open
+            && !self.a_popup_is_open()
+            && !self.changes_takes_keys()
     }
 
     /// Does what a key the settings page took means, against the controls
@@ -11578,6 +11579,7 @@ impl Workspace {
                     return;
                 }
                 search.edit(crate::editor::Editor::clear);
+                focus.changed();
             }
             // Onto the rail only while it lists something: a query that
             // found nothing leaves no page for the ring to be around.
@@ -11604,8 +11606,17 @@ impl Workspace {
                 Place::Rail,
                 SettingsKey::Up | SettingsKey::Down | SettingsKey::Home | SettingsKey::End,
             ) => {
+                // From the page the rail has selected, which a step changes at
+                // once, rather than the one the last frame showed — a second
+                // Down before the page is drawn again goes one further. The
+                // shown page where the search has left the selected one out.
                 let (pages, showing) = self.page.rail();
-                let at = showing.and_then(|showing| pages.iter().position(|page| *page == showing));
+                let selected = self.page.selected(&self.host);
+                let at = selected
+                    .and_then(|selected| pages.iter().position(|page| *page == selected))
+                    .or_else(|| {
+                        showing.and_then(|showing| pages.iter().position(|page| *page == showing))
+                    });
                 let Some(last) = pages.len().checked_sub(1) else {
                     return;
                 };
@@ -11617,18 +11628,12 @@ impl Workspace {
                     (_, None) => 0,
                     _ => return,
                 };
-                if Some(pages[next]) != showing {
+                if Some(next) != at {
                     self.apply_settings(SettingsAction::Select(pages[next]), ctx);
                 }
                 return;
             }
             (Place::Rail, SettingsKey::Left) => return,
-
-            (_, SettingsKey::Type(character)) => {
-                focus.put(Place::Search);
-                let (_, search) = self.field(SETTINGS_SECTION, "search");
-                search.edit(|editor| editor.insert(&character.to_string()));
-            }
 
             (Place::Control, SettingsKey::Escape) => focus.put(Place::Search),
             (Place::Control, SettingsKey::Previous) if focus.is_on_first() => {
@@ -11651,6 +11656,7 @@ impl Workspace {
                 };
                 if let Some(action) = action {
                     self.handle_action(&action, ctx);
+                    focus.changed();
                 }
                 return;
             }
@@ -12901,6 +12907,14 @@ impl Workspace {
     fn apply_settings(&mut self, action: SettingsAction, ctx: &mut ViewContext<Self>) {
         match action {
             SettingsAction::Key(key) => self.settings_key(key, ctx),
+            SettingsAction::SearchEdited => {
+                // The query decides what the controls are.
+                self.page.focus.changed();
+                if self.page.focus.place() != Place::Search {
+                    self.page.focus.put(Place::Search);
+                    ctx.notify();
+                }
+            }
             SettingsAction::Select(page) => {
                 let key = self.host.settings_page_key(page).map(str::to_owned);
                 if self.page.page == key {
@@ -12913,8 +12927,8 @@ impl Workspace {
                 // the rail.
                 if self.page.focus.place() == Place::Control {
                     self.page.focus.put(Place::Search);
-                    self.sync_input_keys();
                 }
+                self.page.focus.changed();
                 // The row being recorded for is on the page being left, and a
                 // recorder that outlived it would go on holding the keyboard
                 // with nothing on screen to say so.
