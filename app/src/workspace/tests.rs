@@ -45837,6 +45837,118 @@ mod answering_card {
         }
 
         #[test]
+        fn an_answer_sent_from_the_card_for_a_pane_nobody_is_looking_at_leaves_it_waiting_for_nobody()
+         {
+            let (mut harness, away) = window();
+            at_its_dialog(&mut harness, away);
+            let before = stored(&harness, away);
+            hold(&mut harness, away, "rm -rf build");
+            assert_eq!(waiting(&harness), 1);
+            open(&mut harness);
+            settle(&mut harness);
+            press(&mut harness, "Allow once");
+
+            assert_eq!(
+                session(&harness, away, |session| session.asking.clone()),
+                None
+            );
+            assert_eq!(
+                session(&harness, away, |session| session.attention.clone()),
+                None
+            );
+            assert_eq!(shown(&harness, away), before);
+            assert_eq!(
+                waiting(&harness),
+                0,
+                "the question it waited on is answered"
+            );
+        }
+
+        #[test]
+        fn a_question_whose_hook_went_still_asks_for_the_look() {
+            // Its hook gone or its time out, the agent's own dialog may
+            // still be up in a tab nobody has looked at.
+            let (mut harness, away) = window();
+            at_its_dialog(&mut harness, away);
+            let held = hold(&mut harness, away, "rm -rf build");
+            harness.workspace_update(|workspace, ctx| {
+                workspace.asks_mut().end(held.id, Cause::HookGone);
+                workspace.asks_changed(ctx);
+            });
+
+            assert_eq!(
+                session(&harness, away, |session| session.asking.clone()),
+                None
+            );
+            assert_eq!(
+                session(&harness, away, |session| session.attention.clone()),
+                Some(Attention::Asked)
+            );
+            assert_eq!(waiting(&harness), 1);
+        }
+
+        /// A window of two tabs whose notifications go to a list, with a
+        /// question held in the tab not in front while the window was, and
+        /// the person then gone to another application.
+        fn asked_then_left() -> (Harness, PaneId, Posted) {
+            let (mut harness, away) = window();
+            let posted = Posted::default();
+            let notifier = Rc::new(posted.clone());
+            harness.workspace_update(|workspace, ctx| {
+                workspace.set_notifier(notifier);
+                workspace.rename_pane(away, Some("crook tests".to_owned()), ctx);
+            });
+            at_its_dialog(&mut harness, away);
+            hold(&mut harness, away, "rm -rf build");
+            harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+            assert!(posted.0.borrow().is_empty(), "the window was in front");
+            (harness, away, posted)
+        }
+
+        #[test]
+        fn a_failure_while_a_question_is_up_posts_the_failure() {
+            let (mut harness, away, posted) = asked_then_left();
+            harness.dispatch_workspace_action(WorkspaceAction::Settings(
+                SettingsAction::ToggleNotification(crate::notify::Occasion::Failed),
+            ));
+
+            report(
+                &mut harness,
+                away,
+                AgentStatus::Failed,
+                Some("You've hit your limit"),
+            );
+
+            assert_eq!(
+                session(&harness, away, |session| session.asking.clone()),
+                None
+            );
+            assert_eq!(
+                posted.0.borrow().clone(),
+                vec![Notice {
+                    title: "Crook — crook tests".to_owned(),
+                    body: "You've hit your limit".to_owned(),
+                }]
+            );
+        }
+
+        #[test]
+        fn the_notification_six_seconds_later_is_no_turn_and_posts_nothing() {
+            // Not the pane's quiet keeping it back: the window was in front
+            // when the question came, so nothing has been posted yet.
+            let (mut harness, away, posted) = asked_then_left();
+
+            report(
+                &mut harness,
+                away,
+                AgentStatus::NeedsInput,
+                Some("Claude needs your permission"),
+            );
+
+            assert!(posted.0.borrow().is_empty(), "{:?}", posted.0.borrow());
+        }
+
+        #[test]
         fn the_session_file_keeps_no_ask() {
             const MARKER: &str = "crook-marker-91c3e0";
             let (mut harness, away) = window();

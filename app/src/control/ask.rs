@@ -396,8 +396,12 @@ impl Ask {
     /// Nothing would take the amber back until the tool had run. Nor one
     /// this window cannot answer: that is some process that named the
     /// pane's terminal, and it does not get to make a row amber.
+    ///
+    /// And only Claude Code's: the title that ends it is Claude Code's
+    /// glyph, measured on Claude Code. Another agent's question waits for
+    /// its own measured cue before its row turns at once.
     pub fn shows_at_once(&self) -> bool {
-        self.cannot_answer.is_none() && self.inside.is_none()
+        self.agent == AskingAgent::Claude && self.cannot_answer.is_none() && self.inside.is_none()
     }
 }
 

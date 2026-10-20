@@ -338,6 +338,8 @@ pub enum StatusSource {
 /// that a question is open.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Asking {
+    /// Which question it is, for how it ended once it has.
+    pub id: crate::control::ask::AskId,
     /// What the agent calls itself: `Claude Code`.
     pub agent: &'static str,
     /// The agent's name for the tool it asks to use: `Bash`.

@@ -32,7 +32,7 @@ use crookui_core::geometry::{RectF, vec2f};
 use crookui_core::prelude::*;
 
 use crate::clipboard::Clipboard;
-use crate::control::ask::{Asks, Cause};
+use crate::control::ask::{Asks, Cause, How};
 use crate::control::watch::{self, Watches};
 use crate::editor::Selection;
 use crate::file_drop;
@@ -3280,6 +3280,7 @@ impl Workspace {
             .map(|(_, pane)| pane.id())
             .map(|pane| {
                 let asking = self.asks.shown_at_once_in(pane).map(|ask| Asking {
+                    id: ask.id,
                     agent: ask.agent.name(),
                     tool: ask.tool(),
                     summary: ask.summary.clone(),
@@ -3299,7 +3300,28 @@ impl Workspace {
             };
             let session = open.session_mut();
             let begun = session.asking.is_none() && asking.is_some();
+            let ended = match (&session.asking, &asking) {
+                (Some(before), None) => self.asks.outcome(before.id).map(|outcome| outcome.how),
+                _ => None,
+            };
             session.asking = asking;
+            // The look a question asked for is owed for as long as the
+            // question is, and for as long as its dialog may still be up:
+            // after a hook gone, a time run out or answering turned off, it
+            // is, waiting in the agent's own tab. Answered, there or here,
+            // or its turn over, nothing is left to look at.
+            let over = matches!(
+                ended,
+                Some(
+                    How::Answered(_)
+                        | How::Ended(
+                            Cause::AtWorkAgain | Cause::AnsweredInAgent | Cause::TurnEnded
+                        )
+                )
+            );
+            if over && session.attention == Some(Attention::Asked) {
+                session.attention = None;
+            }
             // A notification's words are what the row shows until it is
             // read, as for the bell.
             if begun
@@ -9907,6 +9929,12 @@ impl Workspace {
                 session.attention = Some(Attention::StatusChange);
             }
         });
+        // The questions the report ends go before the desktop is told: a
+        // failure said while one was up is the failure's notice, and the
+        // row's question, mirrored still, would have stood in its place.
+        // `was` is from before, when the question was the row's.
+        self.end_asks_a_report_ends(pane, status, source);
+        self.mirror_asks(ctx);
         if !between(source) {
             self.tell_the_desktop(pane, was, ctx);
         }
@@ -9914,8 +9942,6 @@ impl Workspace {
         if status == AgentStatus::Running {
             self.start_breathing(ctx);
         }
-        self.end_asks_a_report_ends(pane, status, source);
-        self.mirror_asks(ctx);
         self.tell_watches_the_asks();
         // The card says the question may have been answered in the agent's
         // tab, a line that pushes its buttons down: they wait again, so a
@@ -10196,9 +10222,17 @@ impl Workspace {
     /// question the hooks ask after it — the notification six seconds after
     /// a permission dialog's `✳` — would otherwise be no change from it, and
     /// the notice that names the tool would never be posted.
+    ///
+    /// Needs input, though, while the pane's hook is asking
+    /// ([`AgentSession::asking`]): the row has been amber since the hook
+    /// asked, and the notice for that was its own. The notification six
+    /// seconds later is the same question, and no turn.
     fn shown_before_a_report(&self, pane: PaneId) -> Option<AgentStatus> {
         let open = self.tabs.pane(pane)?;
         let session = open.session();
+        if session.asking.is_some() {
+            return Some(AgentStatus::NeedsInput);
+        }
         if matches!(session.source, StatusSource::TitleBetweenHooks(_))
             && session.status == AgentStatus::Idle
         {

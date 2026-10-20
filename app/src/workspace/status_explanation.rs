@@ -618,6 +618,7 @@ mod tests {
         let mut session = AgentSession::new("agent 1");
         session.status = AgentStatus::Running;
         session.asking = Some(crate::tab::Asking {
+            id: ask.id,
             agent: "Claude Code",
             tool: "Bash",
             summary: ask.summary.clone(),
