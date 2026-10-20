@@ -5,18 +5,29 @@
 //! move until a tab can hold more than one thing to show — both modes would
 //! draw the same bar, and the control would be a lie.
 //!
-//! What is here is Warp's `PaneBranch` (`app/src/pane_group/tree.rs:132`) with
-//! the nesting taken out: a flat ordered vector along one axis, plus Warp's
-//! `focus_state.focused_pane_id` and its `pane_history` MRU. That is faithful
-//! rather than a simplification, because Warp's own same-axis fast path
-//! (`PaneBranch::split`, tree.rs:927) already collapses the common case to
-//! exactly this — three "split right"s in Warp produce one horizontal branch
-//! with three children, not a right-leaning tree — and every list-shaped
-//! reader of the tree (`pane_ids()`, the vertical tab rows, prev/next
-//! navigation) only ever sees the flattened order anyway.
+//! A tab's panes are a tree, Warp's `PaneNode` (`app/src/pane_group/tree.rs`)
+//! and tmux's layout cells: a [`Node`] is one pane, or a [`Branch`] dividing
+//! its cell among two or more children along one axis. That is what lets a
+//! tab hold a 2×2, or an agent beside two watchers stacked on top of each
+//! other — neither of which a single row or a single column can draw.
 //!
-//! What a flat vector cannot express is the nested case, and
-//! [`PaneGroup::split`] says exactly what it does instead of pretending.
+//! Two rules keep the tree in one shape for each arrangement, so that no
+//! reader has to tell apart two trees that draw the same thing:
+//!
+//! - **No branch has one child.** A close that leaves a branch with one child
+//!   puts the child in its place, with the branch's share of the parent.
+//! - **No branch has a child dividing along its own axis.** Such a child is
+//!   folded into its parent, its children taking its share between them in
+//!   the proportions they had. So three "split right"s make one row of four
+//!   rather than a right-leaning tree, which is Warp's same-axis fast path
+//!   (`PaneBranch::split`) and tmux's, and is what makes a divider dragged in
+//!   a row of four move only the two panes beside it.
+//!
+//! Every list-shaped reader — the panel's rows, the session file's pane list,
+//! the shells, cycling with `focus-next-pane` — sees the leaves in render
+//! order, depth first: left to right in a row, top to bottom in a column.
+//! What only the tree can answer is spatial, and [`PaneGroup::neighbour`]
+//! answers it from the laid-out cells rather than from that order.
 //!
 //! The one thing here Warp does not have is tmux's zoom: one bool that gives
 //! the focused pane the whole body and hides the rest without touching the
@@ -52,11 +63,10 @@ impl PaneId {
     }
 }
 
-/// Which way a group's panes are laid out. Warp's `SplitDirection`.
+/// Which way a branch divides its cell. Warp's `SplitDirection`.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum SplitAxis {
-    /// Side by side, in a row. What a group that has never been split reports,
-    /// and what "split right" makes of it.
+    /// Side by side, in a row. What "split right" makes.
     #[default]
     Horizontal,
     /// Stacked, in a column.
@@ -90,6 +100,16 @@ impl Direction {
     fn is_leading(self) -> bool {
         matches!(self, Self::Left | Self::Up)
     }
+
+    /// The direction along `axis` that goes before, or after.
+    fn along(axis: SplitAxis, leading: bool) -> Self {
+        match (axis, leading) {
+            (SplitAxis::Horizontal, true) => Self::Left,
+            (SplitAxis::Horizontal, false) => Self::Right,
+            (SplitAxis::Vertical, true) => Self::Up,
+            (SplitAxis::Vertical, false) => Self::Down,
+        }
+    }
 }
 
 /// One pane: an identity, and what it shows.
@@ -102,7 +122,7 @@ impl Direction {
 pub struct Pane {
     id: PaneId,
     session: AgentSession,
-    /// How large a share of the split this pane takes.
+    /// How large a share of the branch it is in this pane takes.
     ///
     /// One for a pane nobody has resized, which is what makes a fresh split an
     /// even one. A divider dragged between two panes moves weight from one to
@@ -144,7 +164,7 @@ impl Pane {
         }
     }
 
-    /// How large a share of the split this pane takes.
+    /// How large a share of the branch it is in this pane takes.
     pub fn flex(&self) -> f32 {
         self.flex
     }
@@ -192,6 +212,482 @@ impl Pane {
     }
 }
 
+/// One cell of a tab's split: a pane filling it, or a branch dividing it.
+///
+/// The variants are public so the body and the session file can walk the
+/// tree, and nothing outside this module can build or change one: every
+/// change goes through [`PaneGroup`], which is what keeps the two rules in
+/// the module docs true.
+#[derive(Debug)]
+pub enum Node {
+    /// A pane, filling the cell.
+    ///
+    /// Boxed because a pane is many times the size of a branch, and every
+    /// branch would otherwise be paying for one.
+    Leaf(Box<Pane>),
+    /// Two or more cells side by side, or stacked.
+    Branch(Branch),
+}
+
+/// Two or more cells dividing one along an axis.
+#[derive(Debug)]
+pub struct Branch {
+    axis: SplitAxis,
+    /// The branch's own share of the branch it is in, the way
+    /// [`Pane::flex`] is a pane's.
+    flex: f32,
+    /// In render order; never fewer than two, and none of them a branch
+    /// along `axis`.
+    children: Vec<Node>,
+}
+
+impl Branch {
+    /// Which way the children are divided.
+    pub fn axis(&self) -> SplitAxis {
+        self.axis
+    }
+
+    /// The cells, in render order.
+    pub fn children(&self) -> &[Node] {
+        &self.children
+    }
+}
+
+impl Node {
+    /// What a cell is turned into for the moment it is taken out of the tree
+    /// and put back. Never left anywhere a reader can see it.
+    fn placeholder() -> Self {
+        Self::Branch(Branch {
+            axis: SplitAxis::default(),
+            flex: DEFAULT_FLEX,
+            children: Vec::new(),
+        })
+    }
+
+    /// This cell's share of the branch it is in.
+    pub fn flex(&self) -> f32 {
+        match self {
+            Self::Leaf(pane) => pane.flex,
+            Self::Branch(branch) => branch.flex,
+        }
+    }
+
+    fn set_flex(&mut self, flex: f32) {
+        match self {
+            Self::Leaf(pane) => pane.flex = flex,
+            Self::Branch(branch) => branch.flex = flex,
+        }
+    }
+
+    /// The first pane in the cell, in render order.
+    ///
+    /// What names a divider: the two cells either side of one start with two
+    /// different panes, and no other pair of adjacent cells anywhere in the
+    /// tree starts with the same two — a cell's first pane is the first pane
+    /// of every cell that starts it, and only one of those has a cell before
+    /// it in a branch. See [`PaneGroup::resize`].
+    pub fn first_pane(&self) -> PaneId {
+        match self {
+            Self::Leaf(pane) => pane.id(),
+            Self::Branch(branch) => branch.children.first().map_or(PaneId(0), Node::first_pane),
+        }
+    }
+
+    /// The last pane in the cell, in render order.
+    fn last_pane(&self) -> PaneId {
+        match self {
+            Self::Leaf(pane) => pane.id(),
+            Self::Branch(branch) => branch.children.last().map_or(PaneId(0), Node::last_pane),
+        }
+    }
+
+    fn collect<'a>(&'a self, into: &mut Vec<&'a Pane>) {
+        match self {
+            Self::Leaf(pane) => into.push(pane),
+            Self::Branch(branch) => {
+                for child in &branch.children {
+                    child.collect(into);
+                }
+            }
+        }
+    }
+
+    fn into_panes(self, into: &mut Vec<Pane>) {
+        match self {
+            Self::Leaf(pane) => into.push(*pane),
+            Self::Branch(branch) => {
+                for child in branch.children {
+                    child.into_panes(into);
+                }
+            }
+        }
+    }
+
+    fn find(&self, id: PaneId) -> Option<&Pane> {
+        match self {
+            Self::Leaf(pane) => (pane.id() == id).then_some(&**pane),
+            Self::Branch(branch) => branch.children.iter().find_map(|child| child.find(id)),
+        }
+    }
+
+    fn find_mut(&mut self, id: PaneId) -> Option<&mut Pane> {
+        match self {
+            Self::Leaf(pane) => (pane.id() == id).then_some(&mut **pane),
+            Self::Branch(branch) => branch
+                .children
+                .iter_mut()
+                .find_map(|child| child.find_mut(id)),
+        }
+    }
+
+    /// The child indices from this cell down to the pane, or `None` when the
+    /// pane is not in it.
+    fn path_to(&self, id: PaneId) -> Option<Vec<usize>> {
+        match self {
+            Self::Leaf(pane) => (pane.id() == id).then(Vec::new),
+            Self::Branch(branch) => branch.children.iter().enumerate().find_map(|(at, child)| {
+                let mut path = child.path_to(id)?;
+                path.insert(0, at);
+                Some(path)
+            }),
+        }
+    }
+
+    fn at(&self, path: &[usize]) -> &Node {
+        match (path.split_first(), self) {
+            (Some((&at, rest)), Self::Branch(branch)) if at < branch.children.len() => {
+                branch.children[at].at(rest)
+            }
+            (_, node) => node,
+        }
+    }
+
+    fn at_mut(&mut self, path: &[usize]) -> &mut Node {
+        let Some((&at, rest)) = path.split_first() else {
+            return self;
+        };
+        if !matches!(self, Self::Branch(branch) if at < branch.children.len()) {
+            return self;
+        }
+        match self {
+            Self::Branch(branch) => branch.children[at].at_mut(rest),
+            node => node,
+        }
+    }
+
+    /// The branch holding the divider between a cell starting with `before`
+    /// and the next one starting with `after`, and the first cell's index.
+    fn divider_mut(&mut self, before: PaneId, after: PaneId) -> Option<(&mut Branch, usize)> {
+        let Self::Branch(branch) = self else {
+            return None;
+        };
+        if let Some(at) = branch
+            .children
+            .windows(2)
+            .position(|pair| pair[0].first_pane() == before && pair[1].first_pane() == after)
+        {
+            return Some((branch, at));
+        }
+        branch
+            .children
+            .iter_mut()
+            .find_map(|child| child.divider_mut(before, after))
+    }
+
+    fn is_even(&self) -> bool {
+        (self.flex() - DEFAULT_FLEX).abs() < f32::EPSILON
+            && match self {
+                Self::Leaf(_) => true,
+                Self::Branch(branch) => branch.children.iter().all(Node::is_even),
+            }
+    }
+
+    fn even_out(&mut self) {
+        self.set_flex(DEFAULT_FLEX);
+        if let Self::Branch(branch) = self {
+            for child in &mut branch.children {
+                child.even_out();
+            }
+        }
+    }
+
+    fn layout(&self) -> Layout {
+        match self {
+            Self::Leaf(pane) => Layout::Pane(pane.id()),
+            Self::Branch(branch) => Layout::Split {
+                axis: branch.axis,
+                flex: branch.flex,
+                children: branch.children.iter().map(Node::layout).collect(),
+            },
+        }
+    }
+
+    /// Lays the cell out over `cell`, writing down where every pane in it
+    /// lands.
+    ///
+    /// Each boundary is computed once and handed to both cells beside it, so
+    /// two neighbours meet at exactly the same number — which is what lets
+    /// [`Cell::borders`] ask for touching edges rather than nearly touching
+    /// ones.
+    fn lay_out(&self, cell: Cell, into: &mut Vec<(PaneId, Cell)>) {
+        let branch = match self {
+            Self::Leaf(pane) => {
+                into.push((pane.id(), cell));
+                return;
+            }
+            Self::Branch(branch) => branch,
+        };
+        let total: f32 = branch.children.iter().map(Node::flex).sum();
+        let (start, end) = cell.span(branch.axis);
+        let mut taken = 0.;
+        let mut from = start;
+        for (at, child) in branch.children.iter().enumerate() {
+            taken += child.flex();
+            let to = if at + 1 == branch.children.len() || total <= 0. {
+                end
+            } else {
+                start + (end - start) * taken / total
+            };
+            child.lay_out(cell.with_span(branch.axis, from, to), into);
+            from = to;
+        }
+    }
+}
+
+/// Puts the tree back into the module's one shape for its arrangement — see
+/// the module docs — or `None` for a cell with no panes left in it.
+///
+/// Bottom up, so a child is already in shape when its parent looks at it: a
+/// branch left with one child hands that child its own share, and a child
+/// dividing along its parent's axis is folded in, its children scaled to
+/// take exactly the share it had.
+///
+/// Except at the root, whose share is of nothing: the cell left there keeps
+/// its own, as a pane left alone in its tab always kept the share it had.
+fn normalized(node: Node, root: bool) -> Option<Node> {
+    let Branch {
+        axis,
+        flex,
+        children,
+    } = match node {
+        Node::Leaf(pane) => return Some(Node::Leaf(pane)),
+        Node::Branch(branch) => branch,
+    };
+
+    let mut kept = Vec::with_capacity(children.len());
+    for child in children
+        .into_iter()
+        .filter_map(|child| normalized(child, false))
+    {
+        match child {
+            Node::Branch(inner) if inner.axis == axis => {
+                let total: f32 = inner.children.iter().map(Node::flex).sum();
+                let scale = if total > 0. { inner.flex / total } else { 1. };
+                for mut grandchild in inner.children {
+                    grandchild.set_flex(grandchild.flex() * scale);
+                    kept.push(grandchild);
+                }
+            }
+            child => kept.push(child),
+        }
+    }
+
+    if kept.len() > 1 {
+        return Some(Node::Branch(Branch {
+            axis,
+            flex,
+            children: kept,
+        }));
+    }
+    kept.pop().map(|mut only| {
+        if !root {
+            only.set_flex(flex);
+        }
+        only
+    })
+}
+
+/// A share read out of a file, or out of a layout kept since: anything a flex
+/// layout could not give room to becomes the default. See [`Pane::set_flex`].
+fn sane_flex(flex: f32) -> f32 {
+    if flex.is_finite() && flex > 0. {
+        flex
+    } else {
+        DEFAULT_FLEX
+    }
+}
+
+/// Builds the cells `layout` describes out of `panes`, taking each pane it
+/// names out of the list. A pane it names that is not there, or names twice,
+/// is left out; the caller normalises what is left.
+fn assemble(layout: &Layout, panes: &mut Vec<Pane>) -> Option<Node> {
+    match layout {
+        Layout::Pane(id) => {
+            let at = panes.iter().position(|pane| pane.id() == *id)?;
+            Some(Node::Leaf(Box::new(panes.remove(at))))
+        }
+        Layout::Split {
+            axis,
+            flex,
+            children,
+        } => Some(Node::Branch(Branch {
+            axis: *axis,
+            flex: sane_flex(*flex),
+            children: children
+                .iter()
+                .filter_map(|child| assemble(child, panes))
+                .collect(),
+        })),
+    }
+}
+
+/// Where a pane sits in a unit square that stands for the body.
+///
+/// A unit square rather than pixels, because whether one pane is beside
+/// another does not depend on how many pixels either got — only on where the
+/// shares put their edges.
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct Cell {
+    x: (f32, f32),
+    y: (f32, f32),
+}
+
+impl Cell {
+    const WHOLE: Self = Self {
+        x: (0., 1.),
+        y: (0., 1.),
+    };
+
+    fn span(self, axis: SplitAxis) -> (f32, f32) {
+        match axis {
+            SplitAxis::Horizontal => self.x,
+            SplitAxis::Vertical => self.y,
+        }
+    }
+
+    fn with_span(self, axis: SplitAxis, from: f32, to: f32) -> Self {
+        match axis {
+            SplitAxis::Horizontal => Self {
+                x: (from, to),
+                ..self
+            },
+            SplitAxis::Vertical => Self {
+                y: (from, to),
+                ..self
+            },
+        }
+    }
+
+    /// Whether `other` lies directly beyond this cell's edge in `direction`:
+    /// its near edge is this one's far edge, and the two overlap across it.
+    ///
+    /// Touching at a corner is not bordering. In a 2×2 the pane diagonally
+    /// opposite shares one point with this one, and "right" never means
+    /// "right and down".
+    fn borders(self, other: Self, direction: Direction) -> bool {
+        const TOUCH: f32 = 1e-4;
+        let (edge, near, across, theirs) = match direction {
+            Direction::Right => (self.x.1, other.x.0, self.y, other.y),
+            Direction::Left => (self.x.0, other.x.1, self.y, other.y),
+            Direction::Down => (self.y.1, other.y.0, self.x, other.x),
+            Direction::Up => (self.y.0, other.y.1, self.x, other.x),
+        };
+        let overlap = across.1.min(theirs.1) - across.0.max(theirs.0);
+        (edge - near).abs() < TOUCH && overlap > TOUCH
+    }
+}
+
+/// The shape of a tab's split, by pane identity, with no panes in it.
+///
+/// What a session file is turned into on the way back in, and what a closed
+/// pane keeps of the split it was closed out of — see [`PanePlace`]. A leaf's
+/// share is the pane's own, so only a branch carries one here.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Layout {
+    /// The cell this pane fills.
+    Pane(PaneId),
+    /// Cells divided along `axis`, with this share of the branch they are in.
+    Split {
+        /// Which way the children are divided.
+        axis: SplitAxis,
+        /// The branch's share of the one it is in.
+        flex: f32,
+        /// The cells, in render order.
+        children: Vec<Layout>,
+    },
+}
+
+impl Layout {
+    fn contains(&self, id: PaneId) -> bool {
+        match self {
+            Self::Pane(pane) => *pane == id,
+            Self::Split { children, .. } => children.iter().any(|child| child.contains(id)),
+        }
+    }
+
+    /// The same shape, with one pane standing where another was.
+    fn renamed(&self, from: PaneId, to: PaneId) -> Self {
+        match self {
+            Self::Pane(pane) => Self::Pane(if *pane == from { to } else { *pane }),
+            Self::Split {
+                axis,
+                flex,
+                children,
+            } => Self::Split {
+                axis: *axis,
+                flex: *flex,
+                children: children
+                    .iter()
+                    .map(|child| child.renamed(from, to))
+                    .collect(),
+            },
+        }
+    }
+}
+
+/// Where a pane was in its tab's split, for putting it back there.
+///
+/// The whole split as it was, rather than an index or a neighbour, because
+/// in a tree "where it was" is a position in every branch above it: a pane
+/// closed out of the corner of a 2×2 collapses its column into one pane, and
+/// only the shape from before says the column was there to be split again.
+/// Restored whole — every share as it was — when no pane has been opened in
+/// the tab since; otherwise the split has moved on and the pane goes back
+/// beside the neighbour it had, see [`PaneGroup::reopen`].
+#[derive(Clone, Debug)]
+pub struct PanePlace {
+    layout: Layout,
+    pane: PaneId,
+    /// Every pane's share at the moment of the close. A close moves shares —
+    /// the branch it collapsed hands its share to the cell left in it — so
+    /// the shape alone does not put them back.
+    flexes: Vec<(PaneId, f32)>,
+    /// The pane it was beside in its branch, and which side of it it was on.
+    beside: Option<(PaneId, Direction)>,
+}
+
+impl PanePlace {
+    /// Hands a pane's new id to this place, for a pane that was closed after
+    /// this one and has come back first under a new one.
+    ///
+    /// Without it the pane coming back is a stranger to the split this place
+    /// kept, and [`PaneGroup::reopen`] takes it for a pane opened since and
+    /// gives up the shape it could have restored whole.
+    pub(crate) fn renamed(&mut self, was: PaneId, is: PaneId) {
+        self.layout = self.layout.renamed(was, is);
+        for (pane, _) in &mut self.flexes {
+            if *pane == was {
+                *pane = is;
+            }
+        }
+        if let Some((anchor, _)) = &mut self.beside
+            && *anchor == was
+        {
+            *anchor = is;
+        }
+    }
+}
+
 /// What a change did to a group, so the tab layer knows whether it survived.
 ///
 /// The first two variants carry the same "did anything move" question
@@ -209,22 +705,20 @@ pub enum PaneEffect {
     GroupEmptied,
 }
 
-/// The panes of one tab, in order, with one of them focused.
+/// The panes of one tab, as a tree of splits, with one of them focused.
 ///
-/// The vector is private and only [`Self::split`] and [`Self::close`] change
-/// it, which is what keeps `focused` resident without a second invariant kept
+/// The tree is private and only this type changes it, which is what keeps
+/// `focused` resident and the tree in shape without a second invariant kept
 /// somewhere else.
 #[derive(Debug)]
 pub struct PaneGroup {
-    panes: Vec<Pane>,
-    /// Which way the panes are divided. Set by the first split and fixed after
-    /// it; see [`Self::split`].
-    axis: SplitAxis,
+    root: Node,
     /// The focused pane's *identity*, never its position — the same reason
     /// [`TabStrip`](super::TabStrip) stores an identity for the active tab.
     focused: PaneId,
     /// Most-recently-focused first. Warp's `pane_history`, and it is what
-    /// picks the successor when the focused pane is closed.
+    /// picks the successor when the focused pane is closed, and which of two
+    /// panes beside the focused one a direction goes to.
     mru: Vec<PaneId>,
     /// Whether the focused pane has the whole body to itself for now.
     ///
@@ -247,27 +741,75 @@ impl PaneGroup {
     fn of(pane: Pane) -> Self {
         let id = pane.id();
         Self {
-            panes: vec![pane],
-            axis: SplitAxis::default(),
+            root: Node::Leaf(Box::new(pane)),
             focused: id,
             mru: vec![id],
             zoomed: false,
         }
     }
 
-    /// How many panes there are. Never zero.
-    pub fn len(&self) -> usize {
-        self.panes.len()
+    /// The group `layout` describes, out of `panes`, or `None` for no panes.
+    ///
+    /// For a session file, which is a list of panes and a shape naming them.
+    /// The shape is checked rather than trusted, because it is a file: a pane
+    /// it names twice or not at all, or a branch left with nothing in it, is
+    /// mended the way a close would mend it, and a pane it leaves out goes
+    /// after the rest in a row rather than being lost.
+    ///
+    /// The last pane is focused and the order of use is the reverse of the
+    /// render order, which is exactly what splitting the panes off one by one
+    /// left behind — and what a file written before the tree was kept still
+    /// restores to.
+    pub(crate) fn from_layout(mut panes: Vec<Pane>, layout: &Layout) -> Option<Self> {
+        let placed = assemble(layout, &mut panes);
+        let root = match placed {
+            Some(placed) if panes.is_empty() => placed,
+            placed => {
+                let mut children: Vec<Node> = placed.into_iter().collect();
+                children.extend(panes.into_iter().map(|pane| Node::Leaf(Box::new(pane))));
+                Node::Branch(Branch {
+                    axis: SplitAxis::Horizontal,
+                    flex: DEFAULT_FLEX,
+                    children,
+                })
+            }
+        };
+        let root = normalized(root, true)?;
+
+        let mut leaves = Vec::new();
+        root.collect(&mut leaves);
+        let mut mru: Vec<PaneId> = leaves.iter().map(|pane| pane.id()).collect();
+        mru.reverse();
+        let focused = *mru.first()?;
+        Some(Self {
+            root,
+            focused,
+            mru,
+            zoomed: false,
+        })
     }
 
-    /// Every pane, in render order — left to right, or top to bottom.
+    /// Every pane, in render order.
+    fn panes(&self) -> Vec<&Pane> {
+        let mut panes = Vec::new();
+        self.root.collect(&mut panes);
+        panes
+    }
+
+    /// How many panes there are. Never zero.
+    pub fn len(&self) -> usize {
+        self.panes().len()
+    }
+
+    /// Every pane, in render order — depth first, so left to right in a row
+    /// and top to bottom in a column.
     ///
     /// Warp needs both `pane_ids()` and `visible_pane_ids()` because a pane
     /// can be hidden for five different reasons (a move, a job, a temporary
     /// replacement, an undoable close, a child agent). With one kind of pane
     /// and no undo the two lists are the same one, and this is it.
     pub fn iter(&self) -> impl Iterator<Item = &Pane> {
-        self.panes.iter()
+        self.panes().into_iter()
     }
 
     /// The panes the body draws, in render order: every one of them, or
@@ -278,8 +820,8 @@ impl PaneGroup {
     /// every pane, because a hidden pane is still open, still running and
     /// still the way back out of the zoom.
     pub fn visible(&self) -> impl Iterator<Item = &Pane> {
-        self.panes
-            .iter()
+        self.panes()
+            .into_iter()
             .filter(move |pane| !self.zoomed || pane.id() == self.focused)
     }
 
@@ -293,16 +835,46 @@ impl PaneGroup {
         self.zoomed
     }
 
+    /// The whole split, for the body to draw and the session file to keep.
+    pub fn root(&self) -> &Node {
+        &self.root
+    }
+
+    /// The shape of the split, with no panes in it.
+    #[cfg(test)]
+    pub fn layout(&self) -> Layout {
+        self.root.layout()
+    }
+
+    /// The shares of the outermost split's cells, or the one pane's own.
+    #[cfg(test)]
+    pub fn root_flexes(&self) -> Vec<f32> {
+        match &self.root {
+            Node::Leaf(pane) => vec![pane.flex],
+            Node::Branch(branch) => branch.children.iter().map(Node::flex).collect(),
+        }
+    }
+
+    /// Which way the outermost split divides the tab, or `None` for a tab of
+    /// one pane.
+    #[cfg(test)]
+    pub fn root_axis(&self) -> Option<SplitAxis> {
+        match &self.root {
+            Node::Leaf(_) => None,
+            Node::Branch(branch) => Some(branch.axis),
+        }
+    }
+
     /// The pane with this id, if it is still open.
     pub fn get(&self, id: PaneId) -> Option<&Pane> {
-        self.panes.iter().find(|pane| pane.id() == id)
+        self.root.find(id)
     }
 
     /// The pane with this id, for reporting agent progress into it.
     ///
     /// Crate-private for the same reason as [`Pane::session_mut`].
     pub(crate) fn get_mut(&mut self, id: PaneId) -> Option<&mut Pane> {
-        self.panes.iter_mut().find(|pane| pane.id() == id)
+        self.root.find_mut(id)
     }
 
     /// The focused pane.
@@ -327,12 +899,7 @@ impl PaneGroup {
 
     /// Where a pane sits in render order.
     pub fn index_of(&self, id: PaneId) -> Option<usize> {
-        self.panes.iter().position(|pane| pane.id() == id)
-    }
-
-    /// Which way the panes are divided.
-    pub fn axis(&self) -> SplitAxis {
-        self.axis
+        self.panes().iter().position(|pane| pane.id() == id)
     }
 
     /// Whether the tab is showing more than one pane.
@@ -343,7 +910,7 @@ impl PaneGroup {
     /// back to one pane has to be indistinguishable from one that never split,
     /// and deriving it is the only way that cannot come apart.
     pub fn is_split(&self) -> bool {
-        self.panes.len() > 1
+        matches!(self.root, Node::Branch(_))
     }
 
     /// Panes in most-recently-focused order, the focused one first.
@@ -352,33 +919,21 @@ impl PaneGroup {
         &self.mru
     }
 
-    /// Inserts a new pane named `title` beside the focused one, and focuses
-    /// it. Warp focuses the new pane on every split path a person can reach.
+    /// Splits the focused pane along `direction`'s axis, puts a new pane named
+    /// `title` on `direction`'s side of it, and focuses the new one. Warp
+    /// focuses the new pane on every split path a person can reach.
     ///
-    /// The first split is what decides the group's axis. After that the axis
-    /// is fixed, and a `direction` across it keeps only its before-or-after
-    /// sense: `Down` on a row inserts to the right of the focused pane rather
-    /// than below it. Warp would nest a perpendicular branch inside that one
-    /// cell and get a 2×2; a flat vector cannot represent that, and pretending
-    /// otherwise would be worse than saying so. The upgrade path, if nested
-    /// splits are ever wanted, is to grow this type into Warp's `PaneNode`
-    /// enum — this is its one-branch case, so nothing here is thrown away.
+    /// Always the *focused* pane, along the axis asked for: "split down" on
+    /// the right half of a row splits that half into two stacked panes and
+    /// leaves the left one alone. When the focused pane's branch already
+    /// divides along that axis, the new pane joins it beside the focused one
+    /// instead of nesting a branch of one more direction inside it — tmux's
+    /// and Warp's rule, and the one that makes three "split right"s a row of
+    /// four even panes rather than halves of halves.
     pub fn split(&mut self, direction: Direction, title: impl Into<String>) -> PaneEffect {
-        if !self.is_split() {
-            self.axis = direction.axis();
-        }
-
         let pane = Pane::new(title);
         let id = pane.id();
-        let at = match self.index_of(self.focused) {
-            Some(index) if direction.is_leading() => index,
-            Some(index) => index + 1,
-            // Unreachable: `repair` keeps the focused id resident. Appending
-            // beats dropping the pane on the floor.
-            None => self.panes.len(),
-        };
-
-        self.panes.insert(at, pane);
+        self.insert_beside(self.focused, direction, Node::Leaf(Box::new(pane)));
         // A zoom is of one arrangement, and this is a different one: the new
         // pane has to be seen to be used, and it is the one being focused.
         self.zoomed = false;
@@ -386,19 +941,117 @@ impl PaneGroup {
         PaneEffect::Changed
     }
 
-    /// Puts a closed pane back at `at` — clamped to the end — and focuses it.
-    ///
-    /// Where it was in the row, between the panes that were its neighbours.
-    /// A group left with one pane since takes `axis` back, the way the split
-    /// went when the pane was closed, because one pane says nothing about
-    /// which way that was; a group still split keeps its own, for the reason
-    /// [`Self::split`] gives.
-    pub(crate) fn reopen(&mut self, pane: Pane, at: usize, axis: SplitAxis) {
-        if !self.is_split() {
-            self.axis = axis;
+    /// Puts `node` on `direction`'s side of `anchor`: into the anchor's
+    /// branch when that divides the same way, or into a new branch that
+    /// takes the anchor's place and its share.
+    fn insert_beside(&mut self, anchor: PaneId, direction: Direction, node: Node) {
+        let axis = direction.axis();
+        let leading = direction.is_leading();
+        // Unreachable without one, since `repair` keeps the focused id
+        // resident and a kept neighbour is checked; beside the whole split
+        // beats dropping the pane on the floor.
+        let path = self.root.path_to(anchor).unwrap_or_default();
+
+        if let Some((&at, parent)) = path.split_last()
+            && let Node::Branch(branch) = self.root.at_mut(parent)
+            && branch.axis == axis
+        {
+            branch
+                .children
+                .insert(if leading { at } else { at + 1 }, node);
+            return;
         }
+
+        let cell = self.root.at_mut(&path);
+        let mut old = std::mem::replace(cell, Node::placeholder());
+        let flex = old.flex();
+        old.set_flex(DEFAULT_FLEX);
+        let children = if leading {
+            vec![node, old]
+        } else {
+            vec![old, node]
+        };
+        *cell = Node::Branch(Branch {
+            axis,
+            flex,
+            children,
+        });
+        // Only the unreachable fallback above can have nested a branch inside
+        // one along its own axis; this puts it back in shape if it did.
+        self.normalize();
+    }
+
+    /// Where a pane is in the split, for [`Self::reopen`] to put it back.
+    pub(crate) fn place_of(&self, id: PaneId) -> Option<PanePlace> {
+        let path = self.root.path_to(id)?;
+        let beside = path.split_last().and_then(|(&at, parent)| {
+            let Node::Branch(branch) = self.root.at(parent) else {
+                return None;
+            };
+            // The cell before it if there is one, which it went after; the
+            // cell after it otherwise, which it went before. The pane of that
+            // cell that touched it.
+            Some(match at.checked_sub(1) {
+                Some(previous) => (
+                    branch.children[previous].last_pane(),
+                    Direction::along(branch.axis, false),
+                ),
+                None => (
+                    branch.children.get(1)?.first_pane(),
+                    Direction::along(branch.axis, true),
+                ),
+            })
+        });
+        Some(PanePlace {
+            layout: self.root.layout(),
+            pane: id,
+            flexes: self.iter().map(|pane| (pane.id(), pane.flex)).collect(),
+            beside,
+        })
+    }
+
+    /// Puts a closed pane back where `place` says it was, and focuses it.
+    ///
+    /// When every pane open now was in the split it was closed out of —
+    /// nothing has been split off since, whatever else was closed — the
+    /// split comes back as it was then, shares and all, less the panes that
+    /// have gone since. Otherwise the arrangement has moved on and that shape
+    /// would throw the new panes about, so the pane goes back beside the
+    /// neighbour it had, on the side it was on — or, with that neighbour gone
+    /// too, to the right of the focused pane.
+    pub(crate) fn reopen(&mut self, pane: Pane, place: &PanePlace) {
         let id = pane.id();
-        self.panes.insert(at.min(self.panes.len()), pane);
+        let layout = place.layout.renamed(place.pane, id);
+        if self.iter().all(|open| layout.contains(open.id())) {
+            let mut panes = Vec::new();
+            std::mem::replace(&mut self.root, Node::placeholder()).into_panes(&mut panes);
+            panes.push(pane);
+            for pane in &mut panes {
+                if let Some((_, flex)) = place.flexes.iter().find(|(kept, _)| *kept == pane.id) {
+                    pane.flex = *flex;
+                }
+            }
+            let mut root = assemble(&layout, &mut panes).unwrap_or_else(Node::placeholder);
+            // Unreachable, since every pane was checked to be in the layout;
+            // a pane in a row at the end beats a pane dropped.
+            if !panes.is_empty() {
+                let mut children = vec![root];
+                children.extend(panes.into_iter().map(|pane| Node::Leaf(Box::new(pane))));
+                root = Node::Branch(Branch {
+                    axis: SplitAxis::Horizontal,
+                    flex: DEFAULT_FLEX,
+                    children,
+                });
+            }
+            self.root = root;
+            self.normalize();
+        } else {
+            let (anchor, direction) = place
+                .beside
+                .filter(|(anchor, _)| self.get(*anchor).is_some())
+                .unwrap_or((self.focused, Direction::Right));
+            self.insert_beside(anchor, direction, Node::Leaf(Box::new(pane)));
+        }
         // As a split does: the zoom was of the arrangement before this one,
         // and the pane coming back has to be seen to be used.
         self.zoomed = false;
@@ -412,16 +1065,21 @@ impl PaneGroup {
     /// Warp's rule — `close_pane` on the last visible pane emits `Exited` and
     /// leaves the pane in place — and it is what keeps "and then the tab goes,
     /// and then the window does" written down in exactly one place.
+    ///
+    /// A branch the close leaves with one cell gives that cell its place and
+    /// its share — see the module docs — so closing a corner of a 2×2 leaves
+    /// a pane the height of the tab beside the column that is still split.
     pub fn close(&mut self, id: PaneId) -> PaneEffect {
-        let Some(index) = self.index_of(id) else {
+        let Some(path) = self.root.path_to(id) else {
             return PaneEffect::Unchanged;
         };
-
-        if !self.is_split() {
+        let Some((&at, parent)) = path.split_last() else {
             return PaneEffect::GroupEmptied;
+        };
+        if let Node::Branch(branch) = self.root.at_mut(parent) {
+            branch.children.remove(at);
         }
-
-        self.panes.remove(index);
+        self.normalize();
         // Whichever pane went: the zoomed one, whose successor a person has
         // to be able to see the split around, or a hidden one, whose going
         // has changed the layout being kept under the zoom.
@@ -433,82 +1091,100 @@ impl PaneGroup {
         PaneEffect::Changed
     }
 
-    /// Moves the divider between two adjacent panes.
+    /// Puts the tree back in shape after a change that may have bent it.
+    fn normalize(&mut self) {
+        let root = std::mem::replace(&mut self.root, Node::placeholder());
+        match normalized(root, true) {
+            Some(root) => self.root = root,
+            None => debug_assert!(false, "the group emptied itself, which `close` forbids"),
+        }
+    }
+
+    /// Moves the divider between two adjacent cells of one branch.
     ///
-    /// `leading` is the share of the pair that goes to the first of them, from
-    /// zero to one; the two keep the weight they had between them, so every
-    /// other pane in the split is untouched and the group still adds up to
-    /// what the layout was already dividing.
+    /// The divider is named by the first pane of the cell on each side of it,
+    /// which names exactly one divider in the whole tree — see
+    /// [`Node::first_pane`] — at whatever depth it is. `leading` is the share
+    /// of the pair that goes to the first of them, from zero to one; the two
+    /// keep the weight they had between them, so every other cell in the
+    /// branch is untouched and the branch still adds up to what the layout
+    /// was already dividing.
     ///
-    /// The pair is checked for adjacency rather than trusted: a divider knows
-    /// its own neighbours, but an action is a value and can arrive after the
-    /// panes it names have moved or closed.
+    /// The pair is looked up rather than trusted: a divider knows its own
+    /// neighbours, but an action is a value and can arrive after the panes it
+    /// names have moved or closed.
     pub fn resize(&mut self, before: PaneId, after: PaneId, leading: f32) -> PaneEffect {
-        let (Some(first), Some(second)) = (self.index_of(before), self.index_of(after)) else {
+        let Some((branch, first)) = self.root.divider_mut(before, after) else {
             return PaneEffect::Unchanged;
         };
-        if second != first + 1 {
-            return PaneEffect::Unchanged;
-        }
+        let second = first + 1;
 
-        let total = self.panes[first].flex + self.panes[second].flex;
-        let leading = (total * leading).clamp(MIN_FLEX, (total - MIN_FLEX).max(MIN_FLEX));
-        let trailing = (total - leading).max(MIN_FLEX);
+        let total = branch.children[first].flex() + branch.children[second].flex();
+        // No smaller than the pair can give both of its cells: folding a
+        // branch into its parent scales its cells' shares down with it, and a
+        // fixed floor above half of what a pair holds would make every drag
+        // between them grow the pair at its neighbours' expense.
+        let floor = MIN_FLEX.min(total / 2.);
+        let leading = (total * leading).clamp(floor, total - floor);
+        let trailing = total - leading;
 
         // A drag that would not move anything by a pixel is not a change, and
         // reporting one would repaint the window at pointer-move rate.
-        if (self.panes[first].flex - leading).abs() < f32::EPSILON
-            && (self.panes[second].flex - trailing).abs() < f32::EPSILON
+        if (branch.children[first].flex() - leading).abs() < f32::EPSILON
+            && (branch.children[second].flex() - trailing).abs() < f32::EPSILON
         {
             return PaneEffect::Unchanged;
         }
 
-        self.panes[first].flex = leading;
-        self.panes[second].flex = trailing;
+        branch.children[first].set_flex(leading);
+        branch.children[second].set_flex(trailing);
         PaneEffect::Changed
     }
 
-    /// Gives every pane an equal share again.
+    /// Gives every cell, at every depth, an equal share of its branch again.
     ///
     /// What a double click on a divider does, and the only way back to an even
     /// split once one has been dragged.
     pub fn even_out(&mut self) -> PaneEffect {
-        if self
-            .panes
-            .iter()
-            .all(|pane| (pane.flex - DEFAULT_FLEX).abs() < f32::EPSILON)
-        {
+        if self.root.is_even() {
             return PaneEffect::Unchanged;
         }
-        for pane in &mut self.panes {
-            pane.flex = DEFAULT_FLEX;
-        }
+        self.root.even_out();
         PaneEffect::Changed
     }
 
-    /// The pane next to the focused one in `direction`, if there is one.
+    /// The pane beside the focused one in `direction`, if there is one.
     ///
-    /// A group is a flat vector along one axis, so a direction *across* that
-    /// axis names nothing: "left" in a column of panes is not the pane above,
-    /// and a command that answered it with one would move the keyboard
-    /// somewhere nobody pointed. `None` is what lets the chord fall through to
-    /// the shell instead — the same bargain
+    /// Spatial, from where the shares put every pane: the panes whose near
+    /// edge is the focused pane's far edge in that direction and that overlap
+    /// it across. Of two or more — the agent with two watchers stacked to its
+    /// right — the one used most recently, which is tmux's answer and the
+    /// one that makes left-then-right come back to where it started. `None`
+    /// where the focused pane is at the edge of the tab, which is what lets
+    /// the chord fall through to the shell instead — the same bargain
     /// [`Workspace::command`](crate::workspace::Workspace::command) makes
     /// everywhere else.
+    ///
+    /// Of the whole split, zoomed or not: [`Self::focus`] ends a zoom, so the
+    /// pane it lands on is drawn.
     pub fn neighbour(&self, direction: Direction) -> Option<PaneId> {
-        if direction.axis() != self.axis {
-            return None;
-        }
-        let index = self.index_of(self.focused)?;
-        let next = if direction.is_leading() {
-            index.checked_sub(1)?
-        } else {
-            index + 1
-        };
-        self.panes.get(next).map(Pane::id)
+        let mut cells = Vec::new();
+        self.root.lay_out(Cell::WHOLE, &mut cells);
+        let (_, from) = cells.iter().find(|(id, _)| *id == self.focused)?;
+        let beside: Vec<PaneId> = cells
+            .iter()
+            .filter(|(id, cell)| *id != self.focused && from.borders(*cell, direction))
+            .map(|(id, _)| *id)
+            .collect();
+        self.mru
+            .iter()
+            .copied()
+            .find(|id| beside.contains(id))
+            .or_else(|| beside.first().copied())
     }
 
-    /// The pane `delta` places along from the focused one, wrapping round.
+    /// The pane `delta` places along from the focused one in render order,
+    /// wrapping round.
     ///
     /// Wrapping, unlike [`Self::neighbour`], because this is the "show me the
     /// next one" gesture rather than a direction: a person cycling through two
@@ -518,31 +1194,38 @@ impl PaneGroup {
         if !self.is_split() {
             return None;
         }
-        let len = self.panes.len() as isize;
+        let panes = self.panes();
+        let len = panes.len() as isize;
         let index = self.index_of(self.focused)? as isize;
         let next = (index + delta).rem_euclid(len);
-        self.panes.get(next as usize).map(Pane::id)
+        panes.get(next as usize).map(|pane| pane.id())
     }
 
     /// The pane at `index` in render order.
     #[cfg(test)]
     pub fn at(&self, index: usize) -> Option<PaneId> {
-        self.panes.get(index).map(Pane::id)
+        self.panes().get(index).map(|pane| pane.id())
     }
 
     /// Moves the divider beside the focused pane, giving it more room or less.
     ///
     /// The keyboard's half of [`Self::resize`], and it takes a *step* rather
     /// than a share because a chord has no pointer position to derive one
-    /// from. Which divider it moves is decided the only way it can be: the one
-    /// after the focused pane, or — for the last pane, which has none — the
-    /// one before it. That asymmetry is what makes the last pane growable at
-    /// all.
+    /// from. Which divider it moves is decided the only way it can be: one of
+    /// the focused pane's own branch — the innermost split it is in — the one
+    /// after it, or for the last cell, which has none, the one before it.
+    /// That asymmetry is what makes the last pane growable at all.
     pub fn nudge(&mut self, grow: bool) -> PaneEffect {
-        let Some(index) = self.index_of(self.focused) else {
+        let Some(path) = self.root.path_to(self.focused) else {
             return PaneEffect::Unchanged;
         };
-        let (first, second) = if index + 1 < self.panes.len() {
+        let Some((&index, parent)) = path.split_last() else {
+            return PaneEffect::Unchanged;
+        };
+        let Node::Branch(branch) = self.root.at(parent) else {
+            return PaneEffect::Unchanged;
+        };
+        let (first, second) = if index + 1 < branch.children.len() {
             (index, index + 1)
         } else if index > 0 {
             (index - 1, index)
@@ -550,14 +1233,15 @@ impl PaneGroup {
             return PaneEffect::Unchanged;
         };
 
-        let total = self.panes[first].flex + self.panes[second].flex;
-        // Growing the *trailing* pane of the pair is shrinking the leading
+        let (one, two) = (&branch.children[first], &branch.children[second]);
+        let total = one.flex() + two.flex();
+        // Growing the *trailing* cell of the pair is shrinking the leading
         // one, and `resize` only speaks in the leading one's share.
         let towards_leading = grow == (first == index);
         let step = RESIZE_STEP * if towards_leading { 1. } else { -1. };
-        let leading = (self.panes[first].flex / total + step).clamp(0., 1.);
+        let leading = (one.flex() / total + step).clamp(0., 1.);
 
-        let (before, after) = (self.panes[first].id(), self.panes[second].id());
+        let (before, after) = (one.first_pane(), two.first_pane());
         self.resize(before, after, leading)
     }
 
@@ -609,14 +1293,14 @@ impl PaneGroup {
     /// removal did to anyone's position, which is exactly why none of them can
     /// get it wrong.
     fn repair(&mut self, preferred: Option<PaneId>) {
-        let open: Vec<PaneId> = self.panes.iter().map(Pane::id).collect();
+        let open: Vec<PaneId> = self.iter().map(Pane::id).collect();
         self.mru.retain(|id| open.contains(id));
 
         let Some(chosen) = preferred
-            .filter(|id| self.get(*id).is_some())
-            .or_else(|| self.get(self.focused).map(Pane::id))
+            .filter(|id| open.contains(id))
+            .or_else(|| open.contains(&self.focused).then_some(self.focused))
             .or_else(|| self.mru.first().copied())
-            .or_else(|| self.panes.first().map(Pane::id))
+            .or_else(|| open.first().copied())
         else {
             debug_assert!(false, "the group emptied itself, which `close` forbids");
             return;

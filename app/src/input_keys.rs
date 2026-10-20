@@ -281,9 +281,10 @@ pub enum Binding {
     ZoomReset,
     /// Move the keyboard to the pane on one side of the focused one.
     ///
-    /// A direction rather than four variants because a pane group is one
-    /// vector along one axis, so the four are one question asked four ways —
-    /// and the group answers `None` for the two that point across its axis.
+    /// A direction rather than four variants because the four are one
+    /// question asked four ways — which pane is beside this one on that
+    /// side — and the group answers `None` at the edge of the tab, which is
+    /// what leaves the chord to the shell.
     FocusPane(Direction),
     /// Move it to the next pane of the split, or the previous one, wrapping.
     CyclePane {

@@ -38,7 +38,7 @@
 //! went goes back into the tab.
 
 use crate::session::{PaneSnapshot, TabSnapshot};
-use crate::tab::{GroupId, Pane, PaneId, SplitAxis, Tab, TabAction, TabEffect, TabId, TabStrip};
+use crate::tab::{GroupId, Pane, PaneId, PanePlace, Tab, TabAction, TabEffect, TabId, TabStrip};
 
 /// How many closes "Reopen the closed tab" can bring back, newest first.
 ///
@@ -84,10 +84,8 @@ enum Taken {
         /// The tab it was in.
         tab: TabId,
         snapshot: PaneSnapshot,
-        /// Its place in the split.
-        index: usize,
-        /// Which way the split went, for a tab left with one pane since.
-        axis: SplitAxis,
+        /// Where it was in the split, at every depth of it.
+        at: PanePlace,
         /// Its tab's place in the strip, where it comes back as a tab of its
         /// own if that tab is not here any more.
         place: usize,
@@ -166,8 +164,7 @@ fn pane_taken(strip: &TabStrip, tab: TabId, pane: PaneId) -> Option<Taken> {
         id: pane,
         tab,
         snapshot: PaneSnapshot::of(panes.get(pane)?),
-        index: panes.index_of(pane)?,
-        axis: panes.axis(),
+        at: panes.place_of(pane)?,
         place: strip.index_of(tab)?,
     })
 }
@@ -265,17 +262,17 @@ impl Closed {
                 Some((TabEffect::Changed, panes))
             }
             Taken::Pane {
+                id,
                 tab,
                 snapshot,
-                index,
-                axis,
+                at,
                 place,
-                ..
             } => {
                 if strip.get(tab).is_some() {
                     let pane = snapshot.restore();
                     let back = vec![pane.id()];
-                    Some((strip.reopen_pane(tab, pane, index, axis), back))
+                    self.renamed_pane(id, pane.id());
+                    Some((strip.reopen_pane(tab, pane, &at), back))
                 } else {
                     // Its tab went without being kept, so there is no tab to
                     // put it back into: it comes back a tab of its own, where
@@ -299,6 +296,16 @@ impl Closed {
                 && *tab == was
             {
                 *tab = is;
+            }
+        }
+    }
+
+    /// Hands a pane's new id to the places kept for the panes closed before
+    /// it, which name it in the splits they went out of.
+    fn renamed_pane(&mut self, was: PaneId, is: PaneId) {
+        for taken in &mut self.0 {
+            if let Taken::Pane { at, .. } = taken {
+                at.renamed(was, is);
             }
         }
     }

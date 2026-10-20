@@ -100,7 +100,7 @@ use crate::pane_find;
 use crate::pane_link::PathsOn;
 use crate::pane_split::{DividerDrag, Drag, PaneExtent};
 use crate::pane_surface::{self, Surface};
-use crate::tab::{Pane, PaneId, SplitAxis, TabAction};
+use crate::tab::{Node, Pane, PaneGroup, PaneId, SplitAxis, TabAction};
 use crate::terminal_font::CellFont;
 use crate::terminal_model::TerminalHandle;
 use crate::theme::theme;
@@ -187,55 +187,20 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
     };
     let panes = tab.panes();
 
-    let mut layout = match panes.axis() {
-        SplitAxis::Horizontal => Flex::row(),
-        SplitAxis::Vertical => Flex::column(),
-    }
-    .with_main_axis_size(MainAxisSize::Max);
-
     // Only what the tab is showing: the whole split, or — zoomed — the
-    // focused pane alone, whose one flex child then takes the whole row.
-    // The hidden panes are not laid out at all, so their shells keep the
-    // size they had and are told the new one when the split comes back.
+    // focused pane alone, with the whole body. The hidden panes are not laid
+    // out at all, so their shells keep the size they had and are told the new
+    // one when the split comes back.
     let grabs = Grabs::default();
-    let mut previous: Option<PaneId> = None;
-    for pane in panes.visible() {
-        if let Some(before) = previous {
-            // The divider between this pane and the one before it, which is
-            // the pair a drag on it moves the boundary of.
-            layout.add_child(
-                SplitDivider::new(
-                    panes.axis(),
-                    before,
-                    pane.id(),
-                    (
-                        workspace.pane_extent(before),
-                        workspace.pane_extent(pane.id()),
-                    ),
-                    workspace.divider_drag().clone(),
-                    grabs.clone(),
-                )
-                .finish(),
-            );
+    let layout = if panes.is_zoomed() {
+        match panes.visible().next() {
+            Some(zoomed) => leaf(workspace, panes, zoomed, app),
+            None => Empty::new().finish(),
         }
-        // The pane's own weight, which is one until a divider is dragged
-        // between it and a neighbour. Warp gives each node a `PaneFlex(1.0)`
-        // and moves away from it on exactly the same gesture.
-        let state = PaneState {
-            is_focused: panes.is_focused(pane.id()),
-        };
-        // Measured on the way past, because the divider beside it has no other
-        // way to learn how many pixels a weight became.
-        let measured = Measured::new(
-            panes.axis(),
-            workspace.pane_extent(pane.id()),
-            grabs.clone(),
-            panel(workspace, pane, state, app),
-        );
-        layout.add_child(Expanded::new(pane.flex(), measured.finish()).finish());
-        previous = Some(pane.id());
-    }
-    let layout = GrabPointers::new(panes.axis(), grabs, layout.finish());
+    } else {
+        cell(workspace, panes, panes.root(), &grabs, app)
+    };
+    let layout = GrabPointers::new(grabs, layout);
 
     // The box the panes share, written down for the panes no layout will
     // see before their shells open: the ones in the tabs behind this one,
@@ -243,38 +208,127 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
     BodyMeasurer::new(workspace.pane_measure(app), layout.finish()).finish()
 }
 
+/// One cell of the split: a pane, or a branch of cells with a divider between
+/// each two of them.
+///
+/// Recursive, as the tree is, so a divider is drawn at every depth and each
+/// one belongs to exactly one branch: it moves the boundary between the two
+/// cells either side of it in that branch, whatever is nested inside them.
+fn cell(
+    workspace: &Workspace,
+    group: &PaneGroup,
+    node: &Node,
+    grabs: &Grabs,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let branch = match node {
+        Node::Leaf(pane) => return leaf(workspace, group, pane, app),
+        Node::Branch(branch) => branch,
+    };
+    let axis = branch.axis();
+    let mut layout = match axis {
+        SplitAxis::Horizontal => Flex::row(),
+        SplitAxis::Vertical => Flex::column(),
+    }
+    .with_main_axis_size(MainAxisSize::Max);
+
+    // Each cell's extent along the axis, measured as it is laid out and read
+    // by the divider either side of it, which has no other way to learn how
+    // many pixels a weight became. Made fresh each frame: the divider and the
+    // cells it measures are in the same tree, and a press lands on the tree
+    // that was laid out.
+    let mut previous: Option<(PaneId, PaneExtent)> = None;
+    for child in branch.children() {
+        let extent = PaneExtent::new();
+        if let Some((before, before_extent)) = previous.take() {
+            // The divider between this cell and the one before it, named by
+            // the first pane of each — see `Node::first_pane`.
+            layout.add_child(
+                SplitDivider::new(
+                    axis,
+                    before,
+                    child.first_pane(),
+                    (before_extent, extent.clone()),
+                    workspace.divider_drag().clone(),
+                    grabs.clone(),
+                )
+                .finish(),
+            );
+        }
+        // The cell's own weight, which is one until a divider is dragged
+        // beside it. Warp gives each node a `PaneFlex(1.0)` and moves away
+        // from it on exactly the same gesture.
+        let measured = Measured::new(
+            axis,
+            extent.clone(),
+            grabs.clone(),
+            cell(workspace, group, child, grabs, app),
+        );
+        layout.add_child(Expanded::new(child.flex(), measured.finish()).finish());
+        previous = Some((child.first_pane(), extent));
+    }
+    layout.finish()
+}
+
+/// One pane of the split.
+fn leaf(
+    workspace: &Workspace,
+    group: &PaneGroup,
+    pane: &Pane,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let state = PaneState {
+        is_focused: group.is_focused(pane.id()),
+    };
+    panel(workspace, pane, state, app)
+}
+
 /// The grid the layout would give `pane` in a tab whose panes share `body`.
 ///
 /// For a shell that has to open before its pane's first layout: a pane in a
 /// tab behind the active one, or one just split off, whose layout comes a
-/// frame after the split. The arithmetic is [`render`]'s — the dividers are
-/// fixed, the panes divide what is left by their weights along the axis and
-/// take the whole of the other — so the answer is the grid the first layout
-/// would resize the pty to, give or take a pixel of rounding no cell count
-/// turns on.
+/// frame after the split. The arithmetic is [`render`]'s — at every depth the
+/// dividers are fixed, and the cells divide what is left by their weights
+/// along the branch's axis and take the whole of the other — so the answer
+/// is the grid the first layout would resize the pty to, give or take a pixel
+/// of rounding no cell count turns on.
 ///
 /// A pane a zoom is hiding is measured against the whole split, which is the
 /// layout it will get the moment it is shown again; the zoomed pane against
 /// the one it is in now.
 pub(super) fn estimated_grid(
     body: Vector2F,
-    group: &crate::tab::PaneGroup,
+    group: &PaneGroup,
     pane: PaneId,
     font: &CellFont,
 ) -> Option<TerminalSize> {
-    let flex = group.get(pane)?.flex();
-    let shown: Vec<&Pane> = if group.is_visible(pane) {
-        group.visible().collect()
+    group.get(pane)?;
+    let size = if group.is_zoomed() && group.is_visible(pane) {
+        body
     } else {
-        group.iter().collect()
-    };
-    let total: f32 = shown.iter().map(|pane| pane.flex()).sum();
-    let dividers = shown.len().saturating_sub(1) as f32 * DIVIDER_THICKNESS;
-    let size = match group.axis() {
-        SplitAxis::Horizontal => vec2f((body.x() - dividers) * flex / total, body.y()),
-        SplitAxis::Vertical => vec2f(body.x(), (body.y() - dividers) * flex / total),
+        size_in(group.root(), body, pane)?
     };
     Some(grid_of(font, size))
+}
+
+/// The size `pane` comes out at in a cell of `size`, or `None` when it is not
+/// in the cell.
+fn size_in(node: &Node, size: Vector2F, pane: PaneId) -> Option<Vector2F> {
+    let branch = match node {
+        Node::Leaf(leaf) => return (leaf.id() == pane).then_some(size),
+        Node::Branch(branch) => branch,
+    };
+    let children = branch.children();
+    let total: f32 = children.iter().map(Node::flex).sum();
+    let dividers = children.len().saturating_sub(1) as f32 * DIVIDER_THICKNESS;
+    children.iter().find_map(|child| {
+        let share = child.flex() / total;
+        let size = match branch.axis() {
+            SplitAxis::Horizontal => vec2f((size.x() - dividers) * share, size.y()),
+            SplitAxis::Vertical => vec2f(size.x(), (size.y() - dividers) * share),
+        };
+        size_in(child, size, pane)
+    })
 }
 
 /// Records the box the active tab's panes are laid out in.
@@ -1324,16 +1378,38 @@ impl Measured {
 /// its area here when it paints, and each pane's wrapper declines a press in
 /// one. Emptied by [`GrabPointers`] each time the split is painted, so a
 /// divider that is gone, or has moved, takes its area with it.
+///
+/// Each area keeps the axis of the divider that wrote it, since a nested split
+/// has dividers both ways and each says resize in its own direction.
 #[derive(Clone, Default)]
-struct Grabs(Rc<RefCell<Vec<RectF>>>);
+struct Grabs(Rc<RefCell<Vec<(RectF, SplitAxis)>>>);
 
 impl Grabs {
-    /// Whether a press at `position` is a divider's.
-    fn take(&self, position: Vector2F) -> bool {
+    /// Whether a press at `position` is the press of a divider outside
+    /// `cell` — one on its edge, whose grab reaches into it.
+    ///
+    /// Not every divider's: a cell holding a split holds that split's
+    /// dividers too, and a cell that declined a press on one of its own would
+    /// keep the press from the divider it was meant for. A divider inside the
+    /// cell lies wholly inside it, since its grab spans the cell it divides
+    /// and widens only across its own line; one on the cell's edge reaches
+    /// out past it.
+    fn take(&self, position: Vector2F, cell: Option<RectF>) -> bool {
+        // Half a pixel of rounding either way, so a divider exactly along
+        // the inside of the edge is still the cell's own.
+        const SLACK: f32 = 0.5;
+        let inside = |area: &RectF| {
+            cell.is_some_and(|cell| {
+                area.min_x() >= cell.min_x() - SLACK
+                    && area.min_y() >= cell.min_y() - SLACK
+                    && area.max_x() <= cell.max_x() + SLACK
+                    && area.max_y() <= cell.max_y() + SLACK
+            })
+        };
         self.0
             .borrow()
             .iter()
-            .any(|area| area.contains_point(position))
+            .any(|(area, _)| area.contains_point(position) && !inside(area))
     }
 }
 
@@ -1354,7 +1430,6 @@ impl Grabs {
 /// this frame's grabs to the last one's, and keep a press and a resize pointer
 /// at a place the divider has left.
 struct GrabPointers {
-    axis: SplitAxis,
     grabs: Grabs,
     child: Box<dyn Element>,
     size: Option<Vector2F>,
@@ -1362,9 +1437,8 @@ struct GrabPointers {
 }
 
 impl GrabPointers {
-    fn new(axis: SplitAxis, grabs: Grabs, child: Box<dyn Element>) -> Self {
+    fn new(grabs: Grabs, child: Box<dyn Element>) -> Self {
         Self {
-            axis,
             grabs,
             child,
             size: None,
@@ -1394,12 +1468,12 @@ impl Element for GrabPointers {
         if grabs.is_empty() {
             return;
         }
-        let shape = match self.axis {
-            SplitAxis::Horizontal => PointerShape::ColumnResize,
-            SplitAxis::Vertical => PointerShape::RowResize,
-        };
         ctx.scene.start_layer(ClipBounds::ActiveLayer);
-        for area in grabs.iter() {
+        for (area, axis) in grabs.iter() {
+            let shape = match axis {
+                SplitAxis::Horizontal => PointerShape::ColumnResize,
+                SplitAxis::Vertical => PointerShape::RowResize,
+            };
             ctx.scene.request_pointer(*area, shape);
         }
         ctx.scene.stop_layer();
@@ -1451,7 +1525,7 @@ impl Element for Measured {
         app: &AppContext,
     ) -> bool {
         if let Event::MouseDown { position, .. } = event.raw_event()
-            && self.grabs.take(*position)
+            && self.grabs.take(*position, self.bounds())
         {
             return false;
         }
@@ -1526,6 +1600,17 @@ impl SplitDivider {
         }
     }
 
+    /// Whether the drag in progress began on this divider.
+    ///
+    /// By both cells' first panes, not the first alone: in a nested split the
+    /// divider of a row and the divider of a column inside its first cell
+    /// both have the same pane before them. Only the order the two are handed
+    /// the pointer in — the column's first — kept one from taking the
+    /// other's drag, and that is not a thing to lean on.
+    fn owns(&self, drag: &Drag) -> bool {
+        drag.before == self.before && drag.after == self.after
+    }
+
     /// How far along the dragged axis a window position is.
     fn along(&self, position: Vector2F) -> f32 {
         match self.axis {
@@ -1589,7 +1674,7 @@ impl SplitDivider {
     /// keeps another divider out of it is that the drag names the pair it
     /// began between.
     fn drag_to(&self, position: Vector2F, ctx: &mut EventContext) -> bool {
-        let Some(drag) = self.drag.get().filter(|drag| drag.before == self.before) else {
+        let Some(drag) = self.drag.get().filter(|drag| self.owns(drag)) else {
             return false;
         };
 
@@ -1629,7 +1714,7 @@ impl Element for SplitDivider {
         self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
         self.child.paint(origin, ctx, app);
         if let Some(area) = self.grab_area() {
-            self.grabs.0.borrow_mut().push(area);
+            self.grabs.0.borrow_mut().push((area, self.axis));
         }
     }
 
@@ -1652,11 +1737,7 @@ impl Element for SplitDivider {
                 button: MouseButton::Left,
                 ..
             } => {
-                return self
-                    .drag
-                    .get()
-                    .is_some_and(|drag| drag.before == self.before)
-                    && self.drag.end();
+                return self.drag.get().is_some_and(|drag| self.owns(&drag)) && self.drag.end();
             }
             _ => {}
         }

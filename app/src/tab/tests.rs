@@ -951,30 +951,56 @@ fn an_action_naming_a_pane_that_is_gone_changes_nothing() {
 }
 
 #[test]
-fn a_split_across_the_groups_axis_appends_along_it_rather_than_nesting() {
-    // A flat vector cannot hold Warp's perpendicular branch, so it does not
-    // pretend to: the first split fixes the axis, and a later direction across
-    // it keeps only its before-or-after sense.
+fn a_split_across_the_branchs_axis_nests_in_the_focused_pane() {
+    // "Split downwards" on the right half of a row stacks two panes in that
+    // half and leaves the left one the full height of the tab — it used to
+    // add a third column.
     let (mut strip, ids) = strip(1);
+    let tab = ids[0];
+    strip.apply(TabAction::Split(Direction::Right));
+    let row = panes_of(&strip, tab);
+
     strip.apply(TabAction::Split(Direction::Down));
-    assert_eq!(
-        strip.get(ids[0]).expect("open").panes().axis(),
-        SplitAxis::Vertical
-    );
 
-    strip.apply(TabAction::Split(Direction::Left));
-
-    let group = strip.get(ids[0]).expect("open").panes();
+    let group = strip.get(tab).expect("open").panes();
+    let below = group.focused_id();
     assert_eq!(
-        group.axis(),
-        SplitAxis::Vertical,
-        "the axis moved under a pane"
+        group.layout(),
+        Layout::Split {
+            axis: SplitAxis::Horizontal,
+            flex: DEFAULT_FLEX,
+            children: vec![
+                Layout::Pane(row[0]),
+                Layout::Split {
+                    axis: SplitAxis::Vertical,
+                    flex: DEFAULT_FLEX,
+                    children: vec![Layout::Pane(row[1]), Layout::Pane(below)],
+                },
+            ],
+        }
     );
+}
+
+#[test]
+fn a_split_along_the_branchs_axis_joins_it_beside_the_focused_pane() {
+    // tmux's and Warp's rule: three "split right"s are a row of four, not
+    // halves of halves, and a leading direction goes before the pane.
+    let (mut strip, ids) = strip(1);
+    let tab = ids[0];
+    strip.apply(TabAction::Split(Direction::Down));
+    strip.apply(TabAction::Split(Direction::Up));
+
+    let group = strip.get(tab).expect("open").panes();
+    assert_eq!(group.root_axis(), Some(SplitAxis::Vertical));
     assert_eq!(group.len(), 3);
     assert_eq!(
         group.index_of(group.focused_id()),
         Some(1),
         "a leading direction still inserts before the pane it was split off"
+    );
+    assert!(
+        matches!(group.layout(), Layout::Split { children, .. } if children.len() == 3),
+        "one column of three, not a column inside a column"
     );
 }
 
@@ -982,26 +1008,33 @@ fn a_split_across_the_groups_axis_appends_along_it_rather_than_nesting() {
 fn a_pane_put_back_beside_the_only_one_left_takes_back_the_way_its_split_went() {
     // Closed out of a column, and the tab split into a row and back to one
     // pane since: the pane left says nothing about which way the closed one
-    // was, so the one coming back says it.
+    // was, so the place kept for the one coming back says it.
     let (mut strip, ids) = strip(1);
     let tab = ids[0];
     strip.apply(TabAction::Split(Direction::Down));
     let column = panes_of(&strip, tab);
+    let place = strip
+        .get(tab)
+        .expect("open")
+        .panes()
+        .place_of(column[1])
+        .expect("in the split");
     strip.apply(TabAction::ClosePane(column[1]));
     strip.apply(TabAction::Split(Direction::Right));
     let row = panes_of(&strip, tab);
     strip.apply(TabAction::ClosePane(row[1]));
-    assert_eq!(
-        strip.get(tab).expect("open").panes().axis(),
-        SplitAxis::Horizontal
-    );
+    assert_eq!(strip.get(tab).expect("open").panes().root_axis(), None);
 
     let pane = Pane::new("agent 2");
     let id = pane.id();
-    strip.reopen_pane(tab, pane, 1, SplitAxis::Vertical);
+    strip.reopen_pane(tab, pane, &place);
 
     let group = strip.get(tab).expect("open").panes();
-    assert_eq!(group.axis(), SplitAxis::Vertical, "it came back in a row");
+    assert_eq!(
+        group.root_axis(),
+        Some(SplitAxis::Vertical),
+        "it came back in a column"
+    );
     assert_eq!(panes_of(&strip, tab), [row[0], id]);
     assert_eq!(group.focused_id(), id);
 }
@@ -2397,4 +2430,601 @@ fn a_close_of_several_with_nothing_to_take_changes_nothing() {
         TabEffect::Unchanged
     );
     assert_eq!(order(&strip), [ids[1]]);
+}
+
+/// Splits that nest: a 2×2, an agent beside two stacked watchers, and every
+/// operation that has to walk the tree to get them right.
+mod nesting {
+    use super::*;
+
+    /// The active tab's pane group.
+    fn group(strip: &TabStrip) -> &PaneGroup {
+        strip.active().expect("a tab is active").panes()
+    }
+
+    /// A 2×2, and its panes as `[top left, top right, bottom left, bottom
+    /// right]`.
+    ///
+    /// Made the way a person makes one: split right, split the right half
+    /// down, go back to the left half and split it down too.
+    fn grid() -> (TabStrip, [PaneId; 4]) {
+        let mut strip = TabStrip::new();
+        let top_left = group(&strip).focused_id();
+        strip.apply(TabAction::Split(Direction::Right));
+        let top_right = group(&strip).focused_id();
+        strip.apply(TabAction::Split(Direction::Down));
+        let bottom_right = group(&strip).focused_id();
+        strip.apply(TabAction::FocusPane(top_left));
+        strip.apply(TabAction::Split(Direction::Down));
+        let bottom_left = group(&strip).focused_id();
+        (strip, [top_left, top_right, bottom_left, bottom_right])
+    }
+
+    /// An agent on the left, and two watchers stacked on its right.
+    fn agent_and_watchers() -> (TabStrip, [PaneId; 3]) {
+        let mut strip = TabStrip::new();
+        let agent = group(&strip).focused_id();
+        strip.apply(TabAction::Split(Direction::Right));
+        let upper = group(&strip).focused_id();
+        strip.apply(TabAction::Split(Direction::Down));
+        let lower = group(&strip).focused_id();
+        (strip, [agent, upper, lower])
+    }
+
+    fn column(children: Vec<Layout>) -> Layout {
+        Layout::Split {
+            axis: SplitAxis::Vertical,
+            flex: DEFAULT_FLEX,
+            children,
+        }
+    }
+
+    fn row(children: Vec<Layout>) -> Layout {
+        Layout::Split {
+            axis: SplitAxis::Horizontal,
+            flex: DEFAULT_FLEX,
+            children,
+        }
+    }
+
+    fn flex_of(strip: &TabStrip, pane: PaneId) -> f32 {
+        group(strip).get(pane).expect("open").flex()
+    }
+
+    #[test]
+    fn four_splits_make_a_two_by_two() {
+        let (strip, [a, b, c, d]) = grid();
+
+        assert_eq!(
+            group(&strip).layout(),
+            row(vec![
+                column(vec![Layout::Pane(a), Layout::Pane(c)]),
+                column(vec![Layout::Pane(b), Layout::Pane(d)]),
+            ])
+        );
+        assert_eq!(
+            panes_of(&strip, strip.active_id()),
+            [a, c, b, d],
+            "render order goes down the first column before the second"
+        );
+    }
+
+    #[test]
+    fn the_keyboard_moves_across_a_two_by_two_by_where_the_panes_are() {
+        let (mut strip, [a, b, c, d]) = grid();
+        strip.apply(TabAction::FocusPane(a));
+
+        assert_eq!(group(&strip).neighbour(Direction::Right), Some(b));
+        assert_eq!(group(&strip).neighbour(Direction::Down), Some(c));
+        assert_eq!(group(&strip).neighbour(Direction::Left), None);
+        assert_eq!(group(&strip).neighbour(Direction::Up), None);
+
+        strip.apply(TabAction::FocusPane(d));
+        assert_eq!(group(&strip).neighbour(Direction::Left), Some(c));
+        assert_eq!(group(&strip).neighbour(Direction::Up), Some(b));
+        assert_eq!(group(&strip).neighbour(Direction::Right), None);
+        assert_eq!(group(&strip).neighbour(Direction::Down), None);
+    }
+
+    #[test]
+    fn a_pane_at_the_corner_is_nobodys_neighbour() {
+        // The top-left and bottom-right panes of a 2×2 share one point. A
+        // direction that answered with the diagonal would land on a pane
+        // nobody pointed at.
+        let (mut strip, [a, _, _, d]) = grid();
+        strip.apply(TabAction::FocusPane(a));
+
+        for direction in [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ] {
+            assert_ne!(group(&strip).neighbour(direction), Some(d), "{direction:?}");
+        }
+    }
+
+    #[test]
+    fn of_two_panes_beside_the_focused_one_the_last_used_is_the_one_moved_to() {
+        // tmux's answer, and the one that makes left-then-right a round trip.
+        let (mut strip, [agent, upper, lower]) = agent_and_watchers();
+
+        strip.apply(TabAction::FocusPane(lower));
+        strip.apply(TabAction::FocusPane(agent));
+        assert_eq!(group(&strip).neighbour(Direction::Right), Some(lower));
+
+        strip.apply(TabAction::FocusPane(upper));
+        assert_eq!(group(&strip).neighbour(Direction::Left), Some(agent));
+        strip.apply(TabAction::FocusPane(agent));
+        assert_eq!(group(&strip).neighbour(Direction::Right), Some(upper));
+    }
+
+    #[test]
+    fn a_pane_the_full_height_of_the_tab_is_beside_both_halves_of_the_other_column() {
+        let (mut strip, [agent, upper, lower]) = agent_and_watchers();
+
+        for watcher in [upper, lower] {
+            strip.apply(TabAction::FocusPane(watcher));
+            assert_eq!(group(&strip).neighbour(Direction::Left), Some(agent));
+        }
+        strip.apply(TabAction::FocusPane(upper));
+        assert_eq!(group(&strip).neighbour(Direction::Down), Some(lower));
+    }
+
+    #[test]
+    fn closing_a_corner_gives_its_column_to_the_pane_left_in_it() {
+        let (mut strip, [a, b, c, d]) = grid();
+        strip.apply(TabAction::ResizePanes {
+            before: a,
+            after: b,
+            leading: 0.25,
+        });
+        let column_share = group(&strip).root_flexes();
+
+        strip.apply(TabAction::ClosePane(c));
+
+        assert_eq!(
+            group(&strip).layout(),
+            row(vec![
+                Layout::Pane(a),
+                Layout::Split {
+                    axis: SplitAxis::Vertical,
+                    flex: column_share[1],
+                    children: vec![Layout::Pane(b), Layout::Pane(d)],
+                },
+            ]),
+            "no branch is left holding one pane, and the other column kept its share"
+        );
+        assert!(
+            (flex_of(&strip, a) - column_share[0]).abs() < 1e-5,
+            "the pane took its column's share: {} for {column_share:?}",
+            flex_of(&strip, a)
+        );
+    }
+
+    #[test]
+    fn a_branch_left_dividing_its_parents_way_is_folded_into_it() {
+        // A row with a column in it, and a row in that column. Closing the
+        // column's other pane leaves the inner row standing where the column
+        // was — a row in a row — so its panes join the outer row, sharing
+        // what the column had in the proportions they had.
+        let mut strip = TabStrip::new();
+        let a = group(&strip).focused_id();
+        strip.apply(TabAction::Split(Direction::Right));
+        let b = group(&strip).focused_id();
+        strip.apply(TabAction::Split(Direction::Down));
+        let c = group(&strip).focused_id();
+        strip.apply(TabAction::Split(Direction::Right));
+        let d = group(&strip).focused_id();
+        strip.apply(TabAction::ResizePanes {
+            before: c,
+            after: d,
+            leading: 0.75,
+        });
+
+        strip.apply(TabAction::ClosePane(b));
+
+        assert_eq!(
+            group(&strip).layout(),
+            row(vec![Layout::Pane(a), Layout::Pane(c), Layout::Pane(d)])
+        );
+        let (c_flex, d_flex) = (flex_of(&strip, c), flex_of(&strip, d));
+        assert!(
+            (c_flex + d_flex - DEFAULT_FLEX).abs() < 1e-5,
+            "the pair took the column's share between them: {c_flex} + {d_flex}"
+        );
+        assert!((c_flex / d_flex - 3.).abs() < 1e-4, "{c_flex} : {d_flex}");
+    }
+
+    #[test]
+    fn a_drag_between_two_small_shares_keeps_what_the_pair_had() {
+        // A column squeezed to its floor and then folded into the row beside
+        // it hands its two panes a share under the floor each. A floor fixed
+        // in the units of the pair would push them apart and take room from
+        // every other pane in the row.
+        let mut strip = TabStrip::new();
+        let a = group(&strip).focused_id();
+        strip.apply(TabAction::Split(Direction::Right));
+        let b = group(&strip).focused_id();
+        strip.apply(TabAction::Split(Direction::Down));
+        let c = group(&strip).focused_id();
+        strip.apply(TabAction::Split(Direction::Right));
+        let d = group(&strip).focused_id();
+        strip.apply(TabAction::ResizePanes {
+            before: a,
+            after: b,
+            leading: 1.,
+        });
+        strip.apply(TabAction::ClosePane(b));
+        let pair = flex_of(&strip, c) + flex_of(&strip, d);
+
+        strip.apply(TabAction::ResizePanes {
+            before: c,
+            after: d,
+            leading: 0.,
+        });
+
+        let after = flex_of(&strip, c) + flex_of(&strip, d);
+        assert!((after - pair).abs() < 1e-5, "{pair} became {after}");
+        assert!(flex_of(&strip, c) > 0.);
+    }
+
+    #[test]
+    fn a_divider_inside_a_column_moves_only_that_column() {
+        let (mut strip, [a, b, c, d]) = grid();
+
+        assert_eq!(
+            TabEffect::Changed,
+            strip.apply(TabAction::ResizePanes {
+                before: b,
+                after: d,
+                leading: 0.75,
+            })
+        );
+
+        assert!((flex_of(&strip, b) - 1.5).abs() < 1e-5);
+        assert!((flex_of(&strip, d) - 0.5).abs() < 1e-5);
+        assert_eq!(flex_of(&strip, a), 1., "the other column never moved");
+        assert_eq!(flex_of(&strip, c), 1.);
+        assert_eq!(group(&strip).root_flexes(), vec![1., 1.]);
+    }
+
+    #[test]
+    fn two_dividers_after_the_same_pane_are_told_apart_by_the_pane_after_them() {
+        // The row's divider and the left column's divider both have the
+        // top-left pane before them; only what comes after says which one a
+        // drag is on.
+        let (mut strip, [a, b, c, _]) = grid();
+
+        strip.apply(TabAction::ResizePanes {
+            before: a,
+            after: b,
+            leading: 0.75,
+        });
+        assert!((group(&strip).root_flexes()[0] - 1.5).abs() < 1e-5);
+        assert_eq!(flex_of(&strip, a), 1., "the column's own divider stayed");
+
+        strip.apply(TabAction::ResizePanes {
+            before: a,
+            after: c,
+            leading: 0.25,
+        });
+        assert!((flex_of(&strip, a) - 0.5).abs() < 1e-5);
+        assert!(
+            (group(&strip).root_flexes()[0] - 1.5).abs() < 1e-5,
+            "the row's divider stayed"
+        );
+    }
+
+    #[test]
+    fn a_pair_from_two_different_branches_names_no_divider() {
+        let (mut strip, [_, _, c, d]) = grid();
+
+        assert_eq!(
+            TabEffect::Unchanged,
+            strip.apply(TabAction::ResizePanes {
+                before: c,
+                after: d,
+                leading: 0.75,
+            }),
+            "the two bottom panes are side by side, but in two columns"
+        );
+    }
+
+    #[test]
+    fn the_keyboard_resizes_the_innermost_split_the_pane_is_in() {
+        let (mut strip, [agent, upper, lower]) = agent_and_watchers();
+        strip.apply(TabAction::FocusPane(upper));
+
+        strip.apply(TabAction::NudgePane { grow: true });
+
+        assert!(flex_of(&strip, upper) > 1., "the watcher grew");
+        assert!(flex_of(&strip, lower) < 1., "against the one under it");
+        assert_eq!(group(&strip).root_flexes(), vec![1., 1.]);
+        assert_eq!(flex_of(&strip, agent), 1.);
+    }
+
+    #[test]
+    fn evening_out_reaches_every_depth() {
+        let (mut strip, [a, b, c, d]) = grid();
+        strip.apply(TabAction::ResizePanes {
+            before: a,
+            after: b,
+            leading: 0.8,
+        });
+        strip.apply(TabAction::ResizePanes {
+            before: b,
+            after: d,
+            leading: 0.2,
+        });
+
+        assert_eq!(TabEffect::Changed, strip.apply(TabAction::EvenPanes));
+
+        assert_eq!(group(&strip).root_flexes(), vec![1., 1.]);
+        for pane in [a, b, c, d] {
+            assert_eq!(flex_of(&strip, pane), 1.);
+        }
+        assert_eq!(TabEffect::Unchanged, strip.apply(TabAction::EvenPanes));
+    }
+
+    #[test]
+    fn a_zoom_of_a_nested_pane_keeps_the_whole_tree_under_it() {
+        let (mut strip, [a, b, _, d]) = grid();
+        strip.apply(TabAction::ResizePanes {
+            before: b,
+            after: d,
+            leading: 0.7,
+        });
+        strip.apply(TabAction::FocusPane(d));
+        let kept = group(&strip).layout();
+        let shares: Vec<f32> = group(&strip).iter().map(Pane::flex).collect();
+
+        strip.apply(TabAction::ZoomPane);
+        let shown: Vec<PaneId> = group(&strip).visible().map(Pane::id).collect();
+        assert_eq!(shown, [d]);
+        assert!(!group(&strip).is_visible(a));
+
+        strip.apply(TabAction::ZoomPane);
+        assert_eq!(group(&strip).layout(), kept);
+        let back: Vec<f32> = group(&strip).iter().map(Pane::flex).collect();
+        assert_eq!(back, shares);
+    }
+
+    #[test]
+    fn walking_out_of_a_zoom_lands_on_a_pane_that_is_drawn() {
+        let (mut strip, [_, b, _, d]) = grid();
+        strip.apply(TabAction::FocusPane(d));
+        strip.apply(TabAction::ZoomPane);
+
+        let up = group(&strip).neighbour(Direction::Up).expect("b is above");
+        assert_eq!(up, b);
+        strip.apply(TabAction::FocusPane(up));
+
+        assert!(!group(&strip).is_zoomed());
+        assert!(group(&strip).is_visible(b));
+    }
+
+    #[test]
+    fn a_corner_closed_and_put_back_restores_the_two_by_two_exactly() {
+        let (mut strip, [a, b, c, _]) = grid();
+        let tab = strip.active_id();
+        strip.apply(TabAction::ResizePanes {
+            before: a,
+            after: b,
+            leading: 0.3,
+        });
+        strip.apply(TabAction::ResizePanes {
+            before: a,
+            after: c,
+            leading: 0.6,
+        });
+        let before = group(&strip).layout();
+        let shares: Vec<f32> = group(&strip).iter().map(Pane::flex).collect();
+        let place = group(&strip).place_of(c).expect("in the split");
+
+        strip.apply(TabAction::ClosePane(c));
+        let pane = Pane::new("agent 3");
+        let back = pane.id();
+        pane_with_flex(pane, shares[1], |pane| {
+            strip.reopen_pane(tab, pane, &place);
+        });
+
+        let after = group(&strip).layout();
+        assert_eq!(
+            format!("{after:?}"),
+            format!("{before:?}").replace(&format!("{c:?}"), &format!("{back:?}")),
+            "the tree came back as it was, with the new pane where the old one was"
+        );
+        let restored: Vec<f32> = group(&strip).iter().map(Pane::flex).collect();
+        assert_eq!(restored, shares, "every share came back too");
+        assert_eq!(group(&strip).focused_id(), back);
+    }
+
+    #[test]
+    fn a_pane_put_back_after_the_split_moved_on_goes_beside_its_neighbour() {
+        // A pane opened since makes the old shape a stranger's: rebuilding it
+        // would throw the new pane about. The closed one goes back on its
+        // old neighbour's side instead.
+        let (mut strip, [agent, upper, lower]) = agent_and_watchers();
+        let tab = strip.active_id();
+        let place = group(&strip).place_of(lower).expect("in the split");
+        strip.apply(TabAction::ClosePane(lower));
+        strip.apply(TabAction::FocusPane(agent));
+        strip.apply(TabAction::Split(Direction::Down));
+        let new = group(&strip).focused_id();
+
+        let pane = Pane::new("agent 9");
+        let back = pane.id();
+        strip.reopen_pane(tab, pane, &place);
+
+        assert_eq!(
+            group(&strip).layout(),
+            row(vec![
+                column(vec![Layout::Pane(agent), Layout::Pane(new)]),
+                column(vec![Layout::Pane(upper), Layout::Pane(back)]),
+            ])
+        );
+    }
+
+    /// Hands `pane` over with `flex` as its share, the way a closed pane's
+    /// snapshot restores one.
+    fn pane_with_flex(mut pane: Pane, flex: f32, put: impl FnOnce(Pane)) {
+        pane.set_flex(flex);
+        put(pane);
+    }
+
+    /// A tiny deterministic generator, so a failing sequence is the same
+    /// sequence every run.
+    struct Steps(u64);
+
+    impl Steps {
+        fn next(&mut self, below: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % below as u64) as usize
+        }
+    }
+
+    /// Everything the module docs promise of a tree, checked from outside.
+    fn assert_in_shape(group: &PaneGroup, open: &[PaneId], step: &str) {
+        fn walk(node: &Node, parent: Option<SplitAxis>, seen: &mut Vec<PaneId>, step: &str) {
+            assert!(
+                node.flex().is_finite() && node.flex() > 0.,
+                "{step}: a share of {}",
+                node.flex()
+            );
+            match node {
+                Node::Leaf(pane) => seen.push(pane.id()),
+                Node::Branch(branch) => {
+                    assert!(
+                        branch.children().len() >= 2,
+                        "{step}: a branch of {}",
+                        branch.children().len()
+                    );
+                    assert_ne!(
+                        Some(branch.axis()),
+                        parent,
+                        "{step}: a branch inside one dividing the same way"
+                    );
+                    for child in branch.children() {
+                        walk(child, Some(branch.axis()), seen, step);
+                    }
+                }
+            }
+        }
+
+        let mut seen = Vec::new();
+        walk(group.root(), None, &mut seen, step);
+        let mut sorted = seen.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), seen.len(), "{step}: a pane is in it twice");
+        let mut expected = open.to_vec();
+        expected.sort();
+        assert_eq!(
+            sorted, expected,
+            "{step}: the panes in it are not the open ones"
+        );
+        assert!(
+            seen.contains(&group.focused_id()),
+            "{step}: the focus is on a pane that is not there"
+        );
+        assert!(
+            group.is_visible(group.focused_id()),
+            "{step}: the focus is on a pane nobody can see"
+        );
+        let mut used = group.mru().to_vec();
+        used.sort();
+        assert_eq!(
+            used, expected,
+            "{step}: the order of use lost or kept a pane"
+        );
+        assert_eq!(group.mru()[0], group.focused_id());
+    }
+
+    #[test]
+    fn any_run_of_splits_closes_resizes_zooms_and_reopens_leaves_the_tree_in_shape() {
+        // From the audit that found the flat group's one fixed axis: what a
+        // person does to a split in any order, a few thousand times over.
+        for seed in 1..=40_u64 {
+            let mut steps = Steps(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let mut strip = TabStrip::new();
+            let tab = strip.active_id();
+            let mut open = panes_of(&strip, tab);
+            let mut closed: Vec<(PanePlace, f32)> = Vec::new();
+
+            for turn in 0..150 {
+                let pick = |steps: &mut Steps, open: &[PaneId]| open[steps.next(open.len())];
+                let direction = [
+                    Direction::Left,
+                    Direction::Right,
+                    Direction::Up,
+                    Direction::Down,
+                ][steps.next(4)];
+                let step = match steps.next(9) {
+                    0 | 1 if open.len() < 12 => {
+                        strip.apply(TabAction::Split(direction));
+                        format!("split {direction:?}")
+                    }
+                    2 if open.len() > 1 => {
+                        let pane = pick(&mut steps, &open);
+                        let group = group(&strip);
+                        let place = group.place_of(pane).expect("open");
+                        let flex = group.get(pane).expect("open").flex();
+                        strip.apply(TabAction::ClosePane(pane));
+                        closed.push((place, flex));
+                        format!("close {pane:?}")
+                    }
+                    3 => match closed.pop() {
+                        Some((place, flex)) => {
+                            let mut pane = Pane::new("back");
+                            pane.set_flex(flex);
+                            strip.reopen_pane(tab, pane, &place);
+                            "reopen".to_owned()
+                        }
+                        None => continue,
+                    },
+                    4 => {
+                        let pane = pick(&mut steps, &open);
+                        strip.apply(TabAction::FocusPane(pane));
+                        format!("focus {pane:?}")
+                    }
+                    5 => {
+                        if let Some(next) = group(&strip).neighbour(direction) {
+                            strip.apply(TabAction::FocusPane(next));
+                        }
+                        format!("walk {direction:?}")
+                    }
+                    6 => {
+                        let panes = panes_of(&strip, tab);
+                        let (before, after) = (pick(&mut steps, &panes), pick(&mut steps, &panes));
+                        let leading = steps.next(101) as f32 / 100.;
+                        strip.apply(TabAction::ResizePanes {
+                            before,
+                            after,
+                            leading,
+                        });
+                        format!("resize {before:?} {after:?} {leading}")
+                    }
+                    7 => {
+                        strip.apply(TabAction::NudgePane {
+                            grow: steps.next(2) == 0,
+                        });
+                        "nudge".to_owned()
+                    }
+                    _ => {
+                        strip.apply(TabAction::ZoomPane);
+                        "zoom".to_owned()
+                    }
+                };
+                open = panes_of(&strip, tab);
+                assert_in_shape(
+                    group(&strip),
+                    &open,
+                    &format!("seed {seed} turn {turn}: {step}"),
+                );
+            }
+        }
+    }
 }

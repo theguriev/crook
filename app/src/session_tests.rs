@@ -235,15 +235,178 @@ fn test_the_split_axis_survives() {
     ] {
         let mut strip = TabStrip::new();
         strip.apply(TabAction::Split(direction));
-        assert_eq!(strip.active().expect("a tab").panes().axis(), axis);
+        assert_eq!(
+            strip.active().expect("a tab").panes().root_axis(),
+            Some(axis)
+        );
 
         let restored = Session::of(&strip, None).restore().expect("restored");
         assert_eq!(
-            restored.active().expect("a tab").panes().axis(),
-            axis,
+            restored.active().expect("a tab").panes().root_axis(),
+            Some(axis),
             "a split {direction:?} came back on the other axis"
         );
     }
+}
+
+/// A 2×2 with both kinds of divider dragged, and its panes as `[top left,
+/// top right, bottom left, bottom right]`.
+fn grid() -> (TabStrip, [crate::tab::PaneId; 4]) {
+    let mut strip = TabStrip::new();
+    let focused = |strip: &TabStrip| strip.active().expect("a tab").panes().focused_id();
+    let a = focused(&strip);
+    strip.apply(TabAction::Split(Direction::Right));
+    let b = focused(&strip);
+    strip.apply(TabAction::Split(Direction::Down));
+    let d = focused(&strip);
+    strip.apply(TabAction::FocusPane(a));
+    strip.apply(TabAction::Split(Direction::Down));
+    let c = focused(&strip);
+    strip.apply(TabAction::ResizePanes {
+        before: a,
+        after: b,
+        leading: 0.3,
+    });
+    strip.apply(TabAction::ResizePanes {
+        before: b,
+        after: d,
+        leading: 0.8,
+    });
+    (strip, [a, b, c, d])
+}
+
+/// A tab's split with every pane named by its place in render order, so two
+/// processes' trees can be compared.
+fn split_shape(group: &PaneGroup) -> String {
+    let mut shape = format!("{:?}", group.layout());
+    for (position, pane) in group.iter().enumerate() {
+        shape = shape.replace(&format!("{:?})", pane.id()), &format!("#{position})"));
+    }
+    shape
+}
+
+#[test]
+fn test_a_nested_split_comes_back_as_it_was() {
+    let (mut strip, [_, _, _, d]) = grid();
+    strip.apply(TabAction::FocusPane(d));
+    strip.apply(TabAction::ZoomPane);
+    let was = strip.active().expect("a tab").panes();
+
+    let restored = Session::of(&strip, None).restore().expect("restored");
+    let group = restored.active().expect("a tab").panes();
+
+    assert_eq!(split_shape(group), split_shape(was));
+    assert!(
+        split_shape(group).contains("Vertical"),
+        "{}",
+        split_shape(group)
+    );
+    let shares = |group: &PaneGroup| group.iter().map(Pane::flex).collect::<Vec<_>>();
+    assert_eq!(shares(group), shares(was));
+    assert_eq!(group.index_of(group.focused_id()), Some(3));
+    assert!(group.is_zoomed());
+}
+
+#[test]
+fn test_a_nested_split_is_still_a_row_to_a_build_from_before() {
+    // An older build ignores `layout`, and reads `horizontal` and `panes` the
+    // way it always did: the four panes in one row, rather than a dropped tab.
+    let (strip, _) = grid();
+    let json = serde_json::to_value(Session::of(&strip, None)).expect("serialisable");
+    let tab = &json["tabs"][0];
+
+    assert_eq!(tab["horizontal"], true, "the outermost split is a row");
+    assert_eq!(tab["panes"].as_array().map(Vec::len), Some(4));
+    assert!(tab["layout"]["split"]["children"].is_array(), "{tab}");
+}
+
+#[test]
+fn test_a_file_from_before_splits_could_nest_restores_as_it_always_did() {
+    // A column of three with a dragged divider and the middle pane focused,
+    // written with no `layout` at all.
+    let session: Session = serde_json::from_str(
+        r#"{"tabs": [{"name": "work", "horizontal": false, "focused": 1, "zoomed": false,
+            "panes": [{"title": "one", "flex": 1.5}, {"title": "two", "flex": 0.5},
+                      {"title": "three", "flex": 1.0}]}]}"#,
+    )
+    .expect("an old file reads");
+    assert_eq!(session.tabs[0].layout, None);
+
+    let restored = session.restore().expect("restored");
+    let group = restored.active().expect("a tab").panes();
+
+    assert_eq!(
+        split_shape(group),
+        "Split { axis: Vertical, flex: 1.0, children: [Pane(#0), Pane(#1), Pane(#2)] }"
+    );
+    let shares: Vec<f32> = group.iter().map(Pane::flex).collect();
+    assert_eq!(shares, [1.5, 0.5, 1.0]);
+    let titles: Vec<&str> = group.iter().map(Pane::title).collect();
+    assert_eq!(titles, ["one", "two", "three"]);
+    let ids: Vec<_> = group.iter().map(Pane::id).collect();
+    assert_eq!(group.focused_id(), ids[1]);
+    assert_eq!(
+        group.mru(),
+        [ids[1], ids[2], ids[0]],
+        "the order of use a restore always left: the focused pane, then the \
+         rest last to first"
+    );
+}
+
+#[test]
+fn test_a_lone_panes_share_comes_back_as_it_was_written() {
+    // Meaningless on screen, and still what the file said: a restore that
+    // rewrote it would write a different file back over an untouched window.
+    let session: Session = serde_json::from_str(
+        r#"{"tabs": [{"name": "work", "panes": [{"title": "one", "flex": 0.5}]}]}"#,
+    )
+    .expect("reads");
+
+    let restored = session.restore().expect("restored");
+
+    assert_eq!(Session::of(&restored, None).tabs[0].panes[0].flex, 0.5);
+}
+
+#[test]
+fn test_a_layout_that_does_not_name_every_pane_once_is_mended() {
+    // A hand edit: the first pane twice, a pane that is not there, a branch
+    // with nothing in it and the third pane not at all. Every pane still
+    // comes back, once, in a tree in shape.
+    let session: Session = serde_json::from_str(
+        r#"{"tabs": [{"name": "work", "panes": [{"title": "one"}, {"title": "two"}, {"title": "three"}],
+            "layout": {"split": {"horizontal": false, "flex": 1.0, "children": [
+                {"pane": 0}, {"pane": 0}, {"pane": 7},
+                {"split": {"horizontal": true, "children": []}},
+                {"split": {"horizontal": true, "children": [{"pane": 1}]}}
+            ]}}}]}"#,
+    )
+    .expect("reads");
+
+    let restored = session.restore().expect("restored");
+    let group = restored.active().expect("a tab").panes();
+
+    assert_eq!(
+        split_shape(group),
+        "Split { axis: Horizontal, flex: 1.0, children: [Split { axis: Vertical, flex: 1.0, \
+         children: [Pane(#0), Pane(#1)] }, Pane(#2)] }"
+    );
+}
+
+#[test]
+fn test_a_layout_this_build_cannot_read_costs_the_shape_and_not_the_tab() {
+    let session: Session = serde_json::from_str(
+        r#"{"tabs": [{"name": "work", "horizontal": true,
+            "panes": [{"title": "one"}, {"title": "two"}], "layout": "a circle"}]}"#,
+    )
+    .expect("the rest of the tab still reads");
+
+    let restored = session.restore().expect("restored");
+    let group = restored.active().expect("a tab").panes();
+
+    assert_eq!(
+        split_shape(group),
+        "Split { axis: Horizontal, flex: 1.0, children: [Pane(#0), Pane(#1)] }"
+    );
 }
 
 #[test]

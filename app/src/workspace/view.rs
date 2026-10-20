@@ -46,7 +46,7 @@ use crate::pane_composition::PaneComposition;
 use crate::pane_find::{Matches, PaneFind};
 use crate::pane_link::{self, Found, Opens, PaneLink};
 use crate::pane_selection::PaneSelection;
-use crate::pane_split::{DividerDrag, PaneExtent};
+use crate::pane_split::DividerDrag;
 use crate::pane_surface::{self, Surface};
 use crate::platform_insets::{ControlLayout, LayoutInsets, WindowChrome};
 use crate::plugin::{ActionId, ActionName, Host, PageId, PluginId, SectionId, Watch};
@@ -155,9 +155,6 @@ pub(super) struct PaneInteraction {
     pub(super) find: PaneFind,
     /// The link under the pointer in the pane's output. See [`PaneLink`].
     pub(super) links: PaneLink,
-    /// How many pixels the pane last measured along the split's axis. See
-    /// [`PaneExtent`].
-    pub(super) extent: PaneExtent,
     /// Where the pane's block list is scrolled to and what the pointer is
     /// over. See [`PaneBlocks`].
     pub(super) blocks: PaneBlocks,
@@ -8793,18 +8790,6 @@ impl Workspace {
         })
     }
 
-    /// How many pixels a pane last measured along the axis its split divides.
-    ///
-    /// Written by the element that lays it out and read by the divider beside
-    /// it, which is the only way a drag in pixels can become the share the
-    /// pane group keeps. A pane with no entry yet reports zero, which is the
-    /// state a divider reads as "nothing to drag against".
-    pub(super) fn pane_extent(&self, pane: PaneId) -> PaneExtent {
-        self.interactions
-            .get(&pane)
-            .map_or_else(PaneExtent::new, |interaction| interaction.extent.clone())
-    }
-
     /// The divider drag in progress anywhere in the window.
     ///
     /// One for the window rather than one per divider, which is what makes
@@ -12146,7 +12131,6 @@ impl Workspace {
                     selection: PaneSelection::new(),
                     find: PaneFind::new(),
                     links: PaneLink::new(),
-                    extent: PaneExtent::new(),
                     blocks: PaneBlocks::new(),
                     composition: PaneComposition::new(),
                 });
