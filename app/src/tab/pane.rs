@@ -171,15 +171,12 @@ impl Pane {
 
     /// Restores a share a previous session recorded.
     ///
-    /// Clamped and defaulted past anything unusable, because the number comes
-    /// out of a file: a zero, a negative or a `NaN` would be a pane a flex
-    /// layout gives no space to, which is a pane nobody can see or get back.
+    /// Through [`sane_flex`], because the number comes out of a file. Not
+    /// floored at [`MIN_FLEX`]: that is where a drag stops, and a branch
+    /// folded into its parent hands its panes shares well under it, which a
+    /// restore has to give back as they were.
     pub(crate) fn set_flex(&mut self, flex: f32) {
-        self.flex = if flex.is_finite() && flex >= MIN_FLEX {
-            flex
-        } else {
-            DEFAULT_FLEX
-        };
+        self.flex = sane_flex(flex);
     }
 
     /// This pane's identity, for as long as it is open.
@@ -507,11 +504,21 @@ fn normalized(node: Node, root: bool) -> Option<Node> {
     })
 }
 
-/// A share read out of a file, or out of a layout kept since: anything a flex
-/// layout could not give room to becomes the default. See [`Pane::set_flex`].
+/// The range a share read back is held to, either side of [`DEFAULT_FLEX`].
+///
+/// Wide enough for any share the tree makes — folds scale shares down by the
+/// share of the branch they fold, and a dragged divider moves them by a few
+/// times at most — and narrow enough that sixteen of them add up to a finite
+/// number with room to spare, and none is a pane no pixel would go to.
+const RESTORED_FLEX: (f32, f32) = (1e-4, 1e4);
+
+/// A share read out of a file, or out of a layout kept since. Anything a flex
+/// layout could not give room to — zero, a negative, a `NaN` — becomes the
+/// default; anything else is held to [`RESTORED_FLEX`]. See
+/// [`Pane::set_flex`].
 fn sane_flex(flex: f32) -> f32 {
     if flex.is_finite() && flex > 0. {
-        flex
+        flex.clamp(RESTORED_FLEX.0, RESTORED_FLEX.1)
     } else {
         DEFAULT_FLEX
     }

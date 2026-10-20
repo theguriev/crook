@@ -11644,10 +11644,10 @@ impl Workspace {
                     self.tabs.focused_pane_id()?,
                 )));
             }
-            // A direction across the group's axis has no pane in it, and
-            // neither has the end of a split. Both come back as `None`, which
-            // is what sends the keystroke on to the shell rather than
-            // swallowing it for a move that could not happen.
+            // A direction with no pane beside the focused one on that side —
+            // the edge of the tab — comes back as `None`, which is what sends
+            // the keystroke on to the shell rather than swallowing it for a
+            // move that could not happen.
             Binding::FocusPane(direction) => {
                 TabAction::FocusPane(self.tabs.active()?.panes().neighbour(direction)?)
             }

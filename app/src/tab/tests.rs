@@ -1233,11 +1233,11 @@ mod resizing {
 
 /// Walking a split with the keyboard, and sizing it from there.
 ///
-/// A pane group is one vector along one axis, so half of what "left, right, up
-/// and down" could mean is a direction the group cannot answer — and the
-/// cases here are mostly about that half, because a command that answered it
-/// anyway would move the keyboard somewhere nobody pointed and eat the chord
-/// on the way.
+/// In a single row or column, half of what "left, right, up and down" could
+/// mean points off the edge of the tab — and the cases here are mostly about
+/// that half, because a command that answered it anyway would move the
+/// keyboard somewhere nobody pointed and eat the chord on the way. Splits
+/// that nest are walked in `nesting`, below.
 mod walking {
     use super::*;
 

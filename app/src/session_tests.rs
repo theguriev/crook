@@ -317,7 +317,10 @@ fn test_a_nested_split_is_still_a_row_to_a_build_from_before() {
 
     assert_eq!(tab["horizontal"], true, "the outermost split is a row");
     assert_eq!(tab["panes"].as_array().map(Vec::len), Some(4));
-    assert!(tab["layout"]["split"]["children"].is_array(), "{tab}");
+    assert_eq!(
+        tab["layout"][0]["split"]["children"], 2,
+        "the row, then the cells under it: {tab}"
+    );
 }
 
 #[test]
@@ -368,17 +371,140 @@ fn test_a_lone_panes_share_comes_back_as_it_was_written() {
 }
 
 #[test]
+fn test_shares_a_fold_made_small_come_back_as_they_were() {
+    // A row of a pane and a column, the row's divider dragged almost to the
+    // end, the column's lower pane split into a row and the upper one
+    // closed: the row folds into the outer one, and its two panes share
+    // the column's sliver between them — well under the floor a drag stops
+    // at. A restore that took them for a file's garbage gave each a whole
+    // share, and the window came back with the big pane a third of the row.
+    let mut strip = TabStrip::new();
+    let focused = |strip: &TabStrip| strip.active().expect("a tab").panes().focused_id();
+    let a = focused(&strip);
+    strip.apply(TabAction::Split(Direction::Right));
+    let b = focused(&strip);
+    strip.apply(TabAction::Split(Direction::Down));
+    strip.apply(TabAction::ResizePanes {
+        before: a,
+        after: b,
+        leading: 0.99,
+    });
+    strip.apply(TabAction::Split(Direction::Right));
+    strip.apply(TabAction::ClosePane(b));
+    let shares = |strip: &TabStrip| {
+        strip
+            .panes()
+            .map(|(_, pane)| pane.flex())
+            .collect::<Vec<_>>()
+    };
+    let live = shares(&strip);
+    assert!(
+        live[1] < 0.08,
+        "the fold left the shares it should: {live:?}"
+    );
+
+    let restored = Session::of(&strip, None).restore().expect("restored");
+
+    assert_eq!(shares(&restored), live);
+}
+
+#[test]
+fn test_shares_no_layout_could_add_up_are_brought_back_into_range() {
+    // Two shares near `f32::MAX` add up to infinity, and every pane of the
+    // branch then divides by it.
+    let session: Session = serde_json::from_str(
+        r#"{"tabs": [{"name": "work",
+            "panes": [{"title": "one", "flex": 3e38}, {"title": "two", "flex": 3e38},
+                      {"title": "three", "flex": 1.0}],
+            "layout": [{"split": {"horizontal": true, "children": 2}},
+                {"pane": 0},
+                {"split": {"horizontal": false, "flex": 3e38, "children": 2}},
+                {"pane": 1}, {"pane": 2}]}]}"#,
+    )
+    .expect("reads");
+
+    let restored = session.restore().expect("restored");
+    let group = restored.active().expect("a tab").panes();
+
+    let total: f32 =
+        group.iter().map(Pane::flex).sum::<f32>() + group.root_flexes().iter().sum::<f32>();
+    assert!(total.is_finite(), "{total}");
+}
+
+#[test]
+fn test_the_focused_pane_is_the_one_the_file_names_whatever_order_the_layout_puts_it_in() {
+    // `focused` is a position in `panes`. A layout that draws them in
+    // another order — a hand edit — must not move the keyboard to whichever
+    // pane is drawn at that position.
+    let session: Session = serde_json::from_str(
+        r#"{"tabs": [{"name": "work", "focused": 0,
+            "panes": [{"title": "one"}, {"title": "two"}],
+            "layout": [{"split": {"horizontal": true, "children": 2}}, {"pane": 1}, {"pane": 0}]}]}"#,
+    )
+    .expect("reads");
+
+    let restored = session.restore().expect("restored");
+    let group = restored.active().expect("a tab").panes();
+
+    assert_eq!(group.focused().map(Pane::title), Some("one"));
+}
+
+#[test]
+fn test_a_split_nested_as_deep_as_a_person_can_split_still_reads_back() {
+    // Splitting the newest pane down, then right, then down, nests one branch
+    // inside the last each time. Written as nested JSON, three levels a
+    // branch, forty-odd of them passed the parser's depth limit, and the
+    // whole file — every tab in it — failed to read.
+    let mut strip = TabStrip::new();
+    strip.apply(TabAction::New);
+    for turn in 0..60 {
+        let direction = if turn % 2 == 0 {
+            Direction::Down
+        } else {
+            Direction::Right
+        };
+        strip.apply(TabAction::Split(direction));
+    }
+    let text = serde_json::to_string(&Session::of(&strip, None)).expect("serialisable");
+
+    let read: Session = serde_json::from_str(&text).expect("the file reads back");
+
+    assert_eq!(read.tabs.len(), 2, "a tab was lost");
+    assert!(read.tabs[1].layout.is_some(), "the shape was lost");
+}
+
+#[test]
+fn test_a_layout_of_endless_one_child_branches_is_cut_short() {
+    // A file nobody wrote: a branch inside a branch a hundred thousand times.
+    // Rebuilt as written, that is a hundred thousand frames of recursion.
+    let mut cells = String::new();
+    for _ in 0..100_000 {
+        cells.push_str(r#"{"split": {"horizontal": true, "children": 1}},"#);
+    }
+    cells.push_str(r#"{"pane": 0}"#);
+    let text = format!(
+        r#"{{"tabs": [{{"name": "work", "panes": [{{"title": "one"}}, {{"title": "two"}}],
+            "layout": [{cells}]}}]}}"#
+    );
+    let session: Session = serde_json::from_str(&text).expect("reads");
+
+    let restored = session.restore().expect("restored");
+
+    assert_eq!(restored.active().expect("a tab").panes().len(), 2);
+}
+
+#[test]
 fn test_a_layout_that_does_not_name_every_pane_once_is_mended() {
     // A hand edit: the first pane twice, a pane that is not there, a branch
     // with nothing in it and the third pane not at all. Every pane still
     // comes back, once, in a tree in shape.
     let session: Session = serde_json::from_str(
         r#"{"tabs": [{"name": "work", "panes": [{"title": "one"}, {"title": "two"}, {"title": "three"}],
-            "layout": {"split": {"horizontal": false, "flex": 1.0, "children": [
+            "layout": [{"split": {"horizontal": false, "flex": 1.0, "children": 5}},
                 {"pane": 0}, {"pane": 0}, {"pane": 7},
-                {"split": {"horizontal": true, "children": []}},
-                {"split": {"horizontal": true, "children": [{"pane": 1}]}}
-            ]}}}]}"#,
+                {"split": {"horizontal": true, "children": 0}},
+                {"split": {"horizontal": true, "children": 1}},
+                {"pane": 1}]}]}"#,
     )
     .expect("reads");
 

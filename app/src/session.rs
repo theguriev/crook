@@ -221,7 +221,8 @@ pub struct TabSnapshot {
     /// the row or column it can draw, with every pane in it, rather than
     /// dropping the tab.
     pub horizontal: bool,
-    /// How the split nests, naming each pane by its position in `panes`.
+    /// How the split nests, as its cells in pre-order — see [`LayoutCell`] —
+    /// naming each pane by its position in `panes`.
     ///
     /// `None` for a tab of one pane and for a file written before a split
     /// could nest, which restores as one row or column of `panes` the way
@@ -232,7 +233,7 @@ pub struct TabSnapshot {
         deserialize_with = "a_layout_or_none",
         skip_serializing_if = "Option::is_none"
     )]
-    pub layout: Option<LayoutSnapshot>,
+    pub layout: Option<Vec<LayoutCell>>,
     /// Which pane had the keyboard, as a position in `panes`.
     pub focused: usize,
     /// Whether that pane had the whole tab to itself, with the split kept
@@ -278,8 +279,15 @@ pub struct TabSnapshot {
     pub recency: Option<usize>,
 }
 
-/// One cell of a split as the session file keeps it: a pane, or a branch of
-/// cells.
+/// One cell of a split as the session file keeps it: a pane, or a branch
+/// whose cells are the ones after it.
+///
+/// A tab's [`TabSnapshot::layout`] is its cells in pre-order — each branch,
+/// then each of its `children` cells in turn, with theirs — rather than JSON
+/// nested as deep as the split is. Nested, a branch was three levels of the
+/// file, and forty-odd splits alternating down and right in one tab took it
+/// past the parser's depth limit: the whole file then failed to read, every
+/// tab in it. Flat, the file is as deep as one cell however the split nests.
 ///
 /// Its own shape rather than [`Layout`]'s, because that one names panes by an
 /// identity that means nothing in a later process; this names them by their
@@ -287,24 +295,32 @@ pub struct TabSnapshot {
 /// share is the pane's own `flex` and only a branch carries one here.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LayoutSnapshot {
+pub enum LayoutCell {
     /// The pane at this position in `panes`.
     Pane(usize),
-    /// Cells divided one way.
-    Split(SplitSnapshot),
+    /// A branch, whose cells are the next `children` in the list.
+    Split(SplitCell),
 }
 
 /// A branch of a split, as the session file keeps it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SplitSnapshot {
+pub struct SplitCell {
     /// Whether its cells are side by side rather than stacked.
     pub horizontal: bool,
     /// Its share of the branch it is in, from a dragged divider.
     pub flex: f32,
-    /// The cells, in render order.
-    pub children: Vec<LayoutSnapshot>,
+    /// How many cells it divides, which are the ones after it.
+    pub children: usize,
 }
+
+/// The most cells of a layout a restore reads.
+///
+/// Four for every pane a tab may restore, which is more than any split of
+/// them has — a tree in shape has fewer cells than twice its panes — and is
+/// what bounds the recursion that rebuilds it: a file nobody wrote can nest
+/// a branch in a branch for as long as it likes.
+const MAX_LAYOUT_CELLS: usize = 4 * MAX_PANES;
 
 /// One pane: where its shell was, and how much of the split it took.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -645,7 +661,11 @@ impl TabSnapshot {
         };
         let layout = match root {
             Node::Leaf(_) => None,
-            Node::Branch(_) => Some(LayoutSnapshot::of(root, &mut 0)),
+            Node::Branch(_) => {
+                let mut cells = Vec::new();
+                LayoutCell::record(root, &mut cells, &mut 0);
+                Some(cells)
+            }
         };
         Some(Self {
             name: tab.name().to_owned(),
@@ -699,7 +719,7 @@ impl TabSnapshot {
         }
         let ids: Vec<PaneId> = panes.iter().map(Pane::id).collect();
         let layout = match &self.layout {
-            Some(layout) => layout.to_layout(&ids),
+            Some(cells) => LayoutCell::to_layout(cells, &ids),
             // A file from before a split could nest: one row or one column of
             // every pane, which is what it always restored to.
             None => Some(Layout::Split {
@@ -719,7 +739,9 @@ impl TabSnapshot {
         });
         *tab.panes_mut() = PaneGroup::from_layout(panes, &layout)?;
 
-        let ids: Vec<_> = tab.panes().iter().map(Pane::id).collect();
+        // By the file's list, which `focused` is a position in, rather than
+        // by the order the layout draws them in: a hand-edited layout may
+        // draw them in another.
         if let Some(id) = ids.get(self.focused.min(ids.len().saturating_sub(1))) {
             tab.panes_mut().focus(*id);
         }
@@ -784,46 +806,65 @@ impl PaneSnapshot {
     }
 }
 
-impl LayoutSnapshot {
-    /// Records a cell, numbering its panes from `next` on in render order —
-    /// the order [`TabSnapshot::panes`] is written in.
-    fn of(node: &Node, next: &mut usize) -> Self {
+impl LayoutCell {
+    /// Writes a cell and every cell under it in pre-order, numbering its
+    /// panes from `next` on in render order — the order
+    /// [`TabSnapshot::panes`] is written in.
+    fn record(node: &Node, into: &mut Vec<Self>, next: &mut usize) {
         match node {
             Node::Leaf(_) => {
+                into.push(Self::Pane(*next));
                 *next += 1;
-                Self::Pane(*next - 1)
             }
-            Node::Branch(branch) => Self::Split(SplitSnapshot {
-                horizontal: branch.axis() == SplitAxis::Horizontal,
-                flex: node.flex(),
-                children: branch
-                    .children()
-                    .iter()
-                    .map(|child| Self::of(child, next))
-                    .collect(),
-            }),
+            Node::Branch(branch) => {
+                into.push(Self::Split(SplitCell {
+                    horizontal: branch.axis() == SplitAxis::Horizontal,
+                    flex: node.flex(),
+                    children: branch.children().len(),
+                }));
+                for child in branch.children() {
+                    Self::record(child, into, next);
+                }
+            }
         }
     }
 
-    /// The shape over the panes `ids` holds, by position. A position past the
-    /// end names no pane, and [`PaneGroup::from_layout`] mends the rest.
-    fn to_layout(&self, ids: &[PaneId]) -> Option<Layout> {
-        match self {
+    /// The shape `cells` describe over the panes `ids` holds, by position,
+    /// read no further than [`MAX_LAYOUT_CELLS`]. A position past the end
+    /// names no pane, a branch the list runs out under keeps the cells it
+    /// got, and [`PaneGroup::from_layout`] mends the rest.
+    fn to_layout(cells: &[Self], ids: &[PaneId]) -> Option<Layout> {
+        let mut cells = cells.iter().take(MAX_LAYOUT_CELLS);
+        Self::read(&mut cells, ids).flatten()
+    }
+
+    /// The next cell and the cells under it: `None` when the list has run
+    /// out, `Some(None)` for a pane that is not there.
+    fn read<'a>(
+        cells: &mut impl Iterator<Item = &'a Self>,
+        ids: &[PaneId],
+    ) -> Option<Option<Layout>> {
+        Some(match cells.next()? {
             Self::Pane(position) => ids.get(*position).copied().map(Layout::Pane),
-            Self::Split(split) => Some(Layout::Split {
-                axis: if split.horizontal {
-                    SplitAxis::Horizontal
-                } else {
-                    SplitAxis::Vertical
-                },
-                flex: split.flex,
-                children: split
-                    .children
-                    .iter()
-                    .filter_map(|child| child.to_layout(ids))
-                    .collect(),
-            }),
-        }
+            Self::Split(split) => {
+                let mut children = Vec::new();
+                for _ in 0..split.children {
+                    match Self::read(cells, ids) {
+                        Some(child) => children.extend(child),
+                        None => break,
+                    }
+                }
+                Some(Layout::Split {
+                    axis: if split.horizontal {
+                        SplitAxis::Horizontal
+                    } else {
+                        SplitAxis::Vertical
+                    },
+                    flex: split.flex,
+                    children,
+                })
+            }
+        })
     }
 }
 
@@ -831,7 +872,7 @@ impl LayoutSnapshot {
 /// [`TabSnapshot::layout`].
 fn a_layout_or_none<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> Result<Option<LayoutSnapshot>, D::Error> {
+) -> Result<Option<Vec<LayoutCell>>, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(serde_json::from_value(value).ok())
 }
