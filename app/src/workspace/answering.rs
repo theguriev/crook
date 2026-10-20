@@ -195,6 +195,11 @@ impl Withdrawn {
             Self::Ended(Cause::AnsweredInAgent) => {
                 format!("It was answered in {agent}'s own tab, and the command has run.")
             }
+            // Not that the command ran: a "No, and tell Claude what to do
+            // differently" sets the agent to work again as a Yes does.
+            Self::Ended(Cause::AtWorkAgain) => {
+                format!("It was answered in {agent}'s own tab, and {agent} is at work again.")
+            }
             Self::Ended(Cause::HookGone) => format!(
                 "Its hook stopped waiting: it was answered in {agent}'s own tab, or {agent} \
                  stopped asking."
