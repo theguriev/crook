@@ -62,7 +62,9 @@
 //! its pane closing, the agent's command ending, the agent saying its turn is
 //! over or failed, the same session asking again, the tool it was about
 //! having run ([`Cause::AnsweredInAgent`]: a person said yes in the agent's
-//! own dialog, which tells the hook nothing), or the window closing.
+//! own dialog, which tells the hook nothing), the agent's title saying it is
+//! at work again after its dialog opened ([`Cause::AtWorkAgain`], the same
+//! answer seen sooner: see [`Asks::titled`]), or the window closing.
 //! Each but the last pushes a pass into the question's feed, which the
 //! connection writes and the hook prints nothing for; a window that closes
 //! says `gone` instead. Each is a line in the log — the agent, the tool, how
@@ -99,7 +101,7 @@
 //! for them holds; nothing ticks for one — its time running out is the
 //! connection's thread's to notice — and nothing about it is written to disk.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -114,7 +116,7 @@ use super::protocol::{
 use super::watch::Feed;
 use super::{Inbox, Notice};
 use crate::agent::request::{self, AskRequest};
-use crate::tab::{PaneId, TabStrip};
+use crate::tab::{AgentStatus, PaneId, TabStrip};
 use crate::workspace::Workspace;
 
 /// How many questions one pane may hold at once. The next is refused as
@@ -216,6 +218,12 @@ pub enum Cause {
     /// own dialog: the hook that runs after the tool said so, on the pane —
     /// see [`Asks::answered_in_agent`].
     AnsweredInAgent,
+    /// The agent's title said it was at work again while its dialog was up,
+    /// so a person answered it there: Yes, or "No, and tell Claude what to do
+    /// differently", which go on with the turn and tell the hook nothing.
+    /// Which of them, and whether the tool has run, the title cannot say.
+    /// See [`Asks::titled`].
+    AtWorkAgain,
     /// The window closed.
     WindowClosed,
     /// Answering agents from Crook was turned off while it waited.
@@ -233,6 +241,7 @@ impl Cause {
             Self::TurnEnded => "turn-ended",
             Self::AskedAgain => "asked-again",
             Self::AnsweredInAgent => "answered-in-agent",
+            Self::AtWorkAgain => "at-work-again",
             Self::WindowClosed => "window-closed",
             Self::AnsweringOff => "answering-off",
         }
@@ -249,7 +258,7 @@ impl Cause {
             Self::CommandEnded => "The agent exited",
             Self::TurnEnded => "The agent's turn ended",
             Self::AskedAgain => "A newer request replaced it",
-            Self::AnsweredInAgent => "Answered in the agent's own dialog",
+            Self::AnsweredInAgent | Self::AtWorkAgain => "Answered in the agent's own dialog",
             Self::WindowClosed => "The window closed",
             Self::AnsweringOff => "Answering in Crook was turned off",
         }
@@ -258,7 +267,7 @@ impl Cause {
     /// How a lead following the pane is told it ended.
     pub fn by(self) -> AnsweredBy {
         match self {
-            Self::AnsweredInAgent => AnsweredBy::InAgent,
+            Self::AnsweredInAgent | Self::AtWorkAgain => AnsweredBy::InAgent,
             Self::Expired => AnsweredBy::Expired,
             Self::AnsweringOff => AnsweredBy::Released,
             Self::PaneClosed | Self::WindowClosed => AnsweredBy::Closed,
@@ -365,12 +374,30 @@ pub struct Ask {
     tab_title: String,
     /// What the hook's connection waits on.
     feed: Arc<Feed>,
+    /// Whether the last title the pane has had since the window took it,
+    /// or the one it had then, was Claude Code's `✳`: see [`Asks::titled`].
+    seen_waiting: bool,
 }
 
 impl Ask {
     /// The agent's name for the tool it asks to use.
     pub fn tool(&self) -> &'static str {
         self.agent.tool(&self.request)
+    }
+
+    /// Whether the pane's row says needs input for this question from the
+    /// moment it is held, rather than once the agent says so: one this
+    /// window could answer, which the pane's own agent asked directly.
+    ///
+    /// Not one from inside a multiplexer. What ends the row's question when
+    /// a person answers in the agent's dialog is the agent's title, and
+    /// inside tmux the pane's title is tmux's — or, with its `set-titles`,
+    /// whichever of its panes is current, which need not be the one asking.
+    /// Nothing would take the amber back until the tool had run. Nor one
+    /// this window cannot answer: that is some process that named the
+    /// pane's terminal, and it does not get to make a row amber.
+    pub fn shows_at_once(&self) -> bool {
+        self.cannot_answer.is_none() && self.inside.is_none()
     }
 }
 
@@ -476,6 +503,9 @@ pub struct Asks {
     /// What the leads following the panes have yet to be told, oldest first:
     /// see [`Self::take_told`].
     told: VecDeque<(PaneId, PaneEvent)>,
+    /// The panes whose last title was Claude Code's `✳`: see
+    /// [`Self::titled`].
+    waiting_titles: HashSet<PaneId>,
 }
 
 impl Asks {
@@ -524,6 +554,15 @@ impl Asks {
         self.live()
             .filter(|ask| ask.pane == pane && ask.cannot_answer.is_none())
             .max_by_key(|ask| (ask.inside.is_none(), ask.id))
+    }
+
+    /// The newest question held in `pane` whose row says needs input from
+    /// the moment it is held: see [`Ask::shows_at_once`]. What the pane's
+    /// session mirrors as `asking`.
+    pub fn shown_at_once_in(&self, pane: PaneId) -> Option<&Ask> {
+        self.live()
+            .filter(|ask| ask.pane == pane && ask.shows_at_once())
+            .max_by_key(|ask| ask.id)
     }
 
     /// Whether the agent in `pane` is asking through Crook: a question this
@@ -684,6 +723,7 @@ impl Asks {
             pane: found.pane,
             cannot_answer: found.cannot_answer,
             asked_at: now,
+            seen_waiting: self.waiting_titles.contains(&found.pane),
             inside: found.inside,
             tab_title: found.tab_title,
             feed,
@@ -750,6 +790,8 @@ impl Asks {
     /// Ends every question whose pane `strip` no longer has, and every one
     /// nobody waits on any more: see [`Self::drop_abandoned`].
     pub fn forget_closed(&mut self, strip: &TabStrip) {
+        self.waiting_titles
+            .retain(|pane| strip.pane(*pane).is_some());
         if self.live.is_empty() {
             return;
         }
@@ -829,6 +871,59 @@ impl Asks {
             .collect();
         for &id in &answered {
             self.end(id, Cause::AnsweredInAgent);
+        }
+        !answered.is_empty()
+    }
+
+    /// Takes in a title the pane `pane` was given — `claude`, what Claude
+    /// Code's glyph at its front says, see
+    /// [`AgentStatus::from_claude_title`] — and ends, as
+    /// [`Cause::AtWorkAgain`], the questions there that the title says a
+    /// person has answered in the agent's own dialog. Says whether it ended
+    /// any.
+    ///
+    /// Measured on Claude Code 2.1.280 (`docs/answering.md`, C12): its title
+    /// turns to `✳` as a permission dialog opens, a few milliseconds before
+    /// the hook starts, and stays so for as long as a dialog is up, a
+    /// background subagent at work included; its spinner is back within a
+    /// few dozen milliseconds of a Yes. So the spinner after the `✳` is the
+    /// dialog closing, where the done of [`Self::answered_in_agent`] comes
+    /// only once the tool has run, however long it takes.
+    ///
+    /// After the `✳`, and never on its own. Titles reach the window in the
+    /// order Claude Code wrote them, and its spinner turns once a second
+    /// while it works; one drawn before the dialog opened, read only once the
+    /// hook's question has arrived over the socket, is the agent at work
+    /// before it asked and says nothing of an answer. So a question ends only
+    /// once the pane's title has been `✳` at or after the moment the window
+    /// took it. A spinner from anything else in the pane can do no more than
+    /// a done can: the hook passes, and the dialog stays up for the person to
+    /// answer.
+    ///
+    /// The `✳` never ends one: it is the dialog opening, and Esc's turn
+    /// ending, which kills the hook and ends its question that way. Only
+    /// questions whose row said needs input at once ([`Ask::shows_at_once`]):
+    /// inside a multiplexer the pane's title is not the agent's.
+    pub fn titled(&mut self, pane: PaneId, claude: Option<AgentStatus>) -> bool {
+        if claude == Some(AgentStatus::Idle) {
+            self.waiting_titles.insert(pane);
+            for ask in self.live.iter_mut().filter(|ask| ask.pane == pane) {
+                ask.seen_waiting = true;
+            }
+            return false;
+        }
+        // Whatever else the title says, `✳` is no longer the last of them.
+        self.waiting_titles.remove(&pane);
+        if claude != Some(AgentStatus::Running) {
+            return false;
+        }
+        let answered: Vec<AskId> = self
+            .live()
+            .filter(|ask| ask.pane == pane && ask.shows_at_once() && ask.seen_waiting)
+            .map(|ask| ask.id)
+            .collect();
+        for &id in &answered {
+            self.end(id, Cause::AtWorkAgain);
         }
         !answered.is_empty()
     }

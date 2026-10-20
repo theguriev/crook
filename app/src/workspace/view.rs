@@ -58,7 +58,7 @@ use crate::settings::{
 };
 use crate::shell_integration::Standing;
 use crate::tab::{
-    AgentSession, AgentStatus, Attention, Direction, GroupId, Pane, PaneId, PullRequest,
+    AgentSession, AgentStatus, Asking, Attention, Direction, GroupId, Pane, PaneId, PullRequest,
     PullRequestCheck, StatusSource, Tab, TabAction, TabEffect, TabGroup, TabId, TabStrip,
     TitleSays,
 };
@@ -3248,9 +3248,71 @@ impl Workspace {
     /// A newer question from the same session ends the one before; the card
     /// stays on what it showed, and never moves on to the new one.
     pub(crate) fn asks_changed(&mut self, ctx: &mut ViewContext<Self>) {
+        self.mirror_asks(ctx);
         self.tell_watches_the_asks();
         self.withdraw_an_ended_ask_card(ctx);
         ctx.notify();
+    }
+
+    /// Writes into each pane's session the question its row shows at once —
+    /// see [`AgentSession::asking`] — now that the questions held may have
+    /// changed, and asks for a look at a pane nobody is looking at whose
+    /// agent has just begun asking.
+    ///
+    /// A pane that begins asking turns amber that moment, and that is a turn
+    /// to needs input like any other: it posts the desktop's notice, under
+    /// the pane's quiet, which names the agent, the tool and the tab and
+    /// never the command — see [`Notice::needs_input`]. The notification
+    /// Claude Code sends six seconds later finds the row amber already, and
+    /// posts none.
+    ///
+    /// Only the mirror moves. The status the agent said stays as it was, so
+    /// the control socket's watches hear of nothing — `asked` is told them
+    /// beside this, by [`Self::tell_watches_the_asks`] — and a question
+    /// ending puts back on the row exactly what the agent last said, never a
+    /// running Crook made up for it: after Allow the next title or report
+    /// says whether the agent went on.
+    fn mirror_asks(&mut self, ctx: &mut ViewContext<Self>) {
+        let looking = self.looking_at();
+        let mirrored: Vec<(PaneId, Option<Asking>)> = self
+            .tabs
+            .panes()
+            .map(|(_, pane)| pane.id())
+            .map(|pane| {
+                let asking = self.asks.shown_at_once_in(pane).map(|ask| Asking {
+                    agent: ask.agent.name(),
+                    tool: ask.tool(),
+                    summary: ask.summary.clone(),
+                });
+                (pane, asking)
+            })
+            .filter(|(pane, asking)| {
+                self.tabs
+                    .pane(*pane)
+                    .is_some_and(|open| open.session().asking != *asking)
+            })
+            .collect();
+        for (pane, asking) in mirrored {
+            let was = self.shown_before_a_report(pane);
+            let Some(open) = self.tabs.pane_mut(pane) else {
+                continue;
+            };
+            let session = open.session_mut();
+            let begun = session.asking.is_none() && asking.is_some();
+            session.asking = asking;
+            // A notification's words are what the row shows until it is
+            // read, as for the bell.
+            if begun
+                && looking != Some(pane)
+                && !matches!(session.attention, Some(Attention::Notification(_)))
+            {
+                session.attention = Some(Attention::Asked);
+            }
+            if begun {
+                self.tell_the_desktop(pane, was, ctx);
+            }
+            ctx.notify();
+        }
     }
 
     /// Tells the leads following a pane that its agent asked through Crook,
@@ -3410,6 +3472,7 @@ impl Workspace {
             return;
         }
         let delivered = self.asks.deliver(ask, &digest, decision);
+        self.mirror_asks(ctx);
         self.tell_watches_the_asks();
         match delivered {
             crate::control::ask::Delivery::Delivered => self.close_ask_card(ctx),
@@ -9852,6 +9915,7 @@ impl Workspace {
             self.start_breathing(ctx);
         }
         self.end_asks_a_report_ends(pane, status, source);
+        self.mirror_asks(ctx);
         self.tell_watches_the_asks();
         // The card says the question may have been answered in the agent's
         // tab, a line that pushes its buttons down: they wait again, so a
@@ -10424,6 +10488,13 @@ impl Workspace {
                         self.update_session(*pane, ctx, |session| session.derived_title = title)
                     }
                 };
+                // Before the title is taken as a status: a question it ends
+                // gives the row back the status the agent said, which the
+                // title then moves as it always has.
+                let claude = title.as_deref().and_then(AgentStatus::from_claude_title);
+                if self.asks.titled(*pane, claude) {
+                    self.asks_changed(ctx);
+                }
                 match said {
                     Some(said) => self.title_reported(*pane, said, ctx),
                     None if title.is_none() => self.take_back_a_running_title(*pane, ctx),
@@ -11202,6 +11273,7 @@ impl Workspace {
         // and is told so before the pane is told closed: a stream anchored
         // on the pane ends with that line.
         self.asks.forget_closed(&self.tabs);
+        self.mirror_asks(ctx);
         self.tell_watches_the_asks();
         self.watches.settled(&self.tabs);
         self.withdraw_an_ended_ask_card(ctx);

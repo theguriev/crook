@@ -158,12 +158,7 @@ impl AgentStatus {
     ) -> Option<TitleSays<'title>> {
         let glyph = title.chars().next()?;
         let rest = &title[glyph.len_utf8()..];
-        let claude = match glyph {
-            '\u{2733}' => Some(Self::Idle),
-            '\u{25d0}'..='\u{25d3}' => Some(Self::Running),
-            _ => None,
-        };
-        if let Some(status) = claude {
+        if let Some(status) = Self::from_claude_title(title) {
             return Some(TitleSays {
                 status,
                 name: Some(rest.trim_start()),
@@ -204,6 +199,22 @@ impl AgentStatus {
             name: None,
             outright,
         })
+    }
+
+    /// What Claude Code's own glyph at the front of `title` says: idle for
+    /// its `✳`, running for its turning half-filled circle, and `None` for
+    /// any other title.
+    ///
+    /// Apart from [`Self::from_title`] because a question its hook asked is
+    /// ended by Claude Code's glyph and by nobody else's: Gemini CLI's `✦`
+    /// says running too, and says nothing about a Claude Code dialog. See
+    /// `Asks::titled`.
+    pub fn from_claude_title(title: &str) -> Option<Self> {
+        match title.chars().next()? {
+            '\u{2733}' => Some(Self::Idle),
+            '\u{25d0}'..='\u{25d3}' => Some(Self::Running),
+            _ => None,
+        }
     }
 }
 
@@ -248,6 +259,9 @@ pub enum Attention {
     /// are what the look is being asked for, so they go when the look is
     /// given and never linger on a row somebody has already read.
     Notification(String),
+    /// An agent's permission hook asked, through Crook, in a pane without
+    /// the keyboard: see [`AgentSession::asking`].
+    Asked,
 }
 
 /// Where a session's status came from.
@@ -312,6 +326,25 @@ pub enum StatusSource {
     /// change, so a hook saying running once more under it is never heard.
     /// See `Workspace::title_reported`.
     TitleBetweenHooks(Instant),
+}
+
+/// A question an agent's permission hook is waiting on in the pane, as the
+/// row shows it: mirrored from the window's questions — see
+/// `control::ask` — each time one is held or ends, and nothing more.
+///
+/// Never written to the session file, and never what `pane.list`, `crook
+/// pane wait` or `crook events` say: they read [`AgentSession::status`],
+/// which the agent and its title write, and this is the window's own word
+/// that a question is open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Asking {
+    /// What the agent calls itself: `Claude Code`.
+    pub agent: &'static str,
+    /// The agent's name for the tool it asks to use: `Bash`.
+    pub tool: &'static str,
+    /// What it asks, in a line: see `control::ask::summary`. The command,
+    /// so it goes on the row and nowhere that leaves the window.
+    pub summary: String,
 }
 
 /// The pull request a session's work belongs to.
@@ -533,6 +566,16 @@ pub struct AgentSession {
     /// file.
     pub restored_agent: Option<crate::agent::Launch>,
 
+    /// The question the agent's permission hook is waiting on here, while
+    /// the window holds one it shows at once: see [`Asking`].
+    ///
+    /// The row's dot says needs input for as long as it is set, from the
+    /// moment the hook asks — six seconds before the notification that would
+    /// say so — whatever [`Self::status`] says. That stays what the agent
+    /// and its title said, so nothing that reads it is told of a question
+    /// it was not told of before.
+    pub asking: Option<Asking>,
+
     /// Which pane opened this one through `crook tab new`, when one did.
     ///
     /// `None` for every pane a person opened. It is what the row's card and
@@ -637,6 +680,7 @@ impl AgentSession {
             running_command: None,
             spawned_by: None,
             restored_agent: None,
+            asking: None,
         }
     }
 
@@ -667,6 +711,7 @@ impl AgentSession {
             pull_request,
             running_command,
             restored_agent,
+            asking,
             spawned_by,
         } = self;
         *title == other.title
@@ -682,6 +727,7 @@ impl AgentSession {
             && *pull_request == other.pull_request
             && *running_command == other.running_command
             && *restored_agent == other.restored_agent
+            && *asking == other.asking
             && *spawned_by == other.spawned_by
     }
 
@@ -814,17 +860,23 @@ impl AgentSession {
     }
 
     /// What the row says on its second line in place of the table's: what
-    /// a notification nobody has seen yet said, else what a waiting agent
-    /// is asking.
+    /// a notification nobody has seen yet said, else the question the
+    /// agent's hook is waiting on, else what a waiting agent said it asks.
     ///
     /// The notification first, because it is the newer of the two — a
     /// status change after it takes its place in [`Self::attention`] — and
     /// because it is the one a look will take away: once somebody has read
-    /// it, the question the agent is still asking comes back.
+    /// it, the question the agent is still asking comes back. The hook's
+    /// question before the agent's words, since it is the command itself and
+    /// the agent's "Claude needs your permission" names nothing.
     pub fn row_message(&self) -> Option<&str> {
         match &self.attention {
             Some(Attention::Notification(message)) => Some(message),
-            _ => self.message.as_deref(),
+            _ => self
+                .asking
+                .as_ref()
+                .map(|asking| asking.summary.as_str())
+                .or(self.message.as_deref()),
         }
     }
 
@@ -844,8 +896,13 @@ impl AgentSession {
     /// looking at is a program saying exactly that. A running agent that rang
     /// stays running — the ring is remembered in [`Self::attention`] and the
     /// dot keeps saying what the agent said.
+    ///
+    /// And a question the agent's hook is waiting on ([`Self::asking`]) is
+    /// needs input whatever the agent last said: its dialog is up, and the
+    /// running its hooks said before it is over until it is answered.
     pub fn shown_status(&self) -> AgentStatus {
         match self.status {
+            _ if self.asking.is_some() => AgentStatus::NeedsInput,
             AgentStatus::Idle if self.asks_for_a_look() => AgentStatus::NeedsInput,
             status => status,
         }
@@ -855,12 +912,16 @@ impl AgentSession {
     ///
     /// The count in the header and the tab the "next waiting" chord goes to:
     /// something happened here unseen, the person marked it to come back to,
-    /// or the agent said it needs input and is still saying so. `active` is
+    /// or the agent said it needs input and is still saying so — or its hook
+    /// is waiting on a question ([`Self::asking`]). `active` is
     /// whether the pane is the one being looked at — the one with the
     /// keyboard, in a window that has the desktop's — and a pane that is can
     /// wait for nobody.
     pub fn is_waiting(&self, active: bool) -> bool {
-        !active && (self.asks_for_a_look() || self.status == AgentStatus::NeedsInput)
+        !active
+            && (self.asks_for_a_look()
+                || self.status == AgentStatus::NeedsInput
+                || self.asking.is_some())
     }
 
     /// Whether closing this pane would end work somebody has not finished

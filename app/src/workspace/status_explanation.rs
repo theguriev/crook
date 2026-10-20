@@ -200,10 +200,17 @@ fn about(session: &AgentSession, now: Instant) -> Vec<String> {
     // a sentence: an amber dot on a row whose agent said nothing of the sort.
     let shown = session.shown_status();
     if shown != session.status {
-        lines.push(format!(
-            "The dot says {}, because the row asks for a look.",
-            shown.label()
-        ));
+        lines.push(match &session.asking {
+            Some(asking) => format!(
+                "The dot says {}, because {}'s hook is waiting on a question.",
+                shown.label(),
+                asking.agent
+            ),
+            None => format!(
+                "The dot says {}, because the row asks for a look.",
+                shown.label()
+            ),
+        });
     }
 
     if let Some(title) = &session.derived_title {
@@ -226,13 +233,16 @@ fn about(session: &AgentSession, now: Instant) -> Vec<String> {
         Some(Attention::Notification(message)) => lines.push(format!(
             "Attention: a notification arrived while nobody was looking: {message}"
         )),
+        Some(Attention::Asked) => {
+            lines.push("Attention: its agent asked while nobody was looking.".to_owned());
+        }
         None => {}
     }
     if session.marked {
         lines.push("Marked as waiting by you.".to_owned());
     }
     if session.attention.is_none() && !session.marked {
-        lines.push(match session.status {
+        lines.push(match shown {
             AgentStatus::NeedsInput => "Nothing else asks for a look.".to_owned(),
             _ => "Nothing asks for a look.".to_owned(),
         });
@@ -338,10 +348,12 @@ fn asking(ask: &Ask, now: Instant, said: &mut Vec<Said>) {
             said,
         );
     }
-    said.push(Said::Sentence(format!(
-        "Asked {} ago.",
-        duration(now.saturating_duration_since(ask.asked_at))
-    )));
+    let ago = duration(now.saturating_duration_since(ask.asked_at));
+    said.push(Said::Sentence(if ask.shows_at_once() {
+        format!("Asked through {agent}'s PermissionRequest hook {ago} ago; Crook shows it at once.")
+    } else {
+        format!("Asked {ago} ago.")
+    }));
     if let Some(cannot) = ask.cannot_answer {
         said.push(Said::Sentence(cannot.sentence().to_owned()));
     }
@@ -580,6 +592,65 @@ mod tests {
                 .iter()
                 .any(|line| line.text().contains("PermissionRequest")),
             "{without:#?}"
+        );
+    }
+
+    /// A question the row shows at once says so, and the dot says why it is
+    /// amber when the agent said nothing of the sort.
+    #[test]
+    fn a_question_shown_at_once_says_it_was_asked_through_the_hook_and_why_the_dot_is_amber() {
+        let mut asks = Asks::default();
+        let asked_at = Instant::now();
+        let pane = PaneId::next();
+        asks.add(
+            asked("rm -rf build"),
+            Found {
+                pane,
+                cannot_answer: None,
+                tab_title: "crook".to_owned(),
+                inside: None,
+            },
+            Arc::new(Feed::for_verb(&Verb::AgentAsk(asked("ls")))),
+            asked_at,
+        )
+        .expect("held");
+        let ask = asks.live().next().expect("held");
+        let mut session = AgentSession::new("agent 1");
+        session.status = AgentStatus::Running;
+        session.asking = Some(crate::tab::Asking {
+            agent: "Claude Code",
+            tool: "Bash",
+            summary: ask.summary.clone(),
+        });
+
+        let said: Vec<String> = lines(&session, Some(ask), asked_at + Duration::from_secs(3))
+            .iter()
+            .map(|line| line.text().to_owned())
+            .collect();
+        assert!(
+            said.contains(
+                &"Asked through Claude Code's PermissionRequest hook 3 s ago; Crook shows it at \
+                  once."
+                    .to_owned()
+            ),
+            "{said:#?}"
+        );
+        assert!(
+            said.contains(
+                &"The dot says needs input, because Claude Code's hook is waiting on a question."
+                    .to_owned()
+            ),
+            "{said:#?}"
+        );
+        assert!(
+            said.contains(&"Nothing else asks for a look.".to_owned()),
+            "{said:#?}"
+        );
+        assert!(
+            !said
+                .iter()
+                .any(|line| line.contains("because the row asks for a look")),
+            "{said:#?}"
         );
     }
 

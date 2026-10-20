@@ -43747,7 +43747,9 @@ mod answering_card {
         settle(&mut harness);
         let deny = button_at(&mut harness, "Deny");
         let scene = harness.frame();
-        let first = word_in(&scene, RectF::new(Vector2F::zero(), WINDOW), "echo line 1");
+        // On the card: the row's second line says the command's first line too.
+        let (card, _) = popup(&scene, "wants to run a command");
+        let first = word_in(&scene, card, "echo line 1");
 
         harness.dispatch(Event::ScrollWheel {
             position: first,
@@ -44710,6 +44712,14 @@ mod answering_card {
         word_in(&scene, RectF::new(Vector2F::zero(), WINDOW), what) + vec2f(2., -3.)
     }
 
+    /// The same, on the list's own rows: a row of the tab panel says the
+    /// question too, on its second line, from the moment it is held.
+    fn aim_at_row(harness: &mut Harness, what: &str) -> Vector2F {
+        let scene = harness.frame();
+        let (list, _) = popup(&scene, "waiting, oldest first");
+        word_in(&scene, list, what) + vec2f(2., -3.)
+    }
+
     #[test]
     fn the_chip_counts_live_asks_and_its_waiting_press_still_goes_to_the_next_waiting_pane() {
         let mut harness = Harness::new(2);
@@ -44890,9 +44900,8 @@ mod answering_card {
         ] {
             // The second time, past the wait the rows keep once a card goes.
             settle_list(&mut harness);
-            let scene = harness.frame();
-            let at = word_in(&scene, RectF::new(Vector2F::zero(), WINDOW), what);
-            harness.click(at + vec2f(2., -3.), MouseButton::Left);
+            let at = aim_at_row(&mut harness, what);
+            harness.click(at, MouseButton::Left);
             assert_eq!(card_on(&harness), Some(held.id), "{what}");
             harness.dispatch_workspace_action(AskAction::NotNow.into());
             assert_eq!(card_on(&harness), None);
@@ -45193,7 +45202,7 @@ mod answering_card {
         harness.let_go(deny);
         assert_eq!(card_on(&harness), None, "the second press opened a card");
         // Nor does any row take a press yet.
-        let row = aim_at(&mut harness, "Bash: echo 2");
+        let row = aim_at_row(&mut harness, "Bash: echo 2");
         harness.click(row, MouseButton::Left);
         assert_eq!(card_on(&harness), None);
 
@@ -45227,10 +45236,10 @@ mod answering_card {
         assert!(list_takes_the_pointer(&harness), "a list opens live");
 
         // Aimed at b, and a ends: c moves up into the place b was.
-        let aimed = aim_at(&mut harness, "Bash: echo b");
+        let aimed = aim_at_row(&mut harness, "Bash: echo b");
         end(&mut harness, &a, crate::control::ask::Cause::TurnEnded);
         // (The list is a row shorter, and centred a little higher.)
-        let moved_up = aim_at(&mut harness, "Bash: echo c");
+        let moved_up = aim_at_row(&mut harness, "Bash: echo c");
         assert!(
             (moved_up.y() - aimed.y()).abs() < 10.,
             "{moved_up:?} {aimed:?}"
@@ -45239,7 +45248,7 @@ mod answering_card {
         assert_eq!(card_on(&harness), None, "a press aimed at b opened c");
 
         settle_list(&mut harness);
-        let at = aim_at(&mut harness, "Bash: echo b");
+        let at = aim_at_row(&mut harness, "Bash: echo b");
         harness.click(at, MouseButton::Left);
         assert_eq!(card_on(&harness), Some(b.id));
         harness.dispatch_workspace_action(AskAction::NotNow.into());
@@ -45248,7 +45257,7 @@ mod answering_card {
         settle_list(&mut harness);
         let d = hold_request(&mut harness, panes[3], "d", command("echo d", false), None);
         assert!(!list_takes_the_pointer(&harness));
-        let at = aim_at(&mut harness, "Bash: echo d");
+        let at = aim_at_row(&mut harness, "Bash: echo d");
         harness.click(at, MouseButton::Left);
         assert_eq!(card_on(&harness), None);
         for held in [&b, &c, &d] {
@@ -45269,7 +45278,7 @@ mod answering_card {
         harness.dispatch_workspace_action(AskAction::NotNow.into());
         assert!(!list_takes_the_pointer(&harness));
 
-        let row = aim_at(&mut harness, "Bash: rm -rf ~");
+        let row = aim_at_row(&mut harness, "Bash: rm -rf ~");
         harness.hold(row, 1);
         settle_list(&mut harness);
         assert!(list_takes_the_pointer(&harness));
@@ -45475,6 +45484,407 @@ mod answering_card {
                     .any(|rect| rect.background == Fill::Solid(theme().surface_raised));
                 assert!(ground_drawn, "the {face} has no ground in this theme");
             }
+        }
+    }
+
+    /// The row turns amber the moment Claude Code's hook asks, and goes back
+    /// to what the agent said the moment the agent's title says the dialog
+    /// was answered: see `AgentSession::asking` and `Asks::titled`.
+    mod at_once {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use super::*;
+        use crate::control::ask::{Cause, Inside};
+        use crate::control::protocol::MultiplexerKind;
+        use crate::notify::{Notice, Notifier};
+
+        const NAME: &str = "Fix the flaky test";
+
+        /// What the workspace posted, where the desktop would be.
+        #[derive(Clone, Default)]
+        struct Posted(Rc<RefCell<Vec<Notice>>>);
+
+        impl Notifier for Posted {
+            fn post(&self, notice: Notice, _: &Background) {
+                self.0.borrow_mut().push(notice);
+            }
+        }
+
+        /// A window of two tabs, and the pane of the one not in front.
+        fn window() -> (Harness, PaneId) {
+            let harness = Harness::new(2);
+            let tabs = harness.tab_ids();
+            let away = harness.panes_of(tabs[0])[0];
+            assert_ne!(harness.focused_pane_id(), Some(away));
+            (harness, away)
+        }
+
+        fn apply(harness: &mut Harness, update: TerminalUpdate) {
+            harness.workspace_update(|workspace, ctx| {
+                workspace.apply_terminal_update(&update, ctx);
+            });
+        }
+
+        fn report(harness: &mut Harness, pane: PaneId, status: AgentStatus, message: Option<&str>) {
+            apply(
+                harness,
+                TerminalUpdate::Agent {
+                    pane,
+                    status,
+                    title: None,
+                    message: message.map(str::to_owned),
+                },
+            );
+        }
+
+        /// Claude Code's title, with `glyph` in front of its name.
+        fn titled(harness: &mut Harness, pane: PaneId, glyph: char) {
+            apply(
+                harness,
+                TerminalUpdate::Title(pane, Some(format!("{glyph} {NAME}"))),
+            );
+        }
+
+        /// An agent at work, as its hooks and its title say, whose
+        /// permission dialog has just opened: the `✳` comes first.
+        fn at_its_dialog(harness: &mut Harness, pane: PaneId) {
+            report(harness, pane, AgentStatus::Running, None);
+            titled(harness, pane, '\u{25d0}');
+            titled(harness, pane, '\u{2733}');
+        }
+
+        fn session<T>(harness: &Harness, pane: PaneId, read: impl FnOnce(&AgentSession) -> T) -> T {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                read(workspace.tabs().pane(pane).expect("open").session())
+            })
+        }
+
+        fn shown(harness: &Harness, pane: PaneId) -> AgentStatus {
+            session(harness, pane, AgentSession::shown_status)
+        }
+
+        fn stored(harness: &Harness, pane: PaneId) -> AgentStatus {
+            session(harness, pane, |session| session.status)
+        }
+
+        fn waiting(harness: &Harness) -> usize {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                crate::plugins::tabs::waiting_count(workspace)
+            })
+        }
+
+        #[test]
+        fn a_question_makes_its_row_need_input_at_once_with_the_command_on_line_two_and_counts_as_waiting()
+         {
+            let (mut harness, away) = window();
+            at_its_dialog(&mut harness, away);
+            assert_eq!(shown(&harness, away), AgentStatus::Idle);
+            assert_eq!(waiting(&harness), 0);
+
+            let held = hold(&mut harness, away, "rm -rf build");
+
+            assert_eq!(shown(&harness, away), AgentStatus::NeedsInput);
+            assert_ne!(
+                stored(&harness, away),
+                AgentStatus::NeedsInput,
+                "the agent said nothing of a question, and the status says what it said"
+            );
+            assert!(
+                strip_text(&harness.frame()).contains("Bash: rm -rf build"),
+                "{}",
+                strip_text(&harness.frame())
+            );
+            assert_eq!(waiting(&harness), 1);
+            assert!(frame_text(&harness.frame()).contains("1 waiting"));
+            assert_eq!(
+                session(&harness, away, |session| session.attention.clone()),
+                Some(Attention::Asked)
+            );
+            assert!(held.nothing_sent());
+        }
+
+        #[test]
+        fn a_question_in_the_pane_being_looked_at_asks_for_no_look() {
+            let mut harness = Harness::new(1);
+            let here = harness.focused_pane_id().expect("a pane");
+            at_its_dialog(&mut harness, here);
+            hold(&mut harness, here, "rm -rf build");
+            assert_eq!(shown(&harness, here), AgentStatus::NeedsInput);
+            assert_eq!(
+                session(&harness, here, |session| session.attention.clone()),
+                None
+            );
+            assert_eq!(
+                waiting(&harness),
+                0,
+                "the pane being looked at waits for nobody"
+            );
+        }
+
+        #[test]
+        fn a_spinner_title_after_it_ends_the_question_and_the_row_runs() {
+            let (mut harness, away) = window();
+            at_its_dialog(&mut harness, away);
+            let held = hold(&mut harness, away, "rm -rf build");
+
+            // A Yes in Claude Code's own dialog: its spinner is back.
+            titled(&mut harness, away, '\u{25d1}');
+
+            assert_eq!(
+                held.sent(),
+                Some(serde_json::json!({"answer": {"decision": "pass", "why": "at-work-again"}}))
+            );
+            assert_eq!(
+                ended(&harness, held.id),
+                Some(How::Ended(Cause::AtWorkAgain))
+            );
+            assert_eq!(shown(&harness, away), AgentStatus::Running);
+            assert_eq!(
+                session(&harness, away, |session| session.asking.clone()),
+                None
+            );
+            assert!(!strip_text(&harness.frame()).contains("rm -rf build"));
+            // The running the title says takes back the look the question
+            // asked for, as a running report does: the stop is over.
+            assert_eq!(waiting(&harness), 0);
+        }
+
+        #[test]
+        fn the_asterisk_does_not() {
+            let (mut harness, away) = window();
+            at_its_dialog(&mut harness, away);
+            let held = hold(&mut harness, away, "rm -rf build");
+
+            apply(
+                &mut harness,
+                TerminalUpdate::Title(away, Some("\u{2733} Clean the build".to_owned())),
+            );
+            titled(&mut harness, away, '\u{2733}');
+
+            assert!(held.nothing_sent());
+            assert_eq!(ended(&harness, held.id), None);
+            assert_eq!(shown(&harness, away), AgentStatus::NeedsInput);
+        }
+
+        #[test]
+        fn a_spinner_drawn_before_the_dialog_opened_ends_nothing() {
+            // The hook's question can reach the window ahead of titles
+            // Claude Code wrote before it asked: the spinner they turn is the
+            // agent at work before the question, and answers none. Only a
+            // spinner after the dialog's `✳` does.
+            let (mut harness, away) = window();
+            report(&mut harness, away, AgentStatus::Running, None);
+            titled(&mut harness, away, '\u{25d0}');
+            let held = hold(&mut harness, away, "rm -rf build");
+
+            titled(&mut harness, away, '\u{25d1}');
+            titled(&mut harness, away, '\u{25d2}');
+            assert!(held.nothing_sent());
+            assert_eq!(shown(&harness, away), AgentStatus::NeedsInput);
+
+            titled(&mut harness, away, '\u{2733}');
+            titled(&mut harness, away, '\u{25d3}');
+            assert_eq!(
+                ended(&harness, held.id),
+                Some(How::Ended(Cause::AtWorkAgain))
+            );
+        }
+
+        #[test]
+        fn a_spinner_ends_only_the_question_in_its_own_pane() {
+            let (mut harness, away) = window();
+            let here = harness.focused_pane_id().expect("a pane");
+            at_its_dialog(&mut harness, away);
+            at_its_dialog(&mut harness, here);
+            let there = hold(&mut harness, away, "rm -rf build");
+            let mine = hold_request(&mut harness, here, "s2", command("make lint", false), None);
+
+            titled(&mut harness, here, '\u{25d1}');
+
+            assert_eq!(
+                ended(&harness, mine.id),
+                Some(How::Ended(Cause::AtWorkAgain))
+            );
+            assert!(there.nothing_sent());
+            assert_eq!(shown(&harness, away), AgentStatus::NeedsInput);
+        }
+
+        #[test]
+        fn another_agents_glyph_ends_no_question() {
+            // Gemini CLI's `✦` says running too, of Gemini.
+            let (mut harness, away) = window();
+            at_its_dialog(&mut harness, away);
+            let held = hold(&mut harness, away, "rm -rf build");
+            apply(
+                &mut harness,
+                TerminalUpdate::Title(away, Some("\u{2726}  Thinking (crook)".to_owned())),
+            );
+            assert!(held.nothing_sent());
+            assert_eq!(shown(&harness, away), AgentStatus::NeedsInput);
+        }
+
+        #[test]
+        fn a_question_from_inside_tmux_or_one_this_window_cannot_answer_leaves_the_row_alone() {
+            // Inside tmux the pane's title is tmux's, and nothing would take
+            // the amber back before the tool ran; one this window cannot
+            // answer is from some process that named the terminal.
+            let (mut harness, away) = window();
+            at_its_dialog(&mut harness, away);
+            hold_request(
+                &mut harness,
+                away,
+                "s1",
+                command("rm -rf build", false),
+                Some(CannotAnswer::NotFromThisTab),
+            );
+            let asked = AgentAsk {
+                agent: AskingAgent::Claude,
+                session: "s2".to_owned(),
+                cwd: "/home/someone/work/crook".to_owned(),
+                tty: None,
+                multiplexer: None,
+                wait: 300,
+                request: command("make lint", false),
+            };
+            let feed = Arc::new(Feed::for_verb(&Verb::AgentAsk(asked.clone())));
+            let inside = feed.clone();
+            harness.workspace_update(|workspace, ctx| {
+                workspace
+                    .asks_mut()
+                    .add(
+                        asked,
+                        Found {
+                            pane: away,
+                            cannot_answer: None,
+                            tab_title: "crook".to_owned(),
+                            inside: Some(Inside {
+                                kind: MultiplexerKind::Tmux,
+                                pane: "%3".to_owned(),
+                                elsewhere: 0,
+                            }),
+                        },
+                        inside,
+                        std::time::Instant::now(),
+                    )
+                    .expect("held");
+                workspace.asks_changed(ctx);
+            });
+
+            assert_eq!(shown(&harness, away), AgentStatus::Idle);
+            assert_eq!(
+                session(&harness, away, |session| session.asking.clone()),
+                None
+            );
+            assert_eq!(waiting(&harness), 0);
+
+            // And the spinner ends neither: the pane's title is not theirs.
+            titled(&mut harness, away, '\u{25d1}');
+            assert_eq!(feed.held(), 0);
+            assert_eq!(
+                harness
+                    .workspace
+                    .read(&harness.app, |workspace, _| workspace.asks().live().count()),
+                2
+            );
+        }
+
+        #[test]
+        fn the_notification_after_it_keeps_the_question() {
+            let (mut harness, away) = window();
+            at_its_dialog(&mut harness, away);
+            let held = hold(&mut harness, away, "rm -rf build");
+
+            // Six seconds in, Claude Code's notification hook.
+            report(
+                &mut harness,
+                away,
+                AgentStatus::NeedsInput,
+                Some("Claude needs your permission"),
+            );
+
+            assert!(held.nothing_sent());
+            assert_eq!(ended(&harness, held.id), None);
+            assert_eq!(shown(&harness, away), AgentStatus::NeedsInput);
+            assert_eq!(
+                session(&harness, away, |session| session
+                    .row_message()
+                    .map(str::to_owned)),
+                Some("Bash: rm -rf build".to_owned())
+            );
+            assert!(strip_text(&harness.frame()).contains("Bash: rm -rf build"));
+        }
+
+        #[test]
+        fn an_answer_sent_from_the_card_gives_the_row_back_what_the_agent_said() {
+            // Never a running Crook made up: whether the agent took the
+            // answer is its next title's or report's to say.
+            let mut harness = Harness::new(1);
+            let here = harness.focused_pane_id().expect("a pane");
+            at_its_dialog(&mut harness, here);
+            let before = stored(&harness, here);
+            hold(&mut harness, here, "rm -rf build");
+            open(&mut harness);
+            settle(&mut harness);
+            press(&mut harness, "Deny");
+
+            assert_eq!(
+                session(&harness, here, |session| session.asking.clone()),
+                None
+            );
+            assert_eq!(shown(&harness, here), before);
+            assert_ne!(shown(&harness, here), AgentStatus::Running);
+        }
+
+        #[test]
+        fn the_session_file_keeps_no_ask() {
+            const MARKER: &str = "crook-marker-91c3e0";
+            let (mut harness, away) = window();
+            at_its_dialog(&mut harness, away);
+            hold(&mut harness, away, &format!("rm -rf {MARKER}"));
+            assert!(session(&harness, away, |session| session.asking.is_some()));
+
+            let written = harness.workspace.read(&harness.app, |workspace, _| {
+                serde_json::to_string(&crate::session::Session::of(workspace.tabs(), None))
+                    .expect("a session file")
+            });
+            assert!(!written.contains(MARKER), "{written}");
+            assert!(!written.contains("asking"), "{written}");
+        }
+
+        #[test]
+        fn the_desktop_notice_names_the_tool_and_tab_and_never_the_command() {
+            const MARKER: &str = "crook-marker-4d7a22";
+            let (mut harness, away) = window();
+            let posted = Posted::default();
+            let notifier = Rc::new(posted.clone());
+            harness.workspace_update(|workspace, ctx| {
+                workspace.set_notifier(notifier);
+                workspace.rename_pane(away, Some("crook tests".to_owned()), ctx);
+            });
+            at_its_dialog(&mut harness, away);
+            harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+
+            hold(&mut harness, away, &format!("rm -rf {MARKER}"));
+            let all = posted.0.borrow().clone();
+            assert_eq!(
+                all,
+                vec![Notice {
+                    title: "Crook — crook tests".to_owned(),
+                    body: "Claude Code asks to use Bash".to_owned(),
+                }]
+            );
+
+            // The notification six seconds later finds the row amber, and
+            // the newer question from the same session is the same wait.
+            report(
+                &mut harness,
+                away,
+                AgentStatus::NeedsInput,
+                Some(&format!("Claude needs your permission: {MARKER}")),
+            );
+            hold(&mut harness, away, &format!("rm -rf {MARKER} again"));
+            assert_eq!(posted.0.borrow().len(), 1, "{:?}", posted.0.borrow());
         }
     }
 }

@@ -7582,6 +7582,78 @@ mod socket {
     }
 
     #[test]
+    fn pane_list_wait_and_events_keep_reading_the_stored_status() {
+        // The row turns amber the moment the hook asks; what the socket
+        // says is what the agent said, as it was before.
+        const MARKER: &str = "crook-marker-e27b90";
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let opened = served
+            .open_tab(Some(token.clone()), new_tab(&["claude"]))
+            .expect("the lead opens a worker");
+        let worker = served.pane(opened.pane_id);
+        served.report(worker, AgentStatus::Running, None);
+        let following = served.start(follow(Some(&token), None));
+        served.pump_until("the stream never began", |served| served.following() == 1);
+        let waiting = served.start(wait(&token, worker, Until::NeedsInput, 120, false));
+        served.pump_until("the wait was never registered", |served| {
+            served.waiting() == 1
+        });
+
+        served.hold_answerable(worker, "s1", &format!("rm -rf {MARKER}"));
+        assert_eq!(
+            served.read(|workspace, _| workspace.tabs().pane(worker).map(|pane| pane.status())),
+            Some(AgentStatus::NeedsInput),
+            "the row is amber"
+        );
+        assert_eq!(served.waiting(), 1, "the wait was answered by the row");
+        let listed = served.read(panes);
+        let entry = listed
+            .iter()
+            .find(|entry| entry.pane_id == opened.pane_id)
+            .expect("the worker is listed");
+        assert_eq!(entry.status, "running");
+        assert_eq!(entry.message, None);
+        assert!(entry.asking);
+
+        served.report(
+            worker,
+            AgentStatus::NeedsInput,
+            Some("Claude needs your permission"),
+        );
+        let printed = served.finish(waiting).expect("answered");
+        assert_eq!(printed.text, "needs-input: Claude needs your permission");
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::ClosePane(worker), ctx);
+        });
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::New, ctx);
+        });
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::ClosePane(lead), ctx);
+        });
+        let events = served
+            .finish(following)
+            .expect("followed until the lead closed");
+        let statuses: Vec<&PaneEvent> = events
+            .iter()
+            .filter(|event| matches!(event, PaneEvent::Status { pane_id, .. } if *pane_id == opened.pane_id))
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![&PaneEvent::Status {
+                pane_id: opened.pane_id,
+                status: "needs-input".to_owned(),
+                message: Some("Claude needs your permission".to_owned()),
+            }],
+            "{events:#?}"
+        );
+        let said = format!("{events:?}");
+        assert!(!said.contains(MARKER), "{said}");
+    }
+
+    #[test]
     fn a_lead_following_its_worker_is_told_it_asks_and_how_it_was_answered_and_never_the_command() {
         use super::super::protocol::{AnsweredBy, Decision};
         use crate::workspace::{AskAction, Pressed};
