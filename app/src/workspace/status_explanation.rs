@@ -719,6 +719,7 @@ mod tests {
                     pane,
                     cannot_answer: None,
                     tab_title: "worker".to_owned(),
+                    inside: None,
                 },
                 feed,
                 at,
