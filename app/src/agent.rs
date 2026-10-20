@@ -125,6 +125,8 @@ use serde_json::{Value, json};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod ancestors;
 pub mod ask;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod holders;
 #[cfg(unix)]
 mod on_disk;
 pub mod request;
@@ -3203,8 +3205,13 @@ process.stdout.write(JSON.stringify({ ran, asked }))
                 }),
             })
         };
-        let question = ask::question(input.as_bytes(), &environment, || Some(1), found)
-            .expect("the fixture is a question the hook asks");
+        let question = ask::question(
+            input.as_bytes(),
+            &environment,
+            || Some(ask::Bound::Tty(1)),
+            found,
+        )
+        .expect("the fixture is a question the hook asks");
         request::fingerprint(&question.asked.digest())
     }
 

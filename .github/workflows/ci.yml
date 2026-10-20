@@ -151,13 +151,15 @@ jobs:
       # has them, so the two runners cover both halves of the fish snippet.
       # zsh is installed on Linux as well, where no system rc sets HISTFILE for
       # it the way macOS's does; macOS ships its own. Windows has no pane these
-      # snippets are for.
+      # snippets are for. tmux too, which the tests of a report or a question
+      # from inside tmux run for real, and which macOS's runner does not have:
+      # they fail on CI without it rather than skip.
       - name: Shells the tests run for real
         if: runner.os != 'Windows'
         shell: bash
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            sudo apt-get update -q && sudo apt-get install -y -q fish zsh
+            sudo apt-get update -q && sudo apt-get install -y -q fish zsh tmux
             # Ubuntu's /etc/zsh/zshrc runs compinit, and the runner leaves
             # directories on zsh's fpath writable by its group — so every zsh
             # the tests start stops at "Ignore insecure directories and
@@ -168,10 +170,11 @@ jobs:
             echo "compaudit: ${insecure:-nothing}"
             [ -z "$insecure" ] || echo "$insecure" | xargs sudo chmod g-w,o-w
           else
-            brew install fish
+            brew install fish tmux
           fi
           fish --version
           zsh --version
+          tmux -V
 
       - name: cargo test
         shell: bash

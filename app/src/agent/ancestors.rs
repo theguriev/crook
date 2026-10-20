@@ -187,6 +187,24 @@ pub(crate) fn process(pid: u32) -> Option<Process> {
     stat_fields(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
 }
 
+/// The foreground process group of the terminal `pid` controls — its
+/// `tpgid` — which is the pid of the group's leader; `None` when it has no
+/// terminal, or cannot be read.
+#[cfg(target_os = "linux")]
+pub(crate) fn foreground_group(pid: u32) -> Option<u32> {
+    foreground_field(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// The eighth field of a `/proc/<pid>/stat` line, `tpgid`, counted from the
+/// last `)` as [`stat_fields`] counts; -1, no terminal, is `None`.
+#[cfg(target_os = "linux")]
+fn foreground_field(stat: &str) -> Option<u32> {
+    let (_, rest) = stat.rsplit_once(')')?;
+    // The state, the parent, the group, the session and the terminal first.
+    let group: i64 = rest.split_ascii_whitespace().nth(5)?.parse().ok()?;
+    u32::try_from(group).ok().filter(|group| *group != 0)
+}
+
 /// The parent, the session and the terminal out of a `/proc/<pid>/stat`
 /// line: its fourth, sixth and seventh fields, `ppid`, `session` and
 /// `tty_nr`, where a `tty_nr` of 0 is no terminal.
@@ -211,68 +229,70 @@ fn stat_fields(stat: &str) -> Option<Process> {
     })
 }
 
-/// Process `pid`'s parent, session and terminal; `None` when the process
-/// cannot be read.
+/// `struct proc_bsdinfo` from `<sys/proc_info.h>`, field for field. A few
+/// fields are read; the others are here so that those sit where the kernel
+/// writes them, and the size is held below to the header's
+/// `PROC_PIDTBSDINFO_SIZE`.
 #[cfg(target_os = "macos")]
-pub(crate) fn process(pid: u32) -> Option<Process> {
-    use std::ffi::{c_int, c_void};
+#[repr(C)]
+struct BsdInfo {
+    pbi_flags: u32,
+    pbi_status: u32,
+    pbi_xstatus: u32,
+    pbi_pid: u32,
+    pbi_ppid: u32,
+    pbi_uid: u32,
+    pbi_gid: u32,
+    pbi_ruid: u32,
+    pbi_rgid: u32,
+    pbi_svuid: u32,
+    pbi_svgid: u32,
+    rfu_1: u32,
+    pbi_comm: [u8; 16],
+    pbi_name: [u8; 32],
+    pbi_nfiles: u32,
+    pbi_pgid: u32,
+    pbi_pjobc: u32,
+    e_tdev: u32,
+    e_tpgid: u32,
+    pbi_nice: i32,
+    pbi_start_tvsec: u64,
+    pbi_start_tvusec: u64,
+}
+#[cfg(target_os = "macos")]
+const _: () = assert!(std::mem::size_of::<BsdInfo>() == 136);
+
+// Declared rather than depended on, the way `AttachConsole` is on Windows:
+// all of them are in `libSystem`, which every macOS binary links, and a few
+// functions do not justify a crate with a build script. `getsid` because
+// `proc_bsdinfo` carries a process group and no session.
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    pub(crate) fn proc_pidinfo(
+        pid: std::ffi::c_int,
+        flavor: std::ffi::c_int,
+        arg: u64,
+        buffer: *mut std::ffi::c_void,
+        buffersize: std::ffi::c_int,
+    ) -> std::ffi::c_int;
+    fn getsid(pid: std::ffi::c_int) -> std::ffi::c_int;
+}
+
+/// `NODEV`, which is what `e_tdev` holds for a process with no controlling
+/// terminal.
+#[cfg(target_os = "macos")]
+const NODEV: u32 = u32::MAX;
+
+/// What `proc_pidinfo` says of process `pid` as a [`BsdInfo`], or `None`.
+#[cfg(target_os = "macos")]
+fn bsd_info(pid: std::ffi::c_int) -> Option<BsdInfo> {
+    use std::ffi::c_int;
     use std::mem::{MaybeUninit, size_of};
 
     /// `PROC_PIDTBSDINFO`: the flavour of `proc_pidinfo` that answers with a
     /// [`BsdInfo`].
     const PROC_PIDTBSDINFO: c_int = 3;
 
-    /// `NODEV`, which is what `e_tdev` holds for a process with no
-    /// controlling terminal.
-    const NODEV: u32 = u32::MAX;
-
-    /// `struct proc_bsdinfo` from `<sys/proc_info.h>`, field for field. Two
-    /// fields are read; the others are here so that those two sit where the
-    /// kernel writes them, and the size is held below to the header's
-    /// `PROC_PIDTBSDINFO_SIZE`.
-    #[repr(C)]
-    struct BsdInfo {
-        pbi_flags: u32,
-        pbi_status: u32,
-        pbi_xstatus: u32,
-        pbi_pid: u32,
-        pbi_ppid: u32,
-        pbi_uid: u32,
-        pbi_gid: u32,
-        pbi_ruid: u32,
-        pbi_rgid: u32,
-        pbi_svuid: u32,
-        pbi_svgid: u32,
-        rfu_1: u32,
-        pbi_comm: [u8; 16],
-        pbi_name: [u8; 32],
-        pbi_nfiles: u32,
-        pbi_pgid: u32,
-        pbi_pjobc: u32,
-        e_tdev: u32,
-        e_tpgid: u32,
-        pbi_nice: i32,
-        pbi_start_tvsec: u64,
-        pbi_start_tvusec: u64,
-    }
-    const _: () = assert!(size_of::<BsdInfo>() == 136);
-
-    // Declared rather than depended on, the way `AttachConsole` is on
-    // Windows: both are in `libSystem`, which every macOS binary links, and
-    // two functions do not justify a crate with a build script. `getsid`
-    // because `proc_bsdinfo` carries a process group and no session.
-    unsafe extern "C" {
-        fn proc_pidinfo(
-            pid: c_int,
-            flavor: c_int,
-            arg: u64,
-            buffer: *mut c_void,
-            buffersize: c_int,
-        ) -> c_int;
-        fn getsid(pid: c_int) -> c_int;
-    }
-
-    let pid = c_int::try_from(pid).ok()?;
     let size = size_of::<BsdInfo>() as c_int;
     let mut info = MaybeUninit::<BsdInfo>::zeroed();
     // SAFETY: the buffer is `size` bytes, and `proc_pidinfo` writes no more
@@ -283,7 +303,15 @@ pub(crate) fn process(pid: u32) -> Option<Process> {
     }
     // SAFETY: zeroed and then filled, and every field is an integer, for which
     // any bits are a value.
-    let info = unsafe { info.assume_init() };
+    Some(unsafe { info.assume_init() })
+}
+
+/// Process `pid`'s parent, session and terminal; `None` when the process
+/// cannot be read.
+#[cfg(target_os = "macos")]
+pub(crate) fn process(pid: u32) -> Option<Process> {
+    let pid = std::ffi::c_int::try_from(pid).ok()?;
+    let info = bsd_info(pid)?;
     // SAFETY: `getsid` takes a pid and touches no memory of this process's;
     // a pid that is gone is -1.
     let session = u32::try_from(unsafe { getsid(pid) }).ok()?;
@@ -292,6 +320,15 @@ pub(crate) fn process(pid: u32) -> Option<Process> {
         session,
         terminal: (info.e_tdev != NODEV && info.e_tdev != 0).then_some(info.e_tdev),
     })
+}
+
+/// The foreground process group of the terminal `pid` controls — its
+/// `e_tpgid` — which is the pid of the group's leader; `None` when it has no
+/// terminal, or cannot be read.
+#[cfg(target_os = "macos")]
+pub(crate) fn foreground_group(pid: u32) -> Option<u32> {
+    let info = bsd_info(std::ffi::c_int::try_from(pid).ok()?)?;
+    (info.e_tdev != NODEV && info.e_tdev != 0 && info.e_tpgid != 0).then_some(info.e_tpgid)
 }
 
 #[cfg(test)]
@@ -500,5 +537,20 @@ mod tests {
             stat_fields("2982218 (sh) S 2982193 2982218 2982218 0 -1 4194560")
         );
         assert_eq!(None, stat_fields("2982218 (sh"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_foreground_group_is_the_eighth_field_and_none_without_a_terminal() {
+        // `tmux attach` in the foreground of pts/7, its own group's leader.
+        assert_eq!(
+            Some(2982300),
+            foreground_field("2982193 (a) b (c)) S 2982192 2982193 2982190 34823 2982300 4194560")
+        );
+        assert_eq!(
+            None,
+            foreground_field("2982218 (sh) S 2982193 2982218 2982218 0 -1 4194560")
+        );
+        assert_eq!(None, foreground_field("2982218 (sh) S 1 2"));
     }
 }

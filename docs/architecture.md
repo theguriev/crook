@@ -2577,6 +2577,36 @@ inside tmux, which tell the window nothing when the hook is killed, and which a 
 behind. Not a nonce printed as an OSC and read back, which costs a round trip through the
 emulator and a deadline, and which anything that prints can replay.
 
+**Inside tmux the binding is tmux's clients' terminals.** There the agent's terminal is one of
+tmux's panes, which no Crook pane is on, and the server's `CROOK_SOCKET` and `CROOK_TOKEN` are those
+of whichever pane started it — another window's, or one since closed. So the hook takes the route a
+status takes there (#516): `tmux` asked once, under a second, for the pane's terminal and the
+clients attached to its session, the pane's terminal checked to be the agent's own. Each client's
+terminal that is a character device this user owns gives its `st_rdev`, low 32 bits — at most
+eight — and the question carries `multiplexer: {kind: "tmux", clients: [u32], pane: "%N"}` in place
+of `tty`, and no token; the pane id is checked as `%` and digits and only shown. A window from
+before the field refuses it, and the hook passes. The window binds it to the first open pane, in
+the panel's order, whose pty is one of the clients, and skips the token and lineage checks, which
+say nothing here: the tmux server is not below that pane's shell. What it checks instead is the
+kernel's account of the asker's ancestors, read on the connection's thread (`agent/holders.rs`,
+at most 16 of them and 1024 descriptors each): one of them — never the asker itself — has to hold
+the pane's pty slave open and run the same executable, by device and inode, as the leader of the
+pane's foreground process group (`tpgid`, from `/proc/<shell>/stat` or `e_tpgid`). tmux's server
+is that ancestor for every process in its panes; a process that only names the terminal, one
+under a program that opened it, and one under a tmux that is not the pane's foreground or holds
+another pane's terminal are each shown read-only, "not from the tmux whose client is in this tab".
+Questions from inside tmux are counted apart from the pane's own four, never replace one, and come
+after one on the row and the card. A remote pane still makes it read-only. The row, the list and "Why this status" say "Bash inside tmux: …", and the card names
+tmux's pane and "inside tmux (also attached in N other tabs)" when other tabs hold a client of the
+same session; Go to tab goes to the pane holding the client. No window is told the request until it
+has said it holds one of those terminals: the hook first sends `pane.find {ttys: [u32]}` — a verb
+with no other field, no token and no kept connection, answering `{found: bool}`, and `false` while
+answering is off — to `CROOK_SOCKET`, and when that one is gone or says no, to at most four other
+sockets that connect in this user's checked control directory, in name order, all within two
+seconds; the question goes down the connection of the first that said yes, and nowhere else. A
+hook with no `CROOK_SOCKET`, or whose tmux names no client, asks nothing. screen and zellij cannot
+be asked where their clients are, and pass as before. Subagents pass inside tmux as everywhere.
+
 **What the window checks.** The kernel must say the process at the other end is this user's, or
 the question is refused as `unauthorized`. On the connection's thread the window reads that
 process's ancestors, at most 64, and a question whose asker is not below the pane's shell, or
@@ -2703,7 +2733,9 @@ on every path, since a hook that fails can fail its agent. It opens and writes n
 | What happens | What the hook does |
 |---|---|
 | `CROOK_SOCKET` empty or unset | prints nothing, connects to nothing |
-| `TMUX`, `STY` or `ZELLIJ` set | prints nothing, connects to nothing |
+| `STY` or `ZELLIJ` set | prints nothing, connects to nothing |
+| `TMUX` set, and tmux names no client of the agent's session this user owns | prints nothing, connects to nothing |
+| `TMUX` set, and no window among `CROOK_SOCKET`'s and four others says it holds a client within two seconds | prints nothing; those windows were sent only `pane.find` |
 | not `PermissionRequest` for `Bash`, `Edit`, `MultiEdit` or `Write`, a subagent's `agent_id`, no session or no absolute `cwd` | prints nothing, connects to nothing |
 | `CLAUDE_CODE_ENTRYPOINT` not exactly `cli`, unset included | prints nothing, connects to nothing: under `claude -p` an empty answer is Claude Code's own deny |
 | a tool input the allowlist does not read whole, a line over 64 KiB, stdin over 1 MiB | prints nothing, connects to nothing |

@@ -944,7 +944,7 @@ fn ask_on(
         ));
         return;
     }
-    let asker = match asker(stream, uid) {
+    let mut asker = match asker(stream, uid) {
         Ok(asker) => asker,
         Err(refusal) => {
             refuse(refusal);
@@ -954,6 +954,9 @@ fn ask_on(
     let Verb::AgentAsk(asked) = &request.verb else {
         return;
     };
+    if asked.multiplexer.is_some() {
+        asker.holders = holders(&asker.lineage);
+    }
     let until = asked_at + asked.wait() + ASK_MARGIN;
     let request = Request {
         asker: Some(asker),
@@ -1043,6 +1046,7 @@ pub fn asker(stream: &UnixStream, uid: u32) -> Result<Asker, Refusal> {
     Ok(Asker {
         pid: peer.pid,
         lineage: peer.pid.map(lineage).unwrap_or_default(),
+        holders: Vec::new(),
     })
 }
 
@@ -1059,6 +1063,21 @@ fn lineage(pid: u32) -> Vec<u32> {
 /// from a process nobody can place, and is shown and never answered.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn lineage(_: u32) -> Vec<u32> {
+    Vec::new()
+}
+
+/// What the ancestors in `lineage` run and hold open, for a question from
+/// inside a multiplexer: see `agent::holders`. Read here, on the
+/// connection's thread, for the reason the lineage is.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn holders(lineage: &[u32]) -> Vec<protocol::Holder> {
+    crate::agent::holders::holders(lineage)
+}
+
+/// Nowhere else are they read, so a question from inside a multiplexer
+/// asked there is shown and never answered.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn holders(_: &[u32]) -> Vec<protocol::Holder> {
     Vec::new()
 }
 

@@ -604,7 +604,8 @@ impl AskFixture {
                 agent: AskingAgent::Claude,
                 session: format!("fixture-{index}"),
                 cwd: cwd.to_string_lossy().into_owned(),
-                tty: 0,
+                tty: Some(0),
+                multiplexer: None,
                 wait: 300,
                 request: AskRequest::Command {
                     command: fixture.command.clone(),
@@ -622,6 +623,7 @@ impl AskFixture {
                     .read_only
                     .then_some(crate::control::ask::CannotAnswer::NotFromThisTab),
                 tab_title: fixture.tab.clone(),
+                inside: None,
             };
             let id = match workspace
                 .asks_mut()

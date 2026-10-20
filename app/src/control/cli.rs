@@ -743,8 +743,26 @@ pub mod unix {
                 return Err(error).context("not asking any window: the control directory");
             }
         }
-        let mut live: Vec<PathBuf> = fs::read_dir(directory)
-            .with_context(|| format!("could not read {}", directory.display()))?
+        let mut live = socket_entries(directory)
+            .with_context(|| format!("could not read {}", directory.display()))?;
+        live.retain(|path| UnixStream::connect(path).is_ok());
+        Ok(live)
+    }
+
+    /// Every socket in `directory`, in name order, when the directory passes
+    /// the window's own check; none otherwise. Nothing is connected to: each
+    /// is one a caller still has to check and connect to on its own, as
+    /// [`connect_checked`] does.
+    pub fn sockets_in(directory: &Path) -> Vec<PathBuf> {
+        match server::check(directory, server::euid()) {
+            Ok(()) => socket_entries(directory).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// The sockets in `directory`, in name order.
+    fn socket_entries(directory: &Path) -> io::Result<Vec<PathBuf>> {
+        let mut sockets: Vec<PathBuf> = fs::read_dir(directory)?
             .flatten()
             .filter(|entry| {
                 entry
@@ -752,10 +770,9 @@ pub mod unix {
                     .is_ok_and(|file_type| file_type.is_socket())
             })
             .map(|entry| entry.path())
-            .filter(|path| UnixStream::connect(path).is_ok())
             .collect();
-        live.sort();
-        Ok(live)
+        sockets.sort();
+        Ok(sockets)
     }
 
     /// What `crook pane list` prints, having asked the window at `socket`.

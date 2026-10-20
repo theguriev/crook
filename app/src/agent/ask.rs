@@ -27,19 +27,39 @@
 //! # When it asks nothing
 //!
 //! Before it connects anywhere, unless all of these hold: `CROOK_SOCKET` names
-//! a window; no `TMUX`, `STY` or `ZELLIJ` says a multiplexer stands between
-//! the agent and the pane; the input is Claude Code's `PermissionRequest` for
+//! a window; no `STY` or `ZELLIJ` says screen or zellij stands between the
+//! agent and the pane; the input is Claude Code's `PermissionRequest` for
 //! `Bash`, `Edit`, `MultiEdit` or `Write`, from the main thread and not a
 //! subagent, with a session and an absolute working directory;
 //! `CLAUDE_CODE_ENTRYPOINT` is exactly `cli` —
 //! under `claude -p` an empty answer is Claude Code's own immediate deny, and
 //! holding it would turn a refusal into a wait; the tool's input is one the
-//! allowlist in [`super::request`] reads whole; a terminal is found; and, for
-//! a write, whether a file is there could be said.
+//! allowlist in [`super::request`] reads whole; a terminal is found — inside
+//! tmux, a client of tmux's — and, for a write, whether a file is there could
+//! be said.
 //!
 //! The socket is asked only once it has been checked, as every client's is
 //! — see `control::cli` — and the connection is never half closed: on macOS
 //! the window cannot tell a closed half from a hook that has gone.
+//!
+//! # Inside tmux
+//!
+//! The terminal a status from here goes to inside tmux is not the agent's,
+//! which is one of tmux's panes, but that of each client attached to the
+//! agent's session — see `super::tmux` — and one of those is the Crook pane
+//! a person sees tmux in. So the question names those terminals rather than
+//! the agent's, and nothing it inherited: a tmux server keeps the
+//! `CROOK_SOCKET` and `CROOK_TOKEN` of the pane it was started from, which
+//! may be another window's, or one's since closed. No token is sent.
+//!
+//! And no window is told what the agent asks until it has said it holds one
+//! of those terminals: `pane.find`, which carries the terminals and nothing
+//! else, is asked first of `CROOK_SOCKET`'s window, and, when that one is
+//! gone or holds none, of at most four others listening in this user's
+//! checked control directory, all within two seconds — see `find`, which
+//! only Unix has. The question goes to the first that says yes, on the
+//! connection it said it on, and to no other. screen and zellij cannot be
+//! asked where their clients are, and a hook inside one asks nothing.
 //!
 //! # Windows
 //!
@@ -59,7 +79,8 @@ use super::request::{AskRequest, OnDisk, from_claude};
 use crate::control::protocol::AskingAgent;
 #[cfg(any(unix, test))]
 use crate::control::protocol::{
-    self, AgentAsk, Answered, Decision, MAX_CWD, Registered, Reply, Verb, Verdict,
+    self, AgentAsk, Answered, Decision, Find, Located, MAX_CWD, Multiplexer, Registered, Reply,
+    Verb, Verdict,
 };
 
 /// How long a Claude Code hook waits for a person, in all.
@@ -76,6 +97,16 @@ pub const CLAUDE_AWAIT: Duration = Duration::from_secs(300);
 /// in a second is one whose agent's own prompt is the better place to answer.
 #[cfg(unix)]
 pub const REGISTER_DEADLINE: Duration = Duration::from_secs(1);
+
+/// How long, in all, a hook inside tmux looks for the window that holds one
+/// of its clients' terminals before it gives up and asks nothing.
+#[cfg(unix)]
+pub const FIND_DEADLINE: Duration = Duration::from_secs(2);
+
+/// How many windows besides `CROOK_SOCKET`'s a hook inside tmux asks
+/// whether they hold one of its clients' terminals.
+#[cfg(any(unix, test))]
+pub const MAX_OTHER_WINDOWS: usize = 4;
 
 /// How much longer than [`CLAUDE_AWAIT`] the hook reads, so that the window,
 /// which knows the question is over, is the side that says so.
@@ -104,8 +135,8 @@ pub struct Environment {
     pub socket: Option<PathBuf>,
     /// `CROOK_TOKEN`, when it is not empty.
     pub token: Option<String>,
-    /// Whether `TMUX`, `STY` or `ZELLIJ` names a multiplexer.
-    pub multiplexed: bool,
+    /// Which multiplexer, when `TMUX`, `STY` or `ZELLIJ` names one.
+    pub multiplexer: Option<Multiplexed>,
     /// `CLAUDE_CODE_ENTRYPOINT`.
     pub entrypoint: Option<String>,
 }
@@ -123,10 +154,37 @@ impl Environment {
             token: std::env::var(crate::control::TOKEN_VARIABLE)
                 .ok()
                 .filter(|token| !token.is_empty()),
-            multiplexed: ["TMUX", "STY", "ZELLIJ"].into_iter().any(named),
+            multiplexer: if named("STY") || named("ZELLIJ") {
+                Some(Multiplexed::Other)
+            } else if named("TMUX") {
+                Some(Multiplexed::Tmux)
+            } else {
+                None
+            },
             entrypoint: std::env::var("CLAUDE_CODE_ENTRYPOINT").ok(),
         }
     }
+}
+
+/// A multiplexer between the agent and the pane.
+#[cfg(any(unix, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Multiplexed {
+    /// tmux, which can be asked where its clients are.
+    Tmux,
+    /// screen or zellij, which cannot — or tmux inside one of them.
+    Other,
+}
+
+/// What names the pane a question goes to.
+#[cfg(any(unix, test))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Bound {
+    /// The device number of the terminal a status from here would be
+    /// written to.
+    Tty(u32),
+    /// Inside tmux: the terminals of its clients.
+    Multiplexer(Multiplexer),
 }
 
 /// A question to ask, and where.
@@ -144,18 +202,19 @@ pub struct Question {
 
 /// The question `input` asks, or `None` when the hook asks nothing: see the
 /// module docs for the rules, in the order they are read. `terminal` is
-/// asked once every other rule holds, and then `look`, for a change to a
-/// file, says what is on disk where it would land under the working
-/// directory — or `None`, which is no question.
+/// asked once every other rule holds — for the terminal, or inside tmux for
+/// its clients', whichever the environment says to look for — and then
+/// `look`, for a change to a file, says what is on disk where it would land
+/// under the working directory — or `None`, which is no question.
 #[cfg(any(unix, test))]
 pub fn question(
     input: &[u8],
     environment: &Environment,
-    terminal: impl FnOnce() -> Option<u32>,
+    terminal: impl FnOnce() -> Option<Bound>,
     look: impl FnOnce(&AskRequest, &str) -> Option<OnDisk>,
 ) -> Option<Question> {
     let socket = environment.socket.clone()?;
-    if environment.multiplexed {
+    if environment.multiplexer == Some(Multiplexed::Other) {
         return None;
     }
     let hook: Value = serde_json::from_slice(input).ok()?;
@@ -177,7 +236,11 @@ pub fn question(
         return None;
     }
     let request = from_claude(tool, hook.get("tool_input")?)?;
-    let tty = terminal()?;
+    let (tty, multiplexer) = match (environment.multiplexer, terminal()?) {
+        (None, Bound::Tty(tty)) => (Some(tty), None),
+        (Some(Multiplexed::Tmux), Bound::Multiplexer(multiplexer)) => (None, Some(multiplexer)),
+        _ => return None,
+    };
     let request = match request.path() {
         Some(_) => {
             let on_disk = look(&request, cwd)?;
@@ -187,12 +250,15 @@ pub fn question(
     };
     Some(Question {
         socket,
-        token: environment.token.clone(),
+        // The token tmux keeps is the pane's that started its server, which
+        // says nothing about the pane the question is for.
+        token: environment.token.clone().filter(|_| multiplexer.is_none()),
         asked: AgentAsk {
             agent: AskingAgent::Claude,
             session: session.to_owned(),
             cwd: cwd.to_owned(),
             tty,
+            multiplexer,
             wait: CLAUDE_AWAIT.as_secs(),
             request,
         },
@@ -209,6 +275,9 @@ pub struct Patience {
     pub answer: Duration,
     /// Between two looks at whether its parent is still there.
     pub poll: Duration,
+    /// Inside tmux, for a window to say it holds one of the clients'
+    /// terminals, all of the windows asked together.
+    pub find: Duration,
 }
 
 #[cfg(any(unix, test))]
@@ -219,6 +288,7 @@ impl Patience {
         register: REGISTER_DEADLINE,
         answer: CLAUDE_AWAIT.saturating_add(PAST_THE_AWAIT),
         poll: POLL,
+        find: FIND_DEADLINE,
     };
 }
 
@@ -243,6 +313,37 @@ pub trait Connection {
 
     /// The next line, waiting for one at most `timeout`.
     fn line(&mut self, timeout: Duration) -> io::Result<Line>;
+}
+
+/// The windows a hook can ask: what [`decide`] connects through, and what a
+/// test stands in for.
+#[cfg(any(unix, test))]
+pub trait Windows {
+    /// A connection to one.
+    type Connection: Connection;
+
+    /// A connection to the window listening at `socket`, once the socket and
+    /// the listener have passed every check; `None` otherwise.
+    fn connect(&mut self, socket: &Path) -> Option<Self::Connection>;
+
+    /// The other sockets in this user's checked control directory, besides
+    /// `socket`, in name order: where a hook inside tmux looks when
+    /// `socket`'s window holds none of its clients' terminals.
+    fn others(&mut self, socket: &Path) -> Vec<PathBuf>;
+}
+
+/// Only the one socket: a connection made by the closure, and no others.
+#[cfg(any(unix, test))]
+impl<C: Connection, F: FnMut(&Path) -> Option<C>> Windows for F {
+    type Connection = C;
+
+    fn connect(&mut self, socket: &Path) -> Option<C> {
+        self(socket)
+    }
+
+    fn others(&mut self, _: &Path) -> Vec<PathBuf> {
+        Vec::new()
+    }
 }
 
 /// Asks the question in `request` over `connection`, and hands back what the
@@ -331,33 +432,92 @@ pub fn decision_line(verdict: &Verdict) -> Option<String> {
 }
 
 /// Everything the hook does before it prints: the question, `terminal` and
-/// `look` asked as [`question`] asks them, the connection `connect` makes to
-/// the socket it names, and the line to print with the connection it came
+/// `look` asked as [`question`] asks them, the connection `windows` makes to
+/// the window it goes to, and the line to print with the connection it came
 /// down — or `None`, having connected to nothing unless every rule held.
+///
+/// The window is the socket the question names; inside tmux, the first of
+/// it and the others `windows` lists to say it holds one of the clients'
+/// terminals — see [`find`] — and none when none does.
 #[cfg(any(unix, test))]
-pub fn decide<C: Connection>(
+pub fn decide<W: Windows>(
     input: &[u8],
     environment: &Environment,
-    terminal: impl FnOnce() -> Option<u32>,
+    terminal: impl FnOnce() -> Option<Bound>,
     look: impl FnOnce(&AskRequest, &str) -> Option<OnDisk>,
-    connect: impl FnOnce(&Path) -> Option<C>,
+    mut windows: W,
     patience: &Patience,
     parent_left: impl Fn() -> bool,
-) -> Option<(String, C)> {
+) -> Option<(String, W::Connection)> {
     let Question {
         socket,
         token,
         asked,
     } = question(input, environment, terminal, look)?;
+    let clients = asked
+        .multiplexer
+        .as_ref()
+        .map(|multiplexer| multiplexer.clients.clone());
     let line = protocol::request_line(&Verb::AgentAsk(asked), token.as_deref());
     // Not asked rather than cut: the window reads no more than this, and a
     // request it could not show whole is no question.
     if line.len() > protocol::MAX_LINE + 1 {
         return None;
     }
-    let mut connection = connect(&socket)?;
+    let mut connection = match clients {
+        None => windows.connect(&socket)?,
+        Some(clients) => find(&mut windows, &socket, clients, patience, &parent_left)?,
+    };
     let verdict = converse(&mut connection, &line, patience, parent_left)?;
     Some((decision_line(&verdict)?, connection))
+}
+
+/// The connection to the first window that says it holds one of `ttys`:
+/// `socket`'s, else one of the first [`MAX_OTHER_WINDOWS`] others `windows`
+/// lists that can be connected to — or `None`, when none says so within
+/// [`Patience::find`].
+///
+/// What each is asked is `pane.find`, which carries the terminals and no
+/// more: nothing of the question, and no token. A window that is gone,
+/// refuses, says no or says nothing in time is passed over, and its
+/// connection closed.
+#[cfg(any(unix, test))]
+pub fn find<W: Windows>(
+    windows: &mut W,
+    socket: &Path,
+    ttys: Vec<u32>,
+    patience: &Patience,
+    parent_left: &impl Fn() -> bool,
+) -> Option<W::Connection> {
+    let line = protocol::request_line(&Verb::PaneFind(Find { ttys }), None);
+    let deadline = Instant::now() + patience.find;
+    let ask = |connection: &mut W::Connection| {
+        connection.send(line.as_bytes()).ok()?;
+        let by = deadline.min(Instant::now() + patience.register);
+        let reply: Reply =
+            serde_json::from_slice(&next_line(connection, by, patience, parent_left)?).ok()?;
+        let located: Located = serde_json::from_value(reply.result.filter(|_| reply.ok)?).ok()?;
+        located.found.then_some(())
+    };
+    if let Some(mut connection) = windows.connect(socket)
+        && ask(&mut connection).is_some()
+    {
+        return Some(connection);
+    }
+    let mut asked = 0;
+    for other in windows.others(socket) {
+        if asked == MAX_OTHER_WINDOWS || Instant::now() >= deadline {
+            break;
+        }
+        let Some(mut connection) = windows.connect(&other) else {
+            continue;
+        };
+        asked += 1;
+        if ask(&mut connection).is_some() {
+            return Some(connection);
+        }
+    }
+    None
 }
 
 /// Prints `line` in one write, and says whether it all went: a reader that
@@ -399,10 +559,14 @@ pub fn run(mut args: impl Iterator<Item = String>) {
 mod unix {
     use std::io::{self, BufRead, BufReader, Read, Write};
     use std::os::unix::net::UnixStream;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    use super::{Connection, Environment, Line, MAX_INPUT, Patience, REGISTER_DEADLINE};
-    use crate::control::cli::unix::connect_checked;
+    use super::{
+        Bound, Connection, Environment, Line, MAX_INPUT, Multiplexed, Patience, REGISTER_DEADLINE,
+        Windows,
+    };
+    use crate::control::cli::unix::{connect_checked, sockets_in};
 
     /// The longest line read from the window, in bytes.
     const MAX_REPLY: usize = 64 * 1024;
@@ -416,12 +580,17 @@ mod unix {
         let Some(input) = input(io::stdin().lock()) else {
             return;
         };
+        let environment = Environment::here();
         let decided = super::decide(
             &input,
-            &Environment::here(),
-            device,
+            &environment,
+            || match environment.multiplexer {
+                None => device().map(Bound::Tty),
+                Some(Multiplexed::Tmux) => inside_tmux().map(Bound::Multiplexer),
+                Some(Multiplexed::Other) => None,
+            },
             crate::agent::on_disk::look,
-            |socket| connect_checked(socket).ok().map(Socketed::new),
+            Sockets,
             &Patience::CLAUDE,
             || std::os::unix::process::parent_id() != parent,
         );
@@ -455,6 +624,71 @@ mod unix {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     fn device() -> Option<u32> {
         None
+    }
+
+    /// Inside tmux, the terminals of the clients attached to the agent's
+    /// session that are this user's, at most
+    /// [`MAX_CLIENTS`](crate::control::protocol::MAX_CLIENTS), and the
+    /// agent's pane as tmux names it; `None` unless tmux says this process
+    /// is on the pane `TMUX_PANE` names and has such a client.
+    ///
+    /// The terminal of another user's client — one attached to a server
+    /// shared with `server-access` — is no pane of this user's windows, and
+    /// is left out rather than named to them.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn inside_tmux() -> Option<crate::control::protocol::Multiplexer> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+        use crate::control::protocol::{self, MultiplexerKind};
+
+        let pane = std::env::var("TMUX_PANE")
+            .ok()
+            .filter(|pane| protocol::is_pane_id(pane))?;
+        let user = crate::control::server::euid();
+        let mut clients = Vec::new();
+        for client in crate::agent::tmux::clients()? {
+            let Ok(metadata) = std::fs::metadata(&client) else {
+                continue;
+            };
+            // The low 32 bits, as the window reads its ptys'.
+            let device = metadata.rdev() as u32;
+            if metadata.file_type().is_char_device()
+                && metadata.uid() == user
+                && !clients.contains(&device)
+            {
+                clients.push(device);
+            }
+        }
+        clients.truncate(protocol::MAX_CLIENTS);
+        (!clients.is_empty()).then_some(protocol::Multiplexer {
+            kind: MultiplexerKind::Tmux,
+            clients,
+            pane,
+        })
+    }
+
+    /// Nowhere else is tmux asked where its clients are.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn inside_tmux() -> Option<crate::control::protocol::Multiplexer> {
+        None
+    }
+
+    /// The windows of this user: a socket asked once it has passed the
+    /// client's checks, and the others in the control directory.
+    struct Sockets;
+
+    impl Windows for Sockets {
+        type Connection = Socketed;
+
+        fn connect(&mut self, socket: &Path) -> Option<Socketed> {
+            connect_checked(socket).ok().map(Socketed::new)
+        }
+
+        fn others(&mut self, socket: &Path) -> Vec<PathBuf> {
+            let mut others = sockets_in(&crate::control::server::directory());
+            others.retain(|other| other != socket);
+            others
+        }
     }
 
     /// A connection to the window's socket.

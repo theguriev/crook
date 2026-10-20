@@ -60,9 +60,10 @@ up the whole time, and whichever is answered first wins: Claude Code drops a lat
 tells Claude "Denied in Crook by the person at the keyboard."; there is no "always allow", and
 the hook never changes the command or writes a permission rule. It reports no status, and passes
 at once, printing nothing, wherever nobody could be asked in Crook: under `claude -p` (unless
-`CLAUDE_CODE_ENTRYPOINT` is exactly `cli`), for a subagent, inside tmux, screen or zellij,
-outside a Crook pane, with "Let agents ask in Crook" turned off in Crook's settings, and on
-Windows. It needs Claude Code 2.1.280 or newer, and a Crook that knows `--agent ask`; an older
+`CLAUDE_CODE_ENTRYPOINT` is exactly `cli`), for a subagent, inside screen or zellij, outside a
+Crook pane, with "Let agents ask in Crook" turned off in Crook's settings, and on
+Windows. Inside tmux it asks the window holding tmux's client, whichever window started the
+tmux server, and the card says the agent is inside tmux. It needs Claude Code 2.1.280 or newer, and a Crook that knows `--agent ask`; an older
 one refuses it before reading anything, and the hook passes.
 
 `skills/crook/SKILL.md` is the skill `crook --skill` prints, and all three load it.

@@ -32,7 +32,9 @@
 //! run in the background or with a time limit. It says the agent is asking in
 //! its own tab too, and how long ago it asked — the age as of the frame, with
 //! no timer to move it — and, once the pane has said it is running again,
-//! that the question may already have been answered there.
+//! that the question may already have been answered there. A question from
+//! inside tmux says so, names tmux's pane, and says in how many other tabs
+//! tmux is attached as well; its tab is the one holding tmux's client.
 //!
 //! **A change to a file is shown as the change.** An edit's old text is drawn
 //! as removed lines and its new text as added ones, in the colours the
@@ -855,13 +857,24 @@ fn live_face(
         }
     }
     column.add_child(divider());
-    column.add_child(one_line(
-        format!(
-            "{agent} is asking in its tab too · asked {} ago",
-            duration(now.saturating_duration_since(ask.asked_at))
-        ),
-        ui,
-    ));
+    let age = duration(now.saturating_duration_since(ask.asked_at));
+    match &ask.inside {
+        None => column.add_child(one_line(
+            format!("{agent} is asking in its tab too · asked {age} ago"),
+            ui,
+        )),
+        Some(inside) => {
+            column.add_child(one_line(
+                format!(
+                    "{agent} is asking in its {} pane {} too · asked {age} ago",
+                    inside.kind.word(),
+                    inside.pane
+                ),
+                ui,
+            ));
+            column.add_child(note(format!("Asked from {}.", inside.said()), ui));
+        }
+    }
     if card.back_to_work {
         column.add_child(note(
             "Its tab has gone back to work; this may already be answered there.",

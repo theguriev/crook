@@ -140,7 +140,8 @@ fn a_verb_this_window_does_not_know_is_refused_by_name() {
             "pane.wait",
             "pane.blocks",
             "events.follow",
-            "agent.ask"
+            "agent.ask",
+            "pane.find"
         ]
     );
     for name in Verb::NAMES {
@@ -1149,7 +1150,8 @@ fn agent_ask(command: &str) -> protocol::AgentAsk {
         agent: protocol::AskingAgent::Claude,
         session: "4f1c2b7e-0d3a".to_owned(),
         cwd: "/home/someone/work/crook".to_owned(),
-        tty: 34819,
+        tty: Some(34819),
+        multiplexer: None,
         wait: 300,
         request: AskRequest::Command {
             command: command.to_owned(),
@@ -1258,6 +1260,112 @@ fn an_ask_with_a_field_or_kind_this_window_does_not_know_is_refused() {
     assert_eq!(asked_with(&args), refused, "a command too long");
     assert_eq!(
         verdict(r#"{"v":1,"verb":"agent.ask"}"#).1,
+        refused,
+        "no args at all"
+    );
+}
+
+/// `agent_ask`, from inside tmux: its clients' terminals in place of its own.
+fn agent_ask_in_tmux(command: &str) -> protocol::AgentAsk {
+    protocol::AgentAsk {
+        tty: None,
+        multiplexer: Some(protocol::Multiplexer {
+            kind: protocol::MultiplexerKind::Tmux,
+            clients: vec![34819, 34823],
+            pane: "%3".to_owned(),
+        }),
+        ..agent_ask(command)
+    }
+}
+
+#[test]
+fn a_question_from_inside_tmux_names_the_clients_and_one_from_a_pane_is_what_it_was() {
+    let asked = agent_ask_in_tmux("rm -rf build");
+    let line = protocol::request_line(&Verb::AgentAsk(asked.clone()), None);
+    let (_, request) = protocol::read(line.trim_end().as_bytes());
+    assert_eq!(
+        request.map(|request| request.verb),
+        Ok(Verb::AgentAsk(asked))
+    );
+    let sent: Value = serde_json::from_str(&line).expect("JSON");
+    assert_eq!(sent["args"].get("tty"), None);
+    assert_eq!(
+        sent["args"]["multiplexer"],
+        json!({"kind": "tmux", "clients": [34819, 34823], "pane": "%3"})
+    );
+
+    // A question from a pane carries what it always did, and no more: the
+    // line an older window reads.
+    let args = agent_ask_args();
+    let mut keys: Vec<_> = args.as_object().expect("an object").keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["agent", "cwd", "request", "session", "tty", "wait"]);
+}
+
+#[test]
+fn a_question_names_one_terminal_or_a_multiplexers_clients_and_never_both_or_neither() {
+    let refused = Err(code::BAD_REQUEST.to_owned());
+    let tmux = || serde_json::to_value(agent_ask_in_tmux("ls")).expect("encodes");
+    assert!(matches!(asked_with(&tmux()), Ok(Verb::AgentAsk(_))));
+
+    let mut both = tmux();
+    both["tty"] = json!(34819);
+    assert_eq!(asked_with(&both), refused, "both");
+    let mut neither = agent_ask_args();
+    neither.as_object_mut().expect("an object").remove("tty");
+    assert_eq!(asked_with(&neither), refused, "neither");
+    for (field, wrong) in [
+        ("clients", json!([])),
+        (
+            "clients",
+            json!((0..=protocol::MAX_CLIENTS as u32).collect::<Vec<_>>()),
+        ),
+        ("clients", json!([-1])),
+        ("pane", json!("3")),
+        ("pane", json!("%")),
+        ("pane", json!("%3; rm -rf ~")),
+        ("pane", json!("%\u{202e}3")),
+        (
+            "pane",
+            json!(format!("%{}", "1".repeat(protocol::MAX_PANE_ID))),
+        ),
+        ("kind", json!("screen")),
+        ("socket", json!("/tmp/tmux-1000/default")),
+    ] {
+        let mut args = tmux();
+        args["multiplexer"][field] = wrong.clone();
+        assert_eq!(asked_with(&args), refused, "{field}: {wrong}");
+    }
+}
+
+#[test]
+fn pane_find_carries_terminals_and_nothing_else() {
+    let find =
+        |args: Value| verdict(&json!({"v": 1, "verb": "pane.find", "args": args}).to_string()).1;
+    let asked = protocol::Find {
+        ttys: vec![34819, 34823],
+    };
+    assert_eq!(
+        find(json!({"ttys": [34819, 34823]})),
+        Ok(Verb::PaneFind(asked.clone()))
+    );
+    assert_eq!(
+        protocol::request_line(&Verb::PaneFind(asked.clone()), None),
+        "{\"args\":{\"ttys\":[34819,34823]},\"v\":1,\"verb\":\"pane.find\"}\n"
+    );
+    assert!(!Verb::PaneFind(asked).keeps_connection());
+    let refused = Err(code::BAD_REQUEST.to_owned());
+    for wrong in [
+        json!({"ttys": []}),
+        json!({"ttys": (0..=protocol::MAX_CLIENTS as u32).collect::<Vec<_>>()}),
+        json!({"ttys": [1], "request": {"kind": "command", "command": "ls"}}),
+        json!({"ttys": [1], "session": "s1"}),
+        json!({}),
+    ] {
+        assert_eq!(find(wrong.clone()), refused, "{wrong}");
+    }
+    assert_eq!(
+        verdict(r#"{"v":1,"verb":"pane.find"}"#).1,
         refused,
         "no args at all"
     );
@@ -1489,6 +1597,7 @@ fn a_press_reaches_only_the_question_it_was_given_about() {
         pane,
         cannot_answer,
         tab_title: "crook".to_owned(),
+        inside: None,
     };
     let feed = || Arc::new(watch::Feed::for_verb(&Verb::AgentAsk(agent_ask("ls"))));
     let from = |session: &str, command: &str| protocol::AgentAsk {
@@ -1580,6 +1689,7 @@ fn hold_in(
         pane,
         cannot_answer,
         tab_title: "crook".to_owned(),
+        inside: None,
     };
     asks.add(asked, found, feed.clone(), Instant::now())
         .map(|id| (id, feed))
@@ -1663,6 +1773,118 @@ fn a_read_only_question_neither_replaces_nor_crowds_out_nor_hides_an_answerable_
     assert!(asks.answerable_in(other).is_none());
 }
 
+/// [`hold_in`], answerable, from inside tmux.
+fn hold_from_tmux(
+    asks: &mut super::ask::Asks,
+    pane: crate::tab::PaneId,
+    session: &str,
+) -> Result<(super::ask::AskId, Arc<watch::Feed>), protocol::Refusal> {
+    let feed = Arc::new(watch::Feed::for_verb(&Verb::AgentAsk(agent_ask("ls"))));
+    let asked = protocol::AgentAsk {
+        session: session.to_owned(),
+        ..agent_ask_in_tmux("ls")
+    };
+    let found = super::ask::Found {
+        pane,
+        cannot_answer: None,
+        tab_title: "crook".to_owned(),
+        inside: Some(super::ask::Inside {
+            kind: protocol::MultiplexerKind::Tmux,
+            pane: "%3".to_owned(),
+            elsewhere: 0,
+        }),
+    };
+    asks.add(asked, found, feed.clone(), Instant::now())
+        .map(|id| (id, feed))
+}
+
+#[test]
+fn a_question_from_inside_tmux_neither_replaces_nor_crowds_out_nor_hides_the_panes_own() {
+    use super::ask::{Asks, MAX_PER_PANE};
+
+    let pane = crate::tab::PaneId::next();
+    let mut asks = Asks::default();
+    let (agents, feed) = hold_in(&mut asks, pane, "s1", "rm -rf build", None).expect("held");
+
+    // Newer, answerable and from the same session: held beside it, and
+    // behind it.
+    let (through_tmux, _) = hold_from_tmux(&mut asks, pane, "s1").expect("held");
+    assert!(feed.is_open(), "the pane's own question was ended");
+    assert_eq!(asks.answerable_in(pane).map(|ask| ask.id), Some(agents));
+    assert_eq!(asks.in_pane(pane).map(|ask| ask.id), Some(agents));
+
+    // They fill a room of their own.
+    for session in ["t2", "t3", "t4"] {
+        hold_from_tmux(&mut asks, pane, session).expect("held");
+    }
+    let Err(refusal) = hold_from_tmux(&mut asks, pane, "t5") else {
+        panic!("the room from inside tmux is full");
+    };
+    assert_eq!(refusal.code, code::BUSY);
+    for session in (2..=MAX_PER_PANE).map(|number| format!("a{number}")) {
+        hold_in(&mut asks, pane, &session, "ls", None).expect("room for the pane's own");
+    }
+
+    // Once the pane's own have gone, one from inside tmux is the one shown.
+    let mut asks = Asks::default();
+    hold_from_tmux(&mut asks, pane, "t1").expect("held");
+    let (newest, _) = hold_from_tmux(&mut asks, pane, "t2").expect("held");
+    assert_eq!(asks.answerable_in(pane).map(|ask| ask.id), Some(newest));
+    let _ = through_tmux;
+}
+
+#[test]
+fn a_question_from_inside_tmux_is_answerable_only_under_the_tmux_holding_the_pane() {
+    use super::ask::from_its_tmux;
+    use protocol::{Asker, Executable, Holder};
+
+    const PANE: u32 = 34819;
+    let tmux = Executable {
+        device: 2049,
+        inode: 1_234_567,
+    };
+    let perl = Executable {
+        device: 2049,
+        inode: 7_654_321,
+    };
+    let asker = |holders: Vec<Holder>| Asker {
+        pid: Some(400),
+        lineage: vec![400, 300, 200, 100],
+        holders,
+    };
+    let holder = |pid, executable, terminals: Vec<u32>| Holder {
+        pid,
+        executable: Some(executable),
+        terminals,
+    };
+
+    // tmux's server: an ancestor running the pane's tmux, holding its client.
+    let under_tmux = asker(vec![
+        holder(300, perl, vec![]),
+        holder(100, tmux, vec![PANE, 7]),
+    ]);
+    assert!(from_its_tmux(&under_tmux, Some(PANE), Some(tmux)));
+
+    // An ancestor that opened the pane's terminal and runs something else.
+    let opened = asker(vec![holder(300, perl, vec![PANE])]);
+    assert!(!from_its_tmux(&opened, Some(PANE), Some(tmux)));
+    // tmux holding another terminal than the pane's.
+    let elsewhere = asker(vec![holder(100, tmux, vec![7])]);
+    assert!(!from_its_tmux(&elsewhere, Some(PANE), Some(tmux)));
+    // A pane whose foreground is not that tmux.
+    assert!(!from_its_tmux(&under_tmux, Some(PANE), Some(perl)));
+    // Nothing read: nothing is answerable.
+    assert!(!from_its_tmux(&asker(Vec::new()), Some(PANE), Some(tmux)));
+    assert!(!from_its_tmux(&under_tmux, None, Some(tmux)));
+    assert!(!from_its_tmux(&under_tmux, Some(PANE), None));
+    let unread = asker(vec![Holder {
+        pid: 100,
+        executable: None,
+        terminals: vec![PANE],
+    }]);
+    assert!(!from_its_tmux(&unread, Some(PANE), Some(tmux)));
+}
+
 #[test]
 fn a_question_whose_connection_gave_up_is_neither_held_nor_shown_nor_kept() {
     use super::ask::{Asks, Cause, How};
@@ -1681,6 +1903,7 @@ fn a_question_whose_connection_gave_up_is_neither_held_nor_shown_nor_kept() {
                 pane,
                 cannot_answer: None,
                 tab_title: "crook".to_owned(),
+                inside: None,
             },
             feed,
             Instant::now(),
@@ -1753,6 +1976,7 @@ fn the_window_remembers_the_last_sixty_four_questions_and_no_more() {
                     pane,
                     cannot_answer: None,
                     tab_title: "crook".to_owned(),
+                    inside: None,
                 },
                 Arc::new(watch::Feed::for_verb(&Verb::AgentAsk(agent_ask("ls")))),
                 Instant::now(),
@@ -1795,6 +2019,7 @@ fn the_trail_keeps_sixty_four() {
                     pane,
                     cannot_answer: None,
                     tab_title: "crook".to_owned(),
+                    inside: None,
                 },
                 Arc::new(watch::Feed::for_verb(&Verb::AgentAsk(agent_ask("ls")))),
                 Instant::now(),
@@ -5842,7 +6067,7 @@ mod socket {
     fn question(session: &str, tty: u32, command: &str) -> AgentAsk {
         AgentAsk {
             session: session.to_owned(),
-            tty,
+            tty: Some(tty),
             ..agent_ask(command)
         }
     }
@@ -5894,7 +6119,7 @@ mod socket {
     impl Served {
         /// The device number of the pty a pane's shell runs on.
         fn tty(&self, pane: PaneId) -> u32 {
-            self.read(|workspace, app| workspace.tty_of(pane, app))
+            self.read(|workspace, app| workspace.tty_device_of(pane, app))
                 .expect("a pane with a shell is on a pty")
         }
 
@@ -6092,6 +6317,116 @@ mod socket {
         assert_eq!(served.asks(), 0);
     }
 
+    /// A question about `command` from `session` inside tmux, whose clients
+    /// are on the terminals numbered `clients`.
+    fn from_tmux(session: &str, clients: Vec<u32>, command: &str) -> AgentAsk {
+        AgentAsk {
+            session: session.to_owned(),
+            tty: None,
+            multiplexer: Some(protocol::Multiplexer {
+                kind: protocol::MultiplexerKind::Tmux,
+                clients,
+                pane: "%3".to_owned(),
+            }),
+            ..agent_ask(command)
+        }
+    }
+
+    /// What the window answers a `pane.find` for `ttys`.
+    fn finds(served: &mut Served, ttys: Vec<u32>) -> Reply {
+        served.ask(move |socket| {
+            let mut client = Client::connect(&socket);
+            client.send(&protocol::request_line(
+                &Verb::PaneFind(protocol::Find { ttys }),
+                None,
+            ));
+            client.reply().expect("the window replies")
+        })
+    }
+
+    #[test]
+    fn a_question_from_inside_tmux_binds_to_the_first_pane_holding_a_client() {
+        let mut served = Served::new(|workspace, ctx, _| {
+            workspace.apply(TabAction::New, ctx);
+            workspace.apply(TabAction::New, ctx);
+        });
+        let panes: Vec<PaneId> = served.read(|workspace, _| {
+            workspace
+                .tabs()
+                .panes()
+                .map(|(_, pane)| pane.id())
+                .collect()
+        });
+        let [first, second, third] = panes[..] else {
+            panic!("three panes: {panes:?}");
+        };
+        // The clients named last first, and a terminal no pane is on: the
+        // panel's order decides, and the token of another pane, which a
+        // tmux server keeps from wherever it started, changes nothing.
+        let clients = vec![served.tty(third), 7, served.tty(second)];
+        let (_client, reply) =
+            served.ask_as(from_tmux("s1", clients, "ls"), Some(served.token(first)));
+        let id = held(&reply);
+        served.read(|workspace, _| {
+            let ask = workspace
+                .asks()
+                .in_pane(second)
+                .expect("held in the second pane");
+            assert_eq!(ask.id.as_u64(), id);
+            // This test is under no tmux at all, whatever terminals it
+            // names: shown, and read-only.
+            assert_eq!(ask.cannot_answer, Some(CannotAnswer::NotFromItsTmux));
+            let inside = ask.inside.as_ref().expect("from inside tmux");
+            assert_eq!(inside.pane, "%3");
+            assert_eq!(inside.said(), "inside tmux (also attached in 1 other tab)");
+            assert_eq!(ask.summary, "Bash inside tmux: ls");
+            assert!(workspace.asks().in_pane(third).is_none());
+            assert!(workspace.asks().in_pane(first).is_none());
+        });
+
+        // Attached in one tab only, it says nothing of others.
+        let (_alone, reply) = served.ask_as(from_tmux("s2", vec![served.tty(first)], "ls"), None);
+        held(&reply);
+        served.read(|workspace, _| {
+            let ask = workspace
+                .asks()
+                .in_pane(first)
+                .expect("held in the first pane");
+            assert_eq!(
+                ask.inside.as_ref().map(|inside| inside.said()).as_deref(),
+                Some("inside tmux")
+            );
+        });
+
+        // And clients no pane is on are no pane.
+        let (_none, reply) = served.ask_as(from_tmux("s3", vec![7, 8], "ls"), None);
+        assert_eq!(refused(&reply), code::NO_SUCH_PANE);
+    }
+
+    #[test]
+    fn a_pane_find_says_only_whether_a_pane_is_on_one_of_the_terminals() {
+        let mut served = Served::new(|_, _, _| {});
+        let pane = first_pane(&served);
+        let tty = served.tty(pane);
+        let found = |reply: Reply| {
+            assert!(reply.ok, "{reply:?}");
+            reply.result.expect("a result")
+        };
+        assert_eq!(
+            found(finds(&mut served, vec![7, tty])),
+            json!({"found": true})
+        );
+        assert_eq!(found(finds(&mut served, vec![7])), json!({"found": false}));
+        assert_eq!(served.asks(), 0, "nothing is held for a find");
+
+        // A window not taking questions holds none of them.
+        served.update(|workspace, ctx| workspace.take_agents_questions(false, ctx));
+        assert_eq!(
+            found(finds(&mut served, vec![tty])),
+            json!({"found": false})
+        );
+    }
+
     #[test]
     fn a_fifth_ask_on_one_pane_is_busy() {
         let mut served = Served::new(|_, _, _| {});
@@ -6230,7 +6565,8 @@ mod socket {
         let beside = held(&reply);
         let (_elsewhere, reply) = served.ask_as(
             AgentAsk {
-                tty: served.tty(second),
+                tty: Some(served.tty(second)),
+                multiplexer: None,
                 ..answered
             },
             None,
@@ -6382,10 +6718,12 @@ mod socket {
         let below = protocol::Asker {
             pid: Some(4242),
             lineage: vec![4242, shell, 1],
+            ..Default::default()
         };
         let stranger = protocol::Asker {
             pid: Some(4242),
             lineage: vec![4242, 1],
+            ..Default::default()
         };
         use super::super::ask::cannot_answer;
         assert_eq!(cannot_answer(None, first, &below, Some(shell), false), None);
@@ -6771,6 +7109,364 @@ mod socket {
         assert_eq!(lines, [crate::agent::ask::ALLOW], "{out:?}");
     }
 
+    /// A tmux server of a window test's own, on a socket under the test's
+    /// directory, killed when this is dropped — a test that fails half way
+    /// leaves no server behind.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    struct TestTmux {
+        /// Its `TMUX_TMPDIR`.
+        directory: PathBuf,
+        /// Its `-L` name.
+        name: &'static str,
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    impl TestTmux {
+        /// `None`, saying so, where no tmux runs; on CI, where a skip would
+        /// be a pass for the wrong reason, a failure instead.
+        fn here() -> bool {
+            let here = crate::process::command("tmux")
+                .arg("-V")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success());
+            assert!(
+                here || std::env::var_os("CI").is_none(),
+                "no tmux, which these tests run for real"
+            );
+            if !here {
+                eprintln!("skipped: no tmux to run");
+            }
+            here
+        }
+
+        /// The words that start a `tmux` of this server's, for a script.
+        fn command(&self) -> String {
+            format!(
+                "TMUX= TMUX_TMPDIR='{}' TERM=xterm-256color tmux -L {} -f /dev/null",
+                self.directory.display(),
+                self.name
+            )
+        }
+
+        /// Runs the tmux command `rest` on this server, beside it.
+        fn run(&self, rest: &[&str]) -> String {
+            let output = crate::process::command("tmux")
+                .env("TMUX_TMPDIR", &self.directory)
+                .env_remove("TMUX")
+                .args(["-L", self.name])
+                .args(rest)
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output();
+            output
+                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                .unwrap_or_default()
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    impl Drop for TestTmux {
+        fn drop(&mut self) {
+            self.run(&["kill-server"]);
+        }
+    }
+
+    /// What a pane's shell does in a tmux test: waits for the gate, says
+    /// which terminal it is on, and becomes a tmux client — or, with
+    /// `under_perl`, runs one as a child of `perl`, so that the pane's
+    /// foreground is not tmux — of a server started there, whose one pane
+    /// runs `pane.sh`. Every pane after the first becomes a client of
+    /// `other`, whose pane runs nothing.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn tmux_shell(
+        root: &TempDir,
+        tmux: &TestTmux,
+        other: &TestTmux,
+        under_perl: bool,
+    ) -> GatedShell {
+        let program = root.0.join("sh");
+        let gate = root.0.join("gate");
+        let wrapper = if under_perl {
+            "perl -e 'exit(system(@ARGV) >> 8)' --"
+        } else {
+            ""
+        };
+        crate::process::write_program(
+            &program,
+            &format!(
+                "#!/bin/sh\n\
+                 while [ ! -e '{gate}' ]; do sleep 0.1; done\n\
+                 if ! mkdir '{root}/first' 2>/dev/null; then\n\
+                 exec env {other} new-session 'exec sleep 600'\n\
+                 fi\n\
+                 tty > '{root}/pane-tty'\n\
+                 exec {wrapper} env {tmux} new-session \"sh '{root}/pane.sh'\"\n",
+                gate = gate.display(),
+                root = root.0.display(),
+                tmux = tmux.command(),
+                other = other.command(),
+            ),
+        );
+        GatedShell { program, gate }
+    }
+
+    /// Writes `pane.sh`: the hook, run as Claude Code runs it in tmux's pane
+    /// once tmux's client is attached — this test binary again, reading the
+    /// request — and then nothing, until the server is killed.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn tmux_pane_runs_the_hook(root: &TempDir) {
+        let input = root.0.join("input.json");
+        fs::write(
+            &input,
+            json!({
+                "session_id": "4f1c2b7e-0d3a-4e5f-9a8b-7c6d5e4f3a2b",
+                "cwd": "/home/someone/work/crook",
+                "hook_event_name": "PermissionRequest",
+                "tool_name": "Bash",
+                "tool_input": {"command": "rm -rf build"},
+            })
+            .to_string(),
+        )
+        .expect("the input is written");
+        let binary = std::env::current_exe().expect("the test binary has a path");
+        fs::write(
+            root.0.join("pane.sh"),
+            format!(
+                "until [ -n \"$(tmux list-clients)\" ]; do sleep 0.05; done\n\
+                 STY= ZELLIJ= CLAUDE_CODE_ENTRYPOINT=cli {CHILD_ASKS}=1 '{binary}' --exact \
+                 control::tests::socket::asks_as_a_hook_below_a_panes_shell --ignored \
+                 --test-threads=1 -q < '{input}'\n\
+                 exec sleep 600\n",
+                binary = binary.display(),
+                input = input.display(),
+            ),
+        )
+        .expect("the pane's script is written");
+    }
+
+    /// A process that asks `asked` of the window at `socket` as a hook would,
+    /// from a `perl` of its own, holding its connection until the window
+    /// ends it; with `opening`, under a parent `perl` that holds that
+    /// terminal open — a process anyone could start that has the pane's
+    /// terminal and no tmux.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn forger(root: &TempDir, socket: &Path, asked: AgentAsk, opening: Option<&Path>) -> String {
+        let line = root.0.join(format!("line-{}", asked.session));
+        fs::write(&line, protocol::request_line(&Verb::AgentAsk(asked), None))
+            .expect("the line is written");
+        let script = root.0.join("forger.pl");
+        fs::write(
+            &script,
+            "use IO::Socket::UNIX;\n\
+             my ($socket, $line) = @ARGV;\n\
+             open(my $read, '<', $line) or die \"$line: $!\";\n\
+             my $sent = <$read>;\n\
+             my $window = IO::Socket::UNIX->new(Type => SOCK_STREAM(), Peer => $socket) \
+             or die \"connect: $!\";\n\
+             print $window $sent;\n\
+             $window->flush;\n\
+             while (<$window>) {}\n",
+        )
+        .expect("the forger is written");
+        let quoted = |path: &Path| format!("'{}'", path.display());
+        let ask = format!(
+            "perl {} {} {}",
+            quoted(&script),
+            quoted(socket),
+            quoted(&line)
+        );
+        match opening {
+            None => ask,
+            Some(terminal) => format!(
+                "perl -e 'open(my $t, \"+<\", $ARGV[0]) or die \"open: $!\"; \
+                 exit(system(\"sh\", \"-c\", $ARGV[1]) >> 8)' {} \"{ask}\"",
+                quoted(terminal)
+            ),
+        }
+    }
+
+    /// Runs `command` under `sh`, beside the test, and leaves it running.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn start(command: &str) -> std::process::Child {
+        crate::process::command("sh")
+            .args(["-c", command])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("sh starts")
+    }
+
+    /// The window `root` serves with a pane that is a tmux client of `tmux`
+    /// whose pane runs the hook, once the hook's question is held: the
+    /// window, the pane, and the question.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn tmux_asking(
+        root: TempDir,
+        tmux: &TestTmux,
+        other: &TestTmux,
+        under_perl: bool,
+    ) -> (Served, PaneId, super::super::ask::AskId) {
+        tmux_pane_runs_the_hook(&root);
+        let shell = tmux_shell(&root, tmux, other, under_perl);
+        let mut served = Served::with(root, shell, |_, _, _| {});
+        let pane = first_pane(&served);
+        served.shell.open();
+        served.pump_until("the hook inside tmux never asked", |served| {
+            served.asks() == 1
+        });
+        let id = served.read(|workspace, _| {
+            let ask = workspace
+                .asks()
+                .in_pane(pane)
+                .expect("held in the tmux pane");
+            assert!(ask.inside.is_some(), "not from inside tmux");
+            ask.id
+        });
+        (served, pane, id)
+    }
+
+    /// Why the newest question held from `session` cannot be answered, if
+    /// it cannot.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn cannot_answer_from(served: &Served, session: &str) -> Option<CannotAnswer> {
+        served.read(|workspace, _| {
+            workspace
+                .asks()
+                .live()
+                .filter(|ask| ask.session == session)
+                .max_by_key(|ask| ask.id)
+                .expect("held")
+                .cannot_answer
+        })
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_question_from_inside_tmux_is_answerable_only_from_under_the_tmux_in_its_pane() {
+        if !TestTmux::here() {
+            return;
+        }
+        let root = TempDir::runtime();
+        let tmux = TestTmux {
+            directory: root.0.clone(),
+            name: "a",
+        };
+        let other = TestTmux {
+            directory: root.0.clone(),
+            name: "b",
+        };
+        let root_path = root.0.clone();
+        let (mut served, pane, real) = tmux_asking(root, &tmux, &other, false);
+        // The hook in tmux's pane, under the server holding the client's
+        // terminal, which runs the tmux in the pane's foreground.
+        assert_eq!(
+            served.read(|workspace, _| workspace.asks().get(real).map(|ask| ask.cannot_answer)),
+            Some(None),
+            "the agent's own question inside tmux is answerable"
+        );
+        let tty = served.tty(pane);
+        let terminal = PathBuf::from(
+            fs::read_to_string(root_path.join("pane-tty"))
+                .expect("the pane said its terminal")
+                .trim(),
+        );
+        let socket = served.socket();
+        let scratch = TempDir::new();
+        let mut started = Vec::new();
+
+        // A process outside tmux naming the client's terminal.
+        let (_outside, reply) = served.ask_as(from_tmux("f1", vec![tty], "ls"), None);
+        held(&reply);
+        assert_eq!(
+            cannot_answer_from(&served, "f1"),
+            Some(CannotAnswer::NotFromItsTmux)
+        );
+
+        // One under a parent that opened the pane's terminal: it holds it,
+        // and runs perl, not the tmux in the pane.
+        started.push(start(&forger(
+            &scratch,
+            &socket,
+            from_tmux("f2", vec![tty], "ls"),
+            Some(&terminal),
+        )));
+        served.pump_until("the forger under perl never asked", |served| {
+            served.asks() == 3
+        });
+        assert_eq!(
+            cannot_answer_from(&served, "f2"),
+            Some(CannotAnswer::NotFromItsTmux)
+        );
+
+        // One inside that tmux naming another tab's terminal, where another
+        // tmux is attached: an ancestor runs tmux, and holds only this
+        // tab's terminal.
+        served.update(|workspace, ctx| workspace.apply(TabAction::New, ctx));
+        let second = served.read(|workspace, _| {
+            workspace
+                .tabs()
+                .panes()
+                .map(|(_, open)| open.id())
+                .find(|open| *open != pane)
+                .expect("a second pane")
+        });
+        served.pump_until("the second tab never started tmux", |_| {
+            !other.run(&["list-clients"]).trim().is_empty()
+        });
+        let script = forger(
+            &scratch,
+            &socket,
+            from_tmux("f3", vec![served.tty(second)], "ls"),
+            None,
+        );
+        tmux.run(&["new-window", &script]);
+        served.pump_until("the forger inside tmux never asked", |served| {
+            served.asks() == 4
+        });
+        assert_eq!(
+            cannot_answer_from(&served, "f3"),
+            Some(CannotAnswer::NotFromItsTmux)
+        );
+
+        // And none of them stands in front of the agent's own.
+        assert_eq!(
+            served.read(|workspace, _| workspace.asks().in_pane(pane).map(|ask| ask.id)),
+            Some(real)
+        );
+        served.update(|workspace, _| workspace.asks_mut().end_all(Cause::TurnEnded));
+        for mut child in started {
+            let _ = child.wait();
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_question_from_a_tmux_that_is_not_the_panes_foreground_is_read_only() {
+        // tmux run as a child of the program in the pane's foreground: the
+        // server holds the terminal, and runs another program than the
+        // pane's.
+        if !TestTmux::here() {
+            return;
+        }
+        let root = TempDir::runtime();
+        let tmux = TestTmux {
+            directory: root.0.clone(),
+            name: "a",
+        };
+        let other = TestTmux {
+            directory: root.0.clone(),
+            name: "b",
+        };
+        let (mut served, _, real) = tmux_asking(root, &tmux, &other, true);
+        assert_eq!(
+            served.read(|workspace, _| workspace.asks().get(real).map(|ask| ask.cannot_answer)),
+            Some(Some(CannotAnswer::NotFromItsTmux))
+        );
+        served.update(|workspace, _| workspace.asks_mut().end_all(Cause::TurnEnded));
+    }
+
     #[test]
     fn neither_pane_list_events_nor_the_session_file_carry_the_command() {
         const MARKER: &str = "crook-marker-7f3a9c";
@@ -6863,6 +7559,7 @@ mod socket {
                             pane,
                             cannot_answer,
                             tab_title: "worker".to_owned(),
+                            inside: None,
                         },
                         feed,
                         Instant::now(),
@@ -7093,6 +7790,7 @@ mod socket {
                         pane,
                         cannot_answer: None,
                         tab_title: "worker".to_owned(),
+                        inside: None,
                     },
                     held_feed,
                     Instant::now(),

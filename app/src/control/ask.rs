@@ -25,6 +25,36 @@
 //! the kernel says is not a process of the pane's shell, and a pane working
 //! on another machine.
 //!
+//! # From inside tmux
+//!
+//! There the agent's terminal is one of tmux's panes, which no pane of a
+//! window is on, and the hook names the terminals of the tmux clients
+//! attached to the agent's session instead — the terminals a status from it
+//! goes to as well. The question goes to the first pane in the panel's order
+//! that is on one of them: the pane a person sees tmux in. Of the three
+//! checks, only the pane working on another machine is made. The tmux
+//! server is not below that pane's shell — it was started wherever tmux was
+//! first run, and lives on after — so the asker never is, and the token it
+//! has is whichever pane started the server, which is no hint at all. What
+//! is checked instead is the kernel's account of the asker's ancestors: one
+//! of them has to hold the pane's terminal open and run the very program in
+//! the pane's foreground, as tmux's server does for every process in its
+//! panes — see [`from_its_tmux`]. Any process can name a terminal; only one
+//! under that tmux has such an ancestor, and any other is shown read-only.
+//! The card says the question is from inside tmux, and in how many other
+//! tabs tmux is attached too.
+//!
+//! Such questions are counted apart from the pane's own, and never replace
+//! one, nor stand in front of one: whatever comes in through tmux cannot
+//! take the room or the place of a question the pane's agent asked
+//! directly.
+//!
+//! A hook whose `CROOK_SOCKET` names a window that holds none of those
+//! terminals — tmux was started from a window since closed — asks
+//! `pane.find`, which carries the terminals and nothing else, of the
+//! window's and a few others' sockets, and sends the question only to the
+//! first that finds one: see [`find`].
+//!
 //! # How a question ends
 //!
 //! With the hook going ([`Cause::HookGone`], which the connection tells the
@@ -78,8 +108,8 @@ use crookui_core::prelude::*;
 use serde_json::Value;
 
 use super::protocol::{
-    AgentAsk, Answered, AnsweredBy, Asker, AskingAgent, Decision, PaneEvent, Refusal, Registered,
-    Verdict, code,
+    AgentAsk, Answered, AnsweredBy, Asker, AskingAgent, Decision, Executable, Find, Located,
+    MultiplexerKind, PaneEvent, Refusal, Registered, Verdict, code,
 };
 use super::watch::Feed;
 use super::{Inbox, Notice};
@@ -137,6 +167,11 @@ pub enum CannotAnswer {
     /// The pane is working on another machine, where its agent would be, so
     /// whatever asked on this one is not that agent.
     Remote,
+    /// From inside a multiplexer, and no ancestor of the process that asked
+    /// both holds the pane's terminal open and runs the program in the
+    /// pane's foreground: whatever asked is not under the tmux whose client
+    /// is in the pane. See [`from_its_tmux`].
+    NotFromItsTmux,
 }
 
 impl CannotAnswer {
@@ -154,6 +189,9 @@ impl CannotAnswer {
             Self::Remote => {
                 "It cannot be answered here: this pane is working on another machine, and what \
                  asked is on this one."
+            }
+            Self::NotFromItsTmux => {
+                "It cannot be answered here: it is not from the tmux whose client is in this tab."
             }
         }
     }
@@ -321,6 +359,8 @@ pub struct Ask {
     pub cannot_answer: Option<CannotAnswer>,
     /// When the window took it.
     pub asked_at: Instant,
+    /// Where in a multiplexer it was asked, for a question from inside one.
+    pub inside: Option<Inside>,
     /// What the pane's row was called when it asked.
     tab_title: String,
     /// What the hook's connection waits on.
@@ -391,6 +431,34 @@ pub struct Found {
     pub cannot_answer: Option<CannotAnswer>,
     /// What the pane's row is called.
     pub tab_title: String,
+    /// Where in a multiplexer it was asked, for a question from inside one.
+    pub inside: Option<Inside>,
+}
+
+/// Where in a multiplexer a question was asked: which one, its name for the
+/// agent's pane, and how many other tabs of the window its clients are in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Inside {
+    /// Which multiplexer.
+    pub kind: MultiplexerKind,
+    /// Its name for the agent's pane, as the hook said it: `%` and a number.
+    pub pane: String,
+    /// How many tabs of the window, besides the one the question went to,
+    /// have a pane holding a client attached to the agent's session.
+    pub elsewhere: usize,
+}
+
+impl Inside {
+    /// Where, in a few words: `inside tmux`, and the other tabs when there
+    /// are any.
+    pub fn said(&self) -> String {
+        let kind = self.kind.word();
+        match self.elsewhere {
+            0 => format!("inside {kind}"),
+            1 => format!("inside {kind} (also attached in 1 other tab)"),
+            more => format!("inside {kind} (also attached in {more} other tabs)"),
+        }
+    }
 }
 
 /// Every question the window is holding, and how the last ones ended.
@@ -449,10 +517,13 @@ impl Asks {
 
     /// The newest question held in `pane` that this window could answer:
     /// the one its agent's dialog is showing, as far as the window can tell.
+    ///
+    /// One the pane's agent asked directly comes before one from inside a
+    /// multiplexer, whichever is newer.
     pub fn answerable_in(&self, pane: PaneId) -> Option<&Ask> {
         self.live()
             .filter(|ask| ask.pane == pane && ask.cannot_answer.is_none())
-            .max_by_key(|ask| ask.id)
+            .max_by_key(|ask| (ask.inside.is_none(), ask.id))
     }
 
     /// Whether the agent in `pane` is asking through Crook: a question this
@@ -540,7 +611,12 @@ impl Asks {
         }
         self.drop_abandoned();
         let answerable = found.cannot_answer.is_none();
-        let alike = |ask: &Ask| ask.pane == found.pane && ask.cannot_answer.is_none() == answerable;
+        let inside = found.inside.is_some();
+        let alike = |ask: &Ask| {
+            ask.pane == found.pane
+                && ask.cannot_answer.is_none() == answerable
+                && ask.inside.is_some() == inside
+        };
         let held = self
             .live
             .iter()
@@ -556,12 +632,14 @@ impl Asks {
             ));
         }
         // An answerable question replaces the session's read-only ones as
-        // well as its own; a read-only one replaces only read-only ones.
+        // well as its own; a read-only one replaces only read-only ones; and
+        // one from inside a multiplexer replaces only others from inside one.
         let replaced: Vec<AskId> = self
             .live
             .iter()
             .filter(|ask| ask.pane == found.pane && ask.session == asked.session)
             .filter(|ask| answerable || ask.cannot_answer.is_some())
+            .filter(|ask| !inside || ask.inside.is_some())
             .map(|ask| ask.id)
             .collect();
         for id in replaced {
@@ -578,6 +656,12 @@ impl Asks {
             request,
             ..
         } = asked;
+        // The row and the list say it is from inside tmux, ahead of what it
+        // asks, since a person reads them for which agent wants what.
+        let tool = match &found.inside {
+            Some(inside) => format!("{} inside {}", agent.tool(&request), inside.kind.word()),
+            None => agent.tool(&request).to_owned(),
+        };
         if answerable {
             self.tell(
                 found.pane,
@@ -591,7 +675,7 @@ impl Asks {
         self.live.push(Ask {
             id,
             agent,
-            summary: summary(agent.tool(&request), &request, &cwd),
+            summary: summary(&tool, &request, &cwd),
             fingerprint: request::fingerprint(&digest),
             digest,
             session,
@@ -600,6 +684,7 @@ impl Asks {
             pane: found.pane,
             cannot_answer: found.cannot_answer,
             asked_at: now,
+            inside: found.inside,
             tab_title: found.tab_title,
             feed,
         });
@@ -876,6 +961,39 @@ pub fn cannot_answer(
     None
 }
 
+/// Whether a question from inside a multiplexer from `asker`, bound to a pane
+/// on the terminal `pane_tty` whose foreground runs `foreground`, comes from
+/// under the tmux whose client that is: some ancestor of the asker — never
+/// the asker itself, which is any process that opened the terminal — holds
+/// the terminal open and runs that same program.
+///
+/// tmux's server is that ancestor for every process in its panes. A process
+/// anywhere else that names the pane's terminal has none: a program it ran
+/// to open the terminal is not the pane's foreground's, and a pane not
+/// running tmux has no tmux to hold its terminal.
+pub fn from_its_tmux(asker: &Asker, pane_tty: Option<u32>, foreground: Option<Executable>) -> bool {
+    let (Some(pane_tty), Some(foreground)) = (pane_tty, foreground) else {
+        return false;
+    };
+    asker
+        .holders
+        .iter()
+        .any(|holder| holder.executable == Some(foreground) && holder.terminals.contains(&pane_tty))
+}
+
+/// The program in the foreground of the terminal the shell `shell` is on.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn foreground(shell: u32) -> Option<Executable> {
+    crate::agent::holders::foreground(shell)
+}
+
+/// Nowhere else is it read, so a question from inside a multiplexer is shown
+/// and never answered there.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn foreground(_: u32) -> Option<Executable> {
+    None
+}
+
 /// Holds an agent's question in the window, or refuses it, and answers with
 /// its number.
 ///
@@ -904,27 +1022,41 @@ pub fn register(
             "`agent.ask` waits for its answer over the connection it is asked on",
         ));
     };
-    let Some(pane) = workspace.pane_with_tty(asked.tty, ctx) else {
+    let Some((pane, inside)) = bind(workspace, &asked, ctx) else {
         return Err(Refusal::new(
             code::NO_SUCH_PANE,
             "no pane of this window is on the terminal the question names",
         ));
     };
-    let caller = token.and_then(|token| workspace.pane_with_token(token, ctx));
-    let shell = workspace.shell_pid(pane, ctx);
     let session = workspace.tabs().pane(pane).map(|open| open.session());
+    let remote = session.is_some_and(|session| session.remote.is_some());
+    let cannot_answer = match inside {
+        // Neither the token nor the asker's lineage says anything inside a
+        // multiplexer; its ancestors' terminals and programs do. See the
+        // module docs.
+        Some(_) => {
+            let foreground = workspace.shell_pid(pane, ctx).and_then(foreground);
+            if remote {
+                Some(CannotAnswer::Remote)
+            } else if !from_its_tmux(asker, workspace.tty_device_of(pane, ctx), foreground) {
+                Some(CannotAnswer::NotFromItsTmux)
+            } else {
+                None
+            }
+        }
+        None => {
+            let caller = token.and_then(|token| workspace.pane_with_token(token, ctx));
+            let shell = workspace.shell_pid(pane, ctx);
+            cannot_answer(caller, pane, asker, shell, remote)
+        }
+    };
     let found = Found {
         pane,
-        cannot_answer: cannot_answer(
-            caller,
-            pane,
-            asker,
-            shell,
-            session.is_some_and(|session| session.remote.is_some()),
-        ),
+        cannot_answer,
         tab_title: session
             .map(|session| super::title(session, workspace.home()))
             .unwrap_or_default(),
+        inside,
     };
     // Before the question is held, so before the connection hears it is and
     // can see anything happen to it. A window slower than the connection's
@@ -936,6 +1068,50 @@ pub fn register(
     // hook gave up on — and the leads following their pane hear of it now.
     workspace.asks_changed(ctx);
     Ok(encode(&Registered { asked: added?.0 }))
+}
+
+/// The pane a question goes to, and where in a multiplexer it was asked
+/// when it was: the pane on the terminal it names, or, from inside a
+/// multiplexer, the first pane in the panel's order on one of its clients'.
+fn bind(
+    workspace: &Workspace,
+    asked: &AgentAsk,
+    app: &AppContext,
+) -> Option<(PaneId, Option<Inside>)> {
+    match (asked.tty, &asked.multiplexer) {
+        (Some(tty), _) => workspace.pane_with_tty(tty, app).map(|pane| (pane, None)),
+        (None, Some(multiplexer)) => {
+            let holding = workspace.panes_on(&multiplexer.clients, app);
+            let &(tab, pane) = holding.first()?;
+            let mut others: Vec<_> = holding
+                .iter()
+                .map(|(other, _)| *other)
+                .filter(|other| *other != tab)
+                .collect();
+            others.dedup();
+            Some((
+                pane,
+                Some(Inside {
+                    kind: multiplexer.kind,
+                    pane: multiplexer.pane.clone(),
+                    elsewhere: others.len(),
+                }),
+            ))
+        }
+        (None, None) => None,
+    }
+}
+
+/// Whether a pane of this window is on one of the terminals `asked` names,
+/// for a hook finding the window to ask: `pane.find`'s answer.
+///
+/// Nothing is held and nothing is said about the pane. Not found while the
+/// window is set not to take agents' questions, so that a hook goes on to
+/// look for one that would.
+pub fn find(workspace: &Workspace, asked: &Find, app: &AppContext) -> Value {
+    let found = workspace.general().answer_agents_from_crook
+        && !workspace.panes_on(&asked.ttys, app).is_empty();
+    encode(&Located { found })
 }
 
 /// Takes in what the questions' connections said happened to them, and
