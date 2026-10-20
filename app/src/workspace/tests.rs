@@ -32929,6 +32929,78 @@ fn a_pane_closed_before_its_tab_goes_back_into_that_tab_once_it_is_back() {
     assert_eq!(back, titles, "the pane did not go back into its tab");
 }
 
+/// A tab's split with every pane named by its place in render order, and
+/// its titles in that order, so a tab and the one that came back for it can
+/// be compared.
+fn split_of(harness: &Harness, tab: TabId) -> (String, Vec<String>) {
+    harness.workspace.read(&harness.app, |workspace, _| {
+        let group = workspace.tabs().get(tab).expect("open").panes();
+        let mut shape = format!("{:?}", group.layout());
+        for (position, pane) in group.iter().enumerate() {
+            shape = shape.replace(&format!("{:?})", pane.id()), &format!("#{position})"));
+        }
+        let titles = group.iter().map(|pane| pane.title().to_owned()).collect();
+        (shape, titles)
+    })
+}
+
+/// Splits the active tab, closes the pane at `closed` in render order, then
+/// the tab — or its whole group — and brings both back.
+fn close_a_pane_then_its_tab_and_reopen_both(
+    harness: &mut Harness,
+    direction: Direction,
+    panes: usize,
+    closed: usize,
+    as_a_group: bool,
+) -> ((String, Vec<String>), (String, Vec<String>)) {
+    let tab = harness.active_id();
+    for _ in 1..panes {
+        harness.dispatch_action(TabAction::Split(direction));
+    }
+    let before = split_of(harness, tab);
+    let pane = harness.panes_of(tab)[closed];
+
+    harness.dispatch_action(TabAction::ClosePane(pane));
+    match harness.group_of(tab).filter(|_| as_a_group) {
+        Some(group) => harness.dispatch_action(TabAction::CloseGroup(group)),
+        None => harness.dispatch_action(TabAction::Close(tab)),
+    }
+    harness.run_command("crook/window/reopen-closed-tab");
+    harness.run_command("crook/window/reopen-closed-tab");
+
+    (before, split_of(harness, harness.active_id()))
+}
+
+#[test]
+fn a_pane_closed_out_of_a_column_before_its_tab_goes_back_into_the_column() {
+    // The tab comes back with new pane ids, and the place kept for the pane
+    // named the old ones: it took the panes there for strangers and put the
+    // pane to the right of the focused one, a row where the column had been.
+    let mut harness = Harness::new(2);
+    let (before, after) =
+        close_a_pane_then_its_tab_and_reopen_both(&mut harness, Direction::Down, 2, 1, false);
+    assert_eq!(after, before);
+}
+
+#[test]
+fn a_pane_closed_out_of_the_middle_of_a_row_before_its_tab_goes_back_in_the_middle() {
+    let mut harness = Harness::new(2);
+    let (before, after) =
+        close_a_pane_then_its_tab_and_reopen_both(&mut harness, Direction::Right, 3, 1, false);
+    assert_eq!(after, before);
+}
+
+#[test]
+fn a_pane_closed_before_its_whole_group_goes_back_where_it_was() {
+    let mut harness = Harness::new(2);
+    let tab = harness.active_id();
+    harness.dispatch_action(TabAction::NewInGroupOf(tab));
+    harness.dispatch_action(TabAction::Select(tab));
+    let (before, after) =
+        close_a_pane_then_its_tab_and_reopen_both(&mut harness, Direction::Right, 3, 1, true);
+    assert_eq!(after, before);
+}
+
 #[test]
 fn a_tab_reopened_beside_a_group_it_was_not_in_does_not_split_it() {
     // The tab closed from the middle, and a group made since over the place
