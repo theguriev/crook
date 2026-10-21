@@ -783,11 +783,12 @@ pub struct Emulator {
     /// rows the open block spilled out of it: see [`Self::display_offset`].
     /// Meant only while the grid's own view is at its oldest line.
     above: usize,
-    /// Whether the shell's view is to come back to its grid's oldest line
-    /// when its screen does: the reflow of a column change under a
-    /// full-screen program moved it, and [`Self::above`] is measured from
-    /// there. See [`Self::resize`].
-    view_pinned: bool,
+    /// Which of the spilled rows the shell's view had at its top when a
+    /// full-screen program came up, for when its screen is back: the grid's
+    /// history under it can be cut back into the spill on the way, and laid
+    /// out again by a column change, either of which moves every line but
+    /// that row's place among the spilled rows. See [`Self::switch_screens`].
+    view_row: Option<usize>,
     /// The least of the scrollback the grid keeps, [`GRID_LINES`] unless a
     /// test says: see [`Self::grid_share`].
     grid_base: usize,
@@ -909,7 +910,7 @@ impl Emulator {
             scrollback_lines,
             grid_lines,
             above: 0,
-            view_pinned: false,
+            view_row: None,
             grid_base,
             switch_held: false,
             background_held: false,
@@ -962,7 +963,7 @@ impl Emulator {
         }
         self.osc_watcher.asks_done_read = 0;
 
-        let view = self.view();
+        let mut view = self.view();
         let mut exited = None;
         // Whether the shell finished a line in this read, which is the only
         // thing that can give the keyboard back to a pane whose line editor
@@ -975,7 +976,7 @@ impl Emulator {
                 .advance_until_terminated(&mut self.osc_watcher, rest);
             let (piece, remaining) = rest.split_at(consumed);
             if std::mem::take(&mut self.osc_watcher.screen_switched) {
-                self.switch_screens(piece);
+                self.switch_screens(piece, &mut view);
             } else {
                 self.feed(piece);
             }
@@ -1221,11 +1222,50 @@ impl Emulator {
     /// in, because that byte can be what lets go of the update: one that
     /// would fill `vte`'s buffer to its limit ends the update instead, inside
     /// the very feed that carries it.
-    fn switch_screens(&mut self, piece: &[u8]) {
+    ///
+    /// And it keeps the shell's view where it stands across the switch:
+    /// `view` is settled on the shell's screen before the switch, as the
+    /// end of a feed would settle it, and taken again after, so that what a
+    /// read prints after a switch is counted from there. A view standing in
+    /// the spilled rows leaves its row for the way back: see
+    /// [`Self::view_row`].
+    fn switch_screens(&mut self, piece: &[u8], view: &mut View) {
         if let Some((last, before)) = piece.split_last() {
             self.feed(before);
+            let was_up = self.term.mode().contains(TermMode::ALT_SCREEN);
+            if !was_up {
+                self.keep_view(*view);
+                self.view_row = self.spilled_view_row();
+            }
             self.switch_held |= self.updating();
             self.feed(std::slice::from_ref(last));
+            let up = self.term.mode().contains(TermMode::ALT_SCREEN);
+            if was_up && !up {
+                self.restore_view_row();
+            } else if !was_up && !up {
+                // Held in an update, or no switch at all: nothing to keep.
+                self.view_row = None;
+            }
+            *view = self.view();
+        }
+    }
+
+    /// Which of the spilled rows is at the top of the shell's view, when one
+    /// of them is.
+    fn spilled_view_row(&self) -> Option<usize> {
+        let above = self.above_grid();
+        (above > 0).then(|| self.blocks.spilled_rows(&self.term) - above)
+    }
+
+    /// Puts the shell's view back on the row it had at its top when a
+    /// full-screen program came up: see [`Self::view_row`].
+    fn restore_view_row(&mut self) {
+        if let Some(row) = self.view_row.take() {
+            let spilled = self.blocks.spilled_rows(&self.term);
+            if row < spilled {
+                let offset = self.term.grid().history_size() + spilled - row;
+                self.set_view(offset.min(self.history_len()));
+            }
         }
     }
 
@@ -1626,6 +1666,7 @@ impl Emulator {
         let shortened = size.rows < self.size.rows;
         let geometry_changed = columns_changed || rows_changed;
         let rows_added = size.rows.saturating_sub(self.size.rows);
+        let old_rows = self.size.rows;
         self.size = size;
         if !geometry_changed {
             return;
@@ -1646,13 +1687,7 @@ impl Emulator {
                 self.set_view(offset);
             }
         }
-        // Under a full-screen program the shell's view is out of sight, and
-        // stands where it stood when the program came up.
-        let (above, spilled) = if alt_screen {
-            (self.above, self.blocks.spilled().rows())
-        } else {
-            (self.above_grid(), self.blocks.spilled_rows(&self.term))
-        };
+        let (above, spilled) = (self.above_grid(), self.blocks.spilled_rows(&self.term));
         let grid_line = (columns_changed && !alt_screen && offset > 0 && above == 0)
             .then(|| self.line_at_view_top(offset));
         self.term.resize(size);
@@ -1666,13 +1701,16 @@ impl Emulator {
         let mut kept = None;
         if columns_changed {
             let blank = self.blank();
-            let track = (above > 0).then(|| spilled - above);
+            // Under a full-screen program the shell's view is out of sight,
+            // and its row among the spilled ones is what is laid out again.
+            let track = if alt_screen {
+                self.view_row
+            } else {
+                (above > 0).then(|| spilled - above)
+            };
             let top_row = self.blocks.rewrap_spill(self.term.columns(), blank, track);
             if alt_screen {
-                // The shell's view comes back to its oldest grid line, and
-                // stands as far above it as the row it was on now is.
-                self.above = top_row.map_or(0, |row| self.blocks.spilled().rows() - row);
-                self.view_pinned = self.above > 0;
+                self.view_row = top_row;
             } else {
                 self.above = 0;
                 kept = top_row.map(Kept::Spilled).or_else(|| {
@@ -1688,7 +1726,8 @@ impl Emulator {
         // taller one pulls them back out: the shell's as well under a
         // full-screen program, where its history cannot be read.
         if rows_changed {
-            self.blocks.rows_changed(&self.term, shortened);
+            let rows = usize::from(size.rows.abs_diff(old_rows));
+            self.blocks.rows_changed(&self.term, shortened, rows);
         }
         self.settle_history();
         self.keep_view_through_resize(offset, rows_added, columns_changed, kept);
@@ -2219,8 +2258,10 @@ impl Emulator {
                 let down = i32::try_from(in_grid - grid_history).unwrap_or(i32::MAX);
                 self.term.scroll_display(Scroll::Delta(-down));
             }
-            if !now.alt_screen && std::mem::take(&mut self.view_pinned) && self.above > 0 {
-                self.term.scroll_display(Scroll::Top);
+            if now.alt_screen {
+                self.view_row = self.view_row.or_else(|| self.spilled_view_row());
+            } else {
+                self.restore_view_row();
             }
             return;
         }

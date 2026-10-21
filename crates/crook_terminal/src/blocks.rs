@@ -1042,11 +1042,12 @@ pub(crate) struct BlockTracker {
     /// long-lived agent keeps open for a whole session has its scrollback
     /// here rather than there, at a few percent of the cost.
     spill: Spill,
-    /// Whether the shell's history may have gone past alacritty's room under
-    /// a full-screen program and been pulled back out of the end by a
-    /// taller screen since, which hides it from [`Self::trim_history`]: a
-    /// synchronized update that switched screens, and then a taller pane.
-    lost_uncounted: bool,
+    /// How many rows taller screens have pulled out of the shell's history
+    /// under a full-screen program since an update that switched screens
+    /// may have scrolled it out of sight: what [`Self::trim_history`] adds
+    /// back to the history it finds, to tell whether it was full. See
+    /// [`Self::rows_changed`].
+    pulled_unseen: usize,
 }
 
 impl BlockTracker {
@@ -1079,7 +1080,7 @@ impl BlockTracker {
             history_unsure: false,
             last_ignored: None,
             spill: Spill::default(),
-            lost_uncounted: false,
+            pulled_unseen: 0,
         }
     }
 
@@ -1745,20 +1746,27 @@ impl BlockTracker {
         // scrollback, which a synchronized update can scroll the grid's
         // history up to before anything cuts it back.
         let limit = scrollback_lines.saturating_add(HISTORY_HEADROOM);
-        if history >= limit || std::mem::take(&mut self.lost_uncounted) {
+        // A history that was full and has had rows pulled back out of it by
+        // a taller screen is short of full by no more than the rows pulled;
+        // one that was never full is short by all the room it never used.
+        let pulled = std::mem::take(&mut self.pulled_unseen);
+        if history.saturating_add(pulled) >= limit {
             self.open.pictures.clear();
-            // Alacritty has evicted lines off the grid's old end that nothing
-            // spilled, so the spilled rows no longer end where the grid
-            // begins: kept, they would be the scrollback with a hole in it.
-            // They go, and what is left is the history alacritty kept, at
-            // least the whole scrollback long, all of it the open block's —
-            // which starts above the oldest line of it, as far as anything
-            // can tell.
-            if !self.spill.is_empty() {
-                self.spill.clear();
-                let oldest = -(history as i32);
-                self.open.top = Anchor::at(oldest, 0, term, self.trimmed);
-            }
+            // Alacritty may have evicted lines off the grid's old end that
+            // nothing spilled, so the spilled rows may no longer end where
+            // the grid begins: kept, they would be the scrollback with a
+            // hole in it. They go, and what is left is the history alacritty
+            // kept — the whole scrollback when nothing pulled rows out of it
+            // since, and short of it by the rows a taller screen pulled —
+            // all of it the open block's, which starts above the oldest line
+            // of it, as far as anything can tell.
+            //
+            // The top goes there with or without a spill: an anchor read
+            // across lines nothing counted names a line below its own, and
+            // the next cut would take the rows above it for nobody's.
+            self.spill.clear();
+            let oldest = -(history as i32);
+            self.open.top = Anchor::at(oldest, 0, term, self.trimmed);
         }
         if history > grid_lines {
             let cut = history - grid_lines;
@@ -1854,13 +1862,24 @@ impl BlockTracker {
     /// update may have scrolled the shell's history out of sight: see
     /// [`Self::update_switched_screens`].
     ///
-    /// The open block's spilled rows go too, in the one case a taller
-    /// screen can hide that the history went past alacritty's room: see
-    /// [`Self::lost_uncounted`].
-    pub(crate) fn rows_changed<T>(&mut self, term: &Term<T>, shorter: bool) {
+    /// And a taller one counts the `rows` it pulled, and a shorter one the
+    /// rows it pushed back, as rows a full history would be short of full by
+    /// when the shell's screen is back: see
+    /// [`Self::pulled_unseen`]. Only a history that went past alacritty's
+    /// room loses anything, and [`Self::trim_history`] can tell one that
+    /// went there from one that did not by how short of it it is.
+    pub(crate) fn rows_changed<T>(&mut self, term: &Term<T>, shorter: bool, rows: usize) {
         if term.mode().contains(TermMode::ALT_SCREEN) && (shorter || self.history_unsure) {
             self.open.pictures.clear();
-            self.lost_uncounted |= !shorter;
+        }
+        // A shorter screen pushes rows back in, which a history short of full
+        // is that much less short by.
+        if term.mode().contains(TermMode::ALT_SCREEN) && self.history_unsure {
+            self.pulled_unseen = if shorter {
+                self.pulled_unseen.saturating_sub(rows)
+            } else {
+                self.pulled_unseen.saturating_add(rows)
+            };
         }
     }
 

@@ -1207,10 +1207,18 @@ A slice of output is cut for a line a byte, and a few escapes — `CSI n S`, an 
 screen with something on it, lines deleted at the top of a scroll region — scroll a screenful
 in a handful of bytes, so a slice of them can take the history past alacritty's room, and the
 lines alacritty evicts then were never spilled. `trim_history` sees that the history is full,
-and drops the spill, which no longer ends where the history begins: what is left is at least
-the whole scrollback long and has no hole in it. A taller screen under a full-screen program
-can hide that the history was full, after an update that switched screens; that is noted when
-it happens. A screen that grows by more than the grid's share in one resize — from 50 rows to
+and drops the spill, which no longer ends where the history begins, and takes the open block's
+first row to the oldest line, since an anchor read across the uncounted lines names one too
+low: what is left has no hole in it, and is the whole scrollback long. A taller screen under a
+full-screen program can hide that the history was full, after an update that switched
+screens. So the rows taller screens pull out of the shell's history under the program, less
+the rows shorter ones push back, are counted, and the history found on the way back is taken
+to have been full only when it is short of full by no more than that: then what is left is
+short of the scrollback by those rows. A `:!cmd` in an editor that draws in synchronized
+updates, and a pane made taller under it, scroll the history nowhere near full and keep all
+of it — 400 random sessions of numbered lines, bursts, programs, switches inside updates,
+erases and resizes, compared against an emulator keeping everything in its grid, found no
+history shorter and no line missing. A screen that grows by more than the grid's share in one resize — from 50 rows to
 600 at once — still finds blank rows at its foot where the spilled lines would have been.
 
 Cutting is the cost. A row is harvested where it is cut, straight into the last piece: the

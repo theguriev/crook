@@ -940,3 +940,276 @@ fn an_update_that_scrolls_the_shell_past_its_room_under_a_program_leaves_no_hole
         "older lines kept above a hole, the last of them {last_l:?}"
     );
 }
+
+#[test]
+fn a_program_that_switches_screens_in_an_update_and_a_taller_pane_keep_the_scrollback() {
+    // Neovim draws inside synchronized updates, its own screen switches
+    // among them, and `:!cmd` puts the shell's screen up for a line in one.
+    // Neither scrolls the shell's history anywhere near its room, and a
+    // taller pane under the program afterwards loses nothing.
+    let size = |rows| TerminalSize::new(40, rows).with_cell_size(8, 16);
+    let shapes = [
+        (
+            "an update that goes up",
+            "\x1b[?2026h\x1b[?1049h\x1b[Hnvim\x1b[?2026l".to_owned(),
+        ),
+        (
+            "`:!cmd` inside one",
+            "\x1b[?1049h\x1b[Hnvim\x1b[?2026h\x1b[?1049l$ ls\r\nfile\r\n\x1b[?1049h\x1b[?2026l"
+                .to_owned(),
+        ),
+    ];
+    for (shape, bytes) in shapes {
+        let mut emulator = Emulator::new(size(50), 10_000, Palette::default());
+        let lines: String = (0..12_000).map(|n| format!("L{n}\r\n")).collect();
+        emulator.advance(lines.as_bytes());
+        let before = emulator.history_len();
+        emulator.advance(bytes.as_bytes());
+        emulator.resize(size(60));
+        emulator.advance(b"\x1b[?1049l");
+        assert!(
+            emulator.history_len() + 50 >= before,
+            "{shape}: the scrollback went from {before} to {} lines",
+            emulator.history_len()
+        );
+    }
+}
+
+#[test]
+fn a_column_change_under_a_program_leaves_the_shells_view_on_its_line() {
+    for grid in [12, 100, 500] {
+        let mut twins = Twins::with_grid(3000, grid);
+        // Lines that fold at the narrower width, so that the grid's history
+        // grows in the reflow under the program.
+        twins.feed(output(0, 1400));
+        twins.scroll(1500);
+        twins.alike("scrolled up");
+        let top = twins
+            .whole
+            .snapshot()
+            .text()
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        twins.feed("\x1b[?1049h\x1b[Hvim");
+        twins.resize(13, ROWS);
+        twins.feed("j");
+        twins.feed("\x1b[?1049l");
+        let shown = twins.spilling.snapshot().text();
+        assert!(
+            shown.lines().next() == Some(top.as_str()),
+            "grid {grid}: the view moved off {top:?} to {:?}",
+            shown.lines().next()
+        );
+        // Output in the same read as the switches moves nothing either.
+        let mut twins = Twins::with_grid(3000, grid);
+        twins.feed(output(0, 1400));
+        twins.scroll(1500);
+        twins.feed("\x1b[?1049h\x1b[Hvim");
+        twins.feed("\x1b[?1049lback\r\nmore\r\n\x1b[?1049h\x1b[Hvim\x1b[?1049l");
+        twins.alike(&format!(
+            "grid {grid}: after output between switches in one read"
+        ));
+    }
+}
+
+/// What [`fuzz`] found over its seeds: checks made, checks where the
+/// spilling twin kept fewer of the lines printed than the other, by more
+/// than a taller screen can pull out of a full history, and checks where it was missing a
+/// numbered line the other kept, between two it kept itself.
+#[derive(Debug, Default)]
+struct Fuzzed {
+    checks: usize,
+    short: usize,
+    holes: usize,
+}
+
+/// Feeds both twins the same random session — numbered lines, bursts of
+/// `CSI n S`, full-screen programs entered and left plainly and inside
+/// synchronized updates, the shell's screen put up for a line inside one,
+/// erases, scrolls and resizes of both kinds — and compares the two after
+/// every step.
+fn fuzz(seeds: std::ops::Range<u64>, scrollback: usize, grid: usize) -> Fuzzed {
+    let mut found = Fuzzed::default();
+    for seed in seeds {
+        let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        let mut next = |below: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % below.max(1)
+        };
+        let mut twins = Twins::with_grid(scrollback, grid);
+        let (mut line, mut up, mut rows) = (0u64, false, ROWS);
+        for _ in 0..60 {
+            let bytes = match next(10) {
+                0..=2 => {
+                    let lines: String = (0..1 + next(400))
+                        .map(|_| {
+                            line += 1;
+                            format!("N{line}\r\n")
+                        })
+                        .collect();
+                    lines
+                }
+                3 => format!("\x1b[{}S", 1 + next(u64::from(rows))).repeat(1 + next(200) as usize),
+                4 if up => {
+                    up = false;
+                    "\x1b[?1049l".to_owned()
+                }
+                4 => {
+                    up = true;
+                    "\x1b[?1049h\x1b[Hvim".to_owned()
+                }
+                5 if up => {
+                    // `:!cmd`, mostly short, sometimes long enough to scroll
+                    // the shell's history past its room in one go.
+                    let count = if next(4) == 0 {
+                        (scrollback - grid) as u64 + next(800)
+                    } else {
+                        1 + next(3)
+                    };
+                    let lines: String = (0..count)
+                        .map(|_| {
+                            line += 1;
+                            format!("N{line}\r\n")
+                        })
+                        .collect();
+                    format!("\x1b[?2026h\x1b[?1049l{lines}\x1b[?1049h\x1b[?2026l")
+                }
+                5 => {
+                    up = true;
+                    "\x1b[?2026h\x1b[?1049h\x1b[Hnvim\x1b[?2026l".to_owned()
+                }
+                6 => {
+                    rows = 2 + next(60) as u16;
+                    twins.resize(COLUMNS, rows);
+                    String::new()
+                }
+                7 => {
+                    twins.resize(10 + next(30) as u16, rows);
+                    String::new()
+                }
+                8 => {
+                    twins.scroll(next(2000) as i32 - 1000);
+                    String::new()
+                }
+                _ if next(8) == 0 => "\x1b[3J".to_owned(),
+                // A key for the program, which the shell's screen never sees.
+                _ if up => "y".to_owned(),
+                _ => String::new(),
+            };
+            twins.feed(&bytes);
+            if up {
+                continue;
+            }
+            found.checks += 1;
+            let (spilling, whole) = (twins.spilling.history_len(), twins.whole.history_len());
+            // A line the other twin still has, between the oldest and the
+            // newest line this one has, missing here: a hole. The session
+            // can leave gaps of its own — a cursor a full-screen program
+            // gave back above lines printed under it — and those are in both.
+            let numbers = |emulator: &Emulator, history: usize| {
+                let (kept, _) = emulator.harvest_rows(0, history + 100);
+                kept.to_text()
+                    .lines()
+                    .filter_map(|text| text.strip_prefix('N')?.parse().ok())
+                    .collect::<std::collections::BTreeSet<u64>>()
+            };
+            let (here, there) = (
+                numbers(&twins.spilling, spilling),
+                numbers(&twins.whole, whole),
+            );
+            // Short: fewer of the lines printed kept than the other twin
+            // keeps, by more than a taller screen can pull out of a full
+            // history. The blank rows a block opened on above its first are
+            // not kept on purpose, and are not counted.
+            if here.len() + 60 < there.len() {
+                found.short += 1;
+            }
+            if let (Some(first), Some(last)) = (here.first(), here.last())
+                && there
+                    .range(first..=last)
+                    .any(|number| !here.contains(number))
+            {
+                found.holes += 1;
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn random_sessions_keep_the_scrollback_whole_and_long() {
+    for (scrollback, grid) in [(600, GRID), (3000, 100)] {
+        let found = fuzz(0..20, scrollback, grid);
+        assert!(
+            found.short == 0 && found.holes == 0,
+            "scrollback {scrollback}, grid {grid}: {found:?}"
+        );
+    }
+}
+
+/// The same, over many more seeds:
+/// `cargo test --release -p crook_terminal --lib bench_fuzz -- --ignored --nocapture`.
+#[test]
+#[ignore = "a long run; run it in release mode"]
+fn bench_fuzz_random_sessions() {
+    for (scrollback, grid) in [(10_000, GRID_LINES), (600, GRID), (3000, 100)] {
+        let found = fuzz(0..400, scrollback, grid);
+        println!("fuzz, scrollback {scrollback}, grid {grid}: {found:?}");
+    }
+}
+
+#[test]
+fn a_taller_and_shorter_pane_in_turn_under_a_program_keep_the_scrollback() {
+    // A pane resized back and forth under a program pulls rows out of the
+    // shell's history and pushes them back as often: what it is short of
+    // full by is what it pulled less what it pushed, not every row it ever
+    // pulled.
+    let size = |rows| TerminalSize::new(20, rows).with_cell_size(8, 16);
+    let mut emulator = Emulator::with_grid_lines(size(5), 600, GRID, Palette::default());
+    let lines: String = (0..1000).map(|n| format!("L{n}\r\n")).collect();
+    emulator.advance(lines.as_bytes());
+    let before = emulator.history_len();
+    emulator.advance(b"\x1b[?1049h\x1b[Hvim\x1b[?2026h\x1b[?1049l$ ls\r\n\x1b[?1049h\x1b[?2026l");
+    for _ in 0..30 {
+        emulator.resize(size(55));
+        emulator.resize(size(5));
+    }
+    emulator.advance(b"\x1b[?1049l");
+    assert!(
+        emulator.history_len() + 10 >= before,
+        "the scrollback went from {before} to {} lines",
+        emulator.history_len()
+    );
+}
+
+#[test]
+fn an_overrun_reaches_the_block_top_however_the_block_was_found() {
+    // A block whose first row a column change found again while its history
+    // was blank, so that it is anchored to a line of the screen: an update
+    // that scrolls the shell past its room then puts that anchor below the
+    // lines it scrolled, and the next cut must not take them for rows above
+    // the block.
+    let mut twins = Twins::with_grid(10_000, 500);
+    twins.feed("\x1b[4S".repeat(123));
+    twins.resize(19, ROWS);
+    twins.feed("\x1b[?1049h\x1b[Hvim");
+    let lines: String = (0..10_000).map(|n| format!("N{n}\r\n")).collect();
+    twins.feed(format!(
+        "\x1b[?2026h\x1b[?1049l{lines}\x1b[?1049h\x1b[?2026l"
+    ));
+    twins.resize(19, 21);
+    twins.feed("\x1b[?1049l");
+    let numbered = |emulator: &Emulator| {
+        let (kept, _) = emulator.harvest_rows(0, emulator.history_len() + 30);
+        kept.to_text()
+            .lines()
+            .filter(|line| line.starts_with('N'))
+            .count()
+    };
+    let (here, there) = (numbered(&twins.spilling), numbered(&twins.whole));
+    assert!(here + 60 >= there, "{here} lines kept against {there}");
+}
