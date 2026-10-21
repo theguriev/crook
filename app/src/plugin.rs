@@ -880,6 +880,21 @@ impl Host {
         self.register_action(action, handler)
     }
 
+    /// Registers a command — in the palette, bindable — that only a person
+    /// may run: an answer, which no plugin is handed however it was granted.
+    /// For a command that moves the keyboard, which is the person's.
+    pub fn register_person_command(
+        &mut self,
+        action: ActionName,
+        title: impl Into<String>,
+        handler: impl Fn(&mut Workspace, &mut ViewContext<Workspace>) + 'static,
+    ) -> ActionId {
+        if !self.answers.contains(&action) {
+            self.answers.push(action.clone());
+        }
+        self.register_command(action, title, handler)
+    }
+
     /// Whether `action` is one a person answers on a card, which a plugin
     /// is never handed however it was granted.
     pub fn answered_by_a_person(&self, action: &ActionName) -> bool {

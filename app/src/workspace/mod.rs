@@ -67,10 +67,10 @@ pub(crate) use action::AskAction;
 #[cfg(all(test, unix))]
 pub use action::Pressed;
 #[cfg(test)]
-pub use action::{BlockAction, ChangesAction, EndingAction, EndingButton};
+pub use action::{BlockAction, EndingAction, EndingButton};
 pub use action::{
-    BlockEdge, BlockPart, OptionsAction, SettingsAction, TabMenuAction, ThemeAction, WindowAction,
-    WorkspaceAction, WorktreeAction,
+    BlockEdge, BlockPart, ChangesAction, OptionsAction, SettingsAction, TabMenuAction, ThemeAction,
+    WindowAction, WorkspaceAction, WorktreeAction,
 };
 pub use answer_list::AskFixture;
 pub use held_locks::HeldLocks;

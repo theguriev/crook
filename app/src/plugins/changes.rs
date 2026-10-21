@@ -5,7 +5,9 @@
 //! surface is: an element tree is native work, and the column is composed
 //! beside the work where the Themes panel is. What is here is how a person
 //! reaches it: `crook/changes/toggle`, which the palette lists and a chord
-//! can be bound to, and a row on a tab's menu that runs the same command.
+//! can be bound to, and a row on a tab's menu that runs the same command —
+//! and `crook/changes/focus`, which puts the keyboard in the column, opening
+//! it first, for a person who reaches it without a pointer.
 //! Switching this plugin off takes both away and leaves the column
 //! unreachable, which is what switching a feature off has to mean.
 
@@ -17,7 +19,7 @@ use crate::plugin::{BuildError, Host, Plugin};
 use crate::plugins::tabs::TAB_MENU_ENTRIES;
 use crate::tab::TabAction;
 use crate::workspace::tab_context_menu::entry;
-use crate::workspace::{Workspace, WorkspaceAction};
+use crate::workspace::{ChangesAction, Workspace, WorkspaceAction};
 
 /// Where the entry goes in a tab's menu: band 2, after the three copies.
 /// They are what the tab *says* — its title, its directory, its branch — and
@@ -55,6 +57,21 @@ impl Plugin for Changes {
             }
             workspace.toggle_changes_panel(ctx);
         });
+
+        // A command of its own rather than the toggle doing it, because the
+        // keyboard stays with the pane until a person puts it somewhere else
+        // — the column's rule, and the comment field's — and a tab's menu
+        // opening the column for a look is not that. Its own name too, so it
+        // can be bound: the palette is the way to it the first time.
+        // A person's command: a plugin granted `run:` for it could only move
+        // the keyboard, but where the keyboard is is never a plugin's call.
+        host.register_person_command(
+            action("focus"),
+            "Move the keyboard to the changes",
+            |workspace, ctx| {
+                workspace.handle_action(&WorkspaceAction::Changes(ChangesAction::TakeKeys), ctx);
+            },
+        );
 
         // Only in a repository, like the worktrees' entry: outside one there
         // is nothing for the column to say, and a row that opened a column

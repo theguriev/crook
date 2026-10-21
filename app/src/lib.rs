@@ -397,6 +397,14 @@ struct Overrides {
     /// Implies `--settings`. A number past the page's last control is its last
     /// control, which is where the arrows stop.
     focus_setting: Option<usize>,
+    /// Put the keyboard on the list of the section that is showing — the
+    /// settings' rail, the plugins, the Store's offers — with the ring on the
+    /// row its page is about, as Tab from the box would.
+    focus_list: bool,
+    /// Put the keyboard in the Changes column, on its control at this place
+    /// — the first is `0` — with its ring drawn, as `crook/changes/focus`
+    /// and the arrows would. Implies `--changes`.
+    focus_changes: Option<usize>,
     /// Type this into the settings page's search box at startup.
     ///
     /// Implies `--settings`: a query with no page to filter is nothing to
@@ -1343,6 +1351,20 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
                 };
                 overrides.focus_setting = Some(at);
             }
+            "--focus-list" => overrides.focus_list = true,
+            "--focus-changes" => {
+                // Optional, as `--focus-setting`'s is: a bare flag is the
+                // column's first control, where the command puts it.
+                let at = match args.peek().map(|next| next.parse::<usize>()) {
+                    Some(Ok(at)) => {
+                        args.next();
+                        at
+                    }
+                    _ => 0,
+                };
+                overrides.focus_changes = Some(at);
+                overrides.changes = true;
+            }
             "--record" => {
                 let command = args
                     .next()
@@ -1811,7 +1833,13 @@ OPTIONS:
                        Store\'s registry search, the Plugins page\'s
     --focus-setting [N]
                        Start with the keyboard on the settings page's Nth control
-                       (0, the first, when N is left out), its focus ring drawn
+                       (0, the first, when N is left out), its focus ring drawn;
+                       with --section, on that section's card
+    --focus-list       Start with the keyboard on the list of the section showing,
+                       its focus ring on the row the page is about
+    --focus-changes [N]
+                       Start with the Changes column open and the keyboard on its
+                       Nth control (0, the first, when N is left out)
     --record <COMMAND> Start with the Keyboard Shortcuts page recording a chord for
                        COMMAND, which is an action name like `crook/window/new-tab`
     --theme <NAME>     Start in this theme rather than the saved one
@@ -2315,6 +2343,9 @@ fn apply_overrides(
     if let Some(at) = overrides.focus_setting {
         workspace.focus_setting_at(at, ctx);
     }
+    if overrides.focus_list {
+        workspace.focus_section_list(ctx);
+    }
     // After `--section`, so that a run asking for both ends where the box is:
     // typing into it shows the tabs, whichever section was named.
     if let Some(query) = &overrides.find {
@@ -2328,6 +2359,9 @@ fn apply_overrides(
     }
     if overrides.changes {
         workspace.open_changes_for_snapshot(ctx);
+    }
+    if let Some(at) = overrides.focus_changes {
+        workspace.focus_changes_at(at, ctx);
     }
     if let Some(layout) = overrides.controls {
         workspace.override_control_layout(layout, ctx);
@@ -5194,6 +5228,34 @@ mod tests {
                 overrides: Overrides {
                     focus_setting: Some(2),
                     settings: Some(Some(_)),
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn focus_changes_takes_an_optional_number_and_opens_the_column() {
+        let bare = parse(&["--focus-changes", "--focus-list"]).expect("valid");
+        assert!(matches!(
+            bare,
+            Startup::Window {
+                overrides: Overrides {
+                    focus_changes: Some(0),
+                    changes: true,
+                    focus_list: true,
+                    ..
+                },
+                ..
+            }
+        ));
+        let third = parse(&["--focus-changes", "3"]).expect("valid");
+        assert!(matches!(
+            third,
+            Startup::Window {
+                overrides: Overrides {
+                    focus_changes: Some(3),
                     ..
                 },
                 ..

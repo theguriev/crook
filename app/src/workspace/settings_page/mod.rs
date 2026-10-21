@@ -173,11 +173,12 @@ pub(crate) struct SettingsState {
     /// Where the keyboard is on the page, and the controls the last frame
     /// offered it. See [`focus`].
     pub(crate) focus: focus::Focus,
-    /// The pages the rail drew on the last frame, in order, and the one it
-    /// showed — which is what Up and Down on the rail step through, for the
-    /// reason the controls are written down while they are drawn: which
-    /// pages the search has left in is a frame's to say.
-    rail: std::cell::RefCell<(Vec<PageId>, Option<PageId>)>,
+    /// The same for every other section of the sidebar, by the section's
+    /// key, made the first time it is asked for. Here rather than in each
+    /// section's plugin, because the window's key handling has to reach the
+    /// keyboard of whichever section is showing, and it can only reach what
+    /// it holds.
+    sections: std::cell::RefCell<HashMap<String, focus::Focus>>,
 }
 
 impl SettingsState {
@@ -200,9 +201,24 @@ impl SettingsState {
         chosen.or_else(|| host.settings_pages().first().map(|(id, _)| *id))
     }
 
-    /// The pages the rail drew on the last frame, and the one it showed.
-    pub(crate) fn rail(&self) -> (Vec<PageId>, Option<PageId>) {
-        self.rail.borrow().clone()
+    /// Where the keyboard is in the section `key`: the settings' own, or
+    /// another section's, made the first time it is asked for.
+    pub(crate) fn focus_of(&self, key: &str) -> focus::Focus {
+        if key == SETTINGS_SECTION {
+            return self.focus.clone();
+        }
+        self.sections
+            .borrow_mut()
+            .entry(key.to_owned())
+            .or_default()
+            .clone()
+    }
+
+    /// Every section's keyboard, the settings' among them.
+    pub(crate) fn every_focus(&self) -> Vec<focus::Focus> {
+        let mut every = vec![self.focus.clone()];
+        every.extend(self.sections.borrow().values().cloned());
+        every
     }
 
     /// The mouse state for one control, creating it if this is its first
@@ -285,16 +301,7 @@ pub(crate) fn render(
         .collect();
 
     let showing = showing(selected, &counts, &query);
-    state.focus.set_holds_keys(workspace.settings_hold_keys());
     let body = host.build_settings_page(showing, workspace, app);
-    *state.rail.borrow_mut() = (
-        pages
-            .iter()
-            .map(|(id, _)| *id)
-            .filter(|id| on_the_rail(*id, &counts, &query))
-            .collect(),
-        Some(showing),
-    );
 
     (
         rail(workspace, &pages, showing, &counts, &query),
@@ -403,6 +410,7 @@ fn rail(
     .finish();
 
     section::sidebar(
+        &state.focus,
         field,
         rows.finish(),
         state.scroll_named(RAIL_SCROLL),
@@ -456,8 +464,6 @@ fn rail_row(
 ) -> Box<dyn Element> {
     let settings = workspace.settings_page();
     let state = settings.control(keyed("page", id));
-    // The rail is one stop, and the ring is around the page it is showing.
-    let lit = selected && settings.focus.rail_is_lit();
     // Warp's `Features (3)`: the count is part of the label rather than a
     // badge beside it, which is what keeps a rail of counted and uncounted
     // rows from having two different shapes.
@@ -466,7 +472,9 @@ fn rail_row(
         None => title.to_owned(),
     };
 
-    let row = section::row(
+    // The rail is one stop, and the ring is around the page it is showing:
+    // `section::row` writes the row down for the keyboard.
+    section::row(
         section::Row {
             label,
             // No mark and no word at the end: every page in the rail is a
@@ -483,8 +491,7 @@ fn rail_row(
             command: Some(WorkspaceAction::Settings(SettingsAction::Select(id))),
         },
         ui,
-    );
-    focus::Stop::fixed(lit, section::ROW_RADIUS, row)
+    )
 }
 
 /// The page beside the rail.
@@ -513,12 +520,17 @@ fn content(
         None => rows,
     };
 
-    // Around the rows and inside the scroll, so the keyboard's list is the
-    // rows that are drawn and a control's place is measured from the top of
-    // what scrolls. See [`focus`].
-    let rows = Box::new(focus::Page::new(settings.focus.clone(), rows));
-
-    section::content(title, None, rows, settings.scroll.clone(), ui)
+    // The keyboard's list is the rows that are drawn: `section::content` puts
+    // the page around them. See [`focus`].
+    section::content(
+        &settings.focus,
+        None,
+        title,
+        None,
+        rows,
+        settings.scroll.clone(),
+        ui,
+    )
 }
 
 /// What the page says while its changes are not reaching the disk.

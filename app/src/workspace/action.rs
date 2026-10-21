@@ -872,6 +872,13 @@ pub enum ChangesAction {
     CopyReview,
     /// Take away what the review last said.
     DismissNote,
+    /// Put the keyboard in the column, on its first control, opening the
+    /// column first if it is shut. What `crook/changes/focus` sends.
+    TakeKeys,
+    /// A key the column took while the keyboard is in it: a step between its
+    /// controls, a press of the one the keyboard is on, or Escape, which
+    /// gives the keyboard back. See the column's module.
+    Key(crate::workspace::settings_page::focus::Key),
 }
 
 /// What the settings page does that is not writing an option.
