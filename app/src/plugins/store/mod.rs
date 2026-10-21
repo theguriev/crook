@@ -288,12 +288,14 @@ impl Plugin for Store {
 
         let installing = self.state.clone();
         host.register_answer(action("install"), move |workspace, ctx| {
-            install(&installing, workspace, ctx);
+            let said = workspace.host().said_plugin(&action("install"));
+            install(&installing, workspace, said, ctx);
         });
 
         let removing = self.state.clone();
         host.register_answer(action("remove"), move |workspace, ctx| {
-            remove(&removing, workspace, ctx);
+            let said = workspace.host().said_plugin(&action("remove"));
+            remove(&removing, workspace, said, ctx);
         });
 
         // The four the Plugins page reaches this plugin by, each about a
@@ -317,8 +319,12 @@ impl Plugin for Store {
         // the arrows walk the results rather than emptying them on the first
         // step. `show` empties it because it is asked for a row from
         // elsewhere, which the field may be hiding.
+        //
+        // An answer, so no plugin is ever handed it: a guest granted
+        // `run:crook/store/choose` could only turn the list under somebody's
+        // keyboard, but that is the person's to do.
         let choosing = self.state.clone();
-        host.register_action(action("choose"), move |workspace, ctx| {
+        host.register_answer(action("choose"), move |workspace, ctx| {
             let Some(plugin) = workspace.host().said_plugin(&action("choose")) else {
                 return;
             };
@@ -451,17 +457,28 @@ fn look_inside(
     });
 }
 
-/// Downloads whatever the card is about.
-fn install(state: &Rc<StoreState>, workspace: &Workspace, ctx: &mut ViewContext<Workspace>) {
+/// Downloads `said` — the offer the card's button was built about — or,
+/// when nothing was said, whatever the card is about.
+fn install(
+    state: &Rc<StoreState>,
+    workspace: &Workspace,
+    said: Option<PluginId>,
+    ctx: &mut ViewContext<Workspace>,
+) {
     let Some(model) = state.model() else {
         return;
     };
     let offers = model.update(ctx, |model, _| model.offers());
-    // Resolved the way the section resolves it, which means through the field
-    // above the list: a handler that asked the *unfiltered* list which row is
-    // showing would answer with whatever is first in that one, and install a
-    // plugin whose card nobody read.
-    let Some(offer) = section::chosen(workspace, state, &offers) else {
+    // The offer the button named, which is the card that was read. Without a
+    // name, resolved the way the section resolves it, which means through
+    // the field above the list: a handler that asked the *unfiltered* list
+    // which row is showing would answer with whatever is first in that one,
+    // and install a plugin whose card nobody read.
+    let offer = match said {
+        Some(said) => offers.into_iter().find(|offer| offer.id == said),
+        None => section::chosen(workspace, state, &offers),
+    };
+    let Some(offer) = offer else {
         return;
     };
     let chosen = offer.id.clone();
@@ -479,13 +496,23 @@ fn install(state: &Rc<StoreState>, workspace: &Workspace, ctx: &mut ViewContext<
     model.update(ctx, |model, ctx| model.download(&chosen, &release, ctx));
 }
 
-/// Takes whatever the card is about off this machine.
-fn remove(state: &Rc<StoreState>, workspace: &mut Workspace, ctx: &mut ViewContext<Workspace>) {
+/// Takes `said` — the offer the card's button was built about — or, when
+/// nothing was said, whatever the card is about off this machine.
+fn remove(
+    state: &Rc<StoreState>,
+    workspace: &mut Workspace,
+    said: Option<PluginId>,
+    ctx: &mut ViewContext<Workspace>,
+) {
     let Some(model) = state.model() else {
         return;
     };
     let offers = model.update(ctx, |model, _| model.offers());
-    let Some(chosen) = section::chosen(workspace, state, &offers).map(|offer| offer.id) else {
+    let chosen = match said {
+        Some(said) => Some(said),
+        None => section::chosen(workspace, state, &offers).map(|offer| offer.id),
+    };
+    let Some(chosen) = chosen else {
         return;
     };
 

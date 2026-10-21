@@ -4289,6 +4289,25 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// Lands `overview` as the answer to a refresh of what the column is
+    /// already showing — a read of the same repository that came home with
+    /// other files — for a test.
+    #[cfg(test)]
+    pub(crate) fn refresh_changes_with(
+        &mut self,
+        overview: crate::git::changes::Overview,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Some(epoch) = self.changes.refresh()
+            && let Some(again) = self.changes.land(epoch, Ok(overview))
+        {
+            for read in again {
+                self.read_hunks(read, ctx);
+            }
+        }
+        ctx.notify();
+    }
+
     /// Opens the Changes column on the directory the process is running in,
     /// read *now*, with the first file that has lines to show showing them —
     /// for a run that was asked to start with it up.
@@ -11700,10 +11719,23 @@ impl Workspace {
             (Place::Search, _) => return,
 
             (Place::Rail, SettingsKey::Previous | SettingsKey::Escape) => focus.put(Place::Search),
-            (Place::Rail, SettingsKey::Next | SettingsKey::Press | SettingsKey::Right) => {
+            (Place::Rail, SettingsKey::Next) => {
                 if focus.has_controls() {
                     focus.first_control();
                 }
+            }
+            // On the settings' rail Enter and Right go into the page, as they
+            // did; their controls are preferences. On a list of plugins or
+            // offers they do nothing: the row is chosen already, and the card
+            // beside it opens with Install or the plugin's switch first, so
+            // a second Enter would install or switch something off. Reaching
+            // a card's controls takes a Tab, which is a step nobody makes by
+            // pressing a key twice.
+            (Place::Rail, SettingsKey::Press | SettingsKey::Right) => {
+                if !finds_controls || !focus.has_controls() {
+                    return;
+                }
+                focus.first_control();
             }
             (
                 Place::Rail,

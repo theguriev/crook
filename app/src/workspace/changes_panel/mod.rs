@@ -106,6 +106,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crookui_core::elements::{MouseStateHandle, Padding, Paragraph};
 use crookui_core::fonts::{FamilyId, Properties, Weight};
@@ -306,6 +307,20 @@ pub(super) enum Control {
     DismissNote,
 }
 
+impl Control {
+    /// Whether pressing it changes nothing a person would have to undo or
+    /// could regret: it reads, it shows, it folds, it opens a field. The
+    /// keyboard falls back only onto one of these when the control it was on
+    /// has gone. The rest send, copy over the clipboard, start an editor,
+    /// take a comment or a note away, or close the column.
+    fn is_safe(self) -> bool {
+        matches!(
+            self,
+            Self::Refresh | Self::File(_) | Self::Line(..) | Self::Draft
+        )
+    }
+}
+
 /// Where the keyboard is in the column, while a person has put it there.
 #[derive(Default)]
 struct Keyboard {
@@ -320,10 +335,11 @@ struct Keyboard {
     /// Whether the column holds the keyboard for the frame being built,
     /// which is when the ring is drawn.
     holds: bool,
-    /// The control the ring was drawn on in the last frame. A press lands
-    /// only there, the sections' rule: a key that moved the keyboard, or a
-    /// press that took the control it was on away, is followed by a frame
-    /// before the next press can land.
+    /// The control the ring was painted on in the last frame, whole on
+    /// screen. A press lands only there, the sections' rule: a key that
+    /// moved the keyboard, a press that took the control it was on away, or
+    /// a wheel that scrolled it out of sight is followed by a frame — and a
+    /// look at the ring — before the next press can land.
     shown: Option<Control>,
 }
 
@@ -461,7 +477,7 @@ pub(super) struct ChangesPanelState {
     note: Option<String>,
     /// Where the keyboard is in the column. Behind a `RefCell` because the
     /// frame settles it against the stops it draws, holding `&self`.
-    keyboard: RefCell<Keyboard>,
+    keyboard: Rc<RefCell<Keyboard>>,
 }
 
 impl ChangesPanelState {
@@ -706,6 +722,26 @@ impl ChangesPanelState {
         }
         self.in_flight = false;
 
+        // The controls are named by a file's place in the list, so a read that
+        // lists other files, or the same ones in another order, has given the
+        // keyboard's control to another file. It starts again at the top,
+        // on Refresh, rather than ringing a file nobody chose.
+        let paths = |overview: &Overview| -> Vec<PathBuf> {
+            overview
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect()
+        };
+        let before = self.overview().map(paths);
+        let after = read.as_ref().ok().map(paths);
+        if before != after {
+            let mut keyboard = self.keyboard.borrow_mut();
+            keyboard.on = None;
+            keyboard.at = 0;
+            keyboard.shown = None;
+        }
+
         match read {
             Ok(overview) => {
                 let listed: HashSet<&PathBuf> =
@@ -849,7 +885,30 @@ impl ChangesPanelState {
                 }
             }
         }
+        // A line is named by its place in the file's diff, so a read that
+        // changed the lines has given the keyboard's line — or a button that
+        // is there only for some diffs — to something else. The keyboard
+        // goes back to the file's own row, which is the same file whatever
+        // its diff now says.
+        let lines =
+            |read: &Result<FileDiff, String>| read.as_ref().ok().map(|diff| diff.lines.clone());
+        let changed = hunks.diff.as_ref().map(lines) != Some(lines(&read));
         hunks.diff = Some(read);
+        if changed
+            && let Some(file) = self
+                .overview()
+                .and_then(|overview| overview.files.iter().position(|file| file.path == path))
+        {
+            let mut keyboard = self.keyboard.borrow_mut();
+            if matches!(
+                keyboard.on,
+                Some(Control::Line(at, _) | Control::Open(at) | Control::CopyPath(at) | Control::CopyDiff(at))
+                    if at == file
+            ) {
+                keyboard.on = Some(Control::File(file));
+                keyboard.shown = None;
+            }
+        }
         self.relayout();
         true
     }
@@ -1169,10 +1228,32 @@ impl ChangesPanelState {
             keyboard.at = at;
             return keyboard.on;
         }
+        // Gone: to the nearest control that does nothing to anything by
+        // being pressed, never to whatever has taken its place. What takes
+        // the place of a comment field or a × is Send, or another comment's
+        // ×, and a second Enter — somebody who did not see the first land —
+        // would send the review or take a comment away.
         let last = stops.len().checked_sub(1)?;
-        keyboard.at = keyboard.at.min(last);
-        keyboard.on = Some(stops[keyboard.at]);
+        let from = keyboard.at.min(last);
+        let at = (from..=last)
+            .chain((0..from).rev())
+            .find(|at| stops[*at].is_safe())?;
+        keyboard.at = at;
+        keyboard.on = Some(stops[at]);
+        keyboard.shown = None;
         keyboard.on
+    }
+
+    /// What the ring around `control` tells once it is painted: whether it
+    /// was whole on screen, which is what lets a press land on it.
+    fn seen(&self, control: Control) -> Rc<dyn Fn(bool)> {
+        let keyboard = self.keyboard.clone();
+        Rc::new(move |whole| {
+            let mut keyboard = keyboard.borrow_mut();
+            if keyboard.on == Some(control) {
+                keyboard.shown = whole.then_some(control);
+            }
+        })
     }
 
     /// Whether the ring is on `control` in the frame being built.
@@ -1185,8 +1266,7 @@ impl ChangesPanelState {
     /// the ring is on a control that is there.
     pub(super) fn settle_keys(&self) {
         if self.keyboard.borrow().holds {
-            let on = self.resolve(&self.stops());
-            self.keyboard.borrow_mut().shown = on;
+            self.resolve(&self.stops());
         }
     }
 
@@ -1329,10 +1409,16 @@ impl ChangesPanelState {
                 .iter()
                 .position(|file| file.path == draft.anchor.path)
         });
+        // A field with no line — set adrift, or on a file the list lost — goes
+        // back to its file's row, or failing that to the nearest control that
+        // is safe to press (see `resolve`): never to what stands where the
+        // field stood, which in the review's strip is Send.
         keyboard.on = match (file, draft.adrift) {
             (Some(file), None) => Some(Control::Line(file, draft.anchor.at)),
-            _ => None,
+            (Some(file), Some(_)) => Some(Control::File(file)),
+            (None, _) => None,
         };
+        keyboard.shown = None;
     }
 
     /// Takes the comment `id` away. Says whether there was one.
@@ -2380,6 +2466,7 @@ fn ringed(
         state.is_lit(control),
         keyboard::ring_radius(4.),
         false,
+        state.seen(control),
         child,
     )
 }
@@ -2393,7 +2480,13 @@ fn ringed_row(
     radius: f32,
     child: Box<dyn Element>,
 ) -> Box<dyn Element> {
-    Stop::fixed(state.is_lit(control), Radius::Pixels(radius), true, child)
+    Stop::fixed(
+        state.is_lit(control),
+        Radius::Pixels(radius),
+        true,
+        state.seen(control),
+        child,
+    )
 }
 
 /// A 16px × that sends `action`: a comment's, and the note's.

@@ -37209,7 +37209,17 @@ mod sandboxed {
             );
             assert!(ring_on_row(&harness.frame(), "Probe"));
 
+            // Enter on a row is the row, chosen already: the keyboard stays,
+            // and a second Enter switches nothing off.
             key(&mut harness, "enter");
+            key(&mut harness, "enter");
+            assert_eq!(place(&harness, PLUGINS), Place::Rail);
+            assert!(
+                is_on(&harness, "eugen/probe"),
+                "Enter, Enter switched it off"
+            );
+
+            key(&mut harness, "tab");
             assert_eq!(place(&harness, PLUGINS), Place::Control);
             assert!(is_on(&harness, "eugen/probe"));
             key(&mut harness, "space");
@@ -37443,20 +37453,28 @@ mod sandboxed {
             assert_eq!(place(&harness, STORE), Place::Rail);
             assert!(ring_on_row(&harness.frame(), "Probe"));
 
-            // Enter goes onto the card — onto Install, under what it asks
-            // for — and presses nothing yet.
-            key(&mut harness, "enter");
-            assert_eq!(place(&harness, STORE), Place::Control);
+            // Enter on the row, at whatever speed, is the row: it installs
+            // nothing and the keyboard stays on the list.
+            for _ in 0..3 {
+                key(&mut harness, "enter");
+            }
+            assert_eq!(place(&harness, STORE), Place::Rail);
             assert_eq!(
                 harness.store_downloading(),
                 None,
                 "Enter on a row installed"
             );
+
+            // A Tab onto the card is the deliberate step: onto Install,
+            // under what it asks for, and Enter there installs.
+            key(&mut harness, "tab");
+            assert_eq!(place(&harness, STORE), Place::Control);
             assert!(
                 ring_on_card_word(&harness.frame(), "Install"),
                 "the first control is not Install: {}",
                 frame_text(&harness.frame())
             );
+            assert_eq!(harness.store_downloading(), None);
             key(&mut harness, "enter");
             assert_eq!(
                 harness.store_downloading(),
@@ -37539,7 +37557,7 @@ mod sandboxed {
             );
             harness.show_section(STORE);
             key(&mut harness, "down");
-            key(&mut harness, "enter");
+            key(&mut harness, "tab");
             for _ in 0..6 {
                 if ring_on_card_word(&harness.frame(), "Remove") {
                     break;
@@ -37593,7 +37611,7 @@ mod sandboxed {
             );
 
             // The last control of the last plugin's card, the same way.
-            harness.press("enter", Modifiers::default(), "");
+            harness.press("tab", Modifiers::default(), "");
             harness.frame_sized(window);
             harness.press("end", Modifiers::default(), "");
             let scene = harness.frame_sized(window);
@@ -37683,6 +37701,133 @@ mod sandboxed {
             );
             key(&mut harness, "end");
             assert_eq!(place(&harness, PLUGINS), Place::Search);
+        }
+
+        #[test]
+        fn a_second_enter_on_allow_does_not_take_back_what_the_first_gave() {
+            // Allow becomes Revoke where it stood. The two are two controls,
+            // so the keyboard leaves the card with the first press and the
+            // second one is on the list, which presses nothing.
+            let scratch = Scratch::new("keys-allow-twice");
+            let mut harness = two_installed(&scratch);
+            harness.click_plugin("Probe");
+            key(&mut harness, "tab");
+            key(&mut harness, "tab");
+            for _ in 0..4 {
+                if ring_on_card_word(&harness.frame(), "Allow") {
+                    break;
+                }
+                key(&mut harness, "down");
+            }
+            assert!(ring_on_card_word(&harness.frame(), "Allow"));
+            key(&mut harness, "enter");
+            assert_eq!(granted(&harness, "eugen/probe"), ["tabs.read"]);
+            key(&mut harness, "enter");
+            key(&mut harness, "enter");
+            assert_eq!(
+                granted(&harness, "eugen/probe"),
+                ["tabs.read"],
+                "a second Enter revoked the grant"
+            );
+            assert_eq!(place(&harness, PLUGINS), Place::Rail);
+        }
+
+        #[test]
+        fn a_control_scrolled_out_of_sight_is_not_pressed() {
+            // Tab onto the switch at the top of a long card, then the wheel
+            // takes it off screen: Space must not switch a plugin off under
+            // a ring nobody can see.
+            let mut harness = Harness::new(1);
+            harness.show_plugins();
+            harness.click_plugin("Tabs");
+            key(&mut harness, "tab");
+            key(&mut harness, "tab");
+            assert_eq!(place(&harness, PLUGINS), Place::Control);
+            assert!(is_on(&harness, "crook/tabs"));
+            let page = settings_pane_box(&harness.frame());
+            harness.dispatch(Event::ScrollWheel {
+                position: center(page),
+                delta: ScrollDelta::Lines(vec2f(0., -40.)),
+                modifiers: Modifiers::default(),
+            });
+            harness.frame();
+            key(&mut harness, "space");
+            assert!(
+                is_on(&harness, "crook/tabs"),
+                "Space switched off a plugin whose switch was scrolled away"
+            );
+        }
+
+        #[test]
+        fn install_is_about_the_card_that_was_read_whatever_the_list_says_by_the_press() {
+            // The ring is on the first offer's Install, and before the key
+            // the list's choice moves to the other — a fetch that reordered it, a
+            // plugin turning the page. The press installs Probe.
+            let plugins = Scratch::new("keys-store-bound");
+            let index = Scratch::new("keys-store-bound-index");
+            let cache = Cache::at(index.path());
+            let offer = |id: &str, name: &str| {
+                format!(
+                    r#"{{"id": "{id}", "name": "{name}", "description": "d",
+                      "repository": "https://example.com/p",
+                      "versions": [{{"version": "0.2.0", "abi": 8,
+                                    "url": "https://github.com/theguriev/crook-plugins/releases/download/index/x.wasm",
+                                    "sha256": "aa", "capabilities": [], "asks": []}}]}}"#
+                )
+            };
+            cache
+                .write(
+                    format!(
+                        r#"{{"schema": 1, "plugins": [{}, {}]}}"#,
+                        offer("eugen/probe", "Probe"),
+                        offer("eugen/other", "Other"),
+                    )
+                    .as_bytes(),
+                    None,
+                )
+                .expect("the test index parses");
+            let mut harness = Harness::with_store(
+                1,
+                opening(&plugins, Default::default(), Default::default()),
+                cache,
+            );
+            harness.show_section(STORE);
+            harness.type_text("eugen/");
+            harness.frame();
+            key(&mut harness, "down");
+            key(&mut harness, "tab");
+            let (read, other) = match card_title(&mut harness).starts_with("Probe") {
+                true => ("eugen/probe", "eugen/other"),
+                false => ("eugen/other", "eugen/probe"),
+            };
+            assert!(ring_on_card_word(&harness.frame(), "Install"));
+
+            harness.run_about("crook/store/choose", other);
+            quick(&mut harness, "enter");
+            assert_eq!(
+                harness
+                    .store_downloading()
+                    .map(|id| id.to_string())
+                    .as_deref(),
+                Some(read),
+                "the press installed what the list chose after the ring was drawn"
+            );
+        }
+
+        #[test]
+        fn no_plugin_may_run_the_commands_that_move_the_keyboard() {
+            let harness = Harness::new(1);
+            for name in ["crook/changes/focus", "crook/store/choose"] {
+                let name = crate::plugin::ActionName::parse(name).expect("a literal");
+                assert!(
+                    harness
+                        .workspace
+                        .read(&harness.app, |workspace, _| workspace
+                            .host()
+                            .answered_by_a_person(&name)),
+                    "{name} can be run by a plugin"
+                );
+            }
         }
 
         #[test]
@@ -41574,6 +41719,290 @@ mod changes_column {
         harness.press("enter", Modifiers::default(), "");
         harness.frame();
         assert!(expanded(&harness, "src/file-0001.rs"));
+    }
+
+    /// Walks the column's keyboard down until it is on a line whose text
+    /// starts with `start`, and says whether it got there.
+    fn walk_to_line(harness: &mut Harness, start: &str) -> bool {
+        use crate::workspace::changes_panel::Control;
+        let on = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                let state = workspace.changes_panel();
+                match state.keys_on() {
+                    Some(Control::Line(file, line)) => state
+                        .overview()
+                        .and_then(|overview| overview.files.get(file))
+                        .and_then(|file| state.diff(&file.path))
+                        .and_then(|diff| diff.lines.get(line))
+                        .is_some_and(|text| text.starts_with(start)),
+                    _ => false,
+                }
+            })
+        };
+        for _ in 0..16 {
+            if on(harness) {
+                return true;
+            }
+            walk(harness, "down");
+        }
+        on(harness)
+    }
+
+    /// The column open on `a_task`'s README with its lines showing, and
+    /// the keyboard in the column on the file.
+    fn readme_from_the_keyboard(harness: &mut Harness) {
+        use crate::workspace::changes_panel::Control;
+        harness.run_command("crook/changes/focus");
+        harness.wait_for("the column never read the repository", |harness| {
+            has_read(harness)
+        });
+        for _ in 0..8 {
+            if column_keys_on(harness) == Some(Control::File(0)) {
+                break;
+            }
+            walk(harness, "down");
+        }
+        walk(harness, "enter");
+        harness.wait_for("the file's hunks never arrived", |harness| {
+            frame_text(&harness.frame()).contains("+what the agent added")
+        });
+    }
+
+    #[test]
+    fn a_comment_field_set_adrift_and_closed_never_leaves_the_keyboard_on_send() {
+        use crate::workspace::changes_panel::Control;
+        let scratch = Scratch::new();
+        let Some((repository, _)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(repository.clone());
+        });
+        readme_from_the_keyboard(&mut harness);
+
+        // A comment on the hunk's header, which outlives the rewrite below,
+        // so the review has a Send.
+        assert!(walk_to_line(&mut harness, "@@"));
+        walk(&mut harness, "enter");
+        type_keys(&mut harness, "keep");
+        walk(&mut harness, "enter");
+        assert_eq!(comment_count(&harness), 1);
+
+        // A field under the added line, with something typed in it.
+        assert!(walk_to_line(&mut harness, "+what the agent added"));
+        walk(&mut harness, "enter");
+        type_keys(&mut harness, "x");
+        assert!(comment_has_keys(&harness));
+
+        // The agent rewrites the line, and the field goes up to the strip,
+        // beside Send.
+        fs::write(
+            repository.join("README"),
+            "worktree test\nwhat the agent wrote instead\n",
+        )
+        .expect("writable");
+        harness.dispatch_workspace_action(WorkspaceAction::Changes(ChangesAction::Refresh));
+        harness.wait_for("the refresh never set the field adrift", |harness| {
+            harness.frame();
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.changes_panel().adrift().is_some()
+            })
+        });
+
+        // The keyboard back in the column, walked onto the field's own stop
+        // in the strip, and into the field with Enter.
+        harness.run_command("crook/changes/focus");
+        harness.frame();
+        for _ in 0..6 {
+            if column_keys_on(&harness) == Some(Control::Draft) {
+                break;
+            }
+            walk(&mut harness, "down");
+        }
+        assert_eq!(column_keys_on(&harness), Some(Control::Draft));
+        walk(&mut harness, "enter");
+        assert!(comment_has_keys(&harness));
+
+        walk(&mut harness, "escape");
+        assert!(column_has_keys(&harness), "Escape left the column");
+        let on = column_keys_on(&harness);
+        assert!(
+            !matches!(
+                on,
+                Some(Control::Send | Control::CopyReview | Control::RemoveComment(_))
+            ),
+            "the keyboard landed on {on:?}"
+        );
+        walk(&mut harness, "enter");
+        walk(&mut harness, "enter");
+        assert_eq!(comment_count(&harness), 1, "the review was sent or cut");
+        assert_eq!(
+            review_note(&harness),
+            None,
+            "something was sent: {:?}",
+            review_note(&harness)
+        );
+    }
+
+    #[test]
+    fn a_line_the_agent_rewrote_takes_the_keyboard_back_to_its_file() {
+        use crate::workspace::changes_panel::Control;
+        let scratch = Scratch::new();
+        let Some((repository, _)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(repository.clone());
+        });
+        readme_from_the_keyboard(&mut harness);
+        assert!(walk_to_line(&mut harness, "+what the agent added"));
+
+        fs::write(
+            repository.join("README"),
+            "worktree test\nwhat the agent wrote instead\n",
+        )
+        .expect("writable");
+        harness.dispatch_workspace_action(WorkspaceAction::Changes(ChangesAction::Refresh));
+        harness.wait_for("the refresh never brought the new line", |harness| {
+            frame_text(&harness.frame()).contains("+what the agent wrote instead")
+        });
+        assert_eq!(
+            column_keys_on(&harness),
+            Some(Control::File(0)),
+            "the keyboard stayed on the place, which is another line now"
+        );
+    }
+
+    #[test]
+    fn removing_a_comment_never_leaves_the_keyboard_on_the_next_one_s_cross() {
+        use crate::workspace::changes_panel::Control;
+        let scratch = Scratch::new();
+        let Some((repository, _)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(repository.clone());
+        });
+        readme_from_the_keyboard(&mut harness);
+
+        // Two comments on one line: their two × are side by side.
+        for words in ["one", "two"] {
+            assert!(walk_to_line(&mut harness, "@@"));
+            walk(&mut harness, "enter");
+            type_keys(&mut harness, words);
+            walk(&mut harness, "enter");
+        }
+        assert_eq!(comment_count(&harness), 2);
+        walk(&mut harness, "down");
+        assert!(matches!(
+            column_keys_on(&harness),
+            Some(Control::RemoveComment(_))
+        ));
+        walk(&mut harness, "enter");
+        assert_eq!(comment_count(&harness), 1);
+        assert!(
+            !matches!(column_keys_on(&harness), Some(Control::RemoveComment(_))),
+            "the keyboard took the next ×"
+        );
+        walk(&mut harness, "enter");
+        assert_eq!(
+            comment_count(&harness),
+            1,
+            "a second Enter took the other comment"
+        );
+    }
+
+    #[test]
+    fn a_read_that_lists_other_files_does_not_leave_the_ring_on_a_file_nobody_chose() {
+        use crate::workspace::changes_panel::Control;
+        let mut harness = Harness::new(1);
+        show_files(&mut harness, 3);
+        harness.run_command("crook/changes/focus");
+        harness.frame();
+        for _ in 0..3 {
+            walk(&mut harness, "down");
+        }
+        assert_eq!(column_keys_on(&harness), Some(Control::File(1)));
+
+        // The same three files, in the other order.
+        let mut overview = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.changes_panel().overview().cloned().expect("read")
+        });
+        overview.files.reverse();
+        harness.workspace_update(|workspace, ctx| workspace.refresh_changes_with(overview, ctx));
+        harness.frame();
+        assert_eq!(
+            column_keys_on(&harness),
+            Some(Control::Refresh),
+            "the ring stayed on the place, which is another file now"
+        );
+        walk(&mut harness, "enter");
+        assert!(!expanded(&harness, "src/file-0001.rs"));
+        assert!(!expanded(&harness, "src/file-0000.rs"));
+        assert!(!expanded(&harness, "src/file-0002.rs"));
+    }
+
+    #[test]
+    fn a_row_scrolled_out_of_sight_in_the_column_is_not_pressed() {
+        // The keyboard walks down to a file at the column's foot, and the
+        // wheel moves the list a line the other way: the row is still built
+        // and painted, its ring cut by the list's edge. Enter must not press
+        // a file whose ring is not whole on screen.
+        use crate::workspace::changes_panel::Control;
+        let mut harness = Harness::new(1);
+        show_files(&mut harness, 400);
+        harness.run_command("crook/changes/focus");
+        harness.frame();
+        for _ in 0..42 {
+            harness.press("down", Modifiers::default(), "");
+        }
+        harness.frame();
+        let Some(Control::File(file)) = column_keys_on(&harness) else {
+            panic!("the walk is not on a file");
+        };
+        let path = format!("src/file-{file:04}.rs");
+        let column = column_box(&harness.frame()).expect("the column is up");
+        let mut cut = false;
+        for _ in 0..8 {
+            let scene = harness.frame();
+            let drawn: Vec<RectF> = scene
+                .layers()
+                .flat_map(|layer| layer.rects.iter())
+                .filter(|rect| {
+                    rect.background == Fill::None
+                        && rect.border.width == 2.
+                        && rect.border.color == Fill::Solid(theme().accent)
+                })
+                .map(|rect| rect.bounds)
+                .collect();
+            let whole = rings(&scene)
+                .first()
+                .is_some_and(|shown| drawn.iter().any(|ring| ring == shown));
+            if !drawn.is_empty() && !whole {
+                cut = true;
+                break;
+            }
+            harness.dispatch(Event::ScrollWheel {
+                position: center(column),
+                delta: ScrollDelta::Lines(vec2f(0., 1.)),
+                modifiers: Modifiers::default(),
+            });
+        }
+        assert!(cut, "the wheel never took the ring off the list's edge");
+        walk(&mut harness, "enter");
+        assert!(
+            !expanded(&harness, &path),
+            "Enter pressed a file whose ring was cut by the list's edge"
+        );
     }
 
     #[test]

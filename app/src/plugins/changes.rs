@@ -63,7 +63,9 @@ impl Plugin for Changes {
         // — the column's rule, and the comment field's — and a tab's menu
         // opening the column for a look is not that. Its own name too, so it
         // can be bound: the palette is the way to it the first time.
-        host.register_command(
+        // A person's command: a plugin granted `run:` for it could only move
+        // the keyboard, but where the keyboard is is never a plugin's call.
+        host.register_person_command(
             action("focus"),
             "Move the keyboard to the changes",
             |workspace, ctx| {

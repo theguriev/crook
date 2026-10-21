@@ -66,11 +66,16 @@
 //! is laid out inside a page, exactly as one on the Appearance page is.
 //!
 //! What the sidebar ends in — the Store's "Look for plugins", the Plugins
-//! list's "Update all" — is part of the controls, after the card's: Enter on
-//! a row opens its card, so the card's controls are the ones the keyboard
-//! arrives on, and End is the way to the foot of the list. With nothing
-//! listed, the foot is all there is, and Tab from the box goes straight to
-//! it.
+//! list's "Update all" — is part of the controls, after the card's: Tab from
+//! a row goes onto its card, so the card's controls are the ones the
+//! keyboard arrives on, and End is the way to the foot of the list. With
+//! nothing listed, the foot is all there is, and Tab from the box goes
+//! straight to it.
+//!
+//! Enter on a row of plugins or offers does nothing more than the row: it is
+//! chosen already, and its card opens with Install or the plugin's switch
+//! first, so an Enter that went onto the card would make a second Enter an
+//! install or a plugin switched off. Getting onto a card takes a Tab.
 //!
 //! # What a plugin draws is never a stop
 //!
@@ -312,13 +317,14 @@ struct Inner {
     /// panel, a popup or the Changes column's comment field has it. The ring
     /// is drawn only while it does.
     holds_keys: bool,
-    /// The control the ring was drawn on in the last frame, if it was drawn.
+    /// The control the ring was drawn on in the last frame, if it was drawn
+    /// whole on screen.
     ///
     /// A press lands only there. The keyboard can be moved onto a control
-    /// faster than a frame draws the ring around it — Enter on a Store row
-    /// goes onto its Install, and a second Enter at once would install what
-    /// nobody was shown the ring on — and a key that presses something must
-    /// press what the person is looking at.
+    /// faster than a frame draws the ring around it — Tab from a Store row
+    /// goes onto its Install, and an Enter at once would install what nobody
+    /// was shown the ring on — or the wheel can scroll it out of sight, and a
+    /// key that presses something must press what the person is looking at.
     shown: Option<StopId>,
     /// The list's rows, as the last frame laid them out.
     rows: Vec<Row>,
@@ -602,9 +608,10 @@ impl Focus {
         inner.place == Place::Control && inner.holds_keys && inner.on == Some(id)
     }
 
-    /// Writes down that the ring was drawn on this control.
-    fn ringed(&self, id: StopId) {
-        self.0.borrow_mut().shown = Some(id);
+    /// Writes down that the ring was drawn on this control — and whether it
+    /// was whole on screen, without which it does not count as shown.
+    fn ringed(&self, id: StopId, whole: bool) {
+        self.0.borrow_mut().shown = whole.then_some(id);
     }
 
     /// Starts a layout's list, which is the page as it is now — about
@@ -886,8 +893,10 @@ enum Lit {
         selected: bool,
     },
     /// Lit or not, and in nobody's list: what a surface that keeps its own
-    /// list of stops draws its ring with — the Changes column's.
-    Fixed(bool),
+    /// list of stops draws its ring with — the Changes column's — told
+    /// whether the ring it drew was whole on screen, which is when that
+    /// surface may let a press land.
+    Fixed(bool, Rc<dyn Fn(bool)>),
 }
 
 /// One control the keyboard can stand on, and the ring drawn around it when
@@ -968,14 +977,16 @@ impl Stop {
     }
 
     /// A ring rounded by `radius`, lit when `lit` says so — around the child,
-    /// or on its own edge when `within`.
+    /// or on its own edge when `within` — telling `seen` after each paint of
+    /// a lit ring whether the whole of it was on screen.
     pub(crate) fn fixed(
         lit: bool,
         radius: Radius,
         within: bool,
+        seen: Rc<dyn Fn(bool)>,
         child: Box<dyn Element>,
     ) -> Box<dyn Element> {
-        Self::boxed(Lit::Fixed(lit), radius, within, child)
+        Self::boxed(Lit::Fixed(lit, seen), radius, within, child)
     }
 }
 
@@ -1012,13 +1023,27 @@ impl Element for Stop {
         let size = self.size.unwrap_or_default();
         self.child.paint(origin, ctx, app);
 
+        // Whether the control is whole inside the clip it is painted in: a
+        // ring scrolled out of sight, or cut by the scroll's edge, is a ring
+        // nobody is looking at, and a press must not land under it.
+        let whole = || {
+            let point = Point::from_vec2f(origin, ctx.scene.z_index());
+            ctx.scene
+                .visible_rect(point, size)
+                .is_some_and(|shown| (shown.height() - size.y()).abs() < 0.5)
+        };
         let lit = match (&self.lit, current()) {
-            (Lit::Fixed(lit), _) => *lit,
+            (Lit::Fixed(lit, seen), _) => {
+                if *lit {
+                    seen(whole());
+                }
+                *lit
+            }
             (Lit::Control(id, _), Some((page, Region::Page | Region::Aside))) => {
                 page.painted(*id, origin.y(), size.y());
                 let on = page.is_on(*id);
                 if on {
-                    page.ringed(*id);
+                    page.ringed(*id, whole());
                 }
                 on
             }

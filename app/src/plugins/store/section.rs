@@ -449,16 +449,14 @@ fn decision(workspace: &Workspace, known: &Known, offer: &Offer, ui: FamilyId) -
         from_build(workspace, &offer.id, installed.as_deref()),
     );
 
-    // Install is about whatever the card is about, resolved the way the
-    // card was; an update is about this plugin by name, which is the same
-    // action the plugin's own card runs. Either way the press names what it
-    // fetches.
+    // Install, Update and Remove each name the plugin they fetch or take
+    // away; an update is the same action the plugin's own card runs.
     let command = match decided.press {
         Press::Nothing => None,
-        Press::Install => workspace
-            .host()
-            .action(&action("install"))
-            .map(WorkspaceAction::Run),
+        // About this offer by name, as the Plugins card's buttons are: a
+        // list fetched again between this frame and the press, or a box
+        // edited, cannot turn the press into one about another plugin.
+        Press::Install => workspace.run_about(&action("install"), offer.id.as_str()),
         Press::Update => workspace.run_about(&action("update"), offer.id.as_str()),
     };
     let live = command.is_some();
@@ -512,10 +510,7 @@ fn decision(workspace: &Workspace, known: &Known, offer: &Offer, ui: FamilyId) -
             true,
             widgets::text_button(
                 "Remove",
-                workspace
-                    .host()
-                    .action(&action("remove"))
-                    .map(WorkspaceAction::Run),
+                workspace.run_about(&action("remove"), offer.id.as_str()),
                 workspace
                     .settings_page()
                     .control(named(&format!("store.remove.{}", offer.id))),

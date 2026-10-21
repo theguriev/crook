@@ -482,7 +482,11 @@ fn permissions(
         command,
         workspace
             .settings_page()
-            .control(named(&format!("plugins.grant.{}", manifest.id))),
+            // One control per verb, not one for the box: a press that turns
+            // Allow into Revoke has taken away the control the keyboard was
+            // on, which hands it back to the list (see `focus`) — a second
+            // Enter must not take back what the first one gave.
+            .control(named(&format!("plugins.{verb}.{}", manifest.id))),
         ui,
     );
 
