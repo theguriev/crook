@@ -452,15 +452,99 @@ impl BlockRows {
     /// fold into the rows below is the one thing a store cannot lay out
     /// again. It ends on its own row instead, unfolded: the line is cut there,
     /// which is what the grid does to a line whose head it no longer holds.
+    ///
+    /// A line with no double-width character and no zero-width one, which is
+    /// nearly every line, is laid out from its text and its runs, a run at a
+    /// time; the rest a cell at a time.
+    ///
+    /// Answers also which row `track` is laid out on: the row its first cell
+    /// went to.
+    pub(crate) fn rewrapped_tracking(
+        &self,
+        columns: usize,
+        blank: SnapshotCell,
+        track: Option<usize>,
+    ) -> (BlockRows, Option<usize>) {
+        self.rewrap(columns, blank, track, true)
+    }
+
+    /// Tests: [`Self::rewrapped_tracking`]'s rows.
+    #[cfg(test)]
     pub(crate) fn rewrapped(&self, columns: usize, blank: SnapshotCell) -> BlockRows {
+        self.rewrapped_tracking(columns, blank, None).0
+    }
+
+    /// [`Self::rewrapped_tracking`], a run at a time where it can be when
+    /// `by_runs`, and a cell at a time everywhere when not.
+    fn rewrap(
+        &self,
+        columns: usize,
+        blank: SnapshotCell,
+        track: Option<usize>,
+        by_runs: bool,
+    ) -> (BlockRows, Option<usize>) {
         let columns = columns.max(1);
         let mut laid = Self::with_columns(columns);
-        let mut line = Vec::new();
+        let mut tracked = None;
+        let mut scratch = Rewrap::default();
+        let mut row = 0;
+        while row < self.rows() {
+            let mut end = row;
+            while end + 1 < self.rows() && self.wraps(end) {
+                end += 1;
+            }
+            let first = laid.rows();
+            let cells_before = if by_runs && self.is_plain(row..end + 1) {
+                laid.push_plain_line(self, row..end + 1, columns, blank, track, &mut scratch)
+            } else {
+                laid.push_line_by_cells(self, row..end + 1, columns, blank, track, &mut scratch)
+            };
+            if let Some(before) = cells_before {
+                tracked = Some((first + before / columns).min(laid.rows().saturating_sub(1)));
+            }
+            row = end + 1;
+        }
+        (laid, tracked)
+    }
+
+    /// Tests: [`Self::rewrapped_tracking`] a cell at a time on every line, which the
+    /// way it lays out most lines has to agree with.
+    #[cfg(test)]
+    pub(crate) fn rewrapped_by_cells(&self, columns: usize, blank: SnapshotCell) -> BlockRows {
+        self.rewrap(columns, blank, None, false).0
+    }
+
+    /// Whether `rows` have no double-width character and no zero-width one.
+    fn is_plain(&self, rows: Range<usize>) -> bool {
+        let wide = CellFlags::WIDE | CellFlags::WIDE_SPACER;
+        self.combining_starts[rows.start] == self.combining_starts[rows.end]
+            && self.runs[self.run_starts[rows.start] as usize..self.run_starts[rows.end] as usize]
+                .iter()
+                .all(|run| run.flags.without(wide) == run.flags)
+    }
+
+    /// Lays out the line on `rows` of `source` a cell at a time, answering
+    /// how many of its cells come before `track`'s first, when `track` is
+    /// one of them.
+    fn push_line_by_cells(
+        &mut self,
+        source: &BlockRows,
+        rows: Range<usize>,
+        columns: usize,
+        blank: SnapshotCell,
+        track: Option<usize>,
+        scratch: &mut Rewrap,
+    ) -> Option<usize> {
+        let Rewrap { cells, line, .. } = scratch;
+        line.clear();
         let mut marks: Vec<RowCombining> = Vec::new();
-        let mut cells = Vec::with_capacity(self.columns());
-        for row in 0..self.rows() {
-            let combining = self.materialise(row, &mut cells);
-            let folds = self.wraps(row);
+        let mut before = None;
+        for row in rows {
+            if Some(row) == track {
+                before = Some(line.len());
+            }
+            let combining = source.materialise(row, cells);
+            let folds = source.wraps(row);
             let length = if folds {
                 // A double-width character that did not fit left a spacer in
                 // the last column, which is the row's and not the line's.
@@ -492,19 +576,163 @@ impl BlockRows {
                         characters: marks.characters.clone(),
                     }),
             );
-            if !folds {
-                laid.push_line(&line, &mut marks, columns, blank);
-                line.clear();
+        }
+        self.push_line(line, &mut marks, columns, blank);
+        before
+    }
+
+    /// Lays out the line on `rows` of `source` from its text and its runs,
+    /// which [`Self::is_plain`] has said hold no character wider or narrower
+    /// than a cell: the same rows [`Self::push_line_by_cells`] lays out, cut
+    /// where the columns end rather than walked a cell at a time.
+    fn push_plain_line(
+        &mut self,
+        source: &BlockRows,
+        rows: Range<usize>,
+        columns: usize,
+        blank: SnapshotCell,
+        track: Option<usize>,
+        scratch: &mut Rewrap,
+    ) -> Option<usize> {
+        let Rewrap {
+            text,
+            runs,
+            offsets,
+            ..
+        } = scratch;
+        text.clear();
+        runs.clear();
+        let mut cells = 0;
+        let mut before = None;
+        let last = rows.end - 1;
+        for row in rows {
+            if Some(row) == track {
+                before = Some(cells);
             }
+            let row_text = source.text(row);
+            let row_runs = source.runs(row).unwrap_or_default();
+            let printed = if row_text.is_ascii() {
+                row_text.len()
+            } else {
+                row_text.chars().count()
+            };
+            // Every cell of a row the line goes on past is the line's; the
+            // last row's end where nothing past is printed or painted.
+            let length = if row < last || source.wraps(row) {
+                source.columns()
+            } else {
+                row_runs
+                    .iter()
+                    .rev()
+                    .find(|run| (run.foreground, run.background, run.flags) != style_of(&blank))
+                    .map_or(0, |run| usize::from(run.start) + usize::from(run.len))
+                    .max(printed)
+            };
+            text.push_str(row_text);
+            text.extend(std::iter::repeat_n(' ', length.saturating_sub(printed)));
+            for run in row_runs {
+                let start = usize::from(run.start);
+                let end = (start + usize::from(run.len)).min(length);
+                if start >= end {
+                    break;
+                }
+                let style = (
+                    run.foreground,
+                    run.background,
+                    run.flags.without(CellFlags::WRAPLINE),
+                );
+                // Two runs painted alike are joined where they are pushed.
+                runs.push((cells + start, end - start, style));
+            }
+            cells += length;
         }
-        if !line.is_empty() {
-            laid.push_line(&line, &mut marks, columns, blank);
+
+        // Where each cell's character starts in `text`, which is one byte a
+        // cell for a line of ASCII and needs counting for any other.
+        let ascii = text.is_ascii();
+        if !ascii {
+            offsets.clear();
+            offsets.extend(text.char_indices().map(|(at, _)| at));
+            offsets.push(text.len());
         }
-        laid
+        let byte = |cell: usize| if ascii { cell } else { offsets[cell] };
+
+        let blank_style = style_of(&blank);
+        let mut from = 0;
+        let mut run = 0;
+        loop {
+            let to = (from + columns).min(cells);
+            let folds = to < cells;
+            if self.text_starts.is_empty() {
+                self.text_starts.push(0);
+                self.run_starts.push(0);
+                self.combining_starts.push(0);
+            }
+            self.text
+                .push_str(text[byte(from)..byte(to)].trim_end_matches(' '));
+            let row_start = self.runs.len();
+            while run < runs.len() && runs[run].0 + runs[run].1 <= from {
+                run += 1;
+            }
+            let mut next = run;
+            while next < runs.len() && runs[next].0 < to {
+                let (at, len, style) = runs[next];
+                let (start, end) = (at.max(from), (at + len).min(to));
+                self.push_styled(row_start, start - from, end - start, style);
+                next += 1;
+            }
+            if folds {
+                // The fold is the last cell's, and only its.
+                let last = self.runs.last_mut().expect("a folded row has cells");
+                let style = (
+                    last.foreground,
+                    last.background,
+                    last.flags | CellFlags::WRAPLINE,
+                );
+                if last.len > 1 {
+                    last.len -= 1;
+                    let start = usize::from(last.start + last.len);
+                    self.runs.push(run_of(start, 1, style));
+                } else {
+                    last.flags = style.2;
+                }
+            } else {
+                self.push_styled(row_start, to - from, columns - (to - from), blank_style);
+            }
+            self.text_starts.push(self.text.len() as u32);
+            self.run_starts.push(self.runs.len() as u32);
+            self.combining_starts.push(self.combining.len() as u32);
+            if !folds {
+                break;
+            }
+            from = to;
+        }
+        before
+    }
+
+    /// Paints `count` cells from `column` of the row whose runs start at
+    /// `row_start` in `style`, onto the row's last run when that one is
+    /// painted the same way.
+    fn push_styled(&mut self, row_start: usize, column: usize, count: usize, style: Style) {
+        if count == 0 {
+            return;
+        }
+        let (foreground, background, flags) = style;
+        self.push_cells(
+            row_start,
+            column,
+            &SnapshotCell {
+                c: ' ',
+                foreground,
+                background,
+                flags,
+            },
+            count,
+        );
     }
 
     /// Appends one line of cells, folded over as many rows of `columns` as it
-    /// takes: see [`Self::rewrapped`]. `marks` are the line's zero-width
+    /// takes: see [`Self::rewrapped_tracking`]. `marks` are the line's zero-width
     /// characters, at cells of the line and in order, and it is left empty.
     fn push_line(
         &mut self,
@@ -566,7 +794,7 @@ impl BlockRows {
     }
 
     /// Starts a store for rows of the given width.
-    fn with_columns(columns: usize) -> Self {
+    pub(crate) fn with_columns(columns: usize) -> Self {
         Self {
             columns: u16::try_from(columns).unwrap_or(u16::MAX),
             ..Self::default()
@@ -657,6 +885,18 @@ impl BlockRows {
     /// Runs are merged as they are pushed, so a row painted in one style
     /// arrives as one run however wide the grid is.
     fn push_row(&mut self, cells: &[SnapshotCell], combining: &mut Vec<RowCombining>) {
+        self.push_row_and_blanks(cells, combining, None);
+    }
+
+    /// [`Self::push_row`], with `blanks` more cells after `cells`, every one
+    /// of them `blank`: what a grid row nothing was printed into the end of
+    /// costs to store without being read a cell at a time.
+    fn push_row_and_blanks(
+        &mut self,
+        cells: &[SnapshotCell],
+        combining: &mut Vec<RowCombining>,
+        blanks: Option<(SnapshotCell, usize)>,
+    ) {
         if self.text_starts.is_empty() {
             self.text_starts.push(0);
             self.run_starts.push(0);
@@ -669,23 +909,12 @@ impl BlockRows {
             .map_or(0, |at| at + 1);
         self.text.extend(cells[..trimmed].iter().map(|cell| cell.c));
 
+        let row_start = self.runs.len();
         for (column, cell) in cells.iter().enumerate() {
-            let extends = self.runs.last().is_some_and(|run| {
-                usize::from(run.start) + usize::from(run.len) == column
-                    && run.foreground == cell.foreground
-                    && run.background == cell.background
-                    && run.flags == cell.flags
-            });
-            match self.runs.last_mut() {
-                Some(run) if extends => run.len += 1,
-                _ => self.runs.push(StyleRun {
-                    start: column as u16,
-                    len: 1,
-                    foreground: cell.foreground,
-                    background: cell.background,
-                    flags: cell.flags,
-                }),
-            }
+            self.push_cells(row_start, column, cell, 1);
+        }
+        if let Some((blank, count)) = blanks.filter(|(_, count)| *count > 0) {
+            self.push_cells(row_start, cells.len(), &blank, count);
         }
 
         self.combining.append(combining);
@@ -693,6 +922,104 @@ impl BlockRows {
         self.run_starts.push(self.runs.len() as u32);
         self.combining_starts.push(self.combining.len() as u32);
     }
+
+    /// Paints `count` cells from `column` of the row whose runs start at
+    /// `row_start` the way `cell` is painted, onto the row's last run when
+    /// that one is painted the same way.
+    fn push_cells(&mut self, row_start: usize, column: usize, cell: &SnapshotCell, count: usize) {
+        let extends = self.runs.len() > row_start
+            && self.runs.last().is_some_and(|run| {
+                usize::from(run.start) + usize::from(run.len) == column
+                    && run.foreground == cell.foreground
+                    && run.background == cell.background
+                    && run.flags == cell.flags
+            });
+        match self.runs.last_mut() {
+            Some(run) if extends => run.len += count as u16,
+            _ => self.runs.push(StyleRun {
+                start: column as u16,
+                len: count as u16,
+                foreground: cell.foreground,
+                background: cell.background,
+                flags: cell.flags,
+            }),
+        }
+    }
+
+    /// Gives back what the store's allocations hold beyond its rows, for a
+    /// store that will not grow again.
+    pub(crate) fn shrink_to_fit(&mut self) {
+        self.text.shrink_to_fit();
+        self.text_starts.shrink_to_fit();
+        self.runs.shrink_to_fit();
+        self.run_starts.shrink_to_fit();
+        self.combining.shrink_to_fit();
+        self.combining_starts.shrink_to_fit();
+    }
+}
+
+/// How a cell is painted: its two colours and its flags.
+type Style = (Rgb, Rgb, CellFlags);
+
+/// How `cell` is painted.
+fn style_of(cell: &SnapshotCell) -> Style {
+    (cell.foreground, cell.background, cell.flags)
+}
+
+/// A run of `len` cells from `start`, painted in `style`.
+fn run_of(start: usize, len: usize, (foreground, background, flags): Style) -> StyleRun {
+    StyleRun {
+        start: start as u16,
+        len: len as u16,
+        foreground,
+        background,
+        flags,
+    }
+}
+
+/// What laying rows out again reuses from one line to the next.
+#[derive(Default)]
+struct Rewrap {
+    /// One row's cells, for a line laid out a cell at a time.
+    cells: Vec<SnapshotCell>,
+    /// The line's cells, laid out a cell at a time.
+    line: Vec<SnapshotCell>,
+    /// The line's characters, laid out a run at a time.
+    text: String,
+    /// The line's runs: where each starts in the line, how long, its style.
+    runs: Vec<(usize, usize, Style)>,
+    /// Where each of the line's cells starts in `text`, when it is not ASCII.
+    offsets: Vec<usize>,
+}
+
+/// How many of `row`'s cells come before the ones nothing was printed into:
+/// the cells after the last one that is not `Cell::default()`, which is what
+/// a grid erases to. Not `Cell::is_empty`, which takes a tab, and bold.
+///
+/// Eight cells at a time from the end, with nothing to stop on inside the
+/// eight: the blank end of a wide row is most of what a harvest reads.
+fn printed(row: &[alacritty_terminal::term::cell::Cell]) -> usize {
+    use alacritty_terminal::vte::ansi::{Color, NamedColor};
+
+    let untouched = |cell: &alacritty_terminal::term::cell::Cell| {
+        (cell.c == ' ')
+            & cell.flags.is_empty()
+            & matches!(cell.bg, Color::Named(NamedColor::Background))
+            & matches!(cell.fg, Color::Named(NamedColor::Foreground))
+            & cell.extra.is_none()
+    };
+    let mut end = row.len();
+    while end >= 8
+        && row[end - 8..end]
+            .iter()
+            .fold(true, |all, cell| all & untouched(cell))
+    {
+        end -= 8;
+    }
+    row[..end]
+        .iter()
+        .rposition(|cell| !untouched(cell))
+        .map_or(0, |at| at + 1)
 }
 
 /// Copies grid lines `top..=bottom` out of the emulator, resolving every
@@ -704,36 +1031,95 @@ impl BlockRows {
 /// row of the one before it is a merge, and merges are recoverable where a
 /// split is not.
 pub(crate) fn harvest<T>(term: &Term<T>, palette: &Palette, top: i32, bottom: i32) -> BlockRows {
+    let mut rows = BlockRows::with_columns(term.grid().columns());
+    harvest_into(term, palette, top, bottom, &mut rows);
+    rows
+}
+
+/// [`harvest`], onto the end of `rows`, which must be as wide as the grid.
+///
+/// Read the way the open block's rows are cut out of the grid a slice of
+/// output at a time, so it is cheap where most of a row is: the cells after
+/// the last one anything was printed into are counted rather than read, and
+/// a cell painted the way the one before it was is not resolved again.
+pub(crate) fn harvest_into<T>(
+    term: &Term<T>,
+    palette: &Palette,
+    top: i32,
+    bottom: i32,
+    rows: &mut BlockRows,
+) {
+    use alacritty_terminal::term::cell::Cell;
+
     let grid = term.grid();
     let columns = grid.columns();
-    let mut rows = BlockRows::with_columns(columns);
-
+    debug_assert!(rows.is_empty() || rows.columns() == columns);
     let oldest = -(grid.history_size() as i32);
     let newest = grid.screen_lines() as i32 - 1;
     let (first, last) = (top.max(oldest), bottom.min(newest));
     if first > last {
-        return rows;
+        return;
     }
 
     let overrides = term.colors();
-    let mut cells = Vec::with_capacity(columns);
-    let mut combining = Vec::new();
+    let default = Cell::default();
+    let blank = snapshot::convert(&default, palette, overrides);
+    // A cell nothing was printed into: what `Cell::default` is, as a grid
+    // erases to it. `Cell::is_empty` is not that — it takes a tab, and bold.
     for line in first..=last {
-        cells.clear();
-        for (column, cell) in grid[Line(line)][..].iter().enumerate() {
-            if let Some(marks) = cell.zerowidth().filter(|marks| !marks.is_empty()) {
-                combining.push(RowCombining {
-                    column,
-                    characters: marks.into(),
-                });
-            }
-            cells.push(snapshot::convert(cell, palette, overrides));
+        let row = &grid[Line(line)][..];
+        let printed = printed(row);
+        if rows.text_starts.is_empty() {
+            rows.text_starts.push(0);
+            rows.run_starts.push(0);
+            rows.combining_starts.push(0);
         }
-        // `push_row` drains `combining`, so its allocation is reused by every
-        // row that needs one.
-        rows.push_row(&cells, &mut combining);
+        // Straight into the store: a run is grown a cell at a time while the
+        // cells are painted alike, and a cell is resolved through the
+        // palette only where the painting changes. What `push_row` would
+        // make of the same cells, without a row of them made first.
+        let row_start = rows.runs.len();
+        let text_start = rows.text.len();
+        let mut column = 0;
+        while column < printed {
+            // The cells from here painted as this one is: one resolve, one
+            // run, and their characters.
+            let first = &row[column];
+            let key = (first.fg, first.bg, first.flags);
+            let mut end = column + 1;
+            let mut extra = first.extra.is_some();
+            rows.text.push(first.c);
+            for cell in &row[end..printed] {
+                if (cell.fg, cell.bg, cell.flags) != key {
+                    break;
+                }
+                rows.text.push(cell.c);
+                extra |= cell.extra.is_some();
+                end += 1;
+            }
+            let converted = snapshot::convert(first, palette, overrides);
+            rows.push_cells(row_start, column, &converted, end - column);
+            if extra {
+                for (at, cell) in row[column..end].iter().enumerate() {
+                    if let Some(marks) = cell.zerowidth().filter(|marks| !marks.is_empty()) {
+                        rows.combining.push(RowCombining {
+                            column: column + at,
+                            characters: marks.into(),
+                        });
+                    }
+                }
+            }
+            column = end;
+        }
+        let kept = rows.text[text_start..].trim_end_matches(' ').len();
+        rows.text.truncate(text_start + kept);
+        if printed < columns {
+            rows.push_cells(row_start, printed, &blank, columns - printed);
+        }
+        rows.text_starts.push(rows.text.len() as u32);
+        rows.run_starts.push(rows.runs.len() as u32);
+        rows.combining_starts.push(rows.combining.len() as u32);
     }
-    rows
 }
 
 #[cfg(test)]

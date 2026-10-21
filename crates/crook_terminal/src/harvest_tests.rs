@@ -211,7 +211,7 @@ fn test_copied_text_drops_wide_spacers_and_keeps_combining_marks() {
             None,
             LiveBlock::default(),
             false,
-            snapshot::Spilled::none(&BlockRows::default()),
+            snapshot::Spilled::none(&crate::spill::Spill::default()),
         )
         .text()
         .trim_end()
@@ -399,4 +399,36 @@ fn a_slice_and_a_dropped_front_keep_the_rows_they_name() {
         "a range that ends before it starts"
     );
     assert_eq!(rows.slice(all - 1..all + 10), rows.slice(all - 1..all));
+}
+
+#[test]
+fn rows_laid_out_from_their_runs_are_the_rows_laid_out_a_cell_at_a_time() {
+    // Coloured runs across folds, a fold whose row ends in spaces, a
+    // coloured erase past the text, inverse and bold runs, non-ASCII
+    // single-width text, and lines with nothing in them, at widths that cut
+    // inside runs and between them.
+    let text = "\x1b[31mred\x1b[0m and \x1b[1;44mbold on blue\x1b[0m and plain text going on\r\n\
+        ends in spaces          \r\n\
+        \x1b[7minverse\x1b[0m \x1b[42m\x1b[Kgreen tail\x1b[0m\r\n\
+        ─── box ─── drawing ─── café ── naïve ─────────────────────\r\n\
+        \r\n\
+        \r\n\
+        last";
+    for from in [7u16, 13, 20, 31] {
+        let rows = laid_out(from, from, text);
+        for to in [1, 2, 5, 7, 12, 13, 19, 20, 33, 80] {
+            assert_eq!(
+                rows.rewrapped_by_cells(to, blank()),
+                rows.rewrapped(to, blank()),
+                "from {from} columns to {to}"
+            );
+        }
+        // And a store that ends inside a folded line.
+        let head = rows.slice(0..2);
+        assert_eq!(
+            head.rewrapped_by_cells(9, blank()),
+            head.rewrapped(9, blank()),
+            "the head of a line, from {from} columns"
+        );
+    }
 }

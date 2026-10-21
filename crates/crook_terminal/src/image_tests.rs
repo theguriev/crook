@@ -192,9 +192,15 @@ fn clear_and_the_alternate_screen_take_no_pictures() {
 /// Twenty columns by six rows, keeping `scrollback` lines of history, with
 /// `lines` of output, then `ABOVE` and a picture two rows tall — and no shell
 /// integration, so all of it is the one open block.
+///
+/// With the grid keeping the whole scrollback, as it does a scrollback no
+/// longer than its share: what these hold is the grid's own count of its
+/// history, which spilling the open block's oldest rows would put past the
+/// headroom only further up. See `spill_tests` for the pictures on them.
 fn picture_printed_after(lines: usize, scrollback: usize) -> Emulator {
-    let mut emulator = Emulator::new(
+    let mut emulator = Emulator::with_grid_lines(
         TerminalSize::new(20, 6).with_cell_size(10, 20),
+        scrollback,
         scrollback,
         Palette::default(),
     );
@@ -656,7 +662,8 @@ fn a_taller_pane_after_a_scroll_past_the_headroom_and_a_program_takes_the_pictur
     // So the pictures have gone by the time the program's screen is up.
     let size = |rows| TerminalSize::new(20, rows).with_cell_size(10, 20);
     let tall = (HISTORY_HEADROOM + 20) as u16;
-    let mut emulator = Emulator::new(size(tall), 1000, Palette::default());
+    // The grid keeping the whole scrollback: see `picture_printed_after`.
+    let mut emulator = Emulator::with_grid_lines(size(tall), 1000, 1000, Palette::default());
     let lines: String = (0..1100 + usize::from(tall))
         .map(|line| format!("log {line}\r\n"))
         .collect();

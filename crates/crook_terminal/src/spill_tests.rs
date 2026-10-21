@@ -468,3 +468,267 @@ fn a_synchronized_update_that_scrolls_past_the_headroom_loses_no_line() {
     let (rows, _) = twins.spilling.harvest_rows(0, 1);
     assert_eq!("red 0\nblue 1", rows.to_text());
 }
+
+#[test]
+fn lines_printed_after_an_erase_in_the_same_read_are_kept() {
+    // `clear` and Claude Code's redraw erase the scrollback and print on in
+    // one write, and a pty hands the whole of it over in one read: the
+    // erase is read before every line after it, and drops only what came
+    // before it.
+    let lines = || output(1000, 1100);
+    let shapes = [
+        ("CSI 3 J", format!("\x1b[H\x1b[2J\x1b[3J{}", lines())),
+        ("ESC c", format!("\x1bc{}", lines())),
+        (
+            "a synchronized redraw",
+            format!("\x1b[?2026h\x1b[H\x1b[2J\x1b[3J{}\x1b[?2026l", lines()),
+        ),
+    ];
+    for (shape, bytes) in shapes {
+        let mut twins = Twins::new(1000);
+        twins.feed(output(0, 80));
+        twins.feed(&bytes);
+        twins.alike(&format!("after {shape}"));
+        let (rows, _) = twins.spilling.harvest_rows(0, 0);
+        assert!(
+            rows.to_text().starts_with("line 1000"),
+            "{shape}: the scrollback starts at {:?}",
+            rows.to_text()
+        );
+    }
+}
+
+#[test]
+fn a_taller_or_shorter_screen_leaves_a_view_in_the_spilled_rows_where_it_was() {
+    let mut twins = Twins::new(1000);
+    twins.feed(output(0, 120));
+    twins.scroll(40);
+    twins.alike("scrolled up");
+    for rows in [8, 3, 5, 9, 2] {
+        twins.resize(COLUMNS, rows);
+        twins.alike(&format!("at {rows} rows"));
+    }
+}
+
+#[test]
+fn a_view_in_the_spilled_rows_is_where_it_was_after_a_full_screen_program() {
+    let mut twins = Twins::new(1000);
+    twins.feed(output(0, 120));
+    twins.scroll(40);
+    twins.alike("scrolled up");
+    twins.feed("\x1b[?1049h\x1b[Hvim");
+    twins.alike("under vim");
+    twins.feed("\x1b[?1049l");
+    twins.alike("after vim");
+}
+
+#[test]
+fn a_column_change_leaves_a_view_in_the_spilled_rows_on_the_line_it_showed() {
+    let mut emulator =
+        Emulator::with_grid_lines(TerminalSize::new(30, 5), 1000, GRID, Palette::default());
+    let lines: String = (0..200)
+        .map(|n| format!("entry {n} {}\r\n", "x".repeat(n % 40)))
+        .collect();
+    emulator.advance(lines.as_bytes());
+    for (scroll, columns) in [(60, 17), (30, 41), (90, 23), (45, 30)] {
+        emulator.scroll_to_bottom();
+        emulator.scroll_lines(scroll);
+        let before = emulator.snapshot().text();
+        let first = before.lines().find(|line| line.starts_with("entry"));
+        let Some(first) = first.and_then(|line| line.split(' ').nth(1)) else {
+            continue;
+        };
+        let first = format!("entry {first} ");
+        emulator.resize(TerminalSize::new(columns, 5));
+        let after = emulator.snapshot();
+        assert!(
+            after.display_offset > emulator.term.grid().history_size(),
+            "at {columns} columns the view left the spilled rows"
+        );
+        assert!(
+            after.text().contains(&first),
+            "at {columns} columns the view moved off {first:?}: {:?}, was {before:?}",
+            after.text()
+        );
+    }
+}
+
+/// Log lines the way a build or a server prints them: a timestamp, a
+/// coloured level, and a message, in pty-sized reads.
+fn log_reads(lines: usize) -> Vec<Vec<u8>> {
+    let mut text = Vec::new();
+    for n in 0..lines {
+        let level = if n % 5 == 0 {
+            "\x1b[33mWARN\x1b[0m"
+        } else {
+            "\x1b[32mINFO\x1b[0m"
+        };
+        text.extend_from_slice(
+            format!(
+                "2026-10-21T12:{:02}:{:02}Z {level} crook::server: request {n} handled in {}ms\r\n",
+                n / 60 % 60,
+                n % 60,
+                n % 97
+            )
+            .as_bytes(),
+        );
+    }
+    text.chunks(4096).map(<[u8]>::to_vec).collect()
+}
+
+/// Release-mode timings, for the pull request:
+/// `cargo test --release -p crook_terminal --lib bench_ -- --ignored --nocapture`.
+#[test]
+#[ignore = "a benchmark; run it in release mode"]
+fn bench_feeding_and_resizing_a_long_open_block() {
+    use std::time::Instant;
+    let reads = log_reads(200_000);
+    for columns in [80, 200] {
+        let size = TerminalSize::new(columns, 50);
+        for (name, grid) in [("grid keeps all", 10_000), ("spilling", GRID_LINES)] {
+            let mut best = f64::MAX;
+            for _ in 0..3 {
+                let mut emulator =
+                    Emulator::with_grid_lines(size, 10_000, grid, Palette::default());
+                let start = Instant::now();
+                for read in &reads {
+                    emulator.advance(read);
+                }
+                best = best.min(start.elapsed().as_secs_f64() * 1000.);
+            }
+            println!("feed 200k lines at {columns} columns, {name}: {best:.0} ms");
+        }
+    }
+    for (name, grid) in [("grid keeps all", 12_000), ("spilling", GRID_LINES)] {
+        let size = TerminalSize::new(200, 50);
+        let mut emulator = Emulator::with_grid_lines(size, 12_000, grid, Palette::default());
+        for read in log_reads(12_100) {
+            emulator.advance(&read);
+        }
+        let start = Instant::now();
+        for step in 0..40u16 {
+            emulator.resize(TerminalSize::new(200 - step % 2, 50));
+        }
+        println!(
+            "column change at 12k rows x 200, {name}: {:.2} ms each",
+            start.elapsed().as_secs_f64() * 1000. / 40.
+        );
+    }
+}
+
+#[test]
+fn a_column_change_moves_no_more_than_the_headroom_up_into_the_spilled_rows() {
+    // One line folded over far more rows than the grid's share, so its head
+    // is spilled and its rest is the grid's whole history: what a resize
+    // moves up to the head is bounded, and the line is cut there.
+    let mut emulator =
+        Emulator::with_grid_lines(TerminalSize::new(10, 5), 10_000, 1000, Palette::default());
+    emulator.advance("x".repeat(10 * 2000).as_bytes());
+    let (spilled, grid) = (emulator.blocks.spilled().rows(), emulator.grid_history());
+    assert!(
+        spilled > 0 && grid >= 1000,
+        "the premise: {spilled} spilled, {grid} in the grid"
+    );
+    emulator.resize(TerminalSize::new(9, 5));
+    let moved = emulator.blocks.spilled().rows() as i64 - (spilled * 10).div_ceil(9) as i64;
+    assert!(
+        moved <= (crate::blocks::HISTORY_HEADROOM * 10).div_ceil(9) as i64 + 1,
+        "{moved} rows moved up"
+    );
+}
+
+/// Ten thousand rows of what an agent's session prints: prose wrapped at
+/// the pane, coloured tool calls, box-drawn panels and diff lines.
+fn agent_session(rows: usize) -> String {
+    let mut out = String::new();
+    for n in 0..rows {
+        match n % 6 {
+            0 => out.push_str(&format!(
+                "\x1b[38;5;174m●\x1b[0m \x1b[1mBash\x1b[0m(cargo test -p crook_terminal spill {n})\r\n"
+            )),
+            1 => out.push_str("  ⎿  \x1b[2mRunning 461 tests … ok\x1b[0m\r\n"),
+            2 => out.push_str(&format!(
+                "\x1b[38;5;246m╭{}╮\x1b[0m\r\n",
+                "─".repeat(60)
+            )),
+            3 => out.push_str(&format!(
+                "\x1b[48;5;22m+ let spilled = self.blocks.spilled_rows(&self.term); // {n}\x1b[0m\r\n"
+            )),
+            4 => out.push_str(&format!(
+                "The grid keeps a cell of 24 bytes for every column of every row, printed into or not, row {n}.\r\n"
+            )),
+            _ => out.push_str("\r\n"),
+        }
+    }
+    out
+}
+
+/// This process's resident set, in KiB.
+fn rss_kib() -> usize {
+    std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|statm| statm.split_whitespace().nth(1)?.parse::<usize>().ok())
+        .map_or(0, |pages| pages * 4)
+}
+
+/// Resident memory of ten 200x50 panes, each one open block of ten
+/// thousand agent rows. One configuration a process, for the allocator's
+/// sake:
+/// `cargo test --release -p crook_terminal --lib bench_rss -- --ignored --nocapture --exact emulator::spill_tests::bench_rss_spilling`
+/// and the same with `bench_rss_grid_keeps_all`.
+fn rss_of_ten_panes(grid: usize) {
+    let session = agent_session(10_000);
+    let before = rss_kib();
+    let panes: Vec<Emulator> = (0..10)
+        .map(|_| {
+            let mut emulator = Emulator::with_grid_lines(
+                TerminalSize::new(200, 50),
+                10_000,
+                grid,
+                Palette::default(),
+            );
+            for read in session.as_bytes().chunks(4096) {
+                emulator.advance(read);
+            }
+            emulator
+        })
+        .collect();
+    let after = rss_kib();
+    let spilled: usize = panes
+        .iter()
+        .map(|pane| pane.blocks.spilled().memory_usage())
+        .sum();
+    let rows: usize = panes.iter().map(|pane| pane.blocks.spilled().rows()).sum();
+    println!(
+        "grid {grid}: {:.1} MiB a pane resident; spilled {} rows at {} B a row",
+        (after - before) as f64 / 1024. / 10.,
+        rows / 10,
+        spilled.checked_div(rows).unwrap_or(0)
+    );
+}
+
+#[test]
+#[ignore = "a measurement; run it in release mode, alone"]
+fn bench_rss_spilling() {
+    rss_of_ten_panes(GRID_LINES);
+}
+
+#[test]
+#[ignore = "a measurement; run it in release mode, alone"]
+fn bench_rss_grid_keeps_all() {
+    rss_of_ten_panes(10_000);
+}
+
+#[test]
+fn a_picture_spilled_with_its_rows_stays_on_them_through_a_long_read() {
+    let mut twins = Twins::new(1000);
+    twins.feed(output(0, 30));
+    twins.feed(picture());
+    twins.feed("\r\nBELOW\r\n");
+    let read: String = (0..crate::blocks::HISTORY_HEADROOM * 3)
+        .map(|line| format!("more {line}\r\n"))
+        .collect();
+    twins.feed(&read);
+    twins.alike("after the read");
+    assert_eq!(1, twins.spilling.live_block().images.len());
+}

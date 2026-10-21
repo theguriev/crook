@@ -1171,27 +1171,45 @@ the open block and nothing else. Three answers depend on that one invariant:
   `\e[3A` leaves behind — can be harvested with the block that printed them, because nothing
   else can have put anything there.
 
-**The open block keeps its scrollback the way a finished one does.** The grid itself holds a
-thousand lines of history (`GRID_LINES`); what the cut takes off its old end is spilled, into
-a `BlockRows` beside the open block (`BlockTracker::spilled`), up to the scrollback. An agent
-such as Claude Code is one command for its whole session, and a shell with no integration one
-block for its whole life, so without this their scrollback sat in alacritty's cells — 24 bytes
-for every column of every row, printed into or not: 29 MiB a pane at 120 columns, 46 MiB at
-200, for as long as the session ran. Spilled, the same ten thousand rows are their text and a
-run of colours each. Everything that reads the scrollback reads both halves as one: the
-emulator's view goes on up past the grid's oldest line into the spilled rows, a snapshot of it
-materialises them through the same `materialise` the list paints from, `Terminal::harvest_rows`
-— what a copy and the find bar read — numbers them first, and the block takes them when it
-finishes. An anchor follows its line over both, since the spilled rows are exactly the lines
-the cut counted. A column change lays the spilled rows out again as alacritty reflows its own
-(`BlockRows::rewrapped`), after the grid's oldest rows that go on a line whose head was spilled
-are moved up to it, so that no folded line is cut at the seam. Two things differ from rows in
-the grid: a spilled row keeps the colours it was cut with when the theme changes, as a finished
-block's do, and the blank rows a block's screen opened on above its first row are not spilled,
-so they no longer show above it when the view is scrolled to the top. Alacritty is still allowed
-the whole scrollback and its headroom: output is fed in slices that cannot scroll past the
-grid's share, but a synchronized update let go of reaches the grid at once, and what it scrolls
-in past the grid's share is spilled rather than evicted uncounted.
+**The open block keeps its scrollback the way a finished one does.** The grid itself holds five
+hundred lines of history (`GRID_LINES`); what the cut takes off its old end is spilled, into a
+`Spill` beside the open block (`BlockTracker::spilled`): `BlockRows` in pieces of up to 512
+rows, so that the oldest go a piece at a time once the scrollback is full, and nothing kept
+moves. An agent such as Claude Code is one command for its whole session, and a shell with no
+integration one block for its whole life, so without this their scrollback sat in alacritty's
+cells — 24 bytes for every column of every row, printed into or not. Measured with ten 200x50
+panes each printing ten thousand rows of an agent's session: 46.9 MiB a pane resident with the
+grid keeping all of it, 6.3 MiB spilling, the spilled rows at about 110 bytes each (text, a few
+runs of colour, three offsets). Alacritty grows its storage a thousand rows at a time, so the
+grid's share below that saves nothing more.
+
+Everything that reads the scrollback reads both halves as one: the emulator's view goes on up
+past the grid's oldest line into the spilled rows, a snapshot of it materialises them through
+the same `materialise` the list paints from, `Terminal::harvest_rows` — what a copy and the
+find bar read — numbers them first, and the block takes them when it finishes. An anchor
+follows its line over both, since the spilled rows are exactly the lines the cut counted. A
+resize keeps a view standing in them where it was: a taller screen takes it down by the rows
+it added, as alacritty does its own, and a column change keeps it on the row at its top. A
+column change lays the spilled rows out again as alacritty reflows its own
+(`BlockRows::rewrapped_tracking`), a run at a time for a line with no double-width or zero-width
+character, after up to 256 of the grid's oldest rows that go on a line whose head was spilled
+are moved up to it, so that a folded line is not cut at the seam. An erase of the scrollback
+or a reset ends the watcher's piece, so the spill is dropped before the lines after it in the
+same read are fed.
+
+Cutting is the cost. A row is harvested where it is cut, straight into the last piece: the
+cells after the last one printed into are counted rather than read, and a run of cells
+painted alike is resolved once. Output is fed in slices that may take the grid 256 lines past
+its share before the cut. Feeding 200,000 log lines in 4 KiB reads (release build): 206 ms
+with the grid keeping all of it, 248 ms spilling at 80 columns and 294 ms at 200, where the
+blank ends of wide rows are most of what is read. A column change at 12,000 rows of 200
+columns: 0.26 ms keeping all, 0.94 ms spilling.
+
+Two things differ from rows in the grid: a spilled row keeps the colours it was cut with when
+the theme changes, as a finished block's do, and the blank rows a block's screen opened on
+above its first row are not spilled, so they no longer show above it when the view is scrolled
+to the top. Alacritty is still allowed the whole scrollback and its headroom, so a synchronized
+update let go of at once is spilled rather than evicted uncounted.
 
 **Two surfaces, one function.** `pane_surface::of` answers both "what draws the output?" and
 "is there a composer?" from one `Snapshot`, and every element that needs either asks it rather

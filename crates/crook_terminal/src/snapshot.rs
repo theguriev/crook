@@ -41,8 +41,8 @@ use alacritty_terminal::vte::ansi::{
 };
 
 use crate::blocks::LiveBlock;
-use crate::harvest::BlockRows;
 use crate::mouse::MouseModes;
+use crate::spill::Spill;
 
 /// How much of a colour survives the dim attribute.
 ///
@@ -761,7 +761,7 @@ fn cursor_cell_of<T>(term: &Term<T>, rows: usize, display_offset: usize) -> Opti
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Spilled<'a> {
     /// The rows, oldest first, ending right above the grid's oldest line.
-    pub(crate) rows: &'a BlockRows,
+    pub(crate) rows: &'a Spill,
     /// How many lines above the grid's own view the view stands. Never more
     /// than there are rows, and nothing unless the grid's own view is at its
     /// oldest line.
@@ -770,7 +770,7 @@ pub(crate) struct Spilled<'a> {
 
 impl<'a> Spilled<'a> {
     /// The rows, with the view at the grid's own.
-    pub(crate) fn none(rows: &'a BlockRows) -> Self {
+    pub(crate) fn none(rows: &'a Spill) -> Self {
         Self { rows, above: 0 }
     }
 }

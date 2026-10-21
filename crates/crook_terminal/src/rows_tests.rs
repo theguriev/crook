@@ -32,7 +32,7 @@ fn both(bytes: &str, rows: usize, columns: usize) -> (Snapshot, BlockRows) {
         None,
         LiveBlock::default(),
         false,
-        crate::snapshot::Spilled::none(&BlockRows::default()),
+        crate::snapshot::Spilled::none(&crate::spill::Spill::default()),
     );
     let stored = harvest(&term, &palette, 0, rows as i32 - 1);
     (snapshot, stored)
