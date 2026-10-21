@@ -708,6 +708,16 @@ struct View {
     scrolled: u64,
 }
 
+/// Where a view stood across a column change: see
+/// [`Emulator::keep_view_through_resize`].
+#[derive(Clone, Copy)]
+enum Kept {
+    /// At the top of the view, this row of the spilled rows.
+    Spilled(usize),
+    /// This many lines above the live output.
+    Offset(usize),
+}
+
 /// What was typed ahead of a shell away from its prompt, counted the way it
 /// will read it back: one prompt for each line ended with an Enter, which it
 /// runs, and one for the start of a line after them, which it keeps. See
@@ -773,6 +783,14 @@ pub struct Emulator {
     /// rows the open block spilled out of it: see [`Self::display_offset`].
     /// Meant only while the grid's own view is at its oldest line.
     above: usize,
+    /// Whether the shell's view is to come back to its grid's oldest line
+    /// when its screen does: the reflow of a column change under a
+    /// full-screen program moved it, and [`Self::above`] is measured from
+    /// there. See [`Self::resize`].
+    view_pinned: bool,
+    /// The least of the scrollback the grid keeps, [`GRID_LINES`] unless a
+    /// test says: see [`Self::grid_share`].
+    grid_base: usize,
     /// Whether the synchronized update `parser` is holding switches screens,
     /// which the watcher saw go by: see [`Self::switch_screens`].
     switch_held: bool,
@@ -841,7 +859,10 @@ impl Emulator {
         grid_lines: usize,
         palette: Palette,
     ) -> Self {
-        let grid_lines = grid_lines.min(scrollback_lines);
+        let grid_lines = grid_lines
+            .max(2 * usize::from(size.rows))
+            .min(scrollback_lines);
+        let grid_base = grid_lines;
         let proxy = EventProxy::default();
         let config = Config {
             // Room past the scrollback for a slice of output to scroll into,
@@ -888,6 +909,8 @@ impl Emulator {
             scrollback_lines,
             grid_lines,
             above: 0,
+            view_pinned: false,
+            grid_base,
             switch_held: false,
             background_held: false,
             switched_from: None,
@@ -1243,8 +1266,17 @@ impl Emulator {
     /// The batch is what a slice may scroll the grid past its share before
     /// the blocks cut it back and spill what they cut: a read of a few
     /// kilobytes is one slice and one cut, rather than one of each for every
-    /// few lines of it. Under it the grid's own rows stay few: the batch is
-    /// what a slice can add, at a line a byte, and is cut back at its end.
+    /// few lines of it.
+    ///
+    /// The count is of bytes, and holds for output that scrolls a line a
+    /// byte at most: text, newlines, and every escape but a few. Those few
+    /// scroll a screenful or more in a handful of bytes — `CSI n S`, an erase
+    /// of a screen with something on it, which alacritty pushes into the
+    /// history, lines deleted at the top of a scroll region — so a slice of
+    /// them can take the history past alacritty's room, and what it evicts
+    /// there goes uncounted. That is caught after the slice rather than
+    /// prevented, by [`BlockTracker::trim_history`]: the history is full,
+    /// and the spilled rows, which no longer end where it begins, go.
     ///
     /// On the alternate screen the shell's history cannot be read. It was
     /// held at its length right before the shell's screen went, and the
@@ -1598,15 +1630,31 @@ impl Emulator {
         if !geometry_changed {
             return;
         }
+        let alt_screen = self.term.mode().contains(TermMode::ALT_SCREEN);
+        // The grid's share follows the screen, so that a taller one finds
+        // its rows in the history: see [`Self::grid_share`].
+        self.grid_lines = self.grid_share(size.rows);
         // Where the reader stands, kept across the resize the way alacritty
-        // keeps its own view: see [`Self::keep_view_through_resize`].
+        // keeps its own view: see [`Self::keep_view_through_resize`]. A line
+        // folded across the seam is gathered up into the spill first, which
+        // can take the rows the view is on with it.
         let offset = self.display_offset();
-        let above = self.above_grid();
-        let spilled = self.blocks.spilled_rows(&self.term);
         if columns_changed {
             self.blocks
                 .gather_split_line(&mut self.term, &self.palette, self.scrollback_lines);
+            if !alt_screen {
+                self.set_view(offset);
+            }
         }
+        // Under a full-screen program the shell's view is out of sight, and
+        // stands where it stood when the program came up.
+        let (above, spilled) = if alt_screen {
+            (self.above, self.blocks.spilled().rows())
+        } else {
+            (self.above_grid(), self.blocks.spilled_rows(&self.term))
+        };
+        let grid_line = (columns_changed && !alt_screen && offset > 0 && above == 0)
+            .then(|| self.line_at_view_top(offset));
         self.term.resize(size);
         // A column change reflows the scrollback, which moves every line the
         // open block is anchored against; a row change does not, and the
@@ -1614,14 +1662,26 @@ impl Emulator {
         // pulls back out of the history. Afterwards, because the open block's
         // first row is then re-found on the reflowed grid rather than guessed
         // at. The rows the block spilled out of the grid are laid out again
-        // first, as the grid has just laid out its own, and a view standing
-        // in them stays on the row at its top.
-        let mut top_row = None;
+        // first, as the grid has just laid out its own.
+        let mut kept = None;
         if columns_changed {
             let blank = self.blank();
             let track = (above > 0).then(|| spilled - above);
-            top_row = self.blocks.rewrap_spill(self.term.columns(), blank, track);
-            self.above = 0;
+            let top_row = self.blocks.rewrap_spill(self.term.columns(), blank, track);
+            if alt_screen {
+                // The shell's view comes back to its oldest grid line, and
+                // stands as far above it as the row it was on now is.
+                self.above = top_row.map_or(0, |row| self.blocks.spilled().rows() - row);
+                self.view_pinned = self.above > 0;
+            } else {
+                self.above = 0;
+                kept = top_row.map(Kept::Spilled).or_else(|| {
+                    grid_line
+                        .flatten()
+                        .and_then(|(line, rows)| self.offset_of_line(line, rows))
+                        .map(Kept::Offset)
+                });
+            }
             self.blocks.reflowed(&self.term);
         }
         // A shorter screen pushes its top rows into the history, and a
@@ -1631,9 +1691,83 @@ impl Emulator {
             self.blocks.rows_changed(&self.term, shortened);
         }
         self.settle_history();
-        self.keep_view_through_resize(offset, rows_added, columns_changed, top_row);
+        self.keep_view_through_resize(offset, rows_added, columns_changed, kept);
         self.dirty = true;
         self.drain();
+    }
+
+    /// How much of the scrollback the grid itself keeps on a screen `rows`
+    /// tall: [`GRID_LINES`] of it, or twice the screen when that is more —
+    /// a taller screen takes its new rows out of the history, as many as it
+    /// grows by, and there have to be that many there for it to find rather
+    /// than blank rows while the lines they were are spilled. A screen that
+    /// more than doubles past it at once still finds blank rows: see the
+    /// architecture notes.
+    fn grid_share(&self, rows: u16) -> usize {
+        self.grid_base
+            .max(2 * usize::from(rows))
+            .min(self.scrollback_lines)
+    }
+
+    /// Which line of the grid's history the top of a view `offset` lines up
+    /// is on, counted in lines from the history's oldest, and how many rows
+    /// down that line it is. `None` when the top is not in the history.
+    fn line_at_view_top(&self, offset: usize) -> Option<(usize, usize)> {
+        let grid = self.term.grid();
+        let history = grid.history_size() as i32;
+        let top = -(offset as i32);
+        if top < -history || top >= 0 {
+            return None;
+        }
+        let last = alacritty_terminal::index::Column(grid.columns().saturating_sub(1));
+        let folds = |line: i32| {
+            grid[alacritty_terminal::index::Line(line)][last]
+                .flags
+                .contains(alacritty_terminal::term::cell::Flags::WRAPLINE)
+        };
+        let (mut lines, mut down) = (0, 0);
+        for line in -history..=top {
+            if line == -history || !folds(line - 1) {
+                lines += 1;
+                down = 0;
+            } else {
+                down += 1;
+            }
+        }
+        Some((lines, down))
+    }
+
+    /// The offset that puts the top of the view on the `line`th line of the
+    /// grid's history, as [`Self::line_at_view_top`] counted it, `down` rows
+    /// into it or at its last row: the same line after a reflow, which keeps
+    /// lines and changes only the rows they are folded over.
+    fn offset_of_line(&self, line: usize, down: usize) -> Option<usize> {
+        let grid = self.term.grid();
+        let history = grid.history_size() as i32;
+        let newest = grid.screen_lines() as i32 - 1;
+        let last = alacritty_terminal::index::Column(grid.columns().saturating_sub(1));
+        let folds = |row: i32| {
+            grid[alacritty_terminal::index::Line(row)][last]
+                .flags
+                .contains(alacritty_terminal::term::cell::Flags::WRAPLINE)
+        };
+        let mut lines = 0;
+        for row in -history..=newest {
+            if row == -history || !folds(row - 1) {
+                lines += 1;
+                if lines == line {
+                    let mut top = row;
+                    for _ in 0..down {
+                        if top >= newest || !folds(top) {
+                            break;
+                        }
+                        top += 1;
+                    }
+                    return Some((-top).max(0) as usize);
+                }
+            }
+        }
+        None
     }
 
     /// Puts the view back where a resize found it, over the grid's history
@@ -1641,27 +1775,29 @@ impl Emulator {
     /// own history alone.
     ///
     /// A taller screen takes the view down by the rows it added, as alacritty
-    /// does, and a shorter one leaves it standing as many lines up. A view
-    /// standing in the spilled rows across a column change stays on the row
-    /// at its top, `top_row` as [`BlockTracker::rewrap_spill`] laid it out:
-    /// on the same line, at the start of the part of it that row held. One
-    /// in the grid across a column change, and any under a full-screen
-    /// program, is alacritty's.
+    /// does, and a shorter one leaves it standing as many lines up. Across a
+    /// column change the view stays on the line at its top, wherever that
+    /// is: a row of the spilled rows as [`BlockTracker::rewrap_spill`] laid
+    /// it out, at the start of the part of the line that row held, or a line
+    /// of the grid's history, found again by counting lines from its oldest.
+    /// Under a full-screen program the shell's view is out of sight, and is
+    /// alacritty's but for the rows above the grid: see [`Self::resize`].
     fn keep_view_through_resize(
         &mut self,
         offset: usize,
         rows_added: u16,
         columns_changed: bool,
-        top_row: Option<usize>,
+        kept: Option<Kept>,
     ) {
         if self.term.mode().contains(TermMode::ALT_SCREEN) || offset == 0 {
             return;
         }
-        let target = match top_row {
-            Some(row) => {
+        let target = match kept {
+            Some(Kept::Spilled(row)) => {
                 let spilled = self.blocks.spilled_rows(&self.term);
                 self.term.grid().history_size() + spilled.saturating_sub(row)
             }
+            Some(Kept::Offset(offset)) => offset,
             None if columns_changed => return,
             None => offset.saturating_sub(usize::from(rows_added)),
         };
@@ -1690,7 +1826,9 @@ impl Emulator {
     /// Returns the viewport to the live output.
     pub fn scroll_to_bottom(&mut self) {
         self.term.scroll_display(Scroll::Bottom);
-        self.above = 0;
+        if !self.term.mode().contains(TermMode::ALT_SCREEN) {
+            self.above = 0;
+        }
         self.dirty = true;
         self.drain();
     }
@@ -1733,7 +1871,11 @@ impl Emulator {
                 i32::try_from(delta).unwrap_or(if delta < 0 { i32::MIN } else { i32::MAX }),
             ));
         }
-        self.above = (offset - in_grid).min(self.blocks.spilled_rows(&self.term));
+        // Under a full-screen program the rows above the grid are the
+        // shell's, and so is where its view stands in them.
+        if !self.term.mode().contains(TermMode::ALT_SCREEN) {
+            self.above = (offset - in_grid).min(self.blocks.spilled_rows(&self.term));
+        }
     }
 
     /// A cell nothing was ever printed into, in the colours the grid draws
@@ -2070,11 +2212,15 @@ impl Emulator {
         // Over a switch of screens the grid on show is another one, whose
         // view is its own, and the shell's view is left where it stood, the
         // rows above its grid included: alacritty keeps the shell's offset
-        // for when its screen is back, and this keeps the rest.
+        // for when its screen is back, and this keeps the rest — under the
+        // program too, where [`Self::set_view`] leaves them alone.
         if now.alt_screen != before.alt_screen {
             if in_grid > grid_history {
                 let down = i32::try_from(in_grid - grid_history).unwrap_or(i32::MAX);
                 self.term.scroll_display(Scroll::Delta(-down));
+            }
+            if !now.alt_screen && std::mem::take(&mut self.view_pinned) && self.above > 0 {
+                self.term.scroll_display(Scroll::Top);
             }
             return;
         }

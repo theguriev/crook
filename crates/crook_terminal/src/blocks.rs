@@ -48,11 +48,14 @@
 //! of it, [`GRID_LINES`], after every slice of output and counts what it cut.
 //! The size and that count together are what an anchor follows, and they are
 //! exact for as long as nothing scrolls the history past the whole
-//! scrollback and the headroom before a cut — which no slice of output does,
+//! scrollback and the headroom before a cut — which a slice of text cannot,
 //! since the emulator feeds none longer than the room left above the grid's
-//! share. A synchronized update let go of can, by scrolling more lines at
-//! once than the scrollback holds. Then every anchor is off by the lines
-//! nothing counted, and the open block's pictures go. Under a full-screen program the shell's
+//! share and text scrolls a line a byte at most. A synchronized update let
+//! go of can, and so can a slice of the few escapes that scroll a screenful
+//! in a handful of bytes, by scrolling more lines at once than the
+//! scrollback holds. Then every anchor is off by the lines nothing counted,
+//! the open block's pictures go, and so do its spilled rows, which no
+//! longer end where the history begins. Under a full-screen program the shell's
 //! history can be neither read nor cut back, so the emulator feeds a switch
 //! of screens apart from the output before it, and the history is cut back
 //! on both sides of the switch. What can still move it out of sight is
@@ -172,8 +175,9 @@ pub(crate) const HISTORY_HEADROOM: usize = 256;
 /// one command for its whole session, and a pane with no shell integration
 /// one block for its whole life. Spilled, the same rows are their text and
 /// a run or so of colours each, the way a finished block keeps its own. So
-/// the grid holds five hundred, ten screens of a tall pane, and the rest of
-/// the scrollback is spilled.
+/// the grid holds five hundred, ten screens of a tall pane — or twice the
+/// screen, for a screen taller than that, so that growing finds its rows in
+/// the history — and the rest of the scrollback is spilled.
 ///
 /// Alacritty adds rows to its storage a thousand at a time and gives them
 /// back only past a thousand spare, so what a pane holds in the grid is this,
@@ -1038,6 +1042,11 @@ pub(crate) struct BlockTracker {
     /// long-lived agent keeps open for a whole session has its scrollback
     /// here rather than there, at a few percent of the cost.
     spill: Spill,
+    /// Whether the shell's history may have gone past alacritty's room under
+    /// a full-screen program and been pulled back out of the end by a
+    /// taller screen since, which hides it from [`Self::trim_history`]: a
+    /// synchronized update that switched screens, and then a taller pane.
+    lost_uncounted: bool,
 }
 
 impl BlockTracker {
@@ -1070,6 +1079,7 @@ impl BlockTracker {
             history_unsure: false,
             last_ignored: None,
             spill: Spill::default(),
+            lost_uncounted: false,
         }
     }
 
@@ -1124,9 +1134,10 @@ impl BlockTracker {
     /// that the whole line is in one place to be laid out again: see
     /// [`Self::rewrap_spill`].
     ///
-    /// As far as the history goes, and no further than [`HISTORY_HEADROOM`]
-    /// rows: a line folded past either keeps the rest in the grid, and is cut
-    /// where the two meet, rather than have a resize copy a whole history.
+    /// As far as the history goes, which is at most the grid's share of the
+    /// scrollback and its headroom: a line folded past the whole of it, onto
+    /// the screen, keeps the rest there, and is cut where the two meet. A
+    /// line that long is a few hundred rows, which a resize reads once.
     pub(crate) fn gather_split_line<T>(
         &mut self,
         term: &mut Term<T>,
@@ -1146,7 +1157,7 @@ impl BlockTracker {
         let last = Column(grid.columns().saturating_sub(1));
         let oldest = -(history as i32);
         let mut cut = 0;
-        while cut < history.min(HISTORY_HEADROOM) {
+        while cut < history {
             let folds = grid[Line(oldest + cut as i32)][last]
                 .flags
                 .contains(Flags::WRAPLINE);
@@ -1734,8 +1745,20 @@ impl BlockTracker {
         // scrollback, which a synchronized update can scroll the grid's
         // history up to before anything cuts it back.
         let limit = scrollback_lines.saturating_add(HISTORY_HEADROOM);
-        if history >= limit {
+        if history >= limit || std::mem::take(&mut self.lost_uncounted) {
             self.open.pictures.clear();
+            // Alacritty has evicted lines off the grid's old end that nothing
+            // spilled, so the spilled rows no longer end where the grid
+            // begins: kept, they would be the scrollback with a hole in it.
+            // They go, and what is left is the history alacritty kept, at
+            // least the whole scrollback long, all of it the open block's —
+            // which starts above the oldest line of it, as far as anything
+            // can tell.
+            if !self.spill.is_empty() {
+                self.spill.clear();
+                let oldest = -(history as i32);
+                self.open.top = Anchor::at(oldest, 0, term, self.trimmed);
+            }
         }
         if history > grid_lines {
             let cut = history - grid_lines;
@@ -1830,9 +1853,14 @@ impl BlockTracker {
     /// lost, as a column change does, and a taller one takes them when an
     /// update may have scrolled the shell's history out of sight: see
     /// [`Self::update_switched_screens`].
+    ///
+    /// The open block's spilled rows go too, in the one case a taller
+    /// screen can hide that the history went past alacritty's room: see
+    /// [`Self::lost_uncounted`].
     pub(crate) fn rows_changed<T>(&mut self, term: &Term<T>, shorter: bool) {
         if term.mode().contains(TermMode::ALT_SCREEN) && (shorter || self.history_unsure) {
             self.open.pictures.clear();
+            self.lost_uncounted |= !shorter;
         }
     }
 

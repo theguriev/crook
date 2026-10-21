@@ -405,12 +405,19 @@ fn a_slice_and_a_dropped_front_keep_the_rows_they_name() {
 fn rows_laid_out_from_their_runs_are_the_rows_laid_out_a_cell_at_a_time() {
     // Coloured runs across folds, a fold whose row ends in spaces, a
     // coloured erase past the text, inverse and bold runs, non-ASCII
-    // single-width text, and lines with nothing in them, at widths that cut
-    // inside runs and between them.
+    // single-width text, tabs, lines ending exactly at the edge, and lines
+    // with nothing in them — and, laid out a cell at a time whichever way,
+    // double-width characters and a variation selector — at widths that cut
+    // inside runs and between them. Each row is tracked to where it goes.
     let text = "\x1b[31mred\x1b[0m and \x1b[1;44mbold on blue\x1b[0m and plain text going on\r\n\
         ends in spaces          \r\n\
         \x1b[7minverse\x1b[0m \x1b[42m\x1b[Kgreen tail\x1b[0m\r\n\
         ─── box ─── drawing ─── café ── naïve ─────────────────────\r\n\
+        tab\tthen\ttabs\tto the\tedge\r\n\
+        0123456\r\n\
+        0123456789abc\r\n\
+        01234567890123456789\r\n\
+        wide 日本語 and ❤\u{fe0f} heart\r\n\
         \r\n\
         \r\n\
         last";
@@ -418,15 +425,22 @@ fn rows_laid_out_from_their_runs_are_the_rows_laid_out_a_cell_at_a_time() {
         let rows = laid_out(from, from, text);
         for to in [1, 2, 5, 7, 12, 13, 19, 20, 33, 80] {
             assert_eq!(
-                rows.rewrapped_by_cells(to, blank()),
+                rows.rewrapped_by_cells(to, blank(), None).0,
                 rows.rewrapped(to, blank()),
                 "from {from} columns to {to}"
             );
+            for track in 0..rows.rows() {
+                assert_eq!(
+                    rows.rewrapped_by_cells(to, blank(), Some(track)).1,
+                    rows.rewrapped_tracking(to, blank(), Some(track)).1,
+                    "row {track}, from {from} columns to {to}"
+                );
+            }
         }
         // And a store that ends inside a folded line.
         let head = rows.slice(0..2);
         assert_eq!(
-            head.rewrapped_by_cells(9, blank()),
+            head.rewrapped_by_cells(9, blank(), None).0,
             head.rewrapped(9, blank()),
             "the head of a line, from {from} columns"
         );

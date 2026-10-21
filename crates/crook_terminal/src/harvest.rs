@@ -510,8 +510,13 @@ impl BlockRows {
     /// Tests: [`Self::rewrapped_tracking`] a cell at a time on every line, which the
     /// way it lays out most lines has to agree with.
     #[cfg(test)]
-    pub(crate) fn rewrapped_by_cells(&self, columns: usize, blank: SnapshotCell) -> BlockRows {
-        self.rewrap(columns, blank, None, false).0
+    pub(crate) fn rewrapped_by_cells(
+        &self,
+        columns: usize,
+        blank: SnapshotCell,
+        track: Option<usize>,
+    ) -> (BlockRows, Option<usize>) {
+        self.rewrap(columns, blank, track, false)
     }
 
     /// Whether `rows` have no double-width character and no zero-width one.

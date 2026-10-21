@@ -31,9 +31,14 @@ struct Twins {
 
 impl Twins {
     fn new(scrollback: usize) -> Self {
+        Self::with_grid(scrollback, GRID)
+    }
+
+    /// Twins whose spilling one keeps `grid` lines in its grid.
+    fn with_grid(scrollback: usize, grid: usize) -> Self {
         let size = TerminalSize::new(COLUMNS, ROWS).with_cell_size(8, 16);
         Self {
-            spilling: Emulator::with_grid_lines(size, scrollback, GRID, Palette::default()),
+            spilling: Emulator::with_grid_lines(size, scrollback, grid, Palette::default()),
             whole: Emulator::with_grid_lines(size, scrollback, scrollback, Palette::default()),
         }
     }
@@ -48,6 +53,11 @@ impl Twins {
         self.whole.scroll_lines(delta);
     }
 
+    fn bottom(&mut self) {
+        self.spilling.scroll_to_bottom();
+        self.whole.scroll_to_bottom();
+    }
+
     fn resize(&mut self, columns: u16, rows: u16) {
         let size = TerminalSize::new(columns, rows).with_cell_size(8, 16);
         self.spilling.resize(size);
@@ -55,11 +65,11 @@ impl Twins {
     }
 
     /// Holds that nothing tells the two apart, and that the spilling one
-    /// keeps no more than [`GRID`] lines in its grid while doing it.
+    /// keeps no more than its share of lines in its grid while doing it.
     fn alike(&mut self, what: &str) {
         let grid = self.spilling.term.grid().history_size();
         assert!(
-            grid <= GRID,
+            grid <= self.spilling.grid_lines,
             "{what}: the grid holds {grid} lines of history"
         );
 
@@ -614,27 +624,28 @@ fn bench_feeding_and_resizing_a_long_open_block() {
             start.elapsed().as_secs_f64() * 1000. / 40.
         );
     }
-}
-
-#[test]
-fn a_column_change_moves_no_more_than_the_headroom_up_into_the_spilled_rows() {
-    // One line folded over far more rows than the grid's share, so its head
-    // is spilled and its rest is the grid's whole history: what a resize
-    // moves up to the head is bounded, and the line is cut there.
-    let mut emulator =
-        Emulator::with_grid_lines(TerminalSize::new(10, 5), 10_000, 1000, Palette::default());
-    emulator.advance("x".repeat(10 * 2000).as_bytes());
-    let (spilled, grid) = (emulator.blocks.spilled().rows(), emulator.grid_history());
-    assert!(
-        spilled > 0 && grid >= 1000,
-        "the premise: {spilled} spilled, {grid} in the grid"
-    );
-    emulator.resize(TerminalSize::new(9, 5));
-    let moved = emulator.blocks.spilled().rows() as i64 - (spilled * 10).div_ceil(9) as i64;
-    assert!(
-        moved <= (crate::blocks::HISTORY_HEADROOM * 10).div_ceil(9) as i64 + 1,
-        "{moved} rows moved up"
-    );
+    // A line of 51 KB, 256 rows at 200 columns, across the seam: the
+    // whole of its rest in the grid is gathered up on every column change.
+    for (name, grid) in [("grid keeps all", 12_000), ("spilling", GRID_LINES)] {
+        let size = TerminalSize::new(200, 50);
+        let mut emulator = Emulator::with_grid_lines(size, 12_000, grid, Palette::default());
+        for read in log_reads(12_000) {
+            emulator.advance(&read);
+        }
+        let line: String = (0..12_800).map(|n| format!("{:04}", n % 10_000)).collect();
+        emulator.advance(format!("{line}\r\n").as_bytes());
+        for read in log_reads(300) {
+            emulator.advance(&read);
+        }
+        let start = Instant::now();
+        for step in 0..40u16 {
+            emulator.resize(TerminalSize::new(200 - step % 2, 50));
+        }
+        println!(
+            "column change with a 51 KB line across the seam, {name}: {:.2} ms each",
+            start.elapsed().as_secs_f64() * 1000. / 40.
+        );
+    }
 }
 
 /// Ten thousand rows of what an agent's session prints: prose wrapped at
@@ -731,4 +742,201 @@ fn a_picture_spilled_with_its_rows_stays_on_them_through_a_long_read() {
     twins.feed(&read);
     twins.alike("after the read");
     assert_eq!(1, twins.spilling.live_block().images.len());
+}
+
+#[test]
+fn a_view_in_the_spilled_rows_outlasts_a_full_screen_program_of_many_reads() {
+    // vim draws over many reads, and the pane is resized under it.
+    let mut twins = Twins::new(1000);
+    twins.feed(output(0, 120));
+    twins.scroll(40);
+    twins.feed("\x1b[?1049h\x1b[Hvim");
+    for key in ["j", "jj", "\x1b[2;1Hdd", "y"] {
+        // A key typed into the pane takes the view on show to the bottom,
+        // and that is vim's.
+        twins.bottom();
+        twins.scroll(3);
+        twins.feed(key);
+        twins.alike(&format!("under vim, after {key:?}"));
+    }
+    twins.feed("\x1b[?1049l");
+    twins.alike("after vim");
+
+    // And across a column change under it, on the line it showed.
+    let mut emulator = twins.spilling;
+    emulator.scroll_to_bottom();
+    emulator.scroll_lines(40);
+    let before = emulator.snapshot().text();
+    let head = before
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split(' ')
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ");
+    emulator.advance(b"\x1b[?1049h\x1b[Hvim");
+    emulator.advance(b"j");
+    emulator.resize(TerminalSize::new(27, ROWS).with_cell_size(8, 16));
+    emulator.advance(b"j");
+    emulator.advance(b"\x1b[?1049l");
+    let after = emulator.snapshot();
+    assert!(
+        after.display_offset > emulator.grid_history(),
+        "the view left the spilled rows across a column change under vim"
+    );
+    assert!(
+        after.text().contains(&head),
+        "the view moved off {head:?} under vim: {:?}, was {before:?}",
+        after.text()
+    );
+}
+
+#[test]
+fn a_read_that_scrolls_the_screen_by_its_height_at_a_time_leaves_no_hole() {
+    // `CSI n S` scrolls a screenful in five bytes, and a slice is cut for
+    // a line a byte: a read of them can scroll the history past alacritty's
+    // room before anything cuts it back, and the lines it evicts were never
+    // spilled. The scrollback must not lose lines from its middle.
+    for (scrollback, rows) in [(5000, 50), (10_000, 100), (10_000, 200)] {
+        let size = TerminalSize::new(20, rows).with_cell_size(8, 16);
+        let mut spilling = Emulator::new(size, scrollback, Palette::default());
+        let lines: String = (0..1200).map(|n| format!("L{n}\r\n")).collect();
+        spilling.advance(lines.as_bytes());
+        // As many as one slice of output holds.
+        let scroll = format!("\x1b[{}S", rows - 1);
+        let burst = scroll.repeat(500 / scroll.len());
+        spilling.advance(burst.as_bytes());
+        spilling.advance(b"after\r\n");
+        let history = spilling.history_len();
+        let (kept, _) = spilling.harvest_rows(0, history + usize::from(rows));
+        let numbers: Vec<usize> = kept
+            .to_text()
+            .lines()
+            .filter_map(|line| line.strip_prefix('L')?.parse().ok())
+            .collect();
+        assert!(
+            numbers.windows(2).all(|pair| pair[1] == pair[0] + 1),
+            "{scrollback} lines, {rows} rows: a hole in {numbers:?}"
+        );
+        assert!(
+            numbers.last().is_none_or(|last| *last == 1199),
+            "{scrollback} lines, {rows} rows: the newest went: {numbers:?}"
+        );
+        assert!(
+            history >= scrollback,
+            "{scrollback} lines, {rows} rows: only {history} kept"
+        );
+    }
+}
+
+#[test]
+fn a_line_longer_than_the_headroom_across_the_seam_stays_one_line() {
+    // Minified code, base64, a long JSON document: one line over hundreds
+    // of rows, its head spilled and the rest of it the grid's whole history.
+    // A column change lays it out again whole, so a copy of it has no line
+    // break in it.
+    let mut twins = Twins::with_grid(2000, 400);
+    twins.feed(output(0, 20));
+    let line: String = (0..3500).map(|n| format!("{:04}", n % 10_000)).collect();
+    twins.feed(format!("{line}\r\n"));
+    // Off the screen, so that what the grid holds of it is all history.
+    twins.feed(output(20, 26));
+    let spill = twins.spilling.blocks.spilled();
+    assert!(
+        !spill.is_empty() && spill.wraps(spill.rows() - 1),
+        "the premise: the line crosses the seam"
+    );
+    assert!(
+        twins.spilling.grid_history() > crate::blocks::HISTORY_HEADROOM,
+        "the premise: more of it is in the grid than the headroom"
+    );
+    twins.resize(13, ROWS);
+    twins.alike("at 13 columns");
+}
+
+#[test]
+fn a_much_taller_screen_pulls_its_rows_back_from_the_spill() {
+    // A taller screen takes its new rows from the history, and the grid has
+    // to hold enough of it for them: its share follows the screen's height.
+    let mut twins = Twins::new(1000);
+    twins.feed(output(0, 300));
+    for rows in [9, 17, 33, 60, 7] {
+        twins.resize(COLUMNS, rows);
+        twins.alike(&format!("at {rows} rows"));
+        twins.feed(output(1000, 1040));
+        twins.alike(&format!("at {rows} rows, after more output"));
+    }
+}
+
+#[test]
+fn a_column_change_leaves_a_view_in_the_grids_history_on_the_line_it_showed() {
+    let mut emulator =
+        Emulator::with_grid_lines(TerminalSize::new(30, 5), 1000, 100, Palette::default());
+    let lines: String = (0..300)
+        .map(|n| format!("entry {n} {}\r\n", "x".repeat(n % 40)))
+        .collect();
+    emulator.advance(lines.as_bytes());
+    for (scroll, columns) in [(30, 17), (12, 41), (20, 23), (25, 30)] {
+        emulator.scroll_to_bottom();
+        emulator.scroll_lines(scroll);
+        let before = emulator.snapshot();
+        assert!(
+            before.display_offset <= emulator.grid_history(),
+            "the premise: {} in {}",
+            before.display_offset,
+            emulator.grid_history()
+        );
+        let first = before
+            .text()
+            .lines()
+            .find(|line| line.starts_with("entry"))
+            .map(str::to_owned);
+        let Some(first) = first.and_then(|line| line.split(' ').nth(1).map(str::to_owned)) else {
+            continue;
+        };
+        let first = format!("entry {first} ");
+        emulator.resize(TerminalSize::new(columns, 5));
+        let after = emulator.snapshot().text();
+        assert!(
+            after.contains(&first),
+            "at {columns} columns the view moved off {first:?}: {after:?}"
+        );
+    }
+}
+
+#[test]
+fn an_update_that_scrolls_the_shell_past_its_room_under_a_program_leaves_no_hole() {
+    // A synchronized update can put the shell's screen up, scroll it by more
+    // than alacritty has room for, and take it down again, all at once; and a
+    // taller screen then pulls rows back out of the history, which hides
+    // that it ever went past its room. The spilled rows above what alacritty
+    // evicted must not be kept as though they joined on.
+    let size = |rows| TerminalSize::new(20, rows).with_cell_size(8, 16);
+    let mut emulator = Emulator::new(size(50), 10_000, Palette::default());
+    let lines: String = (0..1200).map(|n| format!("L{n}\r\n")).collect();
+    emulator.advance(lines.as_bytes());
+    emulator.advance(b"\x1b[?1049hvim");
+    let blank: String = (0..9_850).map(|n| format!("B{n}\r\n")).collect();
+    emulator.advance(format!("\x1b[?2026h\x1b[?1049l{blank}\x1b[?1049h\x1b[?2026l").as_bytes());
+    emulator.resize(size(120));
+    emulator.advance(b"\x1b[?1049l");
+    emulator.advance(b"after\r\n");
+    let (kept, _) = emulator.harvest_rows(0, emulator.history_len() + 120);
+    let text = kept.to_text();
+    for prefix in ['L', 'B'] {
+        let numbers: Vec<usize> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix(prefix)?.parse().ok())
+            .collect();
+        assert!(
+            numbers.windows(2).all(|pair| pair[1] == pair[0] + 1),
+            "a hole in the {prefix} lines: {numbers:?}"
+        );
+    }
+    let last_l = text.lines().rfind(|line| line.starts_with('L'));
+    assert!(
+        last_l.is_none_or(|line| line == "L1199"),
+        "older lines kept above a hole, the last of them {last_l:?}"
+    );
 }
