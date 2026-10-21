@@ -357,7 +357,9 @@ fn go_to_setting(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace>) {
     // frame of the section being left.
     let (_, search) = workspace.field(SETTINGS_SECTION, "search");
     search.edit(|editor| editor.set_text(label));
-    ctx.notify();
+    // And the keyboard onto the row, so that what changes it is one key and
+    // not a walk down from the box.
+    workspace.focus_first_setting(ctx);
 }
 
 /// `crook/palette/<name>`.

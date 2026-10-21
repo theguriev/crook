@@ -391,6 +391,12 @@ struct Overrides {
     /// keys still have to be pressed — so a run that takes a picture and exits
     /// writes no keybindings file.
     record: Option<String>,
+    /// Put the keyboard on this control of the settings page — the first is
+    /// `0` — with its focus ring drawn, as Tab and the arrows would.
+    ///
+    /// Implies `--settings`. A number past the page's last control is its last
+    /// control, which is where the arrows stop.
+    focus_setting: Option<usize>,
     /// Type this into the settings page's search box at startup.
     ///
     /// Implies `--settings`: a query with no page to filter is nothing to
@@ -1324,6 +1330,19 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
                 }
                 overrides.settings = Some(page);
             }
+            "--focus-setting" => {
+                // The number is optional, like `--settings`'s page: a bare
+                // flag is the first control, which is where Down from the box
+                // lands.
+                let at = match args.peek().map(|next| next.parse::<usize>()) {
+                    Some(Ok(at)) => {
+                        args.next();
+                        at
+                    }
+                    _ => 0,
+                };
+                overrides.focus_setting = Some(at);
+            }
             "--record" => {
                 let command = args
                     .next()
@@ -1460,7 +1479,10 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
     // With a section named it is that section's box — the Store's, the
     // Plugins page's — which is why the implication is decided here, once
     // both flags have been read, rather than in the arm for either.
-    if overrides.search.is_some() && overrides.section.is_none() && overrides.settings.is_none() {
+    if (overrides.search.is_some() || overrides.focus_setting.is_some())
+        && overrides.section.is_none()
+        && overrides.settings.is_none()
+    {
         overrides.settings = Some(None);
     }
 
@@ -1787,6 +1809,9 @@ OPTIONS:
     --search <TEXT>    Type TEXT into the settings page\'s search box, opening it;
                        with --section, into that section\'s box instead — the
                        Store\'s registry search, the Plugins page\'s
+    --focus-setting [N]
+                       Start with the keyboard on the settings page's Nth control
+                       (0, the first, when N is left out), its focus ring drawn
     --record <COMMAND> Start with the Keyboard Shortcuts page recording a chord for
                        COMMAND, which is an action name like `crook/window/new-tab`
     --theme <NAME>     Start in this theme rather than the saved one
@@ -2285,6 +2310,10 @@ fn apply_overrides(
             true => workspace.type_into_section_search(query, ctx),
             false => workspace.type_into_settings_search(query, ctx),
         }
+    }
+    // After the query, which decides what the controls are.
+    if let Some(at) = overrides.focus_setting {
+        workspace.focus_setting_at(at, ctx);
     }
     // After `--section`, so that a run asking for both ends where the box is:
     // typing into it shows the tabs, whichever section was named.
@@ -5141,6 +5170,35 @@ mod tests {
 
         let bare = parse(&["--shell"]).expect_err("a shell needs a path");
         assert!(format!("{bare:#}").contains("--shell"), "{bare:#}");
+    }
+
+    #[test]
+    fn focus_setting_takes_an_optional_number_and_opens_the_settings() {
+        let bare = parse(&["--focus-setting", "--menu"]).expect("valid");
+        assert!(matches!(
+            bare,
+            Startup::Window {
+                overrides: Overrides {
+                    focus_setting: Some(0),
+                    settings: Some(None),
+                    menu: true,
+                    ..
+                },
+                ..
+            }
+        ));
+        let third = parse(&["--settings", "shell", "--focus-setting", "2"]).expect("valid");
+        assert!(matches!(
+            third,
+            Startup::Window {
+                overrides: Overrides {
+                    focus_setting: Some(2),
+                    settings: Some(Some(_)),
+                    ..
+                },
+                ..
+            }
+        ));
     }
 
     #[test]

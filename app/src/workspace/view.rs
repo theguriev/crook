@@ -89,7 +89,8 @@ use super::header_chip::HeaderChip;
 use super::held_locks::HeldLocks;
 use super::row_content::row_name;
 use super::session_note::SessionNote;
-use super::settings_page::SettingsState;
+use super::settings_page::focus::{Key as SettingsKey, Place};
+use super::settings_page::{self, SettingsState};
 use super::tab_context_menu::TabContextMenuState;
 use super::tab_menu::{
     Contents, Going, Looked, Mode as WorktreeMode, Pruning, Sweep, TabMenuState,
@@ -3228,6 +3229,17 @@ impl Workspace {
         if news {
             ctx.notify();
         }
+        // The keyboard on a settings page that turned out to have nothing it
+        // can stand on — the palette's row was a fact, not a control — goes
+        // back to the box rather than nowhere.
+        if self.is_settings_page_open()
+            && self.page.focus.place() == Place::Control
+            && !self.page.focus.has_controls()
+        {
+            self.page.focus.put(Place::Search);
+            self.sync_input_keys();
+            ctx.notify();
+        }
         // The header's chip changed shape in this frame, and has its presses
         // waiting: it is drawn again, live, once.
         if let Some(until) = self.header_chip.take_wake() {
@@ -4561,7 +4573,12 @@ impl Workspace {
     /// [`Self::search_takes_keys`] so that a find bar and the tab search box
     /// cannot both believe they are being typed into.
     pub(super) fn find_takes_keys(&self) -> bool {
-        self.focused_find().is_some_and(PaneFind::is_open)
+        // Not while a section of the sidebar is showing, which is when no
+        // pane is: the bar is over a pane nobody can see, and Enter or
+        // Shift-Enter aimed at the section in front of it would step a search
+        // behind it.
+        self.showing_section().is_none()
+            && self.focused_find().is_some_and(PaneFind::is_open)
             && !self.panel.open
             && !self.a_popup_is_open()
             && !self.host.a_surface_is_up()
@@ -5234,6 +5251,9 @@ impl Workspace {
         // go on holding the keyboard.
         self.forget_section_state();
         self.clear_fields();
+        // Coming back to the settings starts in the box, as arriving at them
+        // the first time does.
+        self.page.focus.put(Place::Search);
         // The panel's box goes with them, and for the same reason: it filters
         // a list that is about to be replaced, and coming back to the tabs to
         // find four of forty is a sidebar that reads as broken rather than as
@@ -11485,6 +11505,17 @@ impl Workspace {
             return Some(action);
         }
 
+        // **The settings page owns the keys that move about it** while it is
+        // showing: Tab and the arrows between the search box, the rail and
+        // the controls, Enter and Space to press the one the keyboard is on,
+        // Escape to walk back out. Before the find bar and the selected block
+        // because both belong to a pane the section has covered, and a key
+        // aimed at a page on screen must not land in one that is not. See
+        // [`settings_page::focus`].
+        if let Some(action) = self.settings_action_for(keystroke) {
+            return Some(action);
+        }
+
         // The find bar owns Escape and Enter while it has the keyboard, for
         // the reason the search box owns its two: the field answers Escape by
         // clearing itself and Enter by nothing, and neither of those is a way
@@ -11510,6 +11541,165 @@ impl Workspace {
         self.bound(keystroke)
     }
 
+    /// What a keystroke means to the settings page, if it means anything.
+    ///
+    /// Only while the page is what the keyboard reaches: nothing is up over
+    /// it, the Themes panel beside it is shut — it takes every key while it is
+    /// up — and no comment is being typed in the Changes column.
+    fn settings_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+        if !self.settings_hold_keys() {
+            return None;
+        }
+        let key = settings_page::focus::key_for(self.page.focus.place(), keystroke)?;
+        Some(SettingsAction::Key(key).into())
+    }
+
+    /// Whether the settings page is what the keyboard reaches: it is showing,
+    /// nothing is up over it, the Themes panel beside it is shut — it takes
+    /// every key while it is up — and no comment is being typed in the
+    /// Changes column.
+    pub(super) fn settings_hold_keys(&self) -> bool {
+        self.is_settings_page_open()
+            && !self.panel.open
+            && !self.a_popup_is_open()
+            && !self.changes_takes_keys()
+    }
+
+    /// Does what a key the settings page took means, against the controls
+    /// the last frame drew.
+    fn settings_key(&mut self, key: SettingsKey, ctx: &mut ViewContext<Self>) {
+        let focus = self.page.focus.clone();
+        match (focus.place(), key) {
+            // An empty box is the way out; a box with words in it empties
+            // first, which is what Escape did to it before it was taken here.
+            (Place::Search, SettingsKey::Escape) => {
+                let (_, search) = self.field(SETTINGS_SECTION, "search");
+                if search.editor().text().is_empty() {
+                    self.handle_action(&WorkspaceAction::ShowSection(None), ctx);
+                    return;
+                }
+                search.edit(crate::editor::Editor::clear);
+                focus.changed();
+            }
+            // Onto the rail only while it lists something: a query that
+            // found nothing leaves no page for the ring to be around.
+            (Place::Search, SettingsKey::Next) => {
+                if self.page.rail().0.is_empty() {
+                    return;
+                }
+                focus.put(Place::Rail)
+            }
+            (Place::Search, SettingsKey::Down | SettingsKey::Press) => {
+                if focus.has_controls() {
+                    focus.first_control();
+                }
+            }
+            (Place::Search, _) => return,
+
+            (Place::Rail, SettingsKey::Previous | SettingsKey::Escape) => focus.put(Place::Search),
+            (Place::Rail, SettingsKey::Next | SettingsKey::Press | SettingsKey::Right) => {
+                if focus.has_controls() {
+                    focus.first_control();
+                }
+            }
+            (
+                Place::Rail,
+                SettingsKey::Up | SettingsKey::Down | SettingsKey::Home | SettingsKey::End,
+            ) => {
+                // From the page the rail has selected, which a step changes at
+                // once, rather than the one the last frame showed — a second
+                // Down before the page is drawn again goes one further. The
+                // shown page where the search has left the selected one out.
+                let (pages, showing) = self.page.rail();
+                let selected = self.page.selected(&self.host);
+                let at = selected
+                    .and_then(|selected| pages.iter().position(|page| *page == selected))
+                    .or_else(|| {
+                        showing.and_then(|showing| pages.iter().position(|page| *page == showing))
+                    });
+                let Some(last) = pages.len().checked_sub(1) else {
+                    return;
+                };
+                let next = match (key, at) {
+                    (SettingsKey::Home, _) => 0,
+                    (SettingsKey::End, _) => last,
+                    (SettingsKey::Up, Some(at)) => at.saturating_sub(1),
+                    (SettingsKey::Down, Some(at)) => (at + 1).min(last),
+                    (_, None) => 0,
+                    _ => return,
+                };
+                if Some(next) != at {
+                    self.apply_settings(SettingsAction::Select(pages[next]), ctx);
+                }
+                return;
+            }
+            (Place::Rail, SettingsKey::Left) => return,
+
+            (Place::Control, SettingsKey::Escape) => focus.put(Place::Search),
+            (Place::Control, SettingsKey::Previous) if focus.is_on_first() => {
+                focus.put(Place::Rail)
+            }
+            (Place::Control, SettingsKey::Next | SettingsKey::Down) => {
+                focus.step(1);
+            }
+            (Place::Control, SettingsKey::Previous | SettingsKey::Up) => {
+                focus.step(-1);
+            }
+            (Place::Control, SettingsKey::Home) => focus.first_control(),
+            (Place::Control, SettingsKey::End) => focus.last_control(),
+            (Place::Control, SettingsKey::Press | SettingsKey::Left | SettingsKey::Right) => {
+                let keys = focus.keys().unwrap_or_default();
+                let action = match key {
+                    SettingsKey::Left => keys.left,
+                    SettingsKey::Right => keys.right,
+                    _ => keys.press,
+                };
+                if let Some(action) = action {
+                    self.handle_action(&action, ctx);
+                    focus.changed();
+                }
+                return;
+            }
+        }
+        self.scroll_setting_into_view();
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
+    /// Brings the control the keyboard is on inside the page's viewport, ring
+    /// and all, against where the last frame drew it.
+    ///
+    /// The tab list's rule, and its function: the nearer edge wins, so a walk
+    /// down the page moves the view a control at a time.
+    fn scroll_setting_into_view(&self) {
+        let Some((top, height)) = self.page.focus.box_of_focused() else {
+            return;
+        };
+        let mut scroll = self.page.scroll.lock();
+        let row = tabs_panel::geometry::RowBox { top, height };
+        if let Some(offset) =
+            tabs_panel::geometry::scroll_for(row, scroll.offset(), scroll.viewport())
+        {
+            scroll.scroll_to(offset);
+        }
+    }
+
+    /// Puts the keyboard on the first control the settings page draws, as
+    /// arriving at a row from the palette does: the row is what was asked
+    /// for, and Space is then what changes it.
+    pub(crate) fn focus_first_setting(&mut self, ctx: &mut ViewContext<Self>) {
+        self.focus_setting_at(0, ctx);
+    }
+
+    /// Puts the keyboard on the settings page's control at `at`, in the order
+    /// the page draws them, for a run taking a picture of the ring — see
+    /// `--focus-setting`. Settled against the page when it is next drawn.
+    pub fn focus_setting_at(&mut self, at: usize, ctx: &mut ViewContext<Self>) {
+        self.page.focus.control_at(at);
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
     /// What a keystroke means to a selected block, if anything.
     ///
     /// Only ever when a block is selected in the focused pane, and never over
@@ -11518,7 +11708,8 @@ impl Workspace {
     /// what a copy takes then and the block selection is the quieter of the
     /// two.
     fn block_selection_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
-        if self.find_takes_keys() {
+        // A section covers the panes, and the block with them.
+        if self.find_takes_keys() || self.showing_section().is_some() {
             return None;
         }
         let pane = self.tabs.focused_pane_id()?;
@@ -12715,11 +12906,29 @@ impl Workspace {
     /// than all fifteen.
     fn apply_settings(&mut self, action: SettingsAction, ctx: &mut ViewContext<Self>) {
         match action {
+            SettingsAction::Key(key) => self.settings_key(key, ctx),
+            SettingsAction::SearchEdited => {
+                // The query decides what the controls are.
+                self.page.focus.changed();
+                if self.page.focus.place() != Place::Search {
+                    self.page.focus.put(Place::Search);
+                    ctx.notify();
+                }
+            }
             SettingsAction::Select(page) => {
                 let key = self.host.settings_page_key(page).map(str::to_owned);
                 if self.page.page == key {
                     return;
                 }
+                // A click on the rail while the keyboard was on a control of
+                // the page being left: the controls it could go to are not
+                // the ones it was among, so it goes back to the box, where it
+                // was before it was moved. The rail's own arrows keep it on
+                // the rail.
+                if self.page.focus.place() == Place::Control {
+                    self.page.focus.put(Place::Search);
+                }
+                self.page.focus.changed();
                 // The row being recorded for is on the page being left, and a
                 // recorder that outlived it would go on holding the keyboard
                 // with nothing on screen to say so.
@@ -12741,6 +12950,9 @@ impl Workspace {
                     return;
                 };
                 self.focus_field(index);
+                // And leaving whatever on the page the keyboard was on: a
+                // press in the box is a person who means to type.
+                self.page.focus.put(Place::Search);
                 // A press on a field is a person leaving the comment field in
                 // the Changes column beside it, whose words stay.
                 self.changes.focus_draft(false);
