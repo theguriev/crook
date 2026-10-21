@@ -312,6 +312,20 @@ impl Plugin for Store {
             show(&showing, workspace, &plugin, ctx);
         });
 
+        // A row of the list chooses its offer and nothing else: the row is
+        // one the field let through, so the field keeps what was typed, and
+        // the arrows walk the results rather than emptying them on the first
+        // step. `show` empties it because it is asked for a row from
+        // elsewhere, which the field may be hiding.
+        let choosing = self.state.clone();
+        host.register_action(action("choose"), move |workspace, ctx| {
+            let Some(plugin) = workspace.host().said_plugin(&action("choose")) else {
+                return;
+            };
+            choosing.select(plugin.as_str());
+            ctx.notify();
+        });
+
         let updating = self.state.clone();
         host.register_answer(action("update"), move |workspace, ctx| {
             let Some(plugin) = workspace.host().said_plugin(&action("update")) else {

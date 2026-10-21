@@ -3229,16 +3229,21 @@ impl Workspace {
         if news {
             ctx.notify();
         }
-        // The keyboard on a settings page that turned out to have nothing it
-        // can stand on — the palette's row was a fact, not a control — goes
-        // back to the box rather than nowhere.
-        if self.is_settings_page_open()
-            && self.page.focus.place() == Place::Control
-            && !self.page.focus.has_controls()
-        {
-            self.page.focus.put(Place::Search);
-            self.sync_input_keys();
-            ctx.notify();
+        // The keyboard on a section that turned out to have nothing it can
+        // stand on — the palette's row was a fact, not a control; a card that
+        // became another card left the list with no rows — goes back to the
+        // box rather than nowhere.
+        if let Some(focus) = self.section_focus() {
+            let nowhere = match focus.place() {
+                Place::Control => !focus.has_controls(),
+                Place::Rail => !focus.has_rows(),
+                Place::Search => false,
+            };
+            if nowhere {
+                focus.put(Place::Search);
+                self.sync_input_keys();
+                ctx.notify();
+            }
         }
         // The header's chip changed shape in this frame, and has its presses
         // waiting: it is drawn again, live, once.
@@ -3954,6 +3959,30 @@ impl Workspace {
                 self.changes.dismiss_note();
                 ctx.notify();
             }
+            ChangesAction::TakeKeys => {
+                if !self.changes.open {
+                    self.toggle_changes_panel(ctx);
+                }
+                if !self.changes.open {
+                    return;
+                }
+                // One field is typed into at a time, and a person asking for
+                // the column is leaving the box and the comment field.
+                self.stop_searching();
+                self.changes.focus_draft(false);
+                self.changes.take_keys();
+                self.sync_input_keys();
+                ctx.notify();
+            }
+            ChangesAction::Key(key) => {
+                if key == SettingsKey::Escape {
+                    self.changes.release_keys();
+                } else if let Some(action) = self.changes.walk(key) {
+                    self.apply_changes_action(action, ctx);
+                }
+                self.sync_input_keys();
+                ctx.notify();
+            }
             ChangesAction::OpenFile(index) => {
                 let Some(overview) = self.changes.overview() else {
                     return;
@@ -4180,6 +4209,37 @@ impl Workspace {
             && !self.panel.open
             && !self.a_popup_is_open()
             && !self.search_takes_keys()
+    }
+
+    /// Whether the keyboard is the Changes column's rows' rather than the
+    /// pane's, or the section's: a person put it there with
+    /// `crook/changes/focus`, the comment field does not have it, and nothing
+    /// has taken the keyboard from every field — the clauses
+    /// [`Self::changes_takes_keys`] asks, for its reasons.
+    ///
+    /// Given up the way the comment field's is, to a person going somewhere
+    /// else with it — and on Escape, which gives it back to the pane with the
+    /// column left up.
+    pub(super) fn column_takes_keys(&self) -> bool {
+        self.changes.open
+            && self.changes.wants_keys()
+            && !self.changes.draft_is_focused()
+            && !self.panel.open
+            && !self.a_popup_is_open()
+            && !self.search_takes_keys()
+    }
+
+    /// What a keystroke means to the Changes column's rows while the keyboard
+    /// is in them: the settings' walk, over the column's controls. A
+    /// character is nobody's — there is no field among the rows to type it
+    /// into, and the pane behind does not have the keyboard — and a chord is
+    /// left to the bindings.
+    fn column_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+        if !self.column_takes_keys() {
+            return None;
+        }
+        let key = settings_page::focus::key_for(Place::Control, keystroke)?;
+        Some(WorkspaceAction::Changes(ChangesAction::Key(key)))
     }
 
     /// What a keystroke means to the comment field, if it means anything:
@@ -4584,6 +4644,7 @@ impl Workspace {
             && !self.host.a_surface_is_up()
             && !self.search_takes_keys()
             && !self.changes_takes_keys()
+            && !self.column_takes_keys()
     }
 
     /// Every place the focused pane\'s find query occurs in its output, in
@@ -5092,7 +5153,8 @@ impl Workspace {
         input.set_has_keys(
             self.section.as_deref() == Some(section)
                 && self.field_with_keys().as_deref() == Some(name)
-                && !self.changes_takes_keys(),
+                && !self.changes_takes_keys()
+                && !self.column_takes_keys(),
         );
         (index, input)
     }
@@ -5251,9 +5313,11 @@ impl Workspace {
         // go on holding the keyboard.
         self.forget_section_state();
         self.clear_fields();
-        // Coming back to the settings starts in the box, as arriving at them
-        // the first time does.
-        self.page.focus.put(Place::Search);
+        // Coming back to a section starts in its box, as arriving at it the
+        // first time does.
+        for focus in self.page.every_focus() {
+            focus.put(Place::Search);
+        }
         // The panel's box goes with them, and for the same reason: it filters
         // a list that is about to be replaced, and coming back to the tabs to
         // find four of forty is a sidebar that reads as broken rather than as
@@ -11505,6 +11569,14 @@ impl Workspace {
             return Some(action);
         }
 
+        // And the column's rows own the keys that walk them while a person
+        // has put the keyboard there: before the section's, which is behind
+        // the column, and before the find bar and the selected block, which
+        // belong to the pane it is beside.
+        if let Some(action) = self.column_action_for(keystroke) {
+            return Some(action);
+        }
+
         // **The settings page owns the keys that move about it** while it is
         // showing: Tab and the arrows between the search box, the rail and
         // the controls, Enter and Space to press the one the keyboard is on,
@@ -11541,39 +11613,64 @@ impl Workspace {
         self.bound(keystroke)
     }
 
-    /// What a keystroke means to the settings page, if it means anything.
+    /// What a keystroke means to the section of the sidebar that is showing,
+    /// if it means anything.
     ///
-    /// Only while the page is what the keyboard reaches: nothing is up over
-    /// it, the Themes panel beside it is shut — it takes every key while it is
-    /// up — and no comment is being typed in the Changes column.
+    /// Only while the section is what the keyboard reaches: nothing is up
+    /// over it, the Themes panel beside it is shut — it takes every key while
+    /// it is up — and no comment is being typed in the Changes column, nor
+    /// the keyboard put in that column.
     fn settings_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
-        if !self.settings_hold_keys() {
+        let focus = self.section_focus()?;
+        if !self.section_holds_keys() {
             return None;
         }
-        let key = settings_page::focus::key_for(self.page.focus.place(), keystroke)?;
+        let key = settings_page::focus::key_for(focus.place(), keystroke)?;
         Some(SettingsAction::Key(key).into())
     }
 
-    /// Whether the settings page is what the keyboard reaches: it is showing,
-    /// nothing is up over it, the Themes panel beside it is shut — it takes
-    /// every key while it is up — and no comment is being typed in the
-    /// Changes column.
-    pub(super) fn settings_hold_keys(&self) -> bool {
-        self.is_settings_page_open()
+    /// Where the keyboard is in the section of the sidebar that is showing,
+    /// if one is.
+    pub(super) fn section_focus(&self) -> Option<settings_page::focus::Focus> {
+        self.showing_section()?;
+        let key = self.section.as_deref()?;
+        Some(self.page.focus_of(key))
+    }
+
+    /// Whether the section of the sidebar that is showing is what the
+    /// keyboard reaches: one is showing, nothing is up over it, the Themes
+    /// panel beside it is shut — it takes every key while it is up — and the
+    /// keyboard is not in the Changes column, its comment field or its rows.
+    pub(super) fn section_holds_keys(&self) -> bool {
+        self.showing_section().is_some()
             && !self.panel.open
             && !self.a_popup_is_open()
             && !self.changes_takes_keys()
+            && !self.column_takes_keys()
     }
 
-    /// Does what a key the settings page took means, against the controls
-    /// the last frame drew.
+    /// Does what a key the section took means, against the controls and the
+    /// rows the last frame drew.
+    ///
+    /// One walk for every section: the box, the list — the settings' rail of
+    /// pages, the plugins, the Store's offers — and the controls of the page
+    /// beside it, with what the sidebar ends in first among them. The one
+    /// difference is where Down from the box goes. The settings' query
+    /// finds controls, so it goes to the first of them; the other two
+    /// sections' queries find rows, so it goes to the list.
     fn settings_key(&mut self, key: SettingsKey, ctx: &mut ViewContext<Self>) {
-        let focus = self.page.focus.clone();
+        let Some(focus) = self.section_focus() else {
+            return;
+        };
+        let Some(section) = self.section.clone() else {
+            return;
+        };
+        let finds_controls = section == SETTINGS_SECTION;
         match (focus.place(), key) {
             // An empty box is the way out; a box with words in it empties
             // first, which is what Escape did to it before it was taken here.
             (Place::Search, SettingsKey::Escape) => {
-                let (_, search) = self.field(SETTINGS_SECTION, "search");
+                let (_, search) = self.field(&section, "search");
                 if search.editor().text().is_empty() {
                     self.handle_action(&WorkspaceAction::ShowSection(None), ctx);
                     return;
@@ -11581,16 +11678,22 @@ impl Workspace {
                 search.edit(crate::editor::Editor::clear);
                 focus.changed();
             }
-            // Onto the rail only while it lists something: a query that
-            // found nothing leaves no page for the ring to be around.
+            // Onto the list only while it lists something: a query that
+            // found nothing leaves no row for the ring to be around — and
+            // then onto what the sidebar ends in, where there is something.
             (Place::Search, SettingsKey::Next) => {
-                if self.page.rail().0.is_empty() {
+                if focus.has_rows() {
+                    focus.put(Place::Rail);
+                } else if focus.has_controls() {
+                    focus.first_control();
+                } else {
                     return;
                 }
-                focus.put(Place::Rail)
             }
             (Place::Search, SettingsKey::Down | SettingsKey::Press) => {
-                if focus.has_controls() {
+                if !finds_controls && focus.has_rows() {
+                    focus.put(Place::Rail);
+                } else if focus.has_controls() {
                     focus.first_control();
                 }
             }
@@ -11606,38 +11709,23 @@ impl Workspace {
                 Place::Rail,
                 SettingsKey::Up | SettingsKey::Down | SettingsKey::Home | SettingsKey::End,
             ) => {
-                // From the page the rail has selected, which a step changes at
-                // once, rather than the one the last frame showed — a second
-                // Down before the page is drawn again goes one further. The
-                // shown page where the search has left the selected one out.
-                let (pages, showing) = self.page.rail();
-                let selected = self.page.selected(&self.host);
-                let at = selected
-                    .and_then(|selected| pages.iter().position(|page| *page == selected))
-                    .or_else(|| {
-                        showing.and_then(|showing| pages.iter().position(|page| *page == showing))
-                    });
-                let Some(last) = pages.len().checked_sub(1) else {
-                    return;
-                };
-                let next = match (key, at) {
-                    (SettingsKey::Home, _) => 0,
-                    (SettingsKey::End, _) => last,
-                    (SettingsKey::Up, Some(at)) => at.saturating_sub(1),
-                    (SettingsKey::Down, Some(at)) => (at + 1).min(last),
-                    (_, None) => 0,
-                    _ => return,
-                };
-                if Some(next) != at {
-                    self.apply_settings(SettingsAction::Select(pages[next]), ctx);
+                // From the row chosen since the last frame, so a second Down
+                // before the page is drawn again goes one further; the row it
+                // lands on is chosen by the action a click on it sends.
+                if let Some(choose) = focus.choose(key) {
+                    self.handle_action(&choose, ctx);
+                    focus.changed();
                 }
-                return;
             }
             (Place::Rail, SettingsKey::Left) => return,
 
             (Place::Control, SettingsKey::Escape) => focus.put(Place::Search),
             (Place::Control, SettingsKey::Previous) if focus.is_on_first() => {
-                focus.put(Place::Rail)
+                if focus.has_rows() {
+                    focus.put(Place::Rail)
+                } else {
+                    focus.put(Place::Search)
+                }
             }
             (Place::Control, SettingsKey::Next | SettingsKey::Down) => {
                 focus.step(1);
@@ -11661,27 +11749,9 @@ impl Workspace {
                 return;
             }
         }
-        self.scroll_setting_into_view();
+        focus.scroll_into_view();
         self.sync_input_keys();
         ctx.notify();
-    }
-
-    /// Brings the control the keyboard is on inside the page's viewport, ring
-    /// and all, against where the last frame drew it.
-    ///
-    /// The tab list's rule, and its function: the nearer edge wins, so a walk
-    /// down the page moves the view a control at a time.
-    fn scroll_setting_into_view(&self) {
-        let Some((top, height)) = self.page.focus.box_of_focused() else {
-            return;
-        };
-        let mut scroll = self.page.scroll.lock();
-        let row = tabs_panel::geometry::RowBox { top, height };
-        if let Some(offset) =
-            tabs_panel::geometry::scroll_for(row, scroll.offset(), scroll.viewport())
-        {
-            scroll.scroll_to(offset);
-        }
     }
 
     /// Puts the keyboard on the first control the settings page draws, as
@@ -11695,7 +11765,32 @@ impl Workspace {
     /// the page draws them, for a run taking a picture of the ring — see
     /// `--focus-setting`. Settled against the page when it is next drawn.
     pub fn focus_setting_at(&mut self, at: usize, ctx: &mut ViewContext<Self>) {
-        self.page.focus.control_at(at);
+        let Some(focus) = self.section_focus() else {
+            return;
+        };
+        focus.control_at(at);
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
+    /// Puts the keyboard on the list of the section that is showing, for a
+    /// run taking a picture of the ring on it — see `--focus-list`.
+    pub fn focus_section_list(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(focus) = self.section_focus() else {
+            return;
+        };
+        focus.put(Place::Rail);
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
+    /// Puts the keyboard in the Changes column, on its control at `at`, for
+    /// a run taking a picture of the ring — see `--focus-changes`.
+    pub fn focus_changes_at(&mut self, at: usize, ctx: &mut ViewContext<Self>) {
+        self.apply_changes_action(ChangesAction::TakeKeys, ctx);
+        for _ in 0..at {
+            self.changes.walk(SettingsKey::Next);
+        }
         self.sync_input_keys();
         ctx.notify();
     }
@@ -11708,8 +11803,9 @@ impl Workspace {
     /// what a copy takes then and the block selection is the quieter of the
     /// two.
     fn block_selection_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
-        // A section covers the panes, and the block with them.
-        if self.find_takes_keys() || self.showing_section().is_some() {
+        // A section covers the panes, and the block with them; the keyboard
+        // in the Changes column is not the pane's.
+        if self.find_takes_keys() || self.showing_section().is_some() || self.column_takes_keys() {
             return None;
         }
         let pane = self.tabs.focused_pane_id()?;
@@ -12533,7 +12629,8 @@ impl Workspace {
             && !self.search_takes_keys()
             && !self.find_takes_keys()
             && !a_field_has_keys
-            && !self.changes_takes_keys())
+            && !self.changes_takes_keys()
+            && !self.column_takes_keys())
         .then(|| self.tabs.focused_pane_id())
         .flatten()
     }
@@ -12580,6 +12677,9 @@ impl Workspace {
         // comment about an agent's work is not typing to the agent.
         let comment_has_keys = self.changes_takes_keys();
         self.changes.set_draft_keys(comment_has_keys);
+        // The column's rows count the same way: a person who put the
+        // keyboard there is not typing into a pane or a section's field.
+        let column_has_keys = self.column_takes_keys();
         let listening = self.pane_with_keys_given(a_field_has_keys);
         for (id, input) in &self.inputs {
             input.set_has_keys(Some(*id) == listening);
@@ -12640,7 +12740,8 @@ impl Workspace {
             input.set_has_keys(
                 showing.as_deref() == Some(section.as_str())
                     && focused.as_deref() == Some(name)
-                    && !comment_has_keys,
+                    && !comment_has_keys
+                    && !column_has_keys,
             );
         }
     }
@@ -12908,10 +13009,13 @@ impl Workspace {
         match action {
             SettingsAction::Key(key) => self.settings_key(key, ctx),
             SettingsAction::SearchEdited => {
-                // The query decides what the controls are.
-                self.page.focus.changed();
-                if self.page.focus.place() != Place::Search {
-                    self.page.focus.put(Place::Search);
+                // The query decides what the rows and the controls are.
+                let Some(focus) = self.section_focus() else {
+                    return;
+                };
+                focus.changed();
+                if focus.place() != Place::Search {
+                    focus.put(Place::Search);
                     ctx.notify();
                 }
             }
@@ -12952,7 +13056,9 @@ impl Workspace {
                 self.focus_field(index);
                 // And leaving whatever on the page the keyboard was on: a
                 // press in the box is a person who means to type.
-                self.page.focus.put(Place::Search);
+                if let Some(focus) = self.section_focus() {
+                    focus.put(Place::Search);
+                }
                 // A press on a field is a person leaving the comment field in
                 // the Changes column beside it, whose words stay.
                 self.changes.focus_draft(false);
@@ -13767,6 +13873,11 @@ impl View for Workspace {
         // frame that will not draw it. Only the tabs can be hidden — see
         // [`Self::tabs_panel_is_showing`] — so a section always has its
         // column.
+        // Whether the ring is drawn on the section, for the frame about to be
+        // built: not while anything else has the keyboard.
+        if let Some(focus) = self.section_focus() {
+            focus.begin_frame(self.section_holds_keys());
+        }
         let (sidebar, body) = match self.showing_section() {
             Some(id) => self
                 .host

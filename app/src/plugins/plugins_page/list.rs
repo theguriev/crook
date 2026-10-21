@@ -24,6 +24,7 @@ use crate::plugins::store;
 use crate::plugins::store::index::change;
 use crate::theme::theme;
 use crate::workspace::section;
+use crate::workspace::settings_page::focus::Place;
 use crate::workspace::settings_page::search::{Query, Words};
 use crate::workspace::settings_page::{named, widgets};
 use crate::workspace::{SettingsAction, TextField, Workspace, WorkspaceAction};
@@ -39,7 +40,7 @@ const LIST_SCROLL: &str = "plugins.list";
 
 /// The section this list is the sidebar of, and the name its field is
 /// registered under.
-const SECTION: &str = "crook/plugins/section";
+pub(super) const SECTION: &str = "crook/plugins/section";
 /// See [`SECTION`].
 const FIELD: &str = "search";
 
@@ -67,6 +68,7 @@ pub(super) fn render(
     let ui = workspace.fonts().ui;
     let (index, input) = workspace.field(SECTION, FIELD);
     let host = workspace.host();
+    let focus = settings.focus_of(SECTION);
 
     let field = TextField::new(
         input,
@@ -76,10 +78,14 @@ pub(super) fn render(
         PLACEHOLDER,
     )
     .with_icon(Lucide::Search)
-    .with_window_focused(workspace.is_window_focused())
+    // Drawn as a box without the keys while the ring is on the list or the
+    // card, though it keeps them for text, as the settings' box does: see
+    // `focus::key_for`.
+    .with_window_focused(workspace.is_window_focused() && focus.place() == Place::Search)
     .with_focus(WorkspaceAction::Settings(SettingsAction::FocusField(Some(
         index,
     ))))
+    .with_edit(WorkspaceAction::Settings(SettingsAction::SearchEdited))
     .finish();
 
     let list = if matching.is_empty() {
@@ -139,7 +145,13 @@ pub(super) fn render(
                 .finish(),
         ),
     };
-    section::sidebar(field, list, settings.scroll_named(LIST_SCROLL), footer)
+    section::sidebar(
+        &focus,
+        field,
+        list,
+        settings.scroll_named(LIST_SCROLL),
+        footer,
+    )
 }
 
 /// The count of updates and the button that takes them all, or nothing.

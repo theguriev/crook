@@ -54,6 +54,7 @@ use crookui_core::prelude::*;
 use crate::theme::theme;
 
 use super::action::WorkspaceAction;
+use super::settings_page::focus::{Focus, Page, Stop, Within};
 use super::settings_page::widgets;
 
 /// The widest the page beside the list is allowed to get, before what is left
@@ -179,12 +180,21 @@ pub(crate) struct Row {
 /// pages fitted and would have hidden the sixth — a plugin contributes a
 /// settings page, so how many rows this holds is not a number this file gets
 /// to know.
+///
+/// The keyboard walks it through `focus`, the section's own: the list is its
+/// rail, and what the section ends in is the last of its controls. See
+/// [`focus`](super::settings_page::focus).
 pub(crate) fn sidebar(
+    focus: &Focus,
     field: Box<dyn Element>,
     list: Box<dyn Element>,
     scroll: ScrollStateHandle,
     footer: Option<Box<dyn Element>>,
 ) -> Box<dyn Element> {
+    focus.set_scrolls(Some(scroll.clone()), None);
+    // Inside the scroll, around the rows and nothing else, so a row's offset
+    // is measured from the top of what scrolls.
+    let list = Within::list(focus, list);
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
@@ -203,7 +213,7 @@ pub(crate) fn sidebar(
     // about the section, and a fact that scrolled out of sight would be one
     // nobody could rely on finding.
     if let Some(footer) = footer {
-        column.add_child(footer);
+        column.add_child(Within::aside(focus, footer));
     }
 
     Container::new(column.finish())
@@ -226,6 +236,7 @@ pub(crate) fn row(row: Row, ui: FamilyId) -> Box<dyn Element> {
     // Built inside the builder rather than beside it, because what the row
     // draws depends on the mouse state the builder is handed: the label's
     // colour is the hover's, and there is one label.
+    let hoverable_state = state.clone();
     let hoverable = Hoverable::new(state, move |mouse| {
         // The fill is the selection's and the pointer's in every list. The
         // label is not: see [`Emphasis`].
@@ -292,12 +303,18 @@ pub(crate) fn row(row: Row, ui: FamilyId) -> Box<dyn Element> {
             .finish()
     });
 
-    match command {
+    let stop = hoverable_state;
+    let row = match command {
         Some(command) => hoverable
             .on_click(move |_, ctx, _| ctx.dispatch_typed_action(command))
             .finish(),
         None => hoverable.finish(),
-    }
+    };
+    // A row of the list is one of the rail's rows to the keyboard: Up and
+    // Down choose the next one the way a click does, and the ring is on the
+    // chosen one while the keyboard is on the list. The gap under the row is
+    // inside it, so the ring is drawn on the row's edge, the gap and all.
+    Stop::list_row(&stop, command, selected, ROW_RADIUS, row)
 }
 
 /// The window half: a title that stays put, and the page scrolling under it.
@@ -310,13 +327,24 @@ pub(crate) fn row(row: Row, ui: FamilyId) -> Box<dyn Element> {
 /// `mark` goes before the title, where a section has one: a plugin's icon
 /// beside its name. The settings have none and pass `None`, and the title
 /// then starts where it always did.
+///
+/// The body is the section's page to the keyboard: every control in it is a
+/// stop of `focus`, and `subject` is whom the page is about, for a card that
+/// is about one plugin. See [`focus`](super::settings_page::focus).
 pub(crate) fn content(
+    focus: &Focus,
+    subject: Option<String>,
     title: &str,
     mark: Option<Box<dyn Element>>,
     body: Box<dyn Element>,
     scroll: ScrollStateHandle,
     ui: FamilyId,
 ) -> Box<dyn Element> {
+    focus.set_scrolls(None, Some(scroll.clone()));
+    // Around the body and inside the scroll, so the keyboard's list is what
+    // is drawn and a control's place is measured from the top of what
+    // scrolls.
+    let body: Box<dyn Element> = Box::new(Page::new(focus.clone(), body).about(subject));
     let column = Flex::column()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)

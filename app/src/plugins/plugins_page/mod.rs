@@ -361,6 +361,10 @@ fn page(
     (
         list,
         section::content(
+            &workspace.settings_page().focus_of(list::SECTION),
+            // About this plugin: a press that turns the card to another one —
+            // a Remove — hands the keyboard back to the list.
+            Some(manifest.id.to_string()),
             manifest.name,
             mark,
             card::render(workspace, app, manifest, state),

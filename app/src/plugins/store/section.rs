@@ -42,6 +42,7 @@ use crate::plugin::Face;
 use crate::plugins::pictures::Decoded;
 use crate::theme::theme;
 use crate::workspace::section;
+use crate::workspace::settings_page::focus::Place;
 use crate::workspace::settings_page::search::{Query, Words};
 use crate::workspace::settings_page::widgets::{Mark, Tone};
 use crate::workspace::settings_page::{named, widgets};
@@ -205,6 +206,8 @@ pub(super) fn render(
         return (
             list,
             section::content(
+                &workspace.settings_page().focus_of(SECTION),
+                None,
                 "Store",
                 None,
                 nothing_chosen(&known, ui),
@@ -224,6 +227,11 @@ pub(super) fn render(
     (
         list,
         section::content(
+            &workspace.settings_page().focus_of(SECTION),
+            // About this offer, so a card that turns to another one hands the
+            // keyboard back to the list rather than to whatever is in place
+            // of the control it was on.
+            Some(showing.id.to_string()),
             &showing.name,
             mark,
             card(workspace, &known, showing, ui),
@@ -263,6 +271,7 @@ fn list(
 ) -> Box<dyn Element> {
     let settings = workspace.settings_page();
     let (index, input) = workspace.field(SECTION, FIELD);
+    let focus = settings.focus_of(SECTION);
 
     let field = TextField::new(
         input,
@@ -272,10 +281,13 @@ fn list(
         PLACEHOLDER,
     )
     .with_icon(Lucide::Search)
-    .with_window_focused(workspace.is_window_focused())
+    // Drawn as a box without the keys while the ring is elsewhere, as the
+    // settings' box is: see `focus::key_for`.
+    .with_window_focused(workspace.is_window_focused() && focus.place() == Place::Search)
     .with_focus(WorkspaceAction::Settings(SettingsAction::FocusField(Some(
         index,
     ))))
+    .with_edit(WorkspaceAction::Settings(SettingsAction::SearchEdited))
     .finish();
 
     let body = if matching.is_empty() {
@@ -308,6 +320,7 @@ fn list(
     };
 
     section::sidebar(
+        &focus,
         field,
         body,
         settings.scroll_named(LIST_SCROLL),
@@ -318,9 +331,9 @@ fn list(
 /// One row: its face, what it is called, and one word about where it stands.
 ///
 /// [`section::row`]'s, which is the Plugins list's row, so the two lists are
-/// one list to the eye. A press is the store's own `show` action run about
-/// this plugin — the same gesture "Show in Store" on the plugin's card makes
-/// — so choosing a row and being sent to it are one path.
+/// one list to the eye. A press — or Up and Down on the list — is the
+/// store's own `choose` action run about this plugin, which selects it and
+/// leaves the field alone: the row is one the field let through.
 fn row(
     workspace: &Workspace,
     known: &Known,
@@ -332,7 +345,7 @@ fn row(
         .settings_page()
         .control(named(&format!("store.row.{}", offer.id)));
     let installed = installed_version(workspace, &offer.id);
-    let command = workspace.run_about(&action("show"), offer.id.as_str());
+    let command = workspace.run_about(&action("choose"), offer.id.as_str());
 
     section::row(
         section::Row {

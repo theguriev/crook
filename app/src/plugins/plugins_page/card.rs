@@ -58,6 +58,7 @@ use crook_plugin::{EntryId, Manifest, PluginId, SlotId, Slots, Tier};
 
 use crate::plugins::store;
 use crate::plugins::store::index::{Busy, Change, Release, change};
+use crate::workspace::settings_page::focus::Within;
 use crate::workspace::settings_page::search::Words;
 use crate::workspace::settings_page::widgets::{Command, Mark, Tone};
 use crate::workspace::settings_page::{named, widgets};
@@ -941,7 +942,12 @@ fn status(
     // Inside the box rather than under it, because what it is about is the
     // controls in the box. A line of prose floating between two blocks belongs
     // to whichever one the reader guesses.
-    let mut body = vec![drawn];
+    //
+    // Sealed: what the plugin drew is never a stop the keyboard presses,
+    // whatever it is made of — a host's own button drawn in a plugin's box
+    // would make a key press the host's answer. Its controls keep the
+    // pointer. See `focus`'s module.
+    let mut body = vec![Within::sealed(drawn)];
     if let Some(why) = stalled(
         manifest,
         workspace.settings().granted_to(manifest.id.as_str()),

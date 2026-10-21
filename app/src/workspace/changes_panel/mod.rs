@@ -34,6 +34,30 @@
 //! it goes nowhere rather than to a shell's prompt, is
 //! [`Workspace::review_pane`] and the send beside it.
 //!
+//! # From the keyboard
+//!
+//! The keyboard is the pane's until a person puts it here, with
+//! `crook/changes/focus` ("Move the keyboard to the changes"), which opens the
+//! column first when it is shut. Then every control in the column is a stop,
+//! in the order the column draws them — Refresh and the ×, the review's
+//! buttons, then every file, its buttons, and each line a comment can go on
+//! — with the settings' keys: Tab and Down to the next, Shift-Tab and Up to
+//! the one before, Home and End to the ends, none of them coming round;
+//! Enter and Space press it; Right shows a file's lines and Left folds
+//! them; Escape gives the keyboard back to the pane, with the column left
+//! up. Enter on a line opens its comment field with the keyboard in it, and
+//! the field's own Enter and Escape bring it back to the line.
+//!
+//! The list of stops is worked out from the rows, not written down while
+//! they are laid out as the settings' are (see
+//! [`settings_page::focus`](super::settings_page::focus)): the column builds
+//! only the rows in view, so a frame's list would end at the bottom of the
+//! window, and a walk down a diff would stop there. The rows say every
+//! control there is whether or not it is drawn — the same functions decide
+//! both, see [`ChangesPanelState::stops`] — and a step lands on one and
+//! scrolls it into view. Worked out at the key, from what the next frame will
+//! draw, so a key faster than a frame acts on the column that is coming.
+//!
 //! # Where it is
 //!
 //! A docked column beside the work, composed where the Themes panel is — in
@@ -95,6 +119,8 @@ use crate::text_input::TextInput;
 use crate::theme::theme;
 
 use review::{Anchor, Key};
+
+use super::settings_page::focus::{self as keyboard, Key as Walk, Stop};
 
 use super::action::{ChangesAction, WorkspaceAction};
 use super::view::Workspace;
@@ -280,6 +306,27 @@ pub(super) enum Control {
     DismissNote,
 }
 
+/// Where the keyboard is in the column, while a person has put it there.
+#[derive(Default)]
+struct Keyboard {
+    /// Whether a person put it here — a wish, granted by
+    /// [`Workspace::column_takes_keys`] when nothing else has it.
+    wanted: bool,
+    /// The control it is on, or `None` for "the one at `at`".
+    on: Option<Control>,
+    /// Where `on` was among the stops, which is where the keyboard goes when
+    /// it is no longer there.
+    at: usize,
+    /// Whether the column holds the keyboard for the frame being built,
+    /// which is when the ring is drawn.
+    holds: bool,
+    /// The control the ring was drawn on in the last frame. A press lands
+    /// only there, the sections' rule: a key that moved the keyboard, or a
+    /// press that took the control it was on away, is followed by a frame
+    /// before the next press can land.
+    shown: Option<Control>,
+}
+
 /// The comment being typed: where it will go, and what has been typed.
 struct Draft {
     /// The line it is about.
@@ -412,6 +459,9 @@ pub(super) struct ChangesPanelState {
     /// The last thing the review had to say: where a Send went, why it went
     /// nowhere, which comments a refresh dropped.
     note: Option<String>,
+    /// Where the keyboard is in the column. Behind a `RefCell` because the
+    /// frame settles it against the stops it draws, holding `&self`.
+    keyboard: RefCell<Keyboard>,
 }
 
 impl ChangesPanelState {
@@ -600,6 +650,7 @@ impl ChangesPanelState {
         self.launch_failure = None;
         self.draft = None;
         self.note = None;
+        *self.keyboard.borrow_mut() = Keyboard::default();
         self.forget_hover_state();
         self.relayout();
     }
@@ -614,6 +665,14 @@ impl ChangesPanelState {
         self.launch_failure = None;
         self.draft = None;
         self.note = None;
+        // Another repository's controls: the keyboard starts at the top of
+        // them, rather than on whatever has this one's index there.
+        {
+            let mut keyboard = self.keyboard.borrow_mut();
+            keyboard.on = None;
+            keyboard.at = 0;
+            keyboard.shown = None;
+        }
         self.scroll.lock().scroll_to_top();
         self.forget_hover_state();
         self.epoch = self.epoch.wrapping_add(1);
@@ -942,14 +1001,271 @@ impl ChangesPanelState {
 
     /// Puts the keyboard in the comment field, or takes it out; the words
     /// stay either way. Says whether that changed anything.
+    ///
+    /// Taking it out is a person going somewhere else with the keyboard — a
+    /// pane clicked, a section shown, another field pressed, the find bar
+    /// opened — so the column's rows let go of it as well.
     pub(super) fn focus_draft(&mut self, focused: bool) -> bool {
+        let released = !focused && self.release_keys();
         match &mut self.draft {
             Some(draft) if draft.focused != focused => {
                 draft.focused = focused;
                 true
             }
-            _ => false,
+            _ => released,
         }
+    }
+
+    /// Puts the keyboard in the column, on its first control. Says whether
+    /// that changed anything.
+    pub(super) fn take_keys(&mut self) -> bool {
+        let mut keyboard = self.keyboard.borrow_mut();
+        if keyboard.wanted {
+            return false;
+        }
+        *keyboard = Keyboard {
+            wanted: true,
+            ..Keyboard::default()
+        };
+        true
+    }
+
+    /// Gives the keyboard back from the column's rows. Says whether it had
+    /// it.
+    pub(super) fn release_keys(&mut self) -> bool {
+        std::mem::take(&mut self.keyboard.borrow_mut().wanted)
+    }
+
+    /// Whether a person has put the keyboard in the column.
+    pub(super) fn wants_keys(&self) -> bool {
+        self.keyboard.borrow().wanted
+    }
+
+    /// Says whether the column holds the keyboard, for the frame being built.
+    pub(super) fn set_holds_keys(&self, holds: bool) {
+        let mut keyboard = self.keyboard.borrow_mut();
+        keyboard.holds = holds;
+        keyboard.shown = None;
+    }
+
+    /// Every control the keyboard can stand on, in the order the column draws
+    /// them: the strip's, the review's, then every row's — drawn or not.
+    pub(super) fn stops(&self) -> Vec<Control> {
+        let mut stops = Vec::new();
+        if !self.is_reading() {
+            stops.push(Control::Refresh);
+        }
+        stops.push(Control::Close);
+        if self.adrift().is_some() {
+            stops.push(Control::Draft);
+        }
+        if !self.comments().is_empty() {
+            stops.extend([Control::Send, Control::CopyReview]);
+        }
+        if self.note.is_some() {
+            stops.push(Control::DismissNote);
+        }
+        for row in &self.rows {
+            stops.extend(
+                self.controls_in(row)
+                    .into_iter()
+                    .map(|(control, _)| control),
+            );
+        }
+        stops
+    }
+
+    /// The controls one row draws, each with what a press on it sends. The
+    /// one answer [`row`] draws from and [`Self::stops`] walks, so the two
+    /// cannot disagree about what is there.
+    fn controls_in(&self, row: &Row) -> Vec<(Control, ChangesAction)> {
+        let overview = self.overview();
+        let file_at = |index: usize| overview.and_then(|overview| overview.files.get(index));
+        match row {
+            Row::File(index) if file_at(*index).is_some() => {
+                vec![(Control::File(*index), ChangesAction::ToggleFile(*index))]
+            }
+            Row::Actions(index) => match file_at(*index) {
+                Some(file) => self.file_actions(*index, file),
+                None => Vec::new(),
+            },
+            Row::Line(file, line) => {
+                let commentable = file_at(*file)
+                    .and_then(|found| self.diff(&found.path))
+                    .and_then(|diff| diff.lines.get(*line))
+                    .is_some_and(|text| review::commentable(text));
+                match commentable {
+                    true => vec![(
+                        Control::Line(*file, *line),
+                        ChangesAction::Comment {
+                            file: *file,
+                            line: *line,
+                        },
+                    )],
+                    false => Vec::new(),
+                }
+            }
+            Row::Comment(_, id) if self.comments().iter().any(|comment| comment.id == *id) => {
+                vec![(
+                    Control::RemoveComment(*id),
+                    ChangesAction::RemoveComment(*id),
+                )]
+            }
+            Row::Draft(_) if self.draft.is_some() => {
+                vec![(Control::Draft, ChangesAction::FocusComment)]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// A shown file's buttons. Each is there only when it can do something:
+    /// no "Open" for a file that is gone, for a nested repository, which is a
+    /// directory, or with no editor named; no "Copy diff" until there is a
+    /// whole one to copy.
+    fn file_actions(&self, index: usize, file: &FileChange) -> Vec<(Control, ChangesAction)> {
+        let mut actions = Vec::new();
+        if !matches!(file.status, Status::Deleted | Status::Repository) && self.editor().is_some() {
+            actions.push((Control::Open(index), ChangesAction::OpenFile(index)));
+        }
+        actions.push((Control::CopyPath(index), ChangesAction::CopyPath(index)));
+        // A cut diff is a patch with its end missing, and pasting it anywhere
+        // — to an agent, into `git apply` — would say something false about
+        // the change. The binary sentence is not a patch either.
+        if self
+            .diff(&file.path)
+            .is_some_and(|diff| !diff.binary && !diff.cut && !diff.patch.is_empty())
+        {
+            actions.push((Control::CopyDiff(index), ChangesAction::CopyDiff(index)));
+        }
+        actions
+    }
+
+    /// What a press on `control` sends, if it can send anything now.
+    fn press_of(&self, control: Control) -> Option<ChangesAction> {
+        match control {
+            Control::Refresh => (!self.is_reading()).then_some(ChangesAction::Refresh),
+            Control::Close => Some(ChangesAction::Close),
+            Control::Send => Some(ChangesAction::Send),
+            Control::CopyReview => Some(ChangesAction::CopyReview),
+            Control::DismissNote => Some(ChangesAction::DismissNote),
+            Control::Draft => Some(ChangesAction::FocusComment),
+            _ => self
+                .rows
+                .iter()
+                .flat_map(|row| self.controls_in(row))
+                .find(|(found, _)| *found == control)
+                .map(|(_, action)| action),
+        }
+    }
+
+    /// Settles which control the keyboard is on against `stops`: the one it
+    /// was on if that is still there, or whatever has taken its place.
+    fn resolve(&self, stops: &[Control]) -> Option<Control> {
+        let mut keyboard = self.keyboard.borrow_mut();
+        if let Some(at) = keyboard
+            .on
+            .and_then(|on| stops.iter().position(|stop| *stop == on))
+        {
+            keyboard.at = at;
+            return keyboard.on;
+        }
+        let last = stops.len().checked_sub(1)?;
+        keyboard.at = keyboard.at.min(last);
+        keyboard.on = Some(stops[keyboard.at]);
+        keyboard.on
+    }
+
+    /// Whether the ring is on `control` in the frame being built.
+    pub(super) fn is_lit(&self, control: Control) -> bool {
+        let holds = self.keyboard.borrow().holds;
+        holds && self.keyboard.borrow().on == Some(control)
+    }
+
+    /// Settles the keyboard against what the frame being built will draw, so
+    /// the ring is on a control that is there.
+    pub(super) fn settle_keys(&self) {
+        if self.keyboard.borrow().holds {
+            let on = self.resolve(&self.stops());
+            self.keyboard.borrow_mut().shown = on;
+        }
+    }
+
+    /// What a key the column took does: a step, or the action a press sends.
+    /// Steps clamp to the ends, as every list in the window does.
+    pub(super) fn walk(&mut self, key: Walk) -> Option<ChangesAction> {
+        let stops = self.stops();
+        let on = self.resolve(&stops)?;
+        let at = self.keyboard.borrow().at;
+        let last = stops.len() - 1;
+        let to = match key {
+            Walk::Next | Walk::Down => Some((at + 1).min(last)),
+            Walk::Previous | Walk::Up => Some(at.saturating_sub(1)),
+            Walk::Home => Some(0),
+            Walk::End => Some(last),
+            // Only on the control the last frame drew the ring on.
+            Walk::Press => {
+                let shown = self.keyboard.borrow().shown;
+                return (shown == Some(on)).then(|| self.press_of(on)).flatten();
+            }
+            // A file's lines, shown and folded, the way a tree's arrows do it.
+            Walk::Right | Walk::Left => {
+                let Control::File(index) = on else {
+                    return None;
+                };
+                if self.keyboard.borrow().shown != Some(on) {
+                    return None;
+                }
+                let path = self.overview()?.files.get(index)?.path.clone();
+                let showing = self.is_expanded(&path);
+                return (showing == (key == Walk::Left))
+                    .then_some(ChangesAction::ToggleFile(index));
+            }
+            Walk::Escape => None,
+        };
+        if let Some(to) = to {
+            let mut keyboard = self.keyboard.borrow_mut();
+            keyboard.at = to;
+            keyboard.on = Some(stops[to]);
+            if keyboard.on != Some(on) {
+                keyboard.shown = None;
+            }
+        }
+        drop(stops);
+        self.scroll_to_keys();
+        None
+    }
+
+    /// Brings the row the keyboard is on into the list's view: the nearer
+    /// edge wins, the tab list's rule. Worked out from the rows' heights, so
+    /// a row no frame has built yet is scrolled to as surely as one on
+    /// screen.
+    fn scroll_to_keys(&self) {
+        let Some(on) = self.keyboard.borrow().on else {
+            return;
+        };
+        let Some(index) = self
+            .rows
+            .iter()
+            .position(|row| self.controls_in(row).iter().any(|(found, _)| *found == on))
+        else {
+            return;
+        };
+        let row = super::tabs_panel::geometry::RowBox {
+            top: self.start(index),
+            height: self.rows[index].height(),
+        };
+        let mut scroll = self.scroll.lock();
+        if let Some(offset) =
+            super::tabs_panel::geometry::scroll_for(row, scroll.offset(), scroll.viewport())
+        {
+            scroll.scroll_to(offset);
+        }
+    }
+
+    /// The control the keyboard is on, for a test to read back.
+    #[cfg(test)]
+    pub(super) fn keys_on(&self) -> Option<Control> {
+        self.resolve(&self.stops())
     }
 
     /// Adds what was typed as a comment on the field's line, and takes the
@@ -961,6 +1277,7 @@ impl ChangesPanelState {
         let Some(draft) = self.draft.take() else {
             return false;
         };
+        self.back_to_the_line(&draft);
         let text = draft.input.editor().text().trim().to_owned();
         if draft.adrift.is_some() {
             if !text.is_empty() {
@@ -991,11 +1308,31 @@ impl ChangesPanelState {
 
     /// Takes the field down, and what was typed in it with it.
     pub(super) fn cancel_comment(&mut self) -> bool {
-        if self.draft.take().is_none() {
+        let Some(draft) = self.draft.take() else {
             return false;
-        }
+        };
+        self.back_to_the_line(&draft);
         self.relayout();
         true
+    }
+
+    /// Puts the keyboard back on the line a comment field was under, when the
+    /// keyboard was on the field itself — which goes with it.
+    fn back_to_the_line(&self, draft: &Draft) {
+        let mut keyboard = self.keyboard.borrow_mut();
+        if keyboard.on != Some(Control::Draft) {
+            return;
+        }
+        let file = self.overview().and_then(|overview| {
+            overview
+                .files
+                .iter()
+                .position(|file| file.path == draft.anchor.path)
+        });
+        keyboard.on = match (file, draft.adrift) {
+            (Some(file), None) => Some(Control::Line(file, draft.anchor.at)),
+            _ => None,
+        };
     }
 
     /// Takes the comment `id` away. Says whether there was one.
@@ -1350,6 +1687,11 @@ fn follow_lines(
 /// The whole column.
 pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     let ui = workspace.fonts().ui;
+    // Whether the ring is drawn, and on what: settled against the stops this
+    // frame will draw, so it is on a control that is there.
+    let state = workspace.changes_panel();
+    state.set_holds_keys(workspace.column_takes_keys());
+    state.settle_keys();
 
     // Its own width, ground and edge, because it is a docked column rather
     // than something inside one — the Themes panel's arrangement.
@@ -1382,13 +1724,17 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
 /// Refresh and the ×, at the right end of the strip.
 fn header(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     let state = workspace.changes_panel();
-    let refresh = text_button(
-        state.control(Control::Refresh),
-        "Refresh",
-        // Inert while a read is under way: it would ask the question that is
-        // already being answered. A dead button has no handler at all.
-        (!state.is_reading()).then_some(ChangesAction::Refresh),
-        ui,
+    let refresh = ringed(
+        state,
+        Control::Refresh,
+        text_button(
+            state.control(Control::Refresh),
+            "Refresh",
+            // Inert while a read is under way: it would ask the question that
+            // is already being answered. A dead button has no handler at all.
+            (!state.is_reading()).then_some(ChangesAction::Refresh),
+            ui,
+        ),
     );
 
     ConstrainedBox::new(
@@ -1398,7 +1744,7 @@ fn header(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
             .with_child(Expanded::new(1., Empty::new().finish()).finish())
             .with_child(refresh)
             .with_child(
-                Container::new(close_button(workspace))
+                Container::new(ringed(state, Control::Close, close_button(workspace)))
                     .with_margin_left(6.)
                     .finish(),
             )
@@ -1496,20 +1842,28 @@ fn review_bar(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
                 .with_main_axis_size(MainAxisSize::Max)
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
                 .with_child(
-                    Container::new(text_button(
-                        state.control(Control::Send),
-                        &label,
-                        Some(ChangesAction::Send),
-                        ui,
+                    Container::new(ringed(
+                        state,
+                        Control::Send,
+                        text_button(
+                            state.control(Control::Send),
+                            &label,
+                            Some(ChangesAction::Send),
+                            ui,
+                        ),
                     ))
                     .with_margin_right(6.)
                     .finish(),
                 )
-                .with_child(text_button(
-                    state.control(Control::CopyReview),
-                    "Copy review",
-                    Some(ChangesAction::CopyReview),
-                    ui,
+                .with_child(ringed(
+                    state,
+                    Control::CopyReview,
+                    text_button(
+                        state.control(Control::CopyReview),
+                        "Copy review",
+                        Some(ChangesAction::CopyReview),
+                        ui,
+                    ),
                 ))
                 .finish(),
         );
@@ -1532,9 +1886,13 @@ fn review_bar(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
                     )
                     .finish(),
                 )
-                .with_child(small_cross(
-                    state.control(Control::DismissNote),
-                    ChangesAction::DismissNote,
+                .with_child(ringed(
+                    state,
+                    Control::DismissNote,
+                    small_cross(
+                        state.control(Control::DismissNote),
+                        ChangesAction::DismissNote,
+                    ),
                 ))
                 .finish(),
         );
@@ -1757,7 +2115,7 @@ fn file_row(
     let letter = file.status.letter().to_string();
     let color = status_color(file.status);
 
-    Hoverable::new(state.control(Control::File(index)), move |mouse| {
+    let row = Hoverable::new(state.control(Control::File(index)), move |mouse| {
         Container::new(
             Flex::row()
                 .with_main_axis_size(MainAxisSize::Max)
@@ -1821,13 +2179,12 @@ fn file_row(
     .on_click(move |_, ctx, _| {
         ctx.dispatch_typed_action(WorkspaceAction::Changes(ChangesAction::ToggleFile(index)));
     })
-    .finish()
+    .finish();
+    ringed_row(state, Control::File(index), 4., row)
 }
 
-/// A shown file's buttons. Each is there only when it can do something: no
-/// "Open" for a file that is gone, for a nested repository, which is a
-/// directory, or with no editor named; no "Copy diff" until there is a whole
-/// one to copy.
+/// A shown file's buttons: [`ChangesPanelState::file_actions`]'s, which say
+/// which there are.
 ///
 /// "Open" and not "Open in code": an editor's name is whatever `$VISUAL`
 /// says, a launcher script's included, and a name long enough pushed the
@@ -1843,41 +2200,24 @@ fn actions_row(
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Center);
 
-    if !matches!(file.status, Status::Deleted | Status::Repository) && state.editor().is_some() {
-        row.add_child(
-            Container::new(text_button(
-                state.control(Control::Open(index)),
-                "Open",
-                Some(ChangesAction::OpenFile(index)),
-                ui,
-            ))
-            .with_margin_right(6.)
-            .finish(),
+    let actions = state.file_actions(index, file);
+    let last = actions.len().saturating_sub(1);
+    for (at, (control, action)) in actions.into_iter().enumerate() {
+        let label = match control {
+            Control::Open(_) => "Open",
+            Control::CopyPath(_) => "Copy path",
+            _ => "Copy diff",
+        };
+        let button = ringed(
+            state,
+            control,
+            text_button(state.control(control), label, Some(action), ui),
         );
-    }
-    row.add_child(
-        Container::new(text_button(
-            state.control(Control::CopyPath(index)),
-            "Copy path",
-            Some(ChangesAction::CopyPath(index)),
-            ui,
-        ))
-        .with_margin_right(6.)
-        .finish(),
-    );
-    // A cut diff is a patch with its end missing, and pasting it anywhere —
-    // to an agent, into `git apply` — would say something false about the
-    // change. The binary sentence is not a patch either.
-    if state
-        .diff(&file.path)
-        .is_some_and(|diff| !diff.binary && !diff.cut && !diff.patch.is_empty())
-    {
-        row.add_child(text_button(
-            state.control(Control::CopyDiff(index)),
-            "Copy diff",
-            Some(ChangesAction::CopyDiff(index)),
-            ui,
-        ));
+        row.add_child(
+            Container::new(button)
+                .with_margin_right(if at == last { 0. } else { 6. })
+                .finish(),
+        );
     }
 
     Container::new(row.finish())
@@ -1931,7 +2271,7 @@ fn commentable_line(
 ) -> Box<dyn Element> {
     let state = workspace.changes_panel();
     let text = text.to_owned();
-    Hoverable::new(state.control(Control::Line(file, line)), move |mouse| {
+    let row = Hoverable::new(state.control(Control::Line(file, line)), move |mouse| {
         let hovered = mouse.is_hovered();
         let mut row = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
@@ -1958,7 +2298,8 @@ fn commentable_line(
             line,
         }));
     })
-    .finish()
+    .finish();
+    ringed_row(state, Control::Line(file, line), 0., row)
 }
 
 /// A comment, under its line: a bar in the accent down its left edge, so it
@@ -1984,9 +2325,13 @@ fn comment_row(workspace: &Workspace, comment: &Comment, ui: FamilyId) -> Box<dy
                 )
                 .finish(),
             )
-            .with_child(small_cross(
-                state.control(Control::RemoveComment(comment.id)),
-                ChangesAction::RemoveComment(comment.id),
+            .with_child(ringed(
+                state,
+                Control::RemoveComment(comment.id),
+                small_cross(
+                    state.control(Control::RemoveComment(comment.id)),
+                    ChangesAction::RemoveComment(comment.id),
+                ),
             ))
             .finish(),
     )
@@ -2010,20 +2355,45 @@ fn draft_row(workspace: &Workspace) -> Box<dyn Element> {
     let Some(input) = state.draft_input() else {
         return Empty::new().finish();
     };
-    Container::new(
-        super::text_field::TextField::new(
-            input.clone(),
-            workspace.clipboard().clone(),
-            workspace.fonts(),
-            state.control(Control::Draft),
-            "Comment for the agent · Enter adds it",
-        )
-        .with_window_focused(workspace.is_window_focused())
-        .with_focus(WorkspaceAction::Changes(ChangesAction::FocusComment))
-        .finish(),
+    let field = super::text_field::TextField::new(
+        input.clone(),
+        workspace.clipboard().clone(),
+        workspace.fonts(),
+        state.control(Control::Draft),
+        "Comment for the agent · Enter adds it",
     )
-    .with_vertical_padding(4.)
-    .finish()
+    .with_window_focused(workspace.is_window_focused())
+    .with_focus(WorkspaceAction::Changes(ChangesAction::FocusComment))
+    .finish();
+    Container::new(ringed_row(state, Control::Draft, 6., field))
+        .with_vertical_padding(4.)
+        .finish()
+}
+
+/// `child`, with the ring around it while the keyboard is on `control`.
+fn ringed(
+    state: &ChangesPanelState,
+    control: Control,
+    child: Box<dyn Element>,
+) -> Box<dyn Element> {
+    Stop::fixed(
+        state.is_lit(control),
+        keyboard::ring_radius(4.),
+        false,
+        child,
+    )
+}
+
+/// The same for a control as wide as the column, whose ring is drawn on its
+/// own edge, rounded by `radius` as it is — a ring outside it would be cut
+/// by the list's edges.
+fn ringed_row(
+    state: &ChangesPanelState,
+    control: Control,
+    radius: f32,
+    child: Box<dyn Element>,
+) -> Box<dyn Element> {
+    Stop::fixed(state.is_lit(control), Radius::Pixels(radius), true, child)
 }
 
 /// A 16px × that sends `action`: a comment's, and the note's.

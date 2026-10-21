@@ -36997,6 +36997,733 @@ mod sandboxed {
             );
         }
     }
+    /// The Plugins and Store sections from the keyboard: the settings' walk
+    /// — box, list, card — over their own rows and cards, with the same
+    /// frame-by-frame care, and nothing a plugin draws among what it presses.
+    mod keyboard_sections {
+        use super::*;
+        use crate::plugins::store::cache::Cache;
+        use crate::workspace::settings_page::focus::Place;
+
+        const PLUGINS: &str = "crook/plugins/section";
+        const STORE: &str = "crook/store/section";
+
+        fn shift() -> Modifiers {
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            }
+        }
+
+        /// Presses one bare key the way the window does, and draws what
+        /// follows.
+        fn key(harness: &mut Harness, key: &str) {
+            let chars = if key == "space" { " " } else { "" };
+            harness.press(key, Modifiers::default(), chars);
+            harness.frame();
+        }
+
+        /// Presses a key without drawing a frame after it, as a key that
+        /// comes before the window has redrawn does.
+        fn quick(harness: &mut Harness, key: &str) {
+            harness.press(key, Modifiers::default(), "");
+        }
+
+        fn shift_tab(harness: &mut Harness) {
+            harness.press("tab", shift(), "");
+            harness.frame();
+        }
+
+        /// Where the keyboard is in the section `section`.
+        fn place(harness: &Harness, section: &str) -> Place {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.settings_page().focus_of(section).place()
+            })
+        }
+
+        /// Every focus ring the frame draws: a stroke of two in the accent
+        /// with nothing inside it.
+        fn rings(scene: &Scene) -> Vec<RectF> {
+            visible_rects(scene)
+                .filter(|(rect, _)| {
+                    rect.background == Fill::None
+                        && rect.border.width == 2.
+                        && rect.border.color == Fill::Solid(theme().accent)
+                })
+                .map(|(_, bounds)| bounds)
+                .collect()
+        }
+
+        /// The one ring there is.
+        fn the_ring(scene: &Scene) -> RectF {
+            let rings = rings(scene);
+            assert_eq!(
+                rings.len(),
+                1,
+                "one ring, not {rings:?}: {}",
+                frame_text(scene)
+            );
+            rings[0]
+        }
+
+        /// Whether the ring is around the word `word` on the card.
+        fn ring_on_card_word(scene: &Scene, word: &str) -> bool {
+            the_ring(scene).contains_point(page_word(scene, word) + vec2f(2., -3.))
+        }
+
+        /// Whether the ring is in the sidebar, around the row that says
+        /// `name`.
+        fn ring_on_row(scene: &Scene, name: &str) -> bool {
+            let ring = the_ring(scene);
+            let panel = panel_box(scene);
+            ring.max_x() <= panel.max_x() + 0.5
+                && ring.contains_point(word_in(scene, panel, name) + vec2f(2., -3.))
+        }
+
+        /// What the card is about: the page's title.
+        fn card_title(harness: &mut Harness) -> String {
+            let scene = harness.frame();
+            page_lines(&scene)
+                .into_iter()
+                .next()
+                .map(|(_, line)| line.trim().to_owned())
+                .unwrap_or_default()
+        }
+
+        /// Whether the card is about `plugin`, by the line of facts under its
+        /// title, which starts with its id.
+        fn card_is_about(harness: &mut Harness, plugin: &str) -> bool {
+            let scene = harness.frame();
+            page_lines(&scene)
+                .iter()
+                .any(|(_, line)| line.contains(&format!("{plugin} \u{b7} ")))
+        }
+
+        fn granted(harness: &Harness, plugin: &str) -> Vec<String> {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.settings().granted_to(plugin).to_vec()
+            })
+        }
+
+        fn installed(harness: &Harness, plugin: &str) -> bool {
+            let plugin = crook_plugin::PluginId::parse(plugin).expect("a literal that parses");
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.is_installed(&plugin))
+        }
+
+        fn is_on(harness: &Harness, plugin: &str) -> bool {
+            let plugin = crook_plugin::PluginId::parse(plugin).expect("a literal that parses");
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.plugin_is_on(&plugin))
+        }
+
+        /// A window with two sandboxed plugins installed, each asking for
+        /// the same thing and drawing nothing on its card, showing the
+        /// Plugins section narrowed to the two of them: Other, then Probe.
+        fn two_installed(scratch: &Scratch) -> Harness {
+            install(
+                scratch.path(),
+                "eugen.probe",
+                &wasm("eugen/probe", "header.right", 10),
+            );
+            let mut other = manifest("eugen/other");
+            other.name = "Other".to_owned();
+            install(
+                scratch.path(),
+                "eugen.other",
+                &wasm_saying(&other, "header.left", 10),
+            );
+            let mut harness = harness(scratch);
+            harness.show_plugins();
+            harness.type_text("eugen/");
+            harness.frame();
+            harness
+        }
+
+        #[test]
+        fn tab_walks_the_plugins_from_the_box_to_the_list_to_the_card_and_back() {
+            let mut harness = Harness::new(1);
+            harness.show_plugins();
+            assert_eq!(place(&harness, PLUGINS), Place::Search);
+            assert!(rings(&harness.frame()).is_empty(), "a ring before any key");
+            let first = card_title(&mut harness);
+
+            key(&mut harness, "tab");
+            assert_eq!(place(&harness, PLUGINS), Place::Rail);
+            assert!(
+                ring_on_row(&harness.frame(), &first),
+                "the ring is not on the row the card is about"
+            );
+
+            // Down on the list is a click on the next row.
+            key(&mut harness, "down");
+            let second = card_title(&mut harness);
+            assert_ne!(first, second, "Down chose no other plugin");
+            assert!(ring_on_row(&harness.frame(), &second));
+            key(&mut harness, "up");
+            assert_eq!(card_title(&mut harness), first);
+
+            // Into the card: the first control is the switch.
+            key(&mut harness, "tab");
+            assert_eq!(place(&harness, PLUGINS), Place::Control);
+            let switch = settings_switch_boxes(&harness.frame())[0];
+            assert!(
+                the_ring(&harness.frame()).contains_point(center(switch)),
+                "the first control on a card is its switch"
+            );
+
+            // And back the same way, no further than the box.
+            shift_tab(&mut harness);
+            assert_eq!(place(&harness, PLUGINS), Place::Rail);
+            shift_tab(&mut harness);
+            assert_eq!(place(&harness, PLUGINS), Place::Search);
+            shift_tab(&mut harness);
+            assert_eq!(place(&harness, PLUGINS), Place::Search);
+
+            // Typing reaches the box again.
+            harness.type_text("tabs");
+            let text = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .field(PLUGINS, "search")
+                    .1
+                    .editor()
+                    .text()
+                    .to_owned()
+            });
+            assert_eq!(text, "tabs");
+        }
+
+        #[test]
+        fn down_from_the_plugins_box_walks_what_it_found_and_space_switches_one() {
+            let scratch = Scratch::new("keys-switch");
+            let mut harness = two_installed(&scratch);
+            key(&mut harness, "down");
+            assert_eq!(place(&harness, PLUGINS), Place::Rail);
+            assert!(card_is_about(&mut harness, "eugen/other"));
+            key(&mut harness, "end");
+            assert!(
+                card_is_about(&mut harness, "eugen/probe"),
+                "End chose no other row"
+            );
+            assert!(ring_on_row(&harness.frame(), "Probe"));
+
+            key(&mut harness, "enter");
+            assert_eq!(place(&harness, PLUGINS), Place::Control);
+            assert!(is_on(&harness, "eugen/probe"));
+            key(&mut harness, "space");
+            assert!(
+                !is_on(&harness, "eugen/probe"),
+                "Space did not switch the plugin off"
+            );
+            assert!(
+                is_on(&harness, "eugen/other"),
+                "Space switched the wrong one"
+            );
+            assert_eq!(
+                place(&harness, PLUGINS),
+                Place::Control,
+                "switching it off took the keyboard off the card"
+            );
+            // The switch's knob goes where the arrow points: Right is on.
+            key(&mut harness, "right");
+            assert!(
+                is_on(&harness, "eugen/probe"),
+                "Right did not switch it back on"
+            );
+        }
+
+        #[test]
+        fn allow_from_the_keyboard_is_a_press_on_the_allow_the_card_shows() {
+            let scratch = Scratch::new("keys-allow");
+            let mut harness = two_installed(&scratch);
+            harness.click_plugin("Probe");
+            key(&mut harness, "tab");
+            key(&mut harness, "tab");
+            // Enabled, Remove, then the box the grant is answered in.
+            key(&mut harness, "down");
+            key(&mut harness, "down");
+            assert!(
+                ring_on_card_word(&harness.frame(), "Allow"),
+                "the walk did not reach Allow: {}",
+                frame_text(&harness.frame())
+            );
+            assert!(granted(&harness, "eugen/probe").is_empty());
+            key(&mut harness, "enter");
+            assert_eq!(granted(&harness, "eugen/probe"), ["tabs.read"]);
+            assert!(granted(&harness, "eugen/other").is_empty());
+        }
+
+        #[test]
+        fn keys_before_a_frame_press_nothing_on_the_card_that_is_going() {
+            // Down chooses the next plugin and Tab and Enter follow it before
+            // the window has drawn that plugin's card: the Enter must not press
+            // the control of the card that was showing, nor one on the card
+            // that is coming that nobody has seen the ring on.
+            let scratch = Scratch::new("keys-quick");
+            let mut harness = two_installed(&scratch);
+            key(&mut harness, "down");
+            assert!(card_is_about(&mut harness, "eugen/other"));
+
+            quick(&mut harness, "down");
+            quick(&mut harness, "tab");
+            quick(&mut harness, "enter");
+            harness.frame();
+            assert!(
+                is_on(&harness, "eugen/other"),
+                "Enter switched off the card that was going"
+            );
+            assert!(
+                is_on(&harness, "eugen/probe"),
+                "Enter pressed a switch before the ring was drawn on it"
+            );
+            assert_eq!(place(&harness, PLUGINS), Place::Control);
+            assert!(card_is_about(&mut harness, "eugen/probe"));
+
+            // Once drawn, the same Enter is a press.
+            key(&mut harness, "enter");
+            assert!(!is_on(&harness, "eugen/probe"));
+        }
+
+        #[test]
+        fn a_remove_from_the_keyboard_leaves_it_on_the_list_and_never_on_the_next_remove() {
+            // The two cards are drawn alike, so the next plugin's Remove is
+            // where the first one's was. A second Enter — somebody who did
+            // not see the first one land — must not find it.
+            let scratch = Scratch::new("keys-remove");
+            let mut harness = two_installed(&scratch);
+            harness.click_plugin("Probe");
+            key(&mut harness, "tab");
+            key(&mut harness, "tab");
+            key(&mut harness, "down");
+            assert!(
+                ring_on_card_word(&harness.frame(), "Remove"),
+                "the walk did not reach Remove: {}",
+                frame_text(&harness.frame())
+            );
+
+            key(&mut harness, "enter");
+            assert!(!installed(&harness, "eugen/probe"), "Enter removed nothing");
+            assert!(card_is_about(&mut harness, "eugen/other"));
+            assert_eq!(
+                place(&harness, PLUGINS),
+                Place::Rail,
+                "the keyboard stayed on a card about somebody else"
+            );
+            key(&mut harness, "enter");
+            key(&mut harness, "enter");
+            assert!(
+                installed(&harness, "eugen/other"),
+                "the next Enter removed the next plugin"
+            );
+        }
+
+        /// A plugin from the box that draws, on its own card, a button made
+        /// of the host's widgets that presses a host control: the store's
+        /// switch.
+        struct Sneaky;
+
+        impl crate::plugin::Plugin for Sneaky {
+            fn manifest(&self) -> &'static crook_plugin::Manifest {
+                static MANIFEST: std::sync::OnceLock<crook_plugin::Manifest> =
+                    std::sync::OnceLock::new();
+                MANIFEST.get_or_init(|| crook_plugin::Manifest {
+                    schema: crook_plugin::Manifest::SCHEMA,
+                    id: crook_plugin::PluginId::parse("eugen/sneaky").expect("a literal"),
+                    name: "Sneaky",
+                    description: "Draws a host button on its own card.",
+                    version: "0.1.0",
+                    tier: crook_plugin::Tier::Native,
+                    capabilities: &[],
+                })
+            }
+
+            fn build(
+                &mut self,
+                host: &mut crate::plugin::Host,
+                _: &mut ViewContext<Workspace>,
+            ) -> Result<(), crate::plugin::BuildError> {
+                host.contribute(
+                    crate::plugin::SlotId::new("plugins.card.status"),
+                    "status",
+                    0,
+                    |workspace: &Workspace, _: &AppContext| {
+                        let toggle =
+                            crate::plugin::ActionName::parse("crook/plugins/toggle-crook-store")
+                                .expect("a literal");
+                        Some(widgets::text_button(
+                            "Flip the store",
+                            workspace.host().action(&toggle).map(WorkspaceAction::Run),
+                            workspace
+                                .settings_page()
+                                .control(crate::workspace::settings_page::named("sneaky.button")),
+                            workspace.fonts().ui,
+                        ))
+                    },
+                );
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn nothing_a_plugin_draws_on_its_card_is_a_stop() {
+            let scratch = Scratch::new("keys-sneaky");
+            let mut opening = opening(&scratch, Default::default(), Default::default());
+            opening.plugins.push(Box::new(Sneaky));
+            let mut harness = Harness::with_opening(1, opening);
+            harness.show_plugins();
+            harness.type_text("sneaky");
+            harness.frame();
+            let scene = harness.frame();
+            assert!(
+                says(&scene, "Flip the store"),
+                "the plugin drew nothing: {}",
+                frame_text(&scene)
+            );
+            let (drawn, _) = page_line(&scene, "Flip the store");
+            let status = answer_boxes(&scene)
+                .into_iter()
+                .find(|boxed| boxed.contains_point(drawn))
+                .expect("the plugin's button is in its box");
+
+            // Every stop on the card, pressed: none is in the plugin's box,
+            // and the store is still on.
+            key(&mut harness, "down");
+            key(&mut harness, "tab");
+            for _ in 0..12 {
+                let ring = the_ring(&harness.frame());
+                assert!(
+                    status.intersection(ring).is_none(),
+                    "the ring is on what the plugin drew: {ring:?} in {status:?}"
+                );
+                key(&mut harness, "tab");
+            }
+            key(&mut harness, "end");
+            key(&mut harness, "enter");
+            assert!(
+                is_on(&harness, "crook/store"),
+                "a key pressed the host's switch the plugin drew"
+            );
+        }
+
+        /// A registry listing the probe, asking to reach `example.com`.
+        fn listing(scratch: &Scratch) -> Cache {
+            let cache = Cache::at(scratch.path());
+            cache
+                .write(
+                    br#"{"schema": 1, "plugins": [
+                         {"id": "eugen/probe", "name": "Probe", "description": "d",
+                          "repository": "https://example.com/probe",
+                          "versions": [{"version": "0.2.0", "abi": 8,
+                                        "url": "https://github.com/theguriev/crook-plugins/releases/download/index/eugen.probe-0.2.0.wasm",
+                                        "sha256": "aa",
+                                        "capabilities": ["net:example.com"],
+                                        "asks": ["Reach example.com"]}]}]}"#,
+                    None,
+                )
+                .expect("the test index parses");
+            cache
+        }
+
+        #[test]
+        fn the_store_is_searched_walked_and_installed_from_from_the_keyboard() {
+            let plugins = Scratch::new("keys-store");
+            let index = Scratch::new("keys-store-index");
+            let mut harness = Harness::with_store(
+                1,
+                opening(&plugins, Default::default(), Default::default()),
+                listing(&index),
+            );
+            harness.show_section(STORE);
+            harness.type_text("prob");
+            harness.frame();
+
+            key(&mut harness, "down");
+            assert_eq!(place(&harness, STORE), Place::Rail);
+            assert!(ring_on_row(&harness.frame(), "Probe"));
+
+            // Enter goes onto the card — onto Install, under what it asks
+            // for — and presses nothing yet.
+            key(&mut harness, "enter");
+            assert_eq!(place(&harness, STORE), Place::Control);
+            assert_eq!(
+                harness.store_downloading(),
+                None,
+                "Enter on a row installed"
+            );
+            assert!(
+                ring_on_card_word(&harness.frame(), "Install"),
+                "the first control is not Install: {}",
+                frame_text(&harness.frame())
+            );
+            key(&mut harness, "enter");
+            assert_eq!(
+                harness.store_downloading(),
+                Some(probe()),
+                "Enter on Install did not install"
+            );
+        }
+
+        #[test]
+        fn two_enters_before_a_frame_on_a_store_row_never_install() {
+            // Down chooses the row and the card that comes with it, and two
+            // Enters follow before it is drawn: the first goes onto the card,
+            // and the second has no card it may press on yet.
+            let plugins = Scratch::new("keys-store-quick");
+            let index = Scratch::new("keys-store-quick-index");
+            let mut harness = Harness::with_store(
+                1,
+                opening(&plugins, Default::default(), Default::default()),
+                listing(&index),
+            );
+            harness.show_section(STORE);
+            key(&mut harness, "tab");
+            assert_eq!(place(&harness, STORE), Place::Rail);
+            quick(&mut harness, "down");
+            quick(&mut harness, "end");
+            quick(&mut harness, "home");
+            quick(&mut harness, "enter");
+            quick(&mut harness, "enter");
+            harness.frame();
+            assert_eq!(harness.store_downloading(), None);
+        }
+
+        #[test]
+        fn the_store_s_look_is_reached_from_its_box_when_there_is_nothing_listed() {
+            let plugins = Scratch::new("keys-store-empty");
+            let mut harness = harness(&plugins);
+            harness.show_section(STORE);
+            key(&mut harness, "tab");
+            assert_eq!(place(&harness, STORE), Place::Control);
+            let scene = harness.frame();
+            let ring = the_ring(&scene);
+            let panel = panel_box(&scene);
+            let (look, _) = text_lines(&scene, |at| panel.contains_point(at))
+                .into_iter()
+                .find(|(_, line)| line.trim() == "Look for plugins")
+                .expect("the list ends in its look");
+            assert!(
+                ring.contains_point(look + vec2f(2., -3.)),
+                "the ring is not on the look at the list's foot: {ring:?}"
+            );
+            key(&mut harness, "escape");
+            assert_eq!(place(&harness, STORE), Place::Search);
+            key(&mut harness, "escape");
+            assert!(
+                harness
+                    .workspace
+                    .read(&harness.app, |workspace, _| workspace
+                        .showing_section()
+                        .is_none()),
+                "Escape from an empty box did not leave the Store"
+            );
+        }
+
+        #[test]
+        fn a_remove_in_the_store_never_leaves_the_keyboard_on_the_install_in_its_place() {
+            // The Store's card stays about the plugin after it is removed,
+            // and Install takes the place Remove had: an Enter more must not
+            // put it back.
+            let plugins = Scratch::new("keys-store-remove");
+            let index = Scratch::new("keys-store-remove-index");
+            install(
+                plugins.path(),
+                "eugen.probe",
+                &wasm("eugen/probe", "header.right", 10),
+            );
+            let mut harness = Harness::with_store(
+                1,
+                opening(&plugins, Default::default(), Default::default()),
+                listing(&index),
+            );
+            harness.show_section(STORE);
+            key(&mut harness, "down");
+            key(&mut harness, "enter");
+            for _ in 0..6 {
+                if ring_on_card_word(&harness.frame(), "Remove") {
+                    break;
+                }
+                key(&mut harness, "down");
+            }
+            assert!(
+                ring_on_card_word(&harness.frame(), "Remove"),
+                "the walk never reached Remove: {}",
+                frame_text(&harness.frame())
+            );
+            key(&mut harness, "enter");
+            assert!(!installed(&harness, "eugen/probe"), "Enter removed nothing");
+            assert!(
+                says(&harness.frame(), "Install"),
+                "{}",
+                frame_text(&harness.frame())
+            );
+            assert_eq!(
+                place(&harness, STORE),
+                Place::Rail,
+                "the keyboard stayed on the card, where Install is now"
+            );
+            key(&mut harness, "enter");
+            assert_eq!(
+                harness.store_downloading(),
+                None,
+                "the next Enter installed it again"
+            );
+        }
+
+        #[test]
+        fn the_list_and_the_card_scroll_to_what_the_keyboard_is_on() {
+            let window = vec2f(760., 360.);
+            let mut harness = Harness::new(1);
+            harness.show_plugins();
+            harness.frame_sized(window);
+            harness.press("tab", Modifiers::default(), "");
+            harness.frame_sized(window);
+            harness.press("end", Modifiers::default(), "");
+            let scene = harness.frame_sized(window);
+            let ring = the_ring(&scene);
+            let panel = panel_box(&scene);
+            let (whole, shown) = visible_rects(&scene)
+                .find(|(_, visible)| *visible == ring)
+                .map(|(rect, visible)| (rect.bounds, visible))
+                .expect("the ring is drawn");
+            assert!(
+                ring.max_y() <= panel.max_y() && (whole.height() - shown.height()).abs() < 0.01,
+                "the last row's ring {whole:?} is not on screen in the list {panel:?}"
+            );
+
+            // The last control of the last plugin's card, the same way.
+            harness.press("enter", Modifiers::default(), "");
+            harness.frame_sized(window);
+            harness.press("end", Modifiers::default(), "");
+            let scene = harness.frame_sized(window);
+            let ring = the_ring(&scene);
+            let pane = settings_pane_box(&scene);
+            let (whole, shown) = visible_rects(&scene)
+                .find(|(_, visible)| *visible == ring)
+                .map(|(rect, visible)| (rect.bounds, visible))
+                .expect("the ring is drawn");
+            assert!(
+                pane.contains_point(center(ring))
+                    && ring.max_y() <= window.y()
+                    && (whole.height() - shown.height()).abs() < 0.01,
+                "the card's last control's ring {whole:?} is cut, as {shown:?}"
+            );
+        }
+
+        #[test]
+        fn the_arrows_walk_what_the_store_s_box_found_and_leave_the_box_alone() {
+            let plugins = Scratch::new("keys-store-filter");
+            let index = Scratch::new("keys-store-filter-index");
+            let cache = Cache::at(index.path());
+            let offer = |id: &str, name: &str| {
+                format!(
+                    r#"{{"id": "{id}", "name": "{name}", "description": "d",
+                      "repository": "https://example.com/p",
+                      "versions": [{{"version": "0.2.0", "abi": 8,
+                                    "url": "https://github.com/theguriev/crook-plugins/releases/download/index/x.wasm",
+                                    "sha256": "aa", "capabilities": [], "asks": []}}]}}"#
+                )
+            };
+            cache
+                .write(
+                    format!(
+                        r#"{{"schema": 1, "plugins": [{}, {}, {}]}}"#,
+                        offer("eugen/alpha", "Alpha"),
+                        offer("eugen/probe-one", "Probe one"),
+                        offer("eugen/probe-two", "Probe two"),
+                    )
+                    .as_bytes(),
+                    None,
+                )
+                .expect("the test index parses");
+            let mut harness = Harness::with_store(
+                1,
+                opening(&plugins, Default::default(), Default::default()),
+                cache,
+            );
+            harness.show_section(STORE);
+            harness.type_text("probe");
+            harness.frame();
+            key(&mut harness, "down");
+            key(&mut harness, "down");
+            let typed = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .field(STORE, "search")
+                    .1
+                    .editor()
+                    .text()
+                    .to_owned()
+            });
+            assert_eq!(typed, "probe", "a step on the list emptied the box");
+            let scene = harness.frame();
+            assert!(ring_on_row(&scene, "Probe two"), "{}", frame_text(&scene));
+            assert!(
+                !text_lines(&scene, |at| panel_box(&scene).contains_point(at))
+                    .iter()
+                    .any(|(_, line)| line.trim() == "Alpha"),
+                "the list lost its filter"
+            );
+        }
+
+        #[test]
+        fn a_query_that_finds_no_plugin_leaves_the_keyboard_in_the_box() {
+            let mut harness = Harness::new(1);
+            harness.show_plugins();
+            key(&mut harness, "tab");
+            key(&mut harness, "tab");
+            assert_eq!(place(&harness, PLUGINS), Place::Control);
+            harness.type_text("zzzz");
+            harness.frame();
+            key(&mut harness, "tab");
+            assert_eq!(
+                place(&harness, PLUGINS),
+                Place::Search,
+                "Tab went onto a card nobody can see"
+            );
+            key(&mut harness, "end");
+            assert_eq!(place(&harness, PLUGINS), Place::Search);
+        }
+
+        #[test]
+        fn keys_aimed_at_the_plugins_reach_no_pane_behind_them() {
+            let mut harness = Harness::new(1);
+            if !harness.start_terminals() {
+                return;
+            }
+            let pane = harness.focused_pane_id().expect("a pane");
+            harness.dispatch_workspace_action(WorkspaceAction::Find {
+                pane,
+                action: crate::workspace::action::FindAction::Open,
+            });
+            harness.frame();
+            harness.show_plugins();
+            // The keys the section has no use for in its box are not the
+            // bar's either: it is over a pane the section covers.
+            assert_eq!(
+                harness.action_for("enter", shift()),
+                None,
+                "Shift-Enter stepped the bar"
+            );
+            for each in [
+                "tab", "down", "tab", "space", "space", "enter", "left", "right", "up", "end",
+            ] {
+                key(&mut harness, each);
+            }
+            key(&mut harness, "escape");
+            assert_eq!(place(&harness, PLUGINS), Place::Search);
+            harness.show_tabs();
+            assert!(
+                harness.workspace.read(&harness.app, |workspace, _| {
+                    workspace
+                        .find(pane)
+                        .is_some_and(crate::pane_find::PaneFind::is_open)
+                }),
+                "a key on the plugins closed the pane's find bar"
+            );
+            assert_eq!(harness.field_text(pane), "", "the pane heard the keys");
+        }
+    }
 }
 
 /// The Plugins page: a list on the left, a card on the right.
@@ -40646,6 +41373,419 @@ mod changes_column {
         });
         assert_eq!(query.as_deref(), Some("qq"));
         assert_eq!(comment_typed(&harness).as_deref(), Some("abc"));
+    }
+
+    // --- from the keyboard --------------------------------------------------------
+
+    /// The column's keyboard: whether it is the column's, and which control
+    /// it is on.
+    fn column_has_keys(harness: &Harness) -> bool {
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.column_takes_keys())
+    }
+
+    fn column_keys_on(harness: &Harness) -> Option<crate::workspace::changes_panel::Control> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.changes_panel().keys_on()
+        })
+    }
+
+    /// Every focus ring the frame draws: a stroke of two in the accent with
+    /// nothing inside it.
+    fn rings(scene: &Scene) -> Vec<RectF> {
+        visible_rects(scene)
+            .filter(|(rect, _)| {
+                rect.background == Fill::None
+                    && rect.border.width == 2.
+                    && rect.border.color == Fill::Solid(theme().accent)
+            })
+            .map(|(_, bounds)| bounds)
+            .collect()
+    }
+
+    /// Whether the one ring in the frame is on the column's line that says
+    /// `text`.
+    fn column_ring_on(scene: &Scene, text: &str) -> bool {
+        let rings = rings(scene);
+        assert_eq!(rings.len(), 1, "one ring, not {rings:?}");
+        let (at, _) = column_lines(scene)
+            .into_iter()
+            .find(|(_, line)| line.contains(text))
+            .unwrap_or_else(|| panic!("the column does not say {text:?}"));
+        rings[0].contains_point(at + vec2f(2., -3.))
+    }
+
+    /// Presses one bare key the way the window does, and draws what follows.
+    fn walk(harness: &mut Harness, key: &str) {
+        harness.press(key, Modifiers::default(), "");
+        harness.frame();
+    }
+
+    fn expanded(harness: &Harness, path: &str) -> bool {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.changes_panel().is_expanded(Path::new(path))
+        })
+    }
+
+    #[test]
+    fn the_keyboard_walks_the_column_once_it_is_put_there_and_escape_gives_it_back() {
+        use crate::workspace::changes_panel::Control;
+        let mut harness = Harness::new(1);
+        show_files(&mut harness, 3);
+        harness.frame();
+        assert!(
+            !column_has_keys(&harness),
+            "the column took the keyboard unasked"
+        );
+        assert!(rings(&harness.frame()).is_empty());
+
+        harness.run_command("crook/changes/focus");
+        assert!(column_has_keys(&harness));
+        assert!(
+            !harness.a_pane_field_has_keys(),
+            "the pane kept the keyboard beside the column"
+        );
+        assert!(column_ring_on(&harness.frame(), "Refresh"));
+
+        walk(&mut harness, "tab");
+        assert_eq!(column_keys_on(&harness), Some(Control::Close));
+        walk(&mut harness, "tab");
+        assert_eq!(column_keys_on(&harness), Some(Control::File(0)));
+        assert!(column_ring_on(&harness.frame(), "src/file-0000.rs"));
+        walk(&mut harness, "down");
+        assert!(column_ring_on(&harness.frame(), "src/file-0001.rs"));
+
+        // Enter shows a file's lines, as a press on it does; Left folds them
+        // and Right shows them again.
+        let reads = hunk_reads(&harness);
+        walk(&mut harness, "enter");
+        assert!(expanded(&harness, "src/file-0001.rs"));
+        assert_eq!(
+            hunk_reads(&harness),
+            reads + 1,
+            "the diff was not asked for"
+        );
+        walk(&mut harness, "left");
+        assert!(!expanded(&harness, "src/file-0001.rs"));
+        walk(&mut harness, "left");
+        assert!(!expanded(&harness, "src/file-0001.rs"), "Left showed it");
+        walk(&mut harness, "right");
+        assert!(expanded(&harness, "src/file-0001.rs"));
+
+        // The ends, and no further.
+        walk(&mut harness, "home");
+        assert_eq!(column_keys_on(&harness), Some(Control::Refresh));
+        harness.press(
+            "tab",
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+            "",
+        );
+        harness.frame();
+        assert_eq!(column_keys_on(&harness), Some(Control::Refresh));
+
+        walk(&mut harness, "escape");
+        assert!(!column_has_keys(&harness));
+        assert!(
+            harness.a_pane_field_has_keys(),
+            "Escape gave the keyboard to nothing"
+        );
+        assert!(
+            rings(&harness.frame()).is_empty(),
+            "a ring with the keyboard gone"
+        );
+        assert!(
+            column_box(&harness.frame()).is_some(),
+            "Escape took the column down"
+        );
+
+        // A press on the pane takes it back too, as it does from the comment
+        // field.
+        harness.run_command("crook/changes/focus");
+        assert!(column_has_keys(&harness));
+        let pane = panel_boxes(&harness.frame())[0];
+        harness.click(center(pane), MouseButton::Left);
+        harness.frame();
+        assert!(
+            !column_has_keys(&harness),
+            "a press on the pane left the keyboard in the column"
+        );
+        assert!(harness.a_pane_field_has_keys());
+    }
+
+    #[test]
+    fn a_walk_down_a_list_longer_than_the_window_reaches_rows_no_frame_had_built() {
+        use crate::workspace::changes_panel::Control;
+        let mut harness = Harness::new(1);
+        show_files(&mut harness, 400);
+        harness.run_command("crook/changes/focus");
+        harness.frame();
+
+        walk(&mut harness, "end");
+        assert_eq!(column_keys_on(&harness), Some(Control::File(399)));
+        let scene = harness.frame();
+        assert!(
+            column_ring_on(&scene, "src/file-0399.rs"),
+            "the last file is not on screen with the ring on it"
+        );
+        let column = column_box(&scene).expect("the column is up");
+        let ring = rings(&scene)[0];
+        assert!(
+            ring.min_y() >= column.min_y() && ring.max_y() <= column.max_y(),
+            "the ring {ring:?} is outside the column {column:?}"
+        );
+
+        // And up again, a row at a time, past where the list was built.
+        for _ in 0..60 {
+            harness.press("up", Modifiers::default(), "");
+        }
+        harness.frame();
+        assert_eq!(column_keys_on(&harness), Some(Control::File(339)));
+        assert!(column_ring_on(&harness.frame(), "src/file-0339.rs"));
+    }
+
+    #[test]
+    fn keys_before_a_frame_move_on_the_column_that_is_coming_and_press_nothing_unseen() {
+        // Into the list and onto the second file, and Enter, all before a
+        // frame: the moves are counted against the rows, not a frame's, but
+        // the Enter lands on a file nobody has seen the ring on and presses
+        // nothing. Once the frame is drawn, it shows that file.
+        let mut harness = Harness::new(1);
+        show_files(&mut harness, 3);
+        harness.run_command("crook/changes/focus");
+        harness.frame();
+        for each in ["tab", "tab", "down", "enter"] {
+            harness.press(each, Modifiers::default(), "");
+        }
+        assert!(
+            !expanded(&harness, "src/file-0001.rs"),
+            "Enter pressed an unseen file"
+        );
+        harness.frame();
+        assert!(column_ring_on(&harness.frame(), "src/file-0001.rs"));
+        walk(&mut harness, "enter");
+        assert!(expanded(&harness, "src/file-0001.rs"));
+        assert!(!expanded(&harness, "src/file-0000.rs"));
+        // And a second Enter before the frame does nothing more.
+        harness.press("enter", Modifiers::default(), "");
+        harness.press("enter", Modifiers::default(), "");
+        harness.frame();
+        assert!(expanded(&harness, "src/file-0001.rs"));
+    }
+
+    #[test]
+    fn keys_in_the_column_reach_no_pane_no_find_bar_and_no_section() {
+        let mut harness = Harness::new(1);
+        if !harness.start_terminals() {
+            return;
+        }
+        let pane = harness.focused_pane_id().expect("a pane");
+        show_files(&mut harness, 3);
+        harness.dispatch_workspace_action(WorkspaceAction::Find {
+            pane,
+            action: crate::workspace::action::FindAction::Open,
+        });
+        harness.frame();
+        harness.run_command("crook/changes/focus");
+        assert!(column_has_keys(&harness), "the find bar kept the keyboard");
+
+        type_keys(&mut harness, "ls");
+        for each in [
+            "tab", "tab", "down", "space", "enter", "left", "right", "up",
+        ] {
+            walk(&mut harness, each);
+        }
+        harness.press(
+            "enter",
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+            "",
+        );
+        harness.frame();
+        let query = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .find(pane)
+                .filter(|find| find.is_open())
+                .map(crate::pane_find::PaneFind::query)
+        });
+        assert_eq!(
+            query.as_deref(),
+            Some(""),
+            "the find bar heard the column's keys"
+        );
+        assert_eq!(
+            harness.field_text(pane),
+            "",
+            "the pane heard the column's keys"
+        );
+
+        // Over the settings, the keys are the column's and not the page's,
+        // and the one ring is the column's.
+        harness.open_settings_page();
+        walk(&mut harness, "tab");
+        walk(&mut harness, "tab");
+        let page = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.settings_page().focus.place()
+            })
+        };
+        assert_eq!(
+            page(&harness),
+            crate::workspace::settings_page::focus::Place::Control
+        );
+        harness.run_command("crook/changes/focus");
+        assert!(column_has_keys(&harness));
+        let scene = harness.frame();
+        let column = column_box(&scene).expect("the column is up");
+        let lit = rings(&scene);
+        assert!(
+            lit.len() == 1 && column.contains_point(center(lit[0])),
+            "the rings are not the column's alone: {lit:?}"
+        );
+        walk(&mut harness, "tab");
+        type_keys(&mut harness, "zq");
+        assert_eq!(
+            page(&harness),
+            crate::workspace::settings_page::focus::Place::Control,
+            "the page heard the column's keys"
+        );
+        assert_eq!(
+            harness.search_text(),
+            "",
+            "the settings' box heard the column's keys"
+        );
+        walk(&mut harness, "escape");
+        assert!(!column_has_keys(&harness));
+        harness.type_text("chip");
+        assert_eq!(
+            harness.search_text(),
+            "chip",
+            "Escape left the settings' box without the keyboard"
+        );
+    }
+
+    #[test]
+    fn a_comment_is_left_and_taken_away_from_the_keyboard_alone() {
+        use crate::workspace::changes_panel::Control;
+        let scratch = Scratch::new();
+        let Some((repository, _)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(repository.clone());
+        });
+        harness.run_command("crook/changes/focus");
+        harness.wait_for("the column never read the repository", |harness| {
+            has_read(harness)
+        });
+
+        // Onto the README and open it.
+        for _ in 0..8 {
+            if column_keys_on(&harness) == Some(Control::File(0)) {
+                break;
+            }
+            walk(&mut harness, "down");
+        }
+        assert_eq!(column_keys_on(&harness), Some(Control::File(0)));
+        walk(&mut harness, "enter");
+        harness.wait_for("the file's hunks never arrived", |harness| {
+            frame_text(&harness.frame()).contains("+what the agent added")
+        });
+
+        // Down to the added line: the first line a comment can go on is the
+        // hunk's header, and the added line is after it.
+        let added = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                let state = workspace.changes_panel();
+                match state.keys_on() {
+                    Some(Control::Line(file, line)) => state
+                        .overview()
+                        .and_then(|overview| overview.files.get(file))
+                        .and_then(|file| state.diff(&file.path))
+                        .and_then(|diff| diff.lines.get(line))
+                        .is_some_and(|text| text.starts_with("+what")),
+                    _ => false,
+                }
+            })
+        };
+        for _ in 0..12 {
+            if added(&harness) {
+                break;
+            }
+            walk(&mut harness, "down");
+        }
+        assert!(added(&harness), "the walk never reached the added line");
+        let line = column_keys_on(&harness);
+        assert!(column_ring_on(&harness.frame(), "+what the agent added"));
+
+        // Enter opens the field with the keyboard in it; its Enter keeps the
+        // comment and brings the keyboard back to the line.
+        walk(&mut harness, "enter");
+        assert!(
+            comment_has_keys(&harness),
+            "Enter on a line opened no field"
+        );
+        type_keys(&mut harness, "say why");
+        walk(&mut harness, "enter");
+        assert_eq!(comment_count(&harness), 1, "Enter kept no comment");
+        assert!(column_has_keys(&harness), "the keyboard left the column");
+        assert_eq!(
+            column_keys_on(&harness),
+            line,
+            "the keyboard is not on the line"
+        );
+        assert_eq!(harness.field_text(pane), "", "the pane heard the comment");
+
+        // Escape in a second one throws it away and comes back the same way.
+        walk(&mut harness, "enter");
+        type_keys(&mut harness, "no");
+        walk(&mut harness, "escape");
+        assert_eq!(comment_count(&harness), 1, "Escape kept the comment");
+        assert!(column_has_keys(&harness));
+
+        // The field's own stop: Enter on it puts the keyboard in it, and
+        // Escape there brings it back to the line, not past it.
+        walk(&mut harness, "enter");
+        // The keyboard taken back to the column with the field left open,
+        // which starts it at the top, and walked down onto the field.
+        harness.run_command("crook/changes/focus");
+        harness.frame();
+        for _ in 0..30 {
+            if column_keys_on(&harness) == Some(Control::Draft) {
+                break;
+            }
+            walk(&mut harness, "down");
+        }
+        assert_eq!(column_keys_on(&harness), Some(Control::Draft));
+        walk(&mut harness, "enter");
+        assert!(comment_has_keys(&harness));
+        walk(&mut harness, "escape");
+        assert_eq!(
+            column_keys_on(&harness),
+            line,
+            "Escape left the keyboard past the line"
+        );
+
+        // The comment's × is the next stop, and Enter takes it away.
+        walk(&mut harness, "down");
+        assert!(matches!(
+            column_keys_on(&harness),
+            Some(Control::RemoveComment(_))
+        ));
+        walk(&mut harness, "enter");
+        assert_eq!(
+            comment_count(&harness),
+            0,
+            "Enter on the × kept the comment"
+        );
     }
 }
 
