@@ -5,6 +5,18 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.34
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.33...v0.1.34)
+
+### Features
+
+- **sidebar:** Walk the Plugins and Store sections and the Changes column from the keyboard ([#556](https://github.com/theguriev/crook/pull/556))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.33
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.32...v0.1.33)
