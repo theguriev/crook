@@ -1209,8 +1209,8 @@ draws one — for an `ssh` session without Crook's shell integration, or a REPL 
 whose output has gone past a screenful — where it moves with its rows through the scrollback,
 past the ten thousand lines a pane keeps as well. It goes once its first row has scrolled out of
 them, and the block keeps the blank rows rather than draw it over the oldest line; and every
-picture in the block goes if a program scrolls a full scrollback by hundreds of lines at once, in
-one synchronized update, which is more than Crook can follow. A picture printed over every cell
+picture in the block goes if a program scrolls more than a whole scrollback at once, in one
+synchronized update, which is more than Crook can follow. A picture printed over every cell
 of an earlier one replaces it, so a plot redrawn in place is one picture rather than one a frame.
 The block being printed keeps 256 MB of pictures, counting each as at least 16 KB — sixteen
 thousand icons — and lets its oldest go past that. It is sized the way iTerm2 sizes it: by

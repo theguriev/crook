@@ -394,6 +394,166 @@ impl BlockRows {
         Some(&self.runs[start..end])
     }
 
+    /// A copy of the rows in `rows`, clamped to the rows there are, at this
+    /// store's width.
+    pub(crate) fn slice(&self, rows: Range<usize>) -> BlockRows {
+        let end = rows.end.min(self.rows());
+        let start = rows.start.min(end);
+        let mut slice = Self::with_columns(self.columns());
+        if start == end {
+            return slice;
+        }
+        let (text, run, combining) = (
+            self.text_starts[start],
+            self.run_starts[start],
+            self.combining_starts[start],
+        );
+        slice.text = self.text[text as usize..self.text_starts[end] as usize].to_owned();
+        slice.text_starts = self.text_starts[start..=end]
+            .iter()
+            .map(|at| at - text)
+            .collect();
+        slice.runs = self.runs[run as usize..self.run_starts[end] as usize].to_vec();
+        slice.run_starts = self.run_starts[start..=end]
+            .iter()
+            .map(|at| at - run)
+            .collect();
+        slice.combining =
+            self.combining[combining as usize..self.combining_starts[end] as usize].to_vec();
+        slice.combining_starts = self.combining_starts[start..=end]
+            .iter()
+            .map(|at| at - combining)
+            .collect();
+        slice
+    }
+
+    /// Lets go of the first `count` rows, or of every row when there are no
+    /// more than that. The width stays.
+    pub(crate) fn drop_front(&mut self, count: usize) {
+        if count > 0 {
+            *self = self.slice(count..self.rows());
+        }
+    }
+
+    /// The same rows laid out again at `columns`, the way the grid lays out
+    /// the lines it holds when its width changes.
+    ///
+    /// A line the terminal folded is one line again, read off the rows it was
+    /// folded over, and folded anew where the new width ends: a double-width
+    /// character that would straddle the edge starts the next row and leaves
+    /// a spacer behind, and each row a line goes on past is marked folded.
+    /// What a line never printed into — the cells after its last one that are
+    /// `blank` — is not carried, so a narrower width does not turn a short
+    /// line into a row of text and a row of nothing; a wider one pads each
+    /// row out with `blank`.
+    ///
+    /// The last line may be one whose rows go on below this store — the
+    /// store holds the head of a block and the grid the rest of it — and its
+    /// fold into the rows below is the one thing a store cannot lay out
+    /// again. It ends on its own row instead, unfolded: the line is cut there,
+    /// which is what the grid does to a line whose head it no longer holds.
+    pub(crate) fn rewrapped(&self, columns: usize, blank: SnapshotCell) -> BlockRows {
+        let columns = columns.max(1);
+        let mut laid = Self::with_columns(columns);
+        let mut line = Vec::new();
+        let mut marks: Vec<RowCombining> = Vec::new();
+        let mut cells = Vec::with_capacity(self.columns());
+        for row in 0..self.rows() {
+            let combining = self.materialise(row, &mut cells);
+            let folds = self.wraps(row);
+            let length = if folds {
+                // A double-width character that did not fit left a spacer in
+                // the last column, which is the row's and not the line's.
+                let leading_spacer = cells
+                    .last()
+                    .is_some_and(|cell| cell.flags.contains(CellFlags::WIDE_SPACER))
+                    && !cells
+                        .len()
+                        .checked_sub(2)
+                        .is_some_and(|at| cells[at].flags.contains(CellFlags::WIDE));
+                cells.len() - usize::from(leading_spacer)
+            } else {
+                cells
+                    .iter()
+                    .rposition(|cell| *cell != blank)
+                    .map_or(0, |at| at + 1)
+            };
+            let base = line.len();
+            line.extend(cells[..length].iter().map(|cell| SnapshotCell {
+                flags: cell.flags.without(CellFlags::WRAPLINE),
+                ..*cell
+            }));
+            marks.extend(
+                combining
+                    .iter()
+                    .filter(|marks| marks.column < length)
+                    .map(|marks| RowCombining {
+                        column: base + marks.column,
+                        characters: marks.characters.clone(),
+                    }),
+            );
+            if !folds {
+                laid.push_line(&line, &mut marks, columns, blank);
+                line.clear();
+            }
+        }
+        if !line.is_empty() {
+            laid.push_line(&line, &mut marks, columns, blank);
+        }
+        laid
+    }
+
+    /// Appends one line of cells, folded over as many rows of `columns` as it
+    /// takes: see [`Self::rewrapped`]. `marks` are the line's zero-width
+    /// characters, at cells of the line and in order, and it is left empty.
+    fn push_line(
+        &mut self,
+        line: &[SnapshotCell],
+        marks: &mut Vec<RowCombining>,
+        columns: usize,
+        blank: SnapshotCell,
+    ) {
+        let mut row = Vec::with_capacity(columns);
+        let mut row_marks = Vec::new();
+        let mut pending = marks.drain(..).peekable();
+        let mut at = 0;
+        while at < line.len() {
+            let wide = line[at].flags.contains(CellFlags::WIDE) && columns > 1;
+            // The cell, and the spacer that is a wide one's second column.
+            let take = if wide && at + 1 < line.len() { 2 } else { 1 };
+            if row.len() + take > columns {
+                if wide && row.len() < columns {
+                    // Where the grid leaves a spacer for a wide character
+                    // that starts the next row.
+                    row.push(SnapshotCell {
+                        flags: CellFlags::WIDE_SPACER,
+                        ..blank
+                    });
+                }
+                row.resize(columns, blank);
+                if let Some(last) = row.last_mut() {
+                    last.flags |= CellFlags::WRAPLINE;
+                }
+                self.push_row(&row, &mut row_marks);
+                row.clear();
+            }
+            for (cell, content) in line.iter().enumerate().skip(at).take(take) {
+                while let Some(marked) = pending.next_if(|marks| marks.column <= cell) {
+                    if marked.column == cell {
+                        row_marks.push(RowCombining {
+                            column: row.len(),
+                            characters: marked.characters,
+                        });
+                    }
+                }
+                row.push(*content);
+            }
+            at += take;
+        }
+        row.resize(columns, blank);
+        self.push_row(&row, &mut row_marks);
+    }
+
     /// One row's zero-width characters.
     fn combining(&self, row: usize) -> &[RowCombining] {
         let (Some(&start), Some(&end)) = (

@@ -132,6 +132,51 @@ fn test_a_real_shell_runs_echo_and_the_output_reaches_the_grid() {
 }
 
 #[test]
+fn test_a_real_command_longer_than_the_grid_keeps_all_of_its_scrollback() {
+    // One open block of three thousand lines, as a long `cargo build` or an
+    // agent's session is: the grid keeps the last thousand of them, and the
+    // scrollback still reaches the first.
+    if cfg!(windows) {
+        return;
+    }
+    let Some(program) = shell_command(
+        "i=1; while [ $i -le 3000 ]; do echo \"row $i\"; i=$((i+1)); done; echo crook-$((6*7))-done",
+    ) else {
+        return;
+    };
+    let mut terminal = Terminal::spawn(TerminalOptions {
+        program,
+        size: TerminalSize::new(40, 6),
+        ..TerminalOptions::default()
+    })
+    .expect("a shell should start on a pty");
+    let output = read_on_a_thread(terminal.take_reader().expect("its reader"));
+    assert!(
+        feed_until(&mut terminal, &output, "crook-42-done"),
+        "the loop should finish, got: {:?}",
+        terminal.snapshot().text()
+    );
+
+    assert!(
+        terminal.emulator().grid_history() <= crate::blocks::GRID_LINES,
+        "the grid holds {} lines",
+        terminal.emulator().grid_history()
+    );
+    let history = terminal.history_len();
+    assert!(history >= 2995, "the scrollback is {history} lines");
+    let (rows, at) = terminal.harvest_rows(0, 1);
+    assert_eq!(0, at);
+    assert_eq!("row 1\nrow 2", rows.to_text());
+    terminal.scroll_lines(i32::MAX);
+    assert!(
+        terminal.snapshot().text().starts_with("row 1\n"),
+        "the top of the view is the first line: {:?}",
+        terminal.snapshot().text()
+    );
+    wait_for_exit(&mut terminal);
+}
+
+#[test]
 fn test_the_child_is_started_at_the_size_it_was_asked_for() {
     // `stty` reads the size straight out of the kernel, so this proves the
     // grid's dimensions reached the pty and not just the emulator.

@@ -210,7 +210,8 @@ fn test_copied_text_drops_wide_spacers_and_keeps_combining_marks() {
             0,
             None,
             LiveBlock::default(),
-            false
+            false,
+            snapshot::Spilled::none(&BlockRows::default()),
         )
         .text()
         .trim_end()
@@ -303,4 +304,99 @@ fn a_piece_of_another_width_is_refused() {
     assert!(!narrow.append(wide));
     assert_eq!(1, narrow.rows(), "the refused piece was left out");
     assert_eq!("one", narrow.text(0));
+}
+
+/// What `bytes` leave on a screen `columns` wide, and tall enough for all of
+/// it, once it has been made `resized` wide: harvested down to the last row
+/// anything was printed on.
+fn laid_out(columns: u16, resized: u16, bytes: &str) -> BlockRows {
+    let mut term = term(TerminalSize::new(columns, 40), bytes);
+    term.resize(TerminalSize::new(resized, 40));
+    // A reflow that makes more rows of them pushes the first into history.
+    let history = term.grid().history_size() as i32;
+    let rows = harvest(&term, &Palette::default(), -history, 39);
+    let printed = (0..rows.rows())
+        .rposition(|row| !rows.text(row).is_empty())
+        .map_or(0, |row| row + 1);
+    rows.slice(0..printed)
+}
+
+/// A cell nothing was printed into, in the default palette's colours.
+fn blank() -> SnapshotCell {
+    let palette = Palette::default();
+    SnapshotCell {
+        c: ' ',
+        foreground: palette.foreground,
+        background: palette.background,
+        flags: CellFlags::NONE,
+    }
+}
+
+/// Lines a column change has something to do with: one folded over rows,
+/// a double-width character the edge falls inside, a combining accent,
+/// a coloured erase to the end of the row, a tab, and blank lines.
+const TEXT: &str = "short\r\n\
+    a line long enough to fold over several rows of a narrow grid\r\n\
+    \x1b[44m\x1b[Kblue to the edge\x1b[0m\r\n\
+    \r\n\
+    日本語の文章が折り返される e\u{301}\u{301} done\r\n\
+    tab\there\r\n";
+
+#[test]
+fn rows_laid_out_again_at_a_width_are_the_rows_the_grid_reflows_them_into() {
+    // Against the grid's own reflow rather than against the text printed
+    // at the new width: the two differ where a coloured erase reached the
+    // old edge, which the reflow carries and a fresh print never made.
+    for (from, to) in [(20, 13), (13, 31), (31, 7), (7, 20), (20, 20)] {
+        let rewrapped = laid_out(from, from, TEXT).rewrapped(usize::from(to), blank());
+        let grid = laid_out(from, to, TEXT);
+        assert_eq!(
+            grid.to_text(),
+            rewrapped.to_text(),
+            "from {from} columns to {to}"
+        );
+        assert_eq!(grid, rewrapped, "the cells, from {from} columns to {to}");
+    }
+}
+
+#[test]
+fn a_line_whose_rows_go_on_past_the_store_ends_where_the_store_does() {
+    // The head of a folded line, the way the grid's oldest rows cut off it
+    // leave it: its last row still says the line goes on.
+    let head = laid_out(10, 10, "0123456789abcdefghijklmn").slice(0..2);
+    assert!(
+        head.wraps(1),
+        "the premise: the head is folded into its rest"
+    );
+    let rewrapped = head.rewrapped(7, blank());
+    assert_eq!("0123456\n789abcd\nefghij", rewrapped.to_text());
+    assert!(
+        !rewrapped.wraps(rewrapped.rows() - 1),
+        "a fold into rows that are not there"
+    );
+}
+
+#[test]
+fn a_slice_and_a_dropped_front_keep_the_rows_they_name() {
+    let rows = laid_out(20, 20, TEXT);
+    let all = rows.rows();
+    assert_eq!(rows, {
+        let mut joined = rows.slice(0..3);
+        assert!(joined.append(rows.slice(3..all)));
+        joined
+    });
+    let mut dropped = rows.clone();
+    dropped.drop_front(2);
+    assert_eq!(rows.slice(2..all), dropped);
+    assert_eq!(rows.text(4), dropped.text(2));
+    assert_eq!(rows.zerowidth(6, 15), dropped.zerowidth(4, 15));
+    dropped.drop_front(all);
+    assert!(dropped.is_empty());
+    assert_eq!(20, dropped.columns(), "the width stays");
+    let (from, to) = (5, 2);
+    assert!(
+        rows.slice(from..to).is_empty(),
+        "a range that ends before it starts"
+    );
+    assert_eq!(rows.slice(all - 1..all + 10), rows.slice(all - 1..all));
 }
