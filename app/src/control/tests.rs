@@ -2907,6 +2907,10 @@ mod socket {
         }
     }
 
+    // Linux's: a connect to a full backlog waits there for room. A Mac refuses
+    // one at once, and does not take a smaller backlog from a second
+    // `listen`, so there is nothing to fill and nothing that waits.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_hooks_connect_to_a_window_taking_no_connections_gives_up_in_its_time() {
         // A window that has stopped, with its backlog full: a connect there
@@ -2940,11 +2944,7 @@ mod socket {
             took < within + Duration::from_secs(1),
             "the connect waited {took:?}: {said}"
         );
-        // Linux holds a connect to a full backlog until there is room; a Mac
-        // refuses it at once.
-        if cfg!(target_os = "linux") {
-            assert!(said.contains("took no connection"), "{said}");
-        }
+        assert!(said.contains("took no connection"), "{said}");
         // The ones before it were taken as ever: the backlog is what filled.
         assert!(!waiting.is_empty(), "not one connect was taken: {said}");
     }
