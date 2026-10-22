@@ -765,6 +765,28 @@ impl Asks {
         }
     }
 
+    /// Ends the questions in `pane` whose turn a stop its agent reported
+    /// ended, as [`Cause::TurnEnded`]: those of `session`, the session the
+    /// stop said it was from, wherever in the pane they were asked; or, for
+    /// a stop that names none, those asked in the pane's own terminal and
+    /// none from inside a multiplexer, whose clients hear every one of its
+    /// panes' reports — see `Workspace::end_asks_a_report_ends`.
+    pub fn end_turn_in(&mut self, pane: PaneId, session: Option<&str>) {
+        let ids: Vec<AskId> = self
+            .live
+            .iter()
+            .filter(|ask| ask.pane == pane)
+            .filter(|ask| match session {
+                Some(session) => ask.session == session,
+                None => ask.inside.is_none(),
+            })
+            .map(|ask| ask.id)
+            .collect();
+        for id in ids {
+            self.end(id, Cause::TurnEnded);
+        }
+    }
+
     /// Ends every question held, for `cause`.
     pub fn end_all(&mut self, cause: Cause) {
         let ids: Vec<AskId> = self.live.iter().map(|ask| ask.id).collect();

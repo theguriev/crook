@@ -213,6 +213,37 @@ fn test_the_size_of_whatever_started_crook_does_not_reach_the_child() {
 }
 
 #[test]
+fn test_a_multiplexer_crook_was_started_in_is_not_one_its_panes_are_in() {
+    // A builder seeded the way one is from a Crook started in tmux, screen
+    // or zellij: every pane inherited where Crook was, and tmux in a pane
+    // refused to nest, while an agent's hook asked the window nothing.
+    let mut command = CommandBuilder::new("true");
+    for variable in MULTIPLEXED {
+        command.env(variable, "/tmp/tmux-1000/default,1234,0");
+    }
+    command.env("TMUX_TMPDIR", "/run/user/1000");
+    set_environment(&mut command, &[]);
+    for variable in MULTIPLEXED {
+        assert_eq!(
+            command.get_env(variable),
+            None,
+            "{variable} reached the pane"
+        );
+    }
+    // A setting of the person's, not a fact about where Crook is.
+    assert_eq!(
+        command.get_env("TMUX_TMPDIR"),
+        Some(OsStr::new("/run/user/1000"))
+    );
+    assert_eq!(command.get_env("TERM"), Some(OsStr::new(TERM)));
+
+    // The caller still has the last word, as on every other variable.
+    let mut command = CommandBuilder::new("true");
+    set_environment(&mut command, &[("TMUX".to_owned(), "mine".to_owned())]);
+    assert_eq!(command.get_env("TMUX"), Some(OsStr::new("mine")));
+}
+
+#[test]
 fn test_the_caller_gets_the_last_word_on_the_environment() {
     let command = command_for(
         &Program::command("true", Vec::<String>::new()),

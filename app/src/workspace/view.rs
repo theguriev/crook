@@ -1,6 +1,6 @@
 //! [`Workspace`]: the state behind the window, and the one place it changes.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -1231,7 +1231,7 @@ pub struct Workspace {
     /// or after the header's "N waiting" was pressed, and after every key
     /// that came before then. See [`Self::close_ask_card`] and
     /// [`Self::hold_the_keys`].
-    keys_held: Cell<Option<Instant>>,
+    keys_held: super::pane_output::KeyHold,
     /// What the header's chip keeps from one frame to the next. See
     /// [`header_chip`](super::header_chip).
     header_chip: HeaderChip,
@@ -1459,7 +1459,7 @@ impl Workspace {
             closing: None,
             ask_card: None,
             ask_list: None,
-            keys_held: Cell::new(None),
+            keys_held: super::pane_output::KeyHold::default(),
             header_chip: HeaderChip::default(),
         };
         workspace.sync_interactions();
@@ -3010,9 +3010,14 @@ impl Workspace {
     /// Puts up the card for the question the tab menu's row is asking, when
     /// a row's menu is up; else the list of every question the window holds,
     /// when it holds more than one, and the card for the one it holds when
-    /// it holds one; else nothing. What "Answer waiting agent", the header's
-    /// "to answer" and a row's "Answer…" do; never what a question arriving
-    /// does.
+    /// it holds one. What "Answer waiting agent", the header's "to answer"
+    /// and a row's "Answer…" do; never what a question arriving does.
+    ///
+    /// With nothing held, the list all the same, with no rows: a chord that
+    /// did nothing read as one that did not work, and the person pressing it
+    /// is often looking at an agent that is waiting. The list says why
+    /// nothing is there to answer — see [`Self::asked_without_a_question`] —
+    /// and how the last questions ended.
     pub(crate) fn answer_waiting_agent(&mut self, ctx: &mut ViewContext<Self>) {
         let on_the_row = self
             .tab_context_menu
@@ -3029,9 +3034,40 @@ impl Workspace {
         self.ask_list = None;
         match (on_the_row, held.as_slice()) {
             (Some(asked), _) | (None, &[asked]) => self.open_ask_card(asked, ctx),
-            (None, []) => {}
             (None, _) => self.open_ask_list(ctx),
         }
+    }
+
+    /// The tabs whose Claude Code says, through Crook's own hooks, that it
+    /// is waiting for a permission, while the window holds no question from
+    /// it: what the list with no rows names, beside how to give the plugin
+    /// the hook that asks.
+    ///
+    /// A hook's report, and not the title's: a pane whose Claude Code has no
+    /// hooks at all says nothing of the plugin, and its `✳` is what any
+    /// Claude Code draws. The notification's own words, since Codex reports
+    /// its approvals through the same hooks and asks nothing in Crook, and
+    /// Claude Code's other notification — waiting for a prompt — is no
+    /// question. It is also what a subagent's request, and one under
+    /// `claude -p`, look like, which ask nothing on purpose; so the list says
+    /// what to do if the plugin is old, not that it is.
+    pub(super) fn asked_without_a_question(&self) -> Vec<String> {
+        const PERMISSION: &str = "Claude needs your permission";
+        let strip = &self.tabs;
+        strip
+            .panes()
+            .filter(|(_, pane)| {
+                let session = pane.session();
+                matches!(session.source, StatusSource::Agent(_))
+                    && session.status == AgentStatus::NeedsInput
+                    && session
+                        .message
+                        .as_deref()
+                        .is_some_and(|message| message.starts_with(PERMISSION))
+                    && self.asks.in_pane(pane.id()).is_none()
+            })
+            .filter_map(|(tab, _)| strip.get(tab).map(|tab| tab.name().to_owned()))
+            .collect()
     }
 
     /// Puts up the list of every question the window holds, with the
@@ -3078,7 +3114,7 @@ impl Workspace {
             return;
         };
         let moved = list.follow(&self.asks);
-        if self.ask_card.is_none() && self.asks.is_empty() {
+        if self.ask_card.is_none() && self.asks.is_empty() && !list.has_had_nothing() {
             self.close_ask_list(ctx);
         } else if moved {
             self.hold_the_lists_pointer(ctx);
@@ -3122,6 +3158,19 @@ impl Workspace {
     /// up and Yes as its default.
     fn hold_the_keys(&self) {
         self.keys_held.set(Some(Instant::now() + closing::SETTLE));
+    }
+
+    /// The window's hold on the keys, which a pane's output shares so that
+    /// a word an input method commits waits it out as a key does.
+    pub(crate) fn key_hold(&self) -> &super::pane_output::KeyHold {
+        &self.keys_held
+    }
+
+    /// Whether the keys are held now: what keeps a paste or a drop, which
+    /// no key pressed brings, from the pane as the hold keeps a key. Asking
+    /// restarts nothing.
+    fn keys_are_held(&self) -> bool {
+        self.keys_held.holds(Instant::now())
     }
 
     /// What the header's chip keeps from one frame to the next, for the
@@ -3605,8 +3654,15 @@ impl Workspace {
         // one this cannot take down — it is the plugin's to close — so the
         // card is painted above it instead and claims its keys first. The
         // card an agent's question is answered on goes first of all: a close
-        // is about ending the agent that is asking.
-        self.ask_card = None;
+        // is about ending the agent that is asking. It goes as it does
+        // however else it closes, keeping the keys from what has the
+        // keyboard after it — the question's own keys come first, so it
+        // keeps nothing from them — since the key that closed the window may
+        // be held, and the agent's dialog under the card has Yes as its
+        // default. See [`Self::close_ask_card`].
+        if self.ask_card.take().is_some() {
+            self.hold_the_keys();
+        }
         self.ask_list = None;
         self.close_menu();
         self.close_tab_context_menu(ctx);
@@ -3639,6 +3695,13 @@ impl Workspace {
     /// The question is taken down *before* the close runs, so a close that
     /// takes the last tab finds no card to keep in step on its way out, and a
     /// Cancel is nothing but the card going.
+    ///
+    /// Either way, when the pane it leaves the keyboard on — the one it was
+    /// on, or the one a close moves it to — is an agent that is asking, the
+    /// keys are kept from it until the keyboard has been still, as they are
+    /// once an agent's card is down: its permission dialog may be up with
+    /// Yes as its default, and the Enter that pressed Cancel may be held.
+    /// The close itself is not held back. See [`Self::close_ask_card`].
     fn answer_closing(&mut self, answer: EndingAction, ctx: &mut ViewContext<Self>) {
         match answer {
             EndingAction::Choose(button) => {
@@ -3661,6 +3724,25 @@ impl Workspace {
         if answer == EndingAction::End {
             self.close_now(question.close, ctx);
         }
+        if self.focused_agent_is_asking() {
+            self.hold_the_keys();
+        }
+    }
+
+    /// Whether the pane with the keyboard is an agent that is asking: one
+    /// whose question the window holds, or whose row says it is waiting for
+    /// a person — its dialog up, with Yes as its default, held by the
+    /// window or not. What keeps the keys from it after the close question
+    /// goes; a shell, or an agent at work, has them back at once, as it
+    /// always had.
+    fn focused_agent_is_asking(&self) -> bool {
+        self.tabs.focused_pane_id().is_some_and(|pane| {
+            self.asks.in_pane(pane).is_some()
+                || self
+                    .tabs
+                    .pane(pane)
+                    .is_some_and(|open| open.session().status == AgentStatus::NeedsInput)
+        })
     }
 
     /// The menu a block opens, which is about that block.
@@ -9171,12 +9253,17 @@ impl Workspace {
     /// panes: the pane's field still holds the keyboard then, but nothing
     /// typed reaches a pane that is not drawn.
     ///
+    /// Nor in the second the keys are held after an agent's card went down:
+    /// the pane is as often as not that agent's, with its permission dialog
+    /// up, and a paste is typing it did not ask for. See
+    /// [`Self::hold_the_keys`].
+    ///
     /// [`Event::FilesDropped`]: crookui_core::event::Event::FilesDropped
     pub fn drop_files(&mut self, paths: &[PathBuf], ctx: &mut ViewContext<Self>) -> bool {
         let Some(pane) = self.tabs.focused_pane_id() else {
             return false;
         };
-        if !self.pane_takes_keys(pane) || !self.pane_is_on_screen(pane) {
+        if !self.pane_takes_keys(pane) || !self.pane_is_on_screen(pane) || self.keys_are_held() {
             return false;
         }
         let Some((handle, snapshot)) = self.terminal(pane, ctx) else {
@@ -9382,7 +9469,13 @@ impl Workspace {
     /// Crook answers that read at once from what it holds. The old read's
     /// answer, whenever it comes, is dropped: whoever pressed for it has
     /// selected something newer since. See [`crate::clipboard::primary_taken`].
+    ///
+    /// And none at all while the keys are held after an agent's card went
+    /// down, as a paste by the chord is held — see [`Self::paste_into`].
     fn paste_primary(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        if self.keys_are_held() {
+            return;
+        }
         self.handle_action(&WorkspaceAction::Tab(TabAction::FocusPane(pane)), ctx);
         let taken = crate::clipboard::primary_taken();
         if let Some(paste) = self
@@ -9429,7 +9522,15 @@ impl Workspace {
     /// added to the line rather than put over what is selected in it — see
     /// [`TextInput::paste_primary`]; the pty gets it through
     /// [`TerminalHandle::paste`], bracketed when the program asked.
+    ///
+    /// Nowhere while the keys are held after an agent's card went down —
+    /// see [`Self::hold_the_keys`] — since the read may come back inside the
+    /// second after the press: the pane may be that agent's, with its
+    /// permission dialog up, and a paste is typing too.
     fn paste_into(&mut self, pane: PaneId, text: &str, ctx: &mut ViewContext<Self>) {
+        if self.keys_are_held() {
+            return;
+        }
         let Some((handle, snapshot)) = self.terminal(pane, ctx) else {
             return;
         };
@@ -9986,12 +10087,17 @@ impl Workspace {
     /// the title's glyph, the shell ending a command — so this is also where
     /// the control socket's watches hear one, and a `crook pane wait` hears
     /// the title the way the row does. See [`Self::tell_watches_the_status`].
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a report is its status, its title, its message and its session, each read apart"
+    )]
     fn agent_reported(
         &mut self,
         pane: PaneId,
         status: AgentStatus,
         title: Option<String>,
         message: Option<String>,
+        session: Option<&str>,
         source: StatusSource,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
@@ -10021,7 +10127,7 @@ impl Workspace {
         // failure said while one was up is the failure's notice, and the
         // row's question, mirrored still, would have stood in its place.
         // `was` is from before, when the question was the row's.
-        self.end_asks_a_report_ends(pane, status, source);
+        self.end_asks_a_report_ends(pane, status, session, source);
         self.mirror_asks(ctx);
         if !between(source) {
             self.tell_the_desktop(pane, was, ctx);
@@ -10054,16 +10160,33 @@ impl Workspace {
     /// Not the title's: the `✳` Claude Code draws as a permission dialog
     /// opens is the moment it asks, not the turn ending. Nor a running, which
     /// parallel tools and subagents say while the dialog is still up.
-    fn end_asks_a_report_ends(&mut self, pane: PaneId, status: AgentStatus, source: StatusSource) {
+    ///
+    /// A stop ends only its own session's questions. One terminal can carry
+    /// more than one agent's reports — tmux writes every report from any of
+    /// its panes to each of its clients, so a Crook pane holding tmux hears
+    /// the stop of a Claude Code in another tmux window — and the turn that
+    /// ended is the session's that said so, not the other agent's still
+    /// waiting in its dialog. A stop that names no session, from a hook
+    /// older than the field or one an agent writes without it, ends the
+    /// questions asked in the pane's own terminal and none asked inside a
+    /// multiplexer, which could be anybody's; those still end when their
+    /// hook goes, their time runs out, or the command holding tmux's client
+    /// ends. The end of the command is every question's.
+    fn end_asks_a_report_ends(
+        &mut self,
+        pane: PaneId,
+        status: AgentStatus,
+        session: Option<&str>,
+        source: StatusSource,
+    ) {
         if self.asks.is_empty() || !matches!(status, AgentStatus::Idle | AgentStatus::Failed) {
             return;
         }
-        let cause = match source {
-            StatusSource::Agent(_) => Cause::TurnEnded,
-            StatusSource::CommandEnded(_) => Cause::CommandEnded,
-            _ => return,
-        };
-        self.asks.end_in(pane, cause);
+        match source {
+            StatusSource::Agent(_) => self.asks.end_turn_in(pane, session),
+            StatusSource::CommandEnded(_) => self.asks.end_in(pane, Cause::CommandEnded),
+            _ => {}
+        }
     }
 
     /// What a pane's agent has said so far — its status, its question, and
@@ -10204,7 +10327,7 @@ impl Workspace {
             }
             _ => return,
         };
-        self.agent_reported(pane, status, None, None, source, ctx);
+        self.agent_reported(pane, status, None, None, None, source, ctx);
     }
 
     /// Ends a question the title asked, now that a title has come that
@@ -10240,6 +10363,7 @@ impl Workspace {
         self.agent_reported(
             pane,
             AgentStatus::Idle,
+            None,
             None,
             None,
             StatusSource::TitleStoppedAsking(Instant::now()),
@@ -10289,6 +10413,7 @@ impl Workspace {
         self.agent_reported(
             pane,
             AgentStatus::Idle,
+            None,
             None,
             None,
             StatusSource::CommandEnded(Instant::now()),
@@ -10740,11 +10865,13 @@ impl Workspace {
                 status,
                 title,
                 message,
+                session,
             } => self.agent_reported(
                 *pane,
                 *status,
                 title.clone(),
                 message.clone(),
+                session.as_deref(),
                 StatusSource::Agent(Instant::now()),
                 ctx,
             ),
@@ -10754,6 +10881,7 @@ impl Workspace {
             TerminalUpdate::AgentSettled(pane) => self.agent_reported(
                 *pane,
                 AgentStatus::Idle,
+                None,
                 None,
                 None,
                 StatusSource::CommandEnded(Instant::now()),

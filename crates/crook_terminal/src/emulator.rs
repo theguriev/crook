@@ -461,7 +461,8 @@ impl Perform for OscWatcher {
             // program said — up to a mark or a notification, which it has to
             // be handed over ahead of or behind.
             _ => {
-                if let Some((reported, session)) = agent::parse(params) {
+                if let Some((mut reported, session)) = agent::parse(params) {
+                    reported.session = session.as_ref().map(|said| said.id().clone());
                     if let Some(reported) = self.sessions.admit(reported, session) {
                         self.agent = Some(reported);
                         self.notified_last = false;

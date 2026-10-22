@@ -218,7 +218,9 @@ fn appearance(workspace: &Workspace) -> Vec<Category> {
             .with_description(
                 "Claude Code's permission requests can be read whole and answered from Crook, \
                  with \u{201c}Answer waiting agent\u{201d} or the header\u{2019}s \u{201c}to answer\u{201d}, \
-                 while its own dialog stays up in its tab.",
+                 while its own dialog stays up in its tab. Needs Crook\u{2019}s plugin for Claude \
+                 Code from v0.1.29 on: `claude plugin update crook@crook` brings an older one up \
+                 to date.",
             )
             .with_keywords(&[
                 "permission", "allow", "deny", "approve", "answer", "agents", "hook", "request",

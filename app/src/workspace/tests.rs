@@ -20073,6 +20073,111 @@ mod shells {
         });
     }
 
+    #[test]
+    fn a_word_composed_or_a_drop_on_the_heels_of_the_card_never_reaches_the_agent() {
+        // The card closed over a program with no composer — the agent that
+        // asked, with its own dialog up and Yes as its default. A word an
+        // input method commits in the second after is kept from it as a key
+        // would be, and so is a drop; neither starts the wait again.
+        use crate::agent::request::AskRequest;
+        use crate::control::ask::Found;
+        use crate::control::protocol::{AgentAsk, AskingAgent, Verb};
+        use crate::control::watch::Feed;
+
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        harness.type_into(pane, "printf '\\033[?1049h'\n");
+        harness.wait_for("the shell never took the alt screen", |harness| {
+            harness.alt_screen(pane)
+        });
+        assert!(composer_boxes(&harness.frame()).is_empty());
+
+        let asked = AgentAsk {
+            agent: AskingAgent::Claude,
+            session: "s1".to_owned(),
+            cwd: "/home/someone/work/crook".to_owned(),
+            tty: Some(34819),
+            multiplexer: None,
+            wait: 300,
+            request: AskRequest::Command {
+                command: "rm -rf build".to_owned(),
+                note: None,
+                timeout_ms: None,
+                background: false,
+                outside_sandbox: false,
+            },
+        };
+        let feed = Arc::new(Feed::for_verb(&Verb::AgentAsk(asked.clone())));
+        let held = feed.clone();
+        harness.workspace_update(move |workspace, _| {
+            workspace
+                .asks_mut()
+                .add(
+                    asked,
+                    Found {
+                        pane,
+                        cannot_answer: None,
+                        tab_title: "crook".to_owned(),
+                        inside: None,
+                    },
+                    held,
+                    std::time::Instant::now(),
+                )
+                .expect("held");
+        });
+        harness.run_command("crook/tabs/answer-waiting");
+        harness.frame();
+        assert!(!harness.pane_takes_keys());
+        assert!(harness.press_key("escape", Modifiers::default()));
+        // The frame that hands the program the keyboard back, which the
+        // input method's event reaches.
+        harness.frame();
+        assert!(harness.pane_takes_keys());
+
+        harness.dispatch(Event::Ime(crookui_core::event::Ime::Commit(
+            "zq7y".to_owned(),
+        )));
+        harness.settle(Duration::from_millis(300));
+        let file = PathBuf::from("/tmp/zq7-dropped.png");
+        let workspace = &harness.workspace;
+        let dropped = harness.app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| {
+                workspace.drop_files(std::slice::from_ref(&file), ctx)
+            })
+        });
+        assert!(!dropped, "a drop went in on the heels of the card");
+        // And a middle press, which pastes PRIMARY where there is one.
+        harness.select_elsewhere("zq7primary");
+        harness.dispatch_workspace_action(WorkspaceAction::PastePrimary(pane));
+        harness.settle(Duration::from_millis(300));
+        assert!(
+            !harness.terminal_text(pane).contains("zq7"),
+            "the composed word or the drop reached the program"
+        );
+
+        // Once the keyboard has been still for the card's second, the next
+        // word goes, which is what makes the wait above one for something
+        // that would have come.
+        harness.settle(super::super::closing::SETTLE);
+        harness.dispatch(Event::Ime(crookui_core::event::Ime::Commit(
+            "é日本".to_owned(),
+        )));
+        harness.wait_for("the composed text never reached the program", |harness| {
+            harness.terminal_text(pane).contains("é日本")
+        });
+        assert!(!harness.terminal_text(pane).contains("zq7"));
+        if crate::clipboard::HAS_PRIMARY {
+            harness.dispatch_workspace_action(WorkspaceAction::PastePrimary(pane));
+            harness.wait_for("PRIMARY never reached the program", |harness| {
+                harness.terminal_text(pane).contains("zq7primary")
+            });
+        }
+        assert_eq!(feed.held(), 0, "the word answered");
+    }
+
     /// What an input method sends while a word is being composed: `text`,
     /// with its caret at byte `caret`.
     fn composing(text: &str, caret: usize) -> Event {
@@ -27416,6 +27521,7 @@ mod the_frame_budget {
         let mut harness = Harness::new(2);
         let hidden = pane_behind(&harness);
         let said = |status, message: Option<&str>| TerminalUpdate::Agent {
+            session: None,
             pane: hidden,
             status,
             title: None,
@@ -28701,6 +28807,7 @@ mod hiding_the_panel {
         harness.workspace_update(|workspace, ctx| {
             workspace.apply_terminal_update(
                 &crate::terminal_model::TerminalUpdate::Agent {
+                    session: None,
                     pane: away,
                     status: AgentStatus::NeedsInput,
                     title: None,
@@ -28972,6 +29079,7 @@ mod the_agent {
         message: Option<&str>,
     ) {
         let update = TerminalUpdate::Agent {
+            session: None,
             pane,
             status,
             title: title.map(str::to_owned),
@@ -30605,6 +30713,7 @@ mod desktop_notifications {
         apply(
             harness,
             TerminalUpdate::Agent {
+                session: None,
                 pane,
                 status,
                 title: None,
@@ -42619,6 +42728,7 @@ mod agent_titles {
         report(
             &mut harness,
             TerminalUpdate::Agent {
+                session: None,
                 pane,
                 status: AgentStatus::NeedsInput,
                 title: None,
@@ -42670,6 +42780,7 @@ mod agent_titles {
         report(
             harness,
             TerminalUpdate::Agent {
+                session: None,
                 pane,
                 status,
                 title: None,
@@ -42718,6 +42829,7 @@ mod agent_titles {
         report(
             &mut harness,
             TerminalUpdate::Agent {
+                session: None,
                 pane,
                 status: AgentStatus::Running,
                 title: Some("and the next one".to_owned()),
@@ -43263,6 +43375,7 @@ mod agent_titles {
         report(
             &mut harness,
             TerminalUpdate::Agent {
+                session: None,
                 pane,
                 status: AgentStatus::Running,
                 title: Some("please make the file".to_owned()),
@@ -43640,6 +43753,7 @@ mod pane_strings {
             let update = match event {
                 TerminalEvent::Title(title) => TerminalUpdate::Title(pane, title),
                 TerminalEvent::Agent(reported) => TerminalUpdate::Agent {
+                    session: reported.session,
                     pane,
                     status: reported.status.into(),
                     title: reported.title,
@@ -44829,6 +44943,120 @@ mod answering_card {
         })
     }
 
+    /// What the list with no rows says, its lines run together.
+    fn empty_list_text(harness: &mut Harness) -> String {
+        let scene = harness.frame();
+        popup(&scene, "Nothing is waiting to be answered")
+            .1
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn answer_waiting_agent_with_nothing_held_says_why_rather_than_doing_nothing() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        let here = harness.focused_pane_id().expect("a pane");
+        let report = |harness: &mut Harness, pane, message: &str| {
+            let update = TerminalUpdate::Agent {
+                pane,
+                status: AgentStatus::NeedsInput,
+                title: None,
+                message: Some(message.to_owned()),
+                session: None,
+            };
+            harness.workspace_update(move |workspace, ctx| {
+                workspace.apply_terminal_update(&update, ctx);
+            });
+        };
+
+        // Nothing waits at all: the list comes up with no rows, and says so.
+        open(&mut harness);
+        let text = empty_list_text(&mut harness);
+        assert!(
+            text.contains("No agent is asking for a permission"),
+            "{text}"
+        );
+        assert!(!text.contains("plugin update"), "{text}");
+        let up = |harness: &Harness| {
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.ask_list().is_some())
+        };
+        // An agent at work reports all the while, and the list stays to be
+        // read until it is closed.
+        let running = TerminalUpdate::Agent {
+            pane: away,
+            status: AgentStatus::Running,
+            title: None,
+            message: None,
+            session: None,
+        };
+        harness.workspace_update(move |workspace, ctx| {
+            workspace.apply_terminal_update(&running, ctx);
+        });
+        assert!(up(&harness), "a report took the list down");
+        assert!(harness.press_key("escape", Modifiers::default()));
+        assert!(!up(&harness), "Escape left the list up");
+
+        // A Claude Code whose hooks say it wants a permission, and whose
+        // plugin asked the window nothing: the list names the update.
+        report(
+            &mut harness,
+            away,
+            "Claude needs your permission to use Bash",
+        );
+        // Another notification of Claude Code's is no permission.
+        report(&mut harness, here, "Claude is waiting for your input");
+        open(&mut harness);
+        let text = empty_list_text(&mut harness);
+        assert!(text.contains("claude plugin update crook@crook"), "{text}");
+        let away_tab = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .get(tabs[0])
+                .map(|tab| tab.name().to_owned())
+        });
+        assert!(text.contains(&away_tab.expect("a tab")), "{text}");
+        assert!(harness.press_key("escape", Modifiers::default()));
+
+        // Said by the title alone, nothing says the plugin is in the pane.
+        harness.update_session(away, |session| {
+            session.source = crate::tab::StatusSource::Title(std::time::Instant::now());
+        });
+        open(&mut harness);
+        let text = empty_list_text(&mut harness);
+        assert!(!text.contains("plugin update"), "{text}");
+        assert!(harness.press_key("escape", Modifiers::default()));
+
+        // A question held from that pane is a row, not a hint.
+        report(
+            &mut harness,
+            away,
+            "Claude needs your permission to use Bash",
+        );
+        let held = hold(&mut harness, away, "rm -rf build");
+        open(&mut harness);
+        assert_eq!(card_on(&harness), Some(held.id));
+        assert!(harness.press_key("escape", Modifiers::default()));
+        harness.workspace_update(|workspace, _| {
+            workspace
+                .asks_mut()
+                .end_all(crate::control::ask::Cause::TurnEnded);
+        });
+
+        // And with answering turned off, that is what it says.
+        harness.dispatch_workspace_action(SettingsAction::ToggleAgentsAsk.into());
+        harness.settle(super::super::closing::SETTLE);
+        open(&mut harness);
+        let text = empty_list_text(&mut harness);
+        assert!(text.contains("Let agents ask in Crook"), "{text}");
+        assert!(!text.contains("plugin update"), "{text}");
+    }
+
     #[test]
     fn an_ask_arriving_opens_nothing_and_leaves_the_keyboard_with_the_pane() {
         let mut harness = Harness::new(2);
@@ -45601,6 +45829,48 @@ mod answering_card {
     }
 
     #[test]
+    fn a_key_on_the_heels_of_the_close_question_never_reaches_the_agent_under_it() {
+        // The close question takes the card down and hands the keyboard back
+        // to the agent's pane when it goes, whose own dialog is up with Yes
+        // as its default. An Enter held on Cancel, or a `1` typed after it,
+        // is kept from the pane until the keyboard has been still, as after
+        // the card closing any other way.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        harness.update_session(pane, |session| session.status = AgentStatus::NeedsInput);
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+        assert_eq!(card_on(&harness), Some(held.id));
+        harness.dispatch_workspace_action(WindowAction::Close.into());
+        assert_eq!(card_on(&harness), None);
+        // Under the question its own keys come first; anything else is kept.
+        assert_eq!(harness.action_for("1", Modifiers::default()), too_soon());
+        assert_eq!(
+            harness.action_for("enter", Modifiers::default()),
+            Some(EndingAction::Cancel.into())
+        );
+        assert!(harness.press_key("enter", Modifiers::default()));
+        assert_eq!(harness.asking_about(), None, "Enter was not Cancel");
+        for key in ["enter", "1"] {
+            assert_eq!(
+                harness.action_for(key, Modifiers::default()),
+                too_soon(),
+                "{key} after Cancel reached the pane"
+            );
+        }
+
+        // With no card up, a Cancel by Escape holds them the same way.
+        harness.settle(super::super::closing::SETTLE + std::time::Duration::from_millis(100));
+        harness.dispatch_workspace_action(WindowAction::Close.into());
+        assert_eq!(harness.asking_about(), Some(vec![pane]));
+        assert!(harness.press_key("escape", Modifiers::default()));
+        assert_eq!(harness.asking_about(), None);
+        assert_eq!(harness.action_for("1", Modifiers::default()), too_soon());
+        assert!(held.nothing_sent());
+        assert_eq!(harness.field_text(pane), "", "the pane was typed into");
+    }
+
+    #[test]
     fn the_handler_refuses_without_the_card_for_another_ask_for_a_stale_digest_and_before_the_gates()
      {
         let mut harness = Harness::new(2);
@@ -45692,6 +45962,7 @@ mod answering_card {
         harness.workspace_update(|workspace, ctx| {
             workspace.apply_terminal_update(
                 &TerminalUpdate::Agent {
+                    session: None,
                     pane,
                     status: AgentStatus::Idle,
                     title: None,
@@ -46164,6 +46435,7 @@ mod answering_card {
         harness.workspace_update(|workspace, ctx| {
             workspace.apply_terminal_update(
                 &TerminalUpdate::Agent {
+                    session: None,
                     pane,
                     status: AgentStatus::Running,
                     title: None,
@@ -47334,6 +47606,7 @@ mod answering_card {
             apply(
                 harness,
                 TerminalUpdate::Agent {
+                    session: None,
                     pane,
                     status,
                     title: None,

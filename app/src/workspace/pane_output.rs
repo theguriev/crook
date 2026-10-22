@@ -16,7 +16,9 @@
 //! for the program is a [`PaneComposition`], which the workspace keeps too.
 //! What this owns is the routing.
 
+use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Instant;
 
 use crook_terminal::{
     BlockId, Key, Modifiers, MouseButton, MouseEventKind, MouseModes, Rows, SelectionKind,
@@ -91,6 +93,39 @@ impl Keys {
     }
 }
 
+/// Until when the window keeps what a person types from whatever has the
+/// keyboard: a second after an agent's card, or the question a close asks,
+/// went down, and after every key pressed before then — see
+/// `Workspace::hold_the_keys`.
+///
+/// Shared, because the workspace sets it and an output reads it as text
+/// arrives that no keystroke brought: a word an input method commits comes
+/// as one event of its own, and goes to the program here without passing
+/// the bindings that hold a key. The output asks it at that moment rather
+/// than when its frame was built, since nothing draws a frame when a hold
+/// runs out.
+#[derive(Clone, Default)]
+pub struct KeyHold(Rc<Cell<Option<Instant>>>);
+
+impl KeyHold {
+    /// Until when the keys are held, if they have been.
+    pub fn get(&self) -> Option<Instant> {
+        self.0.get()
+    }
+
+    /// Holds the keys until `until`, or lets go of them with `None`.
+    pub fn set(&self, until: Option<Instant>) {
+        self.0.set(until);
+    }
+
+    /// Whether the keys are held at `now`. Asking restarts nothing: only a
+    /// key pressed starts the wait again, so a word composed in a hold is
+    /// dropped and the next one goes.
+    pub fn holds(&self, now: Instant) -> bool {
+        self.get().is_some_and(|until| now < until)
+    }
+}
+
 /// What became of a keystroke offered to a pane's output.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Typed {
@@ -157,6 +192,10 @@ pub struct Output {
     /// draws at the program's cursor. See [`Self::composition`].
     composition: Option<PaneComposition>,
 
+    /// The window's hold on the keys, which a word an input method commits
+    /// waits out as a key does. See [`KeyHold`].
+    hold: KeyHold,
+
     /// The pointer gesture that selects text out of this output.
     mouse: Option<Mouse>,
 
@@ -192,6 +231,7 @@ impl Output {
             window_focused: true,
             input: None,
             composition: None,
+            hold: KeyHold::default(),
             mouse: None,
             clipboard: None,
             option_as_meta: OptionAsMeta::default(),
@@ -250,6 +290,13 @@ impl Output {
     /// and draws while the program has the keyboard.
     pub fn with_composition(mut self, composition: PaneComposition) -> Self {
         self.composition = Some(composition);
+        self
+    }
+
+    /// Shares the window's hold on the keys: a word an input method commits
+    /// while it holds is dropped, as a key pressed then is. See [`KeyHold`].
+    pub fn with_key_hold(mut self, hold: KeyHold) -> Self {
+        self.hold = hold;
         self
     }
 
@@ -514,9 +561,17 @@ impl Output {
     /// with the whole keyboard: a modal menu, or a find bar being typed into,
     /// leaves the program the signals and nothing else, and a composed word is
     /// not a signal.
+    ///
+    /// Nor while the window holds the keys after an agent's card went down:
+    /// the program here may be that agent, with its permission dialog up,
+    /// and a `1` or a `y` committed then would answer it as surely as one
+    /// typed. Taken and dropped, as the key would be — see [`KeyHold`].
     fn commit(&self, text: &str) -> Typed {
         if self.keys != Keys::All || self.input.is_some() || text.is_empty() {
             return Typed::Ignored;
+        }
+        if self.hold.holds(Instant::now()) {
+            return Typed::Handled;
         }
         match self.handle.as_ref() {
             Some(handle) if handle.write(text) => Typed::SentToPty,

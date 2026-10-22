@@ -377,6 +377,7 @@ fn test_a_report_longer_than_a_row_is_kept_cut_to_its_caps() {
     );
     assert_eq!(
         Reported {
+            session: None,
             status: AgentReport::NeedsInput,
             title: Some(cut_at(&huge, agent::TITLE_BYTES)),
             message: Some(cut_at(&huge, agent::MESSAGE_BYTES)),
@@ -1837,6 +1838,7 @@ fn test_a_program_reports_what_it_is_doing() {
     assert_eq!(AgentReport::NeedsInput, emulator.agent());
     assert_eq!(
         vec![TerminalEvent::Agent(Reported {
+            session: None,
             status: AgentReport::NeedsInput,
             title: Some("port the tab bar".to_owned()),
             message: None,
@@ -1853,6 +1855,7 @@ fn test_a_program_says_what_it_is_waiting_for() {
     emulator.advance(b"\x1b]6340;needs-input;port the tab bar;;run rm -rf build?\x07");
     assert_eq!(
         vec![TerminalEvent::Agent(Reported {
+            session: None,
             status: AgentReport::NeedsInput,
             title: Some("port the tab bar".to_owned()),
             message: Some("run rm -rf build?".to_owned()),
@@ -1863,6 +1866,7 @@ fn test_a_program_says_what_it_is_waiting_for() {
     emulator.advance(b"\x1b]6340;needs-input;;overwrite main.rs?\x07");
     assert_eq!(
         vec![TerminalEvent::Agent(Reported {
+            session: None,
             status: AgentReport::NeedsInput,
             title: None,
             message: Some("overwrite main.rs?".to_owned()),
@@ -2033,6 +2037,7 @@ fn test_a_done_is_handed_over_before_the_running_beside_it() {
         vec![
             TerminalEvent::AskDone(vec![fingerprint(ASKED)]),
             TerminalEvent::Agent(Reported {
+                session: None,
                 status: AgentReport::Running,
                 title: None,
                 message: None,
@@ -2275,9 +2280,46 @@ fn started_by(session: &str, status: &str, title: &str) -> Vec<u8> {
     bytes
 }
 
+/// `events` with the session each report said left off: what the tests of
+/// whose report the pane takes compare, the session the window is handed
+/// beside it being [`test_a_stop_hands_the_window_the_session_it_said`]'s.
+fn sessionless(events: Vec<TerminalEvent>) -> Vec<TerminalEvent> {
+    events
+        .into_iter()
+        .map(|event| match event {
+            TerminalEvent::Agent(reported) => TerminalEvent::Agent(Reported {
+                session: None,
+                ..reported
+            }),
+            event => event,
+        })
+        .collect()
+}
+
+#[test]
+fn test_a_stop_hands_the_window_the_session_it_said() {
+    // The window ends the questions of the turn a stop ended, and only
+    // those: tmux writes every report from any of its panes to each of its
+    // clients, so one terminal can carry another agent's stop.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]6340;running\x07");
+    assert_eq!(vec![bare(AgentReport::Running)], emulator.take_events());
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    assert_eq!(
+        vec![TerminalEvent::Agent(Reported {
+            session: Some(PARENT.to_owned()),
+            status: AgentReport::Idle,
+            title: None,
+            message: None,
+        })],
+        emulator.take_events()
+    );
+}
+
 /// A report the row hears, with neither a title nor a message.
 fn bare(status: AgentReport) -> TerminalEvent {
     TerminalEvent::Agent(Reported {
+        session: None,
         status,
         title: None,
         message: None,
@@ -2293,23 +2335,27 @@ fn test_a_second_session_neither_renames_the_work_nor_ends_it() {
     emulator.advance(&said_by(PARENT, "running", "please delegate the file", ""));
     assert_eq!(
         vec![TerminalEvent::Agent(Reported {
+            session: None,
             status: AgentReport::Running,
             title: Some("please delegate the file".to_owned()),
             message: None,
         })],
-        emulator.take_events()
+        sessionless(emulator.take_events())
     );
 
     emulator.advance(&said_by(SUBAGENT, "running", "run the subtask", ""));
     emulator.advance(&said_by(SUBAGENT, "running", "", ""));
     emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
-    assert!(emulator.take_events().is_empty());
+    assert!(sessionless(emulator.take_events()).is_empty());
     assert_eq!(AgentReport::Running, emulator.agent());
 
     emulator.advance(&said_by(PARENT, "running", "", ""));
-    assert!(emulator.take_events().is_empty());
+    assert!(sessionless(emulator.take_events()).is_empty());
     emulator.advance(&said_by(PARENT, "idle", "", ""));
-    assert_eq!(vec![bare(AgentReport::Idle)], emulator.take_events());
+    assert_eq!(
+        vec![bare(AgentReport::Idle)],
+        sessionless(emulator.take_events())
+    );
 }
 
 #[test]
@@ -2319,7 +2365,7 @@ fn test_a_second_session_still_stops_for_a_person_and_goes_on_after() {
     // answered is what takes the question off the row.
     let mut emulator = emulator();
     emulator.advance(&said_by(PARENT, "running", "please delegate the file", ""));
-    emulator.take_events();
+    sessionless(emulator.take_events());
 
     emulator.advance(&said_by(
         SUBAGENT,
@@ -2329,17 +2375,21 @@ fn test_a_second_session_still_stops_for_a_person_and_goes_on_after() {
     ));
     assert_eq!(
         vec![TerminalEvent::Agent(Reported {
+            session: None,
             status: AgentReport::NeedsInput,
             title: None,
             message: Some("touch made-by-sub.txt?".to_owned()),
         })],
-        emulator.take_events()
+        sessionless(emulator.take_events())
     );
 
     emulator.advance(&said_by(SUBAGENT, "running", "", ""));
-    assert_eq!(vec![bare(AgentReport::Running)], emulator.take_events());
+    assert_eq!(
+        vec![bare(AgentReport::Running)],
+        sessionless(emulator.take_events())
+    );
     emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
-    assert!(emulator.take_events().is_empty());
+    assert!(sessionless(emulator.take_events()).is_empty());
 }
 
 #[test]
@@ -2353,11 +2403,12 @@ fn test_a_second_sessions_end_in_the_same_read_keeps_the_first_sessions_report()
     emulator.advance(&read);
     assert_eq!(
         vec![TerminalEvent::Agent(Reported {
+            session: None,
             status: AgentReport::Running,
             title: Some("please delegate the file".to_owned()),
             message: None,
         })],
-        emulator.take_events()
+        sessionless(emulator.take_events())
     );
 }
 
@@ -2369,21 +2420,25 @@ fn test_once_the_first_session_stops_the_next_one_to_speak_is_the_panes() {
     let mut emulator = emulator();
     emulator.advance(&said_by(PARENT, "running", "first", ""));
     emulator.advance(&said_by(PARENT, "idle", "", ""));
-    emulator.take_events();
+    sessionless(emulator.take_events());
 
     emulator.advance(&said_by(SUBAGENT, "running", "second", ""));
     assert_eq!(
         vec![TerminalEvent::Agent(Reported {
+            session: None,
             status: AgentReport::Running,
             title: Some("second".to_owned()),
             message: None,
         })],
-        emulator.take_events()
+        sessionless(emulator.take_events())
     );
     emulator.advance(&said_by(PARENT, "idle", "", ""));
-    assert!(emulator.take_events().is_empty());
+    assert!(sessionless(emulator.take_events()).is_empty());
     emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
-    assert_eq!(vec![bare(AgentReport::Idle)], emulator.take_events());
+    assert_eq!(
+        vec![bare(AgentReport::Idle)],
+        sessionless(emulator.take_events())
+    );
 }
 
 #[test]
@@ -2395,20 +2450,21 @@ fn test_a_question_while_nobody_holds_the_pane_does_not_take_it() {
     emulator.advance(&said_by(PARENT, "running", "first", ""));
     emulator.advance(&said_by(PARENT, "idle", "", ""));
     emulator.advance(&said_by(PARENT, "needs-input", "", "still there?"));
-    emulator.take_events();
+    sessionless(emulator.take_events());
 
     emulator.advance(&said_by(SUBAGENT, "running", "second", ""));
     emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
     assert_eq!(
         vec![
             TerminalEvent::Agent(Reported {
+                session: None,
                 status: AgentReport::Running,
                 title: Some("second".to_owned()),
                 message: None,
             }),
             bare(AgentReport::Idle),
         ],
-        emulator.take_events()
+        sessionless(emulator.take_events())
     );
 }
 
@@ -2421,20 +2477,21 @@ fn test_the_command_ending_lets_the_next_agent_have_the_pane() {
     emulator.advance(&said_by(PARENT, "running", "first", ""));
     emulator.advance(b"\x1b]133;D;130\x07");
     emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07copilot\r\n\x1b]133;C\x07");
-    emulator.take_events();
+    sessionless(emulator.take_events());
 
     emulator.advance(&said_by(SUBAGENT, "running", "second", ""));
     emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
     assert_eq!(
         vec![
             TerminalEvent::Agent(Reported {
+                session: None,
                 status: AgentReport::Running,
                 title: Some("second".to_owned()),
                 message: None,
             }),
             bare(AgentReport::Idle),
         ],
-        emulator.take_events()
+        sessionless(emulator.take_events())
     );
 }
 
@@ -2457,10 +2514,10 @@ fn test_a_report_too_long_for_the_parser_keeps_its_session() {
     };
     let mut emulator = emulator();
     emulator.advance(said(AgentReport::Running, PARENT).as_bytes());
-    emulator.take_events();
+    sessionless(emulator.take_events());
 
     emulator.advance(said(AgentReport::Idle, SUBAGENT).as_bytes());
-    assert!(emulator.take_events().is_empty());
+    assert!(sessionless(emulator.take_events()).is_empty());
     assert_eq!(AgentReport::Running, emulator.agent());
     emulator.advance(said(AgentReport::Idle, PARENT).as_bytes());
     assert_eq!(AgentReport::Idle, emulator.agent());
@@ -2477,31 +2534,35 @@ fn test_a_session_that_starts_takes_the_pane_from_one_interrupted_mid_turn() {
     const NEW: &str = "2d22d2e4-3653-46a8-a109-0a468850805d";
     let mut emulator = emulator();
     emulator.advance(&said_by(PARENT, "running", "first prompt", ""));
-    emulator.take_events();
+    sessionless(emulator.take_events());
 
     emulator.advance(&said_by(NEW, "running", "second prompt", ""));
-    assert!(emulator.take_events().is_empty());
+    assert!(sessionless(emulator.take_events()).is_empty());
     emulator.advance(&started_by(NEW, "running", "second prompt"));
     assert_eq!(
         vec![TerminalEvent::Agent(Reported {
+            session: None,
             status: AgentReport::Running,
             title: Some("second prompt".to_owned()),
             message: None,
         })],
-        emulator.take_events()
+        sessionless(emulator.take_events())
     );
 
     // And now the new session is the pane's: a subagent of it is still not.
     emulator.advance(&said_by(SUBAGENT, "running", "run the subtask", ""));
     emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
-    assert!(emulator.take_events().is_empty());
+    assert!(sessionless(emulator.take_events()).is_empty());
     emulator.advance(&said_by(NEW, "idle", "", ""));
-    assert_eq!(vec![bare(AgentReport::Idle)], emulator.take_events());
+    assert_eq!(
+        vec![bare(AgentReport::Idle)],
+        sessionless(emulator.take_events())
+    );
 
     // The interrupted session's own end, when Copilot exits, is an idle on
     // a pane already idle.
     emulator.advance(&said_by(PARENT, "idle", "", ""));
-    assert!(emulator.take_events().is_empty());
+    assert!(sessionless(emulator.take_events()).is_empty());
     assert_eq!(AgentReport::Idle, emulator.agent());
 }
 
@@ -2524,12 +2585,15 @@ fn test_a_start_too_long_for_the_parser_is_still_a_start() {
         )
         .as_bytes(),
     );
-    emulator.take_events();
+    sessionless(emulator.take_events());
 
     emulator.advance(&said_by(PARENT, "idle", "", ""));
-    assert!(emulator.take_events().is_empty());
+    assert!(sessionless(emulator.take_events()).is_empty());
     emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
-    assert_eq!(vec![bare(AgentReport::Idle)], emulator.take_events());
+    assert_eq!(
+        vec![bare(AgentReport::Idle)],
+        sessionless(emulator.take_events())
+    );
 }
 
 #[test]
@@ -2538,26 +2602,28 @@ fn test_a_report_that_names_no_session_is_the_panes_whoever_holds_it() {
     // session was: nothing says it is a subagent's, so it is taken.
     let mut emulator = emulator();
     emulator.advance(&said_by(PARENT, "running", "first", ""));
-    emulator.take_events();
+    sessionless(emulator.take_events());
 
     emulator.advance(b"\x1b]6340;running;by hand\x07");
     emulator.advance(b"\x1b]6340;idle\x07");
     assert_eq!(
         vec![
             TerminalEvent::Agent(Reported {
+                session: None,
                 status: AgentReport::Running,
                 title: Some("by hand".to_owned()),
                 message: None,
             }),
             bare(AgentReport::Idle),
         ],
-        emulator.take_events()
+        sessionless(emulator.take_events())
     );
 }
 
 /// A report the row hears, with a title and no message.
 fn reported_as(status: AgentReport, title: &str) -> TerminalEvent {
     TerminalEvent::Agent(Reported {
+        session: None,
         status,
         title: Some(title.to_owned()),
         message: None,
@@ -2588,7 +2654,7 @@ fn test_going_back_to_a_session_that_started_hands_it_the_pane_again() {
             bare(AgentReport::Idle),
             reported_as(AgentReport::Running, "SLOW prompt in Y"),
         ],
-        emulator.take_events()
+        sessionless(emulator.take_events())
     );
 
     emulator.advance(&said_by(X, "running", "prompt back in X", ""));
@@ -2600,10 +2666,10 @@ fn test_going_back_to_a_session_that_started_hands_it_the_pane_again() {
             reported_as(AgentReport::Running, "prompt back in X"),
             bare(AgentReport::Idle),
         ],
-        emulator.take_events()
+        sessionless(emulator.take_events())
     );
     emulator.advance(&said_by(X, "idle", "", ""));
-    assert!(emulator.take_events().is_empty());
+    assert!(sessionless(emulator.take_events()).is_empty());
     assert_eq!(AgentReport::Idle, emulator.agent());
 }
 
@@ -2626,11 +2692,11 @@ fn test_a_background_subagent_neither_names_the_tab_nor_ends_the_next_turn() {
     emulator.advance(&said_by(PARENT, "running", "", ""));
     emulator.advance(&said_by(PARENT, "running", "", ""));
     emulator.advance(&said_by(PARENT, "idle", "", ""));
-    emulator.take_events();
+    sessionless(emulator.take_events());
 
     emulator.advance(&said_by(FIRST, "running", "run the subtask", ""));
     emulator.advance(&said_by(FIRST, "running", "", ""));
-    assert!(emulator.take_events().is_empty());
+    assert!(sessionless(emulator.take_events()).is_empty());
     assert_eq!(AgentReport::Idle, emulator.agent());
 
     emulator.advance(&said_by(PARENT, "running", "another thing", ""));
@@ -2642,12 +2708,15 @@ fn test_a_background_subagent_neither_names_the_tab_nor_ends_the_next_turn() {
     emulator.advance(&said_by(SECOND, "running", "", ""));
     assert_eq!(
         vec![reported_as(AgentReport::Running, "another thing")],
-        emulator.take_events()
+        sessionless(emulator.take_events())
     );
     emulator.advance(&said_by(PARENT, "idle", "", ""));
     emulator.advance(&said_by(SECOND, "running", "", ""));
     emulator.advance(&said_by(SECOND, "idle", "", ""));
-    assert_eq!(vec![bare(AgentReport::Idle)], emulator.take_events());
+    assert_eq!(
+        vec![bare(AgentReport::Idle)],
+        sessionless(emulator.take_events())
+    );
 
     // The subagent's end comes back to the parent as a prompt Copilot
     // wrote, which `crook --agent` sends with no title.
@@ -2656,7 +2725,7 @@ fn test_a_background_subagent_neither_names_the_tab_nor_ends_the_next_turn() {
     emulator.advance(&said_by(PARENT, "idle", "", ""));
     assert_eq!(
         vec![bare(AgentReport::Running), bare(AgentReport::Idle)],
-        emulator.take_events()
+        sessionless(emulator.take_events())
     );
 }
 
@@ -2671,7 +2740,7 @@ fn test_the_command_ending_forgets_the_sessions_that_started() {
     emulator.advance(&said_by(PARENT, "idle", "", ""));
     emulator.advance(b"\x1b]133;D;0\x07");
     emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07./deploy\r\n\x1b]133;C\x07");
-    emulator.take_events();
+    sessionless(emulator.take_events());
 
     emulator.advance(&said_by(SUBAGENT, "running", "deploy", ""));
     emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
@@ -2680,7 +2749,7 @@ fn test_the_command_ending_forgets_the_sessions_that_started() {
             reported_as(AgentReport::Running, "deploy"),
             bare(AgentReport::Idle)
         ],
-        emulator.take_events()
+        sessionless(emulator.take_events())
     );
 }
 

@@ -1825,8 +1825,8 @@ OPTIONS:
     --menu             Start with the tab options menu open
     --tab-menu         Start with the active tab's own context menu open
     --settings [PAGE]  Start with a settings tab open, on the page with this
-                       title: `appearance`, `shell`, `keyboard shortcuts` (quoted)
-                       or `about`, or a plugin\'s own
+                       title: `appearance`, `shell`, `notifications`, `keyboard
+                       shortcuts` (quoted) or `about`, or a plugin\'s own
     --find <TEXT>      Type TEXT into the tabs panel\'s search box, filtering the list
     --search <TEXT>    Type TEXT into the settings page\'s search box, opening it;
                        with --section, into that section\'s box instead — the
@@ -1915,10 +1915,13 @@ OPTIONS:
                        Be `claude`\'s (Claude Code\'s) permission hook: hand the
                        window this pane is in the request the hook reads on
                        stdin, over CROOK_SOCKET, wait there for an answer, and
-                       print it as the hook\'s decision. Prints nothing, and
-                       exits 0, whenever there is none — outside Crook, in
-                       tmux, for `claude -p` or a subagent, and on Windows.
-                       Writes to no terminal. Claude Code runs it as its
+                       print it as the hook\'s decision: a Bash command, or a
+                       file edit (Edit, MultiEdit, Write) drawn as a diff.
+                       Inside tmux it asks the window whose pane holds tmux\'s
+                       client. Prints nothing, and exits 0, whenever there is
+                       no answer — outside Crook, inside screen or zellij, for
+                       `claude -p` or a subagent, and on Windows. Writes to no
+                       terminal. Claude Code runs it as its
                        PermissionRequest hook, from Crook\'s plugin or
                        `--agent-hooks claude`
     --agent-hooks <AGENT>
@@ -1967,6 +1970,8 @@ KEYS (macOS):
     alt+cmd+left/right         Select the previous/next tab
     ctrl+tab / ctrl+shift+tab  The same step, on the chord browsers use
     shift+cmd+j                Back to the tab you were on, and again to return
+    cmd+j                      The next tab whose agent is waiting for you
+    cmd+i                      Answer the waiting agent's request, or list them
     ctrl+cmd+left/right        Move the active tab
     alt+cmd+up / alt+cmd+down  Select the block above / below, and copy it with cmd+c
     shift+pageup/pagedown      Page the output
@@ -1993,6 +1998,8 @@ KEYS (Linux and Windows):
     ctrl+pageup/pagedown       Select the previous/next tab
     ctrl+tab / ctrl+shift+tab  The same step, on the chord browsers use
     ctrl+shift+alt+j           Back to the tab you were on, and again to return
+    ctrl+shift+j               The next tab whose agent is waiting for you
+    ctrl+shift+i               Answer the waiting agent's request, or list them
     ctrl+shift+pageup/pagedown Move the active tab
     ctrl+alt+up / ctrl+alt+down  Select the block above / below, and copy it with ctrl+shift+c
     shift+pageup/pagedown      Page the output
@@ -3821,6 +3828,13 @@ fn updated(channel: Channel) -> Result<String> {
     crate::update::install(&published.tag, &binary, &agent).map_err(anyhow::Error::msg)?;
     said.push_str(&format!("==> {}\n", binary.display()));
     said.push_str("==> Updated. A window that is open is still the old one: restart it.\n");
+    // The agents' plugins are theirs to update, and Claude Code does not on
+    // its own: one from before a hook was added never gets it.
+    said.push_str(&format!(
+        "==> Crook's Claude Code plugin updates apart from Crook: run `{}`, or turn on \
+auto-update for the crook marketplace in Claude Code's /plugin > Marketplaces.\n",
+        crate::agent::CLAUDE_PLUGIN_UPDATE
+    ));
     Ok(said)
 }
 
@@ -5770,6 +5784,28 @@ mod tests {
             let said = format!("{:#}", parse(args).expect_err("refused"));
             assert!(said.contains(complaint), "{args:?}: {said}");
         }
+    }
+
+    #[test]
+    fn the_help_says_where_the_permission_hook_asks_and_what_about() {
+        // tmux was among the places it passed long after it learned to ask
+        // from there, and a Bash command the one request it named.
+        let help = help_text();
+        let start = help.find("--agent ask <AGENT>").expect("the paragraph");
+        let end = start + help[start..].find("--agent-hooks").expect("the next one");
+        let paragraph = help[start..end]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            paragraph.contains("Inside tmux it asks the window"),
+            "{paragraph}"
+        );
+        assert!(paragraph.contains("inside screen or zellij"), "{paragraph}");
+        assert!(!paragraph.contains("in tmux,"), "{paragraph}");
+        assert!(paragraph.contains("MultiEdit"), "{paragraph}");
+        // And the page `--settings notifications` opens is one it names.
+        assert!(help.contains("`notifications`"));
     }
 
     #[test]

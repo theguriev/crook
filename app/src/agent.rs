@@ -923,8 +923,9 @@ const CLAUDE_EVENTS: &[(&str, &str)] = &[
 /// `claude -p` an empty answer is Claude Code's own immediate deny and
 /// holding it would turn a refusal into a wait; for a subagent, whose
 /// dialog waits for the hook rather than opening beside it; and inside
-/// tmux, screen or zellij, where the terminal it names is the
-/// multiplexer's and no pane's.
+/// screen or zellij, where the terminal it names is the multiplexer's and
+/// no pane's. Inside tmux it asks the window whose pane holds tmux's
+/// client — see [`ask`].
 ///
 /// 330 seconds, because Claude Code's timeout is the one that kills the
 /// hook — it honours it (C10) — and it has to come after the hook's own
@@ -962,6 +963,28 @@ const CLAUDE_PLUGIN: &[&str] = &[
     "claude plugin marketplace add theguriev/crook",
     "claude plugin install crook@crook",
 ];
+
+/// The command that brings Crook's Claude Code plugin up to date, which
+/// `--update`, `--agent-hooks claude` and the list of questions with none in
+/// it tell a person to run. See [`CLAUDE_UPDATE`].
+pub const CLAUDE_PLUGIN_UPDATE: &str = "claude plugin update crook@crook";
+
+/// What the lead says after [`CLAUDE_PLUGIN`]'s commands: that Claude Code
+/// keeps the copy of the plugin it installed until it is told to update it.
+///
+/// Auto-update is off for a marketplace like Crook's until a person turns it
+/// on, so a plugin installed before a hook was added never gets it: the one
+/// from before v0.1.29 has no permission hook, and nothing in Crook is ever
+/// asked. Said where the commands are, since that is where a person looks
+/// for how to install the plugin again.
+const CLAUDE_UPDATE: &str = "\n# Claude Code keeps the plugin as it was installed: after updating Crook, run \
+`claude plugin update crook@crook`, or turn on auto-update for the crook marketplace in \
+Claude Code's /plugin > Marketplaces.";
+
+/// What the note says after merging the hooks by hand: that a hand-merged
+/// copy stays as it was when Crook changes them, as the plugin's does.
+const CLAUDE_MERGED: &str = " Merged by hand, they stay as they are when Crook updates: \
+print them again and merge what changed — the permission hook came in v0.1.29.";
 
 /// The Codex CLI hooks: the same object as Claude Code's, in
 /// `~/.codex/hooks.json`, with most of the same event names.
@@ -1242,7 +1265,7 @@ const AGENTS: &[Agent] = &[
             file: "~/.claude/settings.json, or a project's .claude/settings.json",
             events: CLAUDE_EVENTS,
             asks: CLAUDE_ASKS,
-            missing: "",
+            missing: CLAUDE_MERGED,
             trust: "",
             without: CLAUDE_WITHOUT_HOOKS,
         },
@@ -2196,8 +2219,13 @@ doing.",
             Fragment::Copilot { .. } | Fragment::Plugin { .. } => ("save the file below", ""),
             Fragment::None(_) => ("do what the sentence below says", ""),
         };
+        let update = if known.plugin == CLAUDE_PLUGIN {
+            CLAUDE_UPDATE
+        } else {
+            ""
+        };
         format!(
-            "# {} can install these hooks, and the skill beside them, as Crook's plugin:\n{}{trust}\n\
+            "# {} can install these hooks, and the skill beside them, as Crook's plugin:\n{}{trust}{update}\n\
 # Or {by_hand} by hand instead; with both, every report is made twice.",
             known.program,
             known.plugin.join("\n")
@@ -2464,6 +2492,7 @@ mod tests {
         assert_eq!(
             vec![crook_terminal::TerminalEvent::Agent(
                 crook_terminal::Reported {
+                    session: None,
                     status: AgentReport::NeedsInput,
                     title: Some(title),
                     message: Some(message),
@@ -3393,6 +3422,33 @@ process.stdout.write(JSON.stringify({ ran, asked }))
     }
 
     #[test]
+    fn the_claude_hooks_say_how_to_bring_the_plugin_up_to_date() {
+        // Claude Code keeps a plugin as it installed it, and one from before
+        // the permission hook asks nothing in Crook, ever.
+        let printed = hooks_text("claude", Path::new("/usr/bin/crook")).unwrap();
+        let lead = printed.lead.expect("the plugin's commands");
+        assert!(lead.contains(CLAUDE_PLUGIN_UPDATE), "{lead}");
+        assert!(lead.contains("auto-update"), "{lead}");
+        // Every line of it a comment or a command, for a paste into a shell.
+        for line in lead.lines() {
+            assert!(
+                line.starts_with('#') || CLAUDE_PLUGIN.contains(&line),
+                "{line:?} in {lead}"
+            );
+        }
+        let note = printed.note.expect("a note");
+        assert!(note.contains("v0.1.29"), "{note}");
+        // The others say nothing of Claude Code's plugin.
+        let codex = hooks_text("codex", Path::new("/usr/bin/crook")).unwrap();
+        assert!(
+            !codex
+                .lead
+                .unwrap_or_default()
+                .contains("claude plugin update")
+        );
+    }
+
+    #[test]
     fn every_status_hook_command_is_unchanged() {
         // Codex keeps a hash of every hook it was told to trust, and holds a
         // changed one back for review: a hook command is never changed, only
@@ -3774,6 +3830,31 @@ crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$c
 
     /// The marketplace the repository is, which lists the plugin.
     const MARKETPLACE: &str = include_str!("../../.claude-plugin/marketplace.json");
+
+    #[test]
+    fn what_the_plugin_says_of_answering_is_what_it_does() {
+        // Hand-written, and once left behind: tmux was among the places the
+        // permission hook passed after it had learned to ask from there, and
+        // a Bash command the one request after file edits had cards too.
+        let hooks: Value = serde_json::from_str(PLUGIN_HOOKS).unwrap();
+        let marketplace: Value = serde_json::from_str(MARKETPLACE).unwrap();
+        let manifest: Value = serde_json::from_str(PLUGIN_MANIFEST).unwrap();
+        let said = [
+            hooks["description"].as_str().unwrap(),
+            marketplace["plugins"][0]["description"].as_str().unwrap(),
+            manifest["description"].as_str().unwrap(),
+        ];
+        for description in said {
+            assert!(description.contains("file edit"), "{description}");
+            assert!(
+                !description.contains("inside tmux, screen"),
+                "tmux is no place it passes: {description}"
+            );
+        }
+        let hooks = said[0];
+        assert!(hooks.contains("inside screen or zellij"), "{hooks}");
+        assert!(hooks.contains("tmux's client"), "{hooks}");
+    }
 
     /// One agent the plugin serves, and the two files of it that are that
     /// agent's.
