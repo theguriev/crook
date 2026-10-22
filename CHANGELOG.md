@@ -5,6 +5,18 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.35
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.34...v0.1.35)
+
+### Performance
+
+- **blocks:** Keep the open block's scrollback past the grid as harvested rows ([#557](https://github.com/theguriev/crook/pull/557))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.34
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.33...v0.1.34)
