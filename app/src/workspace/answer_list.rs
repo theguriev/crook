@@ -41,6 +41,15 @@
 //! Below the rows, read-only, is how the last [`EARLIER`] questions ended,
 //! newest first. A list with no question left in it closes.
 //!
+//! **Asked for with none held, it opens with no rows**, and says why: a
+//! chord that did nothing would read as one that did not work. Nothing is
+//! handed to Crook; or "Let agents ask in Crook" is off; or a tab's Claude
+//! Code says through Crook's hooks that it wants a permission and handed the
+//! window nothing — a request Crook does not show, or a plugin from before
+//! the permission hook, which Claude Code does not update by itself — so it
+//! says both, and names the command that updates the plugin. See
+//! `Workspace::asked_without_a_question`.
+//!
 //! Every key is the list's while it is up, as every key is the card's: Up and
 //! Down move between the rows, Enter opens one, Escape closes, and anything
 //! else goes nowhere, so a key meant for a pane does not reach the pane of an
@@ -108,6 +117,12 @@ pub(super) struct AskList {
     /// When the pointer may first reach the rows: [`SETTLE`] after the list
     /// came back from a card or its rows last moved.
     pointer_live_at: Cell<Instant>,
+    /// Whether the list has had no row since it opened: one asked for with
+    /// nothing held, which says why. It stays up until it is closed, though
+    /// a list left with nothing in it closes, since every report an agent
+    /// makes is a look at whether the questions changed. Its first row ends
+    /// that.
+    nothing_yet: Cell<bool>,
     /// Whether the one-shot wait for [`Self::pointer_live_at`] has come home
     /// and drawn them live.
     pointer_live: Cell<bool>,
@@ -124,8 +139,15 @@ impl AskList {
             scroll: ScrollStateHandle::default(),
             shown: RefCell::new(ids(asks)),
             pointer_live_at: Cell::new(Instant::now()),
+            nothing_yet: Cell::new(asks.is_empty()),
             pointer_live: Cell::new(true),
         }
+    }
+
+    /// Whether it opened with no row and has had none since, which keeps it
+    /// up with nothing in it.
+    pub(super) fn has_had_nothing(&self) -> bool {
+        self.nothing_yet.get()
     }
 
     /// The row the keyboard is on, by `asks` as they are now: the one it was
@@ -149,6 +171,9 @@ impl AskList {
     /// question is asked next after that. Whether the rows have moved since
     /// they were last followed.
     pub(super) fn follow(&self, asks: &Asks) -> bool {
+        if !asks.is_empty() {
+            self.nothing_yet.set(false);
+        }
         self.selected.set(self.selected(asks));
         let now = ids(asks);
         *self.shown.borrow_mut() != now && {
@@ -304,11 +329,21 @@ pub(super) fn render(workspace: &Workspace, list: &AskList) -> Box<dyn Element> 
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
         .with_child(header(
             match count {
+                0 => "Nothing is waiting to be answered".to_owned(),
                 1 => "1 request waiting, oldest first".to_owned(),
                 count => format!("{count} requests waiting, oldest first"),
             },
             ui,
-        ))
+        ));
+    if count == 0 {
+        for line in why_nothing(
+            workspace.general().answer_agents_from_crook,
+            &workspace.asked_without_a_question(),
+        ) {
+            column.add_child(note(line, ui));
+        }
+    }
+    let mut column = column
         // The one part that gives up height in a short window, and scrolls
         // instead: the header above and the hint below never move.
         .with_child(
@@ -326,7 +361,10 @@ pub(super) fn render(workspace: &Workspace, list: &AskList) -> Box<dyn Element> 
         );
     column.add_child(divider());
     column.add_child(note(
-        "Up and Down to choose, Enter to open its card, Escape to close.",
+        match count {
+            0 => "Escape to close.",
+            _ => "Up and Down to choose, Enter to open its card, Escape to close.",
+        },
         ui,
     ));
 
@@ -365,6 +403,47 @@ pub(super) fn render(workspace: &Workspace, list: &AskList) -> Box<dyn Element> 
         .modal()
         .on_dismiss(|ctx, _| ctx.dispatch_typed_action(WorkspaceAction::from(AskAction::NotNow)))
         .finish()
+}
+
+/// What the list with no rows says about why: `answering` is whether "Let
+/// agents ask in Crook" is on, and `unasked` the tabs
+/// `Workspace::asked_without_a_question` names.
+pub(super) fn why_nothing(answering: bool, unasked: &[String]) -> Vec<String> {
+    if !answering {
+        return vec![
+            "\u{201c}Let agents ask in Crook\u{201d} is off, in Settings \u{203a} Appearance: \
+             agents ask in their own tabs alone."
+                .to_owned(),
+        ];
+    }
+    if unasked.is_empty() {
+        return vec![
+            "No request was handed to Crook. Claude Code\u{2019}s permission requests come \
+             here through Crook\u{2019}s plugin for it."
+                .to_owned(),
+        ];
+    }
+    let tabs = unasked
+        .iter()
+        .map(|tab| format!("\u{201c}{}\u{201d}", visible(tab)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    vec![
+        format!(
+            "Claude Code in {tabs} is waiting for a permission in its own dialog, and handed \
+             Crook nothing. Answer it there."
+        ),
+        "Some requests never come here: a tool other than Bash, Edit, MultiEdit or Write, \
+         one too large to show whole, one from inside screen or zellij, or one that waited \
+         out its five minutes."
+            .to_owned(),
+        format!(
+            "Or its Crook plugin is from before v0.1.29, with no permission hook: run `{}` \
+             and start Claude Code again, or turn on auto-update for the crook marketplace in \
+             Claude Code\u{2019}s /plugin \u{203a} Marketplaces.",
+            crate::agent::CLAUDE_PLUGIN_UPDATE
+        ),
+    ]
 }
 
 /// One question's row: who asks and in which tab, what it asks, how long

@@ -98,6 +98,19 @@ pub const CLAUDE_AWAIT: Duration = Duration::from_secs(300);
 #[cfg(unix)]
 pub const REGISTER_DEADLINE: Duration = Duration::from_secs(1);
 
+/// How long a hook waits for a window to take its connection.
+///
+/// A second, as for the window to say it holds the question: a window takes
+/// a connection at once unless it has stopped, and one that has, with its
+/// backlog full, is no window to ask. It keeps the hook inside the 330
+/// seconds Claude Code gives it: before it reads for its answer, which it
+/// does for [`CLAUDE_AWAIT`] and 15 seconds more, it has spent at most a
+/// second asking tmux, a connect to `CROOK_SOCKET`'s window, those to the
+/// others inside [`FIND_DEADLINE`] and one past it, and [`REGISTER_DEADLINE`]
+/// for the window to say it holds the question — a few seconds in all.
+#[cfg(unix)]
+pub const CONNECT_DEADLINE: Duration = Duration::from_secs(1);
+
 /// How long, in all, a hook inside tmux looks for the window that holds one
 /// of its clients' terminals before it gives up and asks nothing.
 #[cfg(unix)]
@@ -566,7 +579,7 @@ mod unix {
         Bound, Connection, Environment, Line, MAX_INPUT, Multiplexed, Patience, REGISTER_DEADLINE,
         Windows,
     };
-    use crate::control::cli::unix::{connect_checked, sockets_in};
+    use crate::control::cli::unix::{connect_checked_within, sockets_in};
 
     /// The longest line read from the window, in bytes.
     const MAX_REPLY: usize = 64 * 1024;
@@ -681,7 +694,9 @@ mod unix {
         type Connection = Socketed;
 
         fn connect(&mut self, socket: &Path) -> Option<Socketed> {
-            connect_checked(socket).ok().map(Socketed::new)
+            connect_checked_within(socket, super::CONNECT_DEADLINE)
+                .ok()
+                .map(Socketed::new)
         }
 
         fn others(&mut self, socket: &Path) -> Vec<PathBuf> {

@@ -84,7 +84,7 @@ use crate::text_input::TextInput;
 use crate::theme::theme;
 
 use super::action::{BlockAction, WorkspaceAction};
-use super::pane_output::{Keys, Output, Typed, selection_kind};
+use super::pane_output::{KeyHold, Keys, Output, Typed, selection_kind};
 use super::terminal_element::{self, CursorRow, Ink, RowMarks, color};
 
 /// The gap between a pane's edge and the text inside it.
@@ -796,6 +796,13 @@ impl BlockList {
     /// composer. See [`Output::composition`].
     pub fn with_composition(mut self, composition: PaneComposition) -> Self {
         self.output = self.output.with_composition(composition);
+        self
+    }
+
+    /// Shares the window's hold on the keys with the output. See
+    /// [`Output::with_key_hold`].
+    pub fn with_key_hold(mut self, hold: KeyHold) -> Self {
+        self.output = self.output.with_key_hold(hold);
         self
     }
 
