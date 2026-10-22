@@ -42,6 +42,7 @@ use alacritty_terminal::vte::ansi::{
 
 use crate::blocks::LiveBlock;
 use crate::mouse::MouseModes;
+use crate::spill::Spill;
 
 /// How much of a colour survives the dim attribute.
 ///
@@ -139,6 +140,11 @@ impl CellFlags {
     /// Whether no flag at all is set.
     pub const fn is_empty(self) -> bool {
         self.0 == 0
+    }
+
+    /// These flags with every one in `other` taken off.
+    pub const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
     }
 
     /// The raw bits, for a renderer that wants to key a cache on them.
@@ -749,6 +755,26 @@ fn cursor_cell_of<T>(term: &Term<T>, rows: usize, display_offset: usize) -> Opti
     (row < rows).then_some((row, point.column.0))
 }
 
+/// The open block's rows that have left the grid, which are the scrollback
+/// above its oldest line, and how far the view stands up in them: see
+/// [`crate::blocks::BlockTracker::spilled`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Spilled<'a> {
+    /// The rows, oldest first, ending right above the grid's oldest line.
+    pub(crate) rows: &'a Spill,
+    /// How many lines above the grid's own view the view stands. Never more
+    /// than there are rows, and nothing unless the grid's own view is at its
+    /// oldest line.
+    pub(crate) above: usize,
+}
+
+impl<'a> Spilled<'a> {
+    /// The rows, with the view at the grid's own.
+    pub(crate) fn none(rows: &'a Spill) -> Self {
+        Self { rows, above: 0 }
+    }
+}
+
 /// Builds the snapshot the renderer draws from the emulator's current state.
 pub(crate) fn build<T>(
     term: &Term<T>,
@@ -757,20 +783,55 @@ pub(crate) fn build<T>(
     title: Option<&str>,
     live_block: LiveBlock,
     line_editor: bool,
+    spilled: Spilled<'_>,
 ) -> Snapshot {
     let grid = term.grid();
     let overrides = term.colors();
     let columns = grid.columns();
     let rows = grid.screen_lines();
-    let display_offset = grid.display_offset();
+    let alt_screen = term.mode().contains(TermMode::ALT_SCREEN);
+    // A full-screen program's grid has nothing of the shell's above it.
+    let (spill, above) = if alt_screen {
+        (0, 0)
+    } else {
+        let spill = spilled.rows.rows();
+        (spill, spilled.above.min(spill))
+    };
+    let history = grid.history_size();
+    let display_offset = grid.display_offset() + above;
+    let blank = SnapshotCell {
+        c: ' ',
+        foreground: palette.named(NamedColor::Foreground, overrides),
+        background: palette.named(NamedColor::Background, overrides),
+        flags: CellFlags::NONE,
+    };
 
     let mut cells = Vec::with_capacity(columns * rows);
     // Nearly always empty, so it starts that way and only allocates for a
     // screen that actually has an accent on it.
     let mut combining = Vec::new();
+    let mut stored = Vec::new();
     for row in 0..rows {
         // Viewport row 0 is `display_offset` lines above the live bottom line.
-        let line = Line(row as i32 - display_offset as i32);
+        let line = row as i64 - display_offset as i64;
+        // Above the grid's oldest line, a row the open block spilled out of
+        // it: the store's row, at the grid's width.
+        if line < -(history as i64) {
+            let index = (spill as i64 + line + history as i64).max(0) as usize;
+            let marks = spilled.rows.materialise(index, &mut stored);
+            cells.extend((0..columns).map(|column| stored.get(column).copied().unwrap_or(blank)));
+            combining.extend(
+                marks
+                    .iter()
+                    .filter(|marks| marks.column < columns)
+                    .map(|marks| CellCombining {
+                        cell: row * columns + marks.column,
+                        characters: marks.characters.clone(),
+                    }),
+            );
+            continue;
+        }
+        let line = Line(line as i32);
         for (column, cell) in grid[line][..].iter().enumerate() {
             // Pushed in cell order, which is what lets `zerowidth` binary
             // search rather than scan.
@@ -796,8 +857,8 @@ pub(crate) fn build<T>(
         foreground: palette.named(NamedColor::Foreground, overrides),
         background: palette.named(NamedColor::Background, overrides),
         display_offset,
-        history_len: grid.history_size(),
-        alt_screen: term.mode().contains(TermMode::ALT_SCREEN),
+        history_len: history + spill,
+        alt_screen,
         live_block,
         title: title.map(str::to_owned),
         mouse: MouseModes::of(*term.mode()),

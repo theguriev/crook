@@ -1160,15 +1160,80 @@ emulator's history *and* blanks the screen above the block that opens next, so t
 the open block and nothing else. Three answers depend on that one invariant:
 
 - the open block's anchor names a line the grid still has, because the history can now only
-  fill up when the open block is longer than the whole scrollback — at which point "this block
-  starts above the oldest line we have" is not an approximation but the truth. Past that the
+  fill up when the open block is longer than the grid's share of the scrollback. Past that the
   emulator cuts the history back itself and counts what it cut, so the anchors of the pictures
-  in it still follow their lines (`BlockTracker::trim_history`);
+  in it still follow their lines (`BlockTracker::trim_history`), and what it cuts is the open
+  block's own oldest rows, which it keeps — see the next paragraph. Past the whole scrollback,
+  "this block starts above the oldest line we have" is not an approximation but the truth;
 - a column change, which reflows every stored line number into meaninglessness, is answered by
   looking for the first line in the grid with anything on it;
 - rows *below* the cursor when a command ends — what a progress display that redraws with
   `\e[3A` leaves behind — can be harvested with the block that printed them, because nothing
   else can have put anything there.
+
+**The open block keeps its scrollback the way a finished one does.** The grid itself holds five
+hundred lines of history (`GRID_LINES`), or twice the screen's height when that is more, so
+that a taller screen finds the rows it pulls back out of the history there; what the cut takes off its old end is spilled, into a
+`Spill` beside the open block (`BlockTracker::spilled`): `BlockRows` in pieces of up to 512
+rows, so that the oldest go a piece at a time once the scrollback is full, and nothing kept
+moves. An agent such as Claude Code is one command for its whole session, and a shell with no
+integration one block for its whole life, so without this their scrollback sat in alacritty's
+cells — 24 bytes for every column of every row, printed into or not. Measured with ten 200x50
+panes each printing ten thousand rows of an agent's session: 46.9 MiB a pane resident with the
+grid keeping all of it, 6.3 MiB spilling, the spilled rows at about 110 bytes each (text, a few
+runs of colour, three offsets). Alacritty grows its storage a thousand rows at a time, so the
+grid's share below that saves nothing more.
+
+Everything that reads the scrollback reads both halves as one: the emulator's view goes on up
+past the grid's oldest line into the spilled rows, a snapshot of it materialises them through
+the same `materialise` the list paints from, `Terminal::harvest_rows` — what a copy and the
+find bar read — numbers them first, and the block takes them when it finishes. An anchor
+follows its line over both, since the spilled rows are exactly the lines the cut counted. A
+resize keeps a view where it was: a taller screen takes it down by the rows it added, as
+alacritty does its own, and a column change keeps the line at its top on top — a row of the
+spilled rows tracked through their reflow, or a line of the grid's history found again by
+counting lines from its oldest. Under a full-screen program the shell's view stays where it
+stood in the spilled rows, across any number of reads and a column change. A column change
+lays the spilled rows out again as alacritty reflows its own
+(`BlockRows::rewrapped_tracking`), a run at a time for a line with no double-width or zero-width
+character, after the grid's oldest rows that go on a line whose head was spilled are moved up
+to it — all of them, as far as the history goes; a line of 51 KB at 200 columns costs a column
+change 1.03 ms — so that a folded line is not cut at the seam. An erase of the scrollback or a
+reset ends the watcher's piece, so the spill is dropped before the lines after it in the same
+read are fed. Inside a synchronized update the spill is dropped at the erase while `Term` is
+still holding the update, and the two agree again when it is let go of.
+
+A slice of output is cut for a line a byte, and a few escapes — `CSI n S`, an erase of a
+screen with something on it, lines deleted at the top of a scroll region — scroll a screenful
+in a handful of bytes, so a slice of them can take the history past alacritty's room, and the
+lines alacritty evicts then were never spilled. `trim_history` sees that the history is full,
+and drops the spill, which no longer ends where the history begins, and takes the open block's
+first row to the oldest line, since an anchor read across the uncounted lines names one too
+low: what is left has no hole in it, and is the whole scrollback long. A taller screen under a
+full-screen program can hide that the history was full, after an update that switched
+screens. So the rows taller screens pull out of the shell's history under the program, less
+the rows shorter ones push back, are counted, and the history found on the way back is taken
+to have been full only when it is short of full by no more than that: then what is left is
+short of the scrollback by those rows. A `:!cmd` in an editor that draws in synchronized
+updates, and a pane made taller under it, scroll the history nowhere near full and keep all
+of it — 400 random sessions of numbered lines, bursts, programs, switches inside updates,
+erases and resizes, compared against an emulator keeping everything in its grid, found no
+history shorter and no line missing. A screen that grows by more than the grid's share in one resize — from 50 rows to
+600 at once — still finds blank rows at its foot where the spilled lines would have been.
+
+Cutting is the cost. A row is harvested where it is cut, straight into the last piece: the
+cells after the last one printed into are counted rather than read, and a run of cells
+painted alike is resolved once. Output is fed in slices that may take the grid 256 lines past
+its share before the cut. Feeding 200,000 log lines in 4 KiB reads (release build): 208 ms
+with the grid keeping all of it, 248 ms spilling at 80 columns and 293 ms at 200, where the
+blank ends of wide rows are most of what is read. A column change at 12,000 rows of 200
+columns: 0.26 ms keeping all, 0.94 ms spilling.
+
+Two things differ from rows in the grid: a spilled row keeps the colours it was cut with when
+the theme changes, as a finished block's do, and the blank rows a block's screen opened on
+above its first row are not spilled, so they no longer show above it when the view is scrolled
+to the top. Alacritty is still allowed the whole scrollback and its headroom, so a synchronized
+update let go of at once is spilled rather than evicted uncounted.
 
 **Two surfaces, one function.** `pane_surface::of` answers both "what draws the output?" and
 "is there a composer?" from one `Snapshot`, and every element that needs either asks it rather

@@ -25,7 +25,15 @@ fn both(bytes: &str, rows: usize, columns: usize) -> (Snapshot, BlockRows) {
     let size = TerminalSize::new(columns as u16, rows as u16);
     let term = term(size, bytes);
     let palette = Palette::default();
-    let snapshot = crate::snapshot::build(&term, &palette, 0, None, LiveBlock::default(), false);
+    let snapshot = crate::snapshot::build(
+        &term,
+        &palette,
+        0,
+        None,
+        LiveBlock::default(),
+        false,
+        crate::snapshot::Spilled::none(&crate::spill::Spill::default()),
+    );
     let stored = harvest(&term, &palette, 0, rows as i32 - 1);
     (snapshot, stored)
 }

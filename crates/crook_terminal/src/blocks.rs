@@ -44,13 +44,18 @@
 //! full: from then on every line scrolled in evicts one off the top and the
 //! size stays put. So the history is never left to fill. Alacritty is given
 //! [`HISTORY_HEADROOM`] lines more than the scrollback, and
-//! [`BlockTracker::trim_history`] cuts the history back to the scrollback
-//! after every slice of output and counts what it cut. The size and that
-//! count together are what an anchor follows, and they are exact for as long
-//! as no slice scrolls more lines than the headroom holds — which takes more
-//! than one line a byte, since the emulator feeds no slice longer than the
-//! room left. When one does, every anchor is off by the lines nothing counted,
-//! and the open block's pictures go. Under a full-screen program the shell's
+//! [`BlockTracker::trim_history`] cuts the history back to the grid's share
+//! of it, [`GRID_LINES`], after every slice of output and counts what it cut.
+//! The size and that count together are what an anchor follows, and they are
+//! exact for as long as nothing scrolls the history past the whole
+//! scrollback and the headroom before a cut — which a slice of text cannot,
+//! since the emulator feeds none longer than the room left above the grid's
+//! share and text scrolls a line a byte at most. A synchronized update let
+//! go of can, and so can a slice of the few escapes that scroll a screenful
+//! in a handful of bytes, by scrolling more lines at once than the
+//! scrollback holds. Then every anchor is off by the lines nothing counted,
+//! the open block's pictures go, and so do its spilled rows, which no
+//! longer end where the history begins. Under a full-screen program the shell's
 //! history can be neither read nor cut back, so the emulator feeds a switch
 //! of screens apart from the output before it, and the history is cut back
 //! on both sides of the switch. What can still move it out of sight is
@@ -66,11 +71,27 @@
 //! rows are copied out, the grid's history is dropped and the screen above
 //! the new block is erased, so the grid holds the open block and nothing
 //! else. The history can therefore only fill up when the open block itself
-//! is longer than the whole scrollback, and a column change, which reflows
-//! every stored line number into meaninglessness, can be answered by looking
-//! for the first line with anything on it. See [`BlockTracker::reflowed`]. A
+//! is longer than the grid's share of the scrollback, and a column change,
+//! which reflows every stored line number into meaninglessness, can be
+//! answered by looking for the first line with anything on it. See
+//! [`BlockTracker::reflowed`]. A
 //! picture's anchor has no such answer, and a picture drawn over the wrong
 //! rows covers text, so a reflow drops the open block's.
+//!
+//! # The open block's rows past the grid
+//!
+//! What the cut takes off the grid's history is the open block's oldest
+//! rows, and they are the scrollback still: an agent such as Claude Code is
+//! one command for its whole session, and a shell with no integration one
+//! block for its whole life. So they go where a finished block's rows go,
+//! into a [`BlockRows`] — [`BlockTracker::spilled`] — at a few percent of the
+//! 24 bytes a cell the grid holds every one of them at, and they come back
+//! out of it for everything that reads the scrollback: the snapshot of a
+//! view scrolled up into them, a copy, the find bar, the block once it
+//! finishes. An anchor reads lines the same way over both; the lines above
+//! the grid's oldest are the spilled rows, up to the scrollback, and only
+//! past that is a line gone. A column change lays the spilled rows out again
+//! as the grid lays out its own: [`BlockTracker::rewrap_spill`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -87,6 +108,7 @@ use crate::harvest::{self, BlockRows};
 use crate::image::ImagePlacement;
 use crate::marks::{PromptKind, ShellMark};
 use crate::snapshot::Palette;
+use crate::spill::Spill;
 
 /// How many finished blocks a pane keeps before the oldest are dropped.
 ///
@@ -134,14 +156,36 @@ pub(crate) const PICTURE_FLOOR: usize = 16 << 10;
 /// How many lines past the scrollback alacritty's history may grow before
 /// alacritty starts evicting from it on its own, uncounted.
 ///
-/// [`BlockTracker::trim_history`] cuts the history back to the scrollback
-/// after every slice of output and counts what it cut, which is what keeps an
-/// [`Anchor`] exact once the history is full; this is the room a slice
-/// scrolls into before then. It costs this many rows of cells more than the
-/// scrollback while the history is full, and is kept under the thousand spare
-/// rows alacritty holds on to, so the rows a trim cuts are kept for the lines
-/// after it rather than freed and allocated again.
+/// [`BlockTracker::trim_history`] cuts the history back to the grid's share
+/// of the scrollback, [`GRID_LINES`], after every slice of output and counts
+/// what it cut, which is what keeps an [`Anchor`] exact once the history is
+/// full; this is the room a slice scrolls into before then. It costs this
+/// many rows of cells more than the grid's share while that is full, and is
+/// kept under the thousand spare rows alacritty holds on to, so the rows a
+/// trim cuts are kept for the lines after it rather than freed and allocated
+/// again.
 pub(crate) const HISTORY_HEADROOM: usize = 256;
+
+/// How much of the scrollback alacritty's grid itself holds, below the open
+/// block's rows that [`BlockTracker::trim_history`] spills out of it.
+///
+/// The grid keeps a cell of 24 bytes for every column of every row, printed
+/// into or not: ten thousand rows of two hundred columns is 46 MiB, for one
+/// pane, as long as one command runs — and an agent such as Claude Code is
+/// one command for its whole session, and a pane with no shell integration
+/// one block for its whole life. Spilled, the same rows are their text and
+/// a run or so of colours each, the way a finished block keeps its own. So
+/// the grid holds five hundred, ten screens of a tall pane — or twice the
+/// screen, for a screen taller than that, so that growing finds its rows in
+/// the history — and the rest of the scrollback is spilled.
+///
+/// Alacritty adds rows to its storage a thousand at a time and gives them
+/// back only past a thousand spare, so what a pane holds in the grid is this,
+/// the headroom, [`crate::emulator`]'s spill batch and the screen, rounded
+/// up to the next thousand rows: measured with ten 200-column panes of an
+/// agent's session, 6.3 MiB a pane against 46.9 MiB with the grid keeping all
+/// of it. A smaller share saves nothing more, and costs more cutting.
+pub(crate) const GRID_LINES: usize = 500;
 
 /// Identifies one block for as long as the session lives.
 ///
@@ -649,10 +693,34 @@ impl Anchor {
         }
     }
 
-    /// Whether the line the anchor names has scrolled out of the history,
-    /// which [`Self::line`] would read as the oldest line there is.
-    fn scrolled_out<T>(self, term: &Term<T>, trimmed: u64) -> bool {
-        let oldest = -(term.grid().history_size() as i64);
+    /// Which line the anchor names now among the lines the open block keeps:
+    /// the grid's, and above its oldest the `spilled` rows that went from the
+    /// grid into [`BlockTracker::spill`]. Clamped there the way [`Self::line`]
+    /// is clamped at the grid's oldest, and for the same reason.
+    ///
+    /// For an answer about rows, not for indexing the grid, which has none of
+    /// the lines above its own oldest: [`Self::line`] is that.
+    fn kept_line<T>(self, term: &Term<T>, trimmed: u64, spilled: usize) -> i32 {
+        let oldest = -(term.grid().history_size() as i64) - spilled as i64;
+        let line = self.unclamped(term, trimmed).unwrap_or(oldest);
+        line.max(oldest) as i32
+    }
+
+    /// The cell the anchor names, as [`Self::cell`] has it but on the line
+    /// [`Self::kept_line`] reads.
+    fn kept_cell<T>(self, term: &Term<T>, trimmed: u64, spilled: usize) -> (i32, usize) {
+        let column = match self {
+            Self::At { column, .. } => column,
+            Self::Top => 0,
+        };
+        (self.kept_line(term, trimmed, spilled), column)
+    }
+
+    /// Whether the line the anchor names has gone from the lines the open
+    /// block keeps — the grid's history, and the `spilled` rows above it —
+    /// which [`Self::kept_line`] would read as the oldest line there is.
+    fn scrolled_out<T>(self, term: &Term<T>, trimmed: u64, spilled: usize) -> bool {
+        let oldest = -(term.grid().history_size() as i64) - spilled as i64;
         self.unclamped(term, trimmed)
             .is_some_and(|line| line < oldest)
     }
@@ -964,6 +1032,22 @@ pub(crate) struct BlockTracker {
     /// program, may have gone past the end of the headroom: see
     /// [`Self::update_switched_screens`].
     history_unsure: bool,
+    /// The open block's rows that [`Self::trim_history`] cut off the grid's
+    /// history, oldest first, harvested the way a finished block's are: the
+    /// lines right above the grid's oldest, for as far up as the scrollback
+    /// goes. Empty for every block that fits in the grid.
+    ///
+    /// The grid holds a cell of 24 bytes for every column of every row it
+    /// keeps, written to or not; this holds what was written. A block a
+    /// long-lived agent keeps open for a whole session has its scrollback
+    /// here rather than there, at a few percent of the cost.
+    spill: Spill,
+    /// How many rows taller screens have pulled out of the shell's history
+    /// under a full-screen program since an update that switched screens
+    /// may have scrolled it out of sight: what [`Self::trim_history`] adds
+    /// back to the history it finds, to tell whether it was full. See
+    /// [`Self::rows_changed`].
+    pulled_unseen: usize,
 }
 
 impl BlockTracker {
@@ -995,7 +1079,113 @@ impl BlockTracker {
             trimmed_since_settle: false,
             history_unsure: false,
             last_ignored: None,
+            spill: Spill::default(),
+            pulled_unseen: 0,
         }
+    }
+
+    /// The open block's rows that have left the grid for the store: see
+    /// [`Self::spill`]. They sit right above the grid's oldest line.
+    pub(crate) fn spilled(&self) -> &Spill {
+        &self.spill
+    }
+
+    /// How many of [`Self::spilled`]'s rows are above the grid on show:
+    /// none under a full-screen program, whose grid has no history of the
+    /// shell's above it.
+    pub(crate) fn spilled_rows<T>(&self, term: &Term<T>) -> usize {
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            0
+        } else {
+            self.spill.rows()
+        }
+    }
+
+    /// How many lines have scrolled into the history so far, the ones cut
+    /// back off it included: see [`scrolled`].
+    pub(crate) fn scrolled<T>(&self, term: &Term<T>) -> u64 {
+        scrolled(term, self.trimmed)
+    }
+
+    /// Lays [`Self::spilled`]'s rows out again at the grid's new width, as
+    /// the grid has just laid out its own: see [`BlockRows::rewrapped_tracking`].
+    ///
+    /// Before [`Self::reflowed`], which reads how many there are. Under a
+    /// full-screen program too: they are the shell's, and so is the screen
+    /// the grid has just reflowed underneath.
+    ///
+    /// A line the terminal folded can have its head in the spill and the
+    /// rest in the grid, and neither half can be laid out again alone. So
+    /// before the column change, [`Self::gather_split_line`] moves the rest
+    /// up into the spill.
+    ///
+    /// Answers which row the row `track` was is now, for a view that stood
+    /// on it: see [`Spill::rewrap`].
+    pub(crate) fn rewrap_spill(
+        &mut self,
+        columns: usize,
+        blank: crate::SnapshotCell,
+        track: Option<usize>,
+    ) -> Option<usize> {
+        self.spill.rewrap(columns, blank, track)
+    }
+
+    /// Before a column change, cuts the grid's oldest rows that go on with
+    /// the line [`Self::spilled`]'s last row folds into, and spills them, so
+    /// that the whole line is in one place to be laid out again: see
+    /// [`Self::rewrap_spill`].
+    ///
+    /// As far as the history goes, which is at most the grid's share of the
+    /// scrollback and its headroom: a line folded past the whole of it, onto
+    /// the screen, keeps the rest there, and is cut where the two meet. A
+    /// line that long is a few hundred rows, which a resize reads once.
+    pub(crate) fn gather_split_line<T>(
+        &mut self,
+        term: &mut Term<T>,
+        palette: &Palette,
+        scrollback_lines: usize,
+    ) {
+        let folds_on = self
+            .spill
+            .rows()
+            .checked_sub(1)
+            .is_some_and(|last| self.spill.wraps(last));
+        if !folds_on || term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        let grid = term.grid();
+        let history = grid.history_size();
+        let last = Column(grid.columns().saturating_sub(1));
+        let oldest = -(history as i32);
+        let mut cut = 0;
+        while cut < history {
+            let folds = grid[Line(oldest + cut as i32)][last]
+                .flags
+                .contains(Flags::WRAPLINE);
+            cut += 1;
+            if !folds {
+                break;
+            }
+        }
+        if cut == 0 {
+            return;
+        }
+        if self.spill.columns() != Some(grid.columns()) {
+            return;
+        }
+        let rows = self.spill.rows();
+        self.spill.harvest(
+            term,
+            palette,
+            (oldest, oldest + cut as i32 - 1),
+            crate::spill::PIECE_ROWS,
+        );
+        let cut = self.spill.rows() - rows;
+        let grid = term.grid_mut();
+        grid.update_history(history - cut);
+        grid.update_history(scrollback_lines.saturating_add(HISTORY_HEADROOM));
+        self.trimmed += cut as u64;
+        self.trimmed_since_settle = true;
     }
 
     /// The finished blocks, oldest first.
@@ -1027,18 +1217,20 @@ impl BlockTracker {
         self.open.pictures.iter().count()
     }
 
-    /// The open block, resolved against the viewport.
-    pub(crate) fn live<T>(&self, term: &Term<T>) -> LiveBlock {
+    /// The open block, resolved against the viewport, which stands `above`
+    /// lines above the grid's own view up into [`Self::spilled`]'s rows.
+    pub(crate) fn live<T>(&self, term: &Term<T>, above: usize) -> LiveBlock {
         let grid = term.grid();
         let alt_screen = term.mode().contains(TermMode::ALT_SCREEN);
-        let display_offset = grid.display_offset() as i32;
+        let display_offset = (grid.display_offset() + above) as i32;
+        let spilled = self.spilled_rows(term);
         let (top_row, bottom_row) = if alt_screen {
             // A full-screen program owns the whole grid and there is no
             // history under it, so the anchor's arithmetic means nothing here.
             (0, grid.screen_lines() as i32 - 1)
         } else {
             (
-                self.open.top.line(term, self.trimmed) + display_offset,
+                self.open.top.kept_line(term, self.trimmed, spilled) + display_offset,
                 last_content_line(term) + display_offset,
             )
         };
@@ -1053,7 +1245,7 @@ impl BlockTracker {
             .command_start
             .filter(|_| !alt_screen)
             .map(|anchor| {
-                let (line, column) = anchor.cell(term, self.trimmed);
+                let (line, column) = anchor.kept_cell(term, self.trimmed, spilled);
                 PromptEnd {
                     row: line + display_offset,
                     column,
@@ -1067,7 +1259,7 @@ impl BlockTracker {
                 .pictures
                 .iter()
                 .map(|(anchor, placement)| ImagePlacement {
-                    row: anchor.line(term, self.trimmed) + display_offset,
+                    row: anchor.kept_line(term, self.trimmed, spilled) + display_offset,
                     ..placement.clone()
                 })
                 .collect()
@@ -1245,9 +1437,16 @@ impl BlockTracker {
         let grid = term.grid();
         let oldest = -(grid.history_size() as i32);
         let newest = grid.screen_lines() as i32 - 1;
-        let line = (oldest..=newest)
-            .find(|line| !is_blank_line(term, *line))
-            .unwrap_or_else(|| last_content_line(term) + 1);
+        // A block whose head has left the grid starts at the head, which is
+        // the first of the spilled rows: nothing above the block's first row
+        // is ever spilled.
+        let line = if self.spill.is_empty() {
+            (oldest..=newest)
+                .find(|line| !is_blank_line(term, *line))
+                .unwrap_or_else(|| last_content_line(term) + 1)
+        } else {
+            oldest - self.spill.rows() as i32
+        };
 
         self.open.top = Anchor::at(line, 0, term, self.trimmed);
         self.open.command_start = None;
@@ -1285,6 +1484,7 @@ impl BlockTracker {
         let line = term.grid().cursor.point.line;
         term.grid_mut().reset_region::<Color, _>(..line);
         term.clear_screen(ClearMode::Saved);
+        self.spill.clear();
         self.open.top = Anchor::at(line.0, 0, term, self.trimmed);
         self.open.command_start = None;
         self.open.prompt = None;
@@ -1390,7 +1590,10 @@ impl BlockTracker {
     /// `reset` comes here too. Its `ESC c` empties the history and the
     /// screen, so the anchor names a row below the screen, which output
     /// growing the history again brings back up onto other text.
+    ///
+    /// The rows spilled out of the grid were scrollback, and go with it.
     pub(crate) fn history_cleared<T>(&mut self, term: &Term<T>) {
+        self.spill.clear();
         self.reflowed(term);
     }
 
@@ -1457,6 +1660,9 @@ impl BlockTracker {
             .collect();
 
         term.clear_screen(ClearMode::Saved);
+        // The rows spilled out of the grid were history too, and above every
+        // line an anchor read here as one the history held.
+        self.spill.clear();
 
         if let Some(line) = top {
             self.open.top = Anchor::at(line.max(0), 0, term, trimmed);
@@ -1516,21 +1722,96 @@ impl BlockTracker {
     ///
     /// Called after every slice of output fed, and after anything else that
     /// can scroll the grid: a resize, a synchronized update let go of.
-    pub(crate) fn trim_history<T>(&mut self, term: &mut Term<T>, scrollback_lines: usize) {
+    ///
+    /// The grid's history is held at `grid_lines`, and the scrollback goes
+    /// on above it: what is cut off is the open block's oldest rows, and they
+    /// go to [`Self::spill`] rather than nowhere, up to `scrollback_lines`
+    /// in all. Only the rows from the block's first one on, since nothing
+    /// above that row is anybody's. Past the scrollback the spill's own
+    /// oldest go, a batch at a time, as the grid's would have: an anchor on
+    /// one reads as the oldest line there is.
+    pub(crate) fn trim_history<T>(
+        &mut self,
+        term: &mut Term<T>,
+        palette: &Palette,
+        grid_lines: usize,
+        scrollback_lines: usize,
+    ) {
         if term.mode().contains(TermMode::ALT_SCREEN) {
             return;
         }
         self.history_unsure = false;
         let history = term.grid().history_size();
+        // Where alacritty starts evicting on its own: past the whole
+        // scrollback, which a synchronized update can scroll the grid's
+        // history up to before anything cuts it back.
         let limit = scrollback_lines.saturating_add(HISTORY_HEADROOM);
-        if history >= limit {
+        // A history that was full and has had rows pulled back out of it by
+        // a taller screen is short of full by no more than the rows pulled;
+        // one that was never full is short by all the room it never used.
+        let pulled = std::mem::take(&mut self.pulled_unseen);
+        if history.saturating_add(pulled) >= limit {
             self.open.pictures.clear();
+            // Alacritty may have evicted lines off the grid's old end that
+            // nothing spilled, so the spilled rows may no longer end where
+            // the grid begins: kept, they would be the scrollback with a
+            // hole in it. They go, and what is left is the history alacritty
+            // kept — the whole scrollback when nothing pulled rows out of it
+            // since, and short of it by the rows a taller screen pulled —
+            // all of it the open block's, which starts above the oldest line
+            // of it, as far as anything can tell.
+            //
+            // The top goes there with or without a spill: an anchor read
+            // across lines nothing counted names a line below its own, and
+            // the next cut would take the rows above it for nobody's.
+            self.spill.clear();
+            let oldest = -(history as i32);
+            self.open.top = Anchor::at(oldest, 0, term, self.trimmed);
         }
-        if history > scrollback_lines {
+        if history > grid_lines {
+            let cut = history - grid_lines;
+            self.spill_lines(
+                term,
+                palette,
+                cut,
+                scrollback_lines.saturating_sub(grid_lines),
+            );
             let grid = term.grid_mut();
-            grid.update_history(scrollback_lines);
+            grid.update_history(grid_lines);
             grid.update_history(limit);
-            self.trimmed += (history - scrollback_lines) as u64;
+            self.trimmed += cut as u64;
+            self.trimmed_since_settle = true;
+        }
+    }
+
+    /// Copies the open block's rows among the `cut` oldest lines of the
+    /// grid's history into [`Self::spill`], which keeps `room` of them: see
+    /// [`Self::trim_history`].
+    fn spill_lines<T>(&mut self, term: &Term<T>, palette: &Palette, cut: usize, room: usize) {
+        if room == 0 {
+            return;
+        }
+        let oldest = -(term.grid().history_size() as i32);
+        let last = oldest + cut as i32 - 1;
+        // Once the block's head has been spilled, everything after it is the
+        // block's; before, the rows above its first one are nobody's.
+        let mut first = oldest;
+        if self.spill.is_empty()
+            && let Some(top) = self.open.top.unclamped(term, self.trimmed)
+        {
+            first = i32::try_from(top.max(i64::from(oldest))).unwrap_or(i32::MAX);
+        }
+        if first > last {
+            return;
+        }
+        // The width the grid had when the spill began, which a column change
+        // lays out again before anything is cut at the new one. Should the
+        // two differ all the same, the older rows are the ones to lose: the
+        // spill has to end where the grid begins.
+        let piece = (room / 8).clamp(1, crate::spill::PIECE_ROWS);
+        self.spill.harvest(term, palette, (first, last), piece);
+        // A piece at a time, which moves nothing that is kept.
+        if self.spill.drop_oldest(room) > 0 {
             self.trimmed_since_settle = true;
         }
     }
@@ -1558,9 +1839,10 @@ impl BlockTracker {
         }
         self.trimmed_since_settle = false;
         let trimmed = self.trimmed;
+        let spilled = self.spill.rows();
         self.open
             .pictures
-            .retain(|anchor, _| !anchor.scrolled_out(term, trimmed));
+            .retain(|anchor, _| !anchor.scrolled_out(term, trimmed, spilled));
     }
 
     /// Forgets the open block's pictures when the screen has just changed
@@ -1579,9 +1861,25 @@ impl BlockTracker {
     /// lost, as a column change does, and a taller one takes them when an
     /// update may have scrolled the shell's history out of sight: see
     /// [`Self::update_switched_screens`].
-    pub(crate) fn rows_changed<T>(&mut self, term: &Term<T>, shorter: bool) {
+    ///
+    /// And a taller one counts the `rows` it pulled, and a shorter one the
+    /// rows it pushed back, as rows a full history would be short of full by
+    /// when the shell's screen is back: see
+    /// [`Self::pulled_unseen`]. Only a history that went past alacritty's
+    /// room loses anything, and [`Self::trim_history`] can tell one that
+    /// went there from one that did not by how short of it it is.
+    pub(crate) fn rows_changed<T>(&mut self, term: &Term<T>, shorter: bool, rows: usize) {
         if term.mode().contains(TermMode::ALT_SCREEN) && (shorter || self.history_unsure) {
             self.open.pictures.clear();
+        }
+        // A shorter screen pushes rows back in, which a history short of full
+        // is that much less short by.
+        if term.mode().contains(TermMode::ALT_SCREEN) && self.history_unsure {
+            self.pulled_unseen = if shorter {
+                self.pulled_unseen.saturating_sub(rows)
+            } else {
+                self.pulled_unseen.saturating_add(rows)
+            };
         }
     }
 
@@ -1764,7 +2062,8 @@ impl BlockTracker {
         palette: &Palette,
     ) {
         let trimmed = self.trimmed;
-        let top = self.open.top.line(term, trimmed);
+        let spilled = self.spilled_rows(term);
+        let top = self.open.top.kept_line(term, trimmed, spilled);
         // The alternate screen is not scrollback. A full-screen program redraws
         // its frames in place and nothing there ever scrolled, so a block that
         // is being closed while one is up — the shell was killed under `vim` —
@@ -1774,7 +2073,21 @@ impl BlockTracker {
         } else {
             last_content_line(term)
         };
-        let mut rows = harvest::harvest(term, palette, top, bottom);
+        // The rows that left the grid first, from the block's own first row,
+        // and then the grid's from its oldest.
+        let mut rows = self.spill.take();
+        if spilled == 0 {
+            rows = BlockRows::default();
+        } else {
+            let oldest = -(term.grid().history_size() as i32) - spilled as i32;
+            rows.drop_front((top - oldest).max(0) as usize);
+        }
+        let grid = harvest::harvest(term, palette, top, bottom);
+        if rows.is_empty() || rows.columns() != grid.columns() {
+            rows = grid;
+        } else {
+            rows.append(grid);
+        }
         // A block whose rows the grid no longer has — `clear` wiped them, or
         // a program erased the screen on its way out — keeps its command as
         // its one row rather than being a gap with chrome around it. See
@@ -1804,7 +2117,8 @@ impl BlockTracker {
             // and an empty answer is a truer one than the last row.
             let output_from = output_from.unwrap_or_else(|| {
                 self.open.output_start.and_then(|anchor| {
-                    let from = usize::try_from(anchor.line(term, trimmed) - top).ok()?;
+                    let from =
+                        usize::try_from(anchor.kept_line(term, trimmed, spilled) - top).ok()?;
                     (from <= rows.rows()).then_some(from)
                 })
             });
@@ -1815,7 +2129,7 @@ impl BlockTracker {
                 .pictures
                 .take()
                 .filter_map(|(anchor, placement)| {
-                    let row = anchor.line(term, trimmed) - top;
+                    let row = anchor.kept_line(term, trimmed, spilled) - top;
                     (row >= 0 && (row as usize) < rows.rows())
                         .then_some(ImagePlacement { row, ..placement })
                 })
@@ -1906,6 +2220,9 @@ impl BlockTracker {
             term.grid_mut().reset_region::<Color, _>(..);
         }
         term.clear_screen(ClearMode::Saved);
+        // Whatever the harvest did not take of the rows that left the grid
+        // was the closed block's too.
+        self.spill.clear();
         self.open = OpenBlock {
             id: BlockId(self.next_id),
             state,

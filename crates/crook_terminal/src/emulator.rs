@@ -47,7 +47,8 @@ use parking_lot::Mutex;
 
 use crate::agent::{self, AgentReport, Reported};
 use crate::blocks::{
-    Block, BlockId, BlockTracker, HISTORY_HEADROOM, IgnoreReason, LiveBlock, Whereabouts,
+    Block, BlockId, BlockTracker, GRID_LINES, HISTORY_HEADROOM, IgnoreReason, LiveBlock,
+    Whereabouts,
 };
 use crate::harvest::{self, BlockRows};
 use crate::image::{self, ImagePlacement};
@@ -56,7 +57,12 @@ use crate::marks::ShellMark;
 use crate::mouse::MouseModes;
 use crate::notify::{self, Notification};
 use crate::pty::ChildExit;
-use crate::snapshot::{self, Palette, Rgb, Snapshot, TerminalSize};
+use crate::snapshot::{self, Palette, Rgb, Snapshot, Spilled, TerminalSize};
+
+/// How many lines past its share of the scrollback a slice of output may
+/// scroll the grid's history before it is cut back: see
+/// [`Emulator::history_room`].
+const SPILL_BATCH: usize = 256;
 
 /// One item of a stream fed to a mirror, in the order it happened.
 ///
@@ -495,6 +501,11 @@ impl Perform for OscWatcher {
     /// And on a background set or given back, so that whether a synchronized
     /// update holds it can be read off the parser right after it: see
     /// [`Self::background_set`].
+    ///
+    /// And on an erase of the scrollback or a reset, which the blocks hear
+    /// about at the end of the piece: anything after it in the same read is
+    /// fed only once they have, so what they let go of with the history is
+    /// what came before the erase, and not the lines printed after it.
     fn terminated(&self) -> bool {
         self.mark.is_some()
             || self.image.is_some()
@@ -505,6 +516,8 @@ impl Perform for OscWatcher {
             || self.long_title.is_some()
             || self.screen_switched
             || self.background_set
+            || self.history_cleared
+            || self.reset
     }
 }
 
@@ -685,8 +698,24 @@ fn percent_decode(value: &str) -> Option<String> {
 #[derive(Clone, Copy)]
 struct View {
     alt_screen: bool,
+    /// How far up the view stands: see [`Emulator::display_offset`].
     offset: usize,
+    /// How many lines of history there are to stand in: see
+    /// [`Emulator::history_len`].
     history: usize,
+    /// How many lines have scrolled into the history, the ones cut back out
+    /// of it included: see [`BlockTracker::scrolled`].
+    scrolled: u64,
+}
+
+/// Where a view stood across a column change: see
+/// [`Emulator::keep_view_through_resize`].
+#[derive(Clone, Copy)]
+enum Kept {
+    /// At the top of the view, this row of the spilled rows.
+    Spilled(usize),
+    /// This many lines above the live output.
+    Offset(usize),
 }
 
 /// What was typed ahead of a shell away from its prompt, counted the way it
@@ -738,12 +767,31 @@ pub struct Emulator {
     proxy: EventProxy,
     palette: Palette,
     size: TerminalSize,
-    /// The most history the grid keeps between feeds. Alacritty is allowed
-    /// [`HISTORY_HEADROOM`] lines more while one is under way, which the
-    /// blocks cut back off after every slice: see [`Self::feed`]. A history
-    /// this long no longer grows by the lines that scroll into it, which is
-    /// where [`Self::keep_view`] stops being able to count them.
+    /// The most history there is between feeds: the grid's, up to
+    /// [`Self::grid_lines`], and above it the open block's rows cut out of
+    /// the grid and kept where a finished block's are, at a few percent of
+    /// what the grid holds them at — see [`BlockTracker::spilled`].
+    /// Alacritty is allowed [`HISTORY_HEADROOM`] lines more than this, past
+    /// which it evicts on its own and nothing counts what it lost.
     scrollback_lines: usize,
+    /// The most history alacritty's grid itself keeps between feeds:
+    /// [`GRID_LINES`], or the whole scrollback when that is shorter. What a
+    /// slice of output is cut to scroll no further than, with the headroom,
+    /// and what the blocks cut the history back to after it.
+    grid_lines: usize,
+    /// How many lines above the grid's oldest the view stands, up in the
+    /// rows the open block spilled out of it: see [`Self::display_offset`].
+    /// Meant only while the grid's own view is at its oldest line.
+    above: usize,
+    /// Which of the spilled rows the shell's view had at its top when a
+    /// full-screen program came up, for when its screen is back: the grid's
+    /// history under it can be cut back into the spill on the way, and laid
+    /// out again by a column change, either of which moves every line but
+    /// that row's place among the spilled rows. See [`Self::switch_screens`].
+    view_row: Option<usize>,
+    /// The least of the scrollback the grid keeps, [`GRID_LINES`] unless a
+    /// test says: see [`Self::grid_share`].
+    grid_base: usize,
     /// Whether the synchronized update `parser` is holding switches screens,
     /// which the watcher saw go by: see [`Self::switch_screens`].
     switch_held: bool,
@@ -800,11 +848,32 @@ impl Emulator {
     /// A terminal of the given size, drawing with `palette` and keeping
     /// `scrollback_lines` of history above the viewport.
     pub fn new(size: TerminalSize, scrollback_lines: usize, palette: Palette) -> Self {
+        Self::with_grid_lines(size, scrollback_lines, GRID_LINES, palette)
+    }
+
+    /// [`Self::new`], with the grid keeping at most `grid_lines` of the
+    /// scrollback itself: a test's way to reach the rows past it without
+    /// printing a thousand lines.
+    pub(crate) fn with_grid_lines(
+        size: TerminalSize,
+        scrollback_lines: usize,
+        grid_lines: usize,
+        palette: Palette,
+    ) -> Self {
+        let grid_lines = grid_lines
+            .max(2 * usize::from(size.rows))
+            .min(scrollback_lines);
+        let grid_base = grid_lines;
         let proxy = EventProxy::default();
         let config = Config {
             // Room past the scrollback for a slice of output to scroll into,
             // which the blocks cut back off and count, so that nothing
-            // alacritty evicts from a full history goes uncounted.
+            // alacritty evicts from a full history goes uncounted. The whole
+            // scrollback and not the grid's share of it: a slice is cut to
+            // scroll no further than the grid's share and its headroom, but
+            // a synchronized update let go of reaches the grid all at once,
+            // and what it scrolls past the grid's share is spilled rather
+            // than lost. The rows are made only as the history reaches them.
             scrolling_history: scrollback_lines.saturating_add(HISTORY_HEADROOM),
             // Off in alacritty's default config, which means `Term` would
             // refuse the mode-setting escapes and never answer the query a
@@ -819,8 +888,16 @@ impl Emulator {
         term.reset_damage();
 
         let blocks = BlockTracker::new();
-        let live = blocks.live(&term);
-        let snapshot = Arc::new(snapshot::build(&term, &palette, 0, None, live, false));
+        let live = blocks.live(&term, 0);
+        let snapshot = Arc::new(snapshot::build(
+            &term,
+            &palette,
+            0,
+            None,
+            live,
+            false,
+            Spilled::none(blocks.spilled()),
+        ));
         Self {
             term,
             parser: Processor::new(),
@@ -831,6 +908,10 @@ impl Emulator {
             palette,
             size,
             scrollback_lines,
+            grid_lines,
+            above: 0,
+            view_row: None,
+            grid_base,
             switch_held: false,
             background_held: false,
             switched_from: None,
@@ -882,7 +963,7 @@ impl Emulator {
         }
         self.osc_watcher.asks_done_read = 0;
 
-        let view = self.view();
+        let mut view = self.view();
         let mut exited = None;
         // Whether the shell finished a line in this read, which is the only
         // thing that can give the keyboard back to a pane whose line editor
@@ -895,7 +976,7 @@ impl Emulator {
                 .advance_until_terminated(&mut self.osc_watcher, rest);
             let (piece, remaining) = rest.split_at(consumed);
             if std::mem::take(&mut self.osc_watcher.screen_switched) {
-                self.switch_screens(piece);
+                self.switch_screens(piece, &mut view);
             } else {
                 self.feed(piece);
             }
@@ -1114,8 +1195,12 @@ impl Emulator {
                     !self.updating() || self.parser.sync_bytes_count() < buffered + slice.len();
                 self.update_let_go(played);
             }
-            self.blocks
-                .trim_history(&mut self.term, self.scrollback_lines);
+            self.blocks.trim_history(
+                &mut self.term,
+                &self.palette,
+                self.grid_lines,
+                self.scrollback_lines,
+            );
             rest = after;
         }
     }
@@ -1137,11 +1222,50 @@ impl Emulator {
     /// in, because that byte can be what lets go of the update: one that
     /// would fill `vte`'s buffer to its limit ends the update instead, inside
     /// the very feed that carries it.
-    fn switch_screens(&mut self, piece: &[u8]) {
+    ///
+    /// And it keeps the shell's view where it stands across the switch:
+    /// `view` is settled on the shell's screen before the switch, as the
+    /// end of a feed would settle it, and taken again after, so that what a
+    /// read prints after a switch is counted from there. A view standing in
+    /// the spilled rows leaves its row for the way back: see
+    /// [`Self::view_row`].
+    fn switch_screens(&mut self, piece: &[u8], view: &mut View) {
         if let Some((last, before)) = piece.split_last() {
             self.feed(before);
+            let was_up = self.term.mode().contains(TermMode::ALT_SCREEN);
+            if !was_up {
+                self.keep_view(*view);
+                self.view_row = self.spilled_view_row();
+            }
             self.switch_held |= self.updating();
             self.feed(std::slice::from_ref(last));
+            let up = self.term.mode().contains(TermMode::ALT_SCREEN);
+            if was_up && !up {
+                self.restore_view_row();
+            } else if !was_up && !up {
+                // Held in an update, or no switch at all: nothing to keep.
+                self.view_row = None;
+            }
+            *view = self.view();
+        }
+    }
+
+    /// Which of the spilled rows is at the top of the shell's view, when one
+    /// of them is.
+    fn spilled_view_row(&self) -> Option<usize> {
+        let above = self.above_grid();
+        (above > 0).then(|| self.blocks.spilled_rows(&self.term) - above)
+    }
+
+    /// Puts the shell's view back on the row it had at its top when a
+    /// full-screen program came up: see [`Self::view_row`].
+    fn restore_view_row(&mut self) {
+        if let Some(row) = self.view_row.take() {
+            let spilled = self.blocks.spilled_rows(&self.term);
+            if row < spilled {
+                let offset = self.term.grid().history_size() + spilled - row;
+                self.set_view(offset.min(self.history_len()));
+            }
         }
     }
 
@@ -1174,8 +1298,25 @@ impl Emulator {
     }
 
     /// How long the next slice [`Self::feed`] feeds may be: a byte shorter
-    /// than the lines the history has room for before alacritty evicts on its
-    /// own, and a byte at least.
+    /// than the lines the history has room for before it is past the grid's
+    /// share of the scrollback by [`SPILL_BATCH`] and the headroom — and
+    /// never past the whole scrollback and the headroom, where alacritty
+    /// would evict on its own — and a byte at least.
+    ///
+    /// The batch is what a slice may scroll the grid past its share before
+    /// the blocks cut it back and spill what they cut: a read of a few
+    /// kilobytes is one slice and one cut, rather than one of each for every
+    /// few lines of it.
+    ///
+    /// The count is of bytes, and holds for output that scrolls a line a
+    /// byte at most: text, newlines, and every escape but a few. Those few
+    /// scroll a screenful or more in a handful of bytes — `CSI n S`, an erase
+    /// of a screen with something on it, which alacritty pushes into the
+    /// history, lines deleted at the top of a scroll region — so a slice of
+    /// them can take the history past alacritty's room, and what it evicts
+    /// there goes uncounted. That is caught after the slice rather than
+    /// prevented, by [`BlockTracker::trim_history`]: the history is full,
+    /// and the spilled rows, which no longer end where it begins, go.
     ///
     /// On the alternate screen the shell's history cannot be read. It was
     /// held at its length right before the shell's screen went, and the
@@ -1186,11 +1327,15 @@ impl Emulator {
     /// that switched screens — is [`BlockTracker::rows_changed`]'s.
     fn history_room(&self) -> usize {
         let history = if self.term.mode().contains(TermMode::ALT_SCREEN) {
-            self.scrollback_lines
+            self.grid_lines
         } else {
             self.term.grid().history_size()
         };
-        let limit = self.scrollback_lines.saturating_add(HISTORY_HEADROOM);
+        let limit = self
+            .grid_lines
+            .saturating_add(SPILL_BATCH)
+            .min(self.scrollback_lines)
+            .saturating_add(HISTORY_HEADROOM);
         limit.saturating_sub(history).saturating_sub(1).max(1)
     }
 
@@ -1198,8 +1343,12 @@ impl Emulator {
     /// whose first rows have left it: see [`BlockTracker::trim_history`] and
     /// [`BlockTracker::settle_pictures`].
     fn settle_history(&mut self) {
-        self.blocks
-            .trim_history(&mut self.term, self.scrollback_lines);
+        self.blocks.trim_history(
+            &mut self.term,
+            &self.palette,
+            self.grid_lines,
+            self.scrollback_lines,
+        );
         self.blocks.settle_pictures(&self.term);
     }
 
@@ -1423,6 +1572,7 @@ impl Emulator {
     /// still answers whether the pane's command has finished.
     pub fn clear_blocks(&mut self) -> Vec<Block> {
         let dropped = self.blocks.clear(&mut self.term);
+        self.above = 0;
         self.dirty = true;
         dropped
     }
@@ -1446,7 +1596,7 @@ impl Emulator {
     /// The block everything arriving now belongs to. Also on every
     /// [`Snapshot`].
     pub fn live_block(&self) -> LiveBlock {
-        self.blocks.live(&self.term)
+        self.blocks.live(&self.term, self.above_grid())
     }
 
     /// Why the last mark that changed nothing changed nothing, or `None` when
@@ -1478,7 +1628,8 @@ impl Emulator {
             self.dirty = false;
 
             let revision = self.snapshot.revision + 1;
-            let live = self.blocks.live(&self.term);
+            let above = self.above_grid();
+            let live = self.blocks.live(&self.term, above);
             let built = snapshot::build(
                 &self.term,
                 &self.palette,
@@ -1486,6 +1637,10 @@ impl Emulator {
                 self.title.as_deref(),
                 live,
                 self.line_editor,
+                Spilled {
+                    rows: self.blocks.spilled(),
+                    above,
+                },
             );
             if !built.same_content(&self.snapshot) {
                 self.snapshot = Arc::new(built);
@@ -1510,29 +1665,182 @@ impl Emulator {
         let rows_changed = size.rows != self.size.rows;
         let shortened = size.rows < self.size.rows;
         let geometry_changed = columns_changed || rows_changed;
+        let rows_added = size.rows.saturating_sub(self.size.rows);
+        let old_rows = self.size.rows;
         self.size = size;
         if !geometry_changed {
             return;
         }
+        let alt_screen = self.term.mode().contains(TermMode::ALT_SCREEN);
+        // The grid's share follows the screen, so that a taller one finds
+        // its rows in the history: see [`Self::grid_share`].
+        self.grid_lines = self.grid_share(size.rows);
+        // Where the reader stands, kept across the resize the way alacritty
+        // keeps its own view: see [`Self::keep_view_through_resize`]. A line
+        // folded across the seam is gathered up into the spill first, which
+        // can take the rows the view is on with it.
+        let offset = self.display_offset();
+        if columns_changed {
+            self.blocks
+                .gather_split_line(&mut self.term, &self.palette, self.scrollback_lines);
+            if !alt_screen {
+                self.set_view(offset);
+            }
+        }
+        let (above, spilled) = (self.above_grid(), self.blocks.spilled_rows(&self.term));
+        let grid_line = (columns_changed && !alt_screen && offset > 0 && above == 0)
+            .then(|| self.line_at_view_top(offset));
         self.term.resize(size);
         // A column change reflows the scrollback, which moves every line the
         // open block is anchored against; a row change does not, and the
         // anchor's own arithmetic already covers the lines a taller screen
         // pulls back out of the history. Afterwards, because the open block's
         // first row is then re-found on the reflowed grid rather than guessed
-        // at.
+        // at. The rows the block spilled out of the grid are laid out again
+        // first, as the grid has just laid out its own.
+        let mut kept = None;
         if columns_changed {
+            let blank = self.blank();
+            // Under a full-screen program the shell's view is out of sight,
+            // and its row among the spilled ones is what is laid out again.
+            let track = if alt_screen {
+                self.view_row
+            } else {
+                (above > 0).then(|| spilled - above)
+            };
+            let top_row = self.blocks.rewrap_spill(self.term.columns(), blank, track);
+            if alt_screen {
+                self.view_row = top_row;
+            } else {
+                self.above = 0;
+                kept = top_row.map(Kept::Spilled).or_else(|| {
+                    grid_line
+                        .flatten()
+                        .and_then(|(line, rows)| self.offset_of_line(line, rows))
+                        .map(Kept::Offset)
+                });
+            }
             self.blocks.reflowed(&self.term);
         }
         // A shorter screen pushes its top rows into the history, and a
         // taller one pulls them back out: the shell's as well under a
         // full-screen program, where its history cannot be read.
         if rows_changed {
-            self.blocks.rows_changed(&self.term, shortened);
+            let rows = usize::from(size.rows.abs_diff(old_rows));
+            self.blocks.rows_changed(&self.term, shortened, rows);
         }
         self.settle_history();
+        self.keep_view_through_resize(offset, rows_added, columns_changed, kept);
         self.dirty = true;
         self.drain();
+    }
+
+    /// How much of the scrollback the grid itself keeps on a screen `rows`
+    /// tall: [`GRID_LINES`] of it, or twice the screen when that is more —
+    /// a taller screen takes its new rows out of the history, as many as it
+    /// grows by, and there have to be that many there for it to find rather
+    /// than blank rows while the lines they were are spilled. A screen that
+    /// more than doubles past it at once still finds blank rows: see the
+    /// architecture notes.
+    fn grid_share(&self, rows: u16) -> usize {
+        self.grid_base
+            .max(2 * usize::from(rows))
+            .min(self.scrollback_lines)
+    }
+
+    /// Which line of the grid's history the top of a view `offset` lines up
+    /// is on, counted in lines from the history's oldest, and how many rows
+    /// down that line it is. `None` when the top is not in the history.
+    fn line_at_view_top(&self, offset: usize) -> Option<(usize, usize)> {
+        let grid = self.term.grid();
+        let history = grid.history_size() as i32;
+        let top = -(offset as i32);
+        if top < -history || top >= 0 {
+            return None;
+        }
+        let last = alacritty_terminal::index::Column(grid.columns().saturating_sub(1));
+        let folds = |line: i32| {
+            grid[alacritty_terminal::index::Line(line)][last]
+                .flags
+                .contains(alacritty_terminal::term::cell::Flags::WRAPLINE)
+        };
+        let (mut lines, mut down) = (0, 0);
+        for line in -history..=top {
+            if line == -history || !folds(line - 1) {
+                lines += 1;
+                down = 0;
+            } else {
+                down += 1;
+            }
+        }
+        Some((lines, down))
+    }
+
+    /// The offset that puts the top of the view on the `line`th line of the
+    /// grid's history, as [`Self::line_at_view_top`] counted it, `down` rows
+    /// into it or at its last row: the same line after a reflow, which keeps
+    /// lines and changes only the rows they are folded over.
+    fn offset_of_line(&self, line: usize, down: usize) -> Option<usize> {
+        let grid = self.term.grid();
+        let history = grid.history_size() as i32;
+        let newest = grid.screen_lines() as i32 - 1;
+        let last = alacritty_terminal::index::Column(grid.columns().saturating_sub(1));
+        let folds = |row: i32| {
+            grid[alacritty_terminal::index::Line(row)][last]
+                .flags
+                .contains(alacritty_terminal::term::cell::Flags::WRAPLINE)
+        };
+        let mut lines = 0;
+        for row in -history..=newest {
+            if row == -history || !folds(row - 1) {
+                lines += 1;
+                if lines == line {
+                    let mut top = row;
+                    for _ in 0..down {
+                        if top >= newest || !folds(top) {
+                            break;
+                        }
+                        top += 1;
+                    }
+                    return Some((-top).max(0) as usize);
+                }
+            }
+        }
+        None
+    }
+
+    /// Puts the view back where a resize found it, over the grid's history
+    /// and the open block's spilled rows alike, which alacritty keeps for its
+    /// own history alone.
+    ///
+    /// A taller screen takes the view down by the rows it added, as alacritty
+    /// does, and a shorter one leaves it standing as many lines up. Across a
+    /// column change the view stays on the line at its top, wherever that
+    /// is: a row of the spilled rows as [`BlockTracker::rewrap_spill`] laid
+    /// it out, at the start of the part of the line that row held, or a line
+    /// of the grid's history, found again by counting lines from its oldest.
+    /// Under a full-screen program the shell's view is out of sight, and is
+    /// alacritty's but for the rows above the grid: see [`Self::resize`].
+    fn keep_view_through_resize(
+        &mut self,
+        offset: usize,
+        rows_added: u16,
+        columns_changed: bool,
+        kept: Option<Kept>,
+    ) {
+        if self.term.mode().contains(TermMode::ALT_SCREEN) || offset == 0 {
+            return;
+        }
+        let target = match kept {
+            Some(Kept::Spilled(row)) => {
+                let spilled = self.blocks.spilled_rows(&self.term);
+                self.term.grid().history_size() + spilled.saturating_sub(row)
+            }
+            Some(Kept::Offset(offset)) => offset,
+            None if columns_changed => return,
+            None => offset.saturating_sub(usize::from(rows_added)),
+        };
+        self.set_view(target.min(self.history_len()));
     }
 
     /// The size the grid was last set to.
@@ -1543,8 +1851,13 @@ impl Emulator {
     /// Moves the viewport through the scrollback: a positive `delta` moves it
     /// back into history, a negative one towards the live output. It stops at
     /// the oldest line and at the bottom rather than wrapping.
+    ///
+    /// Up past the grid's oldest line into the rows the open block spilled
+    /// out of it, which are the scrollback as much as the grid's are.
     pub fn scroll_lines(&mut self, delta: i32) {
-        self.term.scroll_display(Scroll::Delta(delta));
+        let target =
+            (self.display_offset() as i64 + i64::from(delta)).clamp(0, self.history_len() as i64);
+        self.set_view(target as usize);
         self.dirty = true;
         self.drain();
     }
@@ -1552,12 +1865,74 @@ impl Emulator {
     /// Returns the viewport to the live output.
     pub fn scroll_to_bottom(&mut self) {
         self.term.scroll_display(Scroll::Bottom);
+        if !self.term.mode().contains(TermMode::ALT_SCREEN) {
+            self.above = 0;
+        }
         self.dirty = true;
         self.drain();
     }
 
-    /// How many lines of scrollback sit above the viewport.
+    /// How many lines of scrollback sit above the viewport: the grid's, and
+    /// above them the open block's rows that left it, which the blocks keep
+    /// the way they keep a finished block's.
     pub fn history_len(&self) -> usize {
+        self.term.grid().history_size() + self.blocks.spilled_rows(&self.term)
+    }
+
+    /// How many lines above the live output the viewport stands, counted
+    /// over [`Self::history_len`]'s lines.
+    fn display_offset(&self) -> usize {
+        self.term.grid().display_offset() + self.above_grid()
+    }
+
+    /// How far above the grid's own view the viewport stands, up in the
+    /// rows the open block spilled out of it: [`Self::above`], while the
+    /// grid's view is at its oldest line and there are rows there to stand
+    /// in. Anything that moved the grid's view since — a reset, a cleared
+    /// history, a screen switched — has moved the viewport off them.
+    fn above_grid(&self) -> usize {
+        let grid = self.term.grid();
+        if grid.display_offset() < grid.history_size() {
+            return 0;
+        }
+        self.above.min(self.blocks.spilled_rows(&self.term))
+    }
+
+    /// Stands the viewport `offset` lines above the live output: as far as
+    /// the grid's history goes in the grid's own view, and the rest above it.
+    fn set_view(&mut self, offset: usize) {
+        let history = self.term.grid().history_size();
+        let in_grid = offset.min(history);
+        let now = self.term.grid().display_offset();
+        if in_grid != now {
+            let delta = in_grid as i64 - now as i64;
+            self.term.scroll_display(Scroll::Delta(
+                i32::try_from(delta).unwrap_or(if delta < 0 { i32::MIN } else { i32::MAX }),
+            ));
+        }
+        // Under a full-screen program the rows above the grid are the
+        // shell's, and so is where its view stands in them.
+        if !self.term.mode().contains(TermMode::ALT_SCREEN) {
+            self.above = (offset - in_grid).min(self.blocks.spilled_rows(&self.term));
+        }
+    }
+
+    /// A cell nothing was ever printed into, in the colours the grid draws
+    /// one in now.
+    fn blank(&self) -> snapshot::SnapshotCell {
+        let overrides = self.term.colors();
+        snapshot::SnapshotCell {
+            c: ' ',
+            foreground: self.palette.named(NamedColor::Foreground, overrides),
+            background: self.palette.named(NamedColor::Background, overrides),
+            flags: snapshot::CellFlags::NONE,
+        }
+    }
+
+    /// Tests: how many lines of the history the grid itself holds, below the
+    /// open block's spilled rows.
+    #[cfg(test)]
+    pub(crate) fn grid_history(&self) -> usize {
         self.term.grid().history_size()
     }
 
@@ -1578,11 +1953,40 @@ impl Emulator {
     /// so they do not move under a viewport that scrolls; what does move them
     /// is the history filling up and evicting from the top, and the clamped
     /// first row is returned so a caller can see that it did.
+    ///
+    /// The rows above the grid's oldest line are the open block's that left
+    /// it, read out of the store they went to, which is the one a finished
+    /// block's rows live in.
     pub fn harvest_rows(&self, first: usize, last: usize) -> (BlockRows, usize) {
-        let history = self.history_len() as i32;
-        let top = first as i32 - history;
-        let rows = harvest::harvest(&self.term, &self.palette, top, last as i32 - history);
+        let spilled = self.blocks.spilled_rows(&self.term);
+        let in_grid = self.term.grid().history_size() as i64;
+        let history = in_grid + spilled as i64;
+        let top = first as i64 - history;
+        let bottom = last as i64 - history;
+        let grid = harvest::harvest(
+            &self.term,
+            &self.palette,
+            top.max(-in_grid) as i32,
+            bottom.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        );
         let oldest = top.max(-history);
+        let mut rows = if top < -in_grid && spilled > 0 {
+            let from = (top + history).max(0) as usize;
+            let to = (bottom + history + 1).clamp(0, spilled as i64) as usize;
+            self.blocks.spilled().slice(from..to)
+        } else {
+            BlockRows::default()
+        };
+        if rows.is_empty() || rows.columns() != grid.columns() {
+            // From the grid alone: rows of two widths are not one store.
+            let at = if grid.is_empty() {
+                oldest
+            } else {
+                top.max(-in_grid)
+            };
+            return (grid, (at + history).max(0) as usize);
+        }
+        rows.append(grid);
         (rows, (oldest + history).max(0) as usize)
     }
 
@@ -1802,11 +2206,11 @@ impl Emulator {
     /// Where the viewport stands now, taken before a feed so that
     /// [`Self::keep_view`] can be handed it after.
     fn view(&self) -> View {
-        let grid = self.term.grid();
         View {
             alt_screen: self.term.mode().contains(TermMode::ALT_SCREEN),
-            offset: grid.display_offset(),
-            history: grid.history_size(),
+            offset: self.display_offset(),
+            history: self.history_len(),
+            scrolled: self.blocks.scrolled(&self.term),
         }
     }
 
@@ -1826,28 +2230,55 @@ impl Emulator {
     /// the grid does not have and panicked, taking down whichever thread
     /// asked for the frame.
     ///
-    /// The lines that really reached the history are the lines it grew by, so
-    /// the offset may rise by exactly that many: the view stays on what the
-    /// reader was looking at, which is what it does for ordinary output, rather
-    /// than drifting up or jumping to the live output. The count is exact
-    /// until the history is full, when every line scrolled in evicts one and
-    /// the size stops moving; from there alacritty's own figure stands, which
-    /// is right for all but the scrolls above and cannot pass a history as long
-    /// as its cap. A feed that switched screens compares two different grids,
-    /// and alacritty's figure stands there too. Past both, the offset is held
-    /// to the history there is.
+    /// The lines that really reached the history are the lines it grew by,
+    /// and the ones cut back off its old end with them — the count an anchor
+    /// follows, see [`BlockTracker::scrolled`] — so the offset may rise by
+    /// exactly that many: the view stays on what the reader was looking at,
+    /// which is what it does for ordinary output, rather than drifting up or
+    /// jumping to the live output. That holds once the grid's history is
+    /// full too, where the lines cut off its old end go on above it as the
+    /// open block's spilled rows, and the view goes on up into them. Never
+    /// past alacritty's own figure while that is inside the grid's history,
+    /// since alacritty lowers it only when the history went — a `CSI 3 J`, a
+    /// reset — and what came after that is not what the reader was looking
+    /// at. A feed that switched screens compares two different grids, and
+    /// alacritty's figure stands there. Past all of it, the offset is held to
+    /// the history there is.
     fn keep_view(&mut self, before: View) {
         let now = self.view();
-        let mut offset = now.offset;
-        if now.alt_screen == before.alt_screen && now.history < self.scrollback_lines {
-            let scrolled_in = now.history.saturating_sub(before.history);
-            offset = offset.min(before.offset + scrolled_in);
+        let grid = self.term.grid();
+        let (in_grid, grid_history) = (grid.display_offset(), grid.history_size());
+        // Over a switch of screens the grid on show is another one, whose
+        // view is its own, and the shell's view is left where it stood, the
+        // rows above its grid included: alacritty keeps the shell's offset
+        // for when its screen is back, and this keeps the rest — under the
+        // program too, where [`Self::set_view`] leaves them alone.
+        if now.alt_screen != before.alt_screen {
+            if in_grid > grid_history {
+                let down = i32::try_from(in_grid - grid_history).unwrap_or(i32::MAX);
+                self.term.scroll_display(Scroll::Delta(-down));
+            }
+            if now.alt_screen {
+                self.view_row = self.view_row.or_else(|| self.spilled_view_row());
+            } else {
+                self.restore_view_row();
+            }
+            return;
         }
-        offset = offset.min(now.history);
-        if offset < now.offset {
-            let down = i32::try_from(now.offset - offset).unwrap_or(i32::MAX);
-            self.term.scroll_display(Scroll::Delta(-down));
-        }
+        let offset = if before.offset == 0 {
+            0
+        } else {
+            let scrolled_in = now.scrolled.saturating_sub(before.scrolled);
+            let kept = before
+                .offset
+                .saturating_add(usize::try_from(scrolled_in).unwrap_or(usize::MAX));
+            if in_grid < grid_history {
+                kept.min(in_grid)
+            } else {
+                kept
+            }
+        };
+        self.set_view(offset.min(now.history));
     }
 
     /// Translates everything `Term` reported during the last operation.
@@ -2099,3 +2530,7 @@ impl Emulator {
 #[cfg(test)]
 #[path = "emulator_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "spill_tests.rs"]
+mod spill_tests;
