@@ -280,11 +280,66 @@ fn a_command_marks_its_leading_tabs_and_the_white_space_its_lines_end_in() {
             ["→", "·", "→", "·"].map(str::to_owned).to_vec()
         )
     );
-    // Written out as everything else, the newlines kept.
+    // Written out as everything else, the newlines kept, and what is
+    // written out muted — so a command that spells a mark out itself does
+    // not pass for one.
     assert_eq!(
         marked("echo safe\rrm\u{2800}x\n"),
-        ("echo safe␍rm⟨U+2800⟩x\n".to_owned(), Vec::<String>::new())
+        (
+            "echo safe␍rm⟨U+2800⟩x\n".to_owned(),
+            ["␍", "⟨U+2800⟩"].map(str::to_owned).to_vec()
+        )
     );
+    assert_eq!(
+        marked("echo ⟨U+2800⟩"),
+        ("echo ⟨U+2800⟩".to_owned(), Vec::<String>::new())
+    );
+}
+
+#[test]
+fn a_combining_mark_that_could_disguise_what_it_is_on_is_written_out() {
+    // A solidus drawn through a space reads as `/`: `rm -rf ~ ̸.cache` is
+    // `rm -rf ~` and a word of its own, drawn as `rm -rf ~/.cache`.
+    assert_eq!(visible("rm -rf ~ \u{338}.cache"), "rm -rf ~ ⟨U+0338⟩.cache");
+    // A low line under a space reads as `_`; a vertical line through one as
+    // `|`.
+    assert_eq!(visible("cp a \u{332}b"), "cp a ⟨U+0332⟩b");
+    assert_eq!(visible("a \u{20d2} b"), "a ⟨U+20D2⟩ b");
+    // On ASCII punctuation, at a line's start, after a tab, and after a
+    // mark written out: nothing it could be text on.
+    assert_eq!(visible("~\u{301}"), "~⟨U+0301⟩");
+    assert_eq!(visible("\u{301}x\n\u{301}y"), "⟨U+0301⟩x\n⟨U+0301⟩y");
+    assert_eq!(visible("a\t\u{301}"), "a       ⟨U+0301⟩");
+    assert_eq!(visible("a\u{200b}\u{301}"), "a⟨U+200B⟩⟨U+0301⟩");
+    // An overlay or an enclosing mark, on whatever it is: `o̸` is not `ø`,
+    // and a keycap hides the `#` it is on.
+    for (text, shown) in [
+        ("o\u{334}", "o⟨U+0334⟩"),
+        ("o\u{338}", "o⟨U+0338⟩"),
+        ("l\u{20d3}", "l⟨U+20D3⟩"),
+        ("a\u{20d8}", "a⟨U+20D8⟩"),
+        ("a\u{20da}", "a⟨U+20DA⟩"),
+        ("a\u{20dd}", "a⟨U+20DD⟩"),
+        ("#\u{20e3}", "#⟨U+20E3⟩"),
+        ("a\u{20e5}", "a⟨U+20E5⟩"),
+        ("a\u{20e6}", "a⟨U+20E6⟩"),
+        ("a\u{20ea}", "a⟨U+20EA⟩"),
+        ("a\u{20eb}", "a⟨U+20EB⟩"),
+        ("é\u{338}", "é⟨U+0338⟩"),
+    ] {
+        assert_eq!(visible(text), shown, "{text:?}");
+    }
+    // Text: a name decomposed as macOS stores it, two marks on a Latin
+    // letter, Arabic's vowel marks, Devanagari's virama. A third on one
+    // ASCII letter is drawn over the lines around it, and written out.
+    for text in ["cafe\u{301}.txt", "Vie\u{323}\u{302}t", "بَيْت", "क्ष", "ǖ"] {
+        assert_eq!(visible(text), text, "{text:?}");
+    }
+    assert_eq!(visible("e\u{301}\u{302}\u{303}"), "e\u{301}\u{302}⟨U+0303⟩");
+    // And a command's or a change's writing out is muted.
+    let (shown, muted) = command_lines("ls ~ \u{338}x");
+    assert_eq!(shown, "ls ~ ⟨U+0338⟩x");
+    assert_eq!(&shown[muted[0].clone()], "⟨U+0338⟩");
 }
 
 #[test]

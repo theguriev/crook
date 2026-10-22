@@ -61,6 +61,9 @@ pub struct Paragraph {
     /// Whether lines break at any character, keeping every one: see
     /// [`Paragraph::breaking_anywhere`].
     anywhere: bool,
+    /// Whether every line reads left to right: see
+    /// [`Paragraph::left_to_right`].
+    left_to_right: bool,
     lines: Vec<Line>,
     size: Option<Vector2F>,
     origin: Option<Point>,
@@ -77,6 +80,7 @@ impl Paragraph {
             properties: Properties::default(),
             cut: Cut::End,
             anywhere: false,
+            left_to_right: false,
             color: Color::WHITE,
             lines: Vec::new(),
             size: None,
@@ -114,6 +118,16 @@ impl Paragraph {
         self
     }
 
+    /// Draws every line left to right, its characters in the order they
+    /// come but for the letters of a right-to-left run, whatever letter it
+    /// starts with: see [`crate::text_layout::layout_left_to_right`]. For
+    /// text — a path a person is asked to allow a write to — whose order is
+    /// what it means.
+    pub fn left_to_right(mut self) -> Self {
+        self.left_to_right = true;
+        self
+    }
+
     /// Sets the weight and slant to select within the family.
     pub fn with_style(mut self, properties: Properties) -> Self {
         self.properties = properties;
@@ -140,17 +154,24 @@ impl Paragraph {
             0..text.len(),
             StyleAndFont::new(self.font_family, self.properties, TextStyle::default()),
         )];
-        ctx.text_layout.layout_line(
-            text,
-            LineStyle {
-                font_size: self.font_size,
-                line_height_ratio: self.line_height_ratio,
-                baseline_ratio: DEFAULT_TOP_BOTTOM_RATIO,
-                fixed_width_tab_size: None,
-            },
-            &style_runs,
-            max_width,
-        )
+        let line_style = LineStyle {
+            font_size: self.font_size,
+            line_height_ratio: self.line_height_ratio,
+            baseline_ratio: DEFAULT_TOP_BOTTOM_RATIO,
+            fixed_width_tab_size: None,
+        };
+        if self.left_to_right {
+            crate::text_layout::layout_left_to_right(
+                ctx.text_layout,
+                text,
+                line_style,
+                &style_runs,
+                max_width,
+            )
+        } else {
+            ctx.text_layout
+                .layout_line(text, line_style, &style_runs, max_width)
+        }
     }
 }
 

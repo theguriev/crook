@@ -14,8 +14,8 @@ use std::ops::Range;
 use anyhow::Result;
 
 use crate::fonts::{
-    FamilyId, FontId, GlyphId, GlyphKey, LineStyle, Metrics, RasterBounds, RasterFormat,
-    RasterizedGlyph, StyleAndFont, SubpixelAlignment,
+    FamilyId, FontId, GlyphId, GlyphKey, LineStyle, Metrics, Properties, RasterBounds,
+    RasterFormat, RasterizedGlyph, StyleAndFont, SubpixelAlignment,
 };
 use crate::geometry::Vector2F;
 use crate::text_layout::Line;
@@ -41,6 +41,33 @@ pub trait TextLayoutSystem: 'static + Send + Sync {
         style_runs: &[(Range<usize>, StyleAndFont)],
         max_width: f32,
     ) -> Line;
+
+    /// How wide `character` alone is drawn at `font_size` in the face
+    /// `family` and `properties` select, read off that face's own tables
+    /// with no shaping and no fallback: `None` when that face does not
+    /// cover it, or when this system cannot say without shaping.
+    ///
+    /// The answer [`Self::layout_line`] gives for the character alone when
+    /// the face has it, at a fraction of the cost: no fallback is searched.
+    fn advance_in_face(
+        &self,
+        _family: FamilyId,
+        _properties: Properties,
+        _font_size: f32,
+        _character: char,
+    ) -> Option<f32> {
+        None
+    }
+
+    /// Whether any face this system can draw from has a glyph for
+    /// `character`: `true` when it cannot say.
+    ///
+    /// One a shaper finds in no face is drawn as the primary face's missing
+    /// glyph, a box like every other missing one's — and a search of every
+    /// installed face, once per character, to find that out.
+    fn covers(&self, _character: char) -> bool {
+        true
+    }
 }
 
 /// Loads fonts and rasterizes glyphs.

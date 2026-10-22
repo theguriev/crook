@@ -16,3 +16,4 @@ parking_lot.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
 smallvec.workspace = true
+unicode-bidi.workspace = true

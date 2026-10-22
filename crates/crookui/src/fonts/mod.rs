@@ -197,6 +197,11 @@ struct FontStore {
     /// Keyed by glyph and by the bit patterns of both scale components, which
     /// is what makes a float a usable map key.
     raster_bounds: RwLock<FxHashMap<(GlyphKey, u32, u32), RasterBounds>>,
+
+    /// Every code point some face in the database has a glyph for, one bit
+    /// each: read once, the first time a character no selected face covers
+    /// is asked about. See [`FontStore::covers`].
+    coverage: std::sync::OnceLock<Vec<u64>>,
 }
 
 /// The identity maps: ours to `fontdb`'s and back, plus resolved selections.
@@ -217,7 +222,64 @@ impl FontStore {
             metrics: RwLock::new(FxHashMap::default()),
             advances: RwLock::new(FxHashMap::default()),
             raster_bounds: RwLock::new(FxHashMap::default()),
+            coverage: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Whether some face the shaper can fall back to has a glyph for
+    /// `character`.
+    ///
+    /// Asked of the shaper, the answer for a character no face has is a
+    /// search of every face in the database — milliseconds, each time — and
+    /// then the missing glyph. Here it is one bit, of a table read off every
+    /// face's character map once. A face cosmic-text cannot load, one only
+    /// on disk by path, is left out of it, as the shaper leaves it out.
+    fn covers(&self, character: char) -> bool {
+        let coverage = self.coverage.get_or_init(|| {
+            let started = std::time::Instant::now();
+            let mut bits = vec![0u64; (u32::from(char::MAX) as usize >> 6) + 1];
+            let font_system = self.font_system.read();
+            let db = font_system.db();
+            let mut faces = 0;
+            for face in db.faces() {
+                if matches!(face.source, fontdb::Source::File(_)) {
+                    continue;
+                }
+                faces += 1;
+                db.with_face_data(face.id, |data, index| {
+                    if let Some(font) = swash::FontRef::from_index(data, index as usize) {
+                        font.charmap().enumerate(|point, _| {
+                            if let Some(word) = bits.get_mut(point as usize >> 6) {
+                                *word |= 1 << (point & 63);
+                            }
+                        });
+                    }
+                });
+            }
+            log::debug!(
+                "read which characters {faces} faces cover in {:?}",
+                started.elapsed()
+            );
+            bits
+        });
+        let point = u32::from(character) as usize;
+        coverage[point >> 6] >> (point & 63) & 1 == 1
+    }
+
+    /// How wide `character` is at `font_size` in the face `family_id` and
+    /// `properties` select, when that face covers it.
+    fn advance_in_face(
+        &self,
+        family_id: FamilyId,
+        properties: Properties,
+        font_size: f32,
+        character: char,
+    ) -> Option<f32> {
+        let font_id = self.select_font(family_id, properties)?;
+        let glyph_id = self.glyph_for_char(font_id, character)?;
+        let advance = self.glyph_advance(font_id, glyph_id).ok()?;
+        let units_per_em = self.font_metrics(font_id).units_per_em;
+        (units_per_em > 0).then(|| advance.x() * font_size / units_per_em as f32)
     }
 
     /// The [`FontId`] standing for a `fontdb` face, minting one if this is the

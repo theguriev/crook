@@ -158,6 +158,9 @@ wat = "1"
 # The find bar's regular-expression mode. Already in the tree under
 # other crates, so this names a version the lockfile holds.
 regex = "1.13"
+# Which characters are right-to-left letters, for shaping text that must read
+# in the order it runs. Already in the tree under cosmic-text.
+unicode-bidi = "0.3"
 unicode-segmentation = "1.13"
 # The same East Asian width table the terminal emulator lays its grid out with,
 # so the input field gives a CJK filename the two columns the shell will echo it

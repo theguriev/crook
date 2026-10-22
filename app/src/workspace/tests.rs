@@ -67,10 +67,17 @@ impl TextLayoutSystem for StubShaper {
         _: f32,
     ) -> Line {
         let advance = line_style.font_size * 0.5;
-        let alone = text.chars().count() == 1;
+        // A left-to-right mark is drawn as nothing, as a real shaper draws
+        // every default-ignorable character.
+        let drawn = |character: &char| *character != '\u{200e}';
+        let alone = text.chars().filter(drawn).count() == 1;
+        if alone && text.chars().any(|character| SLOW.contains(&character)) {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         let mut x = 0.;
-        let glyphs: Vec<_> = text
-            .char_indices()
+        let glyphs: Vec<_> = visual_order(text)
+            .into_iter()
+            .filter(|(_, character)| drawn(character))
             .map(|(index, character)| {
                 let width = advance * stub_cells(character, alone);
                 let glyph = Glyph {
@@ -125,6 +132,45 @@ impl TextLayoutSystem for StubShaper {
             descent: line_style.font_size * 0.2,
         }
     }
+
+    fn covers(&self, character: char) -> bool {
+        Self::covered(character)
+    }
+}
+
+impl StubShaper {
+    /// Whether `character` has a glyph in some face: not for the stub's
+    /// first page of plane 15's private use, which no face has.
+    fn covered(character: char) -> bool {
+        !('\u{f0000}'..='\u{f00ff}').contains(&character)
+    }
+}
+
+/// Characters the stub shaper takes two milliseconds to shape alone, as a
+/// real one takes searching every installed face for a character none has.
+const SLOW: std::ops::RangeInclusive<char> = '\u{f0100}'..='\u{f01ff}';
+
+/// `text`'s characters in the order a real shaper draws them, left to right,
+/// with where each is in `text`: by the Unicode bidirectional algorithm,
+/// the line's direction taken from its first strong letter, a right-to-left
+/// level's characters reversed.
+fn visual_order(text: &str) -> Vec<(usize, char)> {
+    let bidi = unicode_bidi::BidiInfo::new(text, None);
+    let mut visual = Vec::new();
+    for paragraph in &bidi.paragraphs {
+        let (levels, runs) = bidi.visual_runs(paragraph, paragraph.range.clone());
+        for run in runs {
+            let mut characters: Vec<(usize, char)> = text[run.clone()]
+                .char_indices()
+                .map(|(at, character)| (run.start + at, character))
+                .collect();
+            if levels[run.start].is_rtl() {
+                characters.reverse();
+            }
+            visual.extend(characters);
+        }
+    }
+    visual
 }
 
 /// How many cells the stub shaper draws `character` in, `alone` when it is
@@ -45691,6 +45737,158 @@ mod answering_card {
         assert_eq!(colours.last(), Some(&theme().text_muted), "{colours:?}");
     }
 
+    /// The card's lines, as drawn, left to right.
+    fn drawn_lines(harness: &mut Harness) -> Vec<String> {
+        card_lines(harness)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect()
+    }
+
+    #[test]
+    fn a_command_with_right_to_left_letters_is_drawn_in_the_order_it_runs() {
+        // A shaper takes a line's direction from its first strong letter and
+        // reorders what lies between right-to-left letters with them. This
+        // one was drawn `echo done ; ع # rm -rf $HOME ; ع :`, the `rm` behind
+        // a `#`, where bash runs it.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let attack = ": ع ; rm -rf $HOME # ع ; echo done";
+        hold(&mut harness, pane, &format!("{attack}\necho \"ع1\";ع2\""));
+        open(&mut harness);
+        settle(&mut harness);
+        let lines = drawn_lines(&mut harness);
+        for line in [attack, "echo \"ع1\";ع2\""] {
+            assert!(
+                lines.iter().any(|drawn| drawn == line),
+                "{line:?}: {lines:?}"
+            );
+        }
+
+        // A change's lines and the path it is to, the same.
+        let path = "/א/ב/../../home/someone/.ssh/config";
+        hold_request(
+            &mut harness,
+            pane,
+            "s2",
+            write(path, "ع ; rm -rf ~ # ع", None),
+            None,
+        );
+        open_newest(&mut harness);
+        settle(&mut harness);
+        let lines = drawn_lines(&mut harness);
+        for line in [path, "+ ع ; rm -rf ~ # ع"] {
+            assert!(
+                lines.iter().any(|drawn| drawn == line),
+                "{line:?}: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_character_no_face_has_is_written_out_and_muted() {
+        // Every such character is drawn as the same box, which says nothing
+        // about which one it is.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        hold(&mut harness, pane, "rm -rf ./\u{f0000}x \u{f0001}y");
+        open(&mut harness);
+        settle(&mut harness);
+        let line = "rm -rf ./⟨U+F0000⟩x ⟨U+F0001⟩y";
+        let lines = drawn_lines(&mut harness);
+        assert!(lines.iter().any(|drawn| drawn == line), "{lines:?}");
+        let scene = harness.frame();
+        let colours = line_colours(&scene, line);
+        let token =
+            "rm -rf ./".chars().count()..line.find('x').map_or(0, |at| line[..at].chars().count());
+        for (at, color) in colours.iter().enumerate() {
+            if token.contains(&at) {
+                assert_eq!(*color, theme().text_muted, "{at}");
+            }
+        }
+        assert_eq!(colours[0], theme().text_primary);
+    }
+
+    #[test]
+    fn a_written_out_character_is_muted_and_one_spelled_out_is_not() {
+        // A command cannot spell `⟨U+200B⟩` out itself and pass for one.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        hold(&mut harness, pane, "rm a\u{200b}b\nrm a⟨U+200B⟩b");
+        open(&mut harness);
+        settle(&mut harness);
+        let scene = harness.frame();
+        let mut found = Vec::new();
+        for (_, line) in text_lines(&scene, |_| true) {
+            if line == "rm a⟨U+200B⟩b" {
+                found.push(line);
+            }
+        }
+        assert_eq!(found.len(), 2, "{}", frame_text(&scene));
+        let lines: Vec<(Vector2F, String)> = card_lines(&mut harness)
+            .into_iter()
+            .filter(|(_, line)| line == "rm a⟨U+200B⟩b")
+            .collect();
+        let colour_of = |y: f32, nth: usize| {
+            let mut glyphs: Vec<_> = scene
+                .layers()
+                .flat_map(|layer| layer.glyphs.iter())
+                .filter(|glyph| glyph.position.y().round() == y)
+                .collect();
+            glyphs.sort_by(|left, right| left.position.x().total_cmp(&right.position.x()));
+            glyphs[nth].color
+        };
+        // The `⟨` of each: the real one's muted, the spelled-out one's not.
+        assert_eq!(colour_of(lines[0].0.y(), 4), theme().text_muted);
+        assert_eq!(colour_of(lines[1].0.y(), 4), theme().text_primary);
+    }
+
+    #[test]
+    fn a_command_still_being_measured_keeps_allow_waiting() {
+        // A grapheme no face of the box's own has is shaped, and a shaper
+        // searches every face for it; a command of thousands would hold the
+        // window that long. A layout measures for a few milliseconds and
+        // guesses the rest, wide, and the next frame measures on: until no
+        // width is a guess the rows are not the ones it will be drawn in,
+        // and Allow waits.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let slow: String = ('\u{f0100}'..='\u{f0120}').collect();
+        let held = hold(&mut harness, pane, &format!("echo {slow}; rm -rf ~"));
+        harness.run_command("crook/tabs/answer-waiting");
+        harness.workspace_update(|workspace, ctx| workspace.settle_the_ask_card(ctx));
+        harness.frame();
+        assert!(
+            card_says(&mut harness, "Measuring the command…"),
+            "{}",
+            card_text(&mut harness)
+        );
+        press(&mut harness, "Allow once");
+        assert!(held.nothing_sent(), "Allow on rows broken by a guess");
+
+        // Some frames on, however slow the machine, it is measured, and read.
+        for _ in 0..200 {
+            if !card_says(&mut harness, "Measuring the command") {
+                break;
+            }
+        }
+        assert!(
+            !card_says(&mut harness, "Measuring the command"),
+            "{}",
+            card_text(&mut harness)
+        );
+        assert!(card_shows_whole(
+            &mut harness,
+            &format!("echo {slow}; rm -rf ~")
+        ));
+        settle(&mut harness);
+        press(&mut harness, "Allow once");
+        assert_eq!(
+            held.sent().expect("an allow")["answer"]["decision"],
+            "allow"
+        );
+    }
+
     #[test]
     fn what_changes_on_the_card_while_it_is_up_never_moves_its_buttons() {
         // A narrow card, a tab renamed to something long while it is up, and
@@ -46216,12 +46414,20 @@ mod answering_card {
         ));
         // Written out, never obeyed: the carriage return is a mark.
         assert!(text.contains("+ echo safe␍rm -rf ~"), "{text}");
+        // In the colour of what it adds, but for the mark itself, muted as
+        // every written-out character is, so that a literal `␍` cannot pass
+        // for one.
         let scene = harness.frame();
-        assert!(
-            line_colours(&scene, "+ echo safe␍rm -rf ~")
-                .iter()
-                .all(|color| *color == theme().diff_added)
-        );
+        let colours = line_colours(&scene, "+ echo safe␍rm -rf ~");
+        let mark = "+ echo safe".chars().count();
+        for (at, color) in colours.iter().enumerate() {
+            let expected = if at == mark {
+                theme().text_muted
+            } else {
+                theme().diff_added
+            };
+            assert_eq!(*color, expected, "{at}: {colours:?}");
+        }
     }
 
     #[test]

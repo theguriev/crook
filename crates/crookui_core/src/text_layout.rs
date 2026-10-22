@@ -311,3 +311,113 @@ mod tests {
         );
     }
 }
+
+/// `text` shaped as one line that reads left to right whatever letters it
+/// holds: every character in the order it comes, but for the letters of
+/// each right-to-left run, which read right to left within it as they are
+/// written. With its glyphs' [`Glyph::index`] into `text`, and `style_runs`
+/// as [`TextLayoutSystem::layout_line`] takes them, into `text`.
+///
+/// A shaper takes a line's direction from its first strong letter and
+/// reorders the neutral characters between right-to-left letters with
+/// them, so `: ع ; rm -rf $HOME # ع ; echo done` is drawn
+/// `echo done ; ع # rm -rf $HOME ; ع :` — the `rm` behind a `#`, where a
+/// shell runs it. For text drawn so that a person can tell what will run,
+/// that order is the one thing that may not change. A left-to-right mark
+/// first sets the line's direction, and one after each right-to-left run
+/// — its combining marks with it — leaves nothing for a neutral to be
+/// reordered with.
+///
+/// [`TextLayoutSystem::layout_line`]: crate::platform::TextLayoutSystem::layout_line
+pub fn layout_left_to_right(
+    text_layout: &dyn crate::platform::TextLayoutSystem,
+    text: &str,
+    line_style: crate::fonts::LineStyle,
+    style_runs: &[(std::ops::Range<usize>, crate::fonts::StyleAndFont)],
+    max_width: f32,
+) -> Line {
+    let (marked, at) = left_to_right(text);
+    let runs: Vec<_> = style_runs
+        .iter()
+        .map(|(range, style)| (at[range.start]..at[range.end], *style))
+        .collect();
+    let mut line = text_layout.layout_line(&marked, line_style, &runs, max_width);
+    // Back to `text`'s offsets: a byte of `marked` is the byte of `text` it
+    // came from, and an inserted mark the one after it.
+    for glyph in line.runs.iter_mut().flat_map(|run| run.glyphs.iter_mut()) {
+        glyph.index = at.partition_point(|&shifted| shifted < glyph.index);
+    }
+    line
+}
+
+/// LRM, U+200E: a strong left-to-right character that draws as nothing.
+const LEFT_TO_RIGHT_MARK: char = '\u{200E}';
+
+/// `text` with a left-to-right mark first and after each right-to-left
+/// run, and where each byte offset of `text`, its end included, lands in it.
+pub fn left_to_right(text: &str) -> (String, Vec<usize>) {
+    use unicode_bidi::{BidiClass, bidi_class};
+    let right_to_left =
+        |character: char| matches!(bidi_class(character), BidiClass::R | BidiClass::AL);
+    let mut marked = String::with_capacity(text.len() + 6);
+    let mut at = vec![0; text.len() + 1];
+    marked.push(LEFT_TO_RIGHT_MARK);
+    let mut in_run = false;
+    for (start, character) in text.char_indices() {
+        let goes_on =
+            right_to_left(character) || (in_run && bidi_class(character) == BidiClass::NSM);
+        if in_run && !goes_on {
+            marked.push(LEFT_TO_RIGHT_MARK);
+        }
+        in_run = goes_on;
+        let shift = marked.len();
+        for (byte, lands) in at[start..start + character.len_utf8()]
+            .iter_mut()
+            .enumerate()
+        {
+            *lands = shift + byte;
+        }
+        marked.push(character);
+    }
+    at[text.len()] = marked.len();
+    if in_run {
+        marked.push(LEFT_TO_RIGHT_MARK);
+    }
+    (marked, at)
+}
+
+#[cfg(test)]
+mod left_to_right_tests {
+    use super::left_to_right;
+
+    /// `text` with its marks shown as `|`.
+    fn marked(text: &str) -> String {
+        left_to_right(text).0.replace('\u{200e}', "|")
+    }
+
+    #[test]
+    fn a_mark_starts_the_line_and_closes_each_right_to_left_run() {
+        assert_eq!(marked("echo hi"), "|echo hi");
+        assert_eq!(marked(": ع ; rm"), "|: ع| ; rm");
+        assert_eq!(marked("مرحبا بالعالم"), "|مرحبا| بالعالم|");
+        // A number after a right-to-left letter is its own, in its order.
+        assert_eq!(marked("\"ع1\";ع2\""), "|\"ع|1\";ع|2\"");
+        // Nothing comes between letters that join, nor between a letter and
+        // its marks: lam-alef and harakat stay one shape.
+        assert_eq!(marked("لا"), "|لا|");
+        assert_eq!(marked("بَيْت x"), "|بَيْت| x");
+        assert_eq!(marked("שָׁלוֹם"), "|שָׁלוֹם|");
+    }
+
+    #[test]
+    fn every_offset_lands_on_its_character() {
+        let text = "a ع b";
+        let (marked, at) = left_to_right(text);
+        for (offset, character) in text.char_indices() {
+            assert_eq!(marked[at[offset]..].chars().next(), Some(character));
+        }
+        assert_eq!(at[text.len()], marked.len());
+        let (marked, at) = left_to_right("a ع");
+        assert_eq!(at["a ع".len()], marked.len() - '\u{200e}'.len_utf8());
+    }
+}

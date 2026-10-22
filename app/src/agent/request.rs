@@ -780,67 +780,62 @@ pub fn hex(bytes: &[u8]) -> String {
 /// is written out where it is: a carriage return — which on a terminal
 /// rewrites the line it ends — as `␍`, and every other C0 control, DEL, C1
 /// control, bidirectional control, zero-width, format or other
-/// default-ignorable character, and every space but U+0020, as `⟨U+XXXX⟩`. A command that hid `rm -rf ~` behind a carriage return, or
-/// reordered itself with a right-to-left override, shows the trick instead
-/// of doing it.
+/// default-ignorable character, and every space but U+0020, as `⟨U+XXXX⟩`.
+/// So is a combining mark drawn over something it could disguise: see
+/// [`Writer::put`]. A command that hid `rm -rf ~` behind a carriage return,
+/// or reordered itself with a right-to-left override, shows the trick
+/// instead of doing it.
 pub fn visible(text: &str) -> String {
-    let mut shown = String::with_capacity(text.len());
-    let mut column = 0;
+    let mut writer = Writer::default();
     for character in text.chars() {
         match character {
-            '\n' => {
-                shown.push('\n');
-                column = 0;
-            }
-            '\t' => {
-                let spaces = TAB_STOP - column % TAB_STOP;
-                shown.extend(std::iter::repeat_n(' ', spaces));
-                column += spaces;
-            }
-            character => written_out(character, &mut shown, &mut column),
+            '\n' => writer.newline(),
+            '\t' => writer.tab(false),
+            character => writer.put(character),
         }
     }
-    shown
+    writer.shown
 }
 
 /// One line of a file, with no newline in it, as a change draws it: as
 /// [`visible`] writes it out, but a tab as `→` and the spaces to the next
 /// stop, and each space after the last character that is not a space or a
-/// tab as `·`, with where the marks are, to be drawn muted.
+/// tab as `·`, with where the marks and the written-out characters are, to
+/// be drawn muted.
 ///
 /// In a file a tab is not a space, as a Makefile's recipe or a heredoc's
 /// `<<-` says, and a space after a `\` turns a continued line into two. A
 /// diff viewer marks both, and so does this.
 fn file_line(line: &str) -> (String, Vec<Range<usize>>) {
-    marked_line(line, Tabs::All)
+    let mut writer = Writer::default();
+    writer.line(line, Tabs::All);
+    (writer.shown, writer.muted)
 }
 
 /// A command as the card draws it: as [`visible`] writes it out, but a tab
 /// a line starts with as `→` and the spaces to the next stop, and the tabs
-/// and spaces a line ends in as `→` and `·`, with where the marks are, in
-/// bytes, to be drawn muted.
+/// and spaces a line ends in as `→` and `·`, with where the marks and the
+/// written-out characters are, in bytes, to be drawn muted.
 ///
 /// Only there. A tab between two words is shown as the spaces it reads as,
 /// since a shell splits words at either; but a line indented with a tab
 /// ends a heredoc's `<<-` where one indented with spaces does not, and a
 /// space after a `\` at a line's end turns one continued command into two.
-/// Drawn as blank space, each reads as its harmless twin.
+/// Drawn as blank space, each reads as its harmless twin. And a character
+/// written out is muted so that a command cannot spell one out itself —
+/// `⟨U+200B⟩` typed as eight characters — to pass for it.
 pub fn command_lines(text: &str) -> (String, Vec<Range<usize>>) {
-    let mut shown = String::with_capacity(text.len());
-    let mut muted = Vec::new();
+    let mut writer = Writer::default();
     for (index, line) in text.split('\n').enumerate() {
         if index > 0 {
-            shown.push('\n');
+            writer.newline();
         }
-        let (line, marks) = marked_line(line, Tabs::Leading);
-        let at = shown.len();
-        muted.extend(marks.into_iter().map(|mark| mark.start + at..mark.end + at));
-        shown.push_str(&line);
+        writer.line(line, Tabs::Leading);
     }
-    (shown, muted)
+    (writer.shown, writer.muted)
 }
 
-/// Which of a line's tabs [`marked_line`] marks, beside those it ends in.
+/// Which of a line's tabs [`Writer::line`] marks, beside those it ends in.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tabs {
     /// Every one: a file's.
@@ -849,62 +844,136 @@ enum Tabs {
     Leading,
 }
 
-/// `line`, which has no newline in it, written out as [`visible`] writes
-/// it, with the tabs `tabs` says and every tab and space after its last
-/// other character marked: a tab as `→` and the spaces to the next stop,
-/// a space as `·`. With where the marks are, in bytes.
-fn marked_line(line: &str, tabs: Tabs) -> (String, Vec<Range<usize>>) {
-    let starts_at = line.len() - line.trim_start_matches([' ', '\t']).len();
-    let ends_at = line.trim_end_matches([' ', '\t']).len();
-    let mut shown = String::with_capacity(line.len());
-    let mut muted = Vec::new();
-    let mut column = 0;
-    for (at, character) in line.char_indices() {
-        let trailing = at >= ends_at;
-        match character {
-            '\t' if tabs == Tabs::All || at < starts_at || trailing => {
-                let start = shown.len();
-                let spaces = TAB_STOP - column % TAB_STOP;
-                shown.push('→');
-                muted.push(start..shown.len());
-                shown.extend(std::iter::repeat_n(' ', spaces - 1));
-                column += spaces;
-            }
-            '\t' => {
-                let spaces = TAB_STOP - column % TAB_STOP;
-                shown.extend(std::iter::repeat_n(' ', spaces));
-                column += spaces;
-            }
-            ' ' if trailing => {
-                let start = shown.len();
-                shown.push('·');
-                muted.push(start..shown.len());
-                column += 1;
-            }
-            character => written_out(character, &mut shown, &mut column),
-        }
-    }
-    (shown, muted)
+/// Text being written out as a card shows it, and where in it what is to be
+/// drawn muted is.
+#[derive(Default)]
+struct Writer {
+    /// What it reads as so far.
+    shown: String,
+    /// Where in it the marks and the written-out characters are, in bytes.
+    muted: Vec<Range<usize>>,
+    /// Which column its line has reached, for the next tab's stop.
+    column: usize,
+    /// What the next combining mark would be drawn over: the last character
+    /// shown as itself on this line, or `None` at a line's start, after a tab,
+    /// or after something written out.
+    base: Option<char>,
+    /// How many combining marks have been drawn over it.
+    marks: usize,
 }
 
-/// `character`, which is neither a newline nor a tab, onto `into` as
-/// [`visible`] writes it out, with `column` moved past it.
-fn written_out(character: char, into: &mut String, column: &mut usize) {
-    match character {
-        '\r' => {
-            into.push('␍');
-            *column += 1;
+impl Writer {
+    /// Ends a line.
+    fn newline(&mut self) {
+        self.shown.push('\n');
+        self.column = 0;
+        self.base = None;
+    }
+
+    /// A tab: the spaces to the next stop, after a muted `→` when `marked`.
+    fn tab(&mut self, marked: bool) {
+        let spaces = TAB_STOP - self.column % TAB_STOP;
+        if marked {
+            let start = self.shown.len();
+            self.shown.push('→');
+            self.muted.push(start..self.shown.len());
+            self.shown.extend(std::iter::repeat_n(' ', spaces - 1));
+        } else {
+            self.shown.extend(std::iter::repeat_n(' ', spaces));
         }
-        character if hidden(character) => {
-            let mark = format!("⟨U+{:04X}⟩", u32::from(character));
-            *column += mark.chars().count();
-            into.push_str(&mark);
-        }
-        character => {
-            into.push(character);
-            *column += unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        self.column += spaces;
+        self.base = None;
+    }
+
+    /// `mark`, one column, drawn muted.
+    fn muted_mark(&mut self, mark: char) {
+        let start = self.shown.len();
+        self.shown.push(mark);
+        self.muted.push(start..self.shown.len());
+        self.column += 1;
+        self.base = None;
+    }
+
+    /// `line`, which has no newline in it, with the tabs `tabs` says and
+    /// every tab and space after its last other character marked: a tab as
+    /// `→` and the spaces to the next stop, a space as `·`.
+    fn line(&mut self, line: &str, tabs: Tabs) {
+        let starts_at = line.len() - line.trim_start_matches([' ', '\t']).len();
+        let ends_at = line.trim_end_matches([' ', '\t']).len();
+        for (at, character) in line.char_indices() {
+            let trailing = at >= ends_at;
+            match character {
+                '\t' => self.tab(tabs == Tabs::All || at < starts_at || trailing),
+                ' ' if trailing => self.muted_mark('·'),
+                character => self.put(character),
+            }
         }
     }
+
+    /// `character`, which is neither a newline nor a tab, as itself or
+    /// written out.
+    ///
+    /// A combining mark is written out when what it would be drawn over is
+    /// something it could disguise: nothing at all — a line's start, a tab,
+    /// a mark written out — or an ASCII character that is not a letter or a
+    /// digit, a space above all. `~ ̸.cache` is `~` and then a space a
+    /// solidus is drawn through, which reads as `~/.cache`; a low line under a
+    /// space reads as `_`. So is a mark that is drawn through or around what
+    /// it is on whatever that is — an overlay or an enclosing mark — and a
+    /// third mark on one ASCII letter or digit, since a stack of them is drawn
+    /// over the lines above and below. Marks on any other letter, and up to
+    /// two on an ASCII one, are text: a file name decomposed as macOS stores
+    /// it, `cafe\u{301}`, still reads as `café`.
+    fn put(&mut self, character: char) {
+        if character == '\r' {
+            self.muted_mark('␍');
+            return;
+        }
+        let combines =
+            !hidden(character) && unicode_width::UnicodeWidthChar::width(character) == Some(0);
+        let disguises = combines
+            && (overlays(character)
+                || match self.base {
+                    None => true,
+                    Some(base) if base.is_ascii_alphanumeric() => self.marks >= 2,
+                    Some(base) => base.is_ascii(),
+                });
+        if hidden(character) || disguises {
+            let start = self.shown.len();
+            let mark = format!("⟨U+{:04X}⟩", u32::from(character));
+            self.column += mark.chars().count();
+            self.shown.push_str(&mark);
+            self.muted.push(start..self.shown.len());
+            self.base = None;
+            return;
+        }
+        self.shown.push(character);
+        if combines {
+            self.marks += 1;
+        } else {
+            self.base = Some(character);
+            self.marks = 0;
+            self.column += unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        }
+    }
+}
+
+/// Whether combining mark `character` is drawn through or around whatever
+/// it is on: the overlays — a tilde, a stroke, a solidus, a vertical line
+/// through it — and the enclosing marks, a circle, a square, a keycap.
+fn overlays(character: char) -> bool {
+    matches!(
+        u32::from(character),
+        0x0334..=0x0338
+            | 0x0488..=0x0489
+            | 0x1ABE
+            | 0x20D2..=0x20D3
+            | 0x20D8..=0x20DA
+            | 0x20DD..=0x20E0
+            | 0x20E2..=0x20E6
+            | 0x20EA..=0x20EB
+            | 0xA670..=0xA672
+    )
 }
 
 /// Whether `character` would not print as itself: a control character, a
