@@ -157,16 +157,17 @@ impl TextLayoutSystem for StubShaper {
 }
 
 impl StubShaper {
-    /// Whether `character` has a glyph in some face: not for the stub's
-    /// first page of plane 15's private use, which no face has.
+    /// Whether `character` has a glyph in some face: not for Bamum's
+    /// letters, which the stub has no face for.
     fn covered(character: char) -> bool {
-        !('\u{f0000}'..='\u{f00ff}').contains(&character)
+        !('\u{a6a0}'..='\u{a6ef}').contains(&character)
     }
 }
 
 /// Characters the stub shaper takes two milliseconds to shape alone, as a
-/// real one takes searching every installed face for a character none has.
-const SLOW: std::ops::RangeInclusive<char> = '\u{f0100}'..='\u{f01ff}';
+/// real one takes searching every installed face for a character none has:
+/// Vai's syllables.
+const SLOW: std::ops::RangeInclusive<char> = '\u{a500}'..='\u{a5ff}';
 
 /// `text`'s characters in the order a real shaper draws them, left to right,
 /// with where each is in `text`: by the Unicode bidirectional algorithm,
@@ -196,14 +197,14 @@ fn visual_order(text: &str) -> Vec<(usize, char)> {
 /// two that stand for what a real shaper does to a terminal's arithmetic.
 ///
 /// `⚠`, which a width table calls one column, is drawn two by the colour
-/// emoji font it falls back to. And U+E000, a private-use point, is one
+/// emoji font it falls back to. And U+A66E, a rare Cyrillic letter, is one
 /// alone and three beside anything else, as a glyph a font draws otherwise
 /// in context than on its own could be: measured alone it fits, and shaped
 /// in its row it does not.
 fn stub_cells(character: char, alone: bool) -> f32 {
     match character {
         '\u{26a0}' => 2.,
-        '\u{e000}' if !alone => 3.,
+        '\u{a66e}' if !alone => 3.,
         _ => 1.,
     }
 }
@@ -45613,8 +45614,9 @@ mod answering_card {
             .map(|(_, line)| line.matches('⚠').count())
             .sum();
         assert_eq!(signs, 30);
-        // All of it on screen at once, so read, and Allow waits on nothing
-        // more than its second.
+        // All of it on screen at once, so read; and, as it is not all ASCII,
+        // Allow waits for it to have been read as written too.
+        show_as_written(&mut harness);
         press(&mut harness, "Allow once");
         assert_eq!(
             held.sent().expect("an allow")["answer"]["decision"],
@@ -45641,14 +45643,14 @@ mod answering_card {
 
     #[test]
     fn a_row_drawn_wider_than_it_was_measured_keeps_allow_waiting() {
-        // The stub's U+E000 is one cell alone and three in a row, as a
+        // The stub's U+A66E is one cell alone and three in a row, as a
         // glyph drawn otherwise beside its neighbours could be: measured
         // alone, the command fits a row; shaped in it, the row's end is cut
         // off at the box's edge. A command whose end was not drawn has not
         // been read, however short.
         let mut harness = Harness::new(1);
         let pane = harness.focused_pane_id().expect("a pane");
-        let text = format!("echo {} ; rm -rf ~", "\u{e000}".repeat(20));
+        let text = format!("echo {} ; rm -rf ~", "\u{a66e}".repeat(20));
         let held = hold(&mut harness, pane, &text);
         open(&mut harness);
         settle(&mut harness);
@@ -45827,10 +45829,10 @@ mod answering_card {
         // about which one it is.
         let mut harness = Harness::new(1);
         let pane = harness.focused_pane_id().expect("a pane");
-        hold(&mut harness, pane, "rm -rf ./\u{f0000}x \u{f0001}y");
+        hold(&mut harness, pane, "rm -rf ./\u{a6a0}x \u{a6a1}y");
         open(&mut harness);
         settle(&mut harness);
-        let line = "rm -rf ./⟨U+F0000⟩x ⟨U+F0001⟩y";
+        let line = "rm -rf ./⟨U+A6A0⟩x ⟨U+A6A1⟩y";
         let lines = drawn_lines(&mut harness);
         assert!(lines.iter().any(|drawn| drawn == line), "{lines:?}");
         let scene = harness.frame();
@@ -45879,6 +45881,25 @@ mod answering_card {
         assert_eq!(colour_of(lines[1].0.y(), 4), theme().text_primary);
     }
 
+    /// The request the window holds as `id`.
+    fn held_request(harness: &Harness, id: AskId) -> AskRequest {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.asks().get(id).expect("held").request.clone()
+        })
+    }
+
+    /// Shows the card's request as written, and draws it so that the end
+    /// is on screen, as a person opening the exact view of a short request
+    /// does; then lets the keyboard and the pointer reach the buttons.
+    fn show_as_written(harness: &mut Harness) {
+        harness.dispatch_workspace_action(AskAction::AsWritten.into());
+        harness.frame();
+        harness.press_key("end", Modifiers::default());
+        harness.frame();
+        harness.frame();
+        settle(harness);
+    }
+
     /// Whether the card's command is still being measured, read without
     /// drawing a frame.
     fn measuring(harness: &Harness) -> bool {
@@ -45905,7 +45926,7 @@ mod answering_card {
         // and Allow waits.
         let mut harness = Harness::new(1);
         let pane = harness.focused_pane_id().expect("a pane");
-        let slow: String = ('\u{f0100}'..='\u{f0140}').collect();
+        let slow: String = ('\u{a500}'..='\u{a540}').collect();
         let held = hold(&mut harness, pane, &format!("echo {slow}; rm -rf ~"));
         harness.run_command("crook/tabs/answer-waiting");
         harness.workspace_update(|workspace, ctx| workspace.settle_the_ask_card(ctx));
@@ -45935,7 +45956,7 @@ mod answering_card {
             &mut harness,
             &format!("echo {slow}; rm -rf ~")
         ));
-        settle(&mut harness);
+        show_as_written(&mut harness);
         press(&mut harness, "Allow once");
         assert_eq!(
             held.sent().expect("an allow")["answer"]["decision"],
@@ -45974,7 +45995,7 @@ mod answering_card {
         frames_asked_for(&mut harness, 50);
         assert!(!measuring(&harness));
         assert!(card_shows_whole(&mut harness, "echo 漢字 ; rm -rf ~"));
-        settle(&mut harness);
+        show_as_written(&mut harness);
         press(&mut harness, "Allow once");
         assert_eq!(
             held.sent().expect("an allow")["answer"]["decision"],
@@ -46101,6 +46122,226 @@ mod answering_card {
         }
         assert_ne!(keyboard_on(&harness), Some(AskButton::AsWritten));
         assert!(held.nothing_sent());
+    }
+
+    /// Every way an Allow can be asked for on the card about `held`, at a
+    /// moment the card's time gates have passed: the pointer, the keyboard,
+    /// and the press itself, dispatched as the window would. Whether any of
+    /// them sent an allow.
+    fn any_allow_gets_through(harness: &mut Harness, held: &Held) -> bool {
+        allow_by_hand_gets_through(harness, held) || allow_pressed_gets_through(harness, held)
+    }
+
+    /// The same, by the pointer and the keyboard only: a press the window
+    /// refuses also turns the card to say nothing was sent.
+    fn allow_by_hand_gets_through(harness: &mut Harness, held: &Held) -> bool {
+        settle(harness);
+        press(harness, "Allow once");
+        if held.sent().is_some() {
+            return true;
+        }
+        for _ in 0..6 {
+            settle(harness);
+            harness.press_key("left", Modifiers::default());
+            if keyboard_on(harness) == Some(AskButton::Allow) {
+                settle(harness);
+                harness.press_key("enter", Modifiers::default());
+                return held.sent().is_some();
+            }
+        }
+        false
+    }
+
+    /// An Allow dispatched as the window would for a press, past every
+    /// gate the card draws: refused, unless the press-time check lets it.
+    fn allow_pressed_gets_through(harness: &mut Harness, held: &Held) -> bool {
+        settle(harness);
+        harness.dispatch_workspace_action(
+            AskAction::Answer {
+                ask: held.id,
+                digest: held.digest,
+                decision: Choice::Allow,
+                by: Pressed::Pointer,
+            }
+            .into(),
+        );
+        held.sent().is_some()
+    }
+
+    #[test]
+    fn allow_waits_for_a_request_that_is_not_ascii_to_be_read_as_written() {
+        // The owner's rule: no list of lookalikes is ever whole — `ꞋꞋ` for
+        // quotes, a private-use `#`, `⟨⟨` for `<<` — so a request with any
+        // text that is not ASCII is allowed only once it has been read as
+        // written, where what is drawn is ASCII and muted marks.
+        let q1 = "echo \u{a78b}; rm -rf ~ \u{a78b}\necho ok \u{29e3} rm -rf ~/.gnupg\n\
+                  echo a \u{2572}; rm -rf ~\necho \u{275c}; rm -rf ~ \u{275c}\n\
+                  echo done \u{f292} rm -rf ~\ncat \u{27e8}\u{27e8}EOF\nrm -rf ~\nEOF";
+        let edit_path = "/home/someone/work/crook/notes.txt";
+        let requests = [
+            ("a command", command(q1, false)),
+            (
+                "an edit's change",
+                edit(edit_path, "a", "echo \u{a78b}; rm -rf ~"),
+            ),
+            (
+                "a write's content",
+                write(edit_path, "#!/bin/sh\necho ok \u{29e3} rm -rf ~\n", None),
+            ),
+            (
+                "a path",
+                write("/home/someone/work/crook/n\u{f292}tes.txt", "ascii\n", None),
+            ),
+            (
+                "what the agent says",
+                AskRequest::Command {
+                    command: "ls".to_owned(),
+                    note: Some("List \u{a78b}quietly\u{a78b}".to_owned()),
+                    timeout_ms: None,
+                    background: false,
+                    outside_sandbox: false,
+                },
+            ),
+        ];
+        for (index, (what, request)) in requests.into_iter().enumerate() {
+            let mut harness = Harness::new(1);
+            let pane = harness.focused_pane_id().expect("a pane");
+            let held = hold_request(&mut harness, pane, &format!("s{index}"), request, None);
+            open(&mut harness);
+            settle(&mut harness);
+            assert!(
+                card_says(&mut harness, "Show as written to allow"),
+                "{what}: {}",
+                card_text(&mut harness)
+            );
+            // Read to its end as drawn, and every way to Allow refused: by
+            // hand, and a press the card never drew.
+            assert!(
+                !allow_by_hand_gets_through(&mut harness, &held),
+                "{what}: allowed"
+            );
+            assert!(held.nothing_sent());
+            let same = held_request(&harness, held.id);
+            let pressed = hold_request(&mut harness, pane, &format!("p{index}"), same, None);
+            open_newest(&mut harness);
+            settle(&mut harness);
+            assert!(
+                !allow_pressed_gets_through(&mut harness, &pressed),
+                "{what}: pressed"
+            );
+            // Deny is live as ever.
+            let same = held_request(&harness, held.id);
+            let denied = hold_request(&mut harness, pane, &format!("d{index}"), same, None);
+            open_newest(&mut harness);
+            settle(&mut harness);
+            press(&mut harness, "Deny");
+            assert_eq!(denied.sent().expect("a deny")["answer"]["decision"], "deny");
+
+            // Shown as written, read to its end, settled: allowed.
+            open_on(&mut harness, held.id);
+            settle(&mut harness);
+            show_as_written(&mut harness);
+            // What it draws is ASCII and written-out marks, but for the
+            // card's own punctuation.
+            let text = card_text(&mut harness);
+            let mut bare = String::new();
+            let mut inside = false;
+            for character in text.chars() {
+                match character {
+                    '⟨' => inside = true,
+                    '⟩' => inside = false,
+                    character if !inside => bare.push(character),
+                    _ => {}
+                }
+            }
+            assert!(
+                bare.chars()
+                    .all(|character| character.is_ascii() || "·↳–…".contains(character)),
+                "{what}: {text}"
+            );
+            assert!(
+                any_allow_gets_through(&mut harness, &held),
+                "{what}: still refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_view_as_written_has_to_be_read_to_its_end_and_settle() {
+        // A long request: shown as written, its end is below the box, and
+        // Allow waits for it; once there, for the keyboard and the pointer's
+        // second.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let long: String = (1..=30)
+            .map(|line| format!("echo line {line} é"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let held = hold(&mut harness, pane, &long);
+        open(&mut harness);
+        settle(&mut harness);
+        // Read to its end as drawn.
+        assert!(harness.press_key("end", Modifiers::default()));
+        harness.frame();
+        harness.dispatch_workspace_action(AskAction::AsWritten.into());
+        harness.frame();
+        harness.frame();
+        let exact_read = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .ask_card()
+                    .is_some_and(|card| card.body().exact_read())
+            })
+        };
+        assert!(
+            !exact_read(&harness),
+            "shown from its top, the end is not on screen"
+        );
+        assert!(!allow_by_hand_gets_through(&mut harness, &held));
+        // Toggling started the waits again: a key straight after is too soon.
+        settle(&mut harness);
+        harness.dispatch_workspace_action(AskAction::AsWritten.into());
+        harness.dispatch_workspace_action(AskAction::AsWritten.into());
+        assert_eq!(harness.action_for("left", Modifiers::default()), too_soon());
+        assert!(harness.press_key("end", Modifiers::default()));
+        harness.frame();
+        harness.frame();
+        assert!(exact_read(&harness));
+        // And once read so, shown as drawn again, it stays allowed.
+        harness.dispatch_workspace_action(AskAction::AsWritten.into());
+        harness.frame();
+        assert!(any_allow_gets_through(&mut harness, &held));
+    }
+
+    #[test]
+    fn an_ascii_request_is_allowed_as_ever() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+        settle(&mut harness);
+        assert!(!card_says(&mut harness, "not ASCII"));
+        press(&mut harness, "Allow once");
+        assert_eq!(
+            held.sent().expect("an allow")["answer"]["decision"],
+            "allow"
+        );
+    }
+
+    #[test]
+    fn a_private_use_or_unassigned_point_is_written_out_as_drawn() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        hold(
+            &mut harness,
+            pane,
+            "echo done \u{f292} rm\u{e0080}x\u{50000}y",
+        );
+        open(&mut harness);
+        settle(&mut harness);
+        let drawn = drawn_lines(&mut harness);
+        let line = "echo done ⟨U+F292⟩ rm⟨U+E0080⟩x⟨U+50000⟩y";
+        assert!(drawn.iter().any(|row| row == line), "{drawn:?}");
     }
 
     #[test]

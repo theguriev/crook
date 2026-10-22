@@ -667,3 +667,19 @@ fn the_coverage_table_reads_every_installed_face_whatever_its_source() {
     // And a point no face has is in none.
     assert!(!covered(&fixture.layout, '\u{10fffd}'));
 }
+
+#[test]
+fn a_coverage_table_that_fails_to_read_does_not_leave_cards_measuring() {
+    // A reading that panicked left the table "being read" for good: every
+    // card measuring, and Allow waiting, until the application restarted.
+    let Some(fixture) = fixture() else {
+        return;
+    };
+    fixture
+        .font_db
+        .store
+        .coverage_panics
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    // It cannot say, which is what a backend with no table says.
+    assert!(covered(&fixture.layout, '\u{10fffd}'));
+}

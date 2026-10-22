@@ -53,6 +53,7 @@ getrandom.workspace = true
 log.workspace = true
 regex.workspace = true
 unicode-normalization.workspace = true
+unicode-script.workspace = true
 unicode-security.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true

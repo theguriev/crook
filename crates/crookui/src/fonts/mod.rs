@@ -202,6 +202,10 @@ struct FontStore {
     /// each: read off the thread that first asks, and read again when the
     /// database has gained faces since. See [`FontStore::covers`].
     coverage: Mutex<Coverage>,
+
+    /// Whether reading the coverage table panics, for a test of what then.
+    #[cfg(test)]
+    coverage_panics: std::sync::atomic::AtomicBool,
 }
 
 /// What is known of which code points the installed faces cover.
@@ -212,6 +216,8 @@ enum Coverage {
     Reading,
     /// Read, from this many faces: one bit per code point.
     Read { faces: usize, bits: Arc<Vec<u64>> },
+    /// Reading it failed, and will not be tried again.
+    Failed,
 }
 
 /// The identity maps: ours to `fontdb`'s and back, plus resolved selections.
@@ -233,6 +239,8 @@ impl FontStore {
             advances: RwLock::new(FxHashMap::default()),
             raster_bounds: RwLock::new(FxHashMap::default()),
             coverage: Mutex::new(Coverage::NotRead),
+            #[cfg(test)]
+            coverage_panics: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -254,6 +262,8 @@ impl FontStore {
                 return Some(bits[point >> 6] >> (point & 63) & 1 == 1);
             }
             Coverage::Reading => return None,
+            // Reading it failed: say what the trait says when it cannot.
+            Coverage::Failed => return Some(true),
             Coverage::NotRead | Coverage::Read { .. } => {}
         }
         *coverage = Coverage::Reading;
@@ -262,10 +272,21 @@ impl FontStore {
         let spawned = std::thread::Builder::new()
             .name("font-coverage".to_owned())
             .spawn(move || {
-                let (faces, bits) = store.read_coverage();
-                *store.coverage.lock() = Coverage::Read {
-                    faces,
-                    bits: Arc::new(bits),
+                // A reading that panics must not leave the table being read
+                // for good: every card would say it is measuring, and Allow
+                // wait, until the application restarts.
+                let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    store.read_coverage()
+                }));
+                *store.coverage.lock() = match read {
+                    Ok((faces, bits)) => Coverage::Read {
+                        faces,
+                        bits: Arc::new(bits),
+                    },
+                    Err(_) => {
+                        log::warn!("reading which characters fonts cover panicked");
+                        Coverage::Failed
+                    }
                 };
             });
         if let Err(error) = spawned {
@@ -281,9 +302,18 @@ impl FontStore {
     /// Every face, whatever its source: fontdb registers an installed font
     /// by its path and cosmic-text maps the file when it first falls back to
     /// it, so a table of only the faces mapped so far is a table of the few
-    /// the window has drawn with. The file is mapped here, outside the
-    /// font system's lock, and only its character map is read.
+    /// the window has drawn with. A file is read here, whole, outside the
+    /// font system's lock — read, not mapped: a mapped font file truncated
+    /// in place by a package upgrade is a SIGBUS on the next page touched,
+    /// and this thread would touch every page of every font.
     fn read_coverage(&self) -> (usize, Vec<u64>) {
+        #[cfg(test)]
+        if self
+            .coverage_panics
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            panic!("a reading of the coverage table that fails, for a test");
+        }
         let started = std::time::Instant::now();
         let sources: Vec<(fontdb::Source, u32)> = {
             let font_system = self.font_system.read();
@@ -303,22 +333,20 @@ impl FontStore {
                 });
             }
         };
-        let mut mapped: FxHashMap<std::path::PathBuf, Option<memmap2::Mmap>> = FxHashMap::default();
+        // A collection's faces share a file, and come one after another:
+        // read once for all of them, and one file held at a time.
+        let mut read: Option<(std::path::PathBuf, Option<Vec<u8>>)> = None;
         for (source, index) in &sources {
             match source {
                 fontdb::Source::Binary(data) | fontdb::Source::SharedFile(_, data) => {
                     mark((**data).as_ref(), *index);
                 }
                 fontdb::Source::File(path) => {
-                    let map = mapped.entry(path.clone()).or_insert_with(|| {
-                        let file = std::fs::File::open(path).ok()?;
-                        // Safety: read-only, and read only here; a font file
-                        // changed under it gives wrong bits, not a fault
-                        // Rust can see — fontdb maps the same files so.
-                        unsafe { memmap2::Mmap::map(&file) }.ok()
-                    });
-                    if let Some(map) = map {
-                        mark(map, *index);
+                    if read.as_ref().is_none_or(|(at, _)| at != path) {
+                        read = Some((path.clone(), std::fs::read(path).ok()));
+                    }
+                    if let Some((_, Some(data))) = &read {
+                        mark(data, *index);
                     }
                 }
             }

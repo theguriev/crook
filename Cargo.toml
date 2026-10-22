@@ -161,15 +161,15 @@ regex = "1.13"
 # Which characters are right-to-left letters, for shaping text that must read
 # in the order it runs. Already in the tree under cosmic-text.
 unicode-bidi = "0.3"
-# Mapping every installed font file once, to read which characters it has.
-# Already in the tree under fontdb.
-memmap2 = "0.9"
 # Canonical composition, for which combining marks a card shows as text: only
 # those that compose with what they are on.
 unicode-normalization = "0.1"
 # UTS #39's confusables, for which characters a card writes out because they
 # look like the ASCII a shell reads as syntax.
 unicode-security = "0.1"
+# Which code points are unassigned or private use, which a card writes out.
+# Already in the tree under unicode-security.
+unicode-script = "0.5"
 unicode-segmentation = "1.13"
 # The same East Asian width table the terminal emulator lays its grid out with,
 # so the input field gives a CJK filename the two columns the shell will echo it

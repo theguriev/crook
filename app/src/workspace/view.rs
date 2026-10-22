@@ -3413,6 +3413,7 @@ impl Workspace {
             AskAction::AsWritten => {
                 if let Some(card) = self.ask_card.as_mut() {
                     card.toggle_as_written();
+                    card.unsettle(Instant::now());
                     self.hold_the_pointer(ctx);
                     ctx.notify();
                 }

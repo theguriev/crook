@@ -287,13 +287,25 @@ impl AskRequest {
     /// difference between a Makefile that builds and one that does not, and
     /// between a `\` that continues a line and one that does not.
     pub fn change(&self) -> Vec<Changed> {
+        self.change_drawn(false)
+    }
+
+    /// [`Self::change`] as written: every character that is not ASCII
+    /// written out.
+    pub fn change_as_written(&self) -> Vec<Changed> {
+        self.change_drawn(true)
+    }
+
+    /// [`Self::change`], with every character that is not ASCII written out
+    /// when `ascii_only`.
+    fn change_drawn(&self, ascii_only: bool) -> Vec<Changed> {
         let mut lines = Vec::new();
         let mut push = |mark: Mark, text: &str| {
             if text.is_empty() {
                 return;
             }
             lines.extend(text.split('\n').map(|line| {
-                let (text, muted) = file_line(line);
+                let (text, muted) = file_line(line, ascii_only);
                 Changed { mark, text, muted }
             }));
         };
@@ -322,6 +334,25 @@ impl AskRequest {
             Self::Write { content, .. } => push(Mark::Added, content),
         }
         lines
+    }
+
+    /// Whether every character of what it asks is ASCII: its command and
+    /// what its agent says it does, or its path and its change. What a card
+    /// draws of one that is not can be drawn to read as something else, and
+    /// Allow waits until it has been shown as written.
+    pub fn is_ascii(&self) -> bool {
+        match self {
+            Self::Command { command, note, .. } => {
+                command.is_ascii() && note.as_deref().is_none_or(str::is_ascii)
+            }
+            Self::Edit { path, edits, .. } => {
+                path.is_ascii()
+                    && edits
+                        .iter()
+                        .all(|edit| edit.old.is_ascii() && edit.new.is_ascii())
+            }
+            Self::Write { path, content, .. } => path.is_ascii() && content.is_ascii(),
+        }
     }
 
     /// How many lines [`Self::change`] would be, counted without building
@@ -797,6 +828,23 @@ pub fn visible(text: &str) -> String {
     writer.shown
 }
 
+/// `text` as [`visible`] writes it, with every character that is not ASCII
+/// written out too: what a card shows of a path or a note as written.
+pub fn as_written(text: &str) -> String {
+    let mut writer = Writer {
+        ascii_only: true,
+        ..Writer::default()
+    };
+    for character in text.chars() {
+        match character {
+            '\n' => writer.newline(),
+            '\t' => writer.tab(false),
+            character => writer.put(character),
+        }
+    }
+    writer.shown
+}
+
 /// One line of a file, with no newline in it, as a change draws it: as
 /// [`visible`] writes it out, but a tab as `→` and the spaces to the next
 /// stop, and each space after the last character that is not a space or a
@@ -806,8 +854,11 @@ pub fn visible(text: &str) -> String {
 /// In a file a tab is not a space, as a Makefile's recipe or a heredoc's
 /// `<<-` says, and a space after a `\` turns a continued line into two. A
 /// diff viewer marks both, and so does this.
-fn file_line(line: &str) -> (String, Vec<Range<usize>>) {
-    let mut writer = Writer::default();
+fn file_line(line: &str, ascii_only: bool) -> (String, Vec<Range<usize>>) {
+    let mut writer = Writer {
+        ascii_only,
+        ..Writer::default()
+    };
     writer.line(line, Tabs::All);
     (writer.shown, writer.muted)
 }
@@ -953,18 +1004,27 @@ impl Writer {
             return;
         }
         let combines =
-            !hidden(character) && unicode_width::UnicodeWidthChar::width(character) == Some(0);
-        let composed = if combines {
-            self.base
-                .filter(|base| !base.is_ascii() || base.is_ascii_alphanumeric())
+            !hidden(character) && unicode_normalization::char::is_combining_mark(character);
+        // A spacing mark — a vowel sign of the scripts of India — takes room
+        // of its own and composes with nothing; it is kept on a letter, as a
+        // mark that composes is, and written out on nothing or on ASCII
+        // punctuation or a space.
+        let spacing_mark =
+            combines && unicode_width::UnicodeWidthChar::width(character).unwrap_or(0) > 0;
+        let on_text = self
+            .base
+            .filter(|base| !base.is_ascii() || base.is_ascii_alphanumeric());
+        let composed = match (combines, spacing_mark) {
+            (false, _) => None,
+            (true, true) => on_text,
+            (true, false) => on_text
                 .filter(|_| !overlays(character))
-                .and_then(|base| unicode_normalization::char::compose(base, character))
-        } else {
-            None
+                .and_then(|base| unicode_normalization::char::compose(base, character)),
         };
         let written_out = hidden(character)
             || (self.ascii_only && !character.is_ascii())
             || (combines && composed.is_none())
+            || (!character.is_ascii() && unassigned_or_private(character))
             || (!combines && !character.is_ascii() && looks_like_syntax(character));
         if written_out {
             let start = self.shown.len();
@@ -976,13 +1036,17 @@ impl Writer {
             return;
         }
         self.shown.push(character);
-        if combines {
-            self.base = composed;
-        } else {
-            self.base = Some(character);
-            self.column += unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
-        }
+        self.column += unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        self.base = if combines { composed } else { Some(character) };
     }
+}
+
+/// Whether `character` is unassigned, a noncharacter or private use: what
+/// Unicode gives no script, and a font may draw as anything at all — a
+/// private-use point as a `#` in a programmer's icon font.
+fn unassigned_or_private(character: char) -> bool {
+    use unicode_script::{Script, UnicodeScript};
+    character.script() == Script::Unknown
 }
 
 /// The ASCII a shell reads as syntax: what quotes, comments, separates,

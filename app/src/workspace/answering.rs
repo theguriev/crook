@@ -48,9 +48,17 @@
 //! would not print as itself is — a combining mark that does not compose
 //! with what it is on, a character that looks like a quote, a `#` or a `;`
 //! — and everything written out is muted, so a command cannot spell a
-//! `⟨U+XXXX⟩` out to pass for one. A shell's syntax is ASCII, so a command
-//! with anything else in it says so under the box, with a button that shows
-//! it as written: every character that is not ASCII written out. A row the box
+//! `⟨U+XXXX⟩` out to pass for one.
+//!
+//! **Text that is not ASCII is allowed only as written.** None of that is a
+//! guarantee: no list of characters that can pass for a quote, a `#` or a
+//! `<<` is ever whole, and a font can draw a private-use point as anything.
+//! So a request any text of which — its command, what its agent says, its
+//! path, its change, the directory — is not ASCII says so under the box, and
+//! Allow waits until it has been shown as written, every such character
+//! written out and muted so that what is drawn is ASCII and marks nothing
+//! can pass for, and read to its end so. Showing it so starts the card's
+//! wait again. Once it has been read so, it stays allowed shown either way. A row the box
 //! broke has a muted `↳` in a gutter before it, and a line of the command's
 //! own has none, so a newline and a break never look alike. A tab a line
 //! starts with is drawn as a muted `→`, and the tabs and spaces a line ends
@@ -161,7 +169,8 @@ use crookui_core::presenter::{LayoutContext, PaintContext};
 use crookui_core::text_layout::Line;
 
 use crate::agent::request::{
-    AskRequest, Mark, Replaced, command_as_written, command_lines, lexically_inside, visible,
+    AskRequest, Mark, Replaced, as_written, command_as_written, command_lines, lexically_inside,
+    visible,
 };
 use crate::control::ask::{Ask, AskId, Asks, Cause, Choice, How};
 use crate::keybindings::Recording;
@@ -288,6 +297,14 @@ pub(super) struct Body {
     /// shaping a row is the dear part of drawing one, and a row drawn on one
     /// frame is drawn on the next.
     shaped: RefCell<std::collections::HashMap<usize, Rc<Line>>>,
+    /// Whether what the card shows of the request has text in it that is
+    /// not ASCII, so that Allow waits for it to have been read as written.
+    exact_needed: Cell<bool>,
+    /// Whether the box shows the request as written: every character that
+    /// is not ASCII written out.
+    exact: Cell<bool>,
+    /// Whether the request, shown as written, has been on screen to its end.
+    exact_read: Cell<bool>,
     /// Whether the last layout broke the command by a guess at how wide
     /// some of it is, having run out of the time a frame may spend measuring:
     /// the rows are not yet the ones it will be drawn in, and it has not been
@@ -307,7 +324,22 @@ impl Body {
     /// on screen, which is never before it has been laid out once, and no
     /// row of it was ever drawn past the box's edge.
     pub(super) fn read_to_end(&self) -> bool {
-        self.read_to_end.get() && !self.too_wide.get() && !self.measuring.get()
+        self.read_to_end.get()
+            && !self.too_wide.get()
+            && !self.measuring.get()
+            && (!self.exact_needed.get() || self.exact_read.get())
+    }
+
+    /// Whether Allow waits for the request to be shown as written and read
+    /// to its end so, and has not yet had it.
+    fn waits_for_exact(&self) -> bool {
+        self.exact_needed.get() && !self.exact_read.get()
+    }
+
+    /// Whether the request, shown as written, has been read to its end.
+    #[cfg(test)]
+    pub(super) fn exact_read(&self) -> bool {
+        self.exact_read.get()
     }
 
     /// Whether the last layout broke the command by a guess.
@@ -361,11 +393,12 @@ impl Body {
     /// `on_screen`, which the paint says: whether the last line was drawn
     /// inside the window and inside whatever clips the card.
     fn note_the_end(&self, on_screen: bool) {
-        if on_screen
-            && self.shows_the_end()
-            && !self.measuring.get()
-            && !self.read_to_end.replace(true)
-        {
+        if !on_screen || !self.shows_the_end() || self.measuring.get() {
+            return;
+        }
+        let first = !self.read_to_end.replace(true);
+        let first_exact = self.exact.get() && !self.exact_read.replace(true);
+        if first || first_exact {
             self.news.set(true);
         }
     }
@@ -467,14 +500,14 @@ pub(super) struct AskCard {
     /// Whether the pane has said it is running since the card came up: the
     /// agent may have been answered in its own tab.
     back_to_work: bool,
-    /// Whether the command is shown as written: every character that is not
-    /// ASCII written out. See [`as_written_line`].
-    as_written: bool,
 }
 
 impl AskCard {
     /// A card about `ask`, coming up at `now`.
     pub(super) fn about(ask: &Ask, now: Instant) -> Self {
+        let body = Rc::new(Body::default());
+        body.exact_needed
+            .set(!ask.request.is_ascii() || !ask.cwd.is_ascii());
         Self {
             ask: ask.id,
             digest: ask.digest,
@@ -484,11 +517,10 @@ impl AskCard {
             press_settles_at: now,
             pointer_live_at: now + SETTLE,
             pointer_live: false,
-            body: Rc::default(),
+            body,
             handles: RefCell::default(),
             withdrawn: None,
             back_to_work: false,
-            as_written: false,
         }
     }
 
@@ -496,15 +528,15 @@ impl AskCard {
     /// afresh; what of the command has been read stays read, since it is the
     /// same command.
     pub(super) fn toggle_as_written(&mut self) {
-        self.as_written = !self.as_written;
+        self.body.exact.set(!self.body.exact.get());
         *self.body.laid.borrow_mut() = None;
         self.body.shaped.borrow_mut().clear();
+        self.body.top.set(0);
     }
 
-    /// Whether the command is shown as written.
-    #[cfg(test)]
+    /// Whether the request is shown as written.
     pub(super) fn is_as_written(&self) -> bool {
-        self.as_written
+        self.body.exact.get()
     }
 
     /// The question it is about.
@@ -660,23 +692,19 @@ fn buttons(face: &Face<'_>) -> &'static [AskButton] {
     }
 }
 
-/// Whether the card says its command holds text that is not ASCII, and
-/// offers to show it as written: a command on a card still waiting.
-fn offers_as_written(face: &Face<'_>) -> bool {
-    matches!(
-        face,
-        Face::Live(Ask {
-            request: AskRequest::Command { command, .. },
-            ..
-        }) if !command.is_ascii()
-    )
+/// Whether the card says the request holds text that is not ASCII, and
+/// offers to show it as written: a card still waiting, on a request of any
+/// kind, any text of which — command, what its agent says, path, change,
+/// working directory — is not all ASCII.
+fn offers_as_written(card: &AskCard, face: &Face<'_>) -> bool {
+    matches!(face, Face::Live(_)) && card.body.exact_needed.get()
 }
 
 /// The buttons the keyboard can stand on: Show as written first, when the
 /// card offers it, then the row's; Allow only once the command has been
 /// read to its end, Go to only while its pane is open.
 fn reachable(card: &AskCard, face: &Face<'_>, pane_open: bool) -> Vec<AskButton> {
-    offers_as_written(face)
+    offers_as_written(card, face)
         .then_some(AskButton::AsWritten)
         .into_iter()
         .chain(buttons(face).iter().copied())
@@ -841,9 +869,14 @@ pub(super) fn render(workspace: &Workspace, card: &AskCard) -> Box<dyn Element> 
         Face::Live(ask) => {
             let cwd =
                 crate::git::user_friendly_path(std::path::Path::new(&ask.cwd), workspace.home());
+            let cwd = if card.is_as_written() {
+                as_written(&cwd)
+            } else {
+                visible(&cwd)
+            };
             let place = match tab {
-                Some(tab) => format!("{} · {}", visible(&tab), visible(&cwd)),
-                None => visible(&cwd),
+                Some(tab) => format!("{} · {cwd}", visible(&tab)),
+                None => cwd,
             };
             column.add_child(one_line(place, ui));
             live_face(&mut column, workspace, card, ask, now, ui);
@@ -909,6 +942,14 @@ fn live_face(
 ) {
     let agent = ask.agent.name();
     let monospace = workspace.fonts().monospace;
+    let exact = card.is_as_written();
+    let shown = |text: &str| {
+        if exact {
+            as_written(text)
+        } else {
+            visible(text)
+        }
+    };
     match &ask.request {
         AskRequest::Command {
             command,
@@ -925,7 +966,7 @@ fn live_face(
                     ui,
                 ));
             }
-            let (text, muted) = if card.as_written {
+            let (text, muted) = if exact {
                 command_as_written(command)
             } else {
                 command_lines(command)
@@ -937,11 +978,11 @@ fn live_face(
             }];
             column.add_child(body_box(lines, card, monospace));
             column.add_child(extent(&card.body, ui));
-            if !command.is_ascii() {
+            if card.body.exact_needed.get() {
                 column.add_child(as_written_line(card, ui));
             }
             if let Some(said) = said {
-                column.add_child(note(format!("{agent} says: {}", visible(said)), ui));
+                column.add_child(note(format!("{agent} says: {}", shown(said)), ui));
             }
             if *background {
                 column.add_child(note(
@@ -964,7 +1005,10 @@ fn live_face(
                 column.add_child(warning(outside.to_owned(), ui));
             }
             column.add_child(file_path(
-                crate::git::user_friendly_path(std::path::Path::new(path), workspace.home()),
+                shown(&crate::git::user_friendly_path(
+                    std::path::Path::new(path),
+                    workspace.home(),
+                )),
                 monospace,
             ));
             if let AskRequest::Write { replaces, .. } = &ask.request {
@@ -973,8 +1017,11 @@ fn live_face(
                     ui,
                 ));
             }
-            column.add_child(body_box(change_lines(&ask.request), card, monospace));
+            column.add_child(body_box(change_lines(&ask.request, exact), card, monospace));
             column.add_child(extent(&card.body, ui));
+            if card.body.exact_needed.get() {
+                column.add_child(as_written_line(card, ui));
+            }
         }
     }
     column.add_child(divider());
@@ -1076,9 +1123,13 @@ pub(super) fn what_a_write_does(replaces: Option<Replaced>, lines: usize, agent:
 /// gives it, in the colour the Changes column draws that mark in, its marks
 /// for white space muted; and for a change with no text at all, one line
 /// saying so, in no mark's colour.
-pub(super) fn change_lines(request: &AskRequest) -> Vec<Shown> {
-    let lines: Vec<Shown> = request
-        .change()
+pub(super) fn change_lines(request: &AskRequest, exact: bool) -> Vec<Shown> {
+    let change = if exact {
+        request.change_as_written()
+    } else {
+        request.change()
+    };
+    let lines: Vec<Shown> = change
         .into_iter()
         .map(|line| {
             let (mark, prefix) = match line.mark {
@@ -1112,7 +1163,7 @@ pub(super) fn change_lines(request: &AskRequest) -> Vec<Shown> {
 /// file — and left to right, as the box's rows are: see [`shape`].
 fn file_path(path: String, monospace: FamilyId) -> Box<dyn Element> {
     Container::new(
-        crookui_core::elements::Paragraph::new(visible(&path), monospace, LABEL_SIZE)
+        crookui_core::elements::Paragraph::new(path, monospace, LABEL_SIZE)
             .with_color(theme().text_primary)
             .breaking_anywhere()
             .left_to_right()
@@ -1123,29 +1174,33 @@ fn file_path(path: String, monospace: FamilyId) -> Box<dyn Element> {
     .finish()
 }
 
-/// A line under a command with text in it that is not ASCII, saying so,
+/// A line under a request with text in it that is not ASCII, saying so,
 /// and a button that shows it as written — every such character written
-/// out as `⟨U+XXXX⟩` — or as drawn again.
+/// out as `⟨U+XXXX⟩`, muted — or as drawn again.
 ///
-/// A shell's syntax is ASCII. What a person can be fooled by on the card is
-/// always text that is not — a letter that reorders a line, a character
-/// that passes for a quote — and the card writes out every kind of it that
-/// it knows of. This is for the kind it does not: one press, or Tab to it
-/// and Enter, and every character the command holds is drawn as what it
-/// is. It waits on nothing and answers nothing, and the card stays on what
-/// it was opened on. It does not keep Allow waiting.
+/// A shell's syntax is ASCII, and so is nearly everything a person reads a
+/// command or a change for. Text that is not can be drawn to pass for it —
+/// a letter that reorders a line, a character a font draws as a quote, a
+/// `#`, a `<<` — and no list of such characters is ever whole. Shown as
+/// written, what is drawn is printable ASCII and muted marks, which nothing
+/// can pass for. So Allow waits until the request has been shown as written
+/// and read to its end so; the card's own wait then applies as ever. Once
+/// it has, it stays allowed shown either way: it is the same request, and
+/// it has been read as what it is.
 fn as_written_line(card: &AskCard, ui: FamilyId) -> Box<dyn Element> {
     let chosen = card.chosen == AskButton::AsWritten;
     let state = card
         .handles
         .borrow_mut()
         .for_button(AskButton::AsWritten, true);
-    let said = if card.as_written {
-        "Shown as written: what is not ASCII written out"
-    } else {
-        "Contains text that is not ASCII"
+    let exact = card.is_as_written();
+    let said = match (exact, card.body.waits_for_exact()) {
+        (true, true) => "Shown as written · read it to its end to allow",
+        (true, false) => "Shown as written: what is not ASCII written out",
+        (false, true) => "Contains text that is not ASCII · Show as written to allow",
+        (false, false) => "Contains text that is not ASCII",
     };
-    let label = if card.as_written {
+    let label = if exact {
         "Show as drawn"
     } else {
         "Show as written"

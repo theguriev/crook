@@ -418,6 +418,57 @@ fn a_character_that_looks_like_shell_syntax_is_written_out() {
 }
 
 #[test]
+fn a_spacing_mark_is_kept_only_on_a_letter() {
+    // A vowel sign of the scripts of India takes room of its own: kept on
+    // its letter, written out on nothing, a space or ASCII punctuation.
+    assert_eq!(visible("नमा"), "नमा");
+    assert_eq!(visible("a \u{93e}"), "a ⟨U+093E⟩");
+    assert_eq!(visible("#\u{93e}"), "#⟨U+093E⟩");
+    assert_eq!(visible("\u{93e}x"), "⟨U+093E⟩x");
+}
+
+#[test]
+fn a_private_use_or_unassigned_point_is_written_out() {
+    // A programmer's icon font draws U+F292 as `#`.
+    for text in ["\u{f292}", "\u{e000}", "\u{f0000}", "\u{50000}", "\u{fffe}"] {
+        let shown = visible(text);
+        assert!(shown.starts_with("⟨U+"), "{text:?}: {shown}");
+    }
+}
+
+#[test]
+fn a_request_is_ascii_only_when_every_text_it_shows_is() {
+    let command = |command: &str, note: Option<&str>| AskRequest::Command {
+        command: command.to_owned(),
+        note: note.map(str::to_owned),
+        timeout_ms: None,
+        background: false,
+        outside_sandbox: false,
+    };
+    assert!(command("ls", Some("List")).is_ascii());
+    assert!(!command("ls é", None).is_ascii());
+    assert!(!command("ls", Some("é")).is_ascii());
+    let write = |path: &str, content: &str| AskRequest::Write {
+        path: path.to_owned(),
+        content: content.to_owned(),
+        resolves_outside: false,
+        replaces: None,
+    };
+    assert!(write("/a", "b").is_ascii());
+    assert!(!write("/é", "b").is_ascii());
+    assert!(!write("/a", "é").is_ascii());
+    let edited = AskRequest::Edit {
+        path: "/a".to_owned(),
+        edits: vec![edit("x", "é", false)],
+        resolves_outside: false,
+    };
+    assert!(!edited.is_ascii());
+    let (shown, _) = (edited.change_as_written(), ());
+    assert_eq!(shown[1].text, "⟨U+00E9⟩");
+    assert_eq!(as_written("/home/é"), "/home/⟨U+00E9⟩");
+}
+
+#[test]
 fn a_command_as_written_writes_out_everything_that_is_not_ascii() {
     let (shown, muted) = command_as_written("echo café 漢\t# x\r\n\tEOF");
     assert_eq!(shown, "echo caf⟨U+00E9⟩ ⟨U+6F22⟩       # x␍\n→       EOF");
