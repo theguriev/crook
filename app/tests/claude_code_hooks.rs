@@ -570,6 +570,23 @@ fn expected_report(command: &str) -> String {
     crook_terminal::agent::report(status, title, message, session)
 }
 
+/// [`expected_report`], for the hook run where `place` says: from inside
+/// tmux, a stop that names no session names the tmux pane it came from, so
+/// the window can end that pane's questions and nobody else's. The pane is
+/// `%0`, the first of a server of [`Tmux`]'s own.
+fn expected_report_from(command: &str, place: &Pane) -> String {
+    let report = expected_report(command);
+    let stop = report.starts_with("\x1b]6340;idle") || report.starts_with("\x1b]6340;failed");
+    if !matches!(place, Pane::Tmux(_)) || !stop || command.contains("--session") {
+        return report;
+    }
+    let (_, arguments) = command.split_once("--agent ").expect("an `--agent`");
+    let status = arguments.split_whitespace().next().expect("a status");
+    let status = AgentReport::parse(status).expect("a status");
+    let message = command.contains("--message -").then_some(MESSAGE);
+    crook_terminal::agent::report(status, None, message, Some(Session::Of("tmux-pane:%0")))
+}
+
 /// Asserts that `command`, run as a hook, told the pane what its arguments
 /// say, exited 0, and printed nothing Claude Code would read.
 fn assert_reaches_the_pane(event: &str, command: &str) {
@@ -583,7 +600,7 @@ fn assert_reaches_the_pane_from(event: &str, command: &str, place: Pane) {
         "detached\n", ran.probe,
         "{event}: a hook here has to be where Claude Code puts one, with no terminal of its own"
     );
-    let report = expected_report(command);
+    let report = expected_report_from(command, &place);
     assert!(
         ran.pane.contains(&report),
         "{event}: the pane never got {report:?}; it got {:?}, and the hook said {:?}",
