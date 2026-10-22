@@ -222,6 +222,12 @@ fn visible_writes_out_esc_cr_bidi_and_zero_width() {
     // A space that is not the one a shell splits at reads as one all the
     // same.
     assert_eq!(visible("rm\u{a0}-rf"), "rm⟨U+00A0⟩-rf");
+    // And one that draws as a space: the Braille pattern with no dots.
+    assert_eq!(
+        visible("rm -rf ./build\u{2800}/tmp/keep"),
+        "rm -rf ./build⟨U+2800⟩/tmp/keep",
+        "a Braille blank"
+    );
     for space in ['\u{2000}', '\u{200a}', '\u{202f}', '\u{3000}'] {
         assert_eq!(
             visible(&format!("a{space}b")),
@@ -234,6 +240,50 @@ fn visible_writes_out_esc_cr_bidi_and_zero_width() {
     assert_eq!(
         visible("cargo build —release 修正"),
         "cargo build —release 修正"
+    );
+}
+
+#[test]
+fn a_command_marks_its_leading_tabs_and_the_white_space_its_lines_end_in() {
+    let marked = |text: &str| {
+        let (shown, muted) = command_lines(text);
+        let marks: Vec<String> = muted
+            .iter()
+            .map(|mark| shown[mark.clone()].to_owned())
+            .collect();
+        (shown, marks)
+    };
+    // A space after a `\` at a line's end: the next line is a command of
+    // its own, not the rest of this one.
+    assert_eq!(
+        marked("printf x \\ \nrm -rf ./build"),
+        (
+            "printf x \\·\nrm -rf ./build".to_owned(),
+            vec!["·".to_owned()]
+        )
+    );
+    // A tab-indented terminator ends a `<<-` heredoc; a tab between words
+    // is the spaces it reads as, a shell splitting at either.
+    assert_eq!(
+        marked("cat <<-EOF\n\t\tEOF\necho a\tb"),
+        (
+            "cat <<-EOF\n→       →       EOF\necho a  b".to_owned(),
+            vec!["→".to_owned(), "→".to_owned()]
+        )
+    );
+    // Spaces before a leading tab are not marked, the tab is; and a line of
+    // nothing but white space is all marks.
+    assert_eq!(
+        marked("  \tx\n \t "),
+        (
+            "  →     x\n·→      ·".to_owned(),
+            ["→", "·", "→", "·"].map(str::to_owned).to_vec()
+        )
+    );
+    // Written out as everything else, the newlines kept.
+    assert_eq!(
+        marked("echo safe\rrm\u{2800}x\n"),
+        ("echo safe␍rm⟨U+2800⟩x\n".to_owned(), Vec::<String>::new())
     );
 }
 

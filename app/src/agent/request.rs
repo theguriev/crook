@@ -808,18 +808,61 @@ pub fn visible(text: &str) -> String {
 /// stop, and each space after the last character that is not a space or a
 /// tab as `·`, with where the marks are, to be drawn muted.
 ///
-/// A command's tab is shown as the spaces it reads as, since a shell splits
-/// words at either; in a file a tab is not a space, as a Makefile's recipe
-/// or a heredoc's `<<-` says, and a space after a `\` turns a continued
-/// line into two. A diff viewer marks both, and so does this.
+/// In a file a tab is not a space, as a Makefile's recipe or a heredoc's
+/// `<<-` says, and a space after a `\` turns a continued line into two. A
+/// diff viewer marks both, and so does this.
 fn file_line(line: &str) -> (String, Vec<Range<usize>>) {
+    marked_line(line, Tabs::All)
+}
+
+/// A command as the card draws it: as [`visible`] writes it out, but a tab
+/// a line starts with as `→` and the spaces to the next stop, and the tabs
+/// and spaces a line ends in as `→` and `·`, with where the marks are, in
+/// bytes, to be drawn muted.
+///
+/// Only there. A tab between two words is shown as the spaces it reads as,
+/// since a shell splits words at either; but a line indented with a tab
+/// ends a heredoc's `<<-` where one indented with spaces does not, and a
+/// space after a `\` at a line's end turns one continued command into two.
+/// Drawn as blank space, each reads as its harmless twin.
+pub fn command_lines(text: &str) -> (String, Vec<Range<usize>>) {
+    let mut shown = String::with_capacity(text.len());
+    let mut muted = Vec::new();
+    for (index, line) in text.split('\n').enumerate() {
+        if index > 0 {
+            shown.push('\n');
+        }
+        let (line, marks) = marked_line(line, Tabs::Leading);
+        let at = shown.len();
+        muted.extend(marks.into_iter().map(|mark| mark.start + at..mark.end + at));
+        shown.push_str(&line);
+    }
+    (shown, muted)
+}
+
+/// Which of a line's tabs [`marked_line`] marks, beside those it ends in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tabs {
+    /// Every one: a file's.
+    All,
+    /// Those it starts with: a command's.
+    Leading,
+}
+
+/// `line`, which has no newline in it, written out as [`visible`] writes
+/// it, with the tabs `tabs` says and every tab and space after its last
+/// other character marked: a tab as `→` and the spaces to the next stop,
+/// a space as `·`. With where the marks are, in bytes.
+fn marked_line(line: &str, tabs: Tabs) -> (String, Vec<Range<usize>>) {
+    let starts_at = line.len() - line.trim_start_matches([' ', '\t']).len();
     let ends_at = line.trim_end_matches([' ', '\t']).len();
     let mut shown = String::with_capacity(line.len());
     let mut muted = Vec::new();
     let mut column = 0;
     for (at, character) in line.char_indices() {
+        let trailing = at >= ends_at;
         match character {
-            '\t' => {
+            '\t' if tabs == Tabs::All || at < starts_at || trailing => {
                 let start = shown.len();
                 let spaces = TAB_STOP - column % TAB_STOP;
                 shown.push('→');
@@ -827,7 +870,12 @@ fn file_line(line: &str) -> (String, Vec<Range<usize>>) {
                 shown.extend(std::iter::repeat_n(' ', spaces - 1));
                 column += spaces;
             }
-            ' ' if at >= ends_at => {
+            '\t' => {
+                let spaces = TAB_STOP - column % TAB_STOP;
+                shown.extend(std::iter::repeat_n(' ', spaces));
+                column += spaces;
+            }
+            ' ' if trailing => {
                 let start = shown.len();
                 shown.push('·');
                 muted.push(start..shown.len());
@@ -896,12 +944,14 @@ fn ignorable(character: char) -> bool {
 
 /// Whether `character` is a space that is not U+0020: a no-break space, the
 /// sized spaces of U+2000 to U+200A, and the narrow, mathematical and
-/// ideographic ones. Each looks like the space a shell splits words at, and
-/// none of them is one, so `rm\u{a0}-rf` is one word that reads as two.
+/// ideographic ones — or draws as one: the Braille pattern with no dots,
+/// which a font draws as a cell of nothing. Each looks like the space a
+/// shell splits words at, and none of them is one, so `rm\u{a0}-rf` is one
+/// word that reads as two.
 fn spacing(character: char) -> bool {
     matches!(
         u32::from(character),
-        0x00A0 | 0x1680 | 0x2000..=0x200A | 0x202F | 0x205F | 0x3000
+        0x00A0 | 0x1680 | 0x2000..=0x200A | 0x202F | 0x205F | 0x2800 | 0x3000
     )
 }
 

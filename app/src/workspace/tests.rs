@@ -67,17 +67,23 @@ impl TextLayoutSystem for StubShaper {
         _: f32,
     ) -> Line {
         let advance = line_style.font_size * 0.5;
+        let alone = text.chars().count() == 1;
+        let mut x = 0.;
         let glyphs: Vec<_> = text
             .char_indices()
-            .enumerate()
-            .map(|(position, (index, character))| Glyph {
-                id: character as u32,
-                position_along_baseline: vec2f(position as f32 * advance, 0.),
-                index,
-                width: advance,
+            .map(|(index, character)| {
+                let width = advance * stub_cells(character, alone);
+                let glyph = Glyph {
+                    id: character as u32,
+                    position_along_baseline: vec2f(x, 0.),
+                    index,
+                    width,
+                };
+                x += width;
+                glyph
             })
             .collect();
-        let width = glyphs.len() as f32 * advance;
+        let width = x;
         // A run per style run, as a real shaper gives, so that a line drawn
         // in more than one colour is drawn so here.
         let runs = if style_runs.len() > 1 {
@@ -91,7 +97,7 @@ impl TextLayoutSystem for StubShaper {
                         .collect();
                     Run {
                         font_id: FontId(0),
-                        width: glyphs.len() as f32 * advance,
+                        width: glyphs.iter().map(|glyph| glyph.width).sum(),
                         glyphs,
                         styles: style_and_font.style,
                     }
@@ -118,6 +124,23 @@ impl TextLayoutSystem for StubShaper {
             ascent: line_style.font_size * 0.8,
             descent: line_style.font_size * 0.2,
         }
+    }
+}
+
+/// How many cells the stub shaper draws `character` in, `alone` when it is
+/// the whole of what is shaped: one, as a monospace face draws it, but for
+/// two that stand for what a real shaper does to a terminal's arithmetic.
+///
+/// `⚠`, which a width table calls one column, is drawn two by the colour
+/// emoji font it falls back to. And U+E000, a private-use point, is one
+/// alone and three beside anything else, as a glyph a font draws otherwise
+/// in context than on its own could be: measured alone it fits, and shaped
+/// in its row it does not.
+fn stub_cells(character: char, alone: bool) -> f32 {
+    match character {
+        '\u{26a0}' => 2.,
+        '\u{e000}' if !alone => 3.,
+        _ => 1.,
     }
 }
 
@@ -44777,6 +44800,16 @@ mod answering_card {
 
     /// What the card says, all of it, with its lines run together.
     fn card_text(harness: &mut Harness) -> String {
+        card_lines(harness)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The card's lines, top to bottom, with where each starts, on a fresh
+    /// frame.
+    fn card_lines(harness: &mut Harness) -> Vec<(Vector2F, String)> {
         let scene = harness.frame();
         let header = [
             "wants to run a command",
@@ -44799,10 +44832,18 @@ mod answering_card {
             .last()
             .expect("the card's header is on no card");
         text_lines_over(&scene, ground)
-            .into_iter()
-            .map(|(_, line)| line)
-            .collect::<Vec<_>>()
-            .join("\n")
+    }
+
+    /// Whether the card shows every character of `command`, in order:
+    /// what it draws of the command with the box's own marks for the rows
+    /// it broke left out, and white space, which a row's end may fall in.
+    fn card_shows_whole(harness: &mut Harness, command: &str) -> bool {
+        let bare = |text: &str| -> String {
+            text.chars()
+                .filter(|character| !character.is_whitespace() && *character != '↳')
+                .collect()
+        };
+        bare(&card_text(harness)).contains(&bare(command))
     }
 
     /// Whether the card says `phrase`, wherever it wrapped.
@@ -45465,6 +45506,189 @@ mod answering_card {
                 .is_some_and(|card| card.body().read_to_end())
         }));
         assert!(held.nothing_sent());
+    }
+
+    #[test]
+    fn a_command_of_characters_drawn_wider_than_counted_is_drawn_whole() {
+        // `⚠` is one column to a width table and two cells as the colour
+        // emoji font draws it. Counted, the command was one row, drawn half
+        // as wide again as the box, and everything after the signs — the
+        // part that runs — was cut off at the card's edge; and a command of
+        // one row needs no scrolling, so Allow was there to press.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let command = format!("echo {} ; rm -rf ~/.gnupg", "⚠".repeat(30));
+        let held = hold(&mut harness, pane, &command);
+        open(&mut harness);
+        settle(&mut harness);
+        assert!(
+            card_shows_whole(&mut harness, &command),
+            "{}",
+            card_text(&mut harness)
+        );
+        let signs: usize = card_lines(&mut harness)
+            .iter()
+            .map(|(_, line)| line.matches('⚠').count())
+            .sum();
+        assert_eq!(signs, 30);
+        // All of it on screen at once, so read, and Allow waits on nothing
+        // more than its second.
+        press(&mut harness, "Allow once");
+        assert_eq!(
+            held.sent().expect("an allow")["answer"]["decision"],
+            "allow"
+        );
+
+        // A change to a file is drawn in the same box.
+        let new = format!("{} ; rm -rf ~/.gnupg", "⚠".repeat(40));
+        hold_request(
+            &mut harness,
+            pane,
+            "s2",
+            edit("/home/someone/work/crook/notes.txt", "a", &new),
+            None,
+        );
+        open(&mut harness);
+        settle(&mut harness);
+        assert!(
+            card_shows_whole(&mut harness, &format!("+ {new}")),
+            "{}",
+            card_text(&mut harness)
+        );
+    }
+
+    #[test]
+    fn a_row_drawn_wider_than_it_was_measured_keeps_allow_waiting() {
+        // The stub's U+E000 is one cell alone and three in a row, as a
+        // glyph drawn otherwise beside its neighbours could be: measured
+        // alone, the command fits a row; shaped in it, the row's end is cut
+        // off at the box's edge. A command whose end was not drawn has not
+        // been read, however short.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let text = format!("echo {} ; rm -rf ~", "\u{e000}".repeat(20));
+        let held = hold(&mut harness, pane, &text);
+        open(&mut harness);
+        settle(&mut harness);
+        assert!(
+            card_says(
+                &mut harness,
+                "A line is drawn wider than this card, so Allow waits"
+            ),
+            "{}",
+            card_text(&mut harness)
+        );
+        assert!(
+            !card_says(&mut harness, "rm -rf ~"),
+            "the cut-off end was drawn: {}",
+            card_text(&mut harness)
+        );
+        press(&mut harness, "Allow once");
+        assert!(held.nothing_sent(), "Allow on a command cut off unseen");
+        for _ in 0..4 {
+            assert!(harness.press_key("left", Modifiers::default()));
+            assert_ne!(keyboard_on(&harness), Some(AskButton::Allow));
+        }
+        harness.dispatch_workspace_action(
+            AskAction::Answer {
+                ask: held.id,
+                digest: held.digest,
+                decision: Choice::Allow,
+                by: Pressed::Keys,
+            }
+            .into(),
+        );
+        assert!(held.nothing_sent(), "an Allow got past the press's checks");
+
+        // A no is never the dangerous answer.
+        let held = hold_request(&mut harness, pane, "s2", command(&text, false), None);
+        open_newest(&mut harness);
+        settle(&mut harness);
+        press(&mut harness, "Deny");
+        assert_eq!(held.sent().expect("a deny")["answer"]["decision"], "deny");
+    }
+
+    #[test]
+    fn a_row_the_box_broke_is_marked_and_a_line_of_its_own_is_not() {
+        // A line that fills its row and a line after it draw as two rows
+        // either way: a newline and a break the box made have to look
+        // different, or `rm` reads as `echo`'s argument.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let command = format!("echo {}\nrm -rf ./build", "x".repeat(100));
+        hold(&mut harness, pane, &command);
+        open(&mut harness);
+        settle(&mut harness);
+        let lines = card_lines(&mut harness);
+        let echo = lines
+            .iter()
+            .find(|(_, line)| line.starts_with("echo x"))
+            .unwrap_or_else(|| panic!("no echo: {lines:?}"));
+        let continued = lines
+            .iter()
+            .find(|(_, line)| line.starts_with('↳'))
+            .unwrap_or_else(|| panic!("no row is marked as going on: {lines:?}"));
+        assert!(continued.1.ends_with('x'), "{lines:?}");
+        assert!(continued.0.y() > echo.0.y());
+        let rm = lines
+            .iter()
+            .find(|(_, line)| line.contains("rm -rf ./build"))
+            .unwrap_or_else(|| panic!("no rm: {lines:?}"));
+        assert_eq!(rm.1, "rm -rf ./build", "a line of its own was marked");
+        // Every row's text starts in one column, the mark in the gutter
+        // before it.
+        assert_eq!(rm.0.x(), echo.0.x());
+        assert!(continued.0.x() < echo.0.x());
+        // Muted, as the box's other marks are, and a glyph, not a colour.
+        let scene = harness.frame();
+        let marks: Vec<Color> = scene
+            .layers()
+            .flat_map(|layer| layer.glyphs.iter())
+            .filter(|glyph| glyph.glyph_key.glyph_id == u32::from('↳'))
+            .map(|glyph| glyph.color)
+            .collect();
+        assert!(!marks.is_empty());
+        assert!(marks.iter().all(|color| *color == theme().text_muted));
+    }
+
+    #[test]
+    fn a_commands_leading_tabs_and_the_white_space_its_lines_end_in_are_marked() {
+        // A space after a `\` at a line's end makes the next line a command
+        // of its own; a tab-indented `EOF` ends a `<<-` heredoc where a
+        // space-indented one does not. Drawn blank, each reads as its
+        // harmless twin. A tab between words is the spaces it reads as.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let command = "printf '%s' Removing: \\ \nrm -rf ./build\u{2800}/tmp/keep\n\
+                       cat <<-EOF >/dev/null\n\tEOF\necho a\tb\nEOF";
+        hold(&mut harness, pane, command);
+        open(&mut harness);
+        settle(&mut harness);
+        let lines: Vec<String> = card_lines(&mut harness)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect();
+        for line in [
+            "printf '%s' Removing: \\·",
+            "rm -rf ./build⟨U+2800⟩/tmp/keep",
+            "→       EOF",
+            "echo a  b",
+        ] {
+            assert!(
+                lines.iter().any(|drawn| drawn == line),
+                "{line:?}: {lines:?}"
+            );
+        }
+        let scene = harness.frame();
+        let colours = line_colours(&scene, "→       EOF");
+        assert_eq!(colours[0], theme().text_muted, "{colours:?}");
+        assert!(
+            colours[1..]
+                .iter()
+                .all(|color| *color == theme().text_primary)
+        );
+        let colours = line_colours(&scene, "printf '%s' Removing: \\·");
+        assert_eq!(colours.last(), Some(&theme().text_muted), "{colours:?}");
     }
 
     #[test]
