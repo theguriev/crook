@@ -6638,6 +6638,44 @@ mod socket {
     }
 
     #[test]
+    fn a_stop_from_inside_tmux_ends_the_questions_of_its_own_tmux_pane() {
+        let mut served = Served::new(|_, _, _| {});
+        let pane = first_pane(&served);
+        let tty = served.tty(pane);
+        let from = |session: &str, tmux_pane: &str| {
+            let mut asked = from_tmux(session, vec![tty], "rm -rf build");
+            if let Some(multiplexer) = asked.multiplexer.as_mut() {
+                multiplexer.pane = tmux_pane.to_owned();
+            }
+            asked
+        };
+        let stop = |tmux_pane: &str| {
+            crate::control::ask::tmux_stop_session(tmux_pane).expect("a tmux pane")
+        };
+
+        // One Claude Code in tmux, told No in its own dialog: nothing runs,
+        // nothing kills its hook, and its stop is the one word that its
+        // question is over.
+        let (mut alone, reply) = served.ask_as(from("sA", "%3"), None);
+        let alone_id = held(&reply);
+        served.report_from(pane, AgentStatus::Idle, &stop("%3"));
+        assert_eq!(alone.answer(), pass("turn-ended"));
+        assert_eq!(served.ended(alone_id), Some(How::Ended(Cause::TurnEnded)));
+
+        // Two: the one in another tmux pane finishing ends nothing of this
+        // one's, nor of the pane's own.
+        served.report(pane, AgentStatus::Running, None);
+        let (_asking, reply) = served.ask_as(from("sA", "%3"), None);
+        let asking_id = held(&reply);
+        let (_direct, reply) = served.ask_as(question("s1", tty, "ls"), None);
+        let direct_id = held(&reply);
+        served.report_from(pane, AgentStatus::Idle, &stop("%4"));
+        assert_eq!(served.ended(asking_id), None, "another tmux pane's stop");
+        assert_eq!(served.ended(direct_id), None, "a stop from inside tmux");
+        assert_eq!(served.asks(), 2);
+    }
+
+    #[test]
     fn a_done_withdraws_only_the_matching_ask() {
         let mut served = Served::new(|workspace, ctx, _| {
             workspace.apply(TabAction::New, ctx);

@@ -905,8 +905,10 @@ Twenty-two features, and the page that configures them:
   nothing Crook does by itself ever allows. With several requests held it opens a list of them,
   oldest first, Enter opening one's card and Escape on the card coming back, with how the last
   ones ended under it; with none, the list says why — and when a tab's Claude Code says it
-  needs a permission and asked Crook nothing, that its plugin needs `claude plugin update
-  crook@crook`. It needs Crook's Claude Code plugin, or the hooks `--agent-hooks claude`
+  needs a permission and handed Crook nothing, that either the request is one Crook does not
+  show (a tool other than Bash, Edit, MultiEdit or Write, one too large, one from inside screen
+  or zellij, or one that waited out its five minutes) or the plugin predates the permission
+  hook and needs `claude plugin update crook@crook`. It needs Crook's Claude Code plugin, or the hooks `--agent-hooks claude`
   prints, from 0.1.29 on, and "Let agents ask in Crook" in Settings › Appearance turns it off.
   **Marking** a tab washes
   its row amber and counts it with the ones waiting for you, for a tab you mean to come back

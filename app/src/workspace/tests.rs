@@ -44976,10 +44976,7 @@ mod answering_card {
         // Nothing waits at all: the list comes up with no rows, and says so.
         open(&mut harness);
         let text = empty_list_text(&mut harness);
-        assert!(
-            text.contains("No agent is asking for a permission"),
-            "{text}"
-        );
+        assert!(text.contains("No request was handed to Crook"), "{text}");
         assert!(!text.contains("plugin update"), "{text}");
         let up = |harness: &Harness| {
             harness
@@ -45003,7 +45000,7 @@ mod answering_card {
         assert!(!up(&harness), "Escape left the list up");
 
         // A Claude Code whose hooks say it wants a permission, and whose
-        // plugin asked the window nothing: the list names the update.
+        // plugin handed the window nothing: the list says why that may be.
         report(
             &mut harness,
             away,
@@ -45014,6 +45011,9 @@ mod answering_card {
         open(&mut harness);
         let text = empty_list_text(&mut harness);
         assert!(text.contains("claude plugin update crook@crook"), "{text}");
+        // An up-to-date plugin hands Crook nothing for some requests too,
+        // and the list does not say the plugin is old when it may not be.
+        assert!(text.contains("Some requests never come here"), "{text}");
         let away_tab = harness.workspace.read(&harness.app, |workspace, _| {
             workspace
                 .tabs()
@@ -45868,6 +45868,35 @@ mod answering_card {
         assert_eq!(harness.action_for("1", Modifiers::default()), too_soon());
         assert!(held.nothing_sent());
         assert_eq!(harness.field_text(pane), "", "the pane was typed into");
+
+        // With no question held, the row is what says whether a dialog is
+        // up: Claude Code's permission notification is one, and its
+        // "waiting for your input" is a prompt somebody is about to type
+        // at, which keeps its keys.
+        harness.workspace_update(|workspace, _| {
+            workspace
+                .asks_mut()
+                .end_all(crate::control::ask::Cause::TurnEnded);
+        });
+        for (message, holds) in [
+            ("Claude needs your permission to use Bash", true),
+            ("Claude is waiting for your input", false),
+        ] {
+            harness.settle(super::super::closing::SETTLE + std::time::Duration::from_millis(100));
+            harness.update_session(pane, |session| {
+                session.status = AgentStatus::NeedsInput;
+                session.source = crate::tab::StatusSource::Agent(std::time::Instant::now());
+                session.message = Some(message.to_owned());
+            });
+            harness.dispatch_workspace_action(WindowAction::Close.into());
+            assert_eq!(harness.asking_about(), Some(vec![pane]), "{message}");
+            assert!(harness.press_key("escape", Modifiers::default()));
+            assert_eq!(
+                harness.action_for("1", Modifiers::default()) == too_soon(),
+                holds,
+                "{message}"
+            );
+        }
     }
 
     #[test]

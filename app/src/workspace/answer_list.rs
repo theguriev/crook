@@ -43,11 +43,12 @@
 //!
 //! **Asked for with none held, it opens with no rows**, and says why: a
 //! chord that did nothing would read as one that did not work. Nothing is
-//! waiting; or "Let agents ask in Crook" is off; or a tab's Claude Code says
-//! through Crook's hooks that it wants a permission and asked the window
-//! nothing — which is what a plugin from before the permission hook does,
-//! and Claude Code does not update a plugin by itself — so it names the
-//! command that does. See `Workspace::asked_without_a_question`.
+//! handed to Crook; or "Let agents ask in Crook" is off; or a tab's Claude
+//! Code says through Crook's hooks that it wants a permission and handed the
+//! window nothing — a request Crook does not show, or a plugin from before
+//! the permission hook, which Claude Code does not update by itself — so it
+//! says both, and names the command that updates the plugin. See
+//! `Workspace::asked_without_a_question`.
 //!
 //! Every key is the list's while it is up, as every key is the card's: Up and
 //! Down move between the rows, Enter opens one, Escape closes, and anything
@@ -417,8 +418,8 @@ pub(super) fn why_nothing(answering: bool, unasked: &[String]) -> Vec<String> {
     }
     if unasked.is_empty() {
         return vec![
-            "No agent is asking for a permission. Claude Code\u{2019}s requests come here \
-             through Crook\u{2019}s plugin for it."
+            "No request was handed to Crook. Claude Code\u{2019}s permission requests come \
+             here through Crook\u{2019}s plugin for it."
                 .to_owned(),
         ];
     }
@@ -429,13 +430,17 @@ pub(super) fn why_nothing(answering: bool, unasked: &[String]) -> Vec<String> {
         .join(", ");
     vec![
         format!(
-            "Claude Code in {tabs} is waiting for a permission in its own dialog, and asked \
-             Crook nothing."
+            "Claude Code in {tabs} is waiting for a permission in its own dialog, and handed \
+             Crook nothing. Answer it there."
         ),
+        "Some requests never come here: a tool other than Bash, Edit, MultiEdit or Write, \
+         one too large to show whole, one from inside screen or zellij, or one that waited \
+         out its five minutes."
+            .to_owned(),
         format!(
-            "A Crook plugin for Claude Code from before v0.1.29 has no permission hook. Run \
-             `{}` and start Claude Code again; or turn on auto-update for the crook \
-             marketplace in Claude Code\u{2019}s /plugin \u{203a} Marketplaces.",
+            "Or its Crook plugin is from before v0.1.29, with no permission hook: run `{}` \
+             and start Claude Code again, or turn on auto-update for the crook marketplace in \
+             Claude Code\u{2019}s /plugin \u{203a} Marketplaces.",
             crate::agent::CLAUDE_PLUGIN_UPDATE
         ),
     ]

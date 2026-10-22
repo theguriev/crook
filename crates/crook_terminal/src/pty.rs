@@ -609,12 +609,13 @@ fn command_for(program: &Program, environment: &[(String, String)]) -> CommandBu
 /// permission hook asks the window it is in only through a pane it can name
 /// — inside tmux the pane holding tmux's client, and inside screen or zellij
 /// none — so it asked nothing at all, and no question ever came up in Crook.
-/// tmux in a pane sets its own again, for the programs in its panes.
+/// tmux in a pane sets its own again, for the programs in its panes. GNU
+/// screen's `WINDOW` goes too, but only beside its `STY`: the name alone is
+/// too plain to be screen's for certain.
 const MULTIPLEXED: &[&str] = &[
     "TMUX",
     "TMUX_PANE",
     "STY",
-    "WINDOW",
     "ZELLIJ",
     "ZELLIJ_SESSION_NAME",
     "ZELLIJ_PANE_ID",
@@ -628,6 +629,11 @@ fn set_environment(command: &mut CommandBuilder, environment: &[(String, String)
     command.env("COLORTERM", "truecolor");
     command.env_remove("LINES");
     command.env_remove("COLUMNS");
+    // GNU screen's window number goes with its session, and only then: a
+    // `WINDOW` with no `STY` beside it is somebody else's word.
+    if command.get_env("STY").is_some() {
+        command.env_remove("WINDOW");
+    }
     for variable in MULTIPLEXED {
         command.env_remove(variable);
     }

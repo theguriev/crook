@@ -237,6 +237,17 @@ fn test_a_multiplexer_crook_was_started_in_is_not_one_its_panes_are_in() {
     );
     assert_eq!(command.get_env("TERM"), Some(OsStr::new(TERM)));
 
+    // screen's window number goes with its session, and nothing else's.
+    let mut command = CommandBuilder::new("true");
+    command.env("STY", "1234.pts-0.host");
+    command.env("WINDOW", "2");
+    set_environment(&mut command, &[]);
+    assert_eq!(command.get_env("WINDOW"), None);
+    let mut command = CommandBuilder::new("true");
+    command.env("WINDOW", "main");
+    set_environment(&mut command, &[]);
+    assert_eq!(command.get_env("WINDOW"), Some(OsStr::new("main")));
+
     // The caller still has the last word, as on every other variable.
     let mut command = CommandBuilder::new("true");
     set_environment(&mut command, &[("TMUX".to_owned(), "mine".to_owned())]);

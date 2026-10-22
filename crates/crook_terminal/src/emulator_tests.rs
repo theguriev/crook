@@ -2316,6 +2316,29 @@ fn test_a_stop_hands_the_window_the_session_it_said() {
     );
 }
 
+#[test]
+fn test_a_stop_after_another_sessions_stop_is_still_heard() {
+    // One terminal, two agents: tmux writes both to its client. The second
+    // stop changes no status, but it ends the other agent's turn.
+    let mut emulator = emulator();
+    emulator.advance(&said_by(PARENT, "needs-input", "", "run it?"));
+    emulator.advance(&said_by(SUBAGENT, "idle", "", ""));
+    emulator.take_events();
+    emulator.advance(&said_by(PARENT, "idle", "", ""));
+    assert_eq!(
+        vec![TerminalEvent::Agent(Reported {
+            session: Some(PARENT.to_owned()),
+            status: AgentReport::Idle,
+            title: None,
+            message: None,
+        })],
+        emulator.take_events()
+    );
+    // A stop that names nobody is still heard only as a change.
+    emulator.advance(b"\x1b]6340;idle\x07");
+    assert!(emulator.take_events().is_empty());
+}
+
 /// A report the row hears, with neither a title nor a message.
 fn bare(status: AgentReport) -> TerminalEvent {
     TerminalEvent::Agent(Reported {

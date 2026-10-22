@@ -267,6 +267,16 @@ pub fn report(
         Some(said.map(|_| id))
     });
 
+    // Inside tmux the terminal this has is one of tmux's panes, and tmux keeps
+    // the sequence to itself; see `tmux`. Asked before the report is
+    // written, since a stop from there says which of tmux's panes it is.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let route = tmux::route();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let session = session.or_else(|| {
+        let pane = route.as_ref().and_then(|_| std::env::var("TMUX_PANE").ok());
+        tmux_stop(status, pane.as_deref())
+    });
     let mut written = if interrupted {
         String::new()
     } else {
@@ -285,10 +295,8 @@ pub fn report(
     if let Some(done) = &done {
         written.push_str(&crook_terminal::agent::done_sequence(done));
     }
-    // Inside tmux the terminal this has is one of tmux's panes, and tmux keeps
-    // the sequence to itself; see `tmux`.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let written = match tmux::route() {
+    let written = match route {
         None => written,
         Some(tmux::Route::Clients(clients)) if tmux::tell(&clients, &written) => return Ok(()),
         Some(_) => tmux::passthrough(&written),
@@ -300,6 +308,25 @@ pub fn report(
         .write_all(written.as_bytes())
         .and_then(|()| terminal.flush())
         .context("could not write to the terminal")
+}
+
+/// The session a report names when its agent named none, from inside tmux
+/// pane `tmux_pane`: for a stop, that pane — see
+/// [`crate::control::ask::TMUX_STOP`] — and nothing for anything else, which
+/// the pane takes from whoever says it as it always has.
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos")),
+    allow(
+        dead_code,
+        reason = "tmux is asked where its clients are only on Linux and macOS"
+    )
+)]
+fn tmux_stop(status: AgentReport, tmux_pane: Option<&str>) -> Option<Session<String>> {
+    let stopped = matches!(status, AgentReport::Idle | AgentReport::Failed);
+    stopped
+        .then(|| crate::control::ask::tmux_stop_session(tmux_pane?))
+        .flatten()
+        .map(Session::Of)
 }
 
 /// Everything one `--agent` writes, in one piece: the status, and the pull
@@ -3419,6 +3446,37 @@ process.stdout.write(JSON.stringify({ ran, asked }))
         let interrupted = with(FAILED, "is_interrupt", json!(true));
         assert!(done_from_hook(&interrupted).is_some());
         assert!(interrupted_a_tool(&interrupted));
+    }
+
+    #[test]
+    fn a_stop_from_inside_tmux_names_the_tmux_pane_it_came_from() {
+        // tmux writes every pane's report to each client, so a stop that
+        // named nobody ended every question asked through that client; one
+        // that names nobody else's ended none, and the Claude Code told No
+        // in its own dialog kept its card up. The pane is what tells them
+        // apart, since Claude Code's hooks name no session.
+        for status in [AgentReport::Idle, AgentReport::Failed] {
+            assert_eq!(
+                tmux_stop(status, Some("%3")),
+                Some(Session::Of("tmux-pane:%3".to_owned()))
+            );
+        }
+        // Only a stop: a running or a question is the pane's as it was.
+        assert_eq!(tmux_stop(AgentReport::Running, Some("%3")), None);
+        assert_eq!(tmux_stop(AgentReport::NeedsInput, Some("%3")), None);
+        // Not inside tmux, or no pane tmux would have named.
+        assert_eq!(tmux_stop(AgentReport::Idle, None), None);
+        for odd in ["", "%", "3", "%3;x", "%3 4", "%x"] {
+            assert_eq!(tmux_stop(AgentReport::Idle, Some(odd)), None, "{odd:?}");
+        }
+        // And the wire takes it whole.
+        let said = crook_terminal::agent::report(
+            AgentReport::Idle,
+            None,
+            None,
+            Some(Session::Of("tmux-pane:%3")),
+        );
+        assert!(said.contains("tmux-pane:%3"), "{said:?}");
     }
 
     #[test]

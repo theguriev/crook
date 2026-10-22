@@ -1237,6 +1237,30 @@ pub struct Workspace {
     header_chip: HeaderChip,
 }
 
+/// How Claude Code's notification begins when it has a permission dialog up:
+/// "Claude needs your permission to use Bash".
+const CLAUDE_PERMISSION: &str = "Claude needs your permission";
+
+/// Whether a row says its agent has an approval up, a dialog whose default
+/// a held key would press: Claude Code's permission notification, the
+/// "permission to use" a tool Codex's approval hook is said as, Copilot
+/// CLI's "requires confirmation", or a question a title asked — Gemini
+/// CLI's and codex's, which their titles keep up exactly while it is open.
+/// Not Claude Code's "waiting for your input", which is a prompt.
+fn asks_for_an_approval(session: &crate::tab::AgentSession) -> bool {
+    if session.status != AgentStatus::NeedsInput {
+        return false;
+    }
+    if matches!(session.source, StatusSource::Title(_)) {
+        return true;
+    }
+    session.message.as_deref().is_some_and(|message| {
+        message.starts_with(CLAUDE_PERMISSION)
+            || message.starts_with("permission to use")
+            || message.contains("requires confirmation")
+    })
+}
+
 impl Workspace {
     /// Builds the workspace, its git model, every plugin in the box, and one
     /// tab to start in.
@@ -3052,7 +3076,6 @@ impl Workspace {
     /// `claude -p`, look like, which ask nothing on purpose; so the list says
     /// what to do if the plugin is old, not that it is.
     pub(super) fn asked_without_a_question(&self) -> Vec<String> {
-        const PERMISSION: &str = "Claude needs your permission";
         let strip = &self.tabs;
         strip
             .panes()
@@ -3063,7 +3086,7 @@ impl Workspace {
                     && session
                         .message
                         .as_deref()
-                        .is_some_and(|message| message.starts_with(PERMISSION))
+                        .is_some_and(|message| message.starts_with(CLAUDE_PERMISSION))
                     && self.asks.in_pane(pane.id()).is_none()
             })
             .filter_map(|(tab, _)| strip.get(tab).map(|tab| tab.name().to_owned()))
@@ -3729,11 +3752,13 @@ impl Workspace {
         }
     }
 
-    /// Whether the pane with the keyboard is an agent that is asking: one
-    /// whose question the window holds, or whose row says it is waiting for
-    /// a person — its dialog up, with Yes as its default, held by the
-    /// window or not. What keeps the keys from it after the close question
-    /// goes; a shell, or an agent at work, has them back at once, as it
+    /// Whether the pane with the keyboard is an agent that is asking for a
+    /// permission: one whose question the window holds, or whose row says
+    /// it has an approval up — its dialog, with Yes as its default, held by
+    /// the window or not. What keeps the keys from it after the close
+    /// question goes; a shell, an agent at work, or one waiting for its next
+    /// prompt — Claude Code's "waiting for your input", where there is no
+    /// dialog and a person is about to type — has them back at once, as it
     /// always had.
     fn focused_agent_is_asking(&self) -> bool {
         self.tabs.focused_pane_id().is_some_and(|pane| {
@@ -3741,7 +3766,7 @@ impl Workspace {
                 || self
                     .tabs
                     .pane(pane)
-                    .is_some_and(|open| open.session().status == AgentStatus::NeedsInput)
+                    .is_some_and(|open| asks_for_an_approval(open.session()))
         })
     }
 
