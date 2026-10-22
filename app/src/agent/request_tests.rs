@@ -329,17 +329,100 @@ fn a_combining_mark_that_could_disguise_what_it_is_on_is_written_out() {
     ] {
         assert_eq!(visible(text), shown, "{text:?}");
     }
-    // Text: a name decomposed as macOS stores it, two marks on a Latin
-    // letter, Arabic's vowel marks, Devanagari's virama. A third on one
-    // ASCII letter is drawn over the lines around it, and written out.
-    for text in ["cafe\u{301}.txt", "Vie\u{323}\u{302}t", "بَيْت", "क्ष", "ǖ"] {
+    // A mark that composes with what it is on is text: a name decomposed as
+    // macOS stores it, two marks that compose on a Latin letter, a jamo.
+    for text in [
+        "cafe\u{301}.txt",
+        "Vie\u{323}\u{302}t",
+        "ǖ",
+        "u\u{308}\u{304}",
+    ] {
         assert_eq!(visible(text), text, "{text:?}");
     }
-    assert_eq!(visible("e\u{301}\u{302}\u{303}"), "e\u{301}\u{302}⟨U+0303⟩");
+    // Any other is written out, on any letter: a comma above draws as an
+    // apostrophe, so `echo x̕; rm -rf ~; y̕` reads as a quoted string.
+    assert_eq!(
+        visible("echo x\u{315}; rm -rf ~; y\u{315}"),
+        "echo x⟨U+0315⟩; rm -rf ~; y⟨U+0315⟩"
+    );
+    for mark in ['\u{313}', '\u{314}', '\u{31b}', '\u{315}'] {
+        assert_eq!(
+            visible(&format!("х{mark}")),
+            format!("х⟨U+{:04X}⟩", u32::from(mark)),
+            "on a Cyrillic letter"
+        );
+    }
+    // So no stack of them is drawn over the rows around it: composition
+    // stops, and every mark after is written out.
+    assert_eq!(
+        visible("e\u{301}\u{302}\u{303}"),
+        "e\u{301}⟨U+0302⟩⟨U+0303⟩"
+    );
+    let stack = format!("а{}", "\u{301}".repeat(25));
+    assert_eq!(visible(&stack), format!("а{}", "⟨U+0301⟩".repeat(25)));
+    // Which costs the scripts whose marks never compose — Arabic's vowel
+    // marks, Devanagari's virama — their marks, written out.
+    assert_eq!(visible("بَ"), "ب⟨U+064E⟩");
+    assert_eq!(visible("क्ष"), "क⟨U+094D⟩ष");
+    // Nor does a mark compose with ASCII punctuation: `=` and a solidus
+    // through it are `≠`, but a shell reads `=`.
+    assert_eq!(visible("a=\u{338}b"), "a=⟨U+0338⟩b");
     // And a command's or a change's writing out is muted.
     let (shown, muted) = command_lines("ls ~ \u{338}x");
     assert_eq!(shown, "ls ~ ⟨U+0338⟩x");
     assert_eq!(&shown[muted[0].clone()], "⟨U+0338⟩");
+}
+
+#[test]
+fn a_character_that_looks_like_shell_syntax_is_written_out() {
+    // Quotes, `#`, `;`, `|`, `/` and the rest, by UTS #39's confusables, by
+    // compatibility decomposition, and by hand where neither has it.
+    for lookalike in [
+        'ʼ', '′', '״', '׳', 'ˈ', 'ꞌ', '῾', // quotes
+        '♯', '⌗', '＃', // `#`
+        '\u{37e}', '；', '⁏', // `;`
+        'ǀ', 'ǁ', '∣', '｜', '│', // `|`
+        'ǃ', '∕', '⁄', '∖', '＼', '٭', '∗', '‹', '›', '˂', '˃', '❮', '＄', '＆', '（', '）',
+    ] {
+        let shown = visible(&format!("a{lookalike}b"));
+        assert_eq!(
+            shown,
+            format!("a⟨U+{:04X}⟩b", u32::from(lookalike)),
+            "{lookalike:?}"
+        );
+    }
+    assert_eq!(
+        visible("echo done ♯; rm -rf ~"),
+        "echo done ⟨U+266F⟩; rm -rf ~"
+    );
+    // Letters, digits and punctuation that look like nothing a shell reads
+    // are text.
+    for text in [
+        "café",
+        "漢字",
+        "Ελλάδα",
+        "Жук",
+        "שלום",
+        "مرحبا",
+        "Ιό",
+        "Іван",
+        "ا",
+        "٣٤",
+        "—",
+        "«»",
+        "…",
+        "ꓸ",
+    ] {
+        assert_eq!(visible(text), text, "{text:?}");
+    }
+}
+
+#[test]
+fn a_command_as_written_writes_out_everything_that_is_not_ascii() {
+    let (shown, muted) = command_as_written("echo café 漢\t# x\r\n\tEOF");
+    assert_eq!(shown, "echo caf⟨U+00E9⟩ ⟨U+6F22⟩       # x␍\n→       EOF");
+    let marks: Vec<&str> = muted.iter().map(|mark| &shown[mark.clone()]).collect();
+    assert_eq!(marks, ["⟨U+00E9⟩", "⟨U+6F22⟩", "␍", "→"]);
 }
 
 #[test]

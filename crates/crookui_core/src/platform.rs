@@ -60,13 +60,15 @@ pub trait TextLayoutSystem: 'static + Send + Sync {
     }
 
     /// Whether any face this system can draw from has a glyph for
-    /// `character`: `true` when it cannot say.
+    /// `character`: `Some(true)` when it cannot say, and `None` while it is
+    /// still finding out — which a caller treats as not knowing yet, and
+    /// asks again.
     ///
     /// One a shaper finds in no face is drawn as the primary face's missing
     /// glyph, a box like every other missing one's — and a search of every
     /// installed face, once per character, to find that out.
-    fn covers(&self, _character: char) -> bool {
-        true
+    fn covers(&self, _character: char) -> Option<bool> {
+        Some(true)
     }
 }
 

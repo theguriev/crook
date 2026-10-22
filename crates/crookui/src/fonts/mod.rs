@@ -199,9 +199,19 @@ struct FontStore {
     raster_bounds: RwLock<FxHashMap<(GlyphKey, u32, u32), RasterBounds>>,
 
     /// Every code point some face in the database has a glyph for, one bit
-    /// each: read once, the first time a character no selected face covers
-    /// is asked about. See [`FontStore::covers`].
-    coverage: std::sync::OnceLock<Vec<u64>>,
+    /// each: read off the thread that first asks, and read again when the
+    /// database has gained faces since. See [`FontStore::covers`].
+    coverage: Mutex<Coverage>,
+}
+
+/// What is known of which code points the installed faces cover.
+enum Coverage {
+    /// Nothing yet.
+    NotRead,
+    /// It is being read, on a thread of its own.
+    Reading,
+    /// Read, from this many faces: one bit per code point.
+    Read { faces: usize, bits: Arc<Vec<u64>> },
 }
 
 /// The identity maps: ours to `fontdb`'s and back, plus resolved selections.
@@ -222,48 +232,103 @@ impl FontStore {
             metrics: RwLock::new(FxHashMap::default()),
             advances: RwLock::new(FxHashMap::default()),
             raster_bounds: RwLock::new(FxHashMap::default()),
-            coverage: std::sync::OnceLock::new(),
+            coverage: Mutex::new(Coverage::NotRead),
         }
     }
 
     /// Whether some face the shaper can fall back to has a glyph for
-    /// `character`.
+    /// `character`, or `None` while that is still being read.
     ///
     /// Asked of the shaper, the answer for a character no face has is a
     /// search of every face in the database — milliseconds, each time — and
     /// then the missing glyph. Here it is one bit, of a table read off every
-    /// face's character map once. A face cosmic-text cannot load, one only
-    /// on disk by path, is left out of it, as the shaper leaves it out.
-    fn covers(&self, character: char) -> bool {
-        let coverage = self.coverage.get_or_init(|| {
-            let started = std::time::Instant::now();
-            let mut bits = vec![0u64; (u32::from(char::MAX) as usize >> 6) + 1];
+    /// face's character map: on a thread of its own, the first time it is
+    /// asked for, since that is hundreds of files, and again whenever the
+    /// database holds another number of faces than it was read from.
+    fn covers(self: &Arc<Self>, character: char) -> Option<bool> {
+        let faces = self.font_system.read().db().len();
+        let mut coverage = self.coverage.lock();
+        match &*coverage {
+            Coverage::Read { faces: read, bits } if *read == faces => {
+                let point = u32::from(character) as usize;
+                return Some(bits[point >> 6] >> (point & 63) & 1 == 1);
+            }
+            Coverage::Reading => return None,
+            Coverage::NotRead | Coverage::Read { .. } => {}
+        }
+        *coverage = Coverage::Reading;
+        drop(coverage);
+        let store = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("font-coverage".to_owned())
+            .spawn(move || {
+                let (faces, bits) = store.read_coverage();
+                *store.coverage.lock() = Coverage::Read {
+                    faces,
+                    bits: Arc::new(bits),
+                };
+            });
+        if let Err(error) = spawned {
+            log::warn!("could not start reading which characters fonts cover: {error}");
+            *self.coverage.lock() = Coverage::NotRead;
+        }
+        None
+    }
+
+    /// Reads which code points every face in the database has a glyph for,
+    /// and how many faces that was.
+    ///
+    /// Every face, whatever its source: fontdb registers an installed font
+    /// by its path and cosmic-text maps the file when it first falls back to
+    /// it, so a table of only the faces mapped so far is a table of the few
+    /// the window has drawn with. The file is mapped here, outside the
+    /// font system's lock, and only its character map is read.
+    fn read_coverage(&self) -> (usize, Vec<u64>) {
+        let started = std::time::Instant::now();
+        let sources: Vec<(fontdb::Source, u32)> = {
             let font_system = self.font_system.read();
-            let db = font_system.db();
-            let mut faces = 0;
-            for face in db.faces() {
-                if matches!(face.source, fontdb::Source::File(_)) {
-                    continue;
-                }
-                faces += 1;
-                db.with_face_data(face.id, |data, index| {
-                    if let Some(font) = swash::FontRef::from_index(data, index as usize) {
-                        font.charmap().enumerate(|point, _| {
-                            if let Some(word) = bits.get_mut(point as usize >> 6) {
-                                *word |= 1 << (point & 63);
-                            }
-                        });
+            font_system
+                .db()
+                .faces()
+                .map(|face| (face.source.clone(), face.index))
+                .collect()
+        };
+        let mut bits = vec![0u64; (u32::from(char::MAX) as usize >> 6) + 1];
+        let mut mark = |data: &[u8], index: u32| {
+            if let Some(font) = swash::FontRef::from_index(data, index as usize) {
+                font.charmap().enumerate(|point, _| {
+                    if let Some(word) = bits.get_mut(point as usize >> 6) {
+                        *word |= 1 << (point & 63);
                     }
                 });
             }
-            log::debug!(
-                "read which characters {faces} faces cover in {:?}",
-                started.elapsed()
-            );
-            bits
-        });
-        let point = u32::from(character) as usize;
-        coverage[point >> 6] >> (point & 63) & 1 == 1
+        };
+        let mut mapped: FxHashMap<std::path::PathBuf, Option<memmap2::Mmap>> = FxHashMap::default();
+        for (source, index) in &sources {
+            match source {
+                fontdb::Source::Binary(data) | fontdb::Source::SharedFile(_, data) => {
+                    mark((**data).as_ref(), *index);
+                }
+                fontdb::Source::File(path) => {
+                    let map = mapped.entry(path.clone()).or_insert_with(|| {
+                        let file = std::fs::File::open(path).ok()?;
+                        // Safety: read-only, and read only here; a font file
+                        // changed under it gives wrong bits, not a fault
+                        // Rust can see — fontdb maps the same files so.
+                        unsafe { memmap2::Mmap::map(&file) }.ok()
+                    });
+                    if let Some(map) = map {
+                        mark(map, *index);
+                    }
+                }
+            }
+        }
+        log::debug!(
+            "read which characters {} faces cover in {:?}",
+            sources.len(),
+            started.elapsed()
+        );
+        (sources.len(), bits)
     }
 
     /// How wide `character` is at `font_size` in the face `family_id` and

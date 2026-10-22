@@ -607,3 +607,63 @@ fn every_subpixel_bin_fills_the_reported_bounds() {
         }
     }
 }
+
+/// What the coverage table says of `character`, once it has been read.
+fn covered(layout: &CosmicTextLayout, character: char) -> bool {
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(covered) = layout.covers(character) {
+            return covered;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "the coverage table was never read"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn the_coverage_table_reads_every_installed_face_whatever_its_source() {
+    // fontdb registers an installed font by its path, and cosmic-text maps
+    // the file only when it first falls back to it: a table read off the
+    // faces mapped so far said CJK and Hebrew were in no font at all.
+    let Some(fixture) = fixture() else {
+        return;
+    };
+    let mut asked = Vec::new();
+    {
+        let font_system = fixture.font_db.store.font_system.read();
+        let db = font_system.db();
+        for face in db.faces() {
+            if !matches!(face.source, fontdb::Source::File(_)) {
+                continue;
+            }
+            let some = db.with_face_data(face.id, |data, index| {
+                let font = swash::FontRef::from_index(data, index as usize)?;
+                let mut found = None;
+                font.charmap().enumerate(|point, _| {
+                    if found.is_none() && point > 0x2000 {
+                        found = char::from_u32(point);
+                    }
+                });
+                found
+            });
+            if let Some(Some(character)) = some {
+                asked.push((character, face.post_script_name.clone()));
+            }
+            if asked.len() == 40 {
+                break;
+            }
+        }
+    }
+    for (character, face) in asked {
+        assert!(
+            covered(&fixture.layout, character),
+            "U+{:04X}, which {face} has, is said to be in no face",
+            u32::from(character)
+        );
+    }
+    // And a point no face has is in none.
+    assert!(!covered(&fixture.layout, '\u{10fffd}'));
+}

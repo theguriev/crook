@@ -52,6 +52,8 @@ gethostname.workspace = true
 getrandom.workspace = true
 log.workspace = true
 regex.workspace = true
+unicode-normalization.workspace = true
+unicode-security.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 # `--snapshot` writes a real frame to a file so a human, or CI, can look at it.

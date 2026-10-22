@@ -353,12 +353,37 @@ pub fn layout_left_to_right(
 /// LRM, U+200E: a strong left-to-right character that draws as nothing.
 const LEFT_TO_RIGHT_MARK: char = '\u{200E}';
 
+/// `text`, ready to be drawn as one line that reads left to right: as it
+/// is when it has nothing that reads right to left in it, and otherwise
+/// with the marks [`left_to_right`] puts in. For a single line of one
+/// style — a label, a row's summary — whose offsets nobody maps back.
+pub fn reads_left_to_right(text: &str) -> std::borrow::Cow<'_, str> {
+    use unicode_bidi::{BidiClass, bidi_class};
+    if text.chars().any(|character| {
+        matches!(
+            bidi_class(character),
+            BidiClass::R | BidiClass::AL | BidiClass::AN
+        )
+    }) {
+        std::borrow::Cow::Owned(left_to_right(text).0)
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
 /// `text` with a left-to-right mark first and after each right-to-left
 /// run, and where each byte offset of `text`, its end included, lands in it.
 pub fn left_to_right(text: &str) -> (String, Vec<usize>) {
     use unicode_bidi::{BidiClass, bidi_class};
-    let right_to_left =
-        |character: char| matches!(bidi_class(character), BidiClass::R | BidiClass::AL);
+    // A right-to-left letter, or an Arabic-Indic digit: one of those the
+    // algorithm counts as right to left when it orders what lies between
+    // them, so that `٣# ;: ٤` would be drawn `٤ :; #٣`.
+    let right_to_left = |character: char| {
+        matches!(
+            bidi_class(character),
+            BidiClass::R | BidiClass::AL | BidiClass::AN
+        )
+    };
     let mut marked = String::with_capacity(text.len() + 6);
     let mut at = vec![0; text.len() + 1];
     marked.push(LEFT_TO_RIGHT_MARK);
@@ -407,6 +432,89 @@ mod left_to_right_tests {
         assert_eq!(marked("لا"), "|لا|");
         assert_eq!(marked("بَيْت x"), "|بَيْت| x");
         assert_eq!(marked("שָׁלוֹם"), "|שָׁלוֹם|");
+    }
+
+    #[test]
+    fn arabic_indic_digits_are_a_run_of_their_own() {
+        // Counted as right to left between them, they reorder what lies
+        // between: `٣# ;: ٤` drawn `٤ :; #٣`.
+        assert_eq!(marked("true ٣# ;: ٤ ; rm"), "|true ٣|# ;: ٤| ; rm");
+        assert_eq!(marked("cat ٣ > ٤"), "|cat ٣| > ٤|");
+        assert_eq!(
+            marked("a \u{10e60} | \u{10e61}"),
+            "|a \u{10e60}| | \u{10e61}|"
+        );
+        assert_eq!(marked("1\u{66b}2"), "|1\u{66b}|2");
+    }
+
+    /// Where each character of `text` is drawn, left to right, by the
+    /// Unicode bidirectional algorithm as cosmic-text applies it: the line's
+    /// direction from its first strong letter, each level's run reversed
+    /// when it is right to left, as offsets into `text`.
+    fn drawn_order(text: &str) -> Vec<usize> {
+        let bidi = unicode_bidi::BidiInfo::new(text, None);
+        let mut order = Vec::new();
+        for paragraph in &bidi.paragraphs {
+            let (levels, runs) = bidi.visual_runs(paragraph, paragraph.range.clone());
+            for run in runs {
+                let mut offsets: Vec<usize> = text[run.clone()]
+                    .char_indices()
+                    .map(|(at, _)| run.start + at)
+                    .collect();
+                if levels[run.start].is_rtl() {
+                    offsets.reverse();
+                }
+                order.extend(offsets);
+            }
+        }
+        order
+    }
+
+    #[test]
+    fn no_ascii_character_is_ever_drawn_out_of_its_order() {
+        // What a shell reads is ASCII. Whatever else a line holds — letters
+        // of any direction, digits of any kind, brackets, marks — its ASCII
+        // characters are drawn in the order they run, so the next class of
+        // character that reorders a line is caught here and not by a reader.
+        let pool: Vec<char> = concat!(
+            "abz09 #'\"`;|&$<>()[]{}\\/*?!~=-+.,:%_",
+            "عبتمرحلا",
+            "אבגש",
+            "٠١٢٣٩",
+            "۰۱۹",
+            "\u{66b}\u{66c}\u{66a}\u{60c}\u{61b}",
+            "\u{10e60}\u{10e6a}\u{10e7e}",
+            "\u{64e}\u{651}\u{5b8}\u{301}",
+            "漢字αβЖ",
+            "（）［］｛｝«»‹›",
+            "\u{2212}\u{b0}\u{20ac}\u{a3}\u{2030}",
+            "\u{7c0}\u{7ca}\u{800}\u{840}\u{1e900}",
+            "ހށܐܒ",
+        )
+        .chars()
+        .collect();
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = |below: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % below as u64) as usize
+        };
+        for _ in 0..50_000 {
+            let length = 1 + next(24);
+            let text: String = (0..length).map(|_| pool[next(pool.len())]).collect();
+            let (marked, at) = left_to_right(&text);
+            let ascii: Vec<usize> = text
+                .char_indices()
+                .filter(|(_, character)| character.is_ascii())
+                .map(|(offset, _)| at[offset])
+                .collect();
+            let drawn: Vec<usize> = drawn_order(&marked)
+                .into_iter()
+                .filter(|offset| ascii.contains(offset))
+                .collect();
+            assert_eq!(drawn, ascii, "{text:?} drawn out of order as {marked:?}");
+        }
     }
 
     #[test]

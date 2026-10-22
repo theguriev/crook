@@ -3408,6 +3408,15 @@ impl Workspace {
             AskAction::TooSoon => {}
             AskAction::HoldKeys => self.hold_the_keys(),
             AskAction::Scrolled => ctx.notify(),
+            // What it shows changes under the pointer: the buttons wait
+            // again, as when the card's face changes.
+            AskAction::AsWritten => {
+                if let Some(card) = self.ask_card.as_mut() {
+                    card.toggle_as_written();
+                    self.hold_the_pointer(ctx);
+                    ctx.notify();
+                }
+            }
             // One face back: a card to the list it was opened from, if it
             // was, and the list to nothing.
             AskAction::NotNow => {

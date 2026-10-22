@@ -45,8 +45,12 @@
 //! right, its characters in the order they run whatever letters it holds: a
 //! shaper would reorder what lies between right-to-left letters with them.
 //! A character no installed face has is written out, as everything else that
-//! would not print as itself is, and everything written out is muted, so a
-//! command cannot spell a `⟨U+XXXX⟩` out to pass for one. A row the box
+//! would not print as itself is — a combining mark that does not compose
+//! with what it is on, a character that looks like a quote, a `#` or a `;`
+//! — and everything written out is muted, so a command cannot spell a
+//! `⟨U+XXXX⟩` out to pass for one. A shell's syntax is ASCII, so a command
+//! with anything else in it says so under the box, with a button that shows
+//! it as written: every character that is not ASCII written out. A row the box
 //! broke has a muted `↳` in a gutter before it, and a line of the command's
 //! own has none, so a newline and a break never look alike. A tab a line
 //! starts with is drawn as a muted `→`, and the tabs and spaces a line ends
@@ -156,7 +160,9 @@ use crookui_core::prelude::*;
 use crookui_core::presenter::{LayoutContext, PaintContext};
 use crookui_core::text_layout::Line;
 
-use crate::agent::request::{AskRequest, Mark, Replaced, command_lines, lexically_inside, visible};
+use crate::agent::request::{
+    AskRequest, Mark, Replaced, command_as_written, command_lines, lexically_inside, visible,
+};
 use crate::control::ask::{Ask, AskId, Asks, Cause, Choice, How};
 use crate::keybindings::Recording;
 use crate::tab::PaneId;
@@ -304,6 +310,12 @@ impl Body {
         self.read_to_end.get() && !self.too_wide.get() && !self.measuring.get()
     }
 
+    /// Whether the last layout broke the command by a guess.
+    #[cfg(test)]
+    pub(super) fn is_measuring(&self) -> bool {
+        self.measuring.get()
+    }
+
     /// Whether a row was drawn wider than the box.
     fn too_wide(&self) -> bool {
         self.too_wide.get()
@@ -387,6 +399,7 @@ struct Handles {
     deny: MouseStateHandle,
     go_to: MouseStateHandle,
     not_now: MouseStateHandle,
+    as_written: MouseStateHandle,
     /// Allow, Deny and Go to, as last drawn.
     live: [bool; 3],
 }
@@ -401,6 +414,7 @@ impl Handles {
             AskButton::Deny => 1,
             AskButton::GoTo => 2,
             AskButton::NotNow => return self.not_now.clone(),
+            AskButton::AsWritten => return self.as_written.clone(),
         };
         let handle = match button {
             AskButton::Allow => &mut self.allow,
@@ -453,6 +467,9 @@ pub(super) struct AskCard {
     /// Whether the pane has said it is running since the card came up: the
     /// agent may have been answered in its own tab.
     back_to_work: bool,
+    /// Whether the command is shown as written: every character that is not
+    /// ASCII written out. See [`as_written_line`].
+    as_written: bool,
 }
 
 impl AskCard {
@@ -471,7 +488,23 @@ impl AskCard {
             handles: RefCell::default(),
             withdrawn: None,
             back_to_work: false,
+            as_written: false,
         }
+    }
+
+    /// Shows the command as written, or as drawn again. The box is laid out
+    /// afresh; what of the command has been read stays read, since it is the
+    /// same command.
+    pub(super) fn toggle_as_written(&mut self) {
+        self.as_written = !self.as_written;
+        *self.body.laid.borrow_mut() = None;
+        self.body.shaped.borrow_mut().clear();
+    }
+
+    /// Whether the command is shown as written.
+    #[cfg(test)]
+    pub(super) fn is_as_written(&self) -> bool {
+        self.as_written
     }
 
     /// The question it is about.
@@ -627,12 +660,26 @@ fn buttons(face: &Face<'_>) -> &'static [AskButton] {
     }
 }
 
-/// The buttons the keyboard can stand on: Allow only once the command has
-/// been read to its end, Go to only while its pane is open.
+/// Whether the card says its command holds text that is not ASCII, and
+/// offers to show it as written: a command on a card still waiting.
+fn offers_as_written(face: &Face<'_>) -> bool {
+    matches!(
+        face,
+        Face::Live(Ask {
+            request: AskRequest::Command { command, .. },
+            ..
+        }) if !command.is_ascii()
+    )
+}
+
+/// The buttons the keyboard can stand on: Show as written first, when the
+/// card offers it, then the row's; Allow only once the command has been
+/// read to its end, Go to only while its pane is open.
 fn reachable(card: &AskCard, face: &Face<'_>, pane_open: bool) -> Vec<AskButton> {
-    buttons(face)
-        .iter()
-        .copied()
+    offers_as_written(face)
+        .then_some(AskButton::AsWritten)
+        .into_iter()
+        .chain(buttons(face).iter().copied())
         .filter(|button| match button {
             AskButton::Allow => card.body.read_to_end(),
             AskButton::GoTo => pane_open,
@@ -647,6 +694,7 @@ fn pressing(card: &AskCard, button: AskButton, by: Pressed) -> AskAction {
     let (ask, digest) = (card.ask, card.digest);
     match button {
         AskButton::NotNow => AskAction::NotNow,
+        AskButton::AsWritten => AskAction::AsWritten,
         AskButton::GoTo => AskAction::GoTo { ask, digest, by },
         AskButton::Allow => AskAction::Answer {
             ask,
@@ -877,7 +925,11 @@ fn live_face(
                     ui,
                 ));
             }
-            let (text, muted) = command_lines(command);
+            let (text, muted) = if card.as_written {
+                command_as_written(command)
+            } else {
+                command_lines(command)
+            };
             let lines = vec![Shown {
                 text,
                 color: theme().text_primary,
@@ -885,6 +937,9 @@ fn live_face(
             }];
             column.add_child(body_box(lines, card, monospace));
             column.add_child(extent(&card.body, ui));
+            if !command.is_ascii() {
+                column.add_child(as_written_line(card, ui));
+            }
             if let Some(said) = said {
                 column.add_child(note(format!("{agent} says: {}", visible(said)), ui));
             }
@@ -1068,6 +1123,62 @@ fn file_path(path: String, monospace: FamilyId) -> Box<dyn Element> {
     .finish()
 }
 
+/// A line under a command with text in it that is not ASCII, saying so,
+/// and a button that shows it as written — every such character written
+/// out as `⟨U+XXXX⟩` — or as drawn again.
+///
+/// A shell's syntax is ASCII. What a person can be fooled by on the card is
+/// always text that is not — a letter that reorders a line, a character
+/// that passes for a quote — and the card writes out every kind of it that
+/// it knows of. This is for the kind it does not: one press, or Tab to it
+/// and Enter, and every character the command holds is drawn as what it
+/// is. It waits on nothing and answers nothing, and the card stays on what
+/// it was opened on. It does not keep Allow waiting.
+fn as_written_line(card: &AskCard, ui: FamilyId) -> Box<dyn Element> {
+    let chosen = card.chosen == AskButton::AsWritten;
+    let state = card
+        .handles
+        .borrow_mut()
+        .for_button(AskButton::AsWritten, true);
+    let said = if card.as_written {
+        "Shown as written: what is not ASCII written out"
+    } else {
+        "Contains text that is not ASCII"
+    };
+    let label = if card.as_written {
+        "Show as drawn"
+    } else {
+        "Show as written"
+    };
+    Container::new(
+        Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(8.)
+            .with_child(
+                Expanded::new(
+                    1.,
+                    Text::new(said, ui, super::tab_menu::PATH_SIZE)
+                        .with_color(theme().text_muted)
+                        .with_ellipsis(Cut::End)
+                        .finish(),
+                )
+                .finish(),
+            )
+            .with_child(button(
+                state,
+                label,
+                chosen,
+                Some(WorkspaceAction::from(AskAction::AsWritten)),
+                ui,
+            ))
+            .finish(),
+    )
+    .with_horizontal_padding(ROW_INSET)
+    .with_margin_bottom(6.)
+    .finish()
+}
+
 /// One line under the command saying how much of it is shown, and, while
 /// Allow waits on it, that the end has to be read first.
 ///
@@ -1179,7 +1290,7 @@ fn button_row(
         .with_spacing(8.);
     for button_kind in buttons(face) {
         let live = match button_kind {
-            AskButton::NotNow => true,
+            AskButton::NotNow | AskButton::AsWritten => true,
             AskButton::Allow => pointer && card.body.read_to_end(),
             AskButton::Deny => pointer,
             AskButton::GoTo => pointer && pane_open,
@@ -1190,6 +1301,7 @@ fn button_row(
             (AskButton::GoTo, _) => "Go to tab",
             (AskButton::NotNow, Face::Live(_)) => "Not now",
             (AskButton::NotNow, Face::Withdrawn(_)) => "Close",
+            (AskButton::AsWritten, _) => "Show as written",
         };
         let action =
             live.then(|| WorkspaceAction::from(pressing(card, *button_kind, Pressed::Pointer)));
@@ -1471,24 +1583,32 @@ impl Measuring<'_, '_> {
                 character,
             )
         };
+        // Asked before it is shaped: a character no face has is the one a
+        // shaper takes longest over, searching every face for it, and it is
+        // drawn written out, not as itself. Not yet known — the table of
+        // which faces have what still being read — is a width not yet known.
+        let (mut covered, mut known) = (true, true);
+        for character in grapheme.chars() {
+            let covers = match in_face(character) {
+                Some(_) => Some(true),
+                None => layout.covers(character),
+            };
+            match covers {
+                Some(true) => {}
+                Some(false) => covered = false,
+                None => known = false,
+            }
+        }
         let measured = match alone.and_then(in_face) {
             Some(width) => Grapheme {
                 width,
                 covered: true,
             },
-            // Asked before it is shaped: a character no face has is the one
-            // a shaper takes longest over, searching every face for it, and
-            // it is drawn written out, not as itself.
-            None if !grapheme
-                .chars()
-                .all(|character| in_face(character).is_some() || layout.covers(character)) =>
-            {
-                Grapheme {
-                    width: 0.,
-                    covered: false,
-                }
-            }
-            None if Instant::now() >= self.until => {
+            None if !covered => Grapheme {
+                width: 0.,
+                covered: false,
+            },
+            None if !known || Instant::now() >= self.until => {
                 self.guessed = true;
                 return None;
             }
@@ -1554,7 +1674,7 @@ impl Measuring<'_, '_> {
                                 character,
                             )
                             .is_some();
-                        if in_face || layout.covers(character) {
+                        if in_face || layout.covers(character) != Some(false) {
                             character.to_string()
                         } else {
                             format!("⟨U+{:04X}⟩", u32::from(character))
@@ -1752,7 +1872,10 @@ impl CommandBody {
             rows,
             guessed: measuring.guessed,
         });
-        if self.body.measuring.replace(laid.guessed) != laid.guessed {
+        // A frame that guessed asks for the next, which measures on: the
+        // window draws only when asked, and a card left on its guess would
+        // say it is measuring, with Allow waiting, for good.
+        if self.body.measuring.replace(laid.guessed) != laid.guessed || laid.guessed {
             self.body.news.set(true);
         }
         // The rows drawn of the last breaking are not this one's.

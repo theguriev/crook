@@ -835,6 +835,25 @@ pub fn command_lines(text: &str) -> (String, Vec<Range<usize>>) {
     (writer.shown, writer.muted)
 }
 
+/// A command as [`command_lines`] draws it, but with every character that
+/// is not ASCII written out too: the command shown as written, character
+/// for character, for a person who wants to see exactly what a shell will
+/// read when what is drawn holds letters, digits or marks it could be
+/// fooled by.
+pub fn command_as_written(text: &str) -> (String, Vec<Range<usize>>) {
+    let mut writer = Writer {
+        ascii_only: true,
+        ..Writer::default()
+    };
+    for (index, line) in text.split('\n').enumerate() {
+        if index > 0 {
+            writer.newline();
+        }
+        writer.line(line, Tabs::Leading);
+    }
+    (writer.shown, writer.muted)
+}
+
 /// Which of a line's tabs [`Writer::line`] marks, beside those it ends in.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tabs {
@@ -854,12 +873,14 @@ struct Writer {
     muted: Vec<Range<usize>>,
     /// Which column its line has reached, for the next tab's stop.
     column: usize,
-    /// What the next combining mark would be drawn over: the last character
-    /// shown as itself on this line, or `None` at a line's start, after a tab,
-    /// or after something written out.
+    /// What the next combining mark would be drawn over, composed with the
+    /// marks drawn over it so far: the last character shown as itself on
+    /// this line, or `None` at a line's start, after a tab, after something
+    /// written out, or after a mark that composes no further.
     base: Option<char>,
-    /// How many combining marks have been drawn over it.
-    marks: usize,
+    /// Whether every character that is not ASCII is written out: a command
+    /// shown as written.
+    ascii_only: bool,
 }
 
 impl Writer {
@@ -913,17 +934,19 @@ impl Writer {
     /// `character`, which is neither a newline nor a tab, as itself or
     /// written out.
     ///
-    /// A combining mark is written out when what it would be drawn over is
-    /// something it could disguise: nothing at all — a line's start, a tab,
-    /// a mark written out — or an ASCII character that is not a letter or a
-    /// digit, a space above all. `~ ̸.cache` is `~` and then a space a
-    /// solidus is drawn through, which reads as `~/.cache`; a low line under a
-    /// space reads as `_`. So is a mark that is drawn through or around what
-    /// it is on whatever that is — an overlay or an enclosing mark — and a
-    /// third mark on one ASCII letter or digit, since a stack of them is drawn
-    /// over the lines above and below. Marks on any other letter, and up to
-    /// two on an ASCII one, are text: a file name decomposed as macOS stores
-    /// it, `cafe\u{301}`, still reads as `café`.
+    /// Written out, besides what would not print as itself:
+    ///
+    /// - A combining mark, unless it composes with what it is on into one
+    ///   precomposed character — `e` and U+0301 are `é` — and that is not
+    ///   ASCII punctuation or a space. Any other is a mark drawn over
+    ///   something it could disguise: a solidus through a space reads as
+    ///   `/`, a comma above a letter as `'`. A name decomposed as macOS
+    ///   stores it still reads as itself, and no stack of marks is drawn
+    ///   over the rows around it: composition stops after two or three.
+    /// - A character that is not ASCII and looks like ASCII a shell reads as
+    ///   syntax: see [`looks_like_syntax`]. `echo done ♯; rm -rf ~` is not a
+    ///   comment.
+    /// - With [`Self::ascii_only`], every character that is not ASCII.
     fn put(&mut self, character: char) {
         if character == '\r' {
             self.muted_mark('␍');
@@ -931,14 +954,19 @@ impl Writer {
         }
         let combines =
             !hidden(character) && unicode_width::UnicodeWidthChar::width(character) == Some(0);
-        let disguises = combines
-            && (overlays(character)
-                || match self.base {
-                    None => true,
-                    Some(base) if base.is_ascii_alphanumeric() => self.marks >= 2,
-                    Some(base) => base.is_ascii(),
-                });
-        if hidden(character) || disguises {
+        let composed = if combines {
+            self.base
+                .filter(|base| !base.is_ascii() || base.is_ascii_alphanumeric())
+                .filter(|_| !overlays(character))
+                .and_then(|base| unicode_normalization::char::compose(base, character))
+        } else {
+            None
+        };
+        let written_out = hidden(character)
+            || (self.ascii_only && !character.is_ascii())
+            || (combines && composed.is_none())
+            || (!combines && !character.is_ascii() && looks_like_syntax(character));
+        if written_out {
             let start = self.shown.len();
             let mark = format!("⟨U+{:04X}⟩", u32::from(character));
             self.column += mark.chars().count();
@@ -949,13 +977,65 @@ impl Writer {
         }
         self.shown.push(character);
         if combines {
-            self.marks += 1;
+            self.base = composed;
         } else {
             self.base = Some(character);
-            self.marks = 0;
             self.column += unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
         }
     }
+}
+
+/// The ASCII a shell reads as syntax: what quotes, comments, separates,
+/// redirects, expands, groups or escapes.
+const SHELL_SYNTAX: &str = "#'\"`;|&$<>()[]{}\\/*?!~=";
+
+/// Characters that look like [`SHELL_SYNTAX`] and that UTS #39's
+/// confusables do not map to it, nor compatibility decomposition: a sharp
+/// and a viewdata square for `#`, box-drawing and other vertical bars for
+/// `|`, and turned and reversed semicolons for `;` — and the click letters
+/// `ǀ` and `ǁ`, which are letters, and drawn as `|` and `||`.
+const LOOKS_LIKE_SYNTAX: &[char] = &[
+    '\u{01C0}', '\u{01C1}', '\u{266F}', '\u{2317}', '\u{22D5}', '\u{2502}', '\u{2503}', '\u{2551}',
+    '\u{23AE}', '\u{23B8}', '\u{23B9}', '\u{2758}', '\u{2759}', '\u{275A}', '\u{FFE8}', '\u{204F}',
+    '\u{2E35}', '\u{2E32}', '\u{2E41}',
+];
+
+/// Whether `character`, which is not ASCII, looks like ASCII a shell reads
+/// as syntax — a quote, a `#`, a `;`, a `|` — or like a space: by its UTS
+/// #39 skeleton, the string of prototypes it is confusable with, by its
+/// compatibility decomposition, which maps a full-width `；` to `;`, or by
+/// [`LOOKS_LIKE_SYNTAX`]. A shell's syntax is ASCII, and a character that
+/// passes for it — `ʼ` for `'`, `♯` for `#` — changes what a command reads
+/// as without changing what it runs.
+fn looks_like_syntax(character: char) -> bool {
+    use std::sync::OnceLock;
+    use unicode_normalization::UnicodeNormalization;
+    // The skeletons the syntax itself has: `|`'s is `l`, so a character
+    // confusable with `|` is one whose skeleton is `l`.
+    static SKELETONS: OnceLock<Vec<String>> = OnceLock::new();
+    let skeletons = SKELETONS.get_or_init(|| {
+        SHELL_SYNTAX
+            .chars()
+            .map(|syntax| unicode_security::skeleton(syntax.encode_utf8(&mut [0; 4])).collect())
+            .collect()
+    });
+    if LOOKS_LIKE_SYNTAX.contains(&character) {
+        return true;
+    }
+    let alone = character.to_string();
+    let compatible: String = alone.nfkc().collect();
+    [alone.as_str(), compatible.as_str()]
+        .into_iter()
+        .any(|form| {
+            let skeleton: String = unicode_security::skeleton(form).collect();
+            [form, skeleton.as_str()].into_iter().any(|seen| {
+                seen.chars()
+                .any(|seen| SHELL_SYNTAX.contains(seen) || seen.is_whitespace())
+                // A letter whose skeleton is `|`'s, `l`, looks like the
+                // letter at least as much: Hebrew's vav, Arabic's alef.
+                || (!character.is_alphabetic() && skeletons.iter().any(|syntax| syntax == seen))
+            })
+        })
 }
 
 /// Whether combining mark `character` is drawn through or around whatever

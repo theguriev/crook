@@ -260,7 +260,7 @@ impl platform::TextLayoutSystem for CosmicTextLayout {
             .advance_in_face(family, properties, font_size, character)
     }
 
-    fn covers(&self, character: char) -> bool {
+    fn covers(&self, character: char) -> Option<bool> {
         self.store.covers(character)
     }
 }
