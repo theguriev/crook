@@ -497,7 +497,11 @@ Twenty-two features, and the page that configures them:
   own text as the message, idle when it is done, failed with the error when an API error such
   as a usage limit ends its turn — once Crook's plugin is installed:
   `claude plugin marketplace add theguriev/crook`, then `claude plugin install crook@crook`,
-  with a Crook newer than 0.1.13. Codex CLI and GitHub Copilot CLI install the same plugin from
+  with a Crook newer than 0.1.13. Claude Code keeps the plugin as it installed it until it is
+  told otherwise — auto-update is off for a marketplace like Crook's — so after updating Crook
+  run `claude plugin update crook@crook`, or turn on auto-update for the crook marketplace in
+  Claude Code's `/plugin` › Marketplaces; a plugin from before 0.1.29 has no permission hook,
+  and nothing it asks reaches Crook. Codex CLI and GitHub Copilot CLI install the same plugin from
   the same marketplace — `codex plugin marketplace add theguriev/crook`, then
   `codex plugin add crook@crook`; `copilot plugin marketplace add theguriev/crook`, then
   `copilot plugin install crook@crook` — and each reads a manifest of its own there, which names
@@ -891,12 +895,20 @@ Twenty-two features, and the page that configures them:
   git branch, rename tab, rename pane, close tab, close other tabs, close tabs below, close tabs
   above, a row of colours, and — inside a repository — show changes and the worktree list, with
   Finish task and Discard task beside them on a tab in a checkout Crook made; open pull request
-  and check pull request join them on a row whose agent has named one, and Answer… — the
-  palette's answer waiting agent — on a row whose agent is asking to run a command. **Answering**
-  puts up a card with the whole command Claude Code asks to run, its tab and directory, and
-  Allow once, Deny, Go to tab and Not now: Not now is the default, the other three wait a second
-  before a key or a press reaches them, and Claude Code's own dialog stays up in its tab, so
-  whichever is answered first wins. **Marking** a tab washes
+  and check pull request join them on a row whose agent has named one, and Answer… on a row
+  whose Claude Code is asking for a permission. **Answering** is the same as the palette's
+  answer waiting agent, `cmd-i` (`ctrl-shift-i` off macOS) and the header's "to answer": a
+  card with the whole of what Claude Code asks — a Bash command, or an Edit, MultiEdit or Write
+  drawn as a diff of the file — its tab and directory, and Allow once, Deny, Go to tab and Not
+  now. Not now is the default, the other three wait a second before a key or a press reaches
+  them, and Claude Code's own dialog stays up in its tab, so whichever is answered first wins;
+  nothing Crook does by itself ever allows. With several requests held it opens a list of them,
+  oldest first, Enter opening one's card and Escape on the card coming back, with how the last
+  ones ended under it; with none, the list says why — and when a tab's Claude Code says it
+  needs a permission and asked Crook nothing, that its plugin needs `claude plugin update
+  crook@crook`. It needs Crook's Claude Code plugin, or the hooks `--agent-hooks claude`
+  prints, from 0.1.29 on, and "Let agents ask in Crook" in Settings › Appearance turns it off.
+  **Marking** a tab washes
   its row amber and counts it with the ones waiting for you, for a tab you mean to come back
   to: it stays until you arrive at the pane or clear it from the same entry, and it never
   answers for the agent. **Why this status** hangs a panel off the menu that says in words
@@ -1097,6 +1109,8 @@ Twenty-two features, and the page that configures them:
   |---|---|---|
   | Tab by position, and the last one | `cmd-1`…`cmd-8`, `cmd-9` | `alt-1`…`alt-8`, `alt-9` |
   | Back to the tab you were on, and again to return | `shift-cmd-j` | `ctrl-shift-alt-j` |
+  | The next tab whose agent is waiting for you | `cmd-j` | `ctrl-shift-j` |
+  | Answer the waiting agent's request, or list them | `cmd-i` | `ctrl-shift-i` |
   | Move to the pane beside this one on that side | `ctrl-shift-←↑↓→` | `alt-←↑↓→` |
   | The next pane, the previous one | `cmd-]`, `cmd-[` | `ctrl-shift-]`, `ctrl-shift-[` |
   | Page the output | `shift-PageUp`, `shift-PageDown` | the same |
