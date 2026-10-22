@@ -36,6 +36,35 @@
 //! inside tmux says so, names tmux's pane, and says in how many other tabs
 //! tmux is attached as well; its tab is the one holding tmux's client.
 //!
+//! **What is drawn is what runs.** The command is broken into rows by how
+//! wide the shaper draws each grapheme, not by a width table, which calls
+//! `⚠` one column where the colour-emoji font draws two; a row is never
+//! broken inside a grapheme or a written-out character, never wider than the
+//! box, and one the shaper still draws wider is cut at its edge and keeps
+//! Allow waiting, since its end was never on screen. Every row reads left to
+//! right, its characters in the order they run whatever letters it holds: a
+//! shaper would reorder what lies between right-to-left letters with them.
+//! A character no installed face has is written out, as everything else that
+//! would not print as itself is — a combining mark that does not compose
+//! with what it is on, a character that looks like a quote, a `#` or a `;`
+//! — and everything written out is muted, so a command cannot spell a
+//! `⟨U+XXXX⟩` out to pass for one.
+//!
+//! **Text that is not ASCII is allowed only as written.** None of that is a
+//! guarantee: no list of characters that can pass for a quote, a `#` or a
+//! `<<` is ever whole, and a font can draw a private-use point as anything.
+//! So a request any text of which — its command, what its agent says, its
+//! path, its change, the directory — is not ASCII says so under the box, and
+//! Allow waits until it has been shown as written, every such character
+//! written out and muted so that what is drawn is ASCII and marks nothing
+//! can pass for, and read to its end so. Showing it so starts the card's
+//! wait again. Once it has been read so, it stays allowed shown either way. A row the box
+//! broke has a muted `↳` in a gutter before it, and a line of the command's
+//! own has none, so a newline and a break never look alike. A tab a line
+//! starts with is drawn as a muted `→`, and the tabs and spaces a line ends
+//! in as `→` and `·`: a tab-indented `EOF` ends a `<<-` heredoc and a space
+//! after a `\` ends a command; drawn blank, each reads as its harmless twin.
+//!
 //! **A change to a file is shown as the change.** An edit's old text is drawn
 //! as removed lines and its new text as added ones, in the colours the
 //! Changes column draws a diff in — see `changes_panel::diff_colour` — under
@@ -137,9 +166,12 @@ use crookui_core::fonts::FamilyId;
 use crookui_core::geometry::Point;
 use crookui_core::prelude::*;
 use crookui_core::presenter::{LayoutContext, PaintContext};
-use unicode_width::UnicodeWidthChar;
+use crookui_core::text_layout::Line;
 
-use crate::agent::request::{AskRequest, Mark, Replaced, lexically_inside, visible};
+use crate::agent::request::{
+    AskRequest, Mark, Replaced, as_written, command_as_written, command_lines, lexically_inside,
+    visible,
+};
 use crate::control::ask::{Ask, AskId, Asks, Cause, Choice, How};
 use crate::keybindings::Recording;
 use crate::tab::PaneId;
@@ -176,6 +208,12 @@ const FALLBACK_COLUMNS: usize = 80;
 /// How wide the thumb beside an overflowing command is, and the room kept
 /// for it.
 const THUMB_WIDTH: f32 = 4.;
+
+/// The mark in the box's gutter beside a row that goes on with the line
+/// above it rather than starting one: a line the box broke, which a newline
+/// in the command would otherwise draw exactly as. Not `↪`, which is an
+/// emoji, and drawn as one in colour by the font it falls back to.
+const CONTINUED: &str = "↳";
 
 /// Why the card is no longer about a question that can be answered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -244,6 +282,34 @@ pub(super) struct Body {
     shown: Cell<usize>,
     /// Whether its last line has been on screen.
     read_to_end: Cell<bool>,
+    /// Whether a row of it was drawn wider than the box, which a row is
+    /// never wrapped to: its end was cut off at the box's edge, unseen, so
+    /// the command has not been read whatever the box shows. Once, for good.
+    too_wide: Cell<bool>,
+    /// How wide each grapheme the command holds is drawn, by the family it
+    /// was measured in: what the rows are broken by. Kept, since a frame asks
+    /// for every one of them.
+    widths:
+        RefCell<std::collections::HashMap<FamilyId, std::collections::HashMap<String, Grapheme>>>,
+    /// The command as last broken into rows, and what it was broken for.
+    laid: RefCell<Option<Rc<Laid>>>,
+    /// The rows drawn so far of [`Self::laid`], shaped, by their number:
+    /// shaping a row is the dear part of drawing one, and a row drawn on one
+    /// frame is drawn on the next.
+    shaped: RefCell<std::collections::HashMap<usize, Rc<Line>>>,
+    /// Whether what the card shows of the request has text in it that is
+    /// not ASCII, so that Allow waits for it to have been read as written.
+    exact_needed: Cell<bool>,
+    /// Whether the box shows the request as written: every character that
+    /// is not ASCII written out.
+    exact: Cell<bool>,
+    /// Whether the request, shown as written, has been on screen to its end.
+    exact_read: Cell<bool>,
+    /// Whether the last layout broke the command by a guess at how wide
+    /// some of it is, having run out of the time a frame may spend measuring:
+    /// the rows are not yet the ones it will be drawn in, and it has not been
+    /// read until they are.
+    measuring: Cell<bool>,
     /// Whether a frame has learned something about the box since the card
     /// was last built: how many lines the command wraps to, how many the box
     /// shows, or that the end was on screen. The card that frame drew was
@@ -254,10 +320,44 @@ pub(super) struct Body {
 }
 
 impl Body {
-    /// Whether the command's last line has been on screen, which is never
-    /// before it has been laid out once.
+    /// Whether the command has been read to its end: its last line has been
+    /// on screen, which is never before it has been laid out once, and no
+    /// row of it was ever drawn past the box's edge.
     pub(super) fn read_to_end(&self) -> bool {
         self.read_to_end.get()
+            && !self.too_wide.get()
+            && !self.measuring.get()
+            && (!self.exact_needed.get() || self.exact_read.get())
+    }
+
+    /// Whether Allow waits for the request to be shown as written and read
+    /// to its end so, and has not yet had it.
+    fn waits_for_exact(&self) -> bool {
+        self.exact_needed.get() && !self.exact_read.get()
+    }
+
+    /// Whether the request, shown as written, has been read to its end.
+    #[cfg(test)]
+    pub(super) fn exact_read(&self) -> bool {
+        self.exact_read.get()
+    }
+
+    /// Whether the last layout broke the command by a guess.
+    #[cfg(test)]
+    pub(super) fn is_measuring(&self) -> bool {
+        self.measuring.get()
+    }
+
+    /// Whether a row was drawn wider than the box.
+    fn too_wide(&self) -> bool {
+        self.too_wide.get()
+    }
+
+    /// Writes down that a row was drawn wider than the box.
+    fn note_too_wide(&self) {
+        if !self.too_wide.replace(true) {
+            self.news.set(true);
+        }
     }
 
     /// How many lines the box shows at once.
@@ -293,7 +393,12 @@ impl Body {
     /// `on_screen`, which the paint says: whether the last line was drawn
     /// inside the window and inside whatever clips the card.
     fn note_the_end(&self, on_screen: bool) {
-        if on_screen && self.shows_the_end() && !self.read_to_end.replace(true) {
+        if !on_screen || !self.shows_the_end() || self.measuring.get() {
+            return;
+        }
+        let first = !self.read_to_end.replace(true);
+        let first_exact = self.exact.get() && !self.exact_read.replace(true);
+        if first || first_exact {
             self.news.set(true);
         }
     }
@@ -327,6 +432,7 @@ struct Handles {
     deny: MouseStateHandle,
     go_to: MouseStateHandle,
     not_now: MouseStateHandle,
+    as_written: MouseStateHandle,
     /// Allow, Deny and Go to, as last drawn.
     live: [bool; 3],
 }
@@ -341,6 +447,7 @@ impl Handles {
             AskButton::Deny => 1,
             AskButton::GoTo => 2,
             AskButton::NotNow => return self.not_now.clone(),
+            AskButton::AsWritten => return self.as_written.clone(),
         };
         let handle = match button {
             AskButton::Allow => &mut self.allow,
@@ -398,6 +505,9 @@ pub(super) struct AskCard {
 impl AskCard {
     /// A card about `ask`, coming up at `now`.
     pub(super) fn about(ask: &Ask, now: Instant) -> Self {
+        let body = Rc::new(Body::default());
+        body.exact_needed
+            .set(!ask.request.is_ascii() || !ask.cwd.is_ascii());
         Self {
             ask: ask.id,
             digest: ask.digest,
@@ -407,11 +517,26 @@ impl AskCard {
             press_settles_at: now,
             pointer_live_at: now + SETTLE,
             pointer_live: false,
-            body: Rc::default(),
+            body,
             handles: RefCell::default(),
             withdrawn: None,
             back_to_work: false,
         }
+    }
+
+    /// Shows the command as written, or as drawn again. The box is laid out
+    /// afresh; what of the command has been read stays read, since it is the
+    /// same command.
+    pub(super) fn toggle_as_written(&mut self) {
+        self.body.exact.set(!self.body.exact.get());
+        *self.body.laid.borrow_mut() = None;
+        self.body.shaped.borrow_mut().clear();
+        self.body.top.set(0);
+    }
+
+    /// Whether the request is shown as written.
+    pub(super) fn is_as_written(&self) -> bool {
+        self.body.exact.get()
     }
 
     /// The question it is about.
@@ -567,12 +692,22 @@ fn buttons(face: &Face<'_>) -> &'static [AskButton] {
     }
 }
 
-/// The buttons the keyboard can stand on: Allow only once the command has
-/// been read to its end, Go to only while its pane is open.
+/// Whether the card says the request holds text that is not ASCII, and
+/// offers to show it as written: a card still waiting, on a request of any
+/// kind, any text of which — command, what its agent says, path, change,
+/// working directory — is not all ASCII.
+fn offers_as_written(card: &AskCard, face: &Face<'_>) -> bool {
+    matches!(face, Face::Live(_)) && card.body.exact_needed.get()
+}
+
+/// The buttons the keyboard can stand on: Show as written first, when the
+/// card offers it, then the row's; Allow only once the command has been
+/// read to its end, Go to only while its pane is open.
 fn reachable(card: &AskCard, face: &Face<'_>, pane_open: bool) -> Vec<AskButton> {
-    buttons(face)
-        .iter()
-        .copied()
+    offers_as_written(card, face)
+        .then_some(AskButton::AsWritten)
+        .into_iter()
+        .chain(buttons(face).iter().copied())
         .filter(|button| match button {
             AskButton::Allow => card.body.read_to_end(),
             AskButton::GoTo => pane_open,
@@ -587,6 +722,7 @@ fn pressing(card: &AskCard, button: AskButton, by: Pressed) -> AskAction {
     let (ask, digest) = (card.ask, card.digest);
     match button {
         AskButton::NotNow => AskAction::NotNow,
+        AskButton::AsWritten => AskAction::AsWritten,
         AskButton::GoTo => AskAction::GoTo { ask, digest, by },
         AskButton::Allow => AskAction::Answer {
             ask,
@@ -733,9 +869,14 @@ pub(super) fn render(workspace: &Workspace, card: &AskCard) -> Box<dyn Element> 
         Face::Live(ask) => {
             let cwd =
                 crate::git::user_friendly_path(std::path::Path::new(&ask.cwd), workspace.home());
+            let cwd = if card.is_as_written() {
+                as_written(&cwd)
+            } else {
+                visible(&cwd)
+            };
             let place = match tab {
-                Some(tab) => format!("{} · {}", visible(&tab), visible(&cwd)),
-                None => visible(&cwd),
+                Some(tab) => format!("{} · {cwd}", visible(&tab)),
+                None => cwd,
             };
             column.add_child(one_line(place, ui));
             live_face(&mut column, workspace, card, ask, now, ui);
@@ -801,6 +942,14 @@ fn live_face(
 ) {
     let agent = ask.agent.name();
     let monospace = workspace.fonts().monospace;
+    let exact = card.is_as_written();
+    let shown = |text: &str| {
+        if exact {
+            as_written(text)
+        } else {
+            visible(text)
+        }
+    };
     match &ask.request {
         AskRequest::Command {
             command,
@@ -817,15 +966,23 @@ fn live_face(
                     ui,
                 ));
             }
+            let (text, muted) = if exact {
+                command_as_written(command)
+            } else {
+                command_lines(command)
+            };
             let lines = vec![Shown {
-                text: visible(command),
+                text,
                 color: theme().text_primary,
-                muted: Vec::new(),
+                muted,
             }];
             column.add_child(body_box(lines, card, monospace));
             column.add_child(extent(&card.body, ui));
+            if card.body.exact_needed.get() {
+                column.add_child(as_written_line(card, ui));
+            }
             if let Some(said) = said {
-                column.add_child(note(format!("{agent} says: {}", visible(said)), ui));
+                column.add_child(note(format!("{agent} says: {}", shown(said)), ui));
             }
             if *background {
                 column.add_child(note(
@@ -848,7 +1005,10 @@ fn live_face(
                 column.add_child(warning(outside.to_owned(), ui));
             }
             column.add_child(file_path(
-                crate::git::user_friendly_path(std::path::Path::new(path), workspace.home()),
+                shown(&crate::git::user_friendly_path(
+                    std::path::Path::new(path),
+                    workspace.home(),
+                )),
                 monospace,
             ));
             if let AskRequest::Write { replaces, .. } = &ask.request {
@@ -857,8 +1017,11 @@ fn live_face(
                     ui,
                 ));
             }
-            column.add_child(body_box(change_lines(&ask.request), card, monospace));
+            column.add_child(body_box(change_lines(&ask.request, exact), card, monospace));
             column.add_child(extent(&card.body, ui));
+            if card.body.exact_needed.get() {
+                column.add_child(as_written_line(card, ui));
+            }
         }
     }
     column.add_child(divider());
@@ -960,9 +1123,13 @@ pub(super) fn what_a_write_does(replaces: Option<Replaced>, lines: usize, agent:
 /// gives it, in the colour the Changes column draws that mark in, its marks
 /// for white space muted; and for a change with no text at all, one line
 /// saying so, in no mark's colour.
-pub(super) fn change_lines(request: &AskRequest) -> Vec<Shown> {
-    let lines: Vec<Shown> = request
-        .change()
+pub(super) fn change_lines(request: &AskRequest, exact: bool) -> Vec<Shown> {
+    let change = if exact {
+        request.change_as_written()
+    } else {
+        request.change()
+    };
+    let lines: Vec<Shown> = change
         .into_iter()
         .map(|line| {
             let (mark, prefix) = match line.mark {
@@ -992,13 +1159,74 @@ pub(super) fn change_lines(request: &AskRequest) -> Vec<Shown> {
 }
 
 /// The file a change is to, whole: in the terminal's family, broken at any
-/// character, and never cut — the end of a path is the part that names the
-/// file.
+/// character, never cut — the end of a path is the part that names the
+/// file — and left to right, as the box's rows are: see [`shape`].
 fn file_path(path: String, monospace: FamilyId) -> Box<dyn Element> {
     Container::new(
-        crookui_core::elements::Paragraph::new(visible(&path), monospace, LABEL_SIZE)
+        crookui_core::elements::Paragraph::new(path, monospace, LABEL_SIZE)
             .with_color(theme().text_primary)
             .breaking_anywhere()
+            .left_to_right()
+            .finish(),
+    )
+    .with_horizontal_padding(ROW_INSET)
+    .with_margin_bottom(6.)
+    .finish()
+}
+
+/// A line under a request with text in it that is not ASCII, saying so,
+/// and a button that shows it as written — every such character written
+/// out as `⟨U+XXXX⟩`, muted — or as drawn again.
+///
+/// A shell's syntax is ASCII, and so is nearly everything a person reads a
+/// command or a change for. Text that is not can be drawn to pass for it —
+/// a letter that reorders a line, a character a font draws as a quote, a
+/// `#`, a `<<` — and no list of such characters is ever whole. Shown as
+/// written, what is drawn is printable ASCII and muted marks, which nothing
+/// can pass for. So Allow waits until the request has been shown as written
+/// and read to its end so; the card's own wait then applies as ever. Once
+/// it has, it stays allowed shown either way: it is the same request, and
+/// it has been read as what it is.
+fn as_written_line(card: &AskCard, ui: FamilyId) -> Box<dyn Element> {
+    let chosen = card.chosen == AskButton::AsWritten;
+    let state = card
+        .handles
+        .borrow_mut()
+        .for_button(AskButton::AsWritten, true);
+    let exact = card.is_as_written();
+    let said = match (exact, card.body.waits_for_exact()) {
+        (true, true) => "Shown as written · read it to its end to allow",
+        (true, false) => "Shown as written: what is not ASCII written out",
+        (false, true) => "Contains text that is not ASCII · Show as written to allow",
+        (false, false) => "Contains text that is not ASCII",
+    };
+    let label = if exact {
+        "Show as drawn"
+    } else {
+        "Show as written"
+    };
+    Container::new(
+        Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(8.)
+            .with_child(
+                Expanded::new(
+                    1.,
+                    Text::new(said, ui, super::tab_menu::PATH_SIZE)
+                        .with_color(theme().text_muted)
+                        .with_ellipsis(Cut::End)
+                        .finish(),
+                )
+                .finish(),
+            )
+            .with_child(button(
+                state,
+                label,
+                chosen,
+                Some(WorkspaceAction::from(AskAction::AsWritten)),
+                ui,
+            ))
             .finish(),
     )
     .with_horizontal_padding(ROW_INSET)
@@ -1018,6 +1246,10 @@ fn extent(body: &Body, ui: FamilyId) -> Box<dyn Element> {
     let lines = body.lines.get();
     let top = body.top.get();
     let said = match lines {
+        _ if body.measuring.get() => "Measuring the command…".to_owned(),
+        _ if body.too_wide() => {
+            "A line is drawn wider than this card, so Allow waits: answer in its tab".to_owned()
+        }
         0 => " ".to_owned(),
         1 => "1 line".to_owned(),
         lines if lines <= body.shown() => format!("{lines} lines"),
@@ -1052,7 +1284,11 @@ fn extent(body: &Body, ui: FamilyId) -> Box<dyn Element> {
 /// A [`note`] wraps, and one of these wrapping onto a second line would push
 /// the buttons down under a pointer on its way to them, with nothing to say
 /// they had moved and no wait started again.
+///
+/// Left to right, as the box's rows are — see [`shape`] — since what it
+/// names, a tab and a directory, is read in order.
 fn one_line(text: String, ui: FamilyId) -> Box<dyn Element> {
+    let (text, _) = crookui_core::text_layout::left_to_right(&text);
     Container::new(
         Text::new(text, ui, super::tab_menu::PATH_SIZE)
             .with_color(theme().text_muted)
@@ -1109,7 +1345,7 @@ fn button_row(
         .with_spacing(8.);
     for button_kind in buttons(face) {
         let live = match button_kind {
-            AskButton::NotNow => true,
+            AskButton::NotNow | AskButton::AsWritten => true,
             AskButton::Allow => pointer && card.body.read_to_end(),
             AskButton::Deny => pointer,
             AskButton::GoTo => pointer && pane_open,
@@ -1120,6 +1356,7 @@ fn button_row(
             (AskButton::GoTo, _) => "Go to tab",
             (AskButton::NotNow, Face::Live(_)) => "Not now",
             (AskButton::NotNow, Face::Withdrawn(_)) => "Close",
+            (AskButton::AsWritten, _) => "Show as written",
         };
         let action =
             live.then(|| WorkspaceAction::from(pressing(card, *button_kind, Pressed::Pointer)));
@@ -1151,20 +1388,43 @@ pub(super) struct Shown {
     pub(super) text: String,
     /// What it is drawn in.
     pub(super) color: crookui_core::geometry::Color,
-    /// Where in [`Self::text`] the marks drawn muted are, in bytes: a
-    /// change's marks for tabs and spaces at the ends of lines.
+    /// Where in [`Self::text`] the marks drawn muted are, in bytes: the
+    /// marks for a change's tabs, a command's leading ones, and the tabs and
+    /// spaces either ends a line in.
     pub(super) muted: Vec<std::ops::Range<usize>>,
 }
 
-/// The command or the change, wrapped at whichever column the box's width
-/// runs out at and shown [`BODY_LINES`] at a time, or as many as the height
-/// it is given has room for.
+/// The command or the change, broken into rows where the box's width runs
+/// out and shown [`BODY_LINES`] at a time, or as many as the height it is
+/// given has room for.
 ///
 /// Built here rather than from a [`Scrollable`], which lays out the whole of
 /// what it scrolls: a command can be as long as the socket's line, and the
-/// card would build every line of it on every frame. This wraps it — string
-/// work, no shaping — and builds the lines on screen, and writes into the
-/// [`Body`] how many lines there are and whether the last is showing.
+/// card would build every line of it on every frame. This breaks it by how
+/// wide each of its graphemes is drawn — measured once each, by the shaper
+/// that draws them, not counted — and shapes the rows on screen, once each,
+/// and writes into the [`Body`] how many rows there are and whether the last
+/// is showing.
+///
+/// Counting would not do. A character a width table calls one column can be
+/// drawn two by the colour-emoji font it falls back to — `⚠` is — and a row
+/// of them counted to fit would run past the box's edge, the rest of the
+/// command cut off with it, unseen. Nor would measuring characters one at a
+/// time: `#` and a keycap mark are one and nothing apart, and two cells
+/// together. A row is never broken inside a grapheme, a flag or a conjunct,
+/// or inside a mark or a written-out character, and never wider than the box
+/// it is drawn in; and should the shaper still draw one wider, it is cut at
+/// the edge and the [`Body`] remembers, which keeps Allow waiting: what was
+/// not drawn was not read.
+///
+/// A character no installed face has a glyph for is written out, muted, as
+/// `⟨U+XXXX⟩`: every such one is drawn as the same box, which says nothing
+/// about which it is. And every row reads left to right, its characters in
+/// the order they run — see [`shape`].
+///
+/// Each row starts after a gutter. A row that goes on with the line before
+/// it has [`CONTINUED`] there, muted, and a row that starts a line has
+/// nothing, so a line the box broke never reads as a line of its own.
 struct CommandBody {
     text: Vec<Shown>,
     body: Rc<Body>,
@@ -1189,100 +1449,399 @@ impl CommandBody {
     }
 }
 
-/// The row of `shown` from `range`, in its colour and its marks muted.
+/// How long one layout may spend shaping graphemes it has not met before.
 ///
-/// One shaped line however many colours it has: a row of separate texts
-/// would be placed by each one's measured width, which need not count the
-/// spaces a tab's mark is followed by.
-fn row(shown: &Shown, range: std::ops::Range<usize>, family: FamilyId) -> Box<dyn Element> {
-    let line = &shown.text[range.clone()];
-    // A line with nothing on it is still a line of the command.
-    if line.is_empty() {
-        return Text::new(" ", family, LABEL_SIZE)
-            .with_color(shown.color)
-            .finish();
+/// A grapheme in the box's own face is read off that face's tables, in
+/// microseconds; one that falls back is shaped, and the shaper searches the
+/// faces for it. A command of thousands of those would hold the window that
+/// long. Past this, the layout guesses — [`GUESSED_CELLS`] — and the next
+/// frame measures on, Allow waiting until none is a guess.
+const MEASURING_BUDGET: Duration = Duration::from_millis(8);
+
+/// How many cells a grapheme not yet measured is taken to be wide, for each
+/// character in it: wide, so that a row broken by a guess is no wider than
+/// the box once measured.
+const GUESSED_CELLS: f32 = 2.;
+
+/// The line style the box's text is shaped in.
+fn line_style() -> crookui_core::fonts::LineStyle {
+    use crookui_core::fonts::{DEFAULT_TOP_BOTTOM_RATIO, DEFAULT_UI_LINE_HEIGHT_RATIO, LineStyle};
+    LineStyle {
+        font_size: LABEL_SIZE,
+        line_height_ratio: DEFAULT_UI_LINE_HEIGHT_RATIO,
+        baseline_ratio: DEFAULT_TOP_BOTTOM_RATIO,
+        fixed_width_tab_size: None,
     }
-    let muted: Vec<std::ops::Range<usize>> = shown
-        .muted
-        .iter()
-        .filter(|mark| mark.start >= range.start && mark.end <= range.end)
-        .map(|mark| mark.start - range.start..mark.end - range.start)
-        .collect();
-    if muted.is_empty() {
-        return Text::new(line.to_owned(), family, LABEL_SIZE)
-            .with_color(shown.color)
-            .finish();
-    }
-    Marked {
-        text: line.to_owned(),
-        muted,
-        color: shown.color,
-        family,
-        line: None,
-        size: None,
-        origin: None,
-    }
-    .finish()
 }
 
-/// One line of text in one colour with some runs of it muted, shaped as one
-/// line so that every character stays in its column.
-struct Marked {
-    text: String,
-    muted: Vec<std::ops::Range<usize>>,
-    color: crookui_core::geometry::Color,
+/// `text` shaped as one row of the box, in `family`, with `runs` its styles,
+/// or one of the default's when `runs` is empty.
+///
+/// Left to right whatever letter it starts with, and with no character
+/// moved but within a run of right-to-left letters: a shaper would take
+/// the row's direction from its first strong letter, and reorder what lies
+/// between two right-to-left ones with them — so that `: ع ; rm -rf $HOME
+/// # ع` is drawn with `rm` behind the `#`, where a shell runs it. See
+/// [`crookui_core::text_layout::layout_left_to_right`].
+fn shape(
+    text: &str,
     family: FamilyId,
-    line: Option<crookui_core::text_layout::Line>,
+    runs: &[(std::ops::Range<usize>, crookui_core::fonts::StyleAndFont)],
+    ctx: &mut LayoutContext,
+) -> Line {
+    use crookui_core::fonts::{Properties, StyleAndFont, TextStyle};
+    let whole = [(
+        0..text.len(),
+        StyleAndFont::new(family, Properties::default(), TextStyle::default()),
+    )];
+    crookui_core::text_layout::layout_left_to_right(
+        ctx.text_layout,
+        text,
+        line_style(),
+        if runs.is_empty() { &whole } else { runs },
+        f32::INFINITY,
+    )
+}
+
+/// One piece of a run of the box's text that a row is never broken inside:
+/// a grapheme, or a whole mark or written-out character, or a newline.
+#[derive(Clone, Debug)]
+struct Piece {
+    /// Where in the run's text it is, in bytes.
+    range: std::ops::Range<usize>,
+    /// What it is drawn as, when that is not its text: a grapheme some
+    /// character of which no face has, its characters written out.
+    drawn: Option<String>,
+    /// Whether it is drawn muted.
+    muted: bool,
+    /// Whether it is a newline, which ends a row and is not drawn.
+    newline: bool,
+    /// How wide it is drawn.
+    width: f32,
+}
+
+/// Where the pieces of `text` are, in bytes, and which are muted: each of
+/// `muted` whole, every other grapheme on its own.
+fn pieces(text: &str, muted: &[std::ops::Range<usize>]) -> Vec<(std::ops::Range<usize>, bool)> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut pieces: Vec<(std::ops::Range<usize>, bool)> = Vec::new();
+    let mut marks = muted.iter().peekable();
+    for (at, grapheme) in text.grapheme_indices(true) {
+        while marks.next_if(|mark| mark.end <= at).is_some() {}
+        let mark = marks.peek().filter(|mark| mark.start <= at);
+        match (pieces.last_mut(), mark) {
+            // The rest of the mark the last piece started.
+            (Some((range, true)), Some(mark)) if range.start >= mark.start => {
+                range.end = at + grapheme.len();
+            }
+            (_, mark) => pieces.push((at..at + grapheme.len(), mark.is_some())),
+        }
+    }
+    pieces
+}
+
+/// The command broken into rows, and what for.
+struct Laid {
+    /// The family and the room it was broken for.
+    key: BrokenFor,
+    /// Each run's pieces.
+    pieces: Vec<Vec<Piece>>,
+    /// The rows.
+    rows: Vec<Wrapped>,
+    /// Whether some piece's width was guessed.
+    guessed: bool,
+}
+
+/// The family and the room, in pixels as bits, a command's rows were
+/// broken for.
+type BrokenFor = (FamilyId, u32);
+
+/// One row of the box: which run of its text it is of, which of that run's
+/// pieces it holds, and whether it goes on with the line before it rather
+/// than starting one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Wrapped {
+    run: usize,
+    start: usize,
+    end: usize,
+    continued: bool,
+}
+
+/// Where each row of a run starts and ends, by piece, given how wide each
+/// piece is and whether it is a newline, broken where the next piece would
+/// take it past `room` — and whether the row goes on with the line before
+/// it rather than starting one. Every line of it is a row at least, an empty
+/// one included, and no row is wider than `room` but one with one piece.
+pub(super) fn wrap(pieces: &[(f32, bool)], room: f32) -> Vec<(usize, usize, bool)> {
+    let mut rows = Vec::new();
+    let mut start = 0;
+    let mut continued = false;
+    let mut width = 0.;
+    for (at, &(wide, newline)) in pieces.iter().enumerate() {
+        if newline {
+            rows.push((start, at, continued));
+            start = at + 1;
+            continued = false;
+            width = 0.;
+            continue;
+        }
+        if width + wide > room && at > start {
+            rows.push((start, at, continued));
+            start = at;
+            continued = true;
+            width = 0.;
+        }
+        width += wide;
+    }
+    rows.push((start, pieces.len(), continued));
+    rows
+}
+
+/// How wide graphemes are drawn, from what is kept of them, from the box's
+/// own face, or shaped, until the layout's time to shape runs out.
+struct Measuring<'a, 'c> {
+    family: FamilyId,
+    ctx: &'a mut LayoutContext<'c>,
+    known: &'a mut std::collections::HashMap<String, Grapheme>,
+    until: Instant,
+    cell: f32,
+    guessed: bool,
+}
+
+/// What is kept of one grapheme.
+#[derive(Clone, Copy)]
+struct Grapheme {
+    /// How wide it is drawn.
+    width: f32,
+    /// Whether some face has a glyph for each of its characters; when not,
+    /// its width is not what it is drawn as, which is written out.
+    covered: bool,
+}
+
+impl Measuring<'_, '_> {
+    /// `grapheme`, measured, or `None` when the time to shape it is gone.
+    fn grapheme(&mut self, grapheme: &str) -> Option<Grapheme> {
+        if let Some(known) = self.known.get(grapheme) {
+            return Some(*known);
+        }
+        let layout = self.ctx.text_layout;
+        let mut characters = grapheme.chars();
+        let alone = match (characters.next(), characters.next()) {
+            (Some(character), None) => Some(character),
+            _ => None,
+        };
+        let in_face = |character: char| {
+            layout.advance_in_face(
+                self.family,
+                crookui_core::fonts::Properties::default(),
+                LABEL_SIZE,
+                character,
+            )
+        };
+        // Asked before it is shaped: a character no face has is the one a
+        // shaper takes longest over, searching every face for it, and it is
+        // drawn written out, not as itself. Not yet known — the table of
+        // which faces have what still being read — is a width not yet known.
+        let (mut covered, mut known) = (true, true);
+        for character in grapheme.chars() {
+            let covers = match in_face(character) {
+                Some(_) => Some(true),
+                None => layout.covers(character),
+            };
+            match covers {
+                Some(true) => {}
+                Some(false) => covered = false,
+                None => known = false,
+            }
+        }
+        let measured = match alone.and_then(in_face) {
+            Some(width) => Grapheme {
+                width,
+                covered: true,
+            },
+            None if !covered => Grapheme {
+                width: 0.,
+                covered: false,
+            },
+            None if !known || Instant::now() >= self.until => {
+                self.guessed = true;
+                return None;
+            }
+            None => Grapheme {
+                width: shape(grapheme, self.family, &[], self.ctx).width,
+                covered: true,
+            },
+        };
+        self.known.insert(grapheme.to_owned(), measured);
+        Some(measured)
+    }
+
+    /// How wide `text` is drawn: each grapheme of it, guessed when need be.
+    fn text(&mut self, text: &str) -> f32 {
+        use unicode_segmentation::UnicodeSegmentation;
+        text.graphemes(true)
+            .map(|grapheme| match self.grapheme(grapheme) {
+                Some(measured) => measured.width,
+                None => self.guess(grapheme),
+            })
+            .sum()
+    }
+
+    /// The width taken for `grapheme` until it is measured.
+    fn guess(&self, grapheme: &str) -> f32 {
+        GUESSED_CELLS * self.cell * grapheme.chars().count() as f32
+    }
+
+    /// The piece of `text` at `range`, measured, and drawn written out where
+    /// no face has a character of it.
+    fn piece(&mut self, text: &str, range: std::ops::Range<usize>, muted: bool) -> Piece {
+        let piece = &text[range.clone()];
+        if piece == "\n" {
+            return Piece {
+                range,
+                drawn: None,
+                muted,
+                newline: true,
+                width: 0.,
+            };
+        }
+        if muted {
+            let width = self.text(piece);
+            return Piece {
+                range,
+                drawn: None,
+                muted,
+                newline: false,
+                width,
+            };
+        }
+        match self.grapheme(piece) {
+            Some(Grapheme { covered: false, .. }) => {
+                let layout = self.ctx.text_layout;
+                let drawn: String = piece
+                    .chars()
+                    .map(|character| {
+                        let in_face = layout
+                            .advance_in_face(
+                                self.family,
+                                crookui_core::fonts::Properties::default(),
+                                LABEL_SIZE,
+                                character,
+                            )
+                            .is_some();
+                        if in_face || layout.covers(character) != Some(false) {
+                            character.to_string()
+                        } else {
+                            format!("⟨U+{:04X}⟩", u32::from(character))
+                        }
+                    })
+                    .collect();
+                let width = self.text(&drawn);
+                Piece {
+                    range,
+                    drawn: Some(drawn),
+                    muted: true,
+                    newline: false,
+                    width,
+                }
+            }
+            Some(Grapheme { width, .. }) => Piece {
+                range,
+                drawn: None,
+                muted,
+                newline: false,
+                width,
+            },
+            None => Piece {
+                range,
+                drawn: None,
+                muted,
+                newline: false,
+                width: self.guess(piece),
+            },
+        }
+    }
+}
+
+/// The text of `row`, as drawn, and where in it what is muted is, in bytes.
+fn row_text(text: &[Shown], laid: &Laid, row: &Wrapped) -> (String, Vec<std::ops::Range<usize>>) {
+    let source = &text[row.run].text;
+    let mut drawn = String::new();
+    let mut muted: Vec<std::ops::Range<usize>> = Vec::new();
+    for piece in &laid.pieces[row.run][row.start..row.end] {
+        let start = drawn.len();
+        drawn.push_str(
+            piece
+                .drawn
+                .as_deref()
+                .unwrap_or(&source[piece.range.clone()]),
+        );
+        if piece.muted {
+            match muted.last_mut() {
+                Some(last) if last.end == start => last.end = drawn.len(),
+                _ => muted.push(start..drawn.len()),
+            }
+        }
+    }
+    // A line with nothing on it is still a line of the command.
+    if drawn.is_empty() {
+        drawn.push(' ');
+    }
+    (drawn, muted)
+}
+
+/// `text` shaped as a row in `family`, its `muted` ranges in the muted
+/// colour and the rest in whatever it is painted in.
+fn shape_row(
+    text: &str,
+    muted: &[std::ops::Range<usize>],
+    family: FamilyId,
+    ctx: &mut LayoutContext,
+) -> Line {
+    use crookui_core::fonts::{Properties, StyleAndFont, TextStyle};
+    let style = |color: Option<crookui_core::geometry::Color>| {
+        StyleAndFont::new(
+            family,
+            Properties::default(),
+            TextStyle {
+                foreground_color: color,
+                ..TextStyle::default()
+            },
+        )
+    };
+    let mut runs = Vec::new();
+    let mut at = 0;
+    for mark in muted {
+        if mark.start > at {
+            runs.push((at..mark.start, style(None)));
+        }
+        runs.push((mark.clone(), style(Some(theme().text_muted))));
+        at = mark.end;
+    }
+    if at < text.len() {
+        runs.push((at..text.len(), style(None)));
+    }
+    shape(text, family, &runs, ctx)
+}
+
+/// One shaped row, painted in one colour but for the runs it names its own
+/// for, and never wider than `room`: a glyph past it is not drawn.
+struct Drawn {
+    line: Rc<Line>,
+    color: crookui_core::geometry::Color,
+    room: f32,
     size: Option<Vector2F>,
     origin: Option<Point>,
 }
 
-impl Element for Marked {
+impl Element for Drawn {
     fn layout(
         &mut self,
         constraint: SizeConstraint,
-        ctx: &mut LayoutContext,
+        _: &mut LayoutContext,
         _: &AppContext,
     ) -> Vector2F {
-        use crookui_core::fonts::{
-            DEFAULT_TOP_BOTTOM_RATIO, DEFAULT_UI_LINE_HEIGHT_RATIO, LineStyle, Properties,
-            StyleAndFont, TextStyle,
-        };
-        let style = |color: Option<crookui_core::geometry::Color>| {
-            StyleAndFont::new(
-                self.family,
-                Properties::default(),
-                TextStyle {
-                    foreground_color: color,
-                    ..TextStyle::default()
-                },
-            )
-        };
-        let mut runs = Vec::new();
-        let mut at = 0;
-        for mark in &self.muted {
-            if mark.start > at {
-                runs.push((at..mark.start, style(None)));
-            }
-            runs.push((mark.clone(), style(Some(theme().text_muted))));
-            at = mark.end;
-        }
-        if at < self.text.len() {
-            runs.push((at..self.text.len(), style(None)));
-        }
-        let line = ctx.text_layout.layout_line(
-            &self.text,
-            LineStyle {
-                font_size: LABEL_SIZE,
-                line_height_ratio: DEFAULT_UI_LINE_HEIGHT_RATIO,
-                baseline_ratio: DEFAULT_TOP_BOTTOM_RATIO,
-                fixed_width_tab_size: None,
-            },
-            &runs,
-            constraint.max.x(),
-        );
-        let size = constraint.apply(vec2f(line.width, line.height()));
-        self.line = Some(line);
+        let size = constraint.apply(vec2f(self.line.width.min(self.room), self.line.height()));
         self.size = Some(size);
         size
     }
@@ -1292,9 +1851,11 @@ impl Element for Marked {
             .size
             .expect("a line was painted before it was laid out");
         self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
-        if let Some(line) = &self.line {
-            line.paint(RectF::new(origin, size), self.color, ctx.scene);
-        }
+        self.line.paint(
+            RectF::new(origin, vec2f(size.x().min(self.room), size.y())),
+            self.color,
+            ctx.scene,
+        );
     }
 
     fn dispatch_event(
@@ -1315,43 +1876,90 @@ impl Element for Marked {
     }
 }
 
-/// The rows `text` wraps to at `columns`, as which run each is of and where
-/// in it it starts and ends, in bytes.
-fn rows(text: &[Shown], columns: usize) -> Vec<(usize, usize, usize)> {
-    text.iter()
-        .enumerate()
-        .flat_map(|(run, shown)| {
-            wrap(&shown.text, columns)
+impl CommandBody {
+    /// The command broken into rows in `room`, as kept from the last layout
+    /// when that was for this family and room and guessed at nothing, and
+    /// broken again, measuring on, when not.
+    fn laid(&self, room: f32, cell: f32, ctx: &mut LayoutContext) -> Rc<Laid> {
+        let key = (self.family, room.to_bits());
+        if let Some(laid) = &*self.body.laid.borrow()
+            && laid.key == key
+            && !laid.guessed
+        {
+            return laid.clone();
+        }
+        let mut widths = self.body.widths.borrow_mut();
+        let known = widths.entry(self.family).or_default();
+        let mut measuring = Measuring {
+            family: self.family,
+            ctx,
+            known,
+            until: Instant::now() + MEASURING_BUDGET,
+            cell,
+            guessed: false,
+        };
+        let mut all = Vec::with_capacity(self.text.len());
+        let mut rows = Vec::new();
+        for (run, shown) in self.text.iter().enumerate() {
+            let run_pieces: Vec<Piece> = pieces(&shown.text, &shown.muted)
                 .into_iter()
-                .map(move |(start, end)| (run, start, end))
-        })
-        .collect()
-}
-
-/// Where each line of `text` starts and ends, in bytes, wrapped at `columns`
-/// display columns: every line of it at least one, an empty one included.
-pub(super) fn wrap(text: &str, columns: usize) -> Vec<(usize, usize)> {
-    let columns = columns.max(1);
-    let mut lines = Vec::new();
-    let mut start = 0;
-    let mut width = 0;
-    for (at, character) in text.char_indices() {
-        if character == '\n' {
-            lines.push((start, at));
-            start = at + 1;
-            width = 0;
-            continue;
+                .map(|(range, muted)| measuring.piece(&shown.text, range, muted))
+                .collect();
+            let measured: Vec<(f32, bool)> = run_pieces
+                .iter()
+                .map(|piece| (piece.width, piece.newline))
+                .collect();
+            rows.extend(
+                wrap(&measured, room)
+                    .into_iter()
+                    .map(|(start, end, continued)| Wrapped {
+                        run,
+                        start,
+                        end,
+                        continued,
+                    }),
+            );
+            all.push(run_pieces);
         }
-        let wide = character.width().unwrap_or(0);
-        if width + wide > columns && at > start {
-            lines.push((start, at));
-            start = at;
-            width = 0;
+        let laid = Rc::new(Laid {
+            key,
+            pieces: all,
+            rows,
+            guessed: measuring.guessed,
+        });
+        // A frame that guessed asks for the next, which measures on: the
+        // window draws only when asked, and a card left on its guess would
+        // say it is measuring, with Allow waiting, for good.
+        if self.body.measuring.replace(laid.guessed) != laid.guessed || laid.guessed {
+            self.body.news.set(true);
         }
-        width += wide;
+        // The rows drawn of the last breaking are not this one's.
+        self.body.shaped.borrow_mut().clear();
+        *self.body.laid.borrow_mut() = Some(laid.clone());
+        laid
     }
-    lines.push((start, text.len()));
-    lines
+
+    /// Row `index` of `laid`, shaped, as kept or shaped now — and the box
+    /// told, when it is drawn wider than `room`.
+    fn shaped_row(
+        &self,
+        laid: &Laid,
+        index: usize,
+        room: f32,
+        ctx: &mut LayoutContext,
+    ) -> Rc<Line> {
+        if let Some(line) = self.body.shaped.borrow().get(&index) {
+            return line.clone();
+        }
+        let (text, muted) = row_text(&self.text, laid, &laid.rows[index]);
+        let line = Rc::new(shape_row(&text, &muted, self.family, ctx));
+        // Half a pixel for the rounding of a sum of advances.
+        if line.width > room + 0.5 {
+            self.body.note_too_wide();
+        }
+        self.body.shaped.borrow_mut().insert(index, line.clone());
+        line
+    }
 }
 
 impl Element for CommandBody {
@@ -1361,45 +1969,77 @@ impl Element for CommandBody {
         ctx: &mut LayoutContext,
         app: &AppContext,
     ) -> Vector2F {
-        // One cell's advance, measured off the family the lines are drawn in,
-        // so the wrap is where the box's edge is.
-        let mut probe = Text::new("0".repeat(16), self.family, LABEL_SIZE).finish();
-        let measured = probe.layout(
-            SizeConstraint {
-                min: Vector2F::zero(),
-                max: vec2f(f32::INFINITY, f32::INFINITY),
-            },
-            ctx,
-            app,
-        );
-        let advance = (measured.x() / 16.).max(1.);
-        self.line_height = measured.y().max(1.);
+        // One cell's advance, off the face the lines are drawn in, for the
+        // gutter and for a box with no width to measure against.
+        let cell = ctx
+            .text_layout
+            .advance_in_face(
+                self.family,
+                crookui_core::fonts::Properties::default(),
+                LABEL_SIZE,
+                '0',
+            )
+            .unwrap_or_else(|| shape("0", self.family, &[], ctx).width)
+            .max(1.);
+        self.line_height = line_style().font_size * line_style().line_height_ratio;
+        let mark = Rc::new(shape(CONTINUED, self.family, &[], ctx));
+        let gutter = (mark.width.max(cell) + cell / 2.).ceil();
         let width = constraint.max.x();
-        let columns = if width.is_finite() {
-            (((width - THUMB_WIDTH * 2.) / advance).floor() as usize).max(1)
+        let room = if width.is_finite() {
+            (width - THUMB_WIDTH * 2. - gutter).max(cell)
         } else {
-            FALLBACK_COLUMNS
+            FALLBACK_COLUMNS as f32 * cell
         };
 
         // As many lines as the card has room for under the window's edge, so
         // that a short window scrolls the command rather than running the
         // card's end, the command's with it, off the bottom of the window.
-        let room = constraint.max.y();
-        let fits = if room.is_finite() {
-            ((room / self.line_height).floor() as usize).clamp(1, BODY_LINES)
+        let height = constraint.max.y();
+        let fits = if height.is_finite() {
+            ((height / self.line_height).floor() as usize).clamp(1, BODY_LINES)
         } else {
             BODY_LINES
         };
-        let wrapped = rows(&self.text, columns);
-        self.body.measured(wrapped.len(), fits);
+        let laid = self.laid(room, cell, ctx);
+        self.body.measured(laid.rows.len(), fits);
         let top = self.body.top.get().min(self.body.last_top());
         self.body.top.set(top);
 
         let mut lines = Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Start);
-        for (run, start, end) in wrapped.iter().skip(top).take(fits) {
-            lines.add_child(row(&self.text[*run], *start..*end, self.family));
+        let end = (top + fits).min(laid.rows.len());
+        for index in top..end {
+            let row = laid.rows[index];
+            let gutter_mark: Box<dyn Element> = if row.continued {
+                Drawn {
+                    line: mark.clone(),
+                    color: theme().text_muted,
+                    room: gutter,
+                    size: None,
+                    origin: None,
+                }
+                .finish()
+            } else {
+                Empty::new().finish()
+            };
+            let line = self.shaped_row(&laid, index, room, ctx);
+            lines.add_child(
+                Flex::row()
+                    .with_cross_axis_alignment(CrossAxisAlignment::Start)
+                    .with_child(ConstrainedBox::new(gutter_mark).with_width(gutter).finish())
+                    .with_child(
+                        Drawn {
+                            line,
+                            color: self.text[row.run].color,
+                            room,
+                            size: None,
+                            origin: None,
+                        }
+                        .finish(),
+                    )
+                    .finish(),
+            );
         }
         let mut lines = lines.finish();
         let shown = lines.layout(
@@ -1521,19 +2161,123 @@ impl Element for CommandBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_width::UnicodeWidthStr;
+
+    /// The rows `text`, with `muted` its marks, breaks into in `room`
+    /// cells, each piece as wide as `advance` says.
+    fn broken_marked<'a>(
+        text: &'a str,
+        muted: &[std::ops::Range<usize>],
+        room: usize,
+        advance: impl Fn(&str) -> usize,
+    ) -> Vec<(&'a str, bool)> {
+        let pieces = pieces(text, muted);
+        let measured: Vec<(f32, bool)> = pieces
+            .iter()
+            .map(|(range, _)| {
+                let piece = &text[range.clone()];
+                (advance(piece) as f32, piece == "\n")
+            })
+            .collect();
+        wrap(&measured, room as f32)
+            .into_iter()
+            .map(|(start, end, continued)| {
+                let from = pieces.get(start).map_or(text.len(), |piece| piece.0.start);
+                let to = pieces[..end]
+                    .last()
+                    .map_or(from, |piece| piece.0.end.max(from));
+                (&text[from..to], continued)
+            })
+            .collect()
+    }
+
+    /// The same, with no marks.
+    fn broken(text: &str, room: usize, advance: impl Fn(&str) -> usize) -> Vec<(&str, bool)> {
+        broken_marked(text, &[], room, advance)
+    }
+
+    /// How many cells a terminal's width table counts a piece as.
+    fn columns(piece: &str) -> usize {
+        piece.width()
+    }
 
     #[test]
-    fn a_command_wraps_at_the_columns_it_has_and_keeps_its_empty_lines() {
-        assert_eq!(wrap("abcdef", 4), [(0, 4), (4, 6)]);
-        assert_eq!(wrap("ab\n\ncd", 4), [(0, 2), (3, 3), (4, 6)]);
-        assert_eq!(wrap("", 4), [(0, 0)]);
-        // A wide character takes two columns, and is never split.
-        let text = "ab漢字";
-        let lines: Vec<&str> = wrap(text, 4)
-            .into_iter()
-            .map(|(start, end)| &text[start..end])
-            .collect();
-        assert_eq!(lines, ["ab漢", "字"]);
+    fn a_command_wraps_at_the_room_it_has_and_keeps_its_empty_lines() {
+        assert_eq!(
+            broken("abcdef", 4, columns),
+            [("abcd", false), ("ef", true)]
+        );
+        assert_eq!(
+            broken("ab\n\ncd", 4, columns),
+            [("ab", false), ("", false), ("cd", false)]
+        );
+        assert_eq!(broken("", 4, columns), [("", false)]);
+        // A wide character takes two cells, and is never split.
+        assert_eq!(
+            broken("ab漢字", 4, columns),
+            [("ab漢", false), ("字", true)]
+        );
+        // A row the box broke goes on with the line; one after a newline
+        // starts one, however full the row before it was.
+        assert_eq!(
+            broken("abcd\nefgh", 4, columns),
+            [("abcd", false), ("efgh", false)]
+        );
+        assert_eq!(
+            broken("abcdefgh", 4, columns),
+            [("abcd", false), ("efgh", true)]
+        );
+    }
+
+    #[test]
+    fn a_row_is_broken_by_how_wide_its_graphemes_are_drawn() {
+        // `⚠` is one column to a width table and two cells as the
+        // colour-emoji font draws it: a row of them counted would run past
+        // the box's edge and take the rest of the command with it.
+        let drawn = |piece: &str| if piece == "⚠" { 2 } else { piece.width() };
+        let command = "echo ⚠⚠⚠⚠ ; rm";
+        assert_eq!(
+            broken(command, 8, drawn),
+            [("echo ⚠", false), ("⚠⚠⚠ ;", true), (" rm", true)]
+        );
+        // Counted, the first row would hold all four, drawn twelve wide.
+        assert_eq!(broken(command, 8, columns)[0].0, "echo ⚠⚠⚠");
+        // A combining mark stays with what it is drawn over.
+        assert_eq!(
+            broken("abce\u{301}fg", 4, columns),
+            [("abce\u{301}", false), ("fg", true)]
+        );
+        // A keycap is one piece, measured whole: `#` and its mark are one
+        // cell and none apart, and two together.
+        let keycap = |piece: &str| {
+            if piece == "#\u{20e3}" {
+                2
+            } else {
+                piece.width()
+            }
+        };
+        assert_eq!(
+            broken("ab#\u{20e3}c", 3, keycap),
+            [("ab", false), ("#\u{20e3}c", true)]
+        );
+        // So is a flag, never broken between its two letters.
+        assert_eq!(
+            broken("ab\u{1f1fa}\u{1f1f8}", 3, |piece: &str| piece.width()),
+            [("ab", false), ("\u{1f1fa}\u{1f1f8}", true)]
+        );
+    }
+
+    #[test]
+    fn a_written_out_character_is_never_broken() {
+        let text = "echo a⟨U+200B⟩b";
+        let token = 6..text.len() - 1;
+        assert_eq!(&text[token.clone()], "⟨U+200B⟩");
+        assert_eq!(
+            broken_marked(text, &[token], 10, columns),
+            [("echo a", false), ("⟨U+200B⟩b", true)]
+        );
+        // Unmarked, the same characters are text, and broken anywhere.
+        assert_eq!(broken(text, 10, columns)[0].0, "echo a⟨U+2");
     }
 
     #[test]

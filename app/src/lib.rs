@@ -2766,6 +2766,21 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
             }
         }
         frame(&mut app, &mut presenter);
+        if let Some(fixture) = &overrides.ask_fixture {
+            app.update(|ctx| {
+                workspace.update(ctx, |workspace, ctx| fixture.after_opening(workspace, ctx));
+            });
+            // A view laid out afresh measures over a frame or two, each
+            // asked for by the last, as the window's delegate does.
+            for _ in 0..5 {
+                frame(&mut app, &mut presenter);
+                app.update(|ctx| {
+                    workspace.update(ctx, |workspace, ctx| {
+                        workspace.frame_drawn(ctx);
+                    });
+                });
+            }
+        }
     }
 
     // A picture a program printed is decoded on a pool, and the frame that

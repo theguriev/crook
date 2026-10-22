@@ -383,6 +383,9 @@ pub enum AskAction {
     NotNow,
     /// The command on the card was scrolled.
     Scrolled,
+    /// Show the card's command as written — every character that is not
+    /// ASCII written out — or as drawn again. Answers nothing.
+    AsWritten,
     /// Keep every key from whatever has the keyboard until it has been still
     /// for a second, as after the card closes. What the header's "N waiting"
     /// press does once it has focused the next waiting pane: the agent there
@@ -441,6 +444,9 @@ pub enum AskButton {
     Deny,
     /// Go to the agent's tab.
     GoTo,
+    /// Show the command as written, or as drawn: on a command with text in
+    /// it that is not ASCII, the first the keyboard can stand on.
+    AsWritten,
 }
 
 impl From<AskAction> for WorkspaceAction {

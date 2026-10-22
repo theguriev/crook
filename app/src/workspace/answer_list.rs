@@ -509,6 +509,9 @@ fn one_line(text: String, ui: FamilyId) -> Box<dyn Element> {
 /// }
 /// ```
 ///
+/// A top-level `"as_written": true` shows the card the action opens with its
+/// request as written, for a picture of that view.
+///
 /// Each `tab` is a tab by that name, the first the window's own and the rest
 /// opened for it, and each question is asked in the pane it shows. `ended`
 /// says how one of the earlier ones went: `allowed`, `denied`, or the word a
@@ -522,6 +525,9 @@ pub struct AskFixture {
     /// The questions that ended, in the order they did.
     #[serde(default)]
     earlier: Vec<FixtureAsk>,
+    /// Whether the card, once opened, shows its request as written.
+    #[serde(default)]
+    as_written: bool,
 }
 
 /// One question of an [`AskFixture`].
@@ -563,6 +569,17 @@ impl AskFixture {
             anyhow::bail!("{}: {word:?} is not how a question ends", path.display());
         }
         Ok(fixture)
+    }
+
+    /// Puts the card opened on one of its questions the way the fixture
+    /// says: shown as written, when it says so.
+    pub fn after_opening(&self, workspace: &mut Workspace, ctx: &mut ViewContext<Workspace>) {
+        if self.as_written && workspace.ask_card().is_some() {
+            workspace.handle_action(
+                &WorkspaceAction::from(super::action::AskAction::AsWritten),
+                ctx,
+            );
+        }
     }
 
     /// Holds its questions in `workspace`, opening and naming the tabs they

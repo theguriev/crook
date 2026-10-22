@@ -1018,7 +1018,8 @@ pub fn log_line(ask: &Ask, how: How, now: Instant) -> String {
 /// and the first line of the command with something on it — or, for a
 /// change to a file, the file, relative to `cwd` when it is inside it —
 /// written out the way [`request::visible`] writes it and cut the way a
-/// row's message is, with a mark at the end when lines follow it.
+/// row's message is, with a mark at the end when lines follow it, and with
+/// left-to-right marks in it when it holds right-to-left text.
 pub fn summary(tool: &str, request: &AskRequest, cwd: &str) -> String {
     let line = match (request.command(), request.path()) {
         (Some(command), _) => {
@@ -1033,7 +1034,11 @@ pub fn summary(tool: &str, request: &AskRequest, cwd: &str) -> String {
         }
         (None, None) => format!("{tool}:"),
     };
-    crate::agent::one_line(&line, SUMMARY_CHARS - 1).unwrap_or_else(|| format!("{tool}:"))
+    let line =
+        crate::agent::one_line(&line, SUMMARY_CHARS - 1).unwrap_or_else(|| format!("{tool}:"));
+    // Drawn left to right, its characters in the order they run, as the
+    // card draws the command: see `text_layout::reads_left_to_right`.
+    crookui_core::text_layout::reads_left_to_right(&line).into_owned()
 }
 
 /// Why a question from `asker` that named `pane` cannot be answered here, or

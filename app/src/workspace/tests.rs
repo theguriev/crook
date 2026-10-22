@@ -56,7 +56,23 @@ const WINDOW: Vector2F = vec2f(1024., 640.);
 /// A shaper with no fonts: every character is a square half its font size.
 /// Real metrics come from a real backend; what these tests need is only that
 /// widths add up.
-struct StubShaper;
+/// A shaper with no font backend: see [`TextLayoutSystem::layout_line`]
+/// below.
+#[derive(Clone)]
+struct StubShaper {
+    /// Whether its table of which characters some face has has been read,
+    /// as a real one's is on a thread of its own: until it has, it cannot
+    /// say of a character outside the box's face whether any face has it.
+    coverage_read: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Default for StubShaper {
+    fn default() -> Self {
+        Self {
+            coverage_read: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        }
+    }
+}
 
 impl TextLayoutSystem for StubShaper {
     fn layout_line(
@@ -67,17 +83,30 @@ impl TextLayoutSystem for StubShaper {
         _: f32,
     ) -> Line {
         let advance = line_style.font_size * 0.5;
-        let glyphs: Vec<_> = text
-            .char_indices()
-            .enumerate()
-            .map(|(position, (index, character))| Glyph {
-                id: character as u32,
-                position_along_baseline: vec2f(position as f32 * advance, 0.),
-                index,
-                width: advance,
+        // A left-to-right mark is drawn as nothing, as a real shaper draws
+        // every default-ignorable character.
+        let drawn = |character: &char| *character != '\u{200e}';
+        let alone = text.chars().filter(drawn).count() == 1;
+        if alone && text.chars().any(|character| SLOW.contains(&character)) {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let mut x = 0.;
+        let glyphs: Vec<_> = visual_order(text)
+            .into_iter()
+            .filter(|(_, character)| drawn(character))
+            .map(|(index, character)| {
+                let width = advance * stub_cells(character, alone);
+                let glyph = Glyph {
+                    id: character as u32,
+                    position_along_baseline: vec2f(x, 0.),
+                    index,
+                    width,
+                };
+                x += width;
+                glyph
             })
             .collect();
-        let width = glyphs.len() as f32 * advance;
+        let width = x;
         // A run per style run, as a real shaper gives, so that a line drawn
         // in more than one colour is drawn so here.
         let runs = if style_runs.len() > 1 {
@@ -91,7 +120,7 @@ impl TextLayoutSystem for StubShaper {
                         .collect();
                     Run {
                         font_id: FontId(0),
-                        width: glyphs.len() as f32 * advance,
+                        width: glyphs.iter().map(|glyph| glyph.width).sum(),
                         glyphs,
                         styles: style_and_font.style,
                     }
@@ -119,6 +148,65 @@ impl TextLayoutSystem for StubShaper {
             descent: line_style.font_size * 0.2,
         }
     }
+
+    fn covers(&self, character: char) -> Option<bool> {
+        self.coverage_read
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .then(|| Self::covered(character))
+    }
+}
+
+impl StubShaper {
+    /// Whether `character` has a glyph in some face: not for Bamum's
+    /// letters, which the stub has no face for.
+    fn covered(character: char) -> bool {
+        !('\u{a6a0}'..='\u{a6ef}').contains(&character)
+    }
+}
+
+/// Characters the stub shaper takes two milliseconds to shape alone, as a
+/// real one takes searching every installed face for a character none has:
+/// Vai's syllables.
+const SLOW: std::ops::RangeInclusive<char> = '\u{a500}'..='\u{a5ff}';
+
+/// `text`'s characters in the order a real shaper draws them, left to right,
+/// with where each is in `text`: by the Unicode bidirectional algorithm,
+/// the line's direction taken from its first strong letter, a right-to-left
+/// level's characters reversed.
+fn visual_order(text: &str) -> Vec<(usize, char)> {
+    let bidi = unicode_bidi::BidiInfo::new(text, None);
+    let mut visual = Vec::new();
+    for paragraph in &bidi.paragraphs {
+        let (levels, runs) = bidi.visual_runs(paragraph, paragraph.range.clone());
+        for run in runs {
+            let mut characters: Vec<(usize, char)> = text[run.clone()]
+                .char_indices()
+                .map(|(at, character)| (run.start + at, character))
+                .collect();
+            if levels[run.start].is_rtl() {
+                characters.reverse();
+            }
+            visual.extend(characters);
+        }
+    }
+    visual
+}
+
+/// How many cells the stub shaper draws `character` in, `alone` when it is
+/// the whole of what is shaped: one, as a monospace face draws it, but for
+/// two that stand for what a real shaper does to a terminal's arithmetic.
+///
+/// `⚠`, which a width table calls one column, is drawn two by the colour
+/// emoji font it falls back to. And U+A66E, a rare Cyrillic letter, is one
+/// alone and three beside anything else, as a glyph a font draws otherwise
+/// in context than on its own could be: measured alone it fits, and shaped
+/// in its row it does not.
+fn stub_cells(character: char, alone: bool) -> f32 {
+    match character {
+        '\u{26a0}' => 2.,
+        '\u{a66e}' if !alone => 3.,
+        _ => 1.,
+    }
 }
 
 /// The fetcher most tests want: a refusal, so what a test can see is the
@@ -134,6 +222,9 @@ struct Harness {
     queue: Arc<LocalQueue>,
     app: App,
     presenter: Presenter,
+    /// The shaper the presenter lays text out with, for a test that changes
+    /// what it knows.
+    shaper: StubShaper,
     window_id: WindowId,
     workspace: ViewHandle<Workspace>,
     quit_requests: Rc<Cell<usize>>,
@@ -304,11 +395,13 @@ impl Harness {
         let cell_font = CellFont::headless(CELL_FONT_SIZE);
         let (window_id, workspace) = app
             .add_window(|ctx| Workspace::new(fonts, cell_font, opening, quit, window.clone(), ctx));
+        let shaper = StubShaper::default();
 
         let mut harness = Self {
             queue,
             app,
-            presenter: Presenter::new(window_id, Arc::new(StubShaper)),
+            presenter: Presenter::new(window_id, Arc::new(shaper.clone())),
+            shaper,
             window_id,
             workspace,
             quit_requests,
@@ -324,6 +417,19 @@ impl Harness {
 
     fn frame(&mut self) -> Rc<Scene> {
         self.frame_sized(WINDOW)
+    }
+
+    /// Draws a frame when, and only when, something asked the window for
+    /// one — as the application draws: a frame no change asked for is never
+    /// drawn. Whether it drew.
+    fn frame_if_asked(&mut self) -> bool {
+        let asked = self
+            .app
+            .read(|ctx| ctx.has_window_invalidations(self.window_id));
+        if asked {
+            self.frame();
+        }
+        asked
     }
 
     /// The same, in a window of another size.
@@ -44777,6 +44883,16 @@ mod answering_card {
 
     /// What the card says, all of it, with its lines run together.
     fn card_text(harness: &mut Harness) -> String {
+        card_lines(harness)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The card's lines, top to bottom, with where each starts, on a fresh
+    /// frame.
+    fn card_lines(harness: &mut Harness) -> Vec<(Vector2F, String)> {
         let scene = harness.frame();
         let header = [
             "wants to run a command",
@@ -44799,10 +44915,18 @@ mod answering_card {
             .last()
             .expect("the card's header is on no card");
         text_lines_over(&scene, ground)
-            .into_iter()
-            .map(|(_, line)| line)
-            .collect::<Vec<_>>()
-            .join("\n")
+    }
+
+    /// Whether the card shows every character of `command`, in order:
+    /// what it draws of the command with the box's own marks for the rows
+    /// it broke left out, and white space, which a row's end may fall in.
+    fn card_shows_whole(harness: &mut Harness, command: &str) -> bool {
+        let bare = |text: &str| -> String {
+            text.chars()
+                .filter(|character| !character.is_whitespace() && *character != '↳')
+                .collect()
+        };
+        bare(&card_text(harness)).contains(&bare(command))
     }
 
     /// Whether the card says `phrase`, wherever it wrapped.
@@ -45468,6 +45592,759 @@ mod answering_card {
     }
 
     #[test]
+    fn a_command_of_characters_drawn_wider_than_counted_is_drawn_whole() {
+        // `⚠` is one column to a width table and two cells as the colour
+        // emoji font draws it. Counted, the command was one row, drawn half
+        // as wide again as the box, and everything after the signs — the
+        // part that runs — was cut off at the card's edge; and a command of
+        // one row needs no scrolling, so Allow was there to press.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let command = format!("echo {} ; rm -rf ~/.gnupg", "⚠".repeat(30));
+        let held = hold(&mut harness, pane, &command);
+        open(&mut harness);
+        settle(&mut harness);
+        assert!(
+            card_shows_whole(&mut harness, &command),
+            "{}",
+            card_text(&mut harness)
+        );
+        let signs: usize = card_lines(&mut harness)
+            .iter()
+            .map(|(_, line)| line.matches('⚠').count())
+            .sum();
+        assert_eq!(signs, 30);
+        // All of it on screen at once, so read; and, as it is not all ASCII,
+        // Allow waits for it to have been read as written too.
+        show_as_written(&mut harness);
+        press(&mut harness, "Allow once");
+        assert_eq!(
+            held.sent().expect("an allow")["answer"]["decision"],
+            "allow"
+        );
+
+        // A change to a file is drawn in the same box.
+        let new = format!("{} ; rm -rf ~/.gnupg", "⚠".repeat(40));
+        hold_request(
+            &mut harness,
+            pane,
+            "s2",
+            edit("/home/someone/work/crook/notes.txt", "a", &new),
+            None,
+        );
+        open(&mut harness);
+        settle(&mut harness);
+        assert!(
+            card_shows_whole(&mut harness, &format!("+ {new}")),
+            "{}",
+            card_text(&mut harness)
+        );
+    }
+
+    #[test]
+    fn a_row_drawn_wider_than_it_was_measured_keeps_allow_waiting() {
+        // The stub's U+A66E is one cell alone and three in a row, as a
+        // glyph drawn otherwise beside its neighbours could be: measured
+        // alone, the command fits a row; shaped in it, the row's end is cut
+        // off at the box's edge. A command whose end was not drawn has not
+        // been read, however short.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let text = format!("echo {} ; rm -rf ~", "\u{a66e}".repeat(20));
+        let held = hold(&mut harness, pane, &text);
+        open(&mut harness);
+        settle(&mut harness);
+        assert!(
+            card_says(
+                &mut harness,
+                "A line is drawn wider than this card, so Allow waits"
+            ),
+            "{}",
+            card_text(&mut harness)
+        );
+        assert!(
+            !card_says(&mut harness, "rm -rf ~"),
+            "the cut-off end was drawn: {}",
+            card_text(&mut harness)
+        );
+        press(&mut harness, "Allow once");
+        assert!(held.nothing_sent(), "Allow on a command cut off unseen");
+        for _ in 0..4 {
+            assert!(harness.press_key("left", Modifiers::default()));
+            assert_ne!(keyboard_on(&harness), Some(AskButton::Allow));
+        }
+        harness.dispatch_workspace_action(
+            AskAction::Answer {
+                ask: held.id,
+                digest: held.digest,
+                decision: Choice::Allow,
+                by: Pressed::Keys,
+            }
+            .into(),
+        );
+        assert!(held.nothing_sent(), "an Allow got past the press's checks");
+
+        // A no is never the dangerous answer.
+        let held = hold_request(&mut harness, pane, "s2", command(&text, false), None);
+        open_newest(&mut harness);
+        settle(&mut harness);
+        press(&mut harness, "Deny");
+        assert_eq!(held.sent().expect("a deny")["answer"]["decision"], "deny");
+    }
+
+    #[test]
+    fn a_row_the_box_broke_is_marked_and_a_line_of_its_own_is_not() {
+        // A line that fills its row and a line after it draw as two rows
+        // either way: a newline and a break the box made have to look
+        // different, or `rm` reads as `echo`'s argument.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let command = format!("echo {}\nrm -rf ./build", "x".repeat(100));
+        hold(&mut harness, pane, &command);
+        open(&mut harness);
+        settle(&mut harness);
+        let lines = card_lines(&mut harness);
+        let echo = lines
+            .iter()
+            .find(|(_, line)| line.starts_with("echo x"))
+            .unwrap_or_else(|| panic!("no echo: {lines:?}"));
+        let continued = lines
+            .iter()
+            .find(|(_, line)| line.starts_with('↳'))
+            .unwrap_or_else(|| panic!("no row is marked as going on: {lines:?}"));
+        assert!(continued.1.ends_with('x'), "{lines:?}");
+        assert!(continued.0.y() > echo.0.y());
+        let rm = lines
+            .iter()
+            .find(|(_, line)| line.contains("rm -rf ./build"))
+            .unwrap_or_else(|| panic!("no rm: {lines:?}"));
+        assert_eq!(rm.1, "rm -rf ./build", "a line of its own was marked");
+        // Every row's text starts in one column, the mark in the gutter
+        // before it.
+        assert_eq!(rm.0.x(), echo.0.x());
+        assert!(continued.0.x() < echo.0.x());
+        // Muted, as the box's other marks are, and a glyph, not a colour.
+        let scene = harness.frame();
+        let marks: Vec<Color> = scene
+            .layers()
+            .flat_map(|layer| layer.glyphs.iter())
+            .filter(|glyph| glyph.glyph_key.glyph_id == u32::from('↳'))
+            .map(|glyph| glyph.color)
+            .collect();
+        assert!(!marks.is_empty());
+        assert!(marks.iter().all(|color| *color == theme().text_muted));
+    }
+
+    #[test]
+    fn a_commands_leading_tabs_and_the_white_space_its_lines_end_in_are_marked() {
+        // A space after a `\` at a line's end makes the next line a command
+        // of its own; a tab-indented `EOF` ends a `<<-` heredoc where a
+        // space-indented one does not. Drawn blank, each reads as its
+        // harmless twin. A tab between words is the spaces it reads as.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let command = "printf '%s' Removing: \\ \nrm -rf ./build\u{2800}/tmp/keep\n\
+                       cat <<-EOF >/dev/null\n\tEOF\necho a\tb\nEOF";
+        hold(&mut harness, pane, command);
+        open(&mut harness);
+        settle(&mut harness);
+        let lines: Vec<String> = card_lines(&mut harness)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect();
+        for line in [
+            "printf '%s' Removing: \\·",
+            "rm -rf ./build⟨U+2800⟩/tmp/keep",
+            "→       EOF",
+            "echo a  b",
+        ] {
+            assert!(
+                lines.iter().any(|drawn| drawn == line),
+                "{line:?}: {lines:?}"
+            );
+        }
+        let scene = harness.frame();
+        let colours = line_colours(&scene, "→       EOF");
+        assert_eq!(colours[0], theme().text_muted, "{colours:?}");
+        assert!(
+            colours[1..]
+                .iter()
+                .all(|color| *color == theme().text_primary)
+        );
+        let colours = line_colours(&scene, "printf '%s' Removing: \\·");
+        assert_eq!(colours.last(), Some(&theme().text_muted), "{colours:?}");
+    }
+
+    /// The card's lines, as drawn, left to right.
+    fn drawn_lines(harness: &mut Harness) -> Vec<String> {
+        card_lines(harness)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect()
+    }
+
+    #[test]
+    fn a_command_with_right_to_left_letters_is_drawn_in_the_order_it_runs() {
+        // A shaper takes a line's direction from its first strong letter and
+        // reorders what lies between right-to-left letters with them. This
+        // one was drawn `echo done ; ع # rm -rf $HOME ; ع :`, the `rm` behind
+        // a `#`, where bash runs it.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let attack = ": ع ; rm -rf $HOME # ع ; echo done";
+        hold(&mut harness, pane, &format!("{attack}\necho \"ع1\";ع2\""));
+        open(&mut harness);
+        settle(&mut harness);
+        let lines = drawn_lines(&mut harness);
+        for line in [attack, "echo \"ع1\";ع2\""] {
+            assert!(
+                lines.iter().any(|drawn| drawn == line),
+                "{line:?}: {lines:?}"
+            );
+        }
+
+        // A change's lines and the path it is to, the same.
+        let path = "/א/ב/../../home/someone/.ssh/config";
+        hold_request(
+            &mut harness,
+            pane,
+            "s2",
+            write(path, "ع ; rm -rf ~ # ع", None),
+            None,
+        );
+        open_newest(&mut harness);
+        settle(&mut harness);
+        let lines = drawn_lines(&mut harness);
+        for line in [path, "+ ع ; rm -rf ~ # ع"] {
+            assert!(
+                lines.iter().any(|drawn| drawn == line),
+                "{line:?}: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_character_no_face_has_is_written_out_and_muted() {
+        // Every such character is drawn as the same box, which says nothing
+        // about which one it is.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        hold(&mut harness, pane, "rm -rf ./\u{a6a0}x \u{a6a1}y");
+        open(&mut harness);
+        settle(&mut harness);
+        let line = "rm -rf ./⟨U+A6A0⟩x ⟨U+A6A1⟩y";
+        let lines = drawn_lines(&mut harness);
+        assert!(lines.iter().any(|drawn| drawn == line), "{lines:?}");
+        let scene = harness.frame();
+        let colours = line_colours(&scene, line);
+        let token =
+            "rm -rf ./".chars().count()..line.find('x').map_or(0, |at| line[..at].chars().count());
+        for (at, color) in colours.iter().enumerate() {
+            if token.contains(&at) {
+                assert_eq!(*color, theme().text_muted, "{at}");
+            }
+        }
+        assert_eq!(colours[0], theme().text_primary);
+    }
+
+    #[test]
+    fn a_written_out_character_is_muted_and_one_spelled_out_is_not() {
+        // A command cannot spell `⟨U+200B⟩` out itself and pass for one.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        hold(&mut harness, pane, "rm a\u{200b}b\nrm a⟨U+200B⟩b");
+        open(&mut harness);
+        settle(&mut harness);
+        let scene = harness.frame();
+        let mut found = Vec::new();
+        for (_, line) in text_lines(&scene, |_| true) {
+            if line == "rm a⟨U+200B⟩b" {
+                found.push(line);
+            }
+        }
+        assert_eq!(found.len(), 2, "{}", frame_text(&scene));
+        let lines: Vec<(Vector2F, String)> = card_lines(&mut harness)
+            .into_iter()
+            .filter(|(_, line)| line == "rm a⟨U+200B⟩b")
+            .collect();
+        let colour_of = |y: f32, nth: usize| {
+            let mut glyphs: Vec<_> = scene
+                .layers()
+                .flat_map(|layer| layer.glyphs.iter())
+                .filter(|glyph| glyph.position.y().round() == y)
+                .collect();
+            glyphs.sort_by(|left, right| left.position.x().total_cmp(&right.position.x()));
+            glyphs[nth].color
+        };
+        // The `⟨` of each: the real one's muted, the spelled-out one's not.
+        assert_eq!(colour_of(lines[0].0.y(), 4), theme().text_muted);
+        assert_eq!(colour_of(lines[1].0.y(), 4), theme().text_primary);
+    }
+
+    /// The request the window holds as `id`.
+    fn held_request(harness: &Harness, id: AskId) -> AskRequest {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.asks().get(id).expect("held").request.clone()
+        })
+    }
+
+    /// Shows the card's request as written, and draws it so that the end
+    /// is on screen, as a person opening the exact view of a short request
+    /// does; then lets the keyboard and the pointer reach the buttons.
+    fn show_as_written(harness: &mut Harness) {
+        harness.dispatch_workspace_action(AskAction::AsWritten.into());
+        harness.frame();
+        harness.press_key("end", Modifiers::default());
+        harness.frame();
+        harness.frame();
+        settle(harness);
+    }
+
+    /// Whether the card's command is still being measured, read without
+    /// drawing a frame.
+    fn measuring(harness: &Harness) -> bool {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .ask_card()
+                .is_some_and(|card| card.body().is_measuring())
+        })
+    }
+
+    /// Draws frames for as long as the window asks for them, as the
+    /// application does, up to `most`; how many it drew.
+    fn frames_asked_for(harness: &mut Harness, most: usize) -> usize {
+        (0..most).take_while(|_| harness.frame_if_asked()).count()
+    }
+
+    #[test]
+    fn a_command_still_being_measured_keeps_allow_waiting() {
+        // A grapheme no face of the box's own has is shaped, and a shaper
+        // searches every face for it; a command of thousands would hold the
+        // window that long. A layout measures for a few milliseconds and
+        // guesses the rest, wide, and the next frame measures on: until no
+        // width is a guess the rows are not the ones it will be drawn in,
+        // and Allow waits.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let slow: String = ('\u{a500}'..='\u{a540}').collect();
+        let held = hold(&mut harness, pane, &format!("echo {slow}; rm -rf ~"));
+        harness.run_command("crook/tabs/answer-waiting");
+        harness.workspace_update(|workspace, ctx| workspace.settle_the_ask_card(ctx));
+        harness.frame();
+        assert!(measuring(&harness));
+        assert!(
+            card_says(&mut harness, "Measuring the command…"),
+            "{}",
+            card_text(&mut harness)
+        );
+        press(&mut harness, "Allow once");
+        assert!(held.nothing_sent(), "Allow on rows broken by a guess");
+
+        // Drawn only when it asks, as the window draws, each frame that
+        // guessed asks for the next, and it is measured, and read.
+        let frames = frames_asked_for(&mut harness, 500);
+        assert!(
+            !measuring(&harness),
+            "still measuring after {frames} frames"
+        );
+        assert!(
+            !card_says(&mut harness, "Measuring the command"),
+            "{}",
+            card_text(&mut harness)
+        );
+        assert!(card_shows_whole(
+            &mut harness,
+            &format!("echo {slow}; rm -rf ~")
+        ));
+        show_as_written(&mut harness);
+        press(&mut harness, "Allow once");
+        assert_eq!(
+            held.sent().expect("an allow")["answer"]["decision"],
+            "allow"
+        );
+    }
+
+    #[test]
+    fn a_command_waits_for_the_table_of_what_fonts_have() {
+        // Which faces have a character is read off every installed face, on
+        // a thread of its own; until it has been, a character outside the
+        // box's own face is not known to be drawn or written out, and the
+        // card is measuring.
+        let mut harness = Harness::new(1);
+        harness
+            .shaper
+            .coverage_read
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "echo 漢字 ; rm -rf ~");
+        open(&mut harness);
+        settle(&mut harness);
+        assert!(measuring(&harness));
+        press(&mut harness, "Allow once");
+        assert!(
+            held.nothing_sent(),
+            "Allow before it was known what is drawn"
+        );
+        // The window goes on asking for frames while it waits.
+        assert_eq!(frames_asked_for(&mut harness, 5), 5);
+
+        harness
+            .shaper
+            .coverage_read
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        frames_asked_for(&mut harness, 50);
+        assert!(!measuring(&harness));
+        assert!(card_shows_whole(&mut harness, "echo 漢字 ; rm -rf ~"));
+        show_as_written(&mut harness);
+        press(&mut harness, "Allow once");
+        assert_eq!(
+            held.sent().expect("an allow")["answer"]["decision"],
+            "allow"
+        );
+    }
+
+    #[test]
+    fn arabic_indic_digits_reorder_nothing_on_the_card_or_its_row() {
+        // Counted as right to left between them, `٣# ;: ٤` was drawn
+        // `٤ :; #٣`: everything after the `:` read as a comment.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let lines = [
+            "true ٣# ;: ٤ ; rm -rf ~",
+            "cat ٣ > ٤",
+            // `١` looks like `|`, and is written out.
+            "x ⟨U+0661⟩ | ٢ & ٣ ; ٤ y",
+            "cp a /tmp/\u{10e60}/../\u{10e61}",
+            "echo 1\u{66b}2 \u{66c} ;",
+        ];
+        hold(
+            &mut harness,
+            pane,
+            &lines.join("\n").replace("⟨U+0661⟩", "١"),
+        );
+        open(&mut harness);
+        settle(&mut harness);
+        let drawn = drawn_lines(&mut harness);
+        for line in lines {
+            assert!(drawn.iter().any(|row| row == line), "{line:?}: {drawn:?}");
+        }
+        // The row the question is shown on in the sidebar, the same.
+        let scene = harness.frame();
+        let panel = panel_box(&scene);
+        let row = text_lines(&scene, |at| at.x() < panel.max_x());
+        assert!(
+            row.iter()
+                .any(|(_, text)| text.contains("true ٣# ;: ٤ ; rm -rf ~")),
+            "{row:?}"
+        );
+    }
+
+    #[test]
+    fn a_lookalike_of_shell_syntax_is_written_out_muted() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        hold(
+            &mut harness,
+            pane,
+            "echo done ♯; rm -rf ~\necho x\u{315}; rm -rf ~; y\u{315}",
+        );
+        open(&mut harness);
+        settle(&mut harness);
+        let drawn = drawn_lines(&mut harness);
+        for line in [
+            "echo done ⟨U+266F⟩; rm -rf ~",
+            "echo x⟨U+0315⟩; rm -rf ~; y⟨U+0315⟩",
+        ] {
+            assert!(drawn.iter().any(|row| row == line), "{line:?}: {drawn:?}");
+        }
+        let scene = harness.frame();
+        let colours = line_colours(&scene, "echo done ⟨U+266F⟩; rm -rf ~");
+        let token = "echo done ".chars().count();
+        assert_eq!(colours[token], theme().text_muted);
+        assert_eq!(colours[0], theme().text_primary);
+    }
+
+    #[test]
+    fn a_command_with_text_that_is_not_ascii_can_be_shown_as_written() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf ./café ~/漢");
+        open(&mut harness);
+        settle(&mut harness);
+        assert!(card_says(&mut harness, "Contains text that is not ASCII"));
+        assert!(card_says(&mut harness, "rm -rf ./café ~/漢"));
+
+        // By the keyboard: it is the first stop, past Allow, never next to
+        // Not now.
+        for _ in 0..5 {
+            settle(&mut harness);
+            harness.press_key("left", Modifiers::default());
+        }
+        assert_eq!(keyboard_on(&harness), Some(AskButton::AsWritten));
+        settle(&mut harness);
+        assert!(harness.press_key("enter", Modifiers::default()));
+        let shown = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .ask_card()
+                .is_some_and(|card| card.is_as_written())
+        });
+        assert!(shown);
+        assert!(card_says(&mut harness, "rm -rf ./caf⟨U+00E9⟩ ~/⟨U+6F22⟩"));
+        assert!(card_says(&mut harness, "Show as drawn"));
+        // It answered nothing, and keeps Allow waiting on nothing more.
+        assert!(held.nothing_sent());
+
+        // By the pointer, back.
+        settle(&mut harness);
+        press(&mut harness, "Show as drawn");
+        assert!(card_says(&mut harness, "rm -rf ./café ~/漢"));
+        settle(&mut harness);
+        press(&mut harness, "Allow once");
+        assert_eq!(
+            held.sent().expect("an allow")["answer"]["decision"],
+            "allow"
+        );
+
+        // An ASCII command has neither the line nor the stop.
+        let held = hold_request(
+            &mut harness,
+            pane,
+            "s2",
+            command("rm -rf build", false),
+            None,
+        );
+        open_newest(&mut harness);
+        settle(&mut harness);
+        assert!(!card_says(&mut harness, "not ASCII"));
+        for _ in 0..5 {
+            settle(&mut harness);
+            harness.press_key("left", Modifiers::default());
+        }
+        assert_ne!(keyboard_on(&harness), Some(AskButton::AsWritten));
+        assert!(held.nothing_sent());
+    }
+
+    /// Every way an Allow can be asked for on the card about `held`, at a
+    /// moment the card's time gates have passed: the pointer, the keyboard,
+    /// and the press itself, dispatched as the window would. Whether any of
+    /// them sent an allow.
+    fn any_allow_gets_through(harness: &mut Harness, held: &Held) -> bool {
+        allow_by_hand_gets_through(harness, held) || allow_pressed_gets_through(harness, held)
+    }
+
+    /// The same, by the pointer and the keyboard only: a press the window
+    /// refuses also turns the card to say nothing was sent.
+    fn allow_by_hand_gets_through(harness: &mut Harness, held: &Held) -> bool {
+        settle(harness);
+        press(harness, "Allow once");
+        if held.sent().is_some() {
+            return true;
+        }
+        for _ in 0..6 {
+            settle(harness);
+            harness.press_key("left", Modifiers::default());
+            if keyboard_on(harness) == Some(AskButton::Allow) {
+                settle(harness);
+                harness.press_key("enter", Modifiers::default());
+                return held.sent().is_some();
+            }
+        }
+        false
+    }
+
+    /// An Allow dispatched as the window would for a press, past every
+    /// gate the card draws: refused, unless the press-time check lets it.
+    fn allow_pressed_gets_through(harness: &mut Harness, held: &Held) -> bool {
+        settle(harness);
+        harness.dispatch_workspace_action(
+            AskAction::Answer {
+                ask: held.id,
+                digest: held.digest,
+                decision: Choice::Allow,
+                by: Pressed::Pointer,
+            }
+            .into(),
+        );
+        held.sent().is_some()
+    }
+
+    #[test]
+    fn allow_waits_for_a_request_that_is_not_ascii_to_be_read_as_written() {
+        // The owner's rule: no list of lookalikes is ever whole — `ꞋꞋ` for
+        // quotes, a private-use `#`, `⟨⟨` for `<<` — so a request with any
+        // text that is not ASCII is allowed only once it has been read as
+        // written, where what is drawn is ASCII and muted marks.
+        let q1 = "echo \u{a78b}; rm -rf ~ \u{a78b}\necho ok \u{29e3} rm -rf ~/.gnupg\n\
+                  echo a \u{2572}; rm -rf ~\necho \u{275c}; rm -rf ~ \u{275c}\n\
+                  echo done \u{f292} rm -rf ~\ncat \u{27e8}\u{27e8}EOF\nrm -rf ~\nEOF";
+        let edit_path = "/home/someone/work/crook/notes.txt";
+        let requests = [
+            ("a command", command(q1, false)),
+            (
+                "an edit's change",
+                edit(edit_path, "a", "echo \u{a78b}; rm -rf ~"),
+            ),
+            (
+                "a write's content",
+                write(edit_path, "#!/bin/sh\necho ok \u{29e3} rm -rf ~\n", None),
+            ),
+            (
+                "a path",
+                write("/home/someone/work/crook/n\u{f292}tes.txt", "ascii\n", None),
+            ),
+            (
+                "what the agent says",
+                AskRequest::Command {
+                    command: "ls".to_owned(),
+                    note: Some("List \u{a78b}quietly\u{a78b}".to_owned()),
+                    timeout_ms: None,
+                    background: false,
+                    outside_sandbox: false,
+                },
+            ),
+        ];
+        for (index, (what, request)) in requests.into_iter().enumerate() {
+            let mut harness = Harness::new(1);
+            let pane = harness.focused_pane_id().expect("a pane");
+            let held = hold_request(&mut harness, pane, &format!("s{index}"), request, None);
+            open(&mut harness);
+            settle(&mut harness);
+            assert!(
+                card_says(&mut harness, "Show as written to allow"),
+                "{what}: {}",
+                card_text(&mut harness)
+            );
+            // Read to its end as drawn, and every way to Allow refused: by
+            // hand, and a press the card never drew.
+            assert!(
+                !allow_by_hand_gets_through(&mut harness, &held),
+                "{what}: allowed"
+            );
+            assert!(held.nothing_sent());
+            let same = held_request(&harness, held.id);
+            let pressed = hold_request(&mut harness, pane, &format!("p{index}"), same, None);
+            open_newest(&mut harness);
+            settle(&mut harness);
+            assert!(
+                !allow_pressed_gets_through(&mut harness, &pressed),
+                "{what}: pressed"
+            );
+            // Deny is live as ever.
+            let same = held_request(&harness, held.id);
+            let denied = hold_request(&mut harness, pane, &format!("d{index}"), same, None);
+            open_newest(&mut harness);
+            settle(&mut harness);
+            press(&mut harness, "Deny");
+            assert_eq!(denied.sent().expect("a deny")["answer"]["decision"], "deny");
+
+            // Shown as written, read to its end, settled: allowed.
+            open_on(&mut harness, held.id);
+            settle(&mut harness);
+            show_as_written(&mut harness);
+            // What it draws is ASCII and written-out marks, but for the
+            // card's own punctuation.
+            let text = card_text(&mut harness);
+            let mut bare = String::new();
+            let mut inside = false;
+            for character in text.chars() {
+                match character {
+                    '⟨' => inside = true,
+                    '⟩' => inside = false,
+                    character if !inside => bare.push(character),
+                    _ => {}
+                }
+            }
+            assert!(
+                bare.chars()
+                    .all(|character| character.is_ascii() || "·↳–…".contains(character)),
+                "{what}: {text}"
+            );
+            assert!(
+                any_allow_gets_through(&mut harness, &held),
+                "{what}: still refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_view_as_written_has_to_be_read_to_its_end_and_settle() {
+        // A long request: shown as written, its end is below the box, and
+        // Allow waits for it; once there, for the keyboard and the pointer's
+        // second.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let long: String = (1..=30)
+            .map(|line| format!("echo line {line} é"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let held = hold(&mut harness, pane, &long);
+        open(&mut harness);
+        settle(&mut harness);
+        // Read to its end as drawn.
+        assert!(harness.press_key("end", Modifiers::default()));
+        harness.frame();
+        harness.dispatch_workspace_action(AskAction::AsWritten.into());
+        harness.frame();
+        harness.frame();
+        let exact_read = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .ask_card()
+                    .is_some_and(|card| card.body().exact_read())
+            })
+        };
+        assert!(
+            !exact_read(&harness),
+            "shown from its top, the end is not on screen"
+        );
+        assert!(!allow_by_hand_gets_through(&mut harness, &held));
+        // Toggling started the waits again: a key straight after is too soon.
+        settle(&mut harness);
+        harness.dispatch_workspace_action(AskAction::AsWritten.into());
+        harness.dispatch_workspace_action(AskAction::AsWritten.into());
+        assert_eq!(harness.action_for("left", Modifiers::default()), too_soon());
+        assert!(harness.press_key("end", Modifiers::default()));
+        harness.frame();
+        harness.frame();
+        assert!(exact_read(&harness));
+        // And once read so, shown as drawn again, it stays allowed.
+        harness.dispatch_workspace_action(AskAction::AsWritten.into());
+        harness.frame();
+        assert!(any_allow_gets_through(&mut harness, &held));
+    }
+
+    #[test]
+    fn an_ascii_request_is_allowed_as_ever() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        let held = hold(&mut harness, pane, "rm -rf build");
+        open(&mut harness);
+        settle(&mut harness);
+        assert!(!card_says(&mut harness, "not ASCII"));
+        press(&mut harness, "Allow once");
+        assert_eq!(
+            held.sent().expect("an allow")["answer"]["decision"],
+            "allow"
+        );
+    }
+
+    #[test]
+    fn a_private_use_or_unassigned_point_is_written_out_as_drawn() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("a pane");
+        hold(
+            &mut harness,
+            pane,
+            "echo done \u{f292} rm\u{e0080}x\u{50000}y",
+        );
+        open(&mut harness);
+        settle(&mut harness);
+        let drawn = drawn_lines(&mut harness);
+        let line = "echo done ⟨U+F292⟩ rm⟨U+E0080⟩x⟨U+50000⟩y";
+        assert!(drawn.iter().any(|row| row == line), "{drawn:?}");
+    }
+
+    #[test]
     fn what_changes_on_the_card_while_it_is_up_never_moves_its_buttons() {
         // A narrow card, a tab renamed to something long while it is up, and
         // a question asked an hour ago: every line that can change stays on
@@ -45992,12 +46869,20 @@ mod answering_card {
         ));
         // Written out, never obeyed: the carriage return is a mark.
         assert!(text.contains("+ echo safe␍rm -rf ~"), "{text}");
+        // In the colour of what it adds, but for the mark itself, muted as
+        // every written-out character is, so that a literal `␍` cannot pass
+        // for one.
         let scene = harness.frame();
-        assert!(
-            line_colours(&scene, "+ echo safe␍rm -rf ~")
-                .iter()
-                .all(|color| *color == theme().diff_added)
-        );
+        let colours = line_colours(&scene, "+ echo safe␍rm -rf ~");
+        let mark = "+ echo safe".chars().count();
+        for (at, color) in colours.iter().enumerate() {
+            let expected = if at == mark {
+                theme().text_muted
+            } else {
+                theme().diff_added
+            };
+            assert_eq!(*color, expected, "{at}: {colours:?}");
+        }
     }
 
     #[test]

@@ -222,6 +222,12 @@ fn visible_writes_out_esc_cr_bidi_and_zero_width() {
     // A space that is not the one a shell splits at reads as one all the
     // same.
     assert_eq!(visible("rm\u{a0}-rf"), "rm⟨U+00A0⟩-rf");
+    // And one that draws as a space: the Braille pattern with no dots.
+    assert_eq!(
+        visible("rm -rf ./build\u{2800}/tmp/keep"),
+        "rm -rf ./build⟨U+2800⟩/tmp/keep",
+        "a Braille blank"
+    );
     for space in ['\u{2000}', '\u{200a}', '\u{202f}', '\u{3000}'] {
         assert_eq!(
             visible(&format!("a{space}b")),
@@ -235,6 +241,239 @@ fn visible_writes_out_esc_cr_bidi_and_zero_width() {
         visible("cargo build —release 修正"),
         "cargo build —release 修正"
     );
+}
+
+#[test]
+fn a_command_marks_its_leading_tabs_and_the_white_space_its_lines_end_in() {
+    let marked = |text: &str| {
+        let (shown, muted) = command_lines(text);
+        let marks: Vec<String> = muted
+            .iter()
+            .map(|mark| shown[mark.clone()].to_owned())
+            .collect();
+        (shown, marks)
+    };
+    // A space after a `\` at a line's end: the next line is a command of
+    // its own, not the rest of this one.
+    assert_eq!(
+        marked("printf x \\ \nrm -rf ./build"),
+        (
+            "printf x \\·\nrm -rf ./build".to_owned(),
+            vec!["·".to_owned()]
+        )
+    );
+    // A tab-indented terminator ends a `<<-` heredoc; a tab between words
+    // is the spaces it reads as, a shell splitting at either.
+    assert_eq!(
+        marked("cat <<-EOF\n\t\tEOF\necho a\tb"),
+        (
+            "cat <<-EOF\n→       →       EOF\necho a  b".to_owned(),
+            vec!["→".to_owned(), "→".to_owned()]
+        )
+    );
+    // Spaces before a leading tab are not marked, the tab is; and a line of
+    // nothing but white space is all marks.
+    assert_eq!(
+        marked("  \tx\n \t "),
+        (
+            "  →     x\n·→      ·".to_owned(),
+            ["→", "·", "→", "·"].map(str::to_owned).to_vec()
+        )
+    );
+    // Written out as everything else, the newlines kept, and what is
+    // written out muted — so a command that spells a mark out itself does
+    // not pass for one.
+    assert_eq!(
+        marked("echo safe\rrm\u{2800}x\n"),
+        (
+            "echo safe␍rm⟨U+2800⟩x\n".to_owned(),
+            ["␍", "⟨U+2800⟩"].map(str::to_owned).to_vec()
+        )
+    );
+    assert_eq!(
+        marked("echo ⟨U+2800⟩"),
+        ("echo ⟨U+2800⟩".to_owned(), Vec::<String>::new())
+    );
+}
+
+#[test]
+fn a_combining_mark_that_could_disguise_what_it_is_on_is_written_out() {
+    // A solidus drawn through a space reads as `/`: `rm -rf ~ ̸.cache` is
+    // `rm -rf ~` and a word of its own, drawn as `rm -rf ~/.cache`.
+    assert_eq!(visible("rm -rf ~ \u{338}.cache"), "rm -rf ~ ⟨U+0338⟩.cache");
+    // A low line under a space reads as `_`; a vertical line through one as
+    // `|`.
+    assert_eq!(visible("cp a \u{332}b"), "cp a ⟨U+0332⟩b");
+    assert_eq!(visible("a \u{20d2} b"), "a ⟨U+20D2⟩ b");
+    // On ASCII punctuation, at a line's start, after a tab, and after a
+    // mark written out: nothing it could be text on.
+    assert_eq!(visible("~\u{301}"), "~⟨U+0301⟩");
+    assert_eq!(visible("\u{301}x\n\u{301}y"), "⟨U+0301⟩x\n⟨U+0301⟩y");
+    assert_eq!(visible("a\t\u{301}"), "a       ⟨U+0301⟩");
+    assert_eq!(visible("a\u{200b}\u{301}"), "a⟨U+200B⟩⟨U+0301⟩");
+    // An overlay or an enclosing mark, on whatever it is: `o̸` is not `ø`,
+    // and a keycap hides the `#` it is on.
+    for (text, shown) in [
+        ("o\u{334}", "o⟨U+0334⟩"),
+        ("o\u{338}", "o⟨U+0338⟩"),
+        ("l\u{20d3}", "l⟨U+20D3⟩"),
+        ("a\u{20d8}", "a⟨U+20D8⟩"),
+        ("a\u{20da}", "a⟨U+20DA⟩"),
+        ("a\u{20dd}", "a⟨U+20DD⟩"),
+        ("#\u{20e3}", "#⟨U+20E3⟩"),
+        ("a\u{20e5}", "a⟨U+20E5⟩"),
+        ("a\u{20e6}", "a⟨U+20E6⟩"),
+        ("a\u{20ea}", "a⟨U+20EA⟩"),
+        ("a\u{20eb}", "a⟨U+20EB⟩"),
+        ("é\u{338}", "é⟨U+0338⟩"),
+    ] {
+        assert_eq!(visible(text), shown, "{text:?}");
+    }
+    // A mark that composes with what it is on is text: a name decomposed as
+    // macOS stores it, two marks that compose on a Latin letter, a jamo.
+    for text in [
+        "cafe\u{301}.txt",
+        "Vie\u{323}\u{302}t",
+        "ǖ",
+        "u\u{308}\u{304}",
+    ] {
+        assert_eq!(visible(text), text, "{text:?}");
+    }
+    // Any other is written out, on any letter: a comma above draws as an
+    // apostrophe, so `echo x̕; rm -rf ~; y̕` reads as a quoted string.
+    assert_eq!(
+        visible("echo x\u{315}; rm -rf ~; y\u{315}"),
+        "echo x⟨U+0315⟩; rm -rf ~; y⟨U+0315⟩"
+    );
+    for mark in ['\u{313}', '\u{314}', '\u{31b}', '\u{315}'] {
+        assert_eq!(
+            visible(&format!("х{mark}")),
+            format!("х⟨U+{:04X}⟩", u32::from(mark)),
+            "on a Cyrillic letter"
+        );
+    }
+    // So no stack of them is drawn over the rows around it: composition
+    // stops, and every mark after is written out.
+    assert_eq!(
+        visible("e\u{301}\u{302}\u{303}"),
+        "e\u{301}⟨U+0302⟩⟨U+0303⟩"
+    );
+    let stack = format!("а{}", "\u{301}".repeat(25));
+    assert_eq!(visible(&stack), format!("а{}", "⟨U+0301⟩".repeat(25)));
+    // Which costs the scripts whose marks never compose — Arabic's vowel
+    // marks, Devanagari's virama — their marks, written out.
+    assert_eq!(visible("بَ"), "ب⟨U+064E⟩");
+    assert_eq!(visible("क्ष"), "क⟨U+094D⟩ष");
+    // Nor does a mark compose with ASCII punctuation: `=` and a solidus
+    // through it are `≠`, but a shell reads `=`.
+    assert_eq!(visible("a=\u{338}b"), "a=⟨U+0338⟩b");
+    // And a command's or a change's writing out is muted.
+    let (shown, muted) = command_lines("ls ~ \u{338}x");
+    assert_eq!(shown, "ls ~ ⟨U+0338⟩x");
+    assert_eq!(&shown[muted[0].clone()], "⟨U+0338⟩");
+}
+
+#[test]
+fn a_character_that_looks_like_shell_syntax_is_written_out() {
+    // Quotes, `#`, `;`, `|`, `/` and the rest, by UTS #39's confusables, by
+    // compatibility decomposition, and by hand where neither has it.
+    for lookalike in [
+        'ʼ', '′', '״', '׳', 'ˈ', 'ꞌ', '῾', // quotes
+        '♯', '⌗', '＃', // `#`
+        '\u{37e}', '；', '⁏', // `;`
+        'ǀ', 'ǁ', '∣', '｜', '│', // `|`
+        'ǃ', '∕', '⁄', '∖', '＼', '٭', '∗', '‹', '›', '˂', '˃', '❮', '＄', '＆', '（', '）',
+    ] {
+        let shown = visible(&format!("a{lookalike}b"));
+        assert_eq!(
+            shown,
+            format!("a⟨U+{:04X}⟩b", u32::from(lookalike)),
+            "{lookalike:?}"
+        );
+    }
+    assert_eq!(
+        visible("echo done ♯; rm -rf ~"),
+        "echo done ⟨U+266F⟩; rm -rf ~"
+    );
+    // Letters, digits and punctuation that look like nothing a shell reads
+    // are text.
+    for text in [
+        "café",
+        "漢字",
+        "Ελλάδα",
+        "Жук",
+        "שלום",
+        "مرحبا",
+        "Ιό",
+        "Іван",
+        "ا",
+        "٣٤",
+        "—",
+        "«»",
+        "…",
+        "ꓸ",
+    ] {
+        assert_eq!(visible(text), text, "{text:?}");
+    }
+}
+
+#[test]
+fn a_spacing_mark_is_kept_only_on_a_letter() {
+    // A vowel sign of the scripts of India takes room of its own: kept on
+    // its letter, written out on nothing, a space or ASCII punctuation.
+    assert_eq!(visible("नमा"), "नमा");
+    assert_eq!(visible("a \u{93e}"), "a ⟨U+093E⟩");
+    assert_eq!(visible("#\u{93e}"), "#⟨U+093E⟩");
+    assert_eq!(visible("\u{93e}x"), "⟨U+093E⟩x");
+}
+
+#[test]
+fn a_private_use_or_unassigned_point_is_written_out() {
+    // A programmer's icon font draws U+F292 as `#`.
+    for text in ["\u{f292}", "\u{e000}", "\u{f0000}", "\u{50000}", "\u{fffe}"] {
+        let shown = visible(text);
+        assert!(shown.starts_with("⟨U+"), "{text:?}: {shown}");
+    }
+}
+
+#[test]
+fn a_request_is_ascii_only_when_every_text_it_shows_is() {
+    let command = |command: &str, note: Option<&str>| AskRequest::Command {
+        command: command.to_owned(),
+        note: note.map(str::to_owned),
+        timeout_ms: None,
+        background: false,
+        outside_sandbox: false,
+    };
+    assert!(command("ls", Some("List")).is_ascii());
+    assert!(!command("ls é", None).is_ascii());
+    assert!(!command("ls", Some("é")).is_ascii());
+    let write = |path: &str, content: &str| AskRequest::Write {
+        path: path.to_owned(),
+        content: content.to_owned(),
+        resolves_outside: false,
+        replaces: None,
+    };
+    assert!(write("/a", "b").is_ascii());
+    assert!(!write("/é", "b").is_ascii());
+    assert!(!write("/a", "é").is_ascii());
+    let edited = AskRequest::Edit {
+        path: "/a".to_owned(),
+        edits: vec![edit("x", "é", false)],
+        resolves_outside: false,
+    };
+    assert!(!edited.is_ascii());
+    let (shown, _) = (edited.change_as_written(), ());
+    assert_eq!(shown[1].text, "⟨U+00E9⟩");
+    assert_eq!(as_written("/home/é"), "/home/⟨U+00E9⟩");
+}
+
+#[test]
+fn a_command_as_written_writes_out_everything_that_is_not_ascii() {
+    let (shown, muted) = command_as_written("echo café 漢\t# x\r\n\tEOF");
+    assert_eq!(shown, "echo caf⟨U+00E9⟩ ⟨U+6F22⟩       # x␍\n→       EOF");
+    let marks: Vec<&str> = muted.iter().map(|mark| &shown[mark.clone()]).collect();
+    assert_eq!(marks, ["⟨U+00E9⟩", "⟨U+6F22⟩", "␍", "→"]);
 }
 
 #[test]

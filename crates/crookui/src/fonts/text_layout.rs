@@ -26,7 +26,7 @@ use std::sync::Arc;
 use cosmic_text::{
     Align, Attrs, AttrsList, Hinting, LayoutGlyph, LayoutLine, ShapeLine, Shaping, Wrap, fontdb,
 };
-use crookui_core::fonts::{FontId, LineStyle, StyleAndFont, TextStyle};
+use crookui_core::fonts::{FamilyId, FontId, LineStyle, Properties, StyleAndFont, TextStyle};
 use crookui_core::geometry::vec2f;
 use crookui_core::platform;
 use crookui_core::text_layout::{Glyph, Line, Run};
@@ -247,6 +247,21 @@ impl platform::TextLayoutSystem for CosmicTextLayout {
             return self.empty_line(line_style, style_runs);
         };
         self.build_line(layout_line, line_style, style_runs, &styles, &indices)
+    }
+
+    fn advance_in_face(
+        &self,
+        family: FamilyId,
+        properties: Properties,
+        font_size: f32,
+        character: char,
+    ) -> Option<f32> {
+        self.store
+            .advance_in_face(family, properties, font_size, character)
+    }
+
+    fn covers(&self, character: char) -> Option<bool> {
+        self.store.covers(character)
     }
 }
 
