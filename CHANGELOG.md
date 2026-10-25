@@ -5,6 +5,19 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.36
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.35...v0.1.36)
+
+### Fixes
+
+- **agent:** End only the stopping session's questions, and hold every way into an asking pane ([#559](https://github.com/theguriev/crook/pull/559))
+- **agent:** Draw the answering card's request as it will run ([#558](https://github.com/theguriev/crook/pull/558))
+
+### ❤️ Contributors
+
+- Eugen Guriev <gurievcreative@gmail.com>
+
 ## v0.1.35
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.34...v0.1.35)
