@@ -580,6 +580,10 @@ impl fmt::Debug for Pty {
 /// kernel's `winsize`, which the pty was opened at before the child existed, is
 /// the truth and is what `ioctl` and `$COLUMNS` in an interactive shell both
 /// come back to.
+///
+/// So are the variables a terminal multiplexer gives the programs in its
+/// panes — see [`MULTIPLEXED`] — for the same reason: they describe where
+/// Crook was started, and a pane is not there.
 fn command_for(program: &Program, environment: &[(String, String)]) -> CommandBuilder {
     let mut command = match program {
         Program::Shell => login_command(&default_shell()),
@@ -590,15 +594,52 @@ fn command_for(program: &Program, environment: &[(String, String)]) -> CommandBu
             command
         }
     };
+    set_environment(&mut command, environment);
+    command
+}
 
+/// What tmux, GNU screen and zellij set in the environment of a program in
+/// one of their panes, which is how that program — and a multiplexer started
+/// under it — tells it is inside one.
+///
+/// A Crook started from a shell in tmux inherits them, and every pane of it
+/// did: a pane is a terminal of its own, inside no multiplexer, but anything
+/// in it read that it was in one. tmux in a pane refused to start, as a
+/// session nested in the one Crook was started from. And an agent's
+/// permission hook asks the window it is in only through a pane it can name
+/// — inside tmux the pane holding tmux's client, and inside screen or zellij
+/// none — so it asked nothing at all, and no question ever came up in Crook.
+/// tmux in a pane sets its own again, for the programs in its panes. GNU
+/// screen's `WINDOW` goes too, but only beside its `STY`: the name alone is
+/// too plain to be screen's for certain.
+const MULTIPLEXED: &[&str] = &[
+    "TMUX",
+    "TMUX_PANE",
+    "STY",
+    "ZELLIJ",
+    "ZELLIJ_SESSION_NAME",
+    "ZELLIJ_PANE_ID",
+];
+
+/// Writes what a spawn is told about its terminal into `command`, over the
+/// environment it was seeded with, then `environment`, which has the last
+/// word. See [`command_for`].
+fn set_environment(command: &mut CommandBuilder, environment: &[(String, String)]) {
     command.env("TERM", TERM);
     command.env("COLORTERM", "truecolor");
     command.env_remove("LINES");
     command.env_remove("COLUMNS");
+    // GNU screen's window number goes with its session, and only then: a
+    // `WINDOW` with no `STY` beside it is somebody else's word.
+    if command.get_env("STY").is_some() {
+        command.env_remove("WINDOW");
+    }
+    for variable in MULTIPLEXED {
+        command.env_remove(variable);
+    }
     for (key, value) in environment {
         command.env(key, value);
     }
-    command
 }
 
 /// The pty's idea of a size, which is the grid plus the pixel dimensions some

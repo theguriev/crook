@@ -2907,6 +2907,48 @@ mod socket {
         }
     }
 
+    // Linux's: a connect to a full backlog waits there for room. A Mac refuses
+    // one at once, and does not take a smaller backlog from a second
+    // `listen`, so there is nothing to fill and nothing that waits.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_hooks_connect_to_a_window_taking_no_connections_gives_up_in_its_time() {
+        // A window that has stopped, with its backlog full: a connect there
+        // waits for a place in it, and the hook with it, until the agent
+        // kills it. Within its time, it is a window not there instead.
+        let root = TempDir::runtime();
+        let (listener, socket) = planted(&root.sockets(), 0o700);
+        // The smallest backlog there is, so a few connects fill it.
+        unsafe extern "C" {
+            fn listen(socket: i32, backlog: i32) -> i32;
+        }
+        use std::os::fd::AsRawFd;
+        // SAFETY: the descriptor is the listener's, open for the whole test.
+        assert_eq!(unsafe { listen(listener.as_raw_fd(), 0) }, 0, "relistened");
+
+        let within = Duration::from_millis(300);
+        let mut waiting = Vec::new();
+        let refused = loop {
+            assert!(
+                waiting.len() < 64,
+                "a backlog of nought took 64 connections"
+            );
+            let started = Instant::now();
+            match cli::unix::connect_checked_within(&socket, within) {
+                Ok(stream) => waiting.push(stream),
+                Err(error) => break (started.elapsed(), format!("{error:#}")),
+            }
+        };
+        let (took, said) = refused;
+        assert!(
+            took < within + Duration::from_secs(1),
+            "the connect waited {took:?}: {said}"
+        );
+        assert!(said.contains("took no connection"), "{said}");
+        // The ones before it were taken as ever: the backlog is what filled.
+        assert!(!waiting.is_empty(), "not one connect was taken: {said}");
+    }
+
     #[test]
     fn a_socket_in_a_directory_others_can_enter_is_not_asked() {
         let root = TempDir::runtime();
@@ -3403,6 +3445,20 @@ mod socket {
                 status,
                 title: None,
                 message: message.map(str::to_owned),
+                session: None,
+            };
+            self.update(|workspace, ctx| workspace.apply_terminal_update(&update, ctx));
+        }
+
+        /// What a pane's agent says, as [`Self::report`], from `session`:
+        /// a report written with `--session`.
+        fn report_from(&mut self, pane: PaneId, status: AgentStatus, session: &str) {
+            let update = TerminalUpdate::Agent {
+                pane,
+                status,
+                title: None,
+                message: None,
+                session: Some(session.to_owned()),
             };
             self.update(|workspace, ctx| workspace.apply_terminal_update(&update, ctx));
         }
@@ -6541,6 +6597,82 @@ mod socket {
         assert_eq!(served.asks(), 0);
         // And the connection closes after the one answer.
         assert_eq!(client.raw(), None);
+    }
+
+    #[test]
+    fn a_stop_ends_only_the_questions_of_the_turn_it_ended() {
+        let mut served = Served::new(|_, _, _| {});
+        let pane = first_pane(&served);
+        let tty = served.tty(pane);
+
+        // Claude Code in tmux's window 1 asks, through the client in this
+        // pane; another in window 2 finishes its turn, and tmux writes that
+        // one's stop to the same client. It names no session, as the
+        // plugin's Stop hook does not: the question from inside tmux is not
+        // its to end, and the pane's own question is.
+        let (mut inside, reply) = served.ask_as(from_tmux("sA", vec![tty], "rm -rf build"), None);
+        let inside_id = held(&reply);
+        let (mut direct, reply) = served.ask_as(question("s1", tty, "ls"), None);
+        let direct_id = held(&reply);
+        served.report(pane, AgentStatus::Idle, None);
+        assert_eq!(direct.answer(), pass("turn-ended"));
+        assert_eq!(served.ended(direct_id), Some(How::Ended(Cause::TurnEnded)));
+        assert_eq!(served.ended(inside_id), None, "another agent's stop");
+        assert_eq!(served.asks(), 1);
+
+        // A stop that says its session ends that session's questions, inside
+        // tmux or not, and nobody else's.
+        let (mut other, reply) = served.ask_as(question("s2", tty, "ls"), None);
+        let other_id = held(&reply);
+        served.report_from(pane, AgentStatus::Failed, "sB");
+        assert_eq!(served.asks(), 2, "a session that asked nothing");
+        served.report(pane, AgentStatus::Running, None);
+        served.report_from(pane, AgentStatus::Idle, "sA");
+        assert_eq!(inside.answer(), pass("turn-ended"));
+        assert_eq!(served.ended(inside_id), Some(How::Ended(Cause::TurnEnded)));
+        assert_eq!(served.ended(other_id), None, "s2's turn goes on");
+        served.report(pane, AgentStatus::Running, None);
+        served.report_from(pane, AgentStatus::Idle, "s2");
+        assert_eq!(other.answer(), pass("turn-ended"));
+        assert_eq!(served.asks(), 0);
+    }
+
+    #[test]
+    fn a_stop_from_inside_tmux_ends_the_questions_of_its_own_tmux_pane() {
+        let mut served = Served::new(|_, _, _| {});
+        let pane = first_pane(&served);
+        let tty = served.tty(pane);
+        let from = |session: &str, tmux_pane: &str| {
+            let mut asked = from_tmux(session, vec![tty], "rm -rf build");
+            if let Some(multiplexer) = asked.multiplexer.as_mut() {
+                multiplexer.pane = tmux_pane.to_owned();
+            }
+            asked
+        };
+        let stop = |tmux_pane: &str| {
+            crate::control::ask::tmux_stop_session(tmux_pane).expect("a tmux pane")
+        };
+
+        // One Claude Code in tmux, told No in its own dialog: nothing runs,
+        // nothing kills its hook, and its stop is the one word that its
+        // question is over.
+        let (mut alone, reply) = served.ask_as(from("sA", "%3"), None);
+        let alone_id = held(&reply);
+        served.report_from(pane, AgentStatus::Idle, &stop("%3"));
+        assert_eq!(alone.answer(), pass("turn-ended"));
+        assert_eq!(served.ended(alone_id), Some(How::Ended(Cause::TurnEnded)));
+
+        // Two: the one in another tmux pane finishing ends nothing of this
+        // one's, nor of the pane's own.
+        served.report(pane, AgentStatus::Running, None);
+        let (_asking, reply) = served.ask_as(from("sA", "%3"), None);
+        let asking_id = held(&reply);
+        let (_direct, reply) = served.ask_as(question("s1", tty, "ls"), None);
+        let direct_id = held(&reply);
+        served.report_from(pane, AgentStatus::Idle, &stop("%4"));
+        assert_eq!(served.ended(asking_id), None, "another tmux pane's stop");
+        assert_eq!(served.ended(direct_id), None, "a stop from inside tmux");
+        assert_eq!(served.asks(), 2);
     }
 
     #[test]

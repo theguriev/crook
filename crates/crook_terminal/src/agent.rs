@@ -473,6 +473,13 @@ pub struct Reported {
     pub title: Option<String>,
     /// What it is waiting for, when it said: at most [`MESSAGE_BYTES`] of it.
     pub message: Option<String>,
+    /// The session it said it was from, when it named one the pane took.
+    ///
+    /// Not part of what is reported on change: the pane weighs it before
+    /// the report gets this far — see "Whose report it is" — and the window
+    /// reads it only to tell whose turn a stop ended, so that a question
+    /// another session asked in the same terminal is not ended with it.
+    pub session: Option<String>,
 }
 
 /// Reads a report out of the parameters of an OSC sequence, and the session
@@ -500,6 +507,7 @@ pub(crate) fn parse(parameters: &[&[u8]]) -> Option<(Reported, Option<Session<St
         status,
         title: joined(title, TITLE_BYTES),
         message: joined(message, MESSAGE_BYTES),
+        session: None,
     };
     let session = session_of(session).map(|id| {
         if starts {
@@ -857,6 +865,7 @@ mod tests {
             assert_eq!(Some(status), AgentReport::parse(status.word()));
             assert_eq!(
                 Some(Reported {
+                    session: None,
                     status,
                     title: None,
                     message: None,
@@ -871,6 +880,7 @@ mod tests {
         let sequence = report(AgentReport::Running, Some("fix a; then b"), None, None);
         assert_eq!(
             Some(Reported {
+                session: None,
                 status: AgentReport::Running,
                 title: Some("fix a; then b".to_owned()),
                 message: None,
@@ -893,6 +903,7 @@ mod tests {
         );
         assert_eq!(
             Some(Reported {
+                session: None,
                 status: AgentReport::NeedsInput,
                 title: Some("fix a; then b".to_owned()),
                 message: Some("run `rm -rf build`; then `make`?".to_owned()),
@@ -909,6 +920,7 @@ mod tests {
         assert_eq!(format!("\x1b]{OSC};needs-input;;approve?\x07"), sequence);
         assert_eq!(
             Some(Reported {
+                session: None,
                 status: AgentReport::NeedsInput,
                 title: None,
                 message: Some("approve?".to_owned()),
@@ -924,6 +936,7 @@ mod tests {
         let sequence = report(AgentReport::Running, Some("a;;;b"), Some("c;;d"), None);
         assert_eq!(
             Some(Reported {
+                session: None,
                 status: AgentReport::Running,
                 title: Some("a;b".to_owned()),
                 message: Some("c;d".to_owned()),
@@ -966,6 +979,7 @@ mod tests {
         );
         assert_eq!(
             Some(Reported {
+                session: None,
                 status: AgentReport::NeedsInput,
                 title: None,
                 message: None,
@@ -1017,6 +1031,7 @@ mod tests {
             assert_eq!(
                 Some((
                     Reported {
+                        session: None,
                         status,
                         title: title.map(str::to_owned),
                         message: message.map(str::to_owned),
@@ -1043,6 +1058,7 @@ mod tests {
             assert_eq!(
                 Some((
                     Reported {
+                        session: None,
                         status: AgentReport::NeedsInput,
                         title: None,
                         message: Some("approve".to_owned()),
@@ -1096,6 +1112,7 @@ mod tests {
             assert_eq!(
                 Some((
                     Reported {
+                        session: None,
                         status: AgentReport::Idle,
                         title: None,
                         message: None,
@@ -1118,6 +1135,7 @@ mod tests {
         said.iter()
             .filter_map(|(status, title, session)| {
                 let reported = Reported {
+                    session: None,
                     status: *status,
                     title: title.map(str::to_owned),
                     message: None,
@@ -1182,6 +1200,7 @@ mod tests {
             assert_eq!(
                 Some((
                     Reported {
+                        session: None,
                         status,
                         title: title.map(str::to_owned),
                         message: message.map(str::to_owned),
@@ -1364,6 +1383,7 @@ mod tests {
         let mut sessions = Sessions::default();
         let mut admit = |status, title: Option<&str>, session: Session<&str>| {
             let reported = Reported {
+                session: None,
                 status,
                 title: title.map(str::to_owned),
                 message: None,
@@ -1393,6 +1413,7 @@ mod tests {
             sessions
                 .admit(
                     Reported {
+                        session: None,
                         status: Running,
                         title: Some("a script".to_owned()),
                         message: None,

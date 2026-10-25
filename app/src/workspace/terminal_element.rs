@@ -144,7 +144,7 @@ use crate::theme::theme;
 use super::action::WorkspaceAction;
 use super::block_list::{FIND_CURRENT_ALPHA, FIND_MATCH_ALPHA, paint_wash};
 use super::box_drawing;
-use super::pane_output::{Keys, Output, Typed, selection_kind};
+use super::pane_output::{KeyHold, Keys, Output, Typed, selection_kind};
 
 /// How thick the rules a cell can carry are, as a fraction of the font size.
 ///
@@ -404,6 +404,13 @@ impl TerminalElement {
     /// [`Output::composition`].
     pub fn with_composition(mut self, composition: PaneComposition) -> Self {
         self.output = self.output.with_composition(composition);
+        self
+    }
+
+    /// Shares the window's hold on the keys with the output. See
+    /// [`Output::with_key_hold`].
+    pub fn with_key_hold(mut self, hold: KeyHold) -> Self {
+        self.output = self.output.with_key_hold(hold);
         self
     }
 

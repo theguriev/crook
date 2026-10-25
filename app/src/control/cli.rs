@@ -972,8 +972,30 @@ pub mod unix {
     /// listener no test can make: one that is somebody else's. The path is
     /// checked as this user's either way.
     pub(crate) fn connect_checked_for(path: &Path, uid: u32) -> Result<UnixStream> {
+        connect_checked_as(path, uid, None)
+    }
+
+    /// [`connect_checked`], giving up once the connect has waited `within`.
+    ///
+    /// For an agent's hook, which has a budget of its own and an agent
+    /// waiting on it: a connect to a window that is not accepting — one
+    /// stopped, with every place in its backlog already taken — waits until
+    /// there is a place, which is no time the kernel will cut short, and
+    /// the hook stood there until the agent killed it. Given up on, it is a
+    /// window not there, which a hook passes over.
+    pub fn connect_checked_within(path: &Path, within: Duration) -> Result<UnixStream> {
+        connect_checked_as(path, server::euid(), Some(within))
+    }
+
+    /// [`connect_checked_for`], with the connect waited on for at most
+    /// `within` when there is one.
+    fn connect_checked_as(path: &Path, uid: u32, within: Option<Duration>) -> Result<UnixStream> {
         let socket = checked_socket(path)?;
-        let stream = UnixStream::connect(&socket).map_err(|error| match error.kind() {
+        let connected = match within {
+            None => UnixStream::connect(&socket),
+            Some(within) => connect_within(&socket, within),
+        };
+        let stream = connected.map_err(|error| match error.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => gone(&socket),
             _ => anyhow!(error).context(format!("could not connect to {}", socket.display())),
         })?;
@@ -991,6 +1013,31 @@ pub mod unix {
             );
         }
         Ok(stream)
+    }
+
+    /// A connect to `socket` on a thread of its own, waited on for at most
+    /// `within`.
+    ///
+    /// A thread rather than a non-blocking socket, as `tmux` asks tmux on
+    /// one: the standard library connects a socket only by blocking, and one
+    /// left waiting ends with the process, which for a hook is soon — or
+    /// connects after all and drops what it made, which the window reads as
+    /// a client that hung up.
+    pub(crate) fn connect_within(socket: &Path, within: Duration) -> io::Result<UnixStream> {
+        let (sender, connected) = std::sync::mpsc::channel();
+        let path = socket.to_owned();
+        std::thread::Builder::new()
+            .name("connect".to_owned())
+            .spawn(move || {
+                // Fails only when the wait is over and nobody is listening.
+                let _ = sender.send(UnixStream::connect(&path));
+            })?;
+        connected.recv_timeout(within).unwrap_or_else(|_| {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("the window took no connection in {within:?}"),
+            ))
+        })
     }
 
     /// The refusal for a socket nothing is listening on, or that is not there.

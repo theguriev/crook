@@ -446,6 +446,8 @@ pub enum TerminalUpdate {
         title: Option<String>,
         /// What it is waiting for, when it said.
         message: Option<String>,
+        /// The agent's session it said it was from, when it named one.
+        session: Option<String>,
     },
     /// The command a running or waiting agent was ended, and the emulator
     /// took the status back to idle for it.
@@ -1682,6 +1684,7 @@ impl TerminalModel {
                     status: reported.status.into(),
                     title: reported.title,
                     message: reported.message,
+                    session: reported.session,
                 }),
                 TerminalEvent::AgentSettled => updates.push(TerminalUpdate::AgentSettled(pane)),
                 TerminalEvent::Notification(notification) => {
