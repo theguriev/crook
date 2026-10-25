@@ -461,7 +461,8 @@ impl Perform for OscWatcher {
             // program said — up to a mark or a notification, which it has to
             // be handed over ahead of or behind.
             _ => {
-                if let Some((reported, session)) = agent::parse(params) {
+                if let Some((mut reported, session)) = agent::parse(params) {
+                    reported.session = session.as_ref().map(|said| said.id().clone());
                     if let Some(reported) = self.sessions.admit(reported, session) {
                         self.agent = Some(reported);
                         self.notified_last = false;
@@ -814,6 +815,8 @@ pub struct Emulator {
     working_host: Option<String>,
     /// What the program in the pane last said it was doing.
     agent: AgentReport,
+    /// The session the last report handed on named, if it named one.
+    agent_session: Option<String>,
     events: Vec<TerminalEvent>,
     replies: Vec<u8>,
     /// The whole answer to XTVERSION, made once, when there is a name to
@@ -919,6 +922,7 @@ impl Emulator {
             working_directory: None,
             working_host: None,
             agent: AgentReport::default(),
+            agent_session: None,
             events: Vec::new(),
             replies: Vec::new(),
             version_reply: None,
@@ -2404,12 +2408,23 @@ impl Emulator {
     /// takes the pending report, so a second call in the same [`Self::advance`]
     /// (from [`Self::drain`]) finds nothing.
     fn apply_agent_report(&mut self) {
+        // A stop from a session other than the last report's goes on
+        // whatever the status was: one terminal can carry several agents'
+        // reports — tmux writes each of its panes' to every client — and an
+        // idle after another session's idle is still the end of this one's
+        // turn, which the window ends that session's questions for. The
+        // same session's stop said twice — Copilot's `agentStop` and then
+        // its `sessionEnd` — is still one.
         if let Some(reported) = self.osc_watcher.agent.take()
             && (reported.status != self.agent
                 || reported.title.is_some()
-                || reported.message.is_some())
+                || reported.message.is_some()
+                || (reported.session.is_some()
+                    && reported.session != self.agent_session
+                    && matches!(reported.status, AgentReport::Idle | AgentReport::Failed)))
         {
             self.agent = reported.status;
+            self.agent_session.clone_from(&reported.session);
             self.events.push(TerminalEvent::Agent(reported));
         }
     }
@@ -2466,6 +2481,7 @@ impl Emulator {
         );
         if over {
             self.agent = AgentReport::Idle;
+            self.agent_session = None;
             self.events.push(TerminalEvent::AgentSettled);
         }
     }

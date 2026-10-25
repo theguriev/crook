@@ -343,6 +343,29 @@ impl How {
     }
 }
 
+/// What a stop from inside tmux names as its session when its agent named
+/// none, ahead of the tmux pane it came from: `tmux-pane:%3`.
+///
+/// tmux writes every report from any of its panes to each of its clients, so
+/// a Crook pane holding a client hears the stop of every agent in that tmux
+/// session, and a stop that names nobody could be any of theirs. Claude
+/// Code's hooks name no session — a crook from before 0.1.27 refuses the
+/// flag, and would report no stop at all — but `crook --agent` knows which
+/// tmux pane it runs in, as the question asked from there said, so it says
+/// so, and the window ends that pane's questions and nobody else's: the one
+/// Claude Code that was told No in its own dialog, and not the one beside it
+/// still asking. Not a session any agent hands out — theirs have no `:` in
+/// them — and only ever on a stop.
+pub const TMUX_STOP: &str = "tmux-pane:";
+
+/// The session a stop from tmux pane `pane` names — see [`TMUX_STOP`] — or
+/// `None` for a pane that is not one of tmux's `%` and a number.
+pub fn tmux_stop_session(pane: &str) -> Option<String> {
+    let number = pane.strip_prefix('%')?;
+    (!number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| format!("{TMUX_STOP}{pane}"))
+}
+
 /// One question a hook is waiting on.
 pub struct Ask {
     /// Its number.
@@ -762,6 +785,34 @@ impl Asks {
             .collect();
         for id in ids {
             self.end(id, cause);
+        }
+    }
+
+    /// Ends the questions in `pane` whose turn a stop its agent reported
+    /// ended, as [`Cause::TurnEnded`]: those of `session`, the session the
+    /// stop said it was from, wherever in the pane they were asked; those
+    /// asked from the tmux pane a stop from inside tmux names — see
+    /// [`tmux_stop_session`]; or, for a stop that names neither, those asked
+    /// in the pane's own terminal and none from inside a multiplexer, whose
+    /// clients hear every one of its panes' reports — see
+    /// `Workspace::end_asks_a_report_ends`.
+    pub fn end_turn_in(&mut self, pane: PaneId, session: Option<&str>) {
+        let tmux_pane = session.and_then(|session| session.strip_prefix(TMUX_STOP));
+        let ids: Vec<AskId> = self
+            .live
+            .iter()
+            .filter(|ask| ask.pane == pane)
+            .filter(|ask| match (tmux_pane, session) {
+                (Some(tmux_pane), _) => ask.inside.as_ref().is_some_and(|inside| {
+                    inside.kind == MultiplexerKind::Tmux && inside.pane == tmux_pane
+                }),
+                (None, Some(session)) => ask.session == session,
+                (None, None) => ask.inside.is_none(),
+            })
+            .map(|ask| ask.id)
+            .collect();
+        for id in ids {
+            self.end(id, Cause::TurnEnded);
         }
     }
 

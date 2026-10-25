@@ -785,7 +785,8 @@ fn blocks(
                 workspace.clipboard().clone(),
             )
             .with_links(interaction.links.clone(), pane_paths(workspace, pane))
-            .with_composition(interaction.composition.clone());
+            .with_composition(interaction.composition.clone())
+            .with_key_hold(workspace.key_hold().clone());
     }
     let list = list.finish();
 
@@ -917,7 +918,8 @@ fn grid(
                 workspace.clipboard().clone(),
             )
             .with_links(interaction.links.clone(), pane_paths(workspace, pane))
-            .with_composition(interaction.composition.clone());
+            .with_composition(interaction.composition.clone())
+            .with_key_hold(workspace.key_hold().clone());
     }
     if let Some((showing, current)) = on_screen {
         grid = grid.with_find(showing, current);
