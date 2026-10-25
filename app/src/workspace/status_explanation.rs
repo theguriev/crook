@@ -303,7 +303,7 @@ fn asking(ask: &Ask, now: Instant, said: &mut Vec<Said>) {
             if let Some(outside) = super::answering::outside_warning(&ask.request, &ask.cwd) {
                 said.push(Said::Sentence(outside.to_owned()));
             }
-            super::answering::change_lines(&ask.request)
+            super::answering::change_lines(&ask.request, false)
                 .into_iter()
                 .map(|line| line.text)
                 .collect()

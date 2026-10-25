@@ -287,13 +287,25 @@ impl AskRequest {
     /// difference between a Makefile that builds and one that does not, and
     /// between a `\` that continues a line and one that does not.
     pub fn change(&self) -> Vec<Changed> {
+        self.change_drawn(false)
+    }
+
+    /// [`Self::change`] as written: every character that is not ASCII
+    /// written out.
+    pub fn change_as_written(&self) -> Vec<Changed> {
+        self.change_drawn(true)
+    }
+
+    /// [`Self::change`], with every character that is not ASCII written out
+    /// when `ascii_only`.
+    fn change_drawn(&self, ascii_only: bool) -> Vec<Changed> {
         let mut lines = Vec::new();
         let mut push = |mark: Mark, text: &str| {
             if text.is_empty() {
                 return;
             }
             lines.extend(text.split('\n').map(|line| {
-                let (text, muted) = file_line(line);
+                let (text, muted) = file_line(line, ascii_only);
                 Changed { mark, text, muted }
             }));
         };
@@ -322,6 +334,25 @@ impl AskRequest {
             Self::Write { content, .. } => push(Mark::Added, content),
         }
         lines
+    }
+
+    /// Whether every character of what it asks is ASCII: its command and
+    /// what its agent says it does, or its path and its change. What a card
+    /// draws of one that is not can be drawn to read as something else, and
+    /// Allow waits until it has been shown as written.
+    pub fn is_ascii(&self) -> bool {
+        match self {
+            Self::Command { command, note, .. } => {
+                command.is_ascii() && note.as_deref().is_none_or(str::is_ascii)
+            }
+            Self::Edit { path, edits, .. } => {
+                path.is_ascii()
+                    && edits
+                        .iter()
+                        .all(|edit| edit.old.is_ascii() && edit.new.is_ascii())
+            }
+            Self::Write { path, content, .. } => path.is_ascii() && content.is_ascii(),
+        }
     }
 
     /// How many lines [`Self::change`] would be, counted without building
@@ -780,83 +811,313 @@ pub fn hex(bytes: &[u8]) -> String {
 /// is written out where it is: a carriage return — which on a terminal
 /// rewrites the line it ends — as `␍`, and every other C0 control, DEL, C1
 /// control, bidirectional control, zero-width, format or other
-/// default-ignorable character, and every space but U+0020, as `⟨U+XXXX⟩`. A command that hid `rm -rf ~` behind a carriage return, or
-/// reordered itself with a right-to-left override, shows the trick instead
-/// of doing it.
+/// default-ignorable character, and every space but U+0020, as `⟨U+XXXX⟩`.
+/// So is a combining mark drawn over something it could disguise: see
+/// [`Writer::put`]. A command that hid `rm -rf ~` behind a carriage return,
+/// or reordered itself with a right-to-left override, shows the trick
+/// instead of doing it.
 pub fn visible(text: &str) -> String {
-    let mut shown = String::with_capacity(text.len());
-    let mut column = 0;
+    let mut writer = Writer::default();
     for character in text.chars() {
         match character {
-            '\n' => {
-                shown.push('\n');
-                column = 0;
-            }
-            '\t' => {
-                let spaces = TAB_STOP - column % TAB_STOP;
-                shown.extend(std::iter::repeat_n(' ', spaces));
-                column += spaces;
-            }
-            character => written_out(character, &mut shown, &mut column),
+            '\n' => writer.newline(),
+            '\t' => writer.tab(false),
+            character => writer.put(character),
         }
     }
-    shown
+    writer.shown
+}
+
+/// `text` as [`visible`] writes it, with every character that is not ASCII
+/// written out too: what a card shows of a path or a note as written.
+pub fn as_written(text: &str) -> String {
+    let mut writer = Writer {
+        ascii_only: true,
+        ..Writer::default()
+    };
+    for character in text.chars() {
+        match character {
+            '\n' => writer.newline(),
+            '\t' => writer.tab(false),
+            character => writer.put(character),
+        }
+    }
+    writer.shown
 }
 
 /// One line of a file, with no newline in it, as a change draws it: as
 /// [`visible`] writes it out, but a tab as `→` and the spaces to the next
 /// stop, and each space after the last character that is not a space or a
-/// tab as `·`, with where the marks are, to be drawn muted.
+/// tab as `·`, with where the marks and the written-out characters are, to
+/// be drawn muted.
 ///
-/// A command's tab is shown as the spaces it reads as, since a shell splits
-/// words at either; in a file a tab is not a space, as a Makefile's recipe
-/// or a heredoc's `<<-` says, and a space after a `\` turns a continued
-/// line into two. A diff viewer marks both, and so does this.
-fn file_line(line: &str) -> (String, Vec<Range<usize>>) {
-    let ends_at = line.trim_end_matches([' ', '\t']).len();
-    let mut shown = String::with_capacity(line.len());
-    let mut muted = Vec::new();
-    let mut column = 0;
-    for (at, character) in line.char_indices() {
-        match character {
-            '\t' => {
-                let start = shown.len();
-                let spaces = TAB_STOP - column % TAB_STOP;
-                shown.push('→');
-                muted.push(start..shown.len());
-                shown.extend(std::iter::repeat_n(' ', spaces - 1));
-                column += spaces;
-            }
-            ' ' if at >= ends_at => {
-                let start = shown.len();
-                shown.push('·');
-                muted.push(start..shown.len());
-                column += 1;
-            }
-            character => written_out(character, &mut shown, &mut column),
-        }
-    }
-    (shown, muted)
+/// In a file a tab is not a space, as a Makefile's recipe or a heredoc's
+/// `<<-` says, and a space after a `\` turns a continued line into two. A
+/// diff viewer marks both, and so does this.
+fn file_line(line: &str, ascii_only: bool) -> (String, Vec<Range<usize>>) {
+    let mut writer = Writer {
+        ascii_only,
+        ..Writer::default()
+    };
+    writer.line(line, Tabs::All);
+    (writer.shown, writer.muted)
 }
 
-/// `character`, which is neither a newline nor a tab, onto `into` as
-/// [`visible`] writes it out, with `column` moved past it.
-fn written_out(character: char, into: &mut String, column: &mut usize) {
-    match character {
-        '\r' => {
-            into.push('␍');
-            *column += 1;
+/// A command as the card draws it: as [`visible`] writes it out, but a tab
+/// a line starts with as `→` and the spaces to the next stop, and the tabs
+/// and spaces a line ends in as `→` and `·`, with where the marks and the
+/// written-out characters are, in bytes, to be drawn muted.
+///
+/// Only there. A tab between two words is shown as the spaces it reads as,
+/// since a shell splits words at either; but a line indented with a tab
+/// ends a heredoc's `<<-` where one indented with spaces does not, and a
+/// space after a `\` at a line's end turns one continued command into two.
+/// Drawn as blank space, each reads as its harmless twin. And a character
+/// written out is muted so that a command cannot spell one out itself —
+/// `⟨U+200B⟩` typed as eight characters — to pass for it.
+pub fn command_lines(text: &str) -> (String, Vec<Range<usize>>) {
+    let mut writer = Writer::default();
+    for (index, line) in text.split('\n').enumerate() {
+        if index > 0 {
+            writer.newline();
         }
-        character if hidden(character) => {
-            let mark = format!("⟨U+{:04X}⟩", u32::from(character));
-            *column += mark.chars().count();
-            into.push_str(&mark);
+        writer.line(line, Tabs::Leading);
+    }
+    (writer.shown, writer.muted)
+}
+
+/// A command as [`command_lines`] draws it, but with every character that
+/// is not ASCII written out too: the command shown as written, character
+/// for character, for a person who wants to see exactly what a shell will
+/// read when what is drawn holds letters, digits or marks it could be
+/// fooled by.
+pub fn command_as_written(text: &str) -> (String, Vec<Range<usize>>) {
+    let mut writer = Writer {
+        ascii_only: true,
+        ..Writer::default()
+    };
+    for (index, line) in text.split('\n').enumerate() {
+        if index > 0 {
+            writer.newline();
         }
-        character => {
-            into.push(character);
-            *column += unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        writer.line(line, Tabs::Leading);
+    }
+    (writer.shown, writer.muted)
+}
+
+/// Which of a line's tabs [`Writer::line`] marks, beside those it ends in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tabs {
+    /// Every one: a file's.
+    All,
+    /// Those it starts with: a command's.
+    Leading,
+}
+
+/// Text being written out as a card shows it, and where in it what is to be
+/// drawn muted is.
+#[derive(Default)]
+struct Writer {
+    /// What it reads as so far.
+    shown: String,
+    /// Where in it the marks and the written-out characters are, in bytes.
+    muted: Vec<Range<usize>>,
+    /// Which column its line has reached, for the next tab's stop.
+    column: usize,
+    /// What the next combining mark would be drawn over, composed with the
+    /// marks drawn over it so far: the last character shown as itself on
+    /// this line, or `None` at a line's start, after a tab, after something
+    /// written out, or after a mark that composes no further.
+    base: Option<char>,
+    /// Whether every character that is not ASCII is written out: a command
+    /// shown as written.
+    ascii_only: bool,
+}
+
+impl Writer {
+    /// Ends a line.
+    fn newline(&mut self) {
+        self.shown.push('\n');
+        self.column = 0;
+        self.base = None;
+    }
+
+    /// A tab: the spaces to the next stop, after a muted `→` when `marked`.
+    fn tab(&mut self, marked: bool) {
+        let spaces = TAB_STOP - self.column % TAB_STOP;
+        if marked {
+            let start = self.shown.len();
+            self.shown.push('→');
+            self.muted.push(start..self.shown.len());
+            self.shown.extend(std::iter::repeat_n(' ', spaces - 1));
+        } else {
+            self.shown.extend(std::iter::repeat_n(' ', spaces));
+        }
+        self.column += spaces;
+        self.base = None;
+    }
+
+    /// `mark`, one column, drawn muted.
+    fn muted_mark(&mut self, mark: char) {
+        let start = self.shown.len();
+        self.shown.push(mark);
+        self.muted.push(start..self.shown.len());
+        self.column += 1;
+        self.base = None;
+    }
+
+    /// `line`, which has no newline in it, with the tabs `tabs` says and
+    /// every tab and space after its last other character marked: a tab as
+    /// `→` and the spaces to the next stop, a space as `·`.
+    fn line(&mut self, line: &str, tabs: Tabs) {
+        let starts_at = line.len() - line.trim_start_matches([' ', '\t']).len();
+        let ends_at = line.trim_end_matches([' ', '\t']).len();
+        for (at, character) in line.char_indices() {
+            let trailing = at >= ends_at;
+            match character {
+                '\t' => self.tab(tabs == Tabs::All || at < starts_at || trailing),
+                ' ' if trailing => self.muted_mark('·'),
+                character => self.put(character),
+            }
         }
     }
+
+    /// `character`, which is neither a newline nor a tab, as itself or
+    /// written out.
+    ///
+    /// Written out, besides what would not print as itself:
+    ///
+    /// - A combining mark, unless it composes with what it is on into one
+    ///   precomposed character — `e` and U+0301 are `é` — and that is not
+    ///   ASCII punctuation or a space. Any other is a mark drawn over
+    ///   something it could disguise: a solidus through a space reads as
+    ///   `/`, a comma above a letter as `'`. A name decomposed as macOS
+    ///   stores it still reads as itself, and no stack of marks is drawn
+    ///   over the rows around it: composition stops after two or three.
+    /// - A character that is not ASCII and looks like ASCII a shell reads as
+    ///   syntax: see [`looks_like_syntax`]. `echo done ♯; rm -rf ~` is not a
+    ///   comment.
+    /// - With [`Self::ascii_only`], every character that is not ASCII.
+    fn put(&mut self, character: char) {
+        if character == '\r' {
+            self.muted_mark('␍');
+            return;
+        }
+        let combines =
+            !hidden(character) && unicode_normalization::char::is_combining_mark(character);
+        // A spacing mark — a vowel sign of the scripts of India — takes room
+        // of its own and composes with nothing; it is kept on a letter, as a
+        // mark that composes is, and written out on nothing or on ASCII
+        // punctuation or a space.
+        let spacing_mark =
+            combines && unicode_width::UnicodeWidthChar::width(character).unwrap_or(0) > 0;
+        let on_text = self
+            .base
+            .filter(|base| !base.is_ascii() || base.is_ascii_alphanumeric());
+        let composed = match (combines, spacing_mark) {
+            (false, _) => None,
+            (true, true) => on_text,
+            (true, false) => on_text
+                .filter(|_| !overlays(character))
+                .and_then(|base| unicode_normalization::char::compose(base, character)),
+        };
+        let written_out = hidden(character)
+            || (self.ascii_only && !character.is_ascii())
+            || (combines && composed.is_none())
+            || (!character.is_ascii() && unassigned_or_private(character))
+            || (!combines && !character.is_ascii() && looks_like_syntax(character));
+        if written_out {
+            let start = self.shown.len();
+            let mark = format!("⟨U+{:04X}⟩", u32::from(character));
+            self.column += mark.chars().count();
+            self.shown.push_str(&mark);
+            self.muted.push(start..self.shown.len());
+            self.base = None;
+            return;
+        }
+        self.shown.push(character);
+        self.column += unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        self.base = if combines { composed } else { Some(character) };
+    }
+}
+
+/// Whether `character` is unassigned, a noncharacter or private use: what
+/// Unicode gives no script, and a font may draw as anything at all — a
+/// private-use point as a `#` in a programmer's icon font.
+fn unassigned_or_private(character: char) -> bool {
+    use unicode_script::{Script, UnicodeScript};
+    character.script() == Script::Unknown
+}
+
+/// The ASCII a shell reads as syntax: what quotes, comments, separates,
+/// redirects, expands, groups or escapes.
+const SHELL_SYNTAX: &str = "#'\"`;|&$<>()[]{}\\/*?!~=";
+
+/// Characters that look like [`SHELL_SYNTAX`] and that UTS #39's
+/// confusables do not map to it, nor compatibility decomposition: a sharp
+/// and a viewdata square for `#`, box-drawing and other vertical bars for
+/// `|`, and turned and reversed semicolons for `;` — and the click letters
+/// `ǀ` and `ǁ`, which are letters, and drawn as `|` and `||`.
+const LOOKS_LIKE_SYNTAX: &[char] = &[
+    '\u{01C0}', '\u{01C1}', '\u{266F}', '\u{2317}', '\u{22D5}', '\u{2502}', '\u{2503}', '\u{2551}',
+    '\u{23AE}', '\u{23B8}', '\u{23B9}', '\u{2758}', '\u{2759}', '\u{275A}', '\u{FFE8}', '\u{204F}',
+    '\u{2E35}', '\u{2E32}', '\u{2E41}',
+];
+
+/// Whether `character`, which is not ASCII, looks like ASCII a shell reads
+/// as syntax — a quote, a `#`, a `;`, a `|` — or like a space: by its UTS
+/// #39 skeleton, the string of prototypes it is confusable with, by its
+/// compatibility decomposition, which maps a full-width `；` to `;`, or by
+/// [`LOOKS_LIKE_SYNTAX`]. A shell's syntax is ASCII, and a character that
+/// passes for it — `ʼ` for `'`, `♯` for `#` — changes what a command reads
+/// as without changing what it runs.
+fn looks_like_syntax(character: char) -> bool {
+    use std::sync::OnceLock;
+    use unicode_normalization::UnicodeNormalization;
+    // The skeletons the syntax itself has: `|`'s is `l`, so a character
+    // confusable with `|` is one whose skeleton is `l`.
+    static SKELETONS: OnceLock<Vec<String>> = OnceLock::new();
+    let skeletons = SKELETONS.get_or_init(|| {
+        SHELL_SYNTAX
+            .chars()
+            .map(|syntax| unicode_security::skeleton(syntax.encode_utf8(&mut [0; 4])).collect())
+            .collect()
+    });
+    if LOOKS_LIKE_SYNTAX.contains(&character) {
+        return true;
+    }
+    let alone = character.to_string();
+    let compatible: String = alone.nfkc().collect();
+    [alone.as_str(), compatible.as_str()]
+        .into_iter()
+        .any(|form| {
+            let skeleton: String = unicode_security::skeleton(form).collect();
+            [form, skeleton.as_str()].into_iter().any(|seen| {
+                seen.chars()
+                .any(|seen| SHELL_SYNTAX.contains(seen) || seen.is_whitespace())
+                // A letter whose skeleton is `|`'s, `l`, looks like the
+                // letter at least as much: Hebrew's vav, Arabic's alef.
+                || (!character.is_alphabetic() && skeletons.iter().any(|syntax| syntax == seen))
+            })
+        })
+}
+
+/// Whether combining mark `character` is drawn through or around whatever
+/// it is on: the overlays — a tilde, a stroke, a solidus, a vertical line
+/// through it — and the enclosing marks, a circle, a square, a keycap.
+fn overlays(character: char) -> bool {
+    matches!(
+        u32::from(character),
+        0x0334..=0x0338
+            | 0x0488..=0x0489
+            | 0x1ABE
+            | 0x20D2..=0x20D3
+            | 0x20D8..=0x20DA
+            | 0x20DD..=0x20E0
+            | 0x20E2..=0x20E6
+            | 0x20EA..=0x20EB
+            | 0xA670..=0xA672
+    )
 }
 
 /// Whether `character` would not print as itself: a control character, a
@@ -896,12 +1157,14 @@ fn ignorable(character: char) -> bool {
 
 /// Whether `character` is a space that is not U+0020: a no-break space, the
 /// sized spaces of U+2000 to U+200A, and the narrow, mathematical and
-/// ideographic ones. Each looks like the space a shell splits words at, and
-/// none of them is one, so `rm\u{a0}-rf` is one word that reads as two.
+/// ideographic ones — or draws as one: the Braille pattern with no dots,
+/// which a font draws as a cell of nothing. Each looks like the space a
+/// shell splits words at, and none of them is one, so `rm\u{a0}-rf` is one
+/// word that reads as two.
 fn spacing(character: char) -> bool {
     matches!(
         u32::from(character),
-        0x00A0 | 0x1680 | 0x2000..=0x200A | 0x202F | 0x205F | 0x3000
+        0x00A0 | 0x1680 | 0x2000..=0x200A | 0x202F | 0x205F | 0x2800 | 0x3000
     )
 }
 

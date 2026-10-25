@@ -52,6 +52,9 @@ gethostname.workspace = true
 getrandom.workspace = true
 log.workspace = true
 regex.workspace = true
+unicode-normalization.workspace = true
+unicode-script.workspace = true
+unicode-security.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 # `--snapshot` writes a real frame to a file so a human, or CI, can look at it.
@@ -74,6 +77,8 @@ objc2-foundation.workspace = true
 objc2-user-notifications.workspace = true
 
 [dev-dependencies]
+# The test shaper reorders right-to-left text as a real one does.
+unicode-bidi.workspace = true
 # Test plugins are written in wasm's text format and assembled in the test, so
 # a wasm toolchain is not needed to run `cargo test`.
 wat.workspace = true
