@@ -1640,34 +1640,43 @@ fn test_every_shell_integration_names_the_machine_its_directory_is_on() {
     }
 }
 
-/// Every integration escapes a `;` in the path it reports.
+/// Every integration escapes every byte of the path it reports but a letter,
+/// a digit and `/._~-`.
 ///
-/// A `;` is where the terminal splits an OSC string into fields, and the OSC 7
-/// reader takes the second field only. A working directory holding one — a
-/// legal byte on every Unix filesystem, `mkdir 'a;b'` — would be reported cut
-/// off at it: the tab's directory, its git chips and any pane that inherits
-/// the cwd would all follow the wrong path. So each snippet must send the `;`
-/// as `%3B`, which the reader decodes back (see `test_working_directory_urls_are_parsed`).
+/// A `;` is where the terminal splits an OSC string into fields, and a BEL or
+/// an ESC ends the string: a working directory holding one — a legal byte on
+/// every Unix filesystem — was reported cut off at it, and what followed the
+/// BEL arrived as output at every prompt. So each snippet sends every other
+/// byte as its `%XX` code, which the reader decodes back (see
+/// `test_working_directory_urls_are_parsed`): zsh and bash by keeping that
+/// set and spelling out the rest, fish with `string escape --style=url`,
+/// which keeps the same set. What the three send is held equal by the
+/// real-shell tests in the application's `shell_integration`.
 #[test]
-fn test_every_shell_integration_escapes_a_semicolon_in_the_cwd() {
-    for (shell, snippet) in [
+fn test_every_shell_integration_escapes_every_byte_a_url_path_cannot_carry() {
+    const SAFE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._~-";
+    for (shell, snippet, escapes) in [
         (
             "zsh",
             include_str!("../../../app/src/shell_integration/crook.zsh"),
+            format!("[^{SAFE}]"),
         ),
         (
             "bash",
             include_str!("../../../app/src/shell_integration/crook.bash"),
+            format!("[!{SAFE}]"),
         ),
         (
             "fish",
             include_str!("../../../app/src/shell_integration/crook.fish"),
+            "(string escape --style=url -- $PWD)".to_owned(),
         ),
     ] {
         assert!(
-            snippet.contains("%3B"),
-            "the {shell} integration does not escape `;` in the working \
-             directory, so a path holding one is reported truncated at it"
+            snippet.contains(&escapes),
+            "the {shell} integration does not escape every byte outside the \
+             URL-safe set in the working directory, so a path holding a `;`, \
+             a BEL or an ESC is reported cut off at it"
         );
     }
 }
@@ -3639,4 +3648,60 @@ fn test_the_line_editor_lets_go_of_the_keyboard_when_the_shell_exits() {
     let mut emulator = searching();
     emulator.child_exited(ChildExit::from_code(0));
     assert!(!emulator.snapshot().line_editor);
+}
+
+#[test]
+fn test_a_working_directory_escaped_whole_comes_back_whole() {
+    // What the shell integrations send for a directory whose name holds
+    // bytes outside the URL-safe set: every one of them as its `%XX` code.
+    assert_eq!(
+        Some((Some("h".to_owned()), PathBuf::from("/srv/a b;c%d/\u{e9}"))),
+        parse_working_directory(b"file://h/srv/a%20b%3Bc%25d/%C3%A9")
+    );
+    // A `;` a shell left in the path: the terminal splits the OSC there, and
+    // the path is put back together rather than cut short at it.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]7;file://h/srv/a;b\x07");
+    assert_eq!(Some(Path::new("/srv/a;b")), emulator.working_directory());
+    // Unless it held so many that `vte` may have dropped the end of it: then
+    // what is left can name another directory, and is no answer. Sixteen
+    // fields is that many, since the sixteenth may or may not be the last.
+    let cut = format!("\x1b]7;file://h/srv/{}x\x07", "a;".repeat(14));
+    emulator.advance(cut.as_bytes());
+    assert_eq!(Some(Path::new("/srv/a;b")), emulator.working_directory());
+    let whole = format!("\x1b]7;file://h/srv/{}x\x07", "a;".repeat(13));
+    emulator.advance(whole.as_bytes());
+    let expected = format!("/srv/{}x", "a;".repeat(13));
+    assert_eq!(Some(Path::new(&expected)), emulator.working_directory());
+}
+
+#[test]
+fn test_a_working_directory_with_a_control_character_in_it_is_refused() {
+    // A directory named `x<BEL><ESC>[3J<ESC>c`, escaped the way the shells
+    // now send it: it arrives whole, so it cannot end the report early or
+    // follow it as output. It is not taken as the directory either: a row
+    // would print it, and a command line typed into a shell would carry an
+    // ESC a line editor reads as a key. The directory before it stays.
+    let mut emulator = emulator();
+    emulator.advance(b"one\r\ntwo\r\n\x1b]7;file://h/srv\x07");
+    assert_eq!(Some(Path::new("/srv")), emulator.working_directory());
+    let _ = emulator.take_events();
+    for hostile in [
+        &b"/srv/x%07%1B%5B3J%1Bc%1B%5B%3F1003h"[..],
+        b"/srv/tab%09here",
+        b"/srv/new%0Aline",
+        b"/srv/del%7F",
+        // A C1 control, U+009B, which is CSI to a terminal that reads them.
+        b"/srv/c1%C2%9B",
+    ] {
+        assert_eq!(None, parse_working_directory(hostile), "{hostile:?}");
+        let mut osc = b"\x1b]7;file://h".to_vec();
+        osc.extend_from_slice(hostile);
+        osc.push(0x07);
+        emulator.advance(&osc);
+        assert_eq!(Some(Path::new("/srv")), emulator.working_directory());
+    }
+    let modes = emulator.mouse_modes();
+    assert!(!modes.motion && !modes.sgr, "{modes:?}");
+    assert!(emulator.snapshot().text().contains("two"));
 }

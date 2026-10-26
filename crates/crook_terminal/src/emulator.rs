@@ -420,8 +420,14 @@ impl Perform for OscWatcher {
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         match params.first() {
-            Some(&b"7") if params.len() >= 2 => {
-                if let Some(reported) = parse_working_directory(params[1]) {
+            // `vte` keeps 16 fields of an OSC and drops the rest, so a report
+            // that filled them may have lost the end of its path: no answer.
+            // Crook's own integrations send a `;` as `%3B` and never get here.
+            Some(&b"7") if (2..OSC_FIELDS).contains(&params.len()) => {
+                // The terminal splits an OSC on `;`, and a path is not split:
+                // a shell that left one in its report is put back together.
+                let value = params[1..].join(&b';');
+                if let Some(reported) = parse_working_directory(&value) {
                     self.working_directory = Some(reported);
                 }
             }
@@ -628,6 +634,10 @@ const HOST_BYTES: usize = 255;
 /// can cost; ending it costs a frame drawn half done.
 const UPDATE_TITLE_BYTES: usize = 4096;
 
+/// How many fields `vte` splits an OSC into at most, dropping the rest: its
+/// `MAX_OSC_PARAMS`, which it does not export.
+const OSC_FIELDS: usize = 16;
+
 /// Reads the payload of OSC 7, which is a `file://` URL or a bare path, into
 /// the host the URL named and the path.
 ///
@@ -642,6 +652,12 @@ const UPDATE_TITLE_BYTES: usize = 4096;
 /// and neither is a host longer than [`HOST_BYTES`] or one holding a control
 /// character or a space, since no machine is called that and the row would
 /// print it.
+///
+/// Nor is a path holding a control character, which the shell integrations
+/// send as a `%XX` code so that it cannot end the report or follow it as
+/// output. Decoded, it would be a directory that a row prints and that a
+/// command line typed into a shell carries: an ESC a line editor reads as
+/// the start of a key. The directory before it stays the answer.
 fn parse_working_directory(value: &[u8]) -> Option<(Option<String>, PathBuf)> {
     let value = str::from_utf8(value).ok()?;
     let (host, path) = match value.strip_prefix("file://") {
@@ -661,6 +677,9 @@ fn parse_working_directory(value: &[u8]) -> Option<(Option<String>, PathBuf)> {
     }
 
     let decoded = percent_decode(path)?;
+    if decoded.chars().any(char::is_control) {
+        return None;
+    }
     // A Windows path arrives as `/C:/Users/...`; the leading slash is part of
     // the URL, not of the path.
     let decoded = if cfg!(windows) && is_drive_prefixed(&decoded) {
@@ -688,7 +707,8 @@ fn is_drive_prefixed(path: &str) -> bool {
         && chars.next() == Some(':')
 }
 
-/// Undoes the percent-encoding an OSC 7 URL uses for spaces and non-ASCII.
+/// Undoes the percent-encoding an OSC 7 URL uses for every byte outside a
+/// small set.
 fn percent_decode(value: &str) -> Option<String> {
     let bytes = value.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());

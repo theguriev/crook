@@ -3446,3 +3446,157 @@ fn test_a_command_after_output_with_no_newline_keeps_its_prompt_and_command_line
         );
     }
 }
+
+/// Startup files that keep the directory out of each shell's prompt and
+/// title, so that what reaches the pane about it is the snippet's OSC 7 and
+/// nothing else. Not the system's either: Arch's /etc/bash.bashrc puts the
+/// directory in the title from `PROMPT_COMMAND`, unescaped.
+const PROMPTS_WITHOUT_THE_DIRECTORY: &[(&str, &str)] = &[
+    (".bash_profile", "PS1='$ '\nunset PROMPT_COMMAND\n"),
+    (".bashrc", "PS1='$ '\nunset PROMPT_COMMAND\n"),
+    (".zshrc", "PROMPT='%% '\n"),
+    (
+        "config/fish/config.fish",
+        "function fish_prompt; printf '> '; end\nfunction fish_title; end\n",
+    ),
+];
+
+#[test]
+fn test_a_real_shell_reports_a_directory_with_any_name_whole_or_not_at_all() {
+    // A directory name can hold any byte but `/`. The snippets used to escape
+    // only `%` and `;`, so a BEL in a name ended the OSC 7 there — the pane
+    // took the directory beside it for the shell's — and what followed it
+    // arrived as output at every prompt: the scrollback erased, the terminal
+    // reset, mouse reporting turned on. Every byte outside the URL-safe set
+    // now leaves as its `%XX` code: a name with nothing worse than spaces,
+    // punctuation and accents comes back as itself, and one with a control
+    // character in it is refused whole, the directory before it kept.
+    let hostile = "crook-dir-x\x07\x1b[3J\x1bc\x1b[?1003h\x1b[?1006h";
+    let plain = "crook-dir-a b;c%d #?&=+é";
+    for name in ["bash", "zsh", "fish", "fish-native"] {
+        if name == "fish-native" && fish_marks_its_own_prompt() != Some(true) {
+            continue;
+        }
+        for (directory, reported) in [(plain, true), (hostile, false)] {
+            let mut home_files = PROMPTS_WITHOUT_THE_DIRECTORY.to_vec();
+            let keep = format!("{directory}/.keep");
+            home_files.push((&keep, ""));
+            let (name, extra): (&str, &[(&str, &str)]) = match name {
+                "fish" => ("fish", &[("fish_features", "no-mark-prompt")]),
+                "fish-native" => ("fish", &[]),
+                name => (name, &[]),
+            };
+            let Some(ran) = (RealShell {
+                name,
+                extra,
+                home_files: &home_files,
+                command: "cd ~/crook-dir-*",
+                then: &["true"],
+                ..RealShell::default()
+            })
+            .run() else {
+                break;
+            };
+            let home = ran.home.path();
+            let reported_as = ran.terminal.working_directory();
+            if reported {
+                assert_eq!(
+                    Some(home.join(directory).as_path()),
+                    reported_as,
+                    "{name} in {directory:?}; it wrote {:?}",
+                    ran.seen
+                );
+            } else {
+                // The directory it reported before, which is the home: as the
+                // shell spelled it, which on macOS can be through /private.
+                assert_eq!(
+                    reported_as.and_then(Path::file_name),
+                    home.file_name(),
+                    "{name} in {directory:?}; it wrote {:?}",
+                    ran.seen
+                );
+            }
+            let modes = ran.terminal.emulator().mouse_modes();
+            assert!(
+                !modes.motion && !modes.sgr,
+                "{name} in {directory:?} turned mouse reporting on: {:?}",
+                ran.seen
+            );
+            assert!(
+                !ran.seen.contains("\x1b[?1003h"),
+                "{name} in {directory:?} printed the name's escapes: {:?}",
+                ran.seen
+            );
+        }
+    }
+}
+
+#[test]
+fn test_reporting_a_directory_leaves_the_shells_locale_as_it_was() {
+    // bash spells a path out in the C locale, with a `local LC_ALL`, and
+    // zsh with `nomultibyte`, which `emulate -L` keeps to the function:
+    // neither may reach the command line the person types next. And a
+    // startup file that made `LC_ALL` read-only gets no error at every
+    // prompt, and zsh still says where it is.
+    let directory = "crook-dir-\u{e9} x";
+    let keep = format!("{directory}/.keep");
+    for (name, setting, print) in [
+        (
+            "bash",
+            "export LC_ALL=POSIX\n",
+            "printf 'CROOK_LC[%s]\\n' \"${LC_ALL-unset}\"",
+        ),
+        (
+            "bash",
+            "readonly LC_ALL=POSIX\n",
+            "printf 'CROOK_LC[%s]\\n' \"${LC_ALL-unset}\"",
+        ),
+        (
+            "zsh",
+            "export LC_ALL=POSIX\n",
+            "printf 'CROOK_LC[%s %s]\\n' \"${LC_ALL-unset}\" \"$options[multibyte]\"",
+        ),
+        (
+            "zsh",
+            "readonly LC_ALL=POSIX\n",
+            "printf 'CROOK_LC[%s %s]\\n' \"${LC_ALL-unset}\" \"$options[multibyte]\"",
+        ),
+    ] {
+        let mut home_files = PROMPTS_WITHOUT_THE_DIRECTORY.to_vec();
+        let profile = format!("PS1='$ '\nunset PROMPT_COMMAND\n{setting}");
+        let zshrc = format!("PROMPT='%% '\n{setting}");
+        home_files.retain(|(file, _)| ![".bash_profile", ".bashrc", ".zshrc"].contains(file));
+        home_files.push((".bash_profile", &profile));
+        home_files.push((".bashrc", &profile));
+        home_files.push((".zshrc", &zshrc));
+        home_files.push((&keep, ""));
+        let Some(ran) = (RealShell {
+            name,
+            home_files: &home_files,
+            command: "cd ~/crook-dir-*",
+            then: &[print],
+            ..RealShell::default()
+        })
+        .run() else {
+            continue;
+        };
+        let expected = if name == "zsh" { "POSIX on" } else { "POSIX" };
+        assert_eq!(
+            printed(&ran.seen, "CROOK_LC").as_deref(),
+            Some(expected),
+            "{name} with {setting:?}: {:?}",
+            ran.seen
+        );
+        assert!(
+            !ran.seen.contains("readonly") && !ran.seen.contains("read-only"),
+            "{name} with {setting:?} complained: {:?}",
+            ran.seen
+        );
+        assert_eq!(
+            Some(ran.home.path().join(directory).as_path()),
+            ran.terminal.working_directory(),
+            "{name} with {setting:?}: {:?}",
+            ran.seen
+        );
+    }
+}

@@ -48,15 +48,39 @@ __crook_mark() { builtin printf '\e]133;%s\a' "$1" }
 # means a directory on this machine and nowhere else: pasted on the far side of
 # an ssh, this is what tells Crook the shell is there, and that the laptop's
 # checkout at the same path is not the one it is in. It is printed as it is: a
-# machine's name holds neither of the two bytes below.
+# machine's name holds none of the bytes escaped below.
 #
-# `%` and `;` are escaped in the path, and nothing else. `%` is the byte the
-# reader would take for the start of a percent-escape; `;` is the one the
-# terminal splits the OSC into fields on, so a path holding one would arrive
-# cut off at it. Both leave as their `%XX` code and the reader turns them back
-# — `%` first, so the `%` in `%3B` is not escaped a second time. Everything
-# else survives the round trip as itself, spaces included.
-__crook_cwd() { builtin printf '\e]7;file://%s%s\a' "${__crook_host-}" "${${PWD//\%/%25}//;/%3B}" }
+# Every byte of the path but a letter, a digit and `/._~-` leaves as its `%XX`
+# code, which the reader turns back. Not only `%`, which the reader would take
+# for the start of an escape, and `;`, which the terminal splits the OSC into
+# fields on: a directory name can hold any byte but `/`, and a BEL or an ESC
+# printed as itself ends the report there. A clone of a repository that has a
+# directory named `x<BEL><ESC>[3J<ESC>c` cut the path short at `x` — the
+# directory beside it, which can be one somebody chose — and the rest arrived
+# as output at every prompt: the scrollback erased, the terminal reset, mouse
+# reporting turned on. The set is the one fish's `string escape --style=url`
+# keeps, so the three shells say the same path the same way.
+#
+# A path of those bytes alone, which is nearly every path, is printed as it
+# is. Any other is split into its bytes and each byte outside the set is
+# replaced by its code, in one expansion of the whole array, which costs the
+# path's length and not the square of it. Bytes, whatever the locale, with
+# `nomultibyte`: `(s::)` splits into them and `#MATCH` numbers one. Not with
+# a `local LC_ALL=C`, which a startup file that made `LC_ALL` read-only turns
+# into an error that ends the function at every prompt. `emulate -L zsh` for
+# the options the expansion reads, and `extendedglob` for `(#m)`, both for
+# this function alone. The `/` in the pattern is quoted, or it would end it.
+__crook_cwd() {
+	emulate -L zsh
+	local d=$PWD
+	if [[ $d == *[^abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._~-]* ]]; then
+		setopt extendedglob nomultibyte
+		local -a bytes
+		bytes=( ${(s::)PWD} )
+		d=${(j::)bytes/(#m)[^abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\/._~-]/%${(l:2::0:)$(( [##16] #MATCH & 255 ))}}
+	fi
+	builtin printf '\e]7;file://%s%s\a' "${__crook_host-}" "$d"
+}
 
 # The name is the system's, read once here, and not `$HOST`. zsh takes `$HOST`
 # from the environment when it is there, and a startup file can set it to
