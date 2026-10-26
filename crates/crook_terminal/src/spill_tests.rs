@@ -1499,3 +1499,28 @@ fn a_flood_a_whole_slice_of_which_scrolls_about_twice_what_is_kept_is_fed_short(
         emulator.overgrown_slices
     );
 }
+
+#[test]
+fn a_column_change_on_a_blank_screen_keeps_the_row_the_cursor_is_on() {
+    // A picture printed over blank cells leaves the cursor beside it, and
+    // so does a cursor move on a cleared screen: the screen holds nothing
+    // and the program's next line goes on the cursor's row. A column change
+    // started the open block on the row below, and the spill then dropped
+    // the cursor's row as nobody's.
+    for (what, opening) in [
+        ("a picture", picture()),
+        ("a cursor move", "\x1b[2;3H".to_owned()),
+    ] {
+        let mut twins = Twins::new(1000);
+        twins.feed(&opening);
+        twins.resize(15, 5);
+        twins.feed("first\r\n");
+        twins.feed(output(0, 60));
+        let (rows, _) = twins.spilling.harvest_rows(0, 1);
+        assert!(
+            rows.to_text().contains("first"),
+            "{what}: the scrollback starts {:?}",
+            rows.to_text()
+        );
+    }
+}

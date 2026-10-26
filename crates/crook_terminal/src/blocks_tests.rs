@@ -1971,3 +1971,103 @@ fn test_a_picture_let_go_of_leaves_the_index_with_it() {
     assert!(pictures.take().count() > 0);
     assert!(pictures.is_empty() && pictures.starts.is_empty());
 }
+
+#[test]
+fn test_a_prompt_drawn_after_output_with_no_newline_starts_the_next_block() {
+    // bash has no `PROMPT_SP`: after `printf hello` it draws the next prompt
+    // on the row the output ended on, marks and all. The block that prompt
+    // opens starts on that row, the cells the output had blanked, rather
+    // than on the row below it with its prompt and command line above its
+    // top.
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}$ {B}printf hello\r\n{C}hello\x1b]133;D;0\x07").as_bytes());
+    emulator.advance(format!("{A}$ {B}seq 3\r\n{C}1\r\n2\r\n3\r\n\x1b]133;D;0\x07").as_bytes());
+
+    let [printf, seq] = emulator.blocks() else {
+        panic!("two blocks, got {}", emulator.blocks().len());
+    };
+    assert_eq!("$ printf hello\nhello", printf.rows.to_text());
+    assert_eq!(Some("seq 3".to_owned()), seq.command);
+    assert_eq!("     $ seq 3\n1\n2\n3", seq.rows.to_text());
+    assert_eq!(
+        Some(1),
+        seq.output_from,
+        "the output starts below the prompt"
+    );
+}
+
+#[test]
+fn test_a_prompt_with_a_wrap_pending_starts_the_block_on_the_row_below() {
+    // Output that filled its last row exactly leaves the cursor on the last
+    // column with a wrap pending, and the prompt's first character goes on
+    // the row below. So does the block.
+    let mut emulator = emulator();
+    let full = "x".repeat(20);
+    emulator.advance(format!("{A}$ {B}fill\r\n{C}{full}\x1b]133;D;0\x07").as_bytes());
+    emulator.advance(format!("{A}$ {B}seq 1\r\n{C}1\r\n\x1b]133;D;0\x07").as_bytes());
+
+    let [fill, seq] = emulator.blocks() else {
+        panic!("two blocks, got {}", emulator.blocks().len());
+    };
+    assert_eq!(format!("$ fill\n{full}"), fill.rows.to_text());
+    assert_eq!("$ seq 1\n1", seq.rows.to_text());
+}
+
+#[test]
+fn test_fish_marking_output_with_no_newline_leaves_its_mark_out_of_the_next_block() {
+    // fish's mark of output with no newline: after the command's `D` it
+    // draws a `⏎` where the output ended, pads past the row's end so the
+    // cursor wraps, and draws the prompt from the start of the row below.
+    // The `⏎` is on the row the output ended on, which is not the next
+    // command's. (zsh's `PROMPT_SP` draws its `%` before its `D`.)
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}$ {B}printf hello\r\n{C}hello\x1b]133;D;0\x07").as_bytes());
+    let pad = " ".repeat(19);
+    emulator.advance(format!("\x1b[7m\u{23ce}\x1b[27m{pad}\r").as_bytes());
+    emulator.advance(format!("{A}$ {B}seq 1\r\n{C}1\r\n\x1b]133;D;0\x07").as_bytes());
+
+    let blocks = emulator.blocks();
+    let rows: Vec<_> = blocks.iter().map(|block| block.rows.to_text()).collect();
+    assert_eq!(2, blocks.len(), "{rows:?}");
+    assert_eq!("$ seq 1\n1", rows[1]);
+}
+
+#[test]
+fn test_a_column_change_on_a_blank_screen_starts_the_block_on_the_cursors_row() {
+    // A screen with nothing on it and the cursor past column zero — a
+    // program moved it there, or a picture over blank cells left it there —
+    // is one whose next line is printed on the cursor's row. A column
+    // change then starts the open block there, not on the row below.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b[2;3H");
+    emulator.resize(TerminalSize::new(15, 6));
+    emulator.advance(b"first\r\nsecond\r\n");
+
+    let live = emulator.live_block();
+    assert_eq!(
+        (1, 2),
+        (live.top_row, live.bottom_row),
+        "the block is the rows `first` and `second` are on: {live:?}"
+    );
+}
+
+#[test]
+fn test_a_column_change_before_fishs_mark_leaves_the_mark_out_of_the_next_block() {
+    // The same `⏎` with a column change between the command finishing and
+    // fish drawing it. The screen is blank and the cursor where the output
+    // ended, and what goes on that row next is the mark, not the next block.
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}$ {B}printf hello\r\n{C}hello\x1b]133;D;0\x07").as_bytes());
+    emulator.resize(TerminalSize::new(24, 6));
+    let pad = " ".repeat(23);
+    emulator.advance(format!("\x1b[7m\u{23ce}\x1b[27m{pad}\r").as_bytes());
+    emulator.advance(format!("{A}$ {B}seq 1\r\n{C}1\r\n\x1b]133;D;0\x07").as_bytes());
+
+    let rows: Vec<_> = emulator
+        .blocks()
+        .iter()
+        .map(|block| block.rows.to_text())
+        .collect();
+    assert_eq!(2, rows.len(), "{rows:?}");
+    assert_eq!("$ seq 1\n1", rows[1]);
+}

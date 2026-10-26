@@ -1595,6 +1595,9 @@ struct RealShell<'a> {
     binary: Option<&'a str>,
     /// The line typed at the first prompt.
     command: &'a str,
+    /// The lines typed at the prompts after it, one a prompt, each once the
+    /// line before it has finished.
+    then: &'a [&'a str],
 }
 
 impl Default for RealShell<'_> {
@@ -1609,6 +1612,7 @@ impl Default for RealShell<'_> {
             inherited_path: None,
             binary: None,
             command: "printf 'crook-ok\\n'",
+            then: &[],
         }
     }
 }
@@ -1621,6 +1625,9 @@ struct Ran {
     /// startup files the shell was measured against, and a test that wants to
     /// run the same shell again by hand needs them still there.
     home: TempDir,
+    /// The pane the shell ran in, with everything it wrote fed to it: what
+    /// Crook made of the bytes, its blocks and the directory it was told.
+    terminal: Terminal,
 }
 
 impl RealShell<'_> {
@@ -1696,8 +1703,18 @@ impl RealShell<'_> {
                 .expect("a fresh terminal has its reader"),
         );
 
+        let lines: Vec<&str> = std::iter::once(self.command)
+            .chain(self.then.iter().copied())
+            .collect();
         let mut seen = String::new();
-        let mut submitted = false;
+        // How many lines have been typed, and where in `seen` the shell's
+        // answer to the last one is looked for: a prompt end after it is the
+        // next prompt, and a success after it is the line finishing. A
+        // success, because a line can hold several commands and fail in all
+        // but the last.
+        let mut typed = 0;
+        let mut after = 0;
+        let mut finished = false;
         let deadline = Instant::now() + DEADLINE;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1713,19 +1730,38 @@ impl RealShell<'_> {
             terminal.feed(&chunk).expect("feeding should not fail");
             seen.push_str(&String::from_utf8_lossy(&chunk));
 
-            if !submitted && seen.contains("\x1b]133;B") {
-                submitted = true;
-                terminal
-                    .write(format!("{}\r", self.command).as_bytes())
-                    .expect("writing to the shell should not fail");
+            // The line finishing first, then the next prompt, because one
+            // read can hold both.
+            if typed > 0
+                && !finished
+                && let Some(at) = seen[after..].find("\x1b]133;D;0")
+            {
+                finished = true;
+                after += at + 1;
+                if typed == lines.len() {
+                    break;
+                }
             }
-            if seen.contains("\x1b]133;D;0") {
-                break;
+            // Every line but the first after its predecessor has finished,
+            // and each at a prompt whose end has been drawn.
+            if (typed == 0 || finished)
+                && let Some(at) = seen[after..].find("\x1b]133;B")
+            {
+                terminal
+                    .write(format!("{}\r", lines[typed]).as_bytes())
+                    .expect("writing to the shell should not fail");
+                typed += 1;
+                after += at + 1;
+                finished = false;
             }
         }
 
         let _ = terminal.write(b"exit\r");
-        Some(Ran { seen, home })
+        Some(Ran {
+            seen,
+            home,
+            terminal,
+        })
     }
 }
 
@@ -3341,4 +3377,72 @@ fn test_a_repeated_subshell_line_keeps_its_status_where_history_skips_it() {
 
     assert_eq!(seen.matches("\x1b]133;D;3").count(), 2, "{seen:?}");
     assert!(seen.contains("\x1b]133;D;5"), "{seen:?}");
+}
+
+/// Runs `first` and then `second` in a real shell, and returns the rows of
+/// the block `second` ran in, a line a row, or `None` when that shell is not
+/// installed here.
+fn rows_of_the_second_block(name: &str, first: &str, second: &str) -> Option<Vec<String>> {
+    // With fish's own marks off where it has them, so that the snippet's are
+    // what is measured, as for every other shell; `fish-native` is fish with
+    // them on, where it has them.
+    let (name, extra): (&str, &[(&str, &str)]) = match name {
+        "fish" => ("fish", &[("fish_features", "no-mark-prompt")]),
+        "fish-native" if fish_marks_its_own_prompt() == Some(true) => ("fish", &[]),
+        "fish-native" => return None,
+        name => (name, &[]),
+    };
+    let ran = RealShell {
+        name,
+        extra,
+        // A prompt of one row: macOS's bash names the machine in its own,
+        // and a runner's name is long enough to wrap it.
+        home_files: PROMPTS_WITHOUT_THE_DIRECTORY,
+        command: first,
+        then: &[second],
+        ..RealShell::default()
+    }
+    .run()?;
+    let blocks = ran.terminal.blocks();
+    let Some(block) = blocks
+        .iter()
+        .find(|block| block.command.as_deref() == Some(second))
+    else {
+        panic!(
+            "{name} filed no block for {second:?}; it filed {:?}, out of {:?}",
+            blocks
+                .iter()
+                .map(|block| (&block.command, block.rows.to_text()))
+                .collect::<Vec<_>>(),
+            ran.seen
+        );
+    };
+    Some(block.rows.to_text().lines().map(str::to_owned).collect())
+}
+
+#[test]
+fn test_a_command_after_output_with_no_newline_keeps_its_prompt_and_command_line() {
+    // `curl -s`, `printf`, `echo -n`: output that does not end in a newline
+    // leaves the cursor in the middle of its last row. bash then draws the
+    // next prompt right there, on the same row, and a block opened on the row
+    // below lost its prompt and its command line. zsh and fish move to a row
+    // of their own first, zsh after drawing its reverse `%` on the old one,
+    // and that mark is not the next block's.
+    for name in ["bash", "zsh", "fish", "fish-native"] {
+        let Some(rows) =
+            rows_of_the_second_block(name, "printf crook-hello", "printf 'crook-next\\n'")
+        else {
+            continue;
+        };
+        let first = rows.first().map(String::as_str).unwrap_or_default();
+        assert!(
+            first.trim_end().ends_with("printf 'crook-next\\n'"),
+            "{name}: the block starts with its prompt and command line, not \
+             {first:?}; its rows were {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row == "crook-next"),
+            "{name}: and has its output; its rows were {rows:?}"
+        );
+    }
 }
