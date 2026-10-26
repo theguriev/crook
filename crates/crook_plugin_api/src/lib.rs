@@ -746,6 +746,15 @@ pub enum Node {
     /// Whether it is up is the plugin's state, not the host's: `panel` is
     /// `None` on every frame it is shut. Dismissing runs `dismiss`, which is
     /// how the plugin finds out that a click somewhere else closed it.
+    ///
+    /// **A dismissal is not a press.** The click that closed the panel landed
+    /// on nothing the plugin drew — and since the plugin can put its panel up
+    /// whenever it likes, it is usually a click on somebody's terminal — so
+    /// `dismiss` runs on nobody's behalf, as a tick does: what only a press
+    /// may ask for, typing, running a command, the clipboard, what a command
+    /// printed, is declined from it. The same goes for Escape on a picker.
+    /// What a click *inside* the panel lands on — a button, a row — is a
+    /// press of that, wherever the panel came from.
     Anchored {
         /// What sits in the slot.
         content: Box<Node>,
@@ -798,6 +807,21 @@ pub enum Node {
     /// a thing this cannot describe, and it stays that way until something
     /// needs it: a variant nobody uses is a variant that has to keep working
     /// for ever.
+    ///
+    /// **And it has the keyboard only when a person put it up.** A picker
+    /// drawn on the frame after a press of one of the plugin's own things —
+    /// a control it drew, a row of its picker, its command, a chord bound to
+    /// it — takes the keyboard, and keeps it until Escape, a click outside or
+    /// a choice takes it down. One the plugin puts up by itself, later, out
+    /// of a timer or an answer — or puts back after it was dismissed — is
+    /// drawn and given nothing: what a person types goes on reaching their
+    /// shell, and Escape, Enter and the arrows with it. Its rows still answer
+    /// a click, which is a press. So a plugin opens its picker from the
+    /// action its chip runs, as it would anyway.
+    ///
+    /// The keyboard stays with a picker for as long as it is drawn, frame by
+    /// frame: one the plugin stops drawing by itself lets go of it at the end
+    /// of that frame, and drawn again later it needs a press again.
     ///
     /// [`Meter`]: Self::Meter
     Picker {
@@ -892,6 +916,13 @@ pub struct MenuItem {
 pub enum Request {
     /// Reach the network. Needs [`Capability::Network`] naming the host in the
     /// URL; anything else comes back [`Answer::Refused`].
+    ///
+    /// A redirect is followed only to a host the grant names too, and three
+    /// at most; the headers given here go only to the host they were
+    /// addressed to, and are left behind by a redirect anywhere else. A
+    /// redirect it may not follow comes back as the answer — its status and
+    /// its body — so a plugin whose host sends it to storage somewhere else
+    /// asks to be allowed that host as well.
     Fetch {
         /// Which verb.
         method: Method,

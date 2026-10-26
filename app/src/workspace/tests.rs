@@ -36781,6 +36781,581 @@ mod sandboxed {
         );
     }
 
+    /// The new-tab command, as a grant and as a request for it.
+    const NEW_TAB: &str = "crook/window/new-tab";
+
+    /// A probe allowed to open a tab — the stand-in for any grant that
+    /// only a press may use — whose one action asks to.
+    fn opening_tabs(scratch: &Scratch, module: &[u8]) -> Harness {
+        install(scratch.path(), "eugen.probe", module);
+        let mut opening = opening(scratch, Default::default(), Default::default());
+        opening
+            .settings
+            .set_granted("eugen/probe", vec![format!("run:{NEW_TAB}")]);
+        Harness::with_opening(1, opening)
+    }
+
+    /// The probe's manifest, asking to open tabs.
+    fn asking_for_tabs() -> crook_plugin_api::Manifest {
+        let mut asking = manifest("eugen/probe");
+        asking.capabilities = vec![Capability::RunCommands(vec![NEW_TAB.to_owned()])];
+        asking
+    }
+
+    /// Serves what a press asked for: the deeds are served by the observer on
+    /// the frames after, and a refusal lands nothing to wait for.
+    fn served(harness: &mut Harness) {
+        for _ in 0..4 {
+            harness.queue.run_until_parked();
+            harness.frame();
+        }
+    }
+
+    #[test]
+    fn a_click_that_dismisses_a_panel_nobody_opened_is_not_a_press() {
+        // Whether a panel is up is the plugin's own state, so a plugin can
+        // put one up with nobody pressing anything — and the click a person
+        // makes on their terminal to get rid of it ran the plugin's dismiss
+        // action as a press: its gesture-only grant, a new tab here, was used
+        // by a click on the pane.
+        let scratch = Scratch::new("dismissed-unasked");
+        let request = crook_plugin_api::Request::Run {
+            name: NEW_TAB.to_owned(),
+            argument: String::new(),
+        };
+        let panel = crook_plugin_api::Node::Note {
+            text: String::from("a panel nobody opened"),
+            tone: crook_plugin_api::Tone::Muted,
+        };
+        let module = crate::plugins::wasm::tests::wasm_with_a_panel_of_its_own(
+            &asking_for_tabs(),
+            &panel,
+            Some(&request),
+        );
+        let mut harness = opening_tabs(&scratch, &module);
+        assert!(
+            says(&harness.frame(), "a panel nobody opened"),
+            "the panel is not up, so this proves nothing"
+        );
+        let before = harness.tab_ids().len();
+
+        harness.click(vec2f(1000., 400.), MouseButton::Left);
+        served(&mut harness);
+        assert_eq!(
+            harness.tab_ids().len(),
+            before,
+            "a click on the pane opened a tab through the plugin's grant"
+        );
+
+        // And the same action, pressed, is a press: the grant is real and the
+        // request is served, so it was the click that was turned down.
+        harness.run_command("eugen/probe/poke");
+        served(&mut harness);
+        assert_eq!(harness.tab_ids().len(), before + 1, "the press was refused");
+    }
+
+    #[test]
+    fn a_picker_nobody_opened_does_not_take_the_keyboard() {
+        // A plugin with no grant at all put a picker up by itself and the
+        // keyboard went into it: what a person typed into their shell — a
+        // password, here — landed in the plugin's field, and after Escape the
+        // plugin drew the picker again and took the keys again. A picker has
+        // the keyboard only when a person's press put it up.
+        let scratch = Scratch::new("picker-unasked");
+        let mut quiet = manifest("eugen/probe");
+        quiet.capabilities = Vec::new();
+        let picker = crook_plugin_api::Node::Picker {
+            placeholder: String::from("Search\u{2026}"),
+            rows: vec![crook_plugin_api::Row {
+                key: String::from("/tmp"),
+                label: String::from("somewhere"),
+                icon: String::new(),
+                tone: crook_plugin_api::Tone::Primary,
+            }],
+            choose: String::from("poke"),
+        };
+        install(
+            scratch.path(),
+            "eugen.probe",
+            &crate::plugins::wasm::tests::wasm_with_a_panel_of_its_own(&quiet, &picker, None),
+        );
+        let mut harness = harness(&scratch);
+        let nothing = "Nothing matches that.";
+
+        assert!(
+            says(&harness.frame(), "somewhere"),
+            "the picker is not up, so this proves nothing"
+        );
+        assert!(
+            harness.a_pane_field_has_keys(),
+            "a picker nobody opened took the keyboard from the pane"
+        );
+        harness.type_text("hunter2");
+        let scene = harness.frame();
+        assert!(
+            !says(&scene, nothing),
+            "what was typed into the shell went into the plugin's picker: {}",
+            frame_text(&scene)
+        );
+
+        // Pressed, it is a picker somebody opened, and typing is its.
+        harness.run_command("eugen/probe/poke");
+        harness.frame();
+        assert!(
+            !harness.a_pane_field_has_keys(),
+            "the picker a person opened did not get the keyboard"
+        );
+        harness.type_text("some");
+        assert!(says(&harness.frame(), "somewhere"));
+
+        // Escape gives it back, and the picker the plugin draws again is
+        // drawn without it.
+        harness.press("escape", Modifiers::default(), "");
+        harness.frame();
+        harness.frame();
+        assert!(
+            harness.a_pane_field_has_keys(),
+            "the plugin took the keyboard back after Escape"
+        );
+        harness.type_text("x");
+        let scene = harness.frame();
+        assert!(
+            !says(&scene, nothing) && says(&scene, "somewhere"),
+            "typing after Escape went into the plugin's picker: {}",
+            frame_text(&scene)
+        );
+
+        // Until somebody presses something of the plugin's again.
+        harness.run_command("eugen/probe/poke");
+        harness.frame();
+        assert!(!harness.a_pane_field_has_keys());
+    }
+
+    #[test]
+    fn escape_on_a_plugins_picker_is_a_dismissal_and_enter_is_a_press() {
+        // The other door a dismissal comes through. Escape is a person's key,
+        // and what it says is "take this down": the plugin hears it, and what
+        // it asks for out of hearing it is asked on nobody's behalf. Enter on
+        // a row of the picker a person opened is choosing that row, which is
+        // a press.
+        let scratch = Scratch::new("escape-dismisses");
+        let request = crook_plugin_api::Request::Run {
+            name: NEW_TAB.to_owned(),
+            argument: String::new(),
+        };
+        let picker = crook_plugin_api::Node::Picker {
+            placeholder: String::from("Search\u{2026}"),
+            rows: vec![crook_plugin_api::Row {
+                key: String::from("/tmp"),
+                label: String::from("somewhere"),
+                icon: String::new(),
+                tone: crook_plugin_api::Tone::Primary,
+            }],
+            choose: String::from("poke"),
+        };
+        let module = crate::plugins::wasm::tests::wasm_with_a_panel_of_its_own(
+            &asking_for_tabs(),
+            &picker,
+            Some(&request),
+        );
+        let mut harness = opening_tabs(&scratch, &module);
+        harness.frame();
+        let before = harness.tab_ids().len();
+
+        harness.run_command("eugen/probe/poke");
+        served(&mut harness);
+        assert_eq!(harness.tab_ids().len(), before + 1, "the press was refused");
+        assert!(
+            !harness.a_pane_field_has_keys(),
+            "the picker a press put up did not get the keyboard"
+        );
+
+        harness.press("enter", Modifiers::default(), "");
+        served(&mut harness);
+        assert_eq!(
+            harness.tab_ids().len(),
+            before + 2,
+            "choosing a row with Enter was not a press"
+        );
+
+        // Enter let go of the keyboard and the frame after it put the picker
+        // back with it, because a choice is a press. Escape takes it down.
+        assert!(!harness.a_pane_field_has_keys());
+        harness.press("escape", Modifiers::default(), "");
+        served(&mut harness);
+        assert_eq!(
+            harness.tab_ids().len(),
+            before + 2,
+            "Escape on the plugin's picker opened a tab through its grant"
+        );
+        assert!(harness.a_pane_field_has_keys());
+    }
+
+    /// A picker of one row, `somewhere`, whose choice runs `choose`.
+    fn one_row_picker(choose: &str) -> crook_plugin_api::Node {
+        crook_plugin_api::Node::Picker {
+            placeholder: String::from("Search\u{2026}"),
+            rows: vec![crook_plugin_api::Row {
+                key: String::from("zzplanted"),
+                label: String::from("somewhere"),
+                icon: String::new(),
+                tone: crook_plugin_api::Tone::Primary,
+            }],
+            choose: choose.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_row_whose_action_answers_to_nothing_says_nothing() {
+        // A click on a row said the row's key before looking for its action,
+        // so a plugin naming one it never registered left its own text for
+        // the next action that reads one — the palette, on its chord.
+        let scratch = Scratch::new("said-for-nothing");
+        let mut quiet = manifest("eugen/probe");
+        quiet.capabilities = Vec::new();
+        install(
+            scratch.path(),
+            "eugen.probe",
+            &crate::plugins::wasm::tests::wasm_with_a_panel_of_its_own(
+                &quiet,
+                &one_row_picker("nothing-by-this-name"),
+                None,
+            ),
+        );
+        let mut harness = harness(&scratch);
+        let row = drawn_line(&harness.frame(), "somewhere")
+            .expect("the picker is not up, so this proves nothing");
+
+        harness.click(row + vec2f(4., -4.), MouseButton::Left);
+        harness.frame();
+        harness.press("p", palette_chord(), "");
+        let scene = harness.frame();
+        assert!(
+            !frame_text(&scene).contains("zzplanted"),
+            "the palette opened holding the row's key: {}",
+            frame_text(&scene)
+        );
+    }
+
+    #[test]
+    fn a_picker_a_plugin_opened_by_running_its_action_is_not_a_person_opening_it() {
+        // `Request::Run` of a plugin's own opener — from another plugin here,
+        // or from itself — is a plugin putting its picker up. However much of
+        // a press is behind the request, it is not a press of the picker's
+        // plugin, and the keyboard stays where the person left it.
+        let scratch = Scratch::new("opened-by-a-plugin");
+        let mut quiet = manifest("eugen/probe");
+        quiet.capabilities = Vec::new();
+        install(
+            scratch.path(),
+            "eugen.probe",
+            &crate::plugins::wasm::tests::wasm_with_a_panel_of_its_own(
+                &quiet,
+                &one_row_picker("poke"),
+                None,
+            ),
+        );
+        install(
+            scratch.path(),
+            "eugen.opener",
+            // Drawn nowhere: the header's corner holds one contribution, and
+            // the probe's is the one this is about.
+            &crate::plugins::wasm::tests::wasm_running_in(
+                "eugen/opener",
+                "somewhere.else",
+                "eugen/probe/poke",
+            ),
+        );
+        let mut opening = opening(&scratch, Default::default(), Default::default());
+        opening
+            .settings
+            .set_granted("eugen/opener", vec![String::from("run:eugen/probe/poke")]);
+        let mut harness = Harness::with_opening(1, opening);
+        assert!(
+            says(&harness.frame(), "somewhere"),
+            "the picker is not up, so this proves nothing"
+        );
+
+        harness.run_command("eugen/opener/poke");
+        served(&mut harness);
+        assert!(
+            harness.a_pane_field_has_keys(),
+            "a plugin running another's opener gave that one the keyboard"
+        );
+
+        // Pressed by a person, it is theirs.
+        harness.run_command("eugen/probe/poke");
+        harness.frame();
+        assert!(!harness.a_pane_field_has_keys());
+    }
+
+    /// The frame after something changed, drawn afresh as a window with
+    /// anything changing in it draws them.
+    fn redrawn(harness: &mut Harness) -> Rc<Scene> {
+        harness.workspace_update(|_, ctx| ctx.notify());
+        harness.frame()
+    }
+
+    /// How many of the probe's renders the frame drew.
+    fn renders_drawn(scene: &Scene) -> usize {
+        frame_text(scene)
+            .matches(crate::plugins::wasm::tests::SPENT)
+            .count()
+    }
+
+    /// How many renders each frame drew from now until the probe is not
+    /// drawn at all, which is the frame after it was switched off — or every
+    /// frame of a dozen, for one that never is.
+    fn frames_until_switched_off(harness: &mut Harness) -> Vec<usize> {
+        let mut drawn = Vec::new();
+        for _ in 0..12 {
+            let now = renders_drawn(&redrawn(harness));
+            drawn.push(now);
+            if now == 0 {
+                break;
+            }
+        }
+        drawn
+    }
+
+    /// Whether `drawn` is a plugin switched off within `GIVE_UP_AFTER`
+    /// frames of being watched, each drawing `each` until then.
+    fn switched_off(drawn: &[usize], each: usize) -> bool {
+        drawn.last() == Some(&0)
+            && drawn.len() <= crate::plugins::wasm::GIVE_UP_AFTER as usize + 1
+            && drawn[..drawn.len() - 1].iter().all(|now| *now == each)
+    }
+
+    /// A window holding one probe, `module`, allowed nothing.
+    fn holding(scratch: &Scratch, module: &[u8]) -> Harness {
+        install(scratch.path(), "eugen.probe", module);
+        harness(scratch)
+    }
+
+    #[test]
+    fn a_plugin_that_spends_a_frame_drawing_is_cut_short_and_then_switched_off() {
+        // Every render inside its own budget and many of them a frame: a frame
+        // took a hundred and thirty milliseconds in a release build, every
+        // frame, and nothing ever failed. What one plugin spends drawing is
+        // counted across everything it contributes.
+        let scratch = Scratch::new("spending");
+        let mut harness = holding(
+            &scratch,
+            &crate::plugins::wasm::tests::wasm_spending(
+                "eugen/probe",
+                &[("window.overlay", 8)],
+                95_000,
+            ),
+        );
+
+        let drawn = renders_drawn(&redrawn(&mut harness));
+        assert!(drawn > 0, "the guest drew nothing, so this proves nothing");
+        assert!(drawn < 8, "all eight renders were drawn in one frame");
+
+        let after = frames_until_switched_off(&mut harness);
+        assert!(
+            switched_off(&after, drawn),
+            "a plugin spending a frame's worth every frame is still drawn: {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_tree_that_costs_the_plugin_nothing_still_costs_the_frame() {
+        // A tree out of the module's data is next to no fuel for the guest
+        // and every node of it for the host: two hundred contributions of two
+        // thousand nodes were a second a frame, and never switched off.
+        let scratch = Scratch::new("nodes");
+        let mut harness = holding(
+            &scratch,
+            &crate::plugins::wasm::tests::wasm_drawing("eugen/probe", 8, 3_000),
+        );
+
+        // Seven of eight: the seventh is the one that goes past.
+        assert_eq!(renders_drawn(&redrawn(&mut harness)), 7);
+        let after = frames_until_switched_off(&mut harness);
+        assert!(
+            switched_off(&after, 7),
+            "a plugin past its nodes every frame is still drawn: {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_plugin_whose_last_render_goes_past_its_budget_is_still_caught() {
+        // Counted at the end of the frame, not at the next ask: a plugin
+        // whose last render of every frame was the one that went over was
+        // never asked again in that frame, and never switched off.
+        let scratch = Scratch::new("last-render");
+        let mut harness = holding(
+            &scratch,
+            &crate::plugins::wasm::tests::wasm_drawing("eugen/probe", 7, 3_000),
+        );
+
+        assert_eq!(renders_drawn(&redrawn(&mut harness)), 7);
+        let after = frames_until_switched_off(&mut harness);
+        assert!(
+            switched_off(&after, 7),
+            "the render that went past was the last, and it got away: {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_plugin_may_contribute_to_one_slot_a_handful_of_times() {
+        let scratch = Scratch::new("per-slot");
+        let mut harness = holding(
+            &scratch,
+            &crate::plugins::wasm::tests::wasm_spending(
+                "eugen/probe",
+                &[("window.overlay", 200)],
+                0,
+            ),
+        );
+
+        assert_eq!(
+            renders_drawn(&redrawn(&mut harness)),
+            8,
+            "two hundred contributions to one slot were all asked for"
+        );
+    }
+
+    #[test]
+    fn a_mark_on_every_row_is_allowed_what_every_row_costs() {
+        // A row slot is asked once per row and the rows are the person's: a
+        // plugin spending a little on each of many tabs was switched off for
+        // the length of somebody's tab list. Each row a plugin is asked about
+        // adds to its budget.
+        let scratch = Scratch::new("per-row");
+        let mut harness = holding(
+            &scratch,
+            &crate::plugins::wasm::tests::wasm_marking("eugen/probe", 18_000),
+        );
+        for _ in 0..80 {
+            harness.run_command("crook/window/new-tab");
+        }
+        let marks = |scene: &Scene| {
+            scene
+                .layers()
+                .flat_map(|layer| layer.icons.iter())
+                .filter(|drawn| drawn.icon_key.mark == Mark::Icon(Lucide::ChevronDown))
+                .count()
+        };
+        let drawn = marks(&redrawn(&mut harness));
+        // More rows than the budget alone would pay for, at this spin.
+        assert!(drawn >= 30, "the rows were cut short: {drawn} drawn");
+
+        for _ in 0..8 {
+            let now = marks(&redrawn(&mut harness));
+            assert_eq!(now, drawn, "a mark on every row was switched off");
+        }
+    }
+
+    /// A window holding a probe whose picker a person opened and the probe
+    /// then hid by itself, out of an answer, with nobody pressing anything —
+    /// and how many tabs it had before.
+    ///
+    /// A picker hidden like that went on holding the keyboard with nothing on
+    /// screen, every Enter chose its row and ran the plugin's grant, and when
+    /// the plugin put it back it had the keys again.
+    fn with_a_hidden_picker(scratch: &Scratch) -> (Harness, usize) {
+        let request = crook_plugin_api::Request::Run {
+            name: NEW_TAB.to_owned(),
+            argument: String::new(),
+        };
+        let module =
+            crate::plugins::wasm::tests::wasm_hiding_its_picker(&asking_for_tabs(), &request);
+        let mut harness = opening_tabs(scratch, &module);
+        redrawn(&mut harness);
+        let before = harness.tab_ids().len();
+
+        harness.run_command("eugen/probe/poke");
+        assert!(says(&redrawn(&mut harness), "somewhere"));
+        assert!(
+            !harness.a_pane_field_has_keys(),
+            "the picker a press put up did not get the keyboard, so this proves nothing"
+        );
+        served(&mut harness);
+        assert!(
+            !says(&redrawn(&mut harness), "somewhere"),
+            "the plugin did not hide its picker, so this proves nothing"
+        );
+        (harness, before)
+    }
+
+    #[test]
+    fn a_picker_the_plugin_hides_by_itself_gives_the_keyboard_back() {
+        let scratch = Scratch::new("hidden-picker-keys");
+        let (harness, _) = with_a_hidden_picker(&scratch);
+        assert!(
+            harness.a_pane_field_has_keys(),
+            "a picker nobody can see kept the keyboard"
+        );
+    }
+
+    #[test]
+    fn enter_does_not_choose_a_row_of_a_picker_that_is_not_on_screen() {
+        let scratch = Scratch::new("hidden-picker-enter");
+        let (mut harness, before) = with_a_hidden_picker(&scratch);
+        harness.type_text("ls");
+        harness.press("enter", Modifiers::default(), "");
+        served(&mut harness);
+        assert_eq!(
+            harness.tab_ids().len(),
+            before,
+            "Enter chose a row of a picker that was not on screen, and ran the plugin's grant"
+        );
+    }
+
+    #[test]
+    fn a_picker_the_plugin_puts_back_by_itself_comes_back_without_the_keyboard() {
+        let scratch = Scratch::new("hidden-picker-back");
+        let (mut harness, before) = with_a_hidden_picker(&scratch);
+        let mut back = false;
+        for _ in 0..=crate::plugins::wasm::tests::HIDDEN_FOR {
+            back |= says(&redrawn(&mut harness), "somewhere");
+        }
+        assert!(
+            back,
+            "the plugin never put its picker back, so this proves nothing"
+        );
+        assert!(
+            harness.a_pane_field_has_keys(),
+            "the picker came back holding the keyboard, with nobody pressing anything"
+        );
+        harness.press("enter", Modifiers::default(), "");
+        served(&mut harness);
+        assert_eq!(harness.tab_ids().len(), before);
+    }
+
+    #[test]
+    fn what_a_plugin_says_to_a_command_that_ignores_it_is_not_left_for_the_next() {
+        // A plugin's `Request::Run` says its argument before the command runs,
+        // and a command that does not read one left it there: the next
+        // action that does read one — the palette, on its chord — took it.
+        let scratch = Scratch::new("planted");
+        let request = crook_plugin_api::Request::Run {
+            name: NEW_TAB.to_owned(),
+            argument: String::from("zzplanted"),
+        };
+        let module = wasm_asking(&asking_for_tabs(), "header.right", 10, &request);
+        let mut harness = opening_tabs(&scratch, &module);
+        let before = harness.tab_ids().len();
+
+        harness.run_command("eugen/probe/poke");
+        served(&mut harness);
+        assert_eq!(
+            harness.tab_ids().len(),
+            before + 1,
+            "the plugin's run was not served, so this proves nothing"
+        );
+
+        harness.press("p", palette_chord(), "");
+        let scene = harness.frame();
+        assert!(
+            !frame_text(&scene).contains("zzplanted"),
+            "the palette opened holding what the plugin said: {}",
+            frame_text(&scene)
+        );
+    }
+
     #[test]
     fn a_sandboxed_plugins_action_is_reachable_by_name_like_any_other() {
         // Prefixed by the host with the plugin's own id, so a guest cannot

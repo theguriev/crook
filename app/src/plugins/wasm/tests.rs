@@ -40,7 +40,7 @@ use crook_plugin_api::{
 };
 
 use crate::clipboard::Clipboard;
-use crate::plugin::{ActionId, Voice};
+use crate::plugin::{ActionId, Frames, Voice};
 use crate::theme::theme;
 use crate::workspace::{Fonts, WorkspaceAction};
 
@@ -180,6 +180,12 @@ pub(crate) fn wasm_asking(
 /// and a guest that traps is switched off, which would end a loop between two
 /// of them that the host is the one supposed to end.
 pub(crate) fn wasm_running(id: &str, name: &str) -> Vec<u8> {
+    wasm_running_in(id, "header.right", name)
+}
+
+/// The same, contributing to `slot` — one this build does not have, for a
+/// plugin that only needs its action.
+pub(crate) fn wasm_running_in(id: &str, slot: &str, name: &str) -> Vec<u8> {
     let mut manifest = manifest(id);
     manifest.capabilities = vec![Capability::RunCommands(vec![name.to_owned()])];
     let request = Request::Run {
@@ -187,7 +193,7 @@ pub(crate) fn wasm_running(id: &str, name: &str) -> Vec<u8> {
         argument: String::new(),
     };
     let bump = "(global.set $next (i32.add (global.get $next) (local.get $len)))";
-    let text = asking_text(&manifest, "header.right", 10, &request);
+    let text = asking_text(&manifest, slot, 10, &request);
     assert!(
         text.contains(bump),
         "the module text changed under this helper"
@@ -492,6 +498,317 @@ pub(crate) fn wasm_with_a_panel(id: &str, slot: &str, order: i32) -> Vec<u8> {
         abi = crook_plugin_api::ABI_VERSION,
     );
 
+    wat::parse_str(&text).expect("the test module should assemble")
+}
+
+/// A module that has a panel up from its first frame, which nobody opened.
+///
+/// Its chip runs `poke`, and so does dismissing the panel — the one action
+/// for both, which is the arrangement a plugin that toggles its panel has.
+/// `poke` raises `request`, when there is one, and the panel never shuts: a
+/// plugin that leaves its panel up, or puts it straight back, is the plugin
+/// the tests about who opened it are about.
+pub(crate) fn wasm_with_a_panel_of_its_own(
+    manifest: &Manifest,
+    panel: &Node,
+    request: Option<&Request>,
+) -> Vec<u8> {
+    let tree = Node::Anchored {
+        content: Box::new(Node::Pressable {
+            content: Box::new(Node::Icon {
+                name: "chevron-down".to_owned(),
+                tone: Tone::Muted,
+            }),
+            action: "poke".to_owned(),
+        }),
+        panel: Some(Box::new(panel.clone())),
+        dismiss: "poke".to_owned(),
+    };
+    let request = request.map_or_else(Vec::new, |request| {
+        to_bytes(request).expect("a request should encode")
+    });
+    guest(manifest, &[("header.right", 1)], &tree, &request, 0)
+}
+
+/// A module that contributes to each of `slots` as many times as it says,
+/// and spins for `spin` rounds of a loop in every render before drawing a
+/// word.
+///
+/// Each render inside its own budget, and every frame all of them: the
+/// plugin a budget per frame is for.
+pub(crate) fn wasm_spending(id: &str, slots: &[(&str, usize)], spin: u32) -> Vec<u8> {
+    let tree = Node::Text {
+        text: SPENT.to_owned(),
+        size: Size::Small,
+        tone: Tone::Muted,
+    };
+    guest(&manifest(id), slots, &tree, &[], spin)
+}
+
+/// A module that puts a mark on every tab's row, spinning for `spin` rounds
+/// of a loop in each render before drawing it.
+pub(crate) fn wasm_marking(id: &str, spin: u32) -> Vec<u8> {
+    let tree = Node::Icon {
+        name: "chevron-down".to_owned(),
+        tone: Tone::Muted,
+    };
+    guest(&manifest(id), &[("tab.row.mark", 1)], &tree, &[], spin)
+}
+
+/// A module that contributes `count` times to the window's overlay, and
+/// answers every render with a column `nodes` long, out of its data: a
+/// render that costs it next to no fuel and the host a tree to build.
+pub(crate) fn wasm_drawing(id: &str, count: usize, nodes: usize) -> Vec<u8> {
+    let mut column = vec![Node::Text {
+        text: SPENT.to_owned(),
+        size: Size::Small,
+        tone: Tone::Muted,
+    }];
+    column.resize(nodes - 1, Node::Empty);
+    guest(
+        &manifest(id),
+        &[("window.overlay", count)],
+        &Node::Column(column),
+        &[],
+        0,
+    )
+}
+
+/// A module whose chip, `poke`, opens a picker that the module then hides by
+/// itself and later puts back, with nobody pressing anything in between.
+///
+/// Its rows run `choose`, which raises `request`. `poke` raises a fetch
+/// nobody granted, and the refusal landing is when it hides the picker — out
+/// of its own `crook_deliver`, with nobody pressing anything — and
+/// [`HIDDEN_FOR`] renders after that it puts it back.
+pub(crate) fn wasm_hiding_its_picker(manifest: &Manifest, request: &Request) -> Vec<u8> {
+    let manifest = to_bytes(manifest).expect("a manifest should encode");
+    let chip = Node::Pressable {
+        content: Box::new(Node::Icon {
+            name: "chevron-down".to_owned(),
+            tone: Tone::Muted,
+        }),
+        action: "poke".to_owned(),
+    };
+    let shut = to_bytes(&Node::Anchored {
+        content: Box::new(chip.clone()),
+        panel: None,
+        dismiss: "poke".to_owned(),
+    })
+    .expect("a tree should encode");
+    let open = to_bytes(&Node::Anchored {
+        content: Box::new(chip),
+        panel: Some(Box::new(Node::Picker {
+            placeholder: String::from("Search\u{2026}"),
+            rows: vec![Row {
+                key: String::from("/tmp"),
+                label: String::from("somewhere"),
+                icon: String::new(),
+                tone: Tone::Primary,
+            }],
+            choose: String::from("choose"),
+        })),
+        dismiss: "poke".to_owned(),
+    })
+    .expect("a tree should encode");
+    let request = to_bytes(request).expect("a request should encode");
+    let refused = to_bytes(&Request::Fetch {
+        method: crook_plugin_api::Method::Get,
+        url: String::from("https://nobody.granted/"),
+        headers: Vec::new(),
+        body: None,
+    })
+    .expect("a request should encode");
+
+    let shut_at = 16 + manifest.len();
+    let open_at = shut_at + shut.len();
+    let request_at = open_at + open.len();
+    let refused_at = request_at + request.len();
+    assert!(
+        refused_at + refused.len() < 4096,
+        "the trees run into the strings"
+    );
+    let text = format!(
+        r#"(module
+            (import "crook" "contribute"
+              (func $contribute (param i32 i32 i32 i32 i32)))
+            (import "crook" "register_action"
+              (func $register_action (param i32 i32 i32 i32)))
+            (import "crook" "request" (func $request (param i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (global $open (mut i32) (i32.const 0))
+            (global $hiding (mut i32) (i32.const 0))
+            (global $renders (mut i32) (i32.const 0))
+            (data (i32.const 16) "{manifest_bytes}")
+            (data (i32.const {shut_at}) "{shut_bytes}")
+            (data (i32.const {open_at}) "{open_bytes}")
+            (data (i32.const {request_at}) "{request_bytes}")
+            (data (i32.const {refused_at}) "{refused_bytes}")
+            (data (i32.const 4096) "header.righthere")
+            (data (i32.const 4112) "pokePoke the probechoose")
+            (func (export "crook_abi_version") (result i32) (i32.const {abi}))
+            (func (export "crook_alloc") (param $len i32) (result i32) (i32.const 8192))
+            (func (export "crook_manifest") (result i64)
+              (i64.or (i64.shl (i64.const 16) (i64.const 32)) (i64.const {manifest_len})))
+            (func (export "crook_build") (result i32)
+              (call $contribute (i32.const 4096) (i32.const 12) (i32.const 4108) (i32.const 4)
+                (i32.const 10))
+              (call $register_action (i32.const 4112) (i32.const 4) (i32.const 4116) (i32.const 14))
+              (call $register_action (i32.const 4130) (i32.const 6) (i32.const 0) (i32.const 0))
+              (i32.const 0))
+            (func (export "crook_render") (param i32 i32) (result i64)
+              (local $shown i32)
+              (local.set $shown
+                (i32.and (global.get $open)
+                  (i32.or (i32.eqz (global.get $hiding))
+                          (i32.ge_u (global.get $renders) (i32.const {hidden_for})))))
+              (if (global.get $hiding)
+                (then (global.set $renders (i32.add (global.get $renders) (i32.const 1)))))
+              (if (result i64) (local.get $shown)
+                (then (i64.or (i64.shl (i64.const {open_at}) (i64.const 32))
+                              (i64.const {open_len})))
+                (else (i64.or (i64.shl (i64.const {shut_at}) (i64.const 32))
+                              (i64.const {shut_len})))))
+            (func (export "crook_run") (param i32) (param $len i32) (param i32 i32) (result i32)
+              ;; By the length of its name: the allocator hands out one buffer,
+              ;; so the argument is written over the name.
+              (if (i32.eq (local.get $len) (i32.const 6))
+                (then (drop (call $request (i32.const {request_at}) (i32.const {request_len}))))
+                (else
+                  (global.set $open (i32.const 1))
+                  (drop (call $request (i32.const {refused_at}) (i32.const {refused_len})))))
+              (i32.const 0))
+            (func (export "crook_deliver") (param i32 i32 i32) (result i32)
+              (global.set $hiding (i32.const 1))
+              (global.set $renders (i32.const 0))
+              (i32.const 0)))"#,
+        manifest_bytes = escaped(&manifest),
+        manifest_len = manifest.len(),
+        shut_bytes = escaped(&shut),
+        shut_len = shut.len(),
+        open_bytes = escaped(&open),
+        open_len = open.len(),
+        request_bytes = escaped(&request),
+        request_len = request.len(),
+        refused_bytes = escaped(&refused),
+        refused_len = refused.len(),
+        hidden_for = HIDDEN_FOR,
+        abi = crook_plugin_api::ABI_VERSION,
+    );
+    wat::parse_str(&text).expect("the test module should assemble")
+}
+
+/// How many renders [`wasm_hiding_its_picker`] keeps its picker hidden for.
+pub(crate) const HIDDEN_FOR: u32 = 20;
+
+/// What [`wasm_spending`] draws, once per render.
+pub(crate) const SPENT: &str = "spun";
+
+/// The module the two above are: `slots` contributed to, an entry per
+/// contribution, `tree` drawn by every render after `spin` rounds of a loop,
+/// and one action, `poke`, that raises `request` when there is one.
+///
+/// Its allocator hands out the same buffer every time, for
+/// [`wasm_running`]'s reason: a test that draws a few hundred frames would
+/// otherwise run a bump allocator's page out and have the guest switched off
+/// for trapping.
+fn guest(
+    manifest: &Manifest,
+    slots: &[(&str, usize)],
+    tree: &Node,
+    request: &[u8],
+    spin: u32,
+) -> Vec<u8> {
+    let manifest = to_bytes(manifest).expect("a manifest should encode");
+    let tree = to_bytes(tree).expect("a tree should encode");
+    let tree_at = 16 + manifest.len();
+    let request_at = tree_at + tree.len();
+    let strings_at = 4096;
+    assert!(
+        request_at + request.len() <= strings_at,
+        "the trees do not fit below the strings"
+    );
+
+    // The slot names, then the action's name and title, then an entry per
+    // contribution: `e000`, `e001`, …
+    let mut strings = String::new();
+    let mut at = strings_at;
+    let mut slot_at = Vec::new();
+    for (slot, _) in slots {
+        slot_at.push((at, slot.len()));
+        strings.push_str(slot);
+        at += slot.len();
+    }
+    let action_at = at;
+    strings.push_str("poke");
+    let title_at = action_at + 4;
+    strings.push_str("Poke the probe");
+    let mut entry_at = title_at + 14;
+    let mut contributions = String::new();
+    let mut serial = 0;
+    for ((slot, count), (at, len)) in slots.iter().zip(&slot_at) {
+        let _ = slot;
+        for _ in 0..*count {
+            strings.push_str(&format!("e{serial:03}"));
+            contributions.push_str(&format!(
+                "(call $contribute (i32.const {at}) (i32.const {len}) \
+                 (i32.const {entry_at}) (i32.const 4) (i32.const 10))\n"
+            ));
+            entry_at += 4;
+            serial += 1;
+        }
+    }
+    assert!(entry_at < 8192, "the strings run into the buffer");
+
+    let raise = if request.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "(drop (call $request (i32.const {request_at}) (i32.const {})))",
+            request.len()
+        )
+    };
+    let text = format!(
+        r#"(module
+            (import "crook" "contribute"
+              (func $contribute (param i32 i32 i32 i32 i32)))
+            (import "crook" "register_action"
+              (func $register_action (param i32 i32 i32 i32)))
+            (import "crook" "request" (func $request (param i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 16) "{manifest_bytes}")
+            (data (i32.const {tree_at}) "{tree_bytes}")
+            (data (i32.const {request_at}) "{request_bytes}")
+            (data (i32.const {strings_at}) "{strings}")
+            (func (export "crook_abi_version") (result i32) (i32.const {abi}))
+            (func (export "crook_alloc") (param $len i32) (result i32) (i32.const 8192))
+            (func (export "crook_manifest") (result i64)
+              (i64.or (i64.shl (i64.const 16) (i64.const 32)) (i64.const {manifest_len})))
+            (func (export "crook_build") (result i32)
+              {contributions}
+              (call $register_action
+                (i32.const {action_at}) (i32.const 4)
+                (i32.const {title_at}) (i32.const 14))
+              (i32.const 0))
+            (func (export "crook_render") (param i32 i32) (result i64)
+              (local $round i32)
+              (block $spun
+                (loop $spin
+                  (br_if $spun (i32.ge_u (local.get $round) (i32.const {spin})))
+                  (local.set $round (i32.add (local.get $round) (i32.const 1)))
+                  (br $spin)))
+              (i64.or (i64.shl (i64.const {tree_at}) (i64.const 32)) (i64.const {tree_len})))
+            (func (export "crook_run") (param i32 i32 i32 i32) (result i32)
+              {raise}
+              (i32.const 0))
+            (func (export "crook_deliver") (param i32 i32 i32) (result i32) (i32.const 0)))"#,
+        manifest_bytes = escaped(&manifest),
+        manifest_len = manifest.len(),
+        tree_bytes = escaped(&tree),
+        tree_len = tree.len(),
+        request_bytes = escaped(request),
+        abi = crook_plugin_api::ABI_VERSION,
+    );
     wat::parse_str(&text).expect("the test module should assemble")
 }
 
@@ -1069,7 +1386,9 @@ impl Frame {
             answers,
             scale,
             hovers: render::Hovers::default(),
-            held: Rc::new(picker::Held::new(Voice::default())),
+            // Trusted, as a fixture's is: what is being asked here is what a
+            // node becomes, and a picker drawn deaf is drawn the same.
+            held: Rc::new(picker::Held::trusted(Voice::default(), Frames::default())),
             clipboard: Clipboard::new(),
         });
         let presenter = Presenter::new(window_id, Arc::new(StubShaper));
@@ -2171,7 +2490,9 @@ fn a_menu_opened_after_a_picker_closed_gives_the_keyboard_back() {
     // right-click the chip with a menu on it and click away from the menu.
     use crookui_core::event::Keystroke;
 
-    let held = Rc::new(picker::Held::new(Voice::default()));
+    let held = Rc::new(picker::Held::new(Voice::default(), Frames::default()));
+    // The chip was pressed, which is what puts a picker up with the keys.
+    held.invite();
     let rows = vec![Row {
         key: String::from("/home/someone"),
         label: String::from("home"),
@@ -2217,6 +2538,64 @@ fn a_menu_opened_after_a_picker_closed_gives_the_keyboard_back() {
     assert!(
         picker::open().is_none(),
         "the menu is gone and the plugin still has the keyboard"
+    );
+}
+
+#[test]
+fn a_press_lets_a_picker_have_the_keyboard_on_the_frame_it_draws_and_no_later() {
+    // A press that put nothing up is not a standing invitation: a plugin
+    // pressed once for something else, that puts a picker up by itself a
+    // frame later, puts it up deaf.
+    let frames = Frames::default();
+    let held = Rc::new(picker::Held::new(Voice::default(), frames.clone()));
+    let rows = vec![Row {
+        key: String::from("/home/someone"),
+        label: String::from("home"),
+        icon: String::new(),
+        tone: Tone::Primary,
+    }];
+    let fonts = Fonts {
+        ui: FamilyId(0),
+        monospace: FamilyId(0),
+    };
+    let draw = |held: &Rc<picker::Held>| {
+        let _ = picker::picker(
+            held,
+            "Search\u{2026}",
+            &rows,
+            Some(an_action()),
+            fonts,
+            &Clipboard::new(),
+            true,
+        );
+    };
+
+    // Unasked: drawn, and nothing claimed.
+    frames.advance();
+    draw(&held);
+    assert!(
+        picker::open().is_none(),
+        "a picker nobody asked for took the keys"
+    );
+
+    // Pressed, and drawn on the frame the press draws.
+    held.invite();
+    frames.advance();
+    draw(&held);
+    assert!(
+        picker::open().is_some(),
+        "the picker a press put up was deaf"
+    );
+    held.shut();
+
+    // Pressed, and drawn a frame after that.
+    held.invite();
+    frames.advance();
+    frames.advance();
+    draw(&held);
+    assert!(
+        picker::open().is_none(),
+        "an invitation outlived the frame it was for"
     );
 }
 

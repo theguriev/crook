@@ -2873,7 +2873,11 @@ fn run_named_action(app: &mut App, workspace: &ViewHandle<Workspace>, given: &st
             workspace.host().say(argument.clone());
             match workspace.host().action(&action) {
                 Some(id) => workspace.run_action(id, ctx),
-                None => log::warn!("nothing here answers to {action}"),
+                None => {
+                    log::warn!("nothing here answers to {action}");
+                    // Not left for the next action that reads one.
+                    workspace.host().said();
+                }
             }
             // Whatever it did, the window has to be drawn again to show it. An
             // action run from a chord arrives with a keystroke and a frame

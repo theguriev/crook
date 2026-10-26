@@ -63,12 +63,112 @@ use runtime::{Gesture, Runtime};
 /// The file a plugin's directory has to hold.
 const MODULE_FILE: &str = "plugin.wasm";
 
+/// What one plugin may spend drawing everything it contributes, in one frame.
+///
+/// Three measures, because what a frame costs is three things. **Fuel** is
+/// what the guest's own code costs: five renders' worth — see
+/// [`Fuel::render`] — about four milliseconds in a release build. But a
+/// tree written into a module's data costs the guest almost nothing to hand
+/// back, and the host still decodes it and builds every node of it, so
+/// **nodes** and **bytes** of answer are counted too: two hundred
+/// contributions answering two thousand nodes each were a second a frame,
+/// spending next to no fuel at all.
+///
+/// Past any of them, the rest of what the plugin contributes draws nothing
+/// that frame; a plugin that goes past [`GIVE_UP_AFTER`] frames in a row is
+/// switched off as one whose renders fail is, until it is built again —
+/// switched off and on on its card, or the window reopened.
+///
+/// The six first-party plugins are far inside all three: between fourteen
+/// and a hundred and twenty thousand fuel a render, and tens of nodes.
+const BUDGET: Budget = Budget {
+    fuel: 5_000_000,
+    nodes: 20_000,
+    bytes: 1 << 20,
+};
+
+/// What each row the host asks a plugin about adds to [`BUDGET`].
+///
+/// A mark on a tab's row is asked for once per row, and how many rows there
+/// are is the person's doing, not the plugin's: a plugin that spends a
+/// hundred thousand on each of a hundred tabs is spending what it was asked
+/// for, and a budget that did not grow with the panel would switch it off for
+/// the length of somebody's tab list. The host draws one contribution per
+/// row slot (they are single), so what this lets through is bounded by the
+/// rows themselves.
+const PER_ROW: Budget = Budget {
+    fuel: 200_000,
+    nodes: 64,
+    bytes: 4 << 10,
+};
+
+/// How many contributions one plugin may make to one slot.
+///
+/// A chip row with four chips in it is the most anything does. What this is
+/// a bound on is a plugin registering two hundred contributions to one slot
+/// to be asked two hundred times a frame.
+const PER_SLOT: usize = 8;
+
+/// A frame's worth of drawing, in the three things it costs. See [`BUDGET`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Budget {
+    fuel: u64,
+    nodes: u64,
+    bytes: u64,
+}
+
+impl Budget {
+    /// Both, added up.
+    fn plus(self, other: Self) -> Self {
+        Self {
+            fuel: self.fuel.saturating_add(other.fuel),
+            nodes: self.nodes.saturating_add(other.nodes),
+            bytes: self.bytes.saturating_add(other.bytes),
+        }
+    }
+
+    /// Whether this is more than `allowed` in any of the three.
+    fn past(self, allowed: Self) -> bool {
+        self.fuel > allowed.fuel || self.nodes > allowed.nodes || self.bytes > allowed.bytes
+    }
+}
+
+/// How many nodes a tree is, counting a picker's rows, a menu's entries and
+/// a chart's bars as one each: each is something the host builds.
+fn nodes_in(node: &Node) -> u64 {
+    1 + match node {
+        Node::Row(children) | Node::Column(children) => children.iter().map(nodes_in).sum(),
+        Node::Pressable { content, .. } => nodes_in(content),
+        Node::Anchored { content, panel, .. } => {
+            nodes_in(content) + panel.as_deref().map_or(0, nodes_in)
+        }
+        Node::Explained {
+            content,
+            explanation,
+        } => nodes_in(content) + nodes_in(explanation),
+        Node::Menu { content, items } => nodes_in(content) + items.len() as u64,
+        Node::Picker { rows, .. } => rows.len() as u64,
+        Node::Bars { values, .. } => values.len() as u64,
+        Node::Empty
+        | Node::Text { .. }
+        | Node::Badge { .. }
+        | Node::Icon { .. }
+        | Node::Gap(_)
+        | Node::Button { .. }
+        | Node::Meter { .. }
+        | Node::Rule
+        | Node::Fill
+        | Node::Note { .. }
+        | Node::Chip { .. } => 0,
+    }
+}
+
 /// How many failures in a row a plugin gets before it stops being asked.
 ///
 /// More than one, because a plugin that failed once may have failed on
 /// something transient; few enough that a broken plugin costs a handful of
 /// frames rather than every frame for the rest of the session.
-const GIVE_UP_AFTER: u32 = 3;
+pub(crate) const GIVE_UP_AFTER: u32 = 3;
 
 /// Every plugin installed in `directory`, in name order.
 ///
@@ -210,6 +310,7 @@ pub fn opened(bytes: &[u8]) -> Result<WasmPlugin, String> {
         pictures,
         sandbox: Rc::new(RefCell::new(sandbox)),
         failures: Rc::new(Cell::new(0)),
+        spending: Rc::new(Spending::default()),
     })
 }
 
@@ -287,6 +388,82 @@ pub struct WasmPlugin {
     sandbox: Rc<RefCell<Sandbox>>,
     /// How many calls in a row have failed. See [`GIVE_UP_AFTER`].
     failures: Rc<Cell<u32>>,
+    /// What it has spent drawing this frame. See [`BUDGET`].
+    spending: Rc<Spending>,
+}
+
+/// What one plugin has spent drawing, frame by frame. See [`BUDGET`].
+///
+/// Shared by every contribution the plugin makes, because the budget is the
+/// plugin's and not a slot's: the frame that two hundred contributions cost
+/// was two hundred renders each inside its own.
+#[derive(Default)]
+struct Spending {
+    /// The frame the rest is counting.
+    frame: Cell<u64>,
+    /// What its renders have cost in it.
+    spent: Cell<Budget>,
+    /// What it may spend in it: [`BUDGET`], and [`PER_ROW`] for every row it
+    /// was asked about.
+    allowed: Cell<Budget>,
+    /// Whether it went past that in this frame.
+    over: Cell<bool>,
+    /// The last frame [`Spending::frame_ended`] looked at.
+    ended: Cell<u64>,
+    /// How many frames in a row it has gone past it in.
+    overruns: Cell<u32>,
+}
+
+impl Spending {
+    /// Whether this plugin may be asked to draw again in `frame`: not once
+    /// it has gone past what it may spend in it.
+    fn may_draw(&self, frame: u64) -> bool {
+        if self.frame.get() != frame {
+            self.frame.set(frame);
+            self.spent.set(Budget::default());
+            self.allowed.set(BUDGET);
+            self.over.set(false);
+        }
+        !self.over.get()
+    }
+
+    /// Counts what one render cost, and what it was allowed if it was a row.
+    fn spend(&self, cost: Budget, row: bool) {
+        if row {
+            self.allowed.set(self.allowed.get().plus(PER_ROW));
+        }
+        let spent = self.spent.get().plus(cost);
+        self.spent.set(spent);
+        if spent.past(self.allowed.get()) {
+            self.over.set(true);
+        }
+    }
+
+    /// Says that `frame` has been built: counts it as an overrun if this
+    /// plugin went past its budget in it, and switches the plugin off once
+    /// it has done that [`GIVE_UP_AFTER`] frames in a row.
+    ///
+    /// At the end of the frame rather than at the next ask, which is what
+    /// it was: a plugin whose last render of every frame was the one that
+    /// went over was never asked again in that frame, and so never caught.
+    fn frame_ended(&self, frame: u64, failures: &Cell<u32>, who: &PluginId) {
+        if self.ended.replace(frame) == frame {
+            return;
+        }
+        if self.frame.get() != frame || !self.over.get() {
+            self.overruns.set(0);
+            return;
+        }
+        let overruns = self.overruns.get() + 1;
+        self.overruns.set(overruns);
+        if overruns == GIVE_UP_AFTER && failures.get() < GIVE_UP_AFTER {
+            log::warn!(
+                "{who} has spent more than a frame's worth drawing {overruns} frames in a row \
+                 and will not be asked again until it is switched off and on"
+            );
+            failures.set(GIVE_UP_AFTER);
+        }
+    }
 }
 
 impl Plugin for WasmPlugin {
@@ -366,7 +543,28 @@ impl Plugin for WasmPlugin {
         // it are not registered here and are not this plugin's: there is one
         // set of them for the tier, on `crook/plugins`, because a panel is
         // modal and only one plugin can have one up. See `picker`.
-        let chrome = Rc::new(Held::new(host.voice()));
+        let chrome = Rc::new(Held::new(host.voice(), host.frames()));
+
+        // Once every frame is built: let go of the keyboard if what held it
+        // is no longer on screen, and count the frame against the budget.
+        // Held weakly, so that a plugin switched off and built again leaves
+        // the hook of the old build to drop itself.
+        {
+            let held = Rc::downgrade(&chrome);
+            let spending = self.spending.clone();
+            let failures = self.failures.clone();
+            let who = self.manifest.id.clone();
+            host.at_frame_end(move |workspace| {
+                let Some(held) = held.upgrade() else {
+                    return false;
+                };
+                if held.frame_ended() {
+                    workspace.sync_input_keys();
+                }
+                spending.frame_ended(workspace.host().frames().now(), &failures, &who);
+                true
+            });
+        }
 
         // Registered on the grant rather than on the export, so a plugin that
         // was refused hears nothing at all rather than being handed events it
@@ -395,9 +593,24 @@ impl Plugin for WasmPlugin {
             );
         }
 
+        let mut per_slot: std::collections::HashMap<String, usize> = Default::default();
         for contribution in registered.contributions {
+            // Refused past [`PER_SLOT`], with a line, and the rest kept.
+            let made = per_slot.entry(contribution.slot.clone()).or_default();
+            *made += 1;
+            if *made > PER_SLOT {
+                if *made == PER_SLOT + 1 {
+                    log::warn!(
+                        "{} contributes to {:?} more than {PER_SLOT} times; the rest are refused",
+                        self.manifest.id,
+                        contribution.slot
+                    );
+                }
+                continue;
+            }
             let sandbox = self.sandbox.clone();
             let failures = self.failures.clone();
+            let spending = self.spending.clone();
             let name = contribution.slot.clone();
             let who = self.manifest.id.clone();
             // Made once, here, and kept for as long as the contribution is on
@@ -428,7 +641,9 @@ impl Plugin for WasmPlugin {
                             subject: about_a_block
                                 .then(|| Subject::Block(sees.block(workspace.block_menu(), &who))),
                         };
-                        let node = ask(&sandbox, &failures, &who, &render);
+                        let node = ask(
+                            &sandbox, &failures, &spending, workspace, &who, &render, false,
+                        );
                         // Nothing described is nothing contributed, and the
                         // difference from an element that lays out to nothing
                         // is the room around it: a row of chips spaces what it
@@ -500,7 +715,9 @@ impl Plugin for WasmPlugin {
                         entry: entry.clone(),
                         subject: Some(Subject::Tab(sees.facts(row, &who))),
                     };
-                    match ask(&sandbox, &failures, &who, &render) {
+                    match ask(
+                        &sandbox, &failures, &spending, workspace, &who, &render, true,
+                    ) {
                         // A row this plugin has nothing to say about, which
                         // is most rows for most plugins. The host draws what
                         // it would have drawn anyway — see `plugins::tabs`.
@@ -545,6 +762,16 @@ impl Plugin for WasmPlugin {
                 if failures.get() >= GIVE_UP_AFTER {
                     return;
                 }
+                // A panel of this plugin's being taken down — a press outside
+                // it, or Escape — rather than a press of anything it drew. It
+                // runs, because that is how the plugin is told; what it asks
+                // for out of it is asked on nobody's behalf. See
+                // `Host::is_a_dismissal`.
+                let gesture = if workspace.host().is_a_dismissal() {
+                    Gesture::None
+                } else {
+                    Gesture::Pressed
+                };
                 // Whatever the thing that was pressed had to say: the key of a
                 // chosen row, the entry of a menu, or what the command line
                 // handed a `--action`. Empty for a chord, for the palette and
@@ -572,6 +799,14 @@ impl Plugin for WasmPlugin {
                 // rather than guessing means the keyboard is the pane's until
                 // the next frame puts a picker back on screen.
                 chrome.released();
+                // And a press is the one thing that may put a picker up with
+                // the keyboard, on the frame it draws. A dismissal is not one:
+                // a plugin whose panel was just taken down that draws it again
+                // draws it deaf. See `Held::invite`.
+                // Nor is another plugin's `Request::Run`, or this one's own.
+                if gesture == Gesture::Pressed && !workspace.host().is_run_by_a_plugin() {
+                    chrome.invite();
+                }
                 workspace.sync_input_keys();
 
                 // The guest may have changed what it draws, and nothing out
@@ -592,7 +827,7 @@ impl Plugin for WasmPlugin {
                 // makes "the button refreshes the reading" work at all — and
                 // it is the *only* one that may type into a shell, which is
                 // what `Gesture` carries.
-                runtime.update(ctx, |runtime, ctx| runtime.pump(Gesture::Pressed, ctx));
+                runtime.update(ctx, |runtime, ctx| runtime.pump(gesture, ctx));
             };
 
             match action.title {
@@ -705,7 +940,9 @@ fn serve(workspace: &mut Workspace, request: &Request, ctx: &mut ViewContext<Wor
             // Said before it is run and taken when it runs, which is the same
             // arrangement a picker's row uses to say which row it was.
             workspace.host().say(argument);
+            let was = workspace.host().set_run_by_a_plugin(true);
             workspace.run_action(id, ctx);
+            workspace.host().set_run_by_a_plugin(was);
             Answer::Done
         }
         // What the command printed, for the entry that was just pressed in its
@@ -834,14 +1071,21 @@ pub(crate) fn quote(argument: &str) -> String {
     format!("'{}'", argument.replace('\'', "''"))
 }
 
-/// Asks the guest what it wants drawn, and gives up on it if it keeps failing.
+/// Asks the guest what it wants drawn, and gives up on it if it keeps failing
+/// or keeps spending more than a frame's worth.
 fn ask(
     sandbox: &Rc<RefCell<Sandbox>>,
     failures: &Rc<Cell<u32>>,
+    spending: &Spending,
+    workspace: &Workspace,
     who: &PluginId,
     render: &Render,
+    row: bool,
 ) -> Node {
     if failures.get() >= GIVE_UP_AFTER {
+        return Node::Empty;
+    }
+    if !spending.may_draw(workspace.host().frames().now()) {
         return Node::Empty;
     }
     // Already running: a guest's own render reached back into it, which it
@@ -850,7 +1094,19 @@ fn ask(
         return Node::Empty;
     };
 
-    match sandbox.render(render) {
+    let drawn = sandbox.render(render);
+    // The fuel all of it, the guest's allocator included — a plugin that did
+    // its spinning there rather than in its render would otherwise spend a
+    // frame for free — and what the host will build out of the answer.
+    spending.spend(
+        Budget {
+            fuel: sandbox.fuel_spent(),
+            nodes: drawn.as_ref().map_or(0, nodes_in),
+            bytes: sandbox.answered() as u64,
+        },
+        row,
+    );
+    match drawn {
         Ok(node) => {
             failures.set(0);
             node

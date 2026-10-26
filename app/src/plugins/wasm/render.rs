@@ -825,8 +825,13 @@ fn anchored(
             // panel is the plugin's state, so a plugin that named an
             // action it never registered has hung a panel it cannot shut.
             // Inert rather than absent, for the reason a button is.
+            //
+            // And a dismissal, not a press: the click landed on nothing the
+            // plugin drew — on the pane, usually, by somebody getting rid of
+            // a panel they never opened — so the plugin is told, and what it
+            // asks for out of being told is asked on nobody's behalf.
             if let Some(id) = dismiss {
-                ctx.dispatch_typed_action(WorkspaceAction::Run(id));
+                ctx.dispatch_typed_action(WorkspaceAction::Dismiss(id));
             }
         })
         .finish(),

@@ -1624,3 +1624,58 @@ fn something_that_is_not_a_module_has_no_pictures_to_read() {
 
     assert!(why.starts_with("not a WebAssembly module"), "{why}");
 }
+
+#[test]
+fn what_a_render_spent_counts_its_allocator_too() {
+    // A render is two calls into the guest — its allocator for the request,
+    // then `crook_render` — each with a render's budget. A host adding up what
+    // a plugin spends drawing read `fuel_left` after the second and charged
+    // nothing for the first, so a plugin that spun in `crook_alloc` drew for
+    // free.
+    let manifest = to_bytes(&manifest()).expect("a manifest should encode");
+    let tree = to_bytes(&tree()).expect("a tree should encode");
+    let tree_at = DATA + manifest.len() as u32;
+    let text = format!(
+        r#"(module
+            (memory (export "memory") 1)
+            (data (i32.const {DATA}) "{manifest_bytes}")
+            (data (i32.const {tree_at}) "{tree_bytes}")
+            (func (export "crook_abi_version") (result i32) (i32.const {ABI_VERSION}))
+            (func (export "crook_alloc") (param $len i32) (result i32)
+              (local $round i32)
+              (block $spun
+                (loop $spin
+                  (br_if $spun (i32.ge_u (local.get $round) (i32.const 50000)))
+                  (local.set $round (i32.add (local.get $round) (i32.const 1)))
+                  (br $spin)))
+              (i32.const 8192))
+            (func (export "crook_manifest") (result i64)
+              (i64.or (i64.shl (i64.const {DATA}) (i64.const 32)) (i64.const {manifest_len})))
+            (func (export "crook_build") (result i32) (i32.const 0))
+            (func (export "crook_render") (param i32 i32) (result i64)
+              (i64.or (i64.shl (i64.const {tree_at}) (i64.const 32)) (i64.const {tree_len})))
+            (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0)))"#,
+        manifest_bytes = escaped(&manifest),
+        manifest_len = manifest.len(),
+        tree_bytes = escaped(&tree),
+        tree_len = tree.len(),
+    );
+    let wasm = wat::parse_str(&text).expect("the test module should assemble");
+    let (mut sandbox, _) = open(&wasm).expect("it should open");
+    sandbox.build().expect("it should build");
+
+    sandbox
+        .render(&for_slot("header.right"))
+        .expect("it should render");
+
+    let render_alone = Fuel::default().render - sandbox.fuel_left();
+    let spent = sandbox.fuel_spent();
+    assert!(
+        render_alone < 1_000,
+        "crook_render itself does nothing, and cost {render_alone}"
+    );
+    assert!(
+        spent > 50_000,
+        "the allocator spun fifty thousand rounds and the render was charged {spent}"
+    );
+}

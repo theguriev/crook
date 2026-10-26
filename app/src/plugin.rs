@@ -397,6 +397,9 @@ pub struct Host {
     loaded: Vec<&'static Manifest>,
     /// The ones that did not, and what went wrong.
     refused: Vec<(PluginId, String)>,
+    /// Whether the action being run now was asked for by a plugin, with
+    /// `Request::Run`, rather than by a person. See [`Host::is_run_by_a_plugin`].
+    plugin_running: Cell<bool>,
     /// What the thing that invoked the next action had to say to it.
     ///
     /// An action is a `Fn(&mut Workspace, &mut ViewContext)` and takes no
@@ -415,7 +418,43 @@ pub struct Host {
     /// per dispatch, because it can be a megabyte. See
     /// [`Host::set_pressed_output`].
     pressed_output: Rc<std::cell::RefCell<Option<String>>>,
+    /// Which frame the window is drawing, or last drew. See [`Frames`].
+    frames: Frames,
+    /// What has to look at a frame once it is built. See
+    /// [`Host::at_frame_end`].
+    frame_ends: RefCell<Vec<FrameEnd>>,
+    /// Whether the action being run now is a panel being dismissed rather
+    /// than something a person pressed. See [`Host::is_a_dismissal`].
+    dismissing: Cell<bool>,
 }
+
+/// Which frame the window is drawing, counted from the first.
+///
+/// A handle rather than a number for [`Voice`]'s reason: what reads it is a
+/// plugin's chrome, built while the plugin builds and holding no host. A
+/// sandboxed plugin's contributions are asked for while the window draws, and
+/// two things about them are per *frame* rather than per call — the fuel one
+/// plugin may spend drawing everything it contributes, and whether a picker
+/// that has just appeared is the one a person's press opened. Neither can be
+/// told from inside a contribution without a number that moves once a frame.
+#[derive(Clone, Default)]
+pub struct Frames(Rc<Cell<u64>>);
+
+impl Frames {
+    /// The frame being drawn, or the last one drawn.
+    pub fn now(&self) -> u64 {
+        self.0.get()
+    }
+
+    /// A new frame has started.
+    pub fn advance(&self) {
+        self.0.set(self.0.get().wrapping_add(1));
+    }
+}
+
+/// Something that looks at a frame once it is built. See
+/// [`Host::at_frame_end`].
+type FrameEnd = Box<dyn Fn(&Workspace) -> bool>;
 
 /// A place to leave something for the next action that runs to take.
 ///
@@ -470,7 +509,77 @@ impl Host {
             loaded: Vec::new(),
             refused: Vec::new(),
             said: Voice::default(),
+            frames: Frames::default(),
+            frame_ends: RefCell::default(),
+            dismissing: Cell::new(false),
+            plugin_running: Cell::new(false),
         }
+    }
+
+    /// The window's frame count, for whatever has to know which frame it is
+    /// drawn in. See [`Frames`].
+    pub fn frames(&self) -> Frames {
+        self.frames.clone()
+    }
+
+    /// Asks for `end` to be run once every frame has been built, for as long
+    /// as it answers `true`.
+    ///
+    /// What a sandboxed plugin's chrome needs and nothing else does: what a
+    /// plugin drew is found out by drawing it, and so is what it *stopped*
+    /// drawing — a picker it hid by itself, which kept the keyboard and its
+    /// Enter, or a frame it spent more than its share of. Neither can be seen
+    /// from inside a contribution, which only runs when the plugin draws.
+    /// Answering `false` is how a hook whose plugin has gone lets go.
+    pub fn at_frame_end(&self, end: impl Fn(&Workspace) -> bool + 'static) {
+        self.frame_ends.borrow_mut().push(Box::new(end));
+    }
+
+    /// Runs what [`Host::at_frame_end`] asked for, keeping what answers
+    /// `true`.
+    pub(crate) fn frame_ended(&self, workspace: &Workspace) {
+        // Taken out first, so that a hook may ask for another without the
+        // list being borrowed twice.
+        let ends = std::mem::take(&mut *self.frame_ends.borrow_mut());
+        let mut kept: Vec<FrameEnd> = ends.into_iter().filter(|end| end(workspace)).collect();
+        let mut ends = self.frame_ends.borrow_mut();
+        kept.append(&mut ends);
+        *ends = kept;
+    }
+
+    /// Says whether the action about to run is a dismissal, and hands back
+    /// what was said before. See [`Host::is_a_dismissal`], and
+    /// [`Workspace::run_dismissal`], which is the one caller.
+    pub(crate) fn set_dismissing(&self, dismissing: bool) -> bool {
+        self.dismissing.replace(dismissing)
+    }
+
+    /// Says whether the action about to run was asked for by a plugin, and
+    /// hands back what was said before.
+    pub(crate) fn set_run_by_a_plugin(&self, running: bool) -> bool {
+        self.plugin_running.replace(running)
+    }
+
+    /// Whether the action being run now was asked for by a plugin rather
+    /// than reached by a person — which may still be on a person's behalf,
+    /// the far end of a press, but is never a person putting a picker up: a
+    /// plugin that ran its own action to open its picker would otherwise
+    /// take the keyboard whenever its gesture let it.
+    pub fn is_run_by_a_plugin(&self) -> bool {
+        self.plugin_running.get()
+    }
+
+    /// Whether the action being run now is a dismissal: a panel being taken
+    /// down because a person pressed somewhere else, or Escape.
+    ///
+    /// Which is not a press of anything the panel's plugin drew. The plugin
+    /// is told — its `dismiss` action runs, and that is how it learns the
+    /// panel is gone — but what that action asks for is asked on nobody's
+    /// behalf: whether a panel is up is the plugin's own state, so a plugin
+    /// that put one up unasked was handed the person's next click on their
+    /// own terminal as a press of its button.
+    pub fn is_a_dismissal(&self) -> bool {
+        self.dismissing.get()
     }
 
     /// Leaves something for the next action to be run to take.

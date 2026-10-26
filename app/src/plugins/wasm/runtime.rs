@@ -299,6 +299,18 @@ const FILES_PER_WALK: usize = 20_000;
 /// hundred megabytes into memory would be finding it out too late.
 const MAX_ANSWER: u64 = 1 << 20;
 
+/// How many redirects one fetch follows, and only to hosts it was granted.
+///
+/// The Store's number, for the Store's reason — see
+/// `plugins::store::fetch::MAX_REDIRECTS` — and with the grant on top: a
+/// person allowed *these hosts*, and a fetch that went wherever a granted
+/// host's `Location` pointed, ten hops deep, carrying the plugin's own
+/// headers, was a grant that read "only these hosts" and meant "anywhere one
+/// of them sends you". A redirect to a host the grant does not name is handed
+/// back to the plugin as the redirect it is; whatever it asks for next is
+/// checked like anything else it asks for.
+const MAX_REDIRECTS: u32 = 3;
+
 /// How many names one [`Request::List`] answers with.
 ///
 /// A directory is one directory and never a tree, so this is a bound on the
@@ -780,10 +792,30 @@ impl Runtime {
     /// then the next is started.
     fn hand_over(&mut self, ticket: u32, work: Work, budget: Budget, ctx: &mut ModelContext<Self>) {
         let chimes = Arc::clone(&self.chimes);
+        // The grant goes with a fetch, because a redirect is a second host and
+        // has to be one of these. See [`MAX_REDIRECTS`].
+        let granted = match &work {
+            Work::Perform(Request::Fetch { .. }) => self.granted.clone(),
+            _ => Vec::new(),
+        };
         let working = self.pool.spawn(async move {
             match work {
                 Work::Answer(answer) => answer,
                 Work::Perform(sound @ Request::PlaySound { .. }) => ring(sound, &chimes),
+                Work::Perform(Request::Fetch {
+                    method,
+                    url,
+                    headers,
+                    body,
+                }) => fetch(
+                    Hop {
+                        method,
+                        url,
+                        headers,
+                        body,
+                    },
+                    &granted,
+                ),
                 Work::Perform(request) => perform(request),
             }
         });
@@ -1067,13 +1099,88 @@ fn under_a_root(granted: &[String], path: &str) -> Result<(), String> {
         return Err(refusal());
     };
 
+    let Some(wanted) = wanted.to_str() else {
+        return Err(refusal());
+    };
+
     let inside = granted
         .iter()
         .filter_map(|key| key.strip_prefix("list:"))
         .filter_map(resolve)
-        .any(|root| wanted.starts_with(&root));
+        .any(|root| {
+            root.to_str()
+                .is_some_and(|root| lexically_under(wanted, root, cfg!(windows)))
+        });
 
     inside.then_some(()).ok_or_else(refusal)
+}
+
+/// Whether `path` is `root` or somewhere under it, read as text the way the
+/// platform reads it — `windows` says whether a backslash is a separator.
+///
+/// Text rather than [`Path::starts_with`], because the question is what the
+/// path *says*, and a `Path` on one platform cannot say what it would mean on
+/// the other: a test on Linux could not reach the Windows reading at all, and
+/// that reading was the hole — `~/Projects\..\..\Windows` passed a check
+/// that only looked for `..` between forward slashes, and was listed. A part
+/// that walks is never under anything, whatever came before it.
+pub(super) fn lexically_under(path: &str, root: &str, windows: bool) -> bool {
+    let (Some(path), Some(root)) = (parts(path, windows), parts(root, windows)) else {
+        return false;
+    };
+    // In one case on Windows, which is how its file systems read a name:
+    // `c:\users` is the directory a grant wrote as `C:\Users`, and a shell
+    // that reports its directory in lower case is reporting that one.
+    let same = |left: &&str, right: &&str| match windows {
+        true => left.eq_ignore_ascii_case(right),
+        false => left == right,
+    };
+    path.len() >= root.len()
+        && path
+            .iter()
+            .zip(&root)
+            .all(|(left, right)| same(left, right))
+}
+
+/// The parts of a path between its separators, or `None` for one with a part
+/// in it that walks — see [`walks`].
+///
+/// A path that starts at a separator starts with an empty part, so that one
+/// written from the root is never mistaken for one written from wherever the
+/// process happens to be. Empty parts after that, and `.`, are nothing.
+fn parts(path: &str, windows: bool) -> Option<Vec<&str>> {
+    let separator = |character: char| character == '/' || (windows && character == '\\');
+    let mut parts = Vec::new();
+    // Two separators in front, on Windows, is another machine — `\\host\share`
+    // — and not the root of this one with a name under it: a grant of `\`
+    // must not reach a share somewhere else, which opening would also hand
+    // that machine this person's credentials.
+    let mut leading = path.chars().take_while(|character| separator(*character));
+    match (leading.next(), leading.next()) {
+        (Some(_), Some(_)) if windows => parts.push("//"),
+        (Some(_), _) => parts.push(""),
+        _ => {}
+    }
+    for part in path.split(separator) {
+        if walks(part) {
+            return None;
+        }
+        if !part.is_empty() && part != "." {
+            parts.push(part);
+        }
+    }
+    Some(parts)
+}
+
+/// Whether one part of a path, between separators, is a way out of the
+/// directory it is in.
+///
+/// `..`, and anything Windows may read as it: a part of nothing but dots and
+/// spaces with two dots in it, since Windows trims the dots and spaces off the
+/// end of a name. No real directory is called that, so the rule costs
+/// nothing anywhere else.
+fn walks(part: &str) -> bool {
+    part.matches('.').count() >= 2 && part.chars().all(|character| matches!(character, '.' | ' '))
 }
 
 /// Whether only the workspace can answer this.
@@ -1159,12 +1266,22 @@ pub(super) fn host_of(url: &str) -> Result<String, String> {
 /// answering something plausible.
 fn perform(request: Request) -> Answer {
     match request {
+        // With no grant to read a redirect against, so none is followed: the
+        // runtime hands a fetch its grant itself — see `Runtime::hand_over`.
         Request::Fetch {
             method,
             url,
             headers,
             body,
-        } => fetch(method, &url, &headers, body),
+        } => fetch(
+            Hop {
+                method,
+                url,
+                headers,
+                body,
+            },
+            &[],
+        ),
         Request::ReadFile { path } => read(&path),
         Request::Tally {
             root,
@@ -1779,46 +1896,202 @@ fn repository(path: &str) -> Answer {
 /// A status is *not* a failure: a 401 is an answer about a session and only
 /// the plugin knows whether that is a problem, so it is handed over as it
 /// stands. What is a failure is not reaching the host at all.
-fn fetch(method: Method, url: &str, headers: &[(String, String)], body: Option<Vec<u8>>) -> Answer {
+///
+/// Redirects are followed here rather than by the library, because each one
+/// is a host to check against the grant — see [`MAX_REDIRECTS`] and
+/// [`followed`]. All of it, every hop, inside the one [`REQUEST_TIMEOUT`].
+fn fetch(first: Hop, granted: &[String]) -> Answer {
     let agent = ureq::Agent::config_builder()
         .https_only(true)
         .timeout_global(Some(REQUEST_TIMEOUT))
         .http_status_as_error(false)
+        .max_redirects(0)
         .build()
         .new_agent();
+    let deadline = Instant::now() + REQUEST_TIMEOUT;
 
-    let sent = match method {
-        Method::Get => {
-            let mut request = agent.get(url);
-            for (name, value) in headers {
-                request = request.header(name, value);
-            }
-            request.call()
+    let send = |hop: &Hop| -> Result<Reply, String> {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(format!("no answer within {}s", REQUEST_TIMEOUT.as_secs()));
         }
-        Method::Post => {
-            let mut request = agent.post(url);
-            for (name, value) in headers {
-                request = request.header(name, value);
+        let sent = match hop.method {
+            Method::Get => {
+                let mut request = agent.get(&hop.url);
+                for (name, value) in &hop.headers {
+                    request = request.header(name, value);
+                }
+                request.config().timeout_global(Some(left)).build().call()
             }
-            request.send(&body.unwrap_or_default()[..])
-        }
+            Method::Post => {
+                let mut request = agent.post(&hop.url);
+                for (name, value) in &hop.headers {
+                    request = request.header(name, value);
+                }
+                request
+                    .config()
+                    .timeout_global(Some(left))
+                    .build()
+                    .send(hop.body.as_deref().unwrap_or_default())
+            }
+        };
+        let mut response = sent.map_err(|why| why.to_string())?;
+        let status = response.status().as_u16();
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_ANSWER)
+            .read_to_vec()
+            .map_err(|why| why.to_string())?;
+        Ok(Reply {
+            status,
+            location,
+            body,
+        })
     };
 
-    let mut response = match sent {
-        Ok(response) => response,
-        Err(why) => return Answer::Failed(why.to_string()),
-    };
+    followed(first, |url| may_fetch(granted, url), send)
+}
 
-    let status = response.status().as_u16();
-    match response
-        .body_mut()
-        .with_config()
-        .limit(MAX_ANSWER)
-        .read_to_vec()
-    {
-        Ok(body) => Answer::Fetched { status, body },
-        Err(why) => Answer::Failed(why.to_string()),
+/// One request of a fetch: the first, or one a redirect led to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Hop {
+    pub(super) method: Method,
+    pub(super) url: String,
+    pub(super) headers: Vec<(String, String)>,
+    pub(super) body: Option<Vec<u8>>,
+}
+
+/// What one hop came back with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Reply {
+    pub(super) status: u16,
+    pub(super) location: Option<String>,
+    pub(super) body: Vec<u8>,
+}
+
+/// Whether a plugin granted `granted` may fetch `url`: the check its first
+/// request was made against, asked again of a redirect.
+fn may_fetch(granted: &[String], url: &str) -> bool {
+    let request = Request::Fetch {
+        method: Method::Get,
+        url: url.to_owned(),
+        headers: Vec::new(),
+        body: None,
+    };
+    allowed(granted, &request).is_ok()
+}
+
+/// A fetch, `send` hop by hop, following at most [`MAX_REDIRECTS`] redirects
+/// and only to a URL `may_reach` allows.
+///
+/// A redirect it may not follow — to a host nobody granted, to something
+/// that is not https, past the last hop — is handed back as the answer, so
+/// the plugin sees the status it was given and nothing is read from anywhere
+/// it was not allowed. Its own headers go only to the host it addressed them
+/// to: on a hop to another host, granted or not, they are left behind,
+/// because a key a plugin sends to its API is not one it meant for that API's
+/// storage.
+pub(super) fn followed(
+    first: Hop,
+    may_reach: impl Fn(&str) -> bool,
+    mut send: impl FnMut(&Hop) -> Result<Reply, String>,
+) -> Answer {
+    let mut hop = first;
+    let mut redirects = 0;
+    loop {
+        let reply = match send(&hop) {
+            Ok(reply) => reply,
+            Err(why) => return Answer::Failed(why),
+        };
+        let next = (redirects < MAX_REDIRECTS)
+            .then(|| redirected(&hop, &reply))
+            .flatten()
+            .filter(|next| may_reach(&next.url));
+        let Some(next) = next else {
+            return Answer::Fetched {
+                status: reply.status,
+                body: reply.body,
+            };
+        };
+        hop = next;
+        redirects += 1;
     }
+}
+
+/// Where a reply sends the request that got it, as the next hop — or `None`
+/// for a reply that is not a redirect this follows.
+///
+/// The method a browser would use: a `303`, and a `301` or `302` to a `POST`,
+/// become a `GET` with no body; a `307` and a `308` are the same request
+/// again.
+fn redirected(hop: &Hop, reply: &Reply) -> Option<Hop> {
+    let (method, body) = match reply.status {
+        307 | 308 => (hop.method, hop.body.clone()),
+        301..=303 => (Method::Get, None),
+        _ => return None,
+    };
+    let url = joined(&hop.url, reply.location.as_deref()?)?;
+    let same_place = matches!(
+        (authority_of(&url), authority_of(&hop.url)),
+        (Some(next), Some(this)) if next == this
+    );
+    Some(Hop {
+        method,
+        headers: if same_place {
+            hop.headers.clone()
+        } else {
+            Vec::new()
+        },
+        url,
+        body,
+    })
+}
+
+/// Where an https URL goes — host and port, without whatever userinfo is in
+/// front of them — for telling whether a redirect leaves it.
+fn authority_of(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let authority = rest.split(['/', '?', '#']).next()?.rsplit('@').next()?;
+    Some(authority.to_ascii_lowercase())
+}
+
+/// The URL a `Location` names, read against the URL it came back from — or
+/// `None` for one that does not name an https URL.
+pub(super) fn joined(base: &str, location: &str) -> Option<String> {
+    let location = location.trim();
+    let rest = base.strip_prefix("https://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if location.starts_with("https://") {
+        return Some(location.to_owned());
+    }
+    if let Some(elsewhere) = location.strip_prefix("//") {
+        return Some(format!("https://{elsewhere}"));
+    }
+    // Any other scheme — `http:` most of all — is somewhere this does not go.
+    if location
+        .split(['/', '?', '#'])
+        .next()
+        .is_some_and(|first| first.contains(':'))
+    {
+        return None;
+    }
+    let path = &rest[authority.len()..];
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    if location.starts_with('/') {
+        return Some(format!("https://{authority}{location}"));
+    }
+    if location.starts_with('?') {
+        return Some(format!("https://{authority}{path}{location}"));
+    }
+    // Relative to the directory the last request was in.
+    let directory = path.rfind('/').map_or("/", |end| &path[..=end]);
+    Some(format!("https://{authority}{directory}{location}"))
 }
 
 /// One file, if it is where the grant said it was.
@@ -1963,7 +2236,11 @@ fn output_within(
 /// text of the path, so a path that can walk is a grant that means something
 /// other than what it says.
 pub(super) fn resolve(path: &str) -> Option<PathBuf> {
-    if path.split('/').any(|part| part == "..") {
+    // Split on both separators, everywhere: on Windows a backslash is one,
+    // and `~/Projects\..\..` walked out of a grant that only looked between
+    // forward slashes. Elsewhere it is a letter, and no directory anybody
+    // grants has `\..\` in its name.
+    if path.split(['/', '\\']).any(walks) {
         return None;
     }
     // `~` on its own is the home directory itself, which a *root* is far more

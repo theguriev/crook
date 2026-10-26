@@ -2656,6 +2656,8 @@ impl Workspace {
 
     pub fn run_action(&mut self, id: ActionId, ctx: &mut ViewContext<Self>) {
         let Some(name) = self.host.action_name(id).cloned() else {
+            // Spent all the same: see below.
+            self.host.said();
             return;
         };
 
@@ -2671,10 +2673,28 @@ impl Workspace {
         let actions = self.host.actions().clone();
         actions.with(&name, |handler| handler(self, ctx));
 
+        // Whatever was said for this action is spent whether or not the
+        // handler read it. Said and left, it was handed to the next action
+        // that does read one — a chord on the palette opened it holding a
+        // plugin's text, and a chord bound to an action that is about a
+        // plugin would have acted on whichever plugin a `Request::Run` named
+        // to a command that ignores its argument. One press, one thing said,
+        // one action, and then nothing.
+        self.host.said();
+
         // A menu entry acts once, whoever contributed it: Crook's own close
         // the menu on their way out, and a plugin's would otherwise leave it
         // up over the block it had just acted on.
         self.close_block_menu(ctx);
+    }
+
+    /// Runs `id` because the panel it takes down was dismissed, which is not
+    /// a press of anything its plugin drew. See
+    /// [`Host::is_a_dismissal`](crate::plugin::Host::is_a_dismissal).
+    pub fn run_dismissal(&mut self, id: ActionId, ctx: &mut ViewContext<Self>) {
+        let was = self.host.set_dismissing(true);
+        self.run_action(id, ctx);
+        self.host.set_dismissing(was);
     }
 
     /// What the block the menu is open on printed, as a copy of it would read.
@@ -14573,6 +14593,21 @@ impl View for Workspace {
     }
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
+        // A new frame, for what a plugin may do once per frame rather than
+        // once per call. See [`Frames`](crate::plugin::Frames).
+        self.host.frames().advance();
+        let frame = self.render_frame(app);
+        // Every contribution is built by now — nothing in the tree is built
+        // lazily — so what a plugin drew this frame, and what it did not, is
+        // known. See [`Host::at_frame_end`](crate::plugin::Host::at_frame_end).
+        self.host.frame_ended(self);
+        frame
+    }
+}
+
+impl Workspace {
+    /// The frame [`View::render`] draws, between the moments it counts.
+    fn render_frame(&self, app: &AppContext) -> Box<dyn Element> {
         // Which panes this frame draws, said to the shells behind them before
         // anything below asks one for its grid: a pane off screen stops
         // building snapshots nothing draws, and one coming back has its
@@ -15091,6 +15126,7 @@ impl TypedActionView for Workspace {
             }
             WorkspaceAction::ResumeAgents => self.resume_every_agent(ctx),
             WorkspaceAction::Run(id) => self.run_action(id, ctx),
+            WorkspaceAction::Dismiss(id) => self.run_dismissal(id, ctx),
             WorkspaceAction::RunAbout(id, subject) => {
                 // Said, then run, which is the gesture a picker's row makes
                 // by hand: the handler takes what was said. A subject nothing
