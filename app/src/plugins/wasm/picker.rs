@@ -45,7 +45,7 @@ use crook_plugin::ActionName;
 use crook_plugin_api::{MenuItem, Row};
 
 use crate::clipboard::Clipboard;
-use crate::plugin::{ActionId, Showing, Voice};
+use crate::plugin::{ActionId, Frames, Showing, Voice};
 use crate::text_input::TextInput;
 use crate::theme::theme;
 use crate::workspace::{Fonts, TextField, WorkspaceAction};
@@ -213,6 +213,21 @@ pub(crate) struct Held {
     voice: Voice,
     /// Whether a picker or a menu of this plugin's is up.
     open: Cell<bool>,
+    /// Which frame the window is drawing, which is what an invitation is
+    /// counted in.
+    frames: Frames,
+    /// The last frame a picker of this plugin's may take the keyboard in
+    /// without already having it — set by a person pressing one of the
+    /// plugin's own controls, commands or bindings, and spent by the picker
+    /// that press put up. See [`Held::invite`].
+    invited: Cell<Option<u64>>,
+    /// Whether the picker that is up has the keyboard: it was put up by a
+    /// press, and nothing has taken it down since.
+    picking: Cell<bool>,
+    /// Whether every picker drawn here may have the keyboard, asked or not:
+    /// a fixture's, which is a file a person named on the command line to be
+    /// drawn, and no plugin's at all.
+    trusted: bool,
     /// Whether that has changed since anybody last asked.
     ///
     /// What tells the contribution that drew it to re-sync the keyboard: the
@@ -239,10 +254,14 @@ pub(crate) struct Held {
 
 impl Held {
     /// A plugin's chrome, with nothing up.
-    pub(crate) fn new(voice: Voice) -> Self {
+    pub(crate) fn new(voice: Voice, frames: Frames) -> Self {
         Self {
             voice,
             open: Cell::new(false),
+            frames,
+            invited: Cell::new(None),
+            picking: Cell::new(false),
+            trusted: false,
             moved: Cell::new(false),
             query: TextInput::new(),
             selected: Cell::new(0),
@@ -254,9 +273,48 @@ impl Held {
         }
     }
 
-    /// Whether the last frame drew a picker rather than only a menu.
+    /// The same, for a fixture: a picker drawn out of a file a person named
+    /// is drawn with the keyboard, as the plugin's would be once pressed.
+    pub(crate) fn trusted(voice: Voice, frames: Frames) -> Self {
+        Self {
+            trusted: true,
+            ..Self::new(voice, frames)
+        }
+    }
+
+    /// Whether the last frame drew a picker with the keyboard, rather than
+    /// only a menu — or a picker nobody asked for, which the keys are not
+    /// claimed for either.
     fn showing_a_picker(&self) -> bool {
         self.shown.borrow().choose.is_some()
+    }
+
+    /// Says that a person has just pressed one of this plugin's own things —
+    /// a control it drew, a row of its picker, its command in the palette, a
+    /// chord bound to it — so a picker that press puts up may have the
+    /// keyboard.
+    ///
+    /// **For the frame that press draws, and no later.** Where the keyboard
+    /// is is never a plugin's call, and a picker is drawn from the plugin's
+    /// own state: a plugin could put one up whenever it liked, and the keys a
+    /// person was typing into their shell — a password, a commit message —
+    /// went into its field instead, and came back to it after every Escape.
+    /// So a picker takes the keyboard only on the frame after a press, and
+    /// keeps it only until something takes it down. One a plugin puts up by
+    /// itself, later, from a timer or an answer, is drawn without it: there
+    /// on screen, and deaf, until a person presses something of the plugin's.
+    pub(crate) fn invite(&self) {
+        self.invited.set(Some(self.frames.now().wrapping_add(1)));
+    }
+
+    /// Whether a picker drawn now may have the keyboard. See [`Self::invite`].
+    fn welcomes_a_picker(&self) -> bool {
+        self.trusted
+            || self.picking.get()
+            || self
+                .invited
+                .get()
+                .is_some_and(|until| self.frames.now() <= until)
     }
 
     /// Says what the thing that was pressed had to say.
@@ -323,6 +381,7 @@ impl Held {
     pub(super) fn released(&self) {
         if self.menu.borrow().is_none() {
             self.shown.replace(Shown::default());
+            self.picking.set(false);
             self.set_open(false);
         }
     }
@@ -338,6 +397,7 @@ impl Held {
     pub(crate) fn shut(&self) {
         self.menu.replace(None);
         self.shown.replace(Shown::default());
+        self.picking.set(false);
         self.set_open(false);
     }
 
@@ -478,18 +538,35 @@ pub(super) fn picker(
         .collect();
 
     chrome.settle(&typed, matching.len());
+    // A picker a person's press put up is a picker with the keyboard. Said
+    // here rather than by whatever put the panel up, because the panel is the
+    // guest's own state and this is the only place the host finds out what is
+    // in it. The caller re-syncs when the keyboard moves.
+    //
+    // One nobody asked for is drawn and given nothing: no keys, and no claim
+    // on Escape, Enter or the arrows, which go on reaching the pane. Its rows
+    // still answer a click, which is a press — and the frame after it is one
+    // this picker may have the keyboard in. See [`Held::invite`].
+    let welcome = chrome.welcomes_a_picker();
     {
         let mut shown = chrome.shown.borrow_mut();
-        shown.keys = matching.iter().map(|row| row.key.clone()).collect();
-        shown.choose = choose;
+        if welcome {
+            shown.keys = matching.iter().map(|row| row.key.clone()).collect();
+            shown.choose = choose;
+        } else {
+            shown.keys.clear();
+            shown.choose = None;
+        }
     }
-    // A picker that is on screen is a picker with the keyboard. Said here
-    // rather than by whatever put the panel up, because the panel is the
-    // guest's own state and this is the only place the host finds out what is
-    // in it. The caller re-syncs when this answers `true`.
-    mark_open(chrome);
-    chrome.set_open(true);
-    chrome.query.set_has_keys(true);
+    if welcome {
+        chrome.invited.set(None);
+        chrome.picking.set(true);
+        mark_open(chrome);
+        chrome.set_open(true);
+        chrome.query.set_has_keys(true);
+    } else {
+        chrome.query.set_has_keys(false);
+    }
 
     let field = TextField::new(
         chrome.query.clone(),
@@ -598,9 +675,10 @@ fn offered(
             // Said before the action is dispatched and taken when it runs,
             // which is safe for the reason the field it is kept in says: an
             // action is applied after the whole tree has seen the event, and
-            // one press presses one row.
-            chrome.say(key.clone());
+            // one press presses one row. Only when there is an action to
+            // take it: said for nothing, it was left for whatever ran next.
             if let Some(action) = choose {
+                chrome.say(key.clone());
                 ctx.dispatch_typed_action(WorkspaceAction::Run(action));
             }
         })
@@ -720,9 +798,10 @@ fn entry(
         .finish()
     })
     .on_click(move |_, ctx, _| {
-        chrome.say(argument.clone());
         chrome.close_menu();
+        // Said only for an action that will take it; see `offered`.
         if let Some(action) = action {
+            chrome.say(argument.clone());
             ctx.dispatch_typed_action(WorkspaceAction::Run(action));
         }
         ctx.notify();

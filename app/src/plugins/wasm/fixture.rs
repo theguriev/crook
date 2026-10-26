@@ -127,7 +127,7 @@ impl Plugin for Fixture {
         // panel that is open, a row the keyboard is on. Nothing here ever
         // changes it; what it is for is that the tree is drawn by the same
         // code as a real plugin's rather than by a copy of it.
-        let chrome = Rc::new(Held::new(host.voice()));
+        let chrome = Rc::new(Held::trusted(host.voice(), host.frames()));
 
         for (name, node) in &self.trees {
             let Some(slot) = host.slot_named(name) else {

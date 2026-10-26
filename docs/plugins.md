@@ -87,9 +87,14 @@ description of something that was never built.
     **What a slot per row costs**, because it is worth writing down before somebody declares one
     per block: a sandboxed contribution to it is one guest call per row per frame, each with its
     own fuel budget. Seven tabs is seven calls where the header's slot is one, and the budget is
-    per call rather than shared — so a plugin cannot be starved by the panel being long, and a
-    panel cannot be slowed to a crawl by a plugin that spends its whole budget, because spending
-    it is a trap and three traps in a row stop it being asked at all. The two plugins written
+    per call — so a plugin cannot be starved by the panel being long, and a panel cannot be
+    slowed to a crawl by a plugin that spends its whole budget, because spending it is a trap and
+    three traps in a row stop it being asked at all. Above that, everything one plugin draws in
+    one frame shares ten calls' worth (`FUEL_PER_FRAME` in `plugins::wasm`): two hundred
+    contributions each spending just under its own budget were a frame of a hundred and thirty
+    milliseconds with nothing ever failing, so what is past the frame's worth draws nothing, and
+    a plugin that runs out three frames in a row is switched off as one that traps is. The six
+    first-party plugins spend between fourteen and a hundred and twenty thousand a render. The two plugins written
     against it answer in a table lookup and a boolean; a slot per *block* would be the same
     arithmetic against a list that is thousands long, and would need something this does not
     have.
