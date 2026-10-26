@@ -153,6 +153,15 @@ pub enum WorkspaceAction {
     /// be clicked. The subject is interned, because the enum is `Copy` and a
     /// plugin's id is a `String`. See [`Subject`].
     RunAbout(ActionId, Subject),
+    /// Run a named action because the panel it takes down was dismissed: a
+    /// press outside a plugin's panel, which is a press of nothing the plugin
+    /// drew.
+    ///
+    /// The same dispatch as [`Run`](Self::Run), and the plugin is told the
+    /// same way, by its action running — but as a dismissal, which is not a
+    /// gesture: what the action asks for is asked on nobody's behalf. See
+    /// [`Host::is_a_dismissal`](crate::plugin::Host::is_a_dismissal).
+    Dismiss(ActionId),
     /// The first half of a chord sequence was pressed, and the window is
     /// waiting for the rest of it.
     ///

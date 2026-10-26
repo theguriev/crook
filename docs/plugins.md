@@ -87,9 +87,21 @@ description of something that was never built.
     **What a slot per row costs**, because it is worth writing down before somebody declares one
     per block: a sandboxed contribution to it is one guest call per row per frame, each with its
     own fuel budget. Seven tabs is seven calls where the header's slot is one, and the budget is
-    per call rather than shared — so a plugin cannot be starved by the panel being long, and a
-    panel cannot be slowed to a crawl by a plugin that spends its whole budget, because spending
-    it is a trap and three traps in a row stop it being asked at all. The two plugins written
+    per call — so a plugin cannot be starved by the panel being long, and a panel cannot be
+    slowed to a crawl by a plugin that spends its whole budget, because spending it is a trap and
+    three traps in a row stop it being asked at all. Above that, everything one plugin draws in
+    one frame shares one budget (`BUDGET` in `plugins::wasm`), counted three ways: five
+    renders' worth of fuel, twenty thousand nodes and a megabyte of answer — the last two
+    because a tree written into a module's data costs the guest no fuel and the host every node
+    of it. Each row a row slot asks about adds `PER_ROW` (two hundred thousand fuel, 64 nodes,
+    4 KiB), since how many tabs there are is the person's doing. Past the budget the rest of
+    what the plugin contributes draws nothing that frame; a plugin that goes past it three
+    frames in a row is switched off, as one that traps is, until it is switched off and on on
+    its card or the window is reopened. And a plugin may contribute to one slot at most eight
+    times (`PER_SLOT`). Measured in a release build: two hundred overlay contributions of two
+    thousand nodes were 31 ms a frame and are 1.2 ms (eight of them, the slot's limit); of
+    three thousand, 46 ms a frame and switched off after three. The six first-party plugins
+    spend 15k-120k fuel, 1-30 nodes and under 600 bytes a render. The two plugins written
     against it answer in a table lookup and a boolean; a slot per *block* would be the same
     arithmetic against a list that is thousands long, and would need something this does not
     have.

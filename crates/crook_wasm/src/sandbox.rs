@@ -186,6 +186,12 @@ pub struct Sandbox {
     memory: Memory,
     fuel: Fuel,
     registry: Registry,
+    /// What the last call into the guest cost, every export it took counted.
+    /// See [`Sandbox::fuel_spent`].
+    spent: u64,
+    /// How long the last render's answer was, in bytes. See
+    /// [`Sandbox::answered`].
+    answered: usize,
 }
 
 impl Sandbox {
@@ -273,6 +279,8 @@ impl Sandbox {
             memory,
             fuel,
             registry,
+            spent: 0,
+            answered: 0,
         };
 
         // The ABI first, because everything below it is decoded against a
@@ -315,6 +323,7 @@ impl Sandbox {
     /// before it gave up is thrown away, so a half-built plugin never leaves
     /// half a contribution on a slot.
     pub fn build(&mut self) -> Result<Registered, Problem> {
+        self.spent = 0;
         self.registry.clear();
         let outcome = self.call::<(), i32>(exports::BUILD, (), self.fuel.build);
 
@@ -340,13 +349,27 @@ impl Sandbox {
     /// application's `plugins::wasm`, which is where a grant is compared
     /// against what a plugin asked to be allowed to know.
     pub fn render(&mut self, render: &Render) -> Result<Node, Problem> {
+        self.spent = 0;
+        self.answered = 0;
         let bytes =
             crook_plugin_api::to_bytes(render).map_err(|why| Problem::Answer(why.to_string()))?;
         let (pointer, length) = self.write(&bytes, self.fuel.render)?;
         let packed =
             self.call::<(i32, i32), i64>(exports::RENDER, (pointer, length), self.fuel.render)?;
         let bytes = self.read(packed)?;
+        self.answered = bytes.len();
         crook_plugin_api::from_bytes(&bytes).map_err(|why| Problem::Answer(why.to_string()))
+    }
+
+    /// How many bytes the last [`Sandbox::render`] answered with, or none for
+    /// one that did not get as far as answering.
+    ///
+    /// What fuel does not measure. A tree written into a module's data costs
+    /// the guest nothing to hand back, and the host still decodes it and
+    /// builds everything in it: a render can be nearly free inside the
+    /// sandbox and a megabyte of work outside it.
+    pub fn answered(&self) -> usize {
+        self.answered
     }
 
     /// Runs one of its actions, by the name it registered, with whatever the
@@ -358,6 +381,7 @@ impl Sandbox {
     /// budget, so an action carrying a long argument is an action with less
     /// fuel left rather than one the host paid for.
     pub fn run(&mut self, action: &str, argument: &str) -> Result<(), Problem> {
+        self.spent = 0;
         let (name, name_len) = self.write(action.as_bytes(), self.fuel.run)?;
         let (argument, argument_len) = self.write(argument.as_bytes(), self.fuel.run)?;
         match self.call::<(i32, i32, i32, i32), i32>(
@@ -390,6 +414,20 @@ impl Sandbox {
         self.store.get_fuel().unwrap_or(0)
     }
 
+    /// What the last of [`Sandbox::render`], [`Sandbox::run`],
+    /// [`Sandbox::deliver`], [`Sandbox::tick`], [`Sandbox::event`] or
+    /// [`Sandbox::build`] cost, all of it.
+    ///
+    /// Not what [`Sandbox::fuel_left`] says subtracted from a budget: each of
+    /// those is more than one call into the guest — its allocator is called
+    /// for every string handed over, with the same budget again — and a host
+    /// counting what a plugin spends across calls would count only the last
+    /// of them, so a plugin that did its spinning in `crook_alloc` would
+    /// spend for free. A call that ran out spent everything it was given.
+    pub fn fuel_spent(&self) -> u64 {
+        self.spent
+    }
+
     /// Everything the guest asked the host to do since it was last asked,
     /// with the ticket each answer must carry.
     ///
@@ -413,6 +451,7 @@ impl Sandbox {
     /// with no `crook_deliver` gets nothing delivered rather than an error,
     /// because a plugin that asks for nothing is a perfectly good plugin.
     pub fn deliver(&mut self, ticket: u32, answer: &Answer) -> Result<(), Problem> {
+        self.spent = 0;
         let bytes =
             crook_plugin_api::to_bytes(answer).map_err(|why| Problem::Answer(why.to_string()))?;
         let (pointer, length) = self.write(&bytes, self.fuel.event)?;
@@ -433,6 +472,7 @@ impl Sandbox {
 
     /// Tells the guest the wait it asked for has passed.
     pub fn tick(&mut self) -> Result<(), Problem> {
+        self.spent = 0;
         match self.call::<(), i32>(exports::TICK, (), self.fuel.event)? {
             0 => Ok(()),
             other => Err(Problem::Ran(format!("its tick answered {other}"))),
@@ -445,6 +485,7 @@ impl Sandbox {
     /// the same thing from the other end: something arriving off the frame
     /// path that the plugin then does its own work on.
     pub fn event(&mut self, event: &Event) -> Result<(), Problem> {
+        self.spent = 0;
         let bytes =
             crook_plugin_api::to_bytes(event).map_err(|why| Problem::Answer(why.to_string()))?;
         let (pointer, length) = self.write(&bytes, self.fuel.event)?;
@@ -492,9 +533,12 @@ impl Sandbox {
         self.store
             .set_fuel(fuel)
             .map_err(|why| Problem::Ran(why.to_string()))?;
-        function
+        let called = function
             .call(&mut self.store, args)
-            .map_err(|why| Problem::Ran(format!("{name}: {why}")))
+            .map_err(|why| Problem::Ran(format!("{name}: {why}")));
+        let left = self.store.get_fuel().unwrap_or(0);
+        self.spent = self.spent.saturating_add(fuel.saturating_sub(left));
+        called
     }
 
     /// Copies `bytes` into the guest's memory, through the guest's allocator.

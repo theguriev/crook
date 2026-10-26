@@ -605,8 +605,11 @@ fn picker_keys(host: &mut Host) {
         let dismiss = held.dismissal();
         held.shut();
         workspace.sync_input_keys();
+        // As a dismissal: Escape is a person's key, and what it says is "take
+        // this down", not "press the plugin's button". See
+        // `Host::is_a_dismissal`.
         if let Some(action) = dismiss {
-            workspace.run_action(action, ctx);
+            workspace.run_dismissal(action, ctx);
         }
         ctx.notify();
     });

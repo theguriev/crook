@@ -1678,6 +1678,288 @@ fn a_listing_cannot_walk_out_of_the_root_it_was_granted() {
 }
 
 #[test]
+fn a_listing_cannot_walk_out_of_its_root_with_backslashes() {
+    // Windows reads a backslash as a separator, and the `..` check read only
+    // forward slashes: `~/Projects\..\..\Windows` passed it, passed the root
+    // check component by component, and the system walked it for read_dir.
+    // Refused on every platform, so that this one can say so.
+    let granted = vec![String::from("list:~/Projects")];
+
+    for walking in [
+        "~/Projects\\..\\..\\..\\Windows",
+        "~/Projects\\..",
+        "~/Projects/sub\\..\\..\\.ssh",
+        // What Windows trims a name to: the dots and spaces off its end.
+        "~/Projects\\.. \\..",
+        "~/Projects/... /x",
+    ] {
+        assert_eq!(resolve(walking), None, "{walking:?} resolved");
+        assert!(
+            allowed(&granted, &list(walking)).is_err(),
+            "{walking:?} was allowed"
+        );
+    }
+    // A name that only has dots in it somewhere is a name.
+    assert!(resolve("~/Projects/a..b").is_some());
+    assert!(allowed(&granted, &list("~/Projects/a..b")).is_ok());
+}
+
+#[test]
+fn under_a_root_is_read_the_way_the_platform_reads_a_path() {
+    // Windows: either separator, and a walk anywhere is never under anything.
+    let root = r"C:\Users\someone\Projects";
+    assert!(lexically_under(r"C:\Users\someone\Projects", root, true));
+    assert!(lexically_under(
+        r"C:\Users\someone\Projects\crook",
+        root,
+        true
+    ));
+    assert!(lexically_under(
+        r"C:\Users\someone\Projects/crook\src",
+        root,
+        true
+    ));
+    assert!(lexically_under(
+        r"C:\Users\someone\Projects\.\crook",
+        root,
+        true
+    ));
+    assert!(!lexically_under(
+        r"C:\Users\someone\Projects\..\..\..\Windows",
+        root,
+        true
+    ));
+    assert!(!lexically_under(
+        r"C:\Users\someone\Projects\crook\..\..",
+        root,
+        true
+    ));
+    assert!(!lexically_under(
+        r"C:\Users\someone\Projects\.. ",
+        root,
+        true
+    ));
+    assert!(!lexically_under(
+        r"C:\Users\someone\ProjectsElsewhere",
+        root,
+        true
+    ));
+    assert!(!lexically_under(r"C:\Windows", root, true));
+    assert!(lexically_under(
+        r"c:\users\someone\projects\crook",
+        root,
+        true
+    ));
+    // Another machine's share is under no root of this one.
+    assert!(!lexically_under(r"\\attacker\share", r"\", true));
+    assert!(!lexically_under("//attacker/share", "/", true));
+    assert!(!lexically_under(r"\\Users\x", r"\Users", true));
+    assert!(lexically_under(r"\\host\share\x", r"\\host\share", true));
+    // A path written from where the process is is not one written from the
+    // root, whatever its parts say.
+    assert!(!lexically_under(
+        r"Users\someone\Projects",
+        r"\Users\someone\Projects",
+        true
+    ));
+
+    // Everywhere else a backslash is a letter, so the same text names a
+    // directory *beside* the root rather than under it, and reading it the
+    // Windows way would have let it in.
+    assert!(lexically_under(
+        "/home/someone/Projects/crook",
+        "/home/someone/Projects",
+        false
+    ));
+    assert!(!lexically_under(
+        "/home/someone/Projects\\crook",
+        "/home/someone/Projects",
+        false
+    ));
+    assert!(!lexically_under(
+        "/home/someone/Projects/../.ssh",
+        "/home/someone/Projects",
+        false
+    ));
+    assert!(!lexically_under(
+        "/home/someone/Projectsx",
+        "/home/someone/Projects",
+        false
+    ));
+    assert!(!lexically_under(
+        "/home/someone/projects/crook",
+        "/home/someone/Projects",
+        false
+    ));
+}
+
+/// A fetch's first hop, to a host the plugin was granted.
+fn first_hop(method: Method) -> Hop {
+    Hop {
+        method,
+        url: String::from("https://api.example.com/v1/usage"),
+        headers: vec![(String::from("x-api-key"), String::from("secret"))],
+        body: (method == Method::Post).then(|| b"{}".to_vec()),
+    }
+}
+
+/// Every hop a fake server was sent, in order.
+type Sent = Rc<RefCell<Vec<Hop>>>;
+
+/// A server that answers each hop with the next of `replies`, and writes down
+/// every hop it was sent.
+fn serving(
+    replies: Vec<(u16, Option<&'static str>)>,
+) -> (Sent, impl FnMut(&Hop) -> Result<Reply, String>) {
+    let sent = Rc::new(RefCell::new(Vec::new()));
+    let log = sent.clone();
+    let mut replies = replies.into_iter();
+    let send = move |hop: &Hop| {
+        log.borrow_mut().push(hop.clone());
+        let (status, location) = replies.next().expect("a hop nobody expected");
+        Ok(Reply {
+            status,
+            location: location.map(str::to_owned),
+            body: format!("from {}", hop.url).into_bytes(),
+        })
+    };
+    (sent, send)
+}
+
+#[test]
+fn a_redirect_to_a_host_nobody_granted_is_handed_back_and_not_followed() {
+    // A plugin's grant reads "only these hosts", and a fetch followed ureq's
+    // ten redirects to any https host at all, custom headers and all.
+    let granted = vec![String::from("net:api.example.com")];
+    let (sent, send) = serving(vec![(302, Some("https://collector.evil/take"))]);
+
+    let answer = followed(first_hop(Method::Get), |url| may_fetch(&granted, url), send);
+
+    assert_eq!(
+        answer,
+        Answer::Fetched {
+            status: 302,
+            body: b"from https://api.example.com/v1/usage".to_vec(),
+        }
+    );
+    assert_eq!(
+        sent.borrow().len(),
+        1,
+        "the redirect was followed: {sent:?}"
+    );
+}
+
+#[test]
+fn a_redirect_to_a_granted_host_is_followed_and_leaves_the_headers_behind() {
+    // The release-asset shape: the API hands over a link to its storage, and
+    // the plugin was granted both. The key it sent the API is not one it
+    // meant for the storage, so it does not go.
+    let granted = vec![
+        String::from("net:api.example.com"),
+        String::from("net:storage.example.net"),
+    ];
+    let (sent, send) = serving(vec![
+        (307, Some("/v2/usage")),
+        (302, Some("https://storage.example.net/blob")),
+        (200, None),
+    ]);
+
+    let answer = followed(
+        first_hop(Method::Post),
+        |url| may_fetch(&granted, url),
+        send,
+    );
+
+    assert_eq!(
+        answer,
+        Answer::Fetched {
+            status: 200,
+            body: b"from https://storage.example.net/blob".to_vec(),
+        }
+    );
+    let sent = sent.borrow();
+    assert_eq!(sent.len(), 3);
+    // Same host: the same request again, headers, body and all.
+    assert_eq!(sent[1].url, "https://api.example.com/v2/usage");
+    assert_eq!(sent[1].method, Method::Post);
+    assert_eq!(sent[1].headers, first_hop(Method::Post).headers);
+    assert_eq!(sent[1].body.as_deref(), Some(&b"{}"[..]));
+    // Another host: a GET, with nothing of the plugin's own on it.
+    assert_eq!(sent[2].method, Method::Get);
+    assert!(sent[2].headers.is_empty(), "{:?}", sent[2].headers);
+    assert_eq!(sent[2].body, None);
+}
+
+#[test]
+fn a_fetch_follows_three_redirects_and_hands_back_the_fourth() {
+    let granted = vec![String::from("net:api.example.com")];
+    let (sent, send) = serving(vec![
+        (301, Some("/1")),
+        (301, Some("/2")),
+        (301, Some("/3")),
+        (301, Some("/4")),
+    ]);
+
+    let answer = followed(first_hop(Method::Get), |url| may_fetch(&granted, url), send);
+
+    assert!(
+        matches!(answer, Answer::Fetched { status: 301, .. }),
+        "{answer:?}"
+    );
+    assert_eq!(sent.borrow().len(), 4, "one request and three redirects");
+}
+
+#[test]
+fn a_redirect_that_leaves_https_is_not_followed() {
+    let granted = vec![String::from("net:api.example.com")];
+    for location in ["http://api.example.com/v1", "ftp://api.example.com/v1"] {
+        let (sent, send) = serving(vec![(302, Some(location))]);
+        let answer = followed(first_hop(Method::Get), |url| may_fetch(&granted, url), send);
+        assert!(
+            matches!(answer, Answer::Fetched { status: 302, .. }),
+            "{location}: {answer:?}"
+        );
+        assert_eq!(sent.borrow().len(), 1, "{location} was followed");
+    }
+}
+
+#[test]
+fn a_location_is_read_against_the_url_it_came_back_from() {
+    let base = "https://api.example.com/v1/usage?week=1";
+    assert_eq!(
+        joined(base, "https://other.example/x").as_deref(),
+        Some("https://other.example/x")
+    );
+    assert_eq!(
+        joined(base, "//other.example/x").as_deref(),
+        Some("https://other.example/x")
+    );
+    assert_eq!(
+        joined(base, "/v2").as_deref(),
+        Some("https://api.example.com/v2")
+    );
+    assert_eq!(
+        joined(base, "totals").as_deref(),
+        Some("https://api.example.com/v1/totals")
+    );
+    assert_eq!(
+        joined(base, "?week=2").as_deref(),
+        Some("https://api.example.com/v1/usage?week=2")
+    );
+    assert_eq!(
+        joined("https://api.example.com", "x").as_deref(),
+        Some("https://api.example.com/x")
+    );
+    assert_eq!(joined(base, "http://api.example.com/v1"), None);
+    assert_eq!(joined(base, "javascript:alert(1)"), None);
+    // A userinfo in front of a granted name is a request to whatever follows
+    // the `@`, which is the host the grant is then asked about.
+    let granted = vec![String::from("net:api.example.com")];
+    let sneaky = joined(base, "https://api.example.com@evil.example/").expect("an https url");
+    assert!(!may_fetch(&granted, &sneaky));
+}
+
+#[test]
 fn only_the_exact_command_somebody_allowed_may_be_typed() {
     // A template is the *shape* of the command, and it is the shape a person
     // agreed to. A plugin that was allowed to `cd` may not `git push`, however
