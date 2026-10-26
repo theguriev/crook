@@ -36374,48 +36374,240 @@ mod sandboxed {
         assert!(!harness.a_pane_field_has_keys());
     }
 
+    /// The frame after something changed, drawn afresh as a window with
+    /// anything changing in it draws them.
+    fn redrawn(harness: &mut Harness) -> Rc<Scene> {
+        harness.workspace_update(|_, ctx| ctx.notify());
+        harness.frame()
+    }
+
+    /// How many of the probe's renders the frame drew.
+    fn renders_drawn(scene: &Scene) -> usize {
+        frame_text(scene)
+            .matches(crate::plugins::wasm::tests::SPENT)
+            .count()
+    }
+
+    /// How many renders each frame drew from now until the probe is not
+    /// drawn at all, which is the frame after it was switched off — or every
+    /// frame of a dozen, for one that never is.
+    fn frames_until_switched_off(harness: &mut Harness) -> Vec<usize> {
+        let mut drawn = Vec::new();
+        for _ in 0..12 {
+            let now = renders_drawn(&redrawn(harness));
+            drawn.push(now);
+            if now == 0 {
+                break;
+            }
+        }
+        drawn
+    }
+
+    /// Whether `drawn` is a plugin switched off within `GIVE_UP_AFTER`
+    /// frames of being watched, each drawing `each` until then.
+    fn switched_off(drawn: &[usize], each: usize) -> bool {
+        drawn.last() == Some(&0)
+            && drawn.len() <= crate::plugins::wasm::GIVE_UP_AFTER as usize + 1
+            && drawn[..drawn.len() - 1].iter().all(|now| *now == each)
+    }
+
+    /// A window holding one probe, `module`, allowed nothing.
+    fn holding(scratch: &Scratch, module: &[u8]) -> Harness {
+        install(scratch.path(), "eugen.probe", module);
+        harness(scratch)
+    }
+
     #[test]
     fn a_plugin_that_spends_a_frame_drawing_is_cut_short_and_then_switched_off() {
-        // Every render inside its own budget and two hundred of them a frame:
-        // a frame took a hundred and thirty milliseconds in a release build,
-        // every frame, and nothing ever failed. What one plugin spends drawing
-        // is now counted across everything it contributes.
+        // Every render inside its own budget and many of them a frame: a frame
+        // took a hundred and thirty milliseconds in a release build, every
+        // frame, and nothing ever failed. What one plugin spends drawing is
+        // counted across everything it contributes.
         let scratch = Scratch::new("spending");
-        install(
-            scratch.path(),
-            "eugen.probe",
-            &crate::plugins::wasm::tests::wasm_spending("eugen/probe", 200, 80_000),
+        let mut harness = holding(
+            &scratch,
+            &crate::plugins::wasm::tests::wasm_spending(
+                "eugen/probe",
+                &[("window.overlay", 8)],
+                95_000,
+            ),
         );
-        let mut harness = harness(&scratch);
-        let spent = crate::plugins::wasm::tests::SPENT;
 
-        let drawn = frame_text(&harness.frame()).matches(spent).count();
+        let drawn = renders_drawn(&redrawn(&mut harness));
         assert!(drawn > 0, "the guest drew nothing, so this proves nothing");
+        assert!(drawn < 8, "all eight renders were drawn in one frame");
+
+        let after = frames_until_switched_off(&mut harness);
         assert!(
-            drawn < 200,
-            "all two hundred renders were drawn in one frame"
+            switched_off(&after, drawn),
+            "a plugin spending a frame's worth every frame is still drawn: {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_tree_that_costs_the_plugin_nothing_still_costs_the_frame() {
+        // A tree out of the module's data is next to no fuel for the guest
+        // and every node of it for the host: two hundred contributions of two
+        // thousand nodes were a second a frame, and never switched off.
+        let scratch = Scratch::new("nodes");
+        let mut harness = holding(
+            &scratch,
+            &crate::plugins::wasm::tests::wasm_drawing("eugen/probe", 8, 3_000),
         );
 
-        // And a plugin that does it frame after frame is one that will go on
-        // doing it. Each frame drawn afresh, as a window that has anything
-        // changing in it draws them.
-        let redrawn = |harness: &mut Harness| {
-            harness.workspace_update(|_, ctx| ctx.notify());
-            harness.frame()
-        };
-        for _ in 0..crate::plugins::wasm::GIVE_UP_AFTER {
-            let drawn = frame_text(&redrawn(&mut harness)).matches(spent).count();
-            assert!(
-                drawn < 200,
-                "all two hundred renders were drawn in one frame"
-            );
-        }
-        let scene = redrawn(&mut harness);
-        assert_eq!(
-            frame_text(&scene).matches(spent).count(),
-            0,
-            "a plugin spending a frame's worth every frame is still drawn"
+        // Seven of eight: the seventh is the one that goes past.
+        assert_eq!(renders_drawn(&redrawn(&mut harness)), 7);
+        let after = frames_until_switched_off(&mut harness);
+        assert!(
+            switched_off(&after, 7),
+            "a plugin past its nodes every frame is still drawn: {after:?}"
         );
+    }
+
+    #[test]
+    fn a_plugin_whose_last_render_goes_past_its_budget_is_still_caught() {
+        // Counted at the end of the frame, not at the next ask: a plugin
+        // whose last render of every frame was the one that went over was
+        // never asked again in that frame, and never switched off.
+        let scratch = Scratch::new("last-render");
+        let mut harness = holding(
+            &scratch,
+            &crate::plugins::wasm::tests::wasm_drawing("eugen/probe", 7, 3_000),
+        );
+
+        assert_eq!(renders_drawn(&redrawn(&mut harness)), 7);
+        let after = frames_until_switched_off(&mut harness);
+        assert!(
+            switched_off(&after, 7),
+            "the render that went past was the last, and it got away: {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_plugin_may_contribute_to_one_slot_a_handful_of_times() {
+        let scratch = Scratch::new("per-slot");
+        let mut harness = holding(
+            &scratch,
+            &crate::plugins::wasm::tests::wasm_spending(
+                "eugen/probe",
+                &[("window.overlay", 200)],
+                0,
+            ),
+        );
+
+        assert_eq!(
+            renders_drawn(&redrawn(&mut harness)),
+            8,
+            "two hundred contributions to one slot were all asked for"
+        );
+    }
+
+    #[test]
+    fn a_mark_on_every_row_is_allowed_what_every_row_costs() {
+        // A row slot is asked once per row and the rows are the person's: a
+        // plugin spending a little on each of many tabs was switched off for
+        // the length of somebody's tab list. Each row a plugin is asked about
+        // adds to its budget.
+        let scratch = Scratch::new("per-row");
+        let mut harness = holding(
+            &scratch,
+            &crate::plugins::wasm::tests::wasm_marking("eugen/probe", 18_000),
+        );
+        for _ in 0..80 {
+            harness.run_command("crook/window/new-tab");
+        }
+        let marks = |scene: &Scene| {
+            scene
+                .layers()
+                .flat_map(|layer| layer.icons.iter())
+                .filter(|drawn| drawn.icon_key.mark == Mark::Icon(Lucide::ChevronDown))
+                .count()
+        };
+        let drawn = marks(&redrawn(&mut harness));
+        // More rows than the budget alone would pay for, at this spin.
+        assert!(drawn >= 30, "the rows were cut short: {drawn} drawn");
+
+        for _ in 0..8 {
+            let now = marks(&redrawn(&mut harness));
+            assert_eq!(now, drawn, "a mark on every row was switched off");
+        }
+    }
+
+    /// A window holding a probe whose picker a person opened and the probe
+    /// then hid by itself, out of an answer, with nobody pressing anything —
+    /// and how many tabs it had before.
+    ///
+    /// A picker hidden like that went on holding the keyboard with nothing on
+    /// screen, every Enter chose its row and ran the plugin's grant, and when
+    /// the plugin put it back it had the keys again.
+    fn with_a_hidden_picker(scratch: &Scratch) -> (Harness, usize) {
+        let request = crook_plugin_api::Request::Run {
+            name: NEW_TAB.to_owned(),
+            argument: String::new(),
+        };
+        let module =
+            crate::plugins::wasm::tests::wasm_hiding_its_picker(&asking_for_tabs(), &request);
+        let mut harness = opening_tabs(scratch, &module);
+        redrawn(&mut harness);
+        let before = harness.tab_ids().len();
+
+        harness.run_command("eugen/probe/poke");
+        assert!(says(&redrawn(&mut harness), "somewhere"));
+        assert!(
+            !harness.a_pane_field_has_keys(),
+            "the picker a press put up did not get the keyboard, so this proves nothing"
+        );
+        served(&mut harness);
+        assert!(
+            !says(&redrawn(&mut harness), "somewhere"),
+            "the plugin did not hide its picker, so this proves nothing"
+        );
+        (harness, before)
+    }
+
+    #[test]
+    fn a_picker_the_plugin_hides_by_itself_gives_the_keyboard_back() {
+        let scratch = Scratch::new("hidden-picker-keys");
+        let (harness, _) = with_a_hidden_picker(&scratch);
+        assert!(
+            harness.a_pane_field_has_keys(),
+            "a picker nobody can see kept the keyboard"
+        );
+    }
+
+    #[test]
+    fn enter_does_not_choose_a_row_of_a_picker_that_is_not_on_screen() {
+        let scratch = Scratch::new("hidden-picker-enter");
+        let (mut harness, before) = with_a_hidden_picker(&scratch);
+        harness.type_text("ls");
+        harness.press("enter", Modifiers::default(), "");
+        served(&mut harness);
+        assert_eq!(
+            harness.tab_ids().len(),
+            before,
+            "Enter chose a row of a picker that was not on screen, and ran the plugin's grant"
+        );
+    }
+
+    #[test]
+    fn a_picker_the_plugin_puts_back_by_itself_comes_back_without_the_keyboard() {
+        let scratch = Scratch::new("hidden-picker-back");
+        let (mut harness, before) = with_a_hidden_picker(&scratch);
+        let mut back = false;
+        for _ in 0..=crate::plugins::wasm::tests::HIDDEN_FOR {
+            back |= says(&redrawn(&mut harness), "somewhere");
+        }
+        assert!(
+            back,
+            "the plugin never put its picker back, so this proves nothing"
+        );
+        assert!(
+            harness.a_pane_field_has_keys(),
+            "the picker came back holding the keyboard, with nobody pressing anything"
+        );
+        harness.press("enter", Modifiers::default(), "");
+        served(&mut harness);
+        assert_eq!(harness.tab_ids().len(), before);
     }
 
     #[test]

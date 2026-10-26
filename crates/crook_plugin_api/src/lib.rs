@@ -753,6 +753,8 @@ pub enum Node {
     /// `dismiss` runs on nobody's behalf, as a tick does: what only a press
     /// may ask for, typing, running a command, the clipboard, what a command
     /// printed, is declined from it. The same goes for Escape on a picker.
+    /// What a click *inside* the panel lands on — a button, a row — is a
+    /// press of that, wherever the panel came from.
     Anchored {
         /// What sits in the slot.
         content: Box<Node>,
@@ -816,6 +818,10 @@ pub enum Node {
     /// shell, and Escape, Enter and the arrows with it. Its rows still answer
     /// a click, which is a press. So a plugin opens its picker from the
     /// action its chip runs, as it would anyway.
+    ///
+    /// The keyboard stays with a picker for as long as it is drawn, frame by
+    /// frame: one the plugin stops drawing by itself lets go of it at the end
+    /// of that frame, and drawn again later it needs a press again.
     ///
     /// [`Meter`]: Self::Meter
     Picker {

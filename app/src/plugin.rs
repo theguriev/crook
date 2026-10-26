@@ -420,6 +420,9 @@ pub struct Host {
     pressed_output: Rc<std::cell::RefCell<Option<String>>>,
     /// Which frame the window is drawing, or last drew. See [`Frames`].
     frames: Frames,
+    /// What has to look at a frame once it is built. See
+    /// [`Host::at_frame_end`].
+    frame_ends: RefCell<Vec<FrameEnd>>,
     /// Whether the action being run now is a panel being dismissed rather
     /// than something a person pressed. See [`Host::is_a_dismissal`].
     dismissing: Cell<bool>,
@@ -448,6 +451,10 @@ impl Frames {
         self.0.set(self.0.get().wrapping_add(1));
     }
 }
+
+/// Something that looks at a frame once it is built. See
+/// [`Host::at_frame_end`].
+type FrameEnd = Box<dyn Fn(&Workspace) -> bool>;
 
 /// A place to leave something for the next action that runs to take.
 ///
@@ -503,6 +510,7 @@ impl Host {
             refused: Vec::new(),
             said: Voice::default(),
             frames: Frames::default(),
+            frame_ends: RefCell::default(),
             dismissing: Cell::new(false),
             plugin_running: Cell::new(false),
         }
@@ -512,6 +520,31 @@ impl Host {
     /// drawn in. See [`Frames`].
     pub fn frames(&self) -> Frames {
         self.frames.clone()
+    }
+
+    /// Asks for `end` to be run once every frame has been built, for as long
+    /// as it answers `true`.
+    ///
+    /// What a sandboxed plugin's chrome needs and nothing else does: what a
+    /// plugin drew is found out by drawing it, and so is what it *stopped*
+    /// drawing — a picker it hid by itself, which kept the keyboard and its
+    /// Enter, or a frame it spent more than its share of. Neither can be seen
+    /// from inside a contribution, which only runs when the plugin draws.
+    /// Answering `false` is how a hook whose plugin has gone lets go.
+    pub fn at_frame_end(&self, end: impl Fn(&Workspace) -> bool + 'static) {
+        self.frame_ends.borrow_mut().push(Box::new(end));
+    }
+
+    /// Runs what [`Host::at_frame_end`] asked for, keeping what answers
+    /// `true`.
+    pub(crate) fn frame_ended(&self, workspace: &Workspace) {
+        // Taken out first, so that a hook may ask for another without the
+        // list being borrowed twice.
+        let ends = std::mem::take(&mut *self.frame_ends.borrow_mut());
+        let mut kept: Vec<FrameEnd> = ends.into_iter().filter(|end| end(workspace)).collect();
+        let mut ends = self.frame_ends.borrow_mut();
+        kept.append(&mut ends);
+        *ends = kept;
     }
 
     /// Says whether the action about to run is a dismissal, and hands back

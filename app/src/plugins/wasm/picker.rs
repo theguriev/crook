@@ -224,6 +224,9 @@ pub(crate) struct Held {
     /// Whether the picker that is up has the keyboard: it was put up by a
     /// press, and nothing has taken it down since.
     picking: Cell<bool>,
+    /// The last frame a picker or a menu of this plugin's was drawn in. See
+    /// [`Held::frame_ended`].
+    drawn_in: Cell<Option<u64>>,
     /// Whether every picker drawn here may have the keyboard, asked or not:
     /// a fixture's, which is a file a person named on the command line to be
     /// drawn, and no plugin's at all.
@@ -261,6 +264,7 @@ impl Held {
             frames,
             invited: Cell::new(None),
             picking: Cell::new(false),
+            drawn_in: Cell::new(None),
             trusted: false,
             moved: Cell::new(false),
             query: TextInput::new(),
@@ -305,6 +309,28 @@ impl Held {
     /// on screen, and deaf, until a person presses something of the plugin's.
     pub(crate) fn invite(&self) {
         self.invited.set(Some(self.frames.now().wrapping_add(1)));
+    }
+
+    /// Says that the frame being drawn has been built, and lets go of the
+    /// keyboard if nothing of this plugin's that holds it was drawn in it.
+    /// Answers whether that moved the keyboard, so the caller re-syncs.
+    ///
+    /// The other end of [`Self::invite`]. A picker is the plugin's state and
+    /// so is hiding one, and the host only learns either by drawing: a picker
+    /// a person opened that the plugin then hid by itself — out of a timer, an
+    /// answer, its own render — went on holding the keyboard with nothing on
+    /// screen, left the pane deaf, and turned every Enter into a press of the
+    /// row nobody could see, typing or running whatever the plugin was
+    /// allowed. And a picker it put back later came back with the keys,
+    /// though nobody had pressed anything since. So what holds the keyboard
+    /// holds it for as long as it is on screen, frame by frame, and a picker
+    /// drawn again after it went needs a press like any other.
+    pub(crate) fn frame_ended(&self) -> bool {
+        if self.open.get() && self.drawn_in.get() != Some(self.frames.now()) {
+            self.shut();
+            return true;
+        }
+        false
     }
 
     /// Whether a picker drawn now may have the keyboard. See [`Self::invite`].
@@ -548,6 +574,7 @@ pub(super) fn picker(
     // still answer a click, which is a press — and the frame after it is one
     // this picker may have the keyboard in. See [`Held::invite`].
     let welcome = chrome.welcomes_a_picker();
+    chrome.drawn_in.set(Some(chrome.frames.now()));
     {
         let mut shown = chrome.shown.borrow_mut();
         if welcome {
@@ -720,6 +747,8 @@ pub(super) fn menued(
     if !chrome.menu_is(items) {
         return stack.finish();
     }
+    // On screen, so still holding the keyboard. See [`Held::frame_ended`].
+    chrome.drawn_in.set(Some(chrome.frames.now()));
 
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)

@@ -14061,7 +14061,18 @@ impl View for Workspace {
         // A new frame, for what a plugin may do once per frame rather than
         // once per call. See [`Frames`](crate::plugin::Frames).
         self.host.frames().advance();
+        let frame = self.render_frame(app);
+        // Every contribution is built by now — nothing in the tree is built
+        // lazily — so what a plugin drew this frame, and what it did not, is
+        // known. See [`Host::at_frame_end`](crate::plugin::Host::at_frame_end).
+        self.host.frame_ended(self);
+        frame
+    }
+}
 
+impl Workspace {
+    /// The frame [`View::render`] draws, between the moments it counts.
+    fn render_frame(&self, app: &AppContext) -> Box<dyn Element> {
         // Which panes this frame draws, said to the shells behind them before
         // anything below asks one for its grid: a pane off screen stops
         // building snapshots nothing draws, and one coming back has its

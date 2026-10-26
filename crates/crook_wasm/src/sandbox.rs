@@ -189,6 +189,9 @@ pub struct Sandbox {
     /// What the last call into the guest cost, every export it took counted.
     /// See [`Sandbox::fuel_spent`].
     spent: u64,
+    /// How long the last render's answer was, in bytes. See
+    /// [`Sandbox::answered`].
+    answered: usize,
 }
 
 impl Sandbox {
@@ -277,6 +280,7 @@ impl Sandbox {
             fuel,
             registry,
             spent: 0,
+            answered: 0,
         };
 
         // The ABI first, because everything below it is decoded against a
@@ -346,13 +350,26 @@ impl Sandbox {
     /// against what a plugin asked to be allowed to know.
     pub fn render(&mut self, render: &Render) -> Result<Node, Problem> {
         self.spent = 0;
+        self.answered = 0;
         let bytes =
             crook_plugin_api::to_bytes(render).map_err(|why| Problem::Answer(why.to_string()))?;
         let (pointer, length) = self.write(&bytes, self.fuel.render)?;
         let packed =
             self.call::<(i32, i32), i64>(exports::RENDER, (pointer, length), self.fuel.render)?;
         let bytes = self.read(packed)?;
+        self.answered = bytes.len();
         crook_plugin_api::from_bytes(&bytes).map_err(|why| Problem::Answer(why.to_string()))
+    }
+
+    /// How many bytes the last [`Sandbox::render`] answered with, or none for
+    /// one that did not get as far as answering.
+    ///
+    /// What fuel does not measure. A tree written into a module's data costs
+    /// the guest nothing to hand back, and the host still decodes it and
+    /// builds everything in it: a render can be nearly free inside the
+    /// sandbox and a megabyte of work outside it.
+    pub fn answered(&self) -> usize {
+        self.answered
     }
 
     /// Runs one of its actions, by the name it registered, with whatever the
