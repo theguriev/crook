@@ -3638,13 +3638,30 @@ says nothing about the session, even when restoring is turned on in it. On Windo
 window does not attach to the console the first one did, so closing the shell that started the
 first window does not end the second. A later ordinary window does say something when restoring
 is turned on in it, even after its line was dismissed, because before the lock the switch wrote
-that window's tabs at once and now it writes nothing. No window reads another's settings once it
-is open, so the keeper goes on with restoring as it had it, and the line says only that the
-other window's tabs are remembered once the setting is on there too. If the keeper has closed by
+that window's tabs at once and now it writes nothing. Every window takes the others' settings as
+they are saved (below), so the switch reaches the keeper within a second and the keeper's tabs
+are the ones remembered. If the keeper has closed by
 then, the second window takes the lock instead and writes its own tabs over whatever restoring
 last left in the file. That is the one time a second window takes over: when the keeper merely
 closes, nobody has said which window's tabs should win. One file per window, all of them
 restored at the next launch, is the fuller answer.
+
+The settings are the other file every window shares, and there the answer is the opposite: no
+window owns `settings.json`, so every window has to agree about it. Each used to write its whole
+copy back on every change, which made the last window to save the one that decided every key —
+a plugin revoked in one window was granted again by the next theme chosen in another, and went
+on running with the grant there until it was restarted. Now a save writes only what that
+window changed (`Settings::take_changes`: the keys this build owns, compared with what the
+window last agreed with the file about, and one entry at a time under `plugin_grants` and
+`resume_lines` and one name at a time in `disabled_plugins`), laid over the file as it is when
+the save lands, with the read and the write one step under a lock on `settings.lock` beside it
+(`Settings::write_changes`). A file that does not read is copied into `settings-backups/` and
+the changes are laid over the last copy that did. And every window looks at the file every
+three quarters of a second, on a thread of its own rather than a parked worker
+(`settings::watch`), and takes what it says: a grant revoked anywhere — another window,
+`--uninstall-plugin`, a hand edit — rebuilds the plugin here under the new answer, and whatever
+it had asked for under the old one goes with the old build. A look that may have read across
+one of the window's own saves is set aside for the next.
 
 A sixth is where the window was. At first only its size came back, read off the frame, so a
 window kept maximised on a second monitor reopened as an ordinary window on the first, at the

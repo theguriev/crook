@@ -2162,6 +2162,11 @@ THE INPUT FIELD:
 /// accepts are threads of their own, and the window's side of a question is a
 /// foreground task woken by one of them. See [`control`].
 ///
+/// Nor does the look at `settings.json` that every window keeps for changes
+/// made in the others. It runs for the life of the window, which on this pool
+/// would be a sixth chain parked forever, so it is a thread of its own in the
+/// control socket's arrangement — see [`settings::watch`].
+///
 /// **The test at the bottom of this file cannot check this number.** It builds
 /// its scenario out of the constant itself, so it proves what
 /// [`background_pool`] does with whatever the number says and nothing at all
@@ -3762,13 +3767,11 @@ struct Launch {
 /// and a reinstall a year later must ask again rather than quietly running
 /// under a grant nobody remembers giving.
 ///
-/// This is the command line's half, and it is a *file* edit: a Crook that is
-/// open at the time holds its own copy of the settings and will write the
-/// grant back the next time anything saves them. That is the ordinary hazard
-/// of editing a file an application has open, it is why `settings.json` says
-/// what it says about hand-editing, and it is not worth a lock — the answer is
-/// the Plugins page, which removes a plugin from inside the window that would
-/// otherwise overwrite this.
+/// This is the command line's half, and it is a *file* edit — of these two
+/// keys and nothing else, under the lock every save takes. A Crook that is
+/// open at the time hears it within a second and rebuilds the plugin with
+/// nothing allowed (see `settings::watch`), and its next save writes only
+/// what that window changed, so the grant is not written back.
 fn forget_plugin(id: &crook_plugin::PluginId) -> Result<()> {
     let mut settings = Settings::for_user();
     settings.set_granted(id.as_str(), Vec::new());
