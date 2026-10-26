@@ -1432,3 +1432,121 @@ fn altgr_is_a_modifier_being_held_rather_than_a_key() {
         );
     }
 }
+
+#[test]
+fn an_edit_in_one_window_does_not_take_back_one_made_in_another() {
+    // Every window is a process with its own copy of the file. A chord
+    // bound in one, then another bound in a window that had not read the
+    // file since, wrote the second window's copy over the first's edit.
+    let (path, mut first) = editable("two-windows", "");
+    let mut second = Keybindings::load_over(Platform::Other, &path);
+
+    saved(first.bind(&command("crook/window/new-tab"), &keys("ctrl+alt+n")));
+    let text = saved(second.bind(&command("crook/window/close-pane"), &keys("ctrl+alt+w")));
+
+    assert!(
+        text.contains("ctrl+alt+n") && text.contains("ctrl+alt+w"),
+        "one window's edit took back the other's: {text}"
+    );
+    let reread = Keybindings::load_over(Platform::Other, &path);
+    assert_eq!(
+        meaning(&reread, "ctrl+alt+n"),
+        Resolution::Command(command("crook/window/new-tab"))
+    );
+    assert_eq!(
+        meaning(&reread, "ctrl+alt+w"),
+        Resolution::Command(command("crook/window/close-pane"))
+    );
+}
+
+#[test]
+fn a_line_written_by_hand_since_the_file_was_read_survives_an_edit_on_the_page() {
+    let (path, mut keybindings) = editable("hand-edit", "[]\n");
+    fs::write(
+        &path,
+        "// mine\n[\n  { \"key\": \"ctrl+alt+h\", \"command\": \"crook/window/new-tab\" }\n]\n",
+    )
+    .expect("writable");
+
+    let text = saved(keybindings.bind(&command("crook/window/close-pane"), &keys("ctrl+alt+w")));
+
+    assert!(
+        text.contains("// mine"),
+        "the person's comment went: {text}"
+    );
+    assert!(
+        text.contains("ctrl+alt+h"),
+        "the person's line went: {text}"
+    );
+    assert!(
+        text.contains("ctrl+alt+w"),
+        "the edit was not written: {text}"
+    );
+}
+
+#[test]
+fn a_save_carrying_two_edits_writes_both_whatever_the_file_held() {
+    // What a window hands its last save when the save of the first edit was
+    // overtaken: both edits, made again in order on the file as it is.
+    let (path, mut keybindings) = editable("two-edits", "");
+    let mut first = keybindings
+        .bind(&command("crook/window/new-tab"), &keys("ctrl+alt+n"))
+        .expect("an edit with a file to write");
+    let second = keybindings
+        .bind(&command("crook/window/close-pane"), &keys("ctrl+alt+w"))
+        .expect("an edit with a file to write");
+    first.then(second);
+    let text = saved(Some(first));
+    assert!(
+        text.contains("ctrl+alt+n") && text.contains("ctrl+alt+w"),
+        "{text}"
+    );
+    let _ = path;
+}
+
+#[test]
+fn a_keybindings_save_never_writes_without_the_lock() {
+    let (path, mut keybindings) = editable("held-lock", "");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_file_name(KEYBINDINGS_LOCK))
+        .expect("the lock file opens");
+    lock.lock().expect("the lock is taken");
+
+    let save = keybindings
+        .bind(&command("crook/window/new-tab"), &keys("ctrl+alt+n"))
+        .expect("an edit with a file to write");
+    let refused = save.write_blocking().expect_err("the lock is held");
+    assert!(
+        refused
+            .downcast_ref::<crate::settings::LockBusy>()
+            .is_some(),
+        "{refused:#}"
+    );
+    assert!(!path.exists(), "the save wrote without the lock");
+
+    drop(lock);
+    save.write_blocking()
+        .expect("the save lands once the lock is free");
+    assert!(
+        fs::read_to_string(&path)
+            .expect("readable")
+            .contains("ctrl+alt+n")
+    );
+}
+
+#[test]
+fn unbinding_a_command_twice_leaves_it_unbound() {
+    // The second unbind found the command's own removal line, took it out,
+    // and then — asking the rules from before it did — saw nothing bound and
+    // wrote no removal: the chord came back.
+    let (_, mut keybindings) = editable("unbind-twice", "");
+    let new_tab = command("crook/window/new-tab");
+    saved(keybindings.unbind(&new_tab));
+    let text = saved(keybindings.unbind(&new_tab));
+    assert!(text.contains("-crook/window/new-tab"), "{text}");
+    assert!(keybindings.chords_for(&new_tab).is_empty());
+}

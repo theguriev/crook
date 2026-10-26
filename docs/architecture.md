@@ -3638,13 +3638,58 @@ says nothing about the session, even when restoring is turned on in it. On Windo
 window does not attach to the console the first one did, so closing the shell that started the
 first window does not end the second. A later ordinary window does say something when restoring
 is turned on in it, even after its line was dismissed, because before the lock the switch wrote
-that window's tabs at once and now it writes nothing. No window reads another's settings once it
-is open, so the keeper goes on with restoring as it had it, and the line says only that the
-other window's tabs are remembered once the setting is on there too. If the keeper has closed by
+that window's tabs at once and now it writes nothing. Every window takes the others' settings as
+they are saved (below), so the switch reaches the keeper within a second and the keeper's tabs
+are the ones remembered. If the keeper has closed by
 then, the second window takes the lock instead and writes its own tabs over whatever restoring
 last left in the file. That is the one time a second window takes over: when the keeper merely
 closes, nobody has said which window's tabs should win. One file per window, all of them
 restored at the next launch, is the fuller answer.
+
+The settings are the other file every window shares, and there the answer is the opposite: no
+window owns `settings.json`, so every window has to agree about it. Each used to write its whole
+copy back on every change, which made the last window to save the one that decided every key —
+a plugin revoked in one window was granted again by the next theme chosen in another, and went
+on running with the grant there until it was restarted. Now a save writes only what that
+window changed (`Settings::take_changes`: the keys this build owns, compared with what the
+window last agreed with the file about, and one entry at a time under `plugin_grants` and
+`resume_lines` and one name at a time in `disabled_plugins`), laid over the file as it is when
+the save lands, with the read and the write one step under a lock on `settings.lock` beside it
+(`Settings::write_changes`). The lock is waited for in the system's own queue, on a thread of
+its own, for at most two seconds; past that the save is never written without it — the change
+waits, the page says it is not being saved, and it is tried again. Saves run on threads of
+their own rather than the pool, since they can wait. Only a file system that keeps no locks is
+written without one, reading the file again just before the rename. A file that does not read is
+copied into `settings-backups/` and not written over at all until it reads.
+
+**A revoke always lands, and a grant only over the answer it was given over.** Every answer a
+Crook writes for a plugin counts that plugin's entry in `plugin_grant_revisions` up by one, and a
+grant lands only on the revision its window last saw, and only while the plugin's grant — read
+the way a load reads it, so `[]` is "nothing allowed" — still says what it said then. The
+revision catches a grant and a revoke made elsewhere in between, which leave the value as it
+was; the value catches a hand edit, which counts nothing. A grant set aside leaves the file's
+answer standing and the card asks again; a grant that finds the file already saying exactly it
+has landed. Older builds carry `plugin_grant_revisions` through their saves as a key they do not
+know. A window closing with revokes it could not write — the lock held, the file not reading —
+parks them in a file of its own, `settings.pending.<pid>-<nonce>.json`, written once and never
+rewritten, so windows closing together at a logout cannot lose each other's; every save, every
+look at the file and the next launch lay them over it, and a save that lands removes exactly the
+parked files it read under the lock. A parked file that does not read is kept and named in the
+log. The lock is waited for by one thread per lock file in a process, which a retry waits on
+rather than starting another.
+`--uninstall-plugin` reads the settings strictly and removes nothing when they do not read, since
+a revoke worked out against every default is a revoke of nothing.
+
+Every window looks at the file every three quarters of a second, on a thread of its own rather
+than a parked worker (`settings::watch`), and takes what it says: a grant revoked anywhere
+rebuilds the plugin here under the new answer, and whatever it had asked for under the old one
+goes with the old build. A look stamped while one of the window's own saves was on its way is set
+aside for the next, and the save's changes stay visible to a look until they are on disk. A file
+gone for three seconds of looks is "do not know" for the plugins — nothing switched back on,
+nothing revoked. The type size, the tabs panel's width and whether it shows stay each window's
+own while it runs (`settings::WINDOW_KEYS`), though the last one written is what the next window
+opens with. `keybindings.json` keeps its own poll, but every save of it carries every edit not
+yet on disk and makes them again, in order, on the file as it is, under `keybindings.lock`.
 
 A sixth is where the window was. At first only its size came back, read off the frame, so a
 window kept maximised on a second monitor reopened as an ordinary window on the first, at the

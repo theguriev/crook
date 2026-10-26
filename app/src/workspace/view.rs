@@ -23,6 +23,20 @@ pub(super) const THEMES_POLL: Duration = Duration::from_millis(750);
 /// arrangement the themes folder has, for the same reason.
 pub(super) const KEYBINDINGS_POLL: Duration = THEMES_POLL;
 
+/// How often `settings.json` is looked at for what other windows, the command
+/// line and a person's editor changed in it.
+///
+/// For as long as the window is open, unlike the two above: what this
+/// carries includes a plugin's grant, and a revoke made elsewhere has to
+/// reach a plugin running here without anybody opening a page. One small
+/// file read on a thread of its own, and the window woken only when it says
+/// something new — see [`crate::settings::watch`].
+pub(super) const SETTINGS_POLL: Duration = THEMES_POLL;
+
+/// How long a settings save that found another Crook holding the lock waits
+/// before it tries again. See [`crate::settings::LockBusy`].
+pub(super) const SETTINGS_SAVE_RETRY: Duration = Duration::from_millis(500);
+
 use crook_plugin_api::Event;
 use crook_terminal::{BlockId, Rows, Snapshot};
 use crookui_core::elements::{MouseStateHandle, ScrollStateHandle};
@@ -53,8 +67,10 @@ use crate::plugin::{ActionId, ActionName, Host, PageId, PluginId, SectionId, Wat
 use crate::plugins::settings::SETTINGS_SECTION;
 use crate::plugins::store::index::{self, Heard, Release};
 use crate::selection::{Blocks, Cells, Filter};
+use crate::settings::watch::{OnDisk, Seen, Watch as SettingsWatch, after, on_a_thread};
 use crate::settings::{
-    DEFAULT_FONT_SIZE, Density, FONT_SIZE_STEP, GeneralOptions, Granularity, Settings, TabOptions,
+    Changes, DEFAULT_FONT_SIZE, Density, FONT_SIZE_STEP, GeneralOptions, Granularity, Settings,
+    TabOptions,
 };
 use crate::shell_integration::Standing;
 use crate::tab::{
@@ -544,6 +560,17 @@ impl SaveOrder {
         self.asked_for.load(Ordering::Relaxed) == asked_at
     }
 
+    /// How many writes have been asked for, when every one of them has run
+    /// or been overtaken; `None` while one is still on its way.
+    ///
+    /// What a look at the same file is stamped with before it reads, so that
+    /// a look which may have read across one of this window's own writes can
+    /// be told from one that cannot: see `settings::watch::Watch::start`.
+    fn quiet_at(&self) -> Option<u64> {
+        let asked = self.asked_for.load(Ordering::Relaxed);
+        (asked == self.finished.load(Ordering::Relaxed)).then_some(asked)
+    }
+
     /// Whether every write asked for has run or been overtaken.
     ///
     /// What a reload of the same file checks before adopting what it read:
@@ -551,6 +578,34 @@ impl SaveOrder {
     /// from before the edit, and adopting it would take the edit back.
     fn is_settled(&self) -> bool {
         self.asked_for.load(Ordering::Relaxed) == self.finished.load(Ordering::Relaxed)
+    }
+}
+
+/// Writes what `pending` holds to the settings at `path`, leaving it there
+/// until it is on disk — and says whether a grant was set aside, or why
+/// nothing was written and whether that was another Crook's lock.
+///
+/// A copy is written, and the changes stay where they are until they have
+/// landed: a look at the file taken while this is being written still sees
+/// them, and a save that fails has nothing to put back.
+fn write_settings(path: &Path, pending: &Mutex<Changes>) -> Result<bool, (String, bool)> {
+    let changes = pending
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    match Settings::write_changes(path, &changes) {
+        Ok(applied) => {
+            pending
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .forget_written(&changes, &applied);
+            Ok(applied.set_aside())
+        }
+        Err(error) => {
+            log::warn!("could not save the settings: {error:#}");
+            let busy = error.downcast_ref::<crate::settings::LockBusy>().is_some();
+            Err((format!("{error:#}"), busy))
+        }
     }
 }
 
@@ -1144,9 +1199,30 @@ pub struct Workspace {
     /// An `Arc<SaveOrder>` rather than a `Cell`, because the deciding and the
     /// writing both happen on the worker. See [`SaveOrder`].
     saves: Arc<SaveOrder>,
+    /// What this window changed in the settings and no save has written yet.
+    ///
+    /// Shared with the saves, because the one that writes is the last one
+    /// asked for — [`SaveOrder`] — and a save that was overtaken must not take
+    /// its change with it: each click adds what it changed here, and the save
+    /// that writes takes all of it. One that fails puts it back. See
+    /// [`Self::save_settings`].
+    settings_changes: Arc<Mutex<Changes>>,
+    /// The look at `settings.json` for what other windows, the command line
+    /// and a person's editor changed in it, while there is a file to look at.
+    /// See [`Self::adopt_settings_file`].
+    settings_watch: Option<SettingsWatch>,
     /// The same, for the keybindings file, which is written by the same rule
     /// and by a different set of clicks.
     keybinding_saves: Arc<SaveOrder>,
+    /// Every edit to the keybindings not yet on disk, which each save carries
+    /// whole. See [`Self::save_keybindings`].
+    unwritten_keybindings: Option<PendingSave>,
+    /// How many times the bindings have been read afresh, so that a save
+    /// coming home to bindings read since does not take edits off them.
+    keybindings_epoch: u64,
+    /// The file as the page last read it while an edit was still to be
+    /// written, so that the edit is tried again once each time it changes.
+    keybindings_tried_over: Option<Keybindings>,
     /// Why the last save of the settings did not land, while it has not: a
     /// folder that cannot be written to, a full disk. The option was applied
     /// to the window regardless, so without this the person sees it work and
@@ -1467,7 +1543,12 @@ impl Workspace {
             agent_directories: None,
             held: HeldLocks::default(),
             saves: Arc::default(),
+            settings_changes: Arc::default(),
+            settings_watch: None,
             keybinding_saves: Arc::default(),
+            unwritten_keybindings: None,
+            keybindings_epoch: 0,
+            keybindings_tried_over: None,
             settings_save_problem: None,
             keybindings_save_problem: None,
             panel_scroll: ScrollStateHandle::default(),
@@ -1488,6 +1569,7 @@ impl Workspace {
         };
         workspace.sync_interactions();
         workspace.sync_git(ctx);
+        workspace.watch_settings(ctx);
         workspace
     }
 
@@ -1559,17 +1641,10 @@ impl Workspace {
     /// than falling back: the file may be one directory away from being put
     /// back, and silently adopting a different theme would lose the choice.
     pub fn set_theme(&mut self, name: &str, ctx: &mut ViewContext<Self>) {
-        let known = self
-            .themes
-            .iter()
-            .find(|available| available.name == name)
-            .map(|available| available.theme);
-        let Some(palette) = known.or_else(|| crate::theme::named(name)) else {
-            log::warn!("no theme called {name:?} on this machine; keeping the current one");
+        if !self.show_theme(name) {
             return;
-        };
+        }
 
-        crate::theme::set_theme(palette);
         self.settings.set_theme(name);
         // And into whichever half of the desktop pair is in force, so that a
         // theme chosen while following the system is the one it comes back to
@@ -1580,6 +1655,23 @@ impl Workspace {
         self.save_settings(ctx);
         self.sync_palette(ctx);
         ctx.notify();
+    }
+
+    /// Puts the theme called `name` on screen, saving nothing, and says
+    /// whether there was one: a name this machine has no theme for is a
+    /// warning and the theme in force stays.
+    fn show_theme(&self, name: &str) -> bool {
+        let known = self
+            .themes
+            .iter()
+            .find(|available| available.name == name)
+            .map(|available| available.theme);
+        let Some(palette) = known.or_else(|| crate::theme::named(name)) else {
+            log::warn!("no theme called {name:?} on this machine; keeping the current one");
+            return false;
+        };
+        crate::theme::set_theme(palette);
+        true
     }
 
     /// Records what the desktop is set to, and follows it if it is being
@@ -2636,6 +2728,10 @@ impl Workspace {
     pub fn set_keybindings(&mut self, mut keybindings: Keybindings, ctx: &mut ViewContext<Self>) {
         keybindings.set_plugin_rules(self.host.suggested_rules());
         self.keybindings = keybindings;
+        // Bindings read afresh are what the file says: edits made on the ones
+        // before are the file's now, or were never going to be.
+        self.unwritten_keybindings = None;
+        self.keybindings_epoch += 1;
         self.pending_keys.borrow_mut().clear();
         ctx.notify();
     }
@@ -2693,10 +2789,25 @@ impl Workspace {
     /// is a file nobody is looking at, and the chain ends rather than adopt
     /// what it happened to read on the way out.
     fn adopt_keybindings(&mut self, mut keybindings: Keybindings, ctx: &mut ViewContext<Self>) {
+        // Nor while an edit is still to be written — refused, or waiting for
+        // another Crook's lock: the file read is the file without it, and
+        // taking it would drop the edit.
         if !self.settings_are_showing() || !self.keybinding_saves.is_settled() {
             return;
         }
         keybindings.set_plugin_rules(self.host.suggested_rules());
+        if self.unwritten_keybindings.is_some() {
+            // A save that failed for a reason other than the lock — a file
+            // that is not a list of bindings, a folder that cannot be written
+            // — is tried again when the file changes: the person may have
+            // just put right whatever stopped it. The page says why it is
+            // not being saved until then.
+            if self.keybindings_tried_over.as_ref() != Some(&keybindings) {
+                self.keybindings_tried_over = Some(keybindings);
+                self.save_keybindings(None, ctx);
+            }
+            return;
+        }
         if keybindings == self.keybindings {
             return;
         }
@@ -8558,10 +8669,21 @@ impl Workspace {
             return;
         }
 
-        let was_still = self.motion_is_reduced();
-        let answering_off =
-            self.general().answer_agents_from_crook && !general.answer_agents_from_crook;
+        let was = self.settings.general();
         self.settings.set_general(general);
+        self.general_changed(was, ctx);
+        self.save_settings(ctx);
+        ctx.notify();
+    }
+
+    /// Starts or stops whatever the options that are not the tab strip's
+    /// gate, now that they are no longer `was`: the half of
+    /// [`Self::set_general`] that is not writing them down, and the whole of
+    /// what another window's change to them does here.
+    fn general_changed(&mut self, was: GeneralOptions, ctx: &mut ViewContext<Self>) {
+        let general = self.settings.general();
+        let was_still = was.motion.is_reduced(self.desktop_reduces_motion);
+        let answering_off = was.answer_agents_from_crook && !general.answer_agents_from_crook;
         // Every question held goes back to the agent's own prompt as a pass,
         // and the card up on one turns to say so: the switch says this window
         // takes no questions, and one it already holds is one it would
@@ -8579,8 +8701,6 @@ impl Workspace {
         if self.motion_is_reduced() != was_still {
             self.apply_motion(ctx);
         }
-        self.save_settings(ctx);
-        ctx.notify();
     }
 
     /// Whether nothing in the window moves on its own: the "Motion" setting,
@@ -8633,22 +8753,68 @@ impl Workspace {
     /// `None` is an edit that had nothing to write — a run with no
     /// configuration directory, or a file no edit may guess at — and both were
     /// reported where they were found.
-    fn save_keybindings(&self, save: Option<PendingSave>, ctx: &mut ViewContext<Self>) {
-        let Some(save) = save else {
+    fn save_keybindings(&mut self, save: Option<PendingSave>, ctx: &mut ViewContext<Self>) {
+        // Every edit not yet on disk goes with this save, in order: the last
+        // save asked for is the one that writes, and one that carried only
+        // its own edit lost the edit before it whenever that save was
+        // overtaken. With nothing new, what is still waiting — a save that
+        // failed or found the lock held — is tried again.
+        match (save, self.unwritten_keybindings.as_mut()) {
+            (Some(save), Some(unwritten)) => unwritten.then(save),
+            (Some(save), None) => self.unwritten_keybindings = Some(save),
+            (None, _) => {}
+        }
+        let Some(save) = self.unwritten_keybindings.clone() else {
             return;
         };
+        let (count, epoch) = (save.edits(), self.keybindings_epoch);
 
         let asked_at = self.keybinding_saves.ask();
         let saves = self.keybinding_saves.clone();
-        let written = ctx.background().spawn(async move {
+        // A thread of its own, for the reason the settings' save has one.
+        let written = on_a_thread("crook-keybindings-save", move || {
             saves.write_if_last(asked_at, || {
                 save.write_blocking().map_err(|error| {
                     log::warn!("could not save the keybindings: {error:#}");
-                    format!("{error:#}")
+                    let busy = error.downcast_ref::<crate::settings::LockBusy>().is_some();
+                    (format!("{error:#}"), busy)
                 })
             })
         });
-        ctx.spawn(written, Self::note_keybindings_save).detach();
+        ctx.spawn(written, move |workspace, outcome, ctx| {
+            workspace.note_keybindings_written(outcome, epoch, count, ctx);
+        })
+        .detach();
+    }
+
+    /// Takes home what a keybindings save did: the edits it wrote are no
+    /// longer waiting — unless the bindings were read afresh from the file
+    /// since (`epoch`), when nothing of before is waiting anyway — and one
+    /// that found the lock held is tried again shortly.
+    fn note_keybindings_written(
+        &mut self,
+        outcome: Option<Result<(), (String, bool)>>,
+        epoch: u64,
+        count: usize,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(outcome) = outcome else {
+            return;
+        };
+        if outcome.is_ok()
+            && epoch == self.keybindings_epoch
+            && let Some(unwritten) = self.unwritten_keybindings.as_mut()
+            && !unwritten.written(count)
+        {
+            self.unwritten_keybindings = None;
+        }
+        if let Err((_, true)) = &outcome {
+            ctx.spawn(after(SETTINGS_SAVE_RETRY), |workspace, (), ctx| {
+                workspace.save_keybindings(None, ctx);
+            })
+            .detach();
+        }
+        self.note_keybindings_save(Some(outcome.map_err(|(why, _)| why)), ctx);
     }
 
     /// Starts in a density the command line asked for, without adopting it.
@@ -13743,43 +13909,412 @@ impl Workspace {
         ctx.notify();
     }
 
-    /// Writes the settings, off the main thread.
+    /// Writes what this window changed in the settings, off the main thread.
     ///
-    /// A click must not wait on a directory being created, a file being
-    /// written, `fsync` returning and a rename landing — so it does not: the
-    /// settings are cheap to clone, and the clone is what the background pool
-    /// gets. A save that fails changes nothing about the option, which has
+    /// A click must not wait on a directory being created, a lock, a file
+    /// being read and written, `fsync` returning and a rename landing — so it
+    /// does not. A save that fails changes nothing about the option, which has
     /// already been applied; it says so on the settings page, through
     /// `settings_save_problem`, until one lands.
     ///
-    /// Each save carries a complete snapshot and writes through its own
-    /// temporary, so two of them racing is never a half-written file — and
-    /// [`SaveOrder`] is what decides which of the two the file keeps.
-    fn save_settings(&self, ctx: &mut ViewContext<Self>) {
-        if self.settings.path().is_none() {
+    /// **What is written is what changed here, laid over the file as it is
+    /// when the save lands** — never this window's whole copy. Each window is
+    /// a process of its own, and a save of the whole copy took back whatever
+    /// another window had written since this one read the file: a plugin
+    /// revoked there was granted again by a theme chosen here. See
+    /// [`Settings::write_changes`].
+    ///
+    /// The change is added to `settings_changes` here, on the thread it was
+    /// made on, before the save is spawned. The save that writes takes all of
+    /// it, so a save [`SaveOrder`] lets a later one overtake loses nothing.
+    fn save_settings(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(path) = self.settings.path().map(Path::to_owned) else {
             // An ephemeral run, or a machine with no configuration directory.
             // Both were reported when the settings were loaded.
             return;
+        };
+
+        let changes = self.settings.take_changes();
+        {
+            let mut pending = self
+                .settings_changes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            pending.then(changes);
+            // Nothing changed, and nothing an earlier save failed to write is
+            // waiting: there is nothing to say to the file.
+            if pending.is_empty() {
+                return;
+            }
         }
 
         // **Only the last one asked for lands.** Browsing themes with the
         // arrow keys asks for one save per keystroke, each on its own
         // background task, racing the others to the same file — and a click on
         // one option followed by a click on another is the same race with two
-        // runners. [`SaveOrder`] is the whole of the answer.
+        // runners. [`SaveOrder`] is the whole of the answer inside a window;
+        // the lock `write_changes` takes is the answer between windows.
         let asked_at = self.saves.ask();
         let saves = self.saves.clone();
-        let settings = self.settings.clone();
+        let pending = self.settings_changes.clone();
 
-        let written = ctx.background().spawn(async move {
-            saves.write_if_last(asked_at, || {
-                settings.save_blocking().map_err(|error| {
-                    log::warn!("could not save the settings: {error:#}");
-                    format!("{error:#}")
-                })
-            })
+        // On a thread of its own rather than the pool: the write may wait up
+        // to `LOCK_PATIENCE` for another Crook's lock, and a wait on the pool
+        // holds a worker for all of it. See `crate::PARKED_WORKERS`.
+        let written = on_a_thread("crook-settings-save", move || {
+            saves.write_if_last(asked_at, || write_settings(&path, &pending))
         });
-        ctx.spawn(written, Self::note_settings_save).detach();
+        ctx.spawn(written, Self::note_settings_written).detach();
+    }
+
+    /// Writes whatever the window still has to write, here and now, as it
+    /// closes — and parks the revokes among it beside the file if that
+    /// cannot be done. See [`crate::settings::Parked`].
+    ///
+    /// A save still on its way as the window closes ends with the process,
+    /// and one waiting to be tried again — the lock held, the file not
+    /// reading — is never tried again at all. That is a theme lost, which is
+    /// a nuisance, or a revoke lost, which is not: the next launch would run
+    /// the plugin under the grant. So the pending changes are written once
+    /// more, on this thread, waiting for the lock as long as a save does;
+    /// and what that cannot write, it parks.
+    pub fn finish_saving_the_settings(&self) {
+        let Some(path) = self.settings.path().map(Path::to_owned) else {
+            return;
+        };
+        let asked_at = self.saves.ask();
+        let written = self
+            .saves
+            .write_if_last(asked_at, || write_settings(&path, &self.settings_changes));
+        if let Some(Err((why, _))) = written {
+            let pending = self
+                .settings_changes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            match Settings::park(&path, &pending) {
+                Ok(()) => log::warn!(
+                    "the settings could not be saved as the window closed ({why}); the revokes \
+                     among them are kept beside the file"
+                ),
+                Err(error) => {
+                    log::warn!("could not keep the revokes beside the settings: {error:#}")
+                }
+            }
+        }
+    }
+
+    /// Takes home what a settings save did.
+    ///
+    /// A grant it set aside — the plugin was answered for elsewhere since —
+    /// is a file this window has to read again, whether or not the save
+    /// changed it: on the watch's next look, or here and now when there is
+    /// no watch, so that the plugin is not left running on the grant. A save
+    /// that found another Crook holding the lock is tried again shortly, its
+    /// changes still waiting.
+    fn note_settings_written(
+        &mut self,
+        outcome: Option<Result<bool, (String, bool)>>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(outcome) = outcome else {
+            return;
+        };
+        let (outcome, stale, busy) = match outcome {
+            Ok(stale) => (Ok(()), stale, false),
+            Err((why, busy)) => (Err(why), false, busy),
+        };
+        if stale {
+            match self.settings_watch.as_ref() {
+                Some(watch) => watch.again(),
+                None => self.read_the_settings_again(ctx),
+            }
+        }
+        if busy {
+            ctx.spawn(after(SETTINGS_SAVE_RETRY), |workspace, (), ctx| {
+                workspace.save_settings(ctx);
+            })
+            .detach();
+        }
+        self.note_settings_save(Some(outcome), ctx);
+    }
+
+    /// Reads `settings.json` here and now and takes it, the way a look does.
+    ///
+    /// For a window with no watch, whose thread did not start: nothing else
+    /// would ever tell it that a grant it gave was set aside.
+    fn read_the_settings_again(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(path) = self.settings.path().map(Path::to_owned) else {
+            return;
+        };
+        // The parked files first, the way a look reads them.
+        let parked = crate::settings::parked_beside(&path).parked;
+        let file = match std::fs::read(&path) {
+            Ok(bytes) => match crate::settings::parse_document(&bytes) {
+                Ok(document) => OnDisk::Document(document),
+                Err(why) => OnDisk::Unreadable(why),
+            },
+            Err(_) => OnDisk::Missing,
+        };
+        let seen = Seen {
+            stamp: self.saves.quiet_at(),
+            file,
+            parked,
+        };
+        self.adopt_settings_file(seen, ctx);
+    }
+
+    /// Starts looking at `settings.json` for changes made anywhere but here.
+    ///
+    /// Once, as the window opens, and only for settings that came from a
+    /// file: an ephemeral run has nothing to look at.
+    fn watch_settings(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(path) = self.settings.path().map(Path::to_owned) else {
+            return;
+        };
+        let saves = self.saves.clone();
+        self.settings_watch = SettingsWatch::start(path, SETTINGS_POLL, move || saves.quiet_at());
+        self.hear_settings(ctx);
+    }
+
+    /// Waits for the next look at `settings.json`, takes it, and waits again
+    /// — until the window, and the look with it, has gone.
+    fn hear_settings(&self, ctx: &mut ViewContext<Self>) {
+        let Some(next) = self.settings_watch.as_ref().map(SettingsWatch::next) else {
+            return;
+        };
+        ctx.spawn(next, |workspace, seen, ctx| {
+            if let Some(seen) = seen {
+                workspace.adopt_settings_file(seen, ctx);
+                workspace.hear_settings(ctx);
+            }
+        })
+        .detach();
+    }
+
+    /// Takes what `settings.json` says now, as the window's own, and puts in
+    /// force whatever that changed.
+    ///
+    /// **A grant revoked anywhere is revoked here, at once.** Another window,
+    /// `--uninstall-plugin`, a person deleting a line from the file: the
+    /// plugin is built again under what the file allows, the way a revoke on
+    /// its own card rebuilds it, so a request it makes from then on is held
+    /// to the new answer and whatever it had waiting goes with the old build.
+    /// A grant given elsewhere takes effect here the same way.
+    ///
+    /// Every other key the same: the file's value, unless this window has
+    /// changed the key and the save is still to land — then this window's,
+    /// which is what the file will say once it has. A look that may have
+    /// been read across one of this window's own saves is set aside and the
+    /// next is asked for, because a file read between a change and its write
+    /// is the file from before the change, and taking it would take the
+    /// change back.
+    ///
+    /// A file that does not read is not taken: the window keeps the last
+    /// settings that did, and says why in the log. The next save writes over
+    /// it with a copy kept — see [`Settings::write_changes`].
+    fn adopt_settings_file(&mut self, seen: Seen, ctx: &mut ViewContext<Self>) {
+        let document = match seen.file {
+            OnDisk::Document(document) => Some(Some(document)),
+            OnDisk::Missing => Some(None),
+            OnDisk::Unreadable(why) => {
+                if let Some(path) = self.settings.path() {
+                    log::warn!(
+                        "{} {why}; keeping the settings this window has until it reads",
+                        path.display()
+                    );
+                }
+                // Nothing to take — except a revoke another Crook parked
+                // beside it, which wins whether or not the file reads.
+                if seen.parked.is_empty() {
+                    return;
+                }
+                None
+            }
+        };
+        // Only a look stamped quiet, and quiet at the same count now: one
+        // stamped while a save was on its way — `None` — may have read the
+        // file from before it, and so may one stamped before a save that has
+        // landed since.
+        let quiet = matches!(
+            (seen.stamp, self.saves.quiet_at()),
+            (Some(then), Some(now)) if then == now
+        );
+        if !quiet {
+            if let Some(watch) = self.settings_watch.as_ref() {
+                watch.again();
+            }
+            return;
+        }
+
+        let before = self.settings.clone();
+        let waiting = {
+            let mut pending = self
+                .settings_changes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            match document {
+                Some(Some(mut document)) => {
+                    seen.parked.lay_over(&mut document);
+                    self.settings.adopt(document, &mut pending);
+                }
+                Some(None) => {
+                    self.settings.adopt_missing(&mut pending);
+                    if !seen.parked.is_empty() {
+                        self.settings.adopt_parked(&seen.parked, &mut pending);
+                    }
+                }
+                None => self.settings.adopt_parked(&seen.parked, &mut pending),
+            }
+            !pending.is_empty()
+        };
+        self.settings_changed_under(&before, ctx);
+        // Changes still waiting with nothing on its way are a save that did
+        // not land — the file did not read, the folder could not be written.
+        // A file that changed is a reason to try again.
+        if waiting {
+            self.save_settings(ctx);
+        }
+    }
+
+    /// Takes `document` as what `settings.json` says now, the way a look at
+    /// the file that read it would — for a test that needs it taken at a
+    /// moment of its own choosing rather than at the next look.
+    #[cfg(test)]
+    pub(crate) fn adopt_settings_document(
+        &mut self,
+        document: serde_json::Map<String, serde_json::Value>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let seen = Seen {
+            stamp: self.saves.quiet_at(),
+            file: OnDisk::Document(document),
+            parked: Default::default(),
+        };
+        self.adopt_settings_file(seen, ctx);
+    }
+
+    /// Stops looking at `settings.json`, as a window whose watch never
+    /// started would have — for a test about what such a window does.
+    #[cfg(test)]
+    pub(crate) fn stop_watching_the_settings(&mut self) {
+        self.settings_watch = None;
+    }
+
+    /// Puts in force what changed between `before` and the settings now,
+    /// when it was not this window that changed it. Nothing is saved: what
+    /// changed is what the file already says.
+    fn settings_changed_under(&mut self, before: &Settings, ctx: &mut ViewContext<Self>) {
+        let after = self.settings.clone();
+        let mut changed = false;
+
+        // The grants first, so that a plugin switched on below is built with
+        // the grant the file gives it now.
+        let mut regranted = Vec::new();
+        let plugins: std::collections::BTreeSet<&String> = before
+            .plugin_grants()
+            .keys()
+            .chain(after.plugin_grants().keys())
+            .collect();
+        for plugin in plugins {
+            if before.granted_to(plugin) == after.granted_to(plugin) {
+                continue;
+            }
+            let Ok(id) = PluginId::parse(plugin) else {
+                continue;
+            };
+            log::info!("{plugin}'s grant changed in settings.json; building it again under it");
+            self.host
+                .set_granted(&id, after.granted_to(plugin).to_vec());
+            regranted.push(id);
+            changed = true;
+        }
+
+        // Then the switches. A plugin the registry withdrew stays out
+        // whatever the file says: that is the registry's answer, not a
+        // person's.
+        let names: std::collections::BTreeSet<&String> = before
+            .disabled_plugins()
+            .iter()
+            .chain(after.disabled_plugins())
+            .collect();
+        let mut switched = Vec::new();
+        for name in names {
+            let off = after.disabled_plugins().contains(name);
+            if before.disabled_plugins().contains(name) == off {
+                continue;
+            }
+            let Ok(id) = PluginId::parse(name) else {
+                continue;
+            };
+            if off {
+                self.host.unload(&id);
+            } else if !self.withdrawn.contains_key(name.as_str()) {
+                self.host.enable(&id, ctx);
+            }
+            switched.push(id);
+            changed = true;
+        }
+
+        // And a plugin still running whose grant changed is built again, the
+        // way a press on its card does it: a plugin reads its grant once, as
+        // it builds.
+        for id in regranted {
+            if !switched.contains(&id) && self.host.is_loaded(&id) {
+                self.host.unload(&id);
+                self.host.enable(&id, ctx);
+            }
+        }
+
+        if before.tab_options() != after.tab_options() {
+            // An option the command line set for this run stays as it said,
+            // the way it does against the file this window opened with.
+            let mut options = after.tab_options();
+            if self.overridden.density {
+                options.density = self.options.density;
+            }
+            if self.overridden.granularity {
+                options.granularity = self.options.granularity;
+            }
+            self.options = options;
+            if !options.show_details_on_hover {
+                self.hovered_row = None;
+            }
+            let wants_diff = wants_diff_stats(options);
+            self.git
+                .update(ctx, |model, _| model.set_diff_stats_wanted(wants_diff));
+            changed = true;
+        }
+
+        // The type size, the panel's width and whether it shows are this
+        // window's own and never arrive here: see `settings::WINDOW_KEYS`.
+        let was = before.general();
+        if was != after.general() {
+            self.general_changed(was, ctx);
+            changed = true;
+        }
+
+        let theme = after.theme_for(self.system_is_dark);
+        if before.theme_for(self.system_is_dark) != theme {
+            let theme = theme.to_owned();
+            match self.theme_before_draft.as_mut() {
+                // Not over a draft: the creator has painted one on the window,
+                // and a person is in the middle of choosing it. What it puts
+                // back when it closes is the theme in force now.
+                Some(underneath) => *underneath = theme,
+                None => {
+                    if self.show_theme(&theme) {
+                        self.sync_palette(ctx);
+                    }
+                }
+            }
+            changed = true;
+        }
+
+        if changed || before.font_family() != after.font_family() {
+            self.sync_input_keys();
+            ctx.notify();
+        }
     }
 
     /// Stops this window writing the session file. A launcher's window never

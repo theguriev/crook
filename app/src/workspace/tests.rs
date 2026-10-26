@@ -5625,6 +5625,178 @@ impl Drop for Scratch {
 }
 
 #[test]
+fn a_settings_file_edited_by_hand_is_taken_and_kept_through_the_next_save() {
+    // A person edits settings.json with Crook open. The window used to keep
+    // the copy it opened with, and its next save wrote that copy over the
+    // edit. Now the edit is taken — the option is in force here — and the
+    // next save writes only what it changed.
+    let scratch = Scratch::new();
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    let file = scratch.path().join("settings.json");
+    fs::write(
+        &file,
+        r#"{"show_tab_numbers": true, "a_later_builds_key": 7}"#,
+    )
+    .expect("writable scratch");
+
+    harness.wait_for("the edit never reached the window", |harness| {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.options().show_tab_numbers
+        })
+    });
+
+    harness.dispatch_option(OptionsAction::ToggleShowDetailsOnHover);
+    let written = scratch.written_containing("show_details_on_hover");
+    let written: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&written).expect("the file reads");
+    assert_eq!(
+        written.get("show_tab_numbers"),
+        Some(&serde_json::Value::from(true))
+    );
+    assert_eq!(
+        written.get("a_later_builds_key"),
+        Some(&serde_json::Value::from(7))
+    );
+    assert_eq!(
+        written.get("show_details_on_hover"),
+        Some(&serde_json::Value::from(false))
+    );
+}
+
+#[test]
+fn a_settings_file_saved_half_written_costs_the_window_nothing() {
+    // A hand edit with a trailing comma reads as nothing. Taking it would
+    // put every option back to its default and revoke every grant; the
+    // window keeps what it had. A save does not write over it either: the
+    // page says the change is not being saved, the person's text is kept
+    // beside it, and once the file reads again the change lands.
+    let scratch = Scratch::new();
+    let file = scratch.path().join("settings.json");
+    fs::write(&file, r#"{"show_tab_numbers": true}"#).expect("writable scratch");
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    let broken = r#"{"show_tab_numbers": false,"#;
+    fs::write(&file, broken).expect("writable scratch");
+
+    harness.settle(std::time::Duration::from_secs(2));
+    let numbers = harness.workspace.read(&harness.app, |workspace, _| {
+        workspace.options().show_tab_numbers
+    });
+    assert!(
+        numbers,
+        "a file that does not read was taken as the defaults"
+    );
+
+    harness.dispatch_option(OptionsAction::ToggleShowDetailsOnHover);
+    harness.wait_for("the refused save never reached the page", |harness| {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.save_problem().is_some()
+        })
+    });
+    assert_eq!(fs::read_to_string(&file).expect("readable"), broken);
+    let kept = fs::read_dir(scratch.path().join("settings-backups"))
+        .expect("the person's text was kept")
+        .count();
+    assert_eq!(kept, 1);
+
+    fs::write(&file, r#"{"show_tab_numbers": true, "audible_bell": true}"#).expect("writable");
+    harness.wait_for("the change never landed once the file read", |_| {
+        fs::read_to_string(&file).is_ok_and(|text| text.contains("show_details_on_hover"))
+    });
+    let written = scratch.written_containing("show_details_on_hover");
+    let written: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&written).expect("the save wrote a file that reads");
+    assert_eq!(
+        written.get("show_tab_numbers"),
+        Some(&serde_json::Value::from(true))
+    );
+    assert_eq!(
+        written.get("audible_bell"),
+        Some(&serde_json::Value::from(true))
+    );
+    harness.wait_for("the page never stopped saying so", |harness| {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.save_problem().is_none()
+        })
+    });
+}
+
+#[test]
+fn a_save_that_finds_the_lock_held_too_long_waits_for_it_and_never_writes_without_it() {
+    // A slow Crook holding the lock past the save's patience. Writing
+    // without it let that one's rename land afterwards and take this save
+    // back out. The change is kept, the page says it is not being saved,
+    // and it lands once the lock is free.
+    let scratch = Scratch::new();
+    let file = scratch.path().join("settings.json");
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(scratch.path().join("settings.lock"))
+        .expect("the lock file opens");
+    lock.lock().expect("the lock is taken");
+
+    harness.dispatch_option(OptionsAction::ToggleShowDetailsOnHover);
+    harness.wait_for("the held lock never reached the page", |harness| {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.save_problem().is_some()
+        })
+    });
+    assert!(!file.exists(), "the save wrote without the lock");
+
+    drop(lock);
+    harness.wait_for("the change never landed once the lock was free", |_| {
+        fs::read_to_string(&file).is_ok_and(|text| text.contains("show_details_on_hover"))
+    });
+    harness.wait_for("the page never stopped saying so", |harness| {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.save_problem().is_none()
+        })
+    });
+}
+
+#[test]
+fn a_window_keeps_its_own_zoom_and_panel_when_another_window_saves_them() {
+    // Zooming one window is not zooming them all, and hiding the panel in
+    // one does not hide it in another. Everything else another window saves
+    // arrives.
+    let scratch = Scratch::new();
+    let file = scratch.path().join("settings.json");
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    let (zoom, cell) = harness.workspace.read(&harness.app, |workspace, _| {
+        (
+            workspace.general().font_size(),
+            workspace.cell_font().font_size(),
+        )
+    });
+    let mut elsewhere = Settings::load(&file);
+    elsewhere.set_general(GeneralOptions {
+        font_size: 20.,
+        show_tabs_panel: false,
+        audible_bell: true,
+        ..elsewhere.general()
+    });
+    elsewhere.save_blocking().expect("the other window saves");
+
+    harness.wait_for("the other window's change never arrived", |harness| {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.general().audible_bell
+        })
+    });
+    let (general, now) = harness.workspace.read(&harness.app, |workspace, _| {
+        (workspace.general(), workspace.cell_font().font_size())
+    });
+    assert!(
+        general.show_tabs_panel,
+        "another window hid this one's panel"
+    );
+    assert_eq!(general.font_size(), zoom, "another window zoomed this one");
+    assert_eq!(now, cell, "another window zoomed this one");
+}
+
+#[test]
 fn a_settings_save_that_fails_says_so_on_the_page_until_one_lands() {
     // A click applied the option and the save of it failed in the log, so
     // the person saw it work and found it gone on the next launch. The page
@@ -5698,9 +5870,13 @@ fn a_density_the_command_line_asked_for_is_never_written_to_the_settings_file() 
     // snapshot, so one that has nothing to do with density still carries it.
     harness.dispatch_option(OptionsAction::ToggleShowDetailsOnHover);
 
+    // A save writes what changed, so the density is not in the file at all
+    // unless something wrote it — and what the next launch reads is what
+    // matters.
     let written = scratch.written_containing("\"show_details_on_hover\": false");
     assert!(
-        written.contains("\"view_mode\": \"compact\""),
+        !written.contains("expanded")
+            && scratch.settings().tab_options().density == Density::Compact,
         "the command line's density reached the settings file, so the next \
          launch with no flags starts Expanded; the file says {written}"
     );
@@ -16017,7 +16193,8 @@ fn choosing_one_option_does_not_carry_another_command_line_override_into_the_fil
 
     let written = scratch.written_containing("\"view_mode\": \"expanded\"");
     assert!(
-        written.contains("\"display_granularity\": \"panes\""),
+        !written.contains("\"display_granularity\": \"tabs\"")
+            && scratch.settings().tab_options().granularity == Granularity::Panes,
         "choosing a density adopted `--granularity tabs` as well, so the next \
          launch with no flags opens showing tabs; the file holds {written}"
     );
@@ -31820,6 +31997,184 @@ fn a_keybindings_save_that_lands_does_not_clear_a_failing_settings_save() {
 }
 
 #[test]
+fn a_keybinding_edit_still_to_be_written_is_not_read_away_by_the_page() {
+    // The page re-reads the file while it shows. An edit refused because
+    // another Crook held the lock is not in the file yet, and taking the
+    // file then dropped the edit — and the retry with it.
+    let mut harness = Harness::new(1);
+    let scratch = Scratch::new();
+    let path = keybindings_in(&mut harness, &scratch);
+    harness.open_settings_page();
+    harness.select_settings_section("Keyboard Shortcuts");
+    let name = ActionName::parse("crook/window/new-tab").expect("a literal");
+    let id = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.host().action(&name))
+        .expect("a registered command");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_file_name("keybindings.lock"))
+        .expect("the lock file opens");
+    lock.lock().expect("the lock is taken");
+
+    harness.dispatch_workspace_action(WorkspaceAction::Settings(SettingsAction::UnbindCommand(id)));
+    harness.wait_for("the held lock never reached the page", |harness| {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.save_problem().is_some()
+        })
+    });
+    harness.settle(super::view::KEYBINDINGS_POLL * 2);
+    let chords = harness.workspace.read(&harness.app, |workspace, _| {
+        workspace.keybindings().chords_for(&name)
+    });
+    assert!(chords.is_empty(), "the page read the edit away: {chords:?}");
+
+    drop(lock);
+    harness.wait_for("the edit never reached the file", |_| {
+        fs::read_to_string(&path).is_ok_and(|text| text.contains("-crook/window/new-tab"))
+    });
+}
+
+#[test]
+fn saves_waiting_on_another_crooks_lock_leave_the_pool_free() {
+    // A save that waited on the lock, and the pause before it was tried
+    // again, were each a worker held on the pool. Two of them — a setting
+    // and a chord — were every worker a window's pool had in a test, and
+    // everything else queued behind them.
+    let scratch = Scratch::new();
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    let path = keybindings_in(&mut harness, &scratch);
+    let take = |name: &str| {
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(scratch.path().join(name))
+            .expect("the lock file opens");
+        lock.lock().expect("the lock is taken");
+        lock
+    };
+    let held = (take("settings.lock"), take("keybindings.lock"));
+
+    harness.dispatch_option(OptionsAction::ToggleShowDetailsOnHover);
+    let name = ActionName::parse("crook/window/new-tab").expect("a literal");
+    let id = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.host().action(&name))
+        .expect("a registered command");
+    harness.dispatch_workspace_action(WorkspaceAction::Settings(SettingsAction::UnbindCommand(id)));
+    harness.settle(std::time::Duration::from_millis(300));
+
+    let done = Rc::new(Cell::new(false));
+    let asked = std::time::Instant::now();
+    let flag = done.clone();
+    harness.workspace_update(|_, ctx| {
+        let task = ctx.background().spawn(async {});
+        ctx.spawn(task, move |_, (), _| flag.set(true)).detach();
+    });
+    harness.wait_for("the pool never ran the task", |_| done.get());
+    assert!(
+        asked.elapsed() < std::time::Duration::from_millis(1000),
+        "the pool was held by saves waiting on a lock for {:?}",
+        asked.elapsed()
+    );
+    drop(held);
+    let _ = path;
+}
+
+#[test]
+fn a_keybindings_save_that_failed_is_tried_again_once_the_file_changes() {
+    // An edit replayed over a file that had stopped being a list of bindings
+    // failed, and waited — and the page, which stops taking the file while
+    // an edit waits, never tried it again.
+    let mut harness = Harness::new(1);
+    let scratch = Scratch::new();
+    let path = keybindings_in(&mut harness, &scratch);
+    harness.open_settings_page();
+    harness.select_settings_section("Keyboard Shortcuts");
+    let name = ActionName::parse("crook/window/new-tab").expect("a literal");
+    let id = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.host().action(&name))
+        .expect("a registered command");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_file_name("keybindings.lock"))
+        .expect("the lock file opens");
+    lock.lock().expect("the lock is taken");
+    harness.dispatch_workspace_action(WorkspaceAction::Settings(SettingsAction::UnbindCommand(id)));
+    fs::write(&path, "{}\n").expect("writable");
+    drop(lock);
+    harness.wait_for("the failed save never reached the page", |harness| {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .save_problem()
+                .is_some_and(|why| why.contains("not a list"))
+        })
+    });
+
+    fs::write(&path, "[]\n").expect("writable");
+    harness.wait_for("the edit was never tried again", |_| {
+        fs::read_to_string(&path).is_ok_and(|text| text.contains("-crook/window/new-tab"))
+    });
+}
+
+#[test]
+fn a_keybinding_edit_that_could_not_be_written_goes_with_the_next_one() {
+    // Every save writes the edits not yet on disk, not only its own. One
+    // that carried only its own lost the edit before it whenever that one's
+    // save was overtaken or refused: here the first waits out another
+    // Crook's lock and is refused, and the second, made before the lock
+    // comes off, is the one that lands.
+    let mut harness = Harness::new(1);
+    let scratch = Scratch::new();
+    let path = keybindings_in(&mut harness, &scratch);
+    let unbind = |harness: &mut Harness, name: &str| {
+        let name = ActionName::parse(name).expect("a literal");
+        let id = harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.host().action(&name))
+            .expect("a registered command");
+        harness.dispatch_workspace_action(WorkspaceAction::Settings(
+            SettingsAction::UnbindCommand(id),
+        ));
+    };
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_file_name("keybindings.lock"))
+        .expect("the lock file opens");
+    lock.lock().expect("the lock is taken");
+
+    unbind(&mut harness, "crook/window/new-tab");
+    harness.wait_for("the held lock never reached the page", |harness| {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.save_problem().is_some()
+        })
+    });
+    unbind(&mut harness, "crook/window/close-pane");
+    drop(lock);
+
+    harness.wait_for("the edits never reached the file", |_| {
+        fs::read_to_string(&path).is_ok_and(|text| text.contains("close-pane"))
+    });
+    let text = fs::read_to_string(&path).expect("readable");
+    assert!(
+        text.contains("-crook/window/new-tab") && text.contains("-crook/window/close-pane"),
+        "the edit that could not be written was lost: {text}"
+    );
+}
+
+#[test]
 fn a_keybindings_file_that_does_not_read_is_named_as_such_on_its_page() {
     // A trailing comma in a hand-edited file took every chord in it out of
     // force, and the page named the file as though nothing were wrong.
@@ -34325,6 +34680,366 @@ mod sandboxed {
     /// The plugin every test here is about.
     fn probe() -> crook_plugin::PluginId {
         crook_plugin::PluginId::parse("eugen/probe").expect("a literal that parses")
+    }
+
+    /// A window whose settings are a file in `scratch`, with `eugen/probe`
+    /// installed: a plugin that, pressed, asks to open a tab, and is allowed
+    /// to by the file.
+    ///
+    /// The file is what another window writes to, so a test can be that
+    /// other window by loading it and saving.
+    fn allowed_to_open_a_tab(scratch: &Scratch) -> (Harness, PathBuf) {
+        let mut asking = manifest("eugen/probe");
+        asking.capabilities = vec![Capability::RunCommands(vec![String::from(
+            "crook/window/new-tab",
+        )])];
+        let request = crook_plugin_api::Request::Run {
+            name: String::from("crook/window/new-tab"),
+            argument: String::new(),
+        };
+        install(
+            scratch.path(),
+            "eugen.probe",
+            &wasm_asking(&asking, "header.right", 10, &request),
+        );
+        let file = scratch.path().join("config").join("settings.json");
+        let mut granted = Settings::load(&file);
+        granted.set_granted(
+            "eugen/probe",
+            vec![String::from("run:crook/window/new-tab")],
+        );
+        granted.save_blocking().expect("the grant is written");
+
+        let mut opening = opening(scratch, Default::default(), Default::default());
+        opening.settings = Settings::load(&file);
+        (Harness::with_opening(1, opening), file)
+    }
+
+    /// Presses the plugin, and gives what it asked for the turns it takes
+    /// to be served.
+    fn poke(harness: &mut Harness) {
+        harness.run_command("eugen/probe/poke");
+        for _ in 0..4 {
+            harness.queue.run_until_parked();
+            harness.frame();
+        }
+    }
+
+    #[test]
+    fn a_grant_revoked_in_another_window_is_revoked_here_without_a_restart() {
+        // Each window is a process with its own copy of the settings. A
+        // revoke in one used to reach the plugin in the others only when
+        // they were restarted — and their next save wrote the grant back.
+        let scratch = Scratch::new("revoked-elsewhere");
+        let (mut harness, file) = allowed_to_open_a_tab(&scratch);
+        poke(&mut harness);
+        assert_eq!(
+            harness.tab_ids().len(),
+            2,
+            "the grant did not let it open a tab"
+        );
+
+        // The other window: its own copy, its own revoke, its own save.
+        let mut elsewhere = Settings::load(&file);
+        elsewhere.set_granted("eugen/probe", Vec::new());
+        elsewhere.save_blocking().expect("the revoke is written");
+
+        harness.wait_for("the revoke never reached this window", |harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.host().granted(&probe()).is_empty()
+                    && workspace.settings().granted_to("eugen/probe").is_empty()
+            })
+        });
+        poke(&mut harness);
+        assert_eq!(
+            harness.tab_ids().len(),
+            2,
+            "the plugin went on using a grant revoked in another window"
+        );
+        let loaded = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.host().is_loaded(&probe())
+        });
+        assert!(
+            loaded,
+            "the revoke switched the plugin off instead of rebuilding it"
+        );
+
+        // And this window's next save does not write the grant back.
+        harness.workspace_update(|workspace, ctx| workspace.set_theme("Crook Light", ctx));
+        harness.wait_for("the theme never reached the file", |_| {
+            Settings::load(&file).theme() == "Crook Light"
+        });
+        assert!(
+            Settings::load(&file).granted_to("eugen/probe").is_empty(),
+            "this window's save gave back the grant revoked in the other"
+        );
+    }
+
+    #[test]
+    fn a_request_made_just_before_a_revoke_elsewhere_lands_is_not_served() {
+        // The press and the file's new answer in the same turn: what the
+        // plugin asked for under the old grant goes with the build that
+        // asked, and nothing is served under a grant that is gone.
+        let scratch = Scratch::new("revoked-mid-request");
+        let (mut harness, _) = allowed_to_open_a_tab(&scratch);
+        let poke = ActionName::parse("eugen/probe/poke").expect("a literal");
+        let id = harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.host().action(&poke))
+            .expect("the plugin registered its action");
+        let (window, workspace) = (harness.window_id, harness.workspace.clone());
+        harness.app.update(|ctx| {
+            ctx.dispatch_typed_action(window, &[workspace.id()], &WorkspaceAction::Run(id));
+            workspace.update(ctx, |workspace, ctx| {
+                workspace.adopt_settings_document(serde_json::Map::new(), ctx);
+            });
+        });
+        for _ in 0..4 {
+            harness.queue.run_until_parked();
+            harness.frame();
+        }
+
+        assert_eq!(
+            harness.tab_ids().len(),
+            1,
+            "a request asked under a grant revoked before it was served was served"
+        );
+    }
+
+    #[test]
+    fn a_grant_given_in_another_window_takes_effect_here_too() {
+        let scratch = Scratch::new("granted-elsewhere");
+        let (mut harness, file) = allowed_to_open_a_tab(&scratch);
+        let mut elsewhere = Settings::load(&file);
+        elsewhere.set_granted("eugen/probe", Vec::new());
+        elsewhere.save_blocking().expect("the revoke is written");
+        harness.wait_for("the revoke never reached this window", |harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.host().granted(&probe()).is_empty()
+            })
+        });
+
+        let mut elsewhere = Settings::load(&file);
+        elsewhere.set_granted(
+            "eugen/probe",
+            vec![String::from("run:crook/window/new-tab")],
+        );
+        elsewhere.save_blocking().expect("the grant is written");
+        harness.wait_for("the grant never reached this window", |harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                !workspace.host().granted(&probe()).is_empty()
+            })
+        });
+        poke(&mut harness);
+        assert_eq!(
+            harness.tab_ids().len(),
+            2,
+            "the grant did not let it open a tab"
+        );
+    }
+
+    /// Takes the lock every settings save takes, the way another Crook in
+    /// the middle of a save holds it, until the returned file is dropped.
+    fn hold_the_settings_lock(file: &Path) -> std::fs::File {
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(file.with_file_name("settings.lock"))
+            .expect("the lock file opens");
+        lock.lock().expect("the lock is taken");
+        lock
+    }
+
+    /// Whether the window's running plugin is allowed anything.
+    fn host_grant(harness: &Harness) -> Vec<String> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.host().granted(&probe()).to_vec()
+        })
+    }
+
+    #[test]
+    fn a_look_at_the_file_taken_while_a_revoke_is_being_saved_does_not_give_the_grant_back() {
+        // The revoke is on its way to disk, held up behind another Crook's
+        // lock, and the file still says the plugin is allowed. A look at the
+        // file in that moment was taken as the truth: the grant came back to
+        // the running plugin, and its next request was served.
+        let scratch = Scratch::new("look-mid-save");
+        let (mut harness, file) = allowed_to_open_a_tab(&scratch);
+        let held = hold_the_settings_lock(&file);
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_plugin_granted(&probe(), Vec::new(), ctx);
+        });
+        assert!(host_grant(&harness).is_empty());
+
+        // Two looks' worth while the save waits on the lock.
+        harness.settle(crate::workspace::view::SETTINGS_POLL * 2);
+        assert!(
+            host_grant(&harness).is_empty(),
+            "a look taken mid-save gave the revoked grant back: {:?}",
+            host_grant(&harness)
+        );
+        poke(&mut harness);
+        assert_eq!(
+            harness.tab_ids().len(),
+            1,
+            "a request was served under a revoked grant"
+        );
+
+        drop(held);
+        harness.wait_for("the revoke never reached the file", |_| {
+            Settings::load(&file).granted_to("eugen/probe").is_empty()
+        });
+        harness.settle(crate::workspace::view::SETTINGS_POLL * 2);
+        assert!(host_grant(&harness).is_empty());
+    }
+
+    #[test]
+    fn a_grant_that_could_not_be_saved_does_not_land_over_a_revoke_made_elsewhere() {
+        // This window widens a grant while the file does not read, so the
+        // save is refused and the grant waits. Meanwhile the file is put
+        // right with the plugin revoked — another window, the command line.
+        // The waiting grant was laid over the revoke: the plugin went on
+        // running with it here, and the next save wrote it back for every
+        // window.
+        let scratch = Scratch::new("grant-over-revoke");
+        let (mut harness, file) = allowed_to_open_a_tab(&scratch);
+        fs::write(&file, "{\"plugin_grants\": ").expect("writable");
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_plugin_granted(
+                &probe(),
+                vec![
+                    String::from("run:crook/window/new-tab"),
+                    String::from("run:crook/window/close-pane"),
+                ],
+                ctx,
+            );
+        });
+        harness.wait_for("the refused save never reached the page", |harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.save_problem().is_some()
+            })
+        });
+        assert_eq!(
+            fs::read_to_string(&file).expect("readable"),
+            "{\"plugin_grants\": ",
+            "a save wrote over a file that does not read"
+        );
+
+        fs::write(&file, "{}\n").expect("writable");
+        harness.wait_for("the revoke never reached the window", |harness| {
+            host_grant(harness).is_empty()
+        });
+        harness.settle(crate::workspace::view::SETTINGS_POLL * 2);
+        assert!(
+            Settings::load(&file).granted_to("eugen/probe").is_empty(),
+            "the waiting grant was written over the revoke"
+        );
+        assert!(host_grant(&harness).is_empty());
+        poke(&mut harness);
+        assert_eq!(
+            harness.tab_ids().len(),
+            1,
+            "the plugin ran under the waiting grant"
+        );
+    }
+
+    #[test]
+    fn a_settings_file_that_goes_missing_revokes_nothing_and_switches_nothing_on() {
+        // An editor that saves slowly, a sync tool replacing the folder: a
+        // file that is not there says nothing about the plugins. It used to
+        // read as every default after a sixth of a second — every grant
+        // revoked, every plugin switched off switched back on.
+        let scratch = Scratch::new("gone");
+        let (mut harness, file) = allowed_to_open_a_tab(&scratch);
+        fs::remove_file(&file).expect("the file goes");
+        harness.settle(std::time::Duration::from_millis(4500));
+        assert_eq!(host_grant(&harness), ["run:crook/window/new-tab"]);
+        poke(&mut harness);
+        assert_eq!(harness.tab_ids().len(), 2, "the grant went with the file");
+    }
+
+    #[test]
+    fn a_revoke_still_waiting_as_the_window_closes_is_kept_for_the_next_launch() {
+        // Another Crook held the lock past the save's patience, so the revoke
+        // waited — and the window closed. A retry on the pool ends with the
+        // process: the next launch ran the plugin under the grant.
+        let scratch = Scratch::new("closing");
+        let (mut harness, file) = allowed_to_open_a_tab(&scratch);
+        let held = hold_the_settings_lock(&file);
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_plugin_granted(&probe(), Vec::new(), ctx);
+        });
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.finish_saving_the_settings();
+        });
+        drop(held);
+
+        assert!(
+            Settings::load(&file).granted_to("eugen/probe").is_empty(),
+            "the next launch came back with the revoked grant"
+        );
+        assert!(Settings::load(&file).granted_to("eugen/probe").is_empty());
+        assert!(
+            crate::settings::parked_files(&file).is_empty(),
+            "the parked revoke was not written in and taken away"
+        );
+    }
+
+    #[test]
+    fn a_window_with_no_watch_reads_the_file_at_once_when_its_grant_is_set_aside() {
+        // Nothing else would tell it: the grant given here was set aside for
+        // a revoke made elsewhere, and the plugin went on running with it.
+        let scratch = Scratch::new("no-watch");
+        let (mut harness, file) = allowed_to_open_a_tab(&scratch);
+        harness.workspace_update(|workspace, _| workspace.stop_watching_the_settings());
+        let mut elsewhere = Settings::load(&file);
+        elsewhere.set_granted("eugen/probe", Vec::new());
+        elsewhere.save_blocking().expect("revoked elsewhere");
+
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_plugin_granted(
+                &probe(),
+                vec![
+                    String::from("run:crook/window/new-tab"),
+                    String::from("run:crook/window/close-pane"),
+                ],
+                ctx,
+            );
+        });
+        harness.wait_for("the window never took the revoke", |harness| {
+            host_grant(harness).is_empty()
+        });
+        poke(&mut harness);
+        assert_eq!(harness.tab_ids().len(), 1);
+    }
+
+    #[test]
+    fn a_plugin_switched_off_in_another_window_goes_out_of_this_one() {
+        let scratch = Scratch::new("switched-elsewhere");
+        let (mut harness, file) = allowed_to_open_a_tab(&scratch);
+        let mut elsewhere = Settings::load(&file);
+        elsewhere.set_plugin_disabled("eugen/probe", true);
+        elsewhere.save_blocking().expect("the switch is written");
+
+        harness.wait_for("the switch never reached this window", |harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                !workspace.host().is_loaded(&probe())
+            })
+        });
+
+        let mut elsewhere = Settings::load(&file);
+        elsewhere.set_plugin_disabled("eugen/probe", false);
+        elsewhere.save_blocking().expect("the switch is written");
+        harness.wait_for(
+            "switching it back on never reached this window",
+            |harness| {
+                harness.workspace.read(&harness.app, |workspace, _| {
+                    workspace.host().is_loaded(&probe())
+                })
+            },
+        );
     }
 
     #[test]
