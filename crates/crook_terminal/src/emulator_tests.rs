@@ -3705,3 +3705,26 @@ fn test_a_working_directory_with_a_control_character_in_it_is_refused() {
     assert!(!modes.motion && !modes.sgr, "{modes:?}");
     assert!(emulator.snapshot().text().contains("two"));
 }
+
+/// How many times `c` is printed in the whole scrollback and screen.
+fn printed(emulator: &Emulator, c: char) -> usize {
+    let last = emulator.history_len() + emulator.term.screen_lines();
+    let (rows, _) = emulator.harvest_rows(0, last);
+    rows.to_text().matches(c).count()
+}
+
+#[test]
+fn test_a_repeat_of_a_screenful_or_less_is_left_as_it_is() {
+    let mut emulator = emulator();
+    emulator.advance(b"ab\x1b[3b\x1b[b\x1b[0b");
+    assert_eq!(Some("abbbbbb"), emulator.snapshot().text().lines().next());
+}
+
+#[test]
+fn test_what_vte_reads_as_no_repeat_is_left_alone() {
+    // A private marker or an intermediate makes it another sequence, which
+    // `vte` does not take for a repeat, and the watcher must not either.
+    let mut emulator = emulator();
+    emulator.advance(b"x\x1b[?65535bx\x1b[65535 b");
+    assert_eq!(2, printed(&emulator, 'x'));
+}

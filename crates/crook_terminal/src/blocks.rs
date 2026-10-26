@@ -1477,6 +1477,13 @@ impl BlockTracker {
     /// search is owed to it: [`Self::settle_reflow`] runs it once that screen
     /// is the one on show again.
     pub(crate) fn reflowed<T>(&mut self, term: &Term<T>) {
+        self.found_again(term, false);
+    }
+
+    /// [`Self::reflowed`], knowing the grid holds nothing at all when `blank`:
+    /// no line to look for, which is the cost of a reset that a flood of
+    /// them pays once each.
+    fn found_again<T>(&mut self, term: &Term<T>, blank: bool) {
         if term.mode().contains(TermMode::ALT_SCREEN) {
             self.reflow_owed = true;
             return;
@@ -1488,12 +1495,14 @@ impl BlockTracker {
         // A block whose head has left the grid starts at the head, which is
         // the first of the spilled rows: nothing above the block's first row
         // is ever spilled.
-        let line = if self.spill.is_empty() {
+        let line = if !self.spill.is_empty() {
+            oldest - self.spill.rows() as i32
+        } else if blank {
+            self.next_row(term)
+        } else {
             (oldest..=newest)
                 .find(|line| !is_blank_line(term, *line))
                 .unwrap_or_else(|| self.next_row(term))
-        } else {
-            oldest - self.spill.rows() as i32
         };
 
         self.open.top = Anchor::at(line, 0, term, self.trimmed);
@@ -1667,6 +1676,13 @@ impl BlockTracker {
     pub(crate) fn history_cleared<T>(&mut self, term: &Term<T>) {
         self.spill.clear();
         self.reflowed(term);
+    }
+
+    /// [`Self::history_cleared`] for RIS, which leaves the screen as blank as
+    /// the history: there is nothing on it to look for.
+    pub(crate) fn reset<T>(&mut self, term: &Term<T>) {
+        self.spill.clear();
+        self.found_again(term, true);
     }
 
     /// Drops every finished block and the grid's history, and keeps the open

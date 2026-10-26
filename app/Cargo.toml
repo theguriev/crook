@@ -51,6 +51,7 @@ gethostname.workspace = true
 # The secret every pane is handed for the control socket. See `control`.
 getrandom.workspace = true
 log.workspace = true
+parking_lot.workspace = true
 regex.workspace = true
 unicode-normalization.workspace = true
 unicode-script.workspace = true

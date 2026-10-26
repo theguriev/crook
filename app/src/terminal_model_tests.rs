@@ -309,7 +309,7 @@ fn session() -> Option<Arc<Shared>> {
     .ok()?;
     let snapshot = terminal.snapshot();
     Some(Arc::new(Shared {
-        terminal: Mutex::new(terminal),
+        terminal: parking_lot::Mutex::new(terminal),
         latest: Mutex::new(Latest::new(snapshot)),
         blocks: Mutex::new(Arc::default()),
         unpublished: Mutex::new(Vec::new()),
@@ -1186,7 +1186,7 @@ fn assert_the_terminal_is_held_until_the_snapshot_is_published(
     let watching = Instant::now();
     while watching.elapsed() < GAP_WINDOW {
         assert!(
-            shared.terminal.try_lock().is_err(),
+            shared.terminal.try_lock().is_none(),
             "the terminal was let go before its snapshot was published, so the \
              other writer could publish a newer one in between and be overwritten"
         );
@@ -2312,4 +2312,88 @@ fn the_list_lets_go_of_the_pictures_the_emulator_let_go_of() {
         gone.upgrade().is_none(),
         "something still holds the picture the budget let go of"
     );
+}
+
+/// Feeds `reads` on a thread of its own, the way the reader does, while this
+/// thread takes the terminal every 16 ms, the way the window does to draw a
+/// frame, and answers how long each of those waits was.
+fn waits_through_a_flood(shared: &Arc<Shared>, reads: Vec<Vec<u8>>) -> Vec<Duration> {
+    let feeding = shared.clone();
+    let reader = thread::spawn(move || {
+        for read in reads {
+            feeding.feed(&read);
+        }
+    });
+    let mut waits = Vec::new();
+    while !reader.is_finished() {
+        let asked = Instant::now();
+        let terminal = shared.lock();
+        waits.push(asked.elapsed());
+        drop(terminal);
+        thread::sleep(Duration::from_millis(16));
+    }
+    reader.join().expect("the reader finished");
+    waits
+}
+
+/// A flood of escapes that each write the whole screen, in the 16 KiB reads
+/// the reader makes.
+fn screen_flood(reads: usize) -> Vec<Vec<u8>> {
+    let mut flood = Vec::new();
+    while flood.len() < reads * READ_CHUNK {
+        flood.extend_from_slice(b"\x1b#8x");
+    }
+    flood.chunks(READ_CHUNK).map(<[u8]>::to_vec).collect()
+}
+
+#[test]
+fn the_window_gets_the_terminal_between_slices_of_a_flood() {
+    // The reader lets the terminal go between slices of a flood, and takes
+    // it straight back for the next one. Handed over unfairly, the window
+    // asking for it to draw a frame lost to the reader nearly every time,
+    // and waited out the flood: seconds. Handed over fairly, a frame waits
+    // for a slice. Generous bounds, for a debug build on a loaded runner.
+    let Some(shared) = session() else {
+        return;
+    };
+    let started = Instant::now();
+    let waits = waits_through_a_flood(&shared, screen_flood(10));
+    let took = started.elapsed();
+    let worst = waits.iter().max().copied().unwrap_or_default();
+    assert!(waits.len() >= 4, "{} frames in {took:?}", waits.len());
+    assert!(
+        worst * 4 < took,
+        "a frame waited {worst:?} of a {took:?} flood: {} frames",
+        waits.len()
+    );
+}
+
+/// Release-mode waits for the pull request: `cargo test --release -p crook
+/// --lib bench_the_window_through_a_flood -- --ignored --nocapture`.
+#[test]
+#[ignore = "a benchmark; run it in release mode"]
+fn bench_the_window_through_a_flood() {
+    let Some(shared) = session() else {
+        return;
+    };
+    for (name, reads) in [
+        ("DECALN and a character", screen_flood(200)),
+        ("REP 65535", {
+            let flood = b"x\x1b[65535b".repeat(200 * READ_CHUNK / 9);
+            flood.chunks(READ_CHUNK).map(<[u8]>::to_vec).collect()
+        }),
+    ] {
+        let started = Instant::now();
+        let mut waits = waits_through_a_flood(&shared, reads);
+        let took = started.elapsed();
+        waits.sort();
+        let at = |fraction: f64| waits[((waits.len() - 1) as f64 * fraction) as usize];
+        println!(
+            "{name}: {took:?}, {} frames, waits p50 {:?} p99 {:?} worst {:?}",
+            waits.len(),
+            at(0.5),
+            at(0.99),
+            waits.last().copied().unwrap_or_default()
+        );
+    }
 }
