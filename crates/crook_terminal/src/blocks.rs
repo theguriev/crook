@@ -347,6 +347,25 @@ impl Block {
         let (started, finished) = (self.started_at?, self.finished_at?);
         finished.checked_duration_since(started)
     }
+
+    /// The same block around the same rows, with no pictures: what the
+    /// budget leaves of one it takes the pictures of, built without a copy
+    /// of the pictures it is letting go of.
+    fn without_pictures(&self) -> Self {
+        Self {
+            id: self.id,
+            state: self.state,
+            command: self.command.clone(),
+            exit: self.exit,
+            working_directory: self.working_directory.clone(),
+            working_host: self.working_host.clone(),
+            started_at: self.started_at,
+            finished_at: self.finished_at,
+            rows: Arc::clone(&self.rows),
+            output_from: self.output_from,
+            images: Vec::new(),
+        }
+    }
 }
 
 /// The cell the shell's prompt finished on, resolved against the viewport the
@@ -2203,9 +2222,9 @@ impl BlockTracker {
             // A block a copy of the list still holds is shared with it, so
             // the one here becomes a new block around the same rows, and the
             // copy, which is told by `changes`, takes it in place of the old
-            // one and lets the pictures go too. Changed in place, the block
-            // would be copied rows and all, and the copy would keep every
-            // picture the budget let go of.
+            // one and lets the pictures go too: the copy would otherwise keep
+            // every picture the budget let go of. One nothing else holds is
+            // changed where it is.
             let mut oldest = self.finished.iter_mut();
             while self.image_bytes > MAX_IMAGE_BYTES {
                 let Some(block) = oldest.next() else { break };
@@ -2213,7 +2232,10 @@ impl BlockTracker {
                     continue;
                 }
                 self.image_bytes -= weight(&block.images);
-                Arc::make_mut(block).images = Vec::new();
+                match Arc::get_mut(block) {
+                    Some(own) => own.images = Vec::new(),
+                    None => *block = Arc::new(block.without_pictures()),
+                }
             }
         }
     }

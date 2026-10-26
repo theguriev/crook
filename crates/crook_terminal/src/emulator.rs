@@ -70,6 +70,21 @@ const SPILL_BATCH: usize = 256;
 /// [`Emulator::slice_room`].
 const ALACRITTY_SPARE_ROWS: usize = 1000;
 
+/// How many times the rows the spill keeps a slice of output has to be on
+/// course to scroll before it is fed whole after all, as a numerator and a
+/// denominator: two and a half. See [`Emulator::slice_room`]. Measured over
+/// screens of 24 to 400 rows and scrollbacks of 1,000 to 10,000 lines: a
+/// flood a whole slice of which scrolls about twice what is kept is fed
+/// fastest in short slices, one of three times or more whole, and between
+/// the two they cost about the same.
+const SHORT_SLICES_BELOW: (usize, usize) = (5, 2);
+
+/// How many bytes [`Emulator::scroll_rate`] is measured over: a few
+/// slices, however the reads that brought them were cut. One slice alone
+/// can be the last byte of an escape whose screenful it scrolls, or the
+/// tail of a read, and read as a rate of a screenful a byte.
+const RATE_WINDOW: usize = 512;
+
 /// One item of a stream fed to a mirror, in the order it happened.
 ///
 /// Almost everything an emulator knows arrives as bytes from the child. One
@@ -799,10 +814,20 @@ pub struct Emulator {
     /// The least of the scrollback the grid keeps, [`GRID_LINES`] unless a
     /// test says: see [`Self::grid_share`].
     grid_base: usize,
-    /// How many lines a byte of the last slice [`Self::feed`] fed scrolled
-    /// into the shell's history, rounded up, and never less than one: what
-    /// the next slice's room may be divided by. See [`Self::slice_room`].
-    lines_a_byte: usize,
+    /// How many lines what [`Self::feed`] fed last scrolled into the shell's
+    /// history, over how many bytes, and never less than a line a byte: what
+    /// the next slice's room may be cut by. A fraction rather than a whole
+    /// number of lines, so that a flood is not taken for one that scrolls
+    /// most of a line a byte more than it does. See [`Self::slice_room`] and
+    /// [`Self::measure_rate`].
+    scroll_rate: (usize, usize),
+    /// What [`Self::scroll_rate`] is being measured from next: the bytes
+    /// fed and the lines they scrolled since it was last, and whether a
+    /// slice among them scrolled the history to alacritty's end.
+    rate_window: (usize, usize, bool),
+    /// Tests: how many slices [`Self::feed`] has fed.
+    #[cfg(test)]
+    fed_slices: usize,
     /// Tests: how many slices scrolled more lines into the history than
     /// alacritty keeps spare rows for, so that cutting them back made it
     /// let go of rows it would allocate again. See [`Self::feed`].
@@ -930,7 +955,10 @@ impl Emulator {
             above: 0,
             view_row: None,
             grid_base,
-            lines_a_byte: 1,
+            scroll_rate: (1, 1),
+            rate_window: (0, 0, false),
+            #[cfg(test)]
+            fed_slices: 0,
             #[cfg(test)]
             overgrown_slices: 0,
             switch_held: false,
@@ -1219,14 +1247,12 @@ impl Emulator {
                     !self.updating() || self.parser.sync_bytes_count() < buffered + slice.len();
                 self.update_let_go(played);
             }
-            // Measured on the shell's screen alone: a switch of screens
-            // swaps one history for another, which scrolls nothing.
-            let scrolled = history
-                .zip(self.shell_history())
-                .map_or(0, |(before, after)| after.saturating_sub(before));
-            self.lines_a_byte = scrolled.div_ceil(slice.len()).max(1);
+            let scrolled = self.measure_rate(slice.len(), history);
+            #[cfg(not(test))]
+            let _ = scrolled;
             #[cfg(test)]
             {
+                self.fed_slices += 1;
                 self.overgrown_slices += usize::from(scrolled > ALACRITTY_SPARE_ROWS);
             }
             self.blocks.trim_history(
@@ -1331,6 +1357,46 @@ impl Emulator {
         }
     }
 
+    /// Counts the lines a slice of `bytes` scrolled into the shell's
+    /// history, which held `history` lines before it, toward
+    /// [`Self::scroll_rate`], and answers them. Over [`RATE_WINDOW`] bytes
+    /// at a time.
+    ///
+    /// On the shell's screen alone: a switch of screens swaps one history
+    /// for another, which scrolls nothing.
+    ///
+    /// A slice that scrolled the history to alacritty's end scrolled more
+    /// than it counts, and says only that the rate is at least what it
+    /// counted, while the short slices before it said what the rate is.
+    /// Taken as said, it would make the next slice short, which would make
+    /// the one after it long again, and the long ones churn the rows the
+    /// short ones save.
+    fn measure_rate(&mut self, bytes: usize, history: Option<usize>) -> usize {
+        let after = self.shell_history();
+        let scrolled = history
+            .zip(after)
+            .map_or(0, |(before, after)| after.saturating_sub(before));
+        let end = self.scrollback_lines.saturating_add(HISTORY_HEADROOM);
+        let window = &mut self.rate_window;
+        window.0 += bytes;
+        window.1 += scrolled;
+        window.2 |= after.is_some_and(|after| after >= end);
+        if window.0 >= RATE_WINDOW {
+            let rate = if window.1 > window.0 {
+                (window.1, window.0)
+            } else {
+                (1, 1)
+            };
+            let (lines, bytes) = self.scroll_rate;
+            let faster = rate.0.saturating_mul(bytes) > lines.saturating_mul(rate.1);
+            if faster || !window.2 {
+                self.scroll_rate = rate;
+            }
+            *window = (0, 0, false);
+        }
+        scrolled
+    }
+
     /// How many lines the shell's history holds in the grid, or `None` under
     /// a full-screen program, whose grid is the one `Term` hands out.
     fn shell_history(&self) -> Option<usize> {
@@ -1381,9 +1447,11 @@ impl Emulator {
     }
 
     /// How long the next slice [`Self::feed`] feeds may be:
-    /// [`Self::history_room`], divided by the lines a byte the last slice
-    /// scrolled when the history has room to grow by more rows than
-    /// alacritty keeps spare.
+    /// [`Self::history_room`], cut by the lines a byte the last few slices
+    /// scrolled ([`Self::scroll_rate`]) when the history has room to grow by
+    /// more rows than
+    /// alacritty keeps spare, and a whole slice would scroll less than
+    /// [`SHORT_SLICES_BELOW`] times the rows the spill keeps.
     ///
     /// A slice of escapes that each scroll a screenful — a flood of
     /// `CSI n S` — scrolls several lines a byte. Thousands of lines scrolled
@@ -1395,20 +1463,28 @@ impl Emulator {
     /// about as many lines as a slice of text does. Any byte is a place a
     /// feed may be cut at, so a shorter slice is only one more cut.
     ///
-    /// A history with no more room than the spare rows costs nothing of the
-    /// kind, and there a longer slice is the cheaper one: what it scrolls
-    /// past the scrollback is not harvested at all — see
-    /// [`crate::spill::Spill::harvest_keeping`] — and what scrolls past the
-    /// end of alacritty's room is caught after the slice, as
-    /// [`Self::history_room`] says.
+    /// But short slices harvest every row they scroll, and a long one only
+    /// the rows the spill keeps — what it scrolls past those is not
+    /// harvested at all, see [`crate::spill::Spill::harvest_keeping`], and
+    /// what it scrolls past the end of alacritty's room is caught after the
+    /// slice, as [`Self::history_room`] says. So a slice on course to scroll
+    /// many times what is kept — a tall screen over a short scrollback — is
+    /// fed whole: its churn is of rows it never harvests, and cheaper than
+    /// harvesting them. And a history with no more room than the spare rows
+    /// churns nothing, so there a slice is always fed whole.
     fn slice_room(&self) -> usize {
         let room = self.history_room();
         let growth = self
             .scrollback_lines
             .saturating_add(HISTORY_HEADROOM)
             .saturating_sub(self.grid_lines);
-        if growth > ALACRITTY_SPARE_ROWS {
-            (room / self.lines_a_byte).max(1)
+        let kept = self.scrollback_lines.saturating_sub(self.grid_lines);
+        let (lines, bytes) = self.scroll_rate;
+        let course = room.saturating_mul(lines) / bytes;
+        let (times, over) = SHORT_SLICES_BELOW;
+        if growth > ALACRITTY_SPARE_ROWS && course.saturating_mul(over) < kept.saturating_mul(times)
+        {
+            (room.saturating_mul(bytes) / lines).max(1)
         } else {
             room
         }

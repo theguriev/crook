@@ -708,6 +708,54 @@ fn bench_short_lines_and_screenful_scrolls() {
     }
 }
 
+/// Release-mode timings of floods of screenful scrolls across screen
+/// heights and scrollbacks, spilling: best of three, and the slowest 4 KiB
+/// read of the best run:
+/// `cargo test --release -p crook_terminal --lib bench_scroll_floods -- --ignored --nocapture`.
+#[test]
+#[ignore = "a benchmark; run it in release mode"]
+fn bench_scroll_floods_across_screens_and_scrollbacks() {
+    use std::time::Instant;
+    let su = "\x1b[65535S".repeat(10_000).into_bytes();
+    let su999 = "\x1b[999S".repeat(20_000).into_bytes();
+    let cases: [(&str, &[u8], u16, u16, usize); 10] = [
+        ("10k x CSI 65535 S", &su, 80, 24, 2000),
+        ("10k x CSI 65535 S", &su, 200, 50, 1000),
+        ("10k x CSI 65535 S", &su, 200, 50, 2000),
+        ("10k x CSI 65535 S", &su, 200, 50, 10_000),
+        ("10k x CSI 65535 S", &su, 200, 100, 2000),
+        ("10k x CSI 65535 S", &su, 200, 100, 10_000),
+        ("10k x CSI 65535 S", &su, 200, 135, 10_000),
+        ("20k x CSI 999 S", &su999, 200, 200, 2000),
+        ("10k x CSI 65535 S", &su, 300, 400, 10_000),
+        ("20k x CSI 999 S", &su999, 300, 400, 10_000),
+    ];
+    for (what, bytes, columns, rows, scrollback) in cases {
+        let (mut best, mut worst_read) = (f64::MAX, 0.);
+        for _ in 0..3 {
+            let mut emulator = Emulator::new(
+                TerminalSize::new(columns, rows),
+                scrollback,
+                Palette::default(),
+            );
+            let mut worst = 0f64;
+            let start = Instant::now();
+            for read in bytes.chunks(4096) {
+                let at = Instant::now();
+                emulator.advance(read);
+                worst = worst.max(at.elapsed().as_secs_f64() * 1000.);
+            }
+            let took = start.elapsed().as_secs_f64() * 1000.;
+            if took < best {
+                (best, worst_read) = (took, worst);
+            }
+        }
+        println!(
+            "{what} at {columns}x{rows}, scrollback {scrollback}: {best:.0} ms, worst read {worst_read:.1} ms"
+        );
+    }
+}
+
 /// Ten thousand rows of what an agent's session prints: prose wrapped at
 /// the pane, coloured tool calls, box-drawn panels and diff lines.
 fn agent_session(rows: usize) -> String {
@@ -1408,4 +1456,46 @@ fn a_flood_of_screenful_scrolls_is_fed_in_slices_that_scroll_no_more_than_a_cut_
     );
     assert!(emulator.history_len() >= 10_000);
     assert!(emulator.snapshot().text().contains("after"));
+}
+
+#[test]
+fn a_flood_on_a_tall_screen_over_a_short_scrollback_is_fed_in_whole_slices() {
+    // `CSI 999 S` on two hundred rows scrolls nearly thirty lines a byte,
+    // and a whole slice of it ten times the rows a scrollback of two
+    // thousand keeps. Short slices would harvest every one of those rows;
+    // a whole one harvests the ones kept, and that is cheaper than the rows
+    // alacritty frees and allocates again for it. A whole slice scrolls to
+    // the end of alacritty's room and counts less than it scrolled, which
+    // must not be taken for a slower flood, or the slices go short and
+    // whole by turns.
+    let mut emulator = Emulator::new(TerminalSize::new(200, 200), 2000, Palette::default());
+    let flood = "\x1b[999S".repeat(20_000);
+    for read in flood.as_bytes().chunks(4096) {
+        emulator.advance(read);
+    }
+    let whole = flood.len().div_ceil(511);
+    assert!(
+        emulator.fed_slices * 2 <= whole * 3,
+        "{} slices for {} bytes, {whole} of them whole",
+        emulator.fed_slices,
+        flood.len()
+    );
+}
+
+#[test]
+fn a_flood_a_whole_slice_of_which_scrolls_about_twice_what_is_kept_is_fed_short() {
+    // On fifty rows over a scrollback of two thousand, a whole slice of
+    // `CSI 65535 S` scrolls about twice the rows the spill keeps: few enough
+    // that harvesting them all costs less than alacritty's churn, which
+    // short slices are spared. The first few slices measure what the rest
+    // are cut to.
+    let mut emulator = Emulator::new(TerminalSize::new(200, 50), 2000, Palette::default());
+    for read in "\x1b[65535S".repeat(3000).as_bytes().chunks(4096) {
+        emulator.advance(read);
+    }
+    assert!(
+        emulator.overgrown_slices <= 8,
+        "{} slices scrolled past alacritty's spare rows",
+        emulator.overgrown_slices
+    );
 }
