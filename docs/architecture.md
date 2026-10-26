@@ -3661,7 +3661,10 @@ three quarters of a second, on a thread of its own rather than a parked worker
 (`settings::watch`), and takes what it says: a grant revoked anywhere — another window,
 `--uninstall-plugin`, a hand edit — rebuilds the plugin here under the new answer, and whatever
 it had asked for under the old one goes with the old build. A look that may have read across
-one of the window's own saves is set aside for the next.
+one of the window's own saves is set aside for the next. `keybindings.json` keeps its own
+poll, but its edits are made the same way: the write reads the file again under
+`keybindings.lock`, and if it is no longer the text the edit was made on, makes the edit again on
+what it is now.
 
 A sixth is where the window was. At first only its size came back, read off the frame, so a
 window kept maximised on a second monitor reopened as an ordinary window on the first, at the
