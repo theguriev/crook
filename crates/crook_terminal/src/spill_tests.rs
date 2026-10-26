@@ -648,6 +648,66 @@ fn bench_feeding_and_resizing_a_long_open_block() {
     }
 }
 
+/// Release-mode timings of what costs the spill the most against a grid
+/// that keeps the whole scrollback: lines much shorter than the pane, and
+/// escapes that scroll a screenful in a few bytes. Best of three, and the
+/// slowest single 4 KiB read of the best run, which is how long the reader
+/// holds the terminal's lock at worst:
+/// `cargo test --release -p crook_terminal --lib bench_short -- --ignored --nocapture`.
+#[test]
+#[ignore = "a benchmark; run it in release mode"]
+fn bench_short_lines_and_screenful_scrolls() {
+    use std::time::Instant;
+    let seq: Vec<u8> = (1..=200_000)
+        .flat_map(|n| format!("{n}\r\n").into_bytes())
+        .collect();
+    let hello: Vec<u8> = (1..=200_000)
+        .flat_map(|n| format!("hello world line {n}\r\n").into_bytes())
+        .collect();
+    let scrolls = "\x1b[65535S".repeat(10_000).into_bytes();
+    let cases: [(&str, &[u8], u16, u16, usize); 6] = [
+        ("seq 200k", &seq, 80, 24, 10_000),
+        ("seq 200k", &seq, 200, 50, 10_000),
+        ("hello world 200k", &hello, 80, 24, 10_000),
+        ("hello world 200k", &hello, 200, 50, 10_000),
+        ("10k x CSI 65535 S", &scrolls, 200, 50, 10_000),
+        (
+            "10k x CSI 65535 S, scrollback 1000",
+            &scrolls,
+            200,
+            50,
+            1000,
+        ),
+    ];
+    for (what, bytes, columns, rows, scrollback) in cases {
+        for (name, grid) in [("grid keeps all", scrollback), ("spilling", GRID_LINES)] {
+            let (mut best, mut worst_read) = (f64::MAX, 0.);
+            for _ in 0..3 {
+                let mut emulator = Emulator::with_grid_lines(
+                    TerminalSize::new(columns, rows),
+                    scrollback,
+                    grid,
+                    Palette::default(),
+                );
+                let mut worst = 0f64;
+                let start = Instant::now();
+                for read in bytes.chunks(4096) {
+                    let at = Instant::now();
+                    emulator.advance(read);
+                    worst = worst.max(at.elapsed().as_secs_f64() * 1000.);
+                }
+                let took = start.elapsed().as_secs_f64() * 1000.;
+                if took < best {
+                    (best, worst_read) = (took, worst);
+                }
+            }
+            println!(
+                "{what} at {columns}x{rows}, {name}: {best:.1} ms, worst read {worst_read:.2} ms"
+            );
+        }
+    }
+}
+
 /// Ten thousand rows of what an agent's session prints: prose wrapped at
 /// the pane, coloured tool calls, box-drawn panels and diff lines.
 fn agent_session(rows: usize) -> String {
@@ -1266,4 +1326,86 @@ fn an_overrun_reaches_the_block_top_however_the_block_was_found() {
     };
     let (here, there) = (numbered(&twins.spilling), numbered(&twins.whole));
     assert!(here + 60 >= there, "{here} lines kept against {there}");
+}
+
+#[test]
+fn harvesting_past_the_room_leaves_what_harvesting_and_dropping_would() {
+    // Every layout of pieces a cut can meet, every cut and every room, done
+    // the long way — harvest everything, drop the oldest pieces — and the
+    // short way, which harvests none of the rows the drop would let go of.
+    let size = TerminalSize::new(30, 6);
+    let mut emulator = Emulator::with_grid_lines(size, 4000, 4000, Palette::default());
+    emulator.advance(output(0, 1500).as_bytes());
+    let (term, palette) = (&emulator.term, &emulator.palette);
+    let oldest = -(term.grid().history_size() as i32);
+    let mut cases = 0;
+    for held in [0, 1, 7, 8, 9, 23, 40] {
+        for piece in [1, 3, 8, 64] {
+            for cut in [1, 5, 8, 31, 100, 400] {
+                for keep in [1, 4, 8, 17, 64, 300] {
+                    let mut long = crate::spill::Spill::default();
+                    long.harvest(term, palette, (oldest, oldest + held - 1), piece);
+                    let mut short = crate::spill::Spill::default();
+                    short.harvest(term, palette, (oldest, oldest + held - 1), piece);
+                    let range = (oldest + held, oldest + held + cut - 1);
+                    long.harvest(term, palette, range, piece);
+                    let dropped = long.drop_oldest(keep);
+                    let what = format!("held {held}, piece {piece}, cut {cut}, keep {keep}");
+                    assert_eq!(
+                        dropped,
+                        short.harvest_keeping(term, palette, range, piece, keep),
+                        "{what}: rows dropped"
+                    );
+                    assert_eq!(long.piece_sizes(), short.piece_sizes(), "{what}: pieces");
+                    assert_eq!(long.rows(), short.rows(), "{what}: rows");
+                    assert_eq!(long.take(), short.take(), "{what}: the rows kept");
+                    cases += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 7 * 4 * 6 * 6);
+}
+
+#[test]
+fn a_cut_longer_than_the_scrollback_harvests_only_the_rows_it_keeps() {
+    // A short scrollback and a read of `CSI n S` that scrolls ten times as
+    // many lines as it holds: the rows that would be dropped as soon as they
+    // were harvested are not harvested.
+    let mut twins = Twins::new(60);
+    twins.feed(output(0, 40));
+    let before = twins.spilling.blocks.spilled().harvested;
+    let burst = format!("\x1b[{ROWS}S").repeat(120);
+    twins.feed(&burst);
+    twins.feed(output(40, 45));
+    twins.alike("after the burst");
+    let harvested = twins.spilling.blocks.spilled().harvested - before;
+    let scrolled = 120 * usize::from(ROWS);
+    assert!(
+        harvested < scrolled / 4,
+        "{harvested} rows harvested of the {scrolled} scrolled, for a scrollback of 60"
+    );
+}
+
+#[test]
+fn a_flood_of_screenful_scrolls_is_fed_in_slices_that_scroll_no_more_than_a_cut_keeps() {
+    // `CSI 65535 S` scrolls a screenful in nine bytes. Fed in slices cut for
+    // a line a byte, each slice scrolls thousands of lines into the grid's
+    // history, and cutting them back makes alacritty give back the rows
+    // past its thousand spare and allocate them again for the next slice,
+    // every slice: sixty times what the same flood costs a grid keeping
+    // the whole scrollback. After the first slice the rest are shorter.
+    let mut emulator = Emulator::new(TerminalSize::new(200, 50), 10_000, Palette::default());
+    emulator.advance(b"before\r\n");
+    for read in "\x1b[65535S".repeat(10_000).as_bytes().chunks(4096) {
+        emulator.advance(read);
+    }
+    emulator.advance(b"after\r\n");
+    assert!(
+        emulator.overgrown_slices <= 1,
+        "{} slices scrolled past alacritty's spare rows",
+        emulator.overgrown_slices
+    );
+    assert!(emulator.history_len() >= 10_000);
+    assert!(emulator.snapshot().text().contains("after"));
 }

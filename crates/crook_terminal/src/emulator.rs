@@ -64,6 +64,12 @@ use crate::snapshot::{self, Palette, Rgb, Snapshot, Spilled, TerminalSize};
 /// [`Emulator::history_room`].
 const SPILL_BATCH: usize = 256;
 
+/// How many rows alacritty keeps allocated past the ones its grid holds:
+/// past these, cutting its history back gives the rest of them back, and
+/// growing it again allocates them anew. Its `MAX_CACHE_SIZE`. See
+/// [`Emulator::slice_room`].
+const ALACRITTY_SPARE_ROWS: usize = 1000;
+
 /// One item of a stream fed to a mirror, in the order it happened.
 ///
 /// Almost everything an emulator knows arrives as bytes from the child. One
@@ -793,6 +799,15 @@ pub struct Emulator {
     /// The least of the scrollback the grid keeps, [`GRID_LINES`] unless a
     /// test says: see [`Self::grid_share`].
     grid_base: usize,
+    /// How many lines a byte of the last slice [`Self::feed`] fed scrolled
+    /// into the shell's history, rounded up, and never less than one: what
+    /// the next slice's room may be divided by. See [`Self::slice_room`].
+    lines_a_byte: usize,
+    /// Tests: how many slices scrolled more lines into the history than
+    /// alacritty keeps spare rows for, so that cutting them back made it
+    /// let go of rows it would allocate again. See [`Self::feed`].
+    #[cfg(test)]
+    overgrown_slices: usize,
     /// Whether the synchronized update `parser` is holding switches screens,
     /// which the watcher saw go by: see [`Self::switch_screens`].
     switch_held: bool,
@@ -915,6 +930,9 @@ impl Emulator {
             above: 0,
             view_row: None,
             grid_base,
+            lines_a_byte: 1,
+            #[cfg(test)]
+            overgrown_slices: 0,
             switch_held: false,
             background_held: false,
             switched_from: None,
@@ -1182,13 +1200,15 @@ impl Emulator {
     /// the room left cannot reach the end with newlines, however many it
     /// holds. The history is at its length after every slice, so the room is
     /// the whole headroom when it is full, and the whole feed when it is far
-    /// from it.
+    /// from it. After a slice that scrolled several lines a byte, the next
+    /// is shorter: see [`Self::slice_room`].
     fn feed(&mut self, bytes: &[u8]) {
         let mut rest = bytes;
         while !rest.is_empty() {
-            let (slice, after) = rest.split_at(self.history_room().min(rest.len()));
+            let (slice, after) = rest.split_at(self.slice_room().min(rest.len()));
             let held = self.updating();
             let buffered = self.parser.sync_bytes_count();
+            let history = self.shell_history();
             self.parser.advance(&mut self.term, slice);
             if held {
                 // `vte` adds the whole slice to the update it holds, unless
@@ -1198,6 +1218,16 @@ impl Emulator {
                 let played =
                     !self.updating() || self.parser.sync_bytes_count() < buffered + slice.len();
                 self.update_let_go(played);
+            }
+            // Measured on the shell's screen alone: a switch of screens
+            // swaps one history for another, which scrolls nothing.
+            let scrolled = history
+                .zip(self.shell_history())
+                .map_or(0, |(before, after)| after.saturating_sub(before));
+            self.lines_a_byte = scrolled.div_ceil(slice.len()).max(1);
+            #[cfg(test)]
+            {
+                self.overgrown_slices += usize::from(scrolled > ALACRITTY_SPARE_ROWS);
             }
             self.blocks.trim_history(
                 &mut self.term,
@@ -1301,6 +1331,13 @@ impl Emulator {
         }
     }
 
+    /// How many lines the shell's history holds in the grid, or `None` under
+    /// a full-screen program, whose grid is the one `Term` hands out.
+    fn shell_history(&self) -> Option<usize> {
+        let alt_screen = self.term.mode().contains(TermMode::ALT_SCREEN);
+        (!alt_screen).then(|| self.term.grid().history_size())
+    }
+
     /// How long the next slice [`Self::feed`] feeds may be: a byte shorter
     /// than the lines the history has room for before it is past the grid's
     /// share of the scrollback by [`SPILL_BATCH`] and the headroom — and
@@ -1341,6 +1378,40 @@ impl Emulator {
             .min(self.scrollback_lines)
             .saturating_add(HISTORY_HEADROOM);
         limit.saturating_sub(history).saturating_sub(1).max(1)
+    }
+
+    /// How long the next slice [`Self::feed`] feeds may be:
+    /// [`Self::history_room`], divided by the lines a byte the last slice
+    /// scrolled when the history has room to grow by more rows than
+    /// alacritty keeps spare.
+    ///
+    /// A slice of escapes that each scroll a screenful — a flood of
+    /// `CSI n S` — scrolls several lines a byte. Thousands of lines scrolled
+    /// into the history and cut back out of it make alacritty give back the
+    /// rows past [`ALACRITTY_SPARE_ROWS`] and allocate them again for the
+    /// next slice, and that, not the cut, is most of what such a flood costs
+    /// a spilling grid: sixty times what it costs a grid holding the whole
+    /// scrollback, measured. So the slice after one is as much shorter, and scrolls
+    /// about as many lines as a slice of text does. Any byte is a place a
+    /// feed may be cut at, so a shorter slice is only one more cut.
+    ///
+    /// A history with no more room than the spare rows costs nothing of the
+    /// kind, and there a longer slice is the cheaper one: what it scrolls
+    /// past the scrollback is not harvested at all — see
+    /// [`crate::spill::Spill::harvest_keeping`] — and what scrolls past the
+    /// end of alacritty's room is caught after the slice, as
+    /// [`Self::history_room`] says.
+    fn slice_room(&self) -> usize {
+        let room = self.history_room();
+        let growth = self
+            .scrollback_lines
+            .saturating_add(HISTORY_HEADROOM)
+            .saturating_sub(self.grid_lines);
+        if growth > ALACRITTY_SPARE_ROWS {
+            (room / self.lines_a_byte).max(1)
+        } else {
+            room
+        }
     }
 
     /// Holds the history at its length, and forgets the open block's pictures

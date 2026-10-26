@@ -26,6 +26,9 @@ pub(crate) struct Spill {
     rows: usize,
     /// The most rows a piece is filled to: see [`Self::harvest`].
     piece_rows: usize,
+    /// Tests: how many rows have been harvested in all, kept or not.
+    #[cfg(test)]
+    pub(crate) harvested: usize,
 }
 
 impl Spill {
@@ -149,11 +152,90 @@ impl Spill {
             harvest::harvest_into(term, palette, line, to, piece);
             let added = piece.rows() - before;
             self.rows += added;
+            #[cfg(test)]
+            {
+                self.harvested += added;
+            }
             if added == 0 {
                 break;
             }
             line = to + 1;
         }
+    }
+
+    /// [`Self::harvest`], and then [`Self::drop_oldest`] of `keep`, without
+    /// harvesting the rows that drop would let go of straight away. Answers
+    /// how many rows went, as the drop would have, and leaves the pieces the
+    /// two would have left.
+    ///
+    /// A slice of output can scroll more rows than the scrollback keeps — a
+    /// short scrollback, a tall screen, escapes that scroll a screenful each
+    /// — and a row harvested only to be dropped costs a harvest for nothing.
+    /// The drop takes whole pieces off the front, so where it stops is a
+    /// piece boundary that counting alone decides: the pieces there are
+    /// now, the rows that fill the last of them, and the whole pieces the
+    /// cut makes after it. When it would take every piece there is now, the
+    /// rows up to where it stops are skipped, and the rest harvested into
+    /// pieces that start where the ones the two would have left start.
+    pub(crate) fn harvest_keeping<T>(
+        &mut self,
+        term: &Term<T>,
+        palette: &Palette,
+        (top, bottom): (i32, i32),
+        piece_rows: usize,
+        keep: usize,
+    ) -> usize {
+        use alacritty_terminal::grid::Dimensions as _;
+
+        let piece_rows = piece_rows.clamp(1, PIECE_ROWS);
+        let grid = term.grid();
+        let oldest = -(grid.history_size() as i32);
+        let newest = grid.screen_lines() as i32 - 1;
+        let (first, last) = (top.max(oldest), bottom.min(newest));
+        if keep > 0 && first <= last {
+            let cut = (last - first + 1) as usize;
+            // The pieces held now, as the harvest would find them: none
+            // when the width changed, which starts over.
+            let held: Vec<usize> = if self.columns().is_some_and(|held| held != grid.columns()) {
+                Vec::new()
+            } else {
+                self.pieces.iter().map(BlockRows::rows).collect()
+            };
+            let held_rows: usize = held.iter().sum();
+            // The rows of the cut that go into the last piece held, until
+            // it is full.
+            let fill = held
+                .last()
+                .map_or(0, |&rows| piece_rows.saturating_sub(rows))
+                .min(cut);
+            let mut left = held_rows + cut;
+            let mut every_held_piece_goes = true;
+            for (at, &rows) in held.iter().enumerate() {
+                let rows = if at + 1 == held.len() {
+                    rows + fill
+                } else {
+                    rows
+                };
+                if left - rows < keep {
+                    every_held_piece_goes = false;
+                    break;
+                }
+                left -= rows;
+            }
+            // And the cut's own whole pieces after those, which go while the
+            // rest of it is `keep` or more: only the last of them is short,
+            // so the one at the front is whole whenever that holds.
+            let fresh = cut - fill;
+            let skipped = fresh.saturating_sub(keep) / piece_rows * piece_rows;
+            if every_held_piece_goes && fill + skipped > 0 {
+                self.clear();
+                let from = first + (fill + skipped) as i32;
+                self.harvest(term, palette, (from, last), piece_rows);
+                return held_rows + fill + skipped;
+            }
+        }
+        self.harvest(term, palette, (top, bottom), piece_rows);
+        self.drop_oldest(keep)
     }
 
     /// Lets go of the oldest pieces for as long as at least `keep` rows are
@@ -195,6 +277,12 @@ impl Spill {
             self.pieces.push_back(piece);
         }
         tracked
+    }
+
+    /// Tests: how many rows each piece holds, oldest first.
+    #[cfg(test)]
+    pub(crate) fn piece_sizes(&self) -> Vec<usize> {
+        self.pieces.iter().map(BlockRows::rows).collect()
     }
 
     /// Roughly how many bytes of heap the rows occupy: see

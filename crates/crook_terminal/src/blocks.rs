@@ -1838,9 +1838,14 @@ impl BlockTracker {
         // two differ all the same, the older rows are the ones to lose: the
         // spill has to end where the grid begins.
         let piece = (room / 8).clamp(1, crate::spill::PIECE_ROWS);
-        self.spill.harvest(term, palette, (first, last), piece);
-        // A piece at a time, which moves nothing that is kept.
-        if self.spill.drop_oldest(room) > 0 {
+        // Past the scrollback the oldest go a piece at a time, which moves
+        // nothing that is kept, and the rows of the cut they would be are
+        // not harvested at all.
+        if self
+            .spill
+            .harvest_keeping(term, palette, (first, last), piece, room)
+            > 0
+        {
             self.trimmed_since_settle = true;
         }
     }
