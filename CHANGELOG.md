@@ -5,6 +5,19 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.37
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.36...v0.1.37)
+
+### Fixes
+
+- **plugins:** Trust a plugin's panel, picker, fetch and list only as far as a person did ([#561](https://github.com/theguriev/crook/pull/561))
+- **settings:** Keep one settings.json across windows ([#560](https://github.com/theguriev/crook/pull/560))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.36
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.35...v0.1.36)
