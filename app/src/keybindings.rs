@@ -77,6 +77,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use crook_plugin::ActionName;
 use crookui_core::event::{Keystroke, Modifiers};
 use serde_json::Value;
@@ -504,7 +505,6 @@ impl Keybindings {
             return None;
         }
 
-        let over = self.document.text().to_owned();
         self.forget(command);
         // Asked *after* the person's own lines have gone, so that what is
         // being removed is what the rest of the layers say — the shipped
@@ -521,7 +521,7 @@ impl Keybindings {
         }
 
         self.reread();
-        self.pending(over, Edit::Bind(command.clone(), keys.to_vec()))
+        self.pending(Edit::Bind(command.clone(), keys.to_vec()))
     }
 
     /// Takes every chord away from `command`, and gives the keys back.
@@ -530,7 +530,6 @@ impl Keybindings {
     /// error: it is how a chord is handed back to a shell or to an editor
     /// running in a pane.
     pub fn unbind(&mut self, command: &ActionName) -> Option<PendingSave> {
-        let over = self.document.text().to_owned();
         self.forget(command);
         if self.is_bound(command) && !self.document.append(&removal_entry(command)) {
             log::warn!(
@@ -541,7 +540,7 @@ impl Keybindings {
         }
 
         self.reread();
-        self.pending(over, Edit::Unbind(command.clone()))
+        self.pending(Edit::Unbind(command.clone()))
     }
 
     /// Puts `command` back to what this build ships with.
@@ -550,10 +549,9 @@ impl Keybindings {
     /// which is the whole of what "reset" can mean in a file where the
     /// defaults are not written down.
     pub fn reset(&mut self, command: &ActionName) -> Option<PendingSave> {
-        let over = self.document.text().to_owned();
         self.forget(command);
         self.reread();
-        self.pending(over, Edit::Reset(command.clone()))
+        self.pending(Edit::Reset(command.clone()))
     }
 
     /// Makes `edit` on these bindings, as the page's press that asked for it
@@ -582,6 +580,13 @@ impl Keybindings {
             let named = entry.get("command").and_then(Value::as_str).unwrap_or("");
             named.strip_prefix('-').unwrap_or(named).trim() == wanted
         });
+        // Read back at once: what the edit asks next — whether anything
+        // still reaches the command — is a question about the file without
+        // these lines. Asked of the rules from before, a command already
+        // unbound read as unbound, and unbinding it again wrote no removal
+        // and so bound it back; which is what making an edit again on a file
+        // that already had it did.
+        self.reread();
     }
 
     /// Reads the rules back out of the document.
@@ -606,15 +611,13 @@ impl Keybindings {
 
     /// The write this edit is asking for, for whoever has a thread to do it on.
     ///
-    /// `over` is the file's text the edit was made on, and `edit` the edit
-    /// itself, so that the write can make it again on the file as it is by
-    /// then if that is something else. See [`PendingSave::write_blocking`].
-    fn pending(&self, over: String, edit: Edit) -> Option<PendingSave> {
+    /// The edit itself rather than the text it left, so that the write can
+    /// make it again on the file as it is by then. See
+    /// [`PendingSave::write_blocking`].
+    fn pending(&self, edit: Edit) -> Option<PendingSave> {
         Some(PendingSave {
             path: self.path.clone()?,
-            text: self.document.text().to_owned(),
-            over,
-            edit,
+            edits: vec![edit],
             with: Box::new(self.clone()),
         })
     }
@@ -743,15 +746,13 @@ impl Recording {
 pub struct PendingSave {
     /// Where it goes.
     path: PathBuf,
-    /// What goes there: the whole file, as the edit left it.
-    text: String,
-    /// The file's text the edit was made on.
-    over: String,
-    /// The edit, for making again on a file that is no longer `over`.
-    edit: Edit,
-    /// The bindings it was made with — the table this platform ships and
-    /// what the plugins asked for — which decide whether a binding needs a
-    /// removal line before it.
+    /// The edits, in the order the page made them, that have not been
+    /// written yet. More than one when a save was overtaken by the next edit
+    /// or failed: see [`PendingSave::then`].
+    edits: Vec<Edit>,
+    /// The bindings the last of them was made with — the table this platform
+    /// ships and what the plugins asked for — which decide whether a binding
+    /// needs a removal line before it.
     with: Box<Keybindings>,
 }
 
@@ -764,6 +765,30 @@ enum Edit {
 }
 
 impl PendingSave {
+    /// Adds the edits of `later`, made after these, to the ones to write.
+    ///
+    /// A window keeps one of these for every edit not yet on disk. The last
+    /// save asked for is the one that writes, and a save that wrote only the
+    /// edit it was asked for lost the one before it whenever that save was
+    /// overtaken — two chords recorded in quick succession, the first gone.
+    pub fn then(&mut self, later: PendingSave) {
+        self.edits.extend(later.edits);
+        self.path = later.path;
+        self.with = later.with;
+    }
+
+    /// How many edits this writes.
+    pub fn edits(&self) -> usize {
+        self.edits.len()
+    }
+
+    /// Takes out the first `count` edits, which a save has written, and says
+    /// whether any are left to write.
+    pub fn written(&mut self, count: usize) -> bool {
+        self.edits.drain(..count.min(self.edits.len()));
+        !self.edits.is_empty()
+    }
+
     /// Writes it, atomically. Blocking; this belongs on the background pool.
     ///
     /// Atomically for the reason the settings are written that way: the bytes
@@ -775,38 +800,33 @@ impl PendingSave {
     /// window read, and every window is a process with a copy of its own: a
     /// chord bound in one window, or a line a person added in their editor,
     /// was taken back by the next edit made in a window that had not read it
-    /// yet. So the file is read again, under a lock every Crook's write takes,
-    /// and when it is no longer the text the edit was made on the edit is
-    /// made again on what it is now — the person's line, and the other
-    /// window's chord, stay.
+    /// yet. So the file is read again, under a lock every Crook's write takes
+    /// (see [`crate::settings::rewrite`]), and every edit not yet written is
+    /// made again on what it holds, in order — the person's line, and the
+    /// other window's chord, stay. Each edit says the whole of what it means
+    /// about its command, so making one again over a file that already has it
+    /// changes nothing.
     pub fn write_blocking(&self) -> anyhow::Result<()> {
-        if let Some(directory) = self.path.parent() {
-            crate::settings::ensure_directory(directory)?;
-        }
-        let _held = crate::settings::hold_the_lock(&self.path, KEYBINDINGS_LOCK);
-        let now = match fs::read_to_string(&self.path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(error) => {
-                return Err(anyhow::Error::new(error)
-                    .context(format!("could not read {}", self.path.display())));
+        crate::settings::rewrite(&self.path, KEYBINDINGS_LOCK, |_, bytes| {
+            let now = match bytes {
+                None => String::new(),
+                Some(bytes) => String::from_utf8(bytes.to_vec()).with_context(|| {
+                    format!("{} is not text, so it was left alone", self.path.display())
+                })?,
+            };
+            let mut fresh = (*self.with).clone();
+            fresh.document = Document::new(now);
+            fresh.reread();
+            for edit in &self.edits {
+                if fresh.make(edit).is_none() {
+                    anyhow::bail!(
+                        "{} is not a list of bindings, so it was left alone",
+                        self.path.display()
+                    );
+                }
             }
-        };
-        if now == self.over {
-            return crate::settings::atomic_write(&self.path, self.text.as_bytes());
-        }
-
-        let mut fresh = (*self.with).clone();
-        fresh.document = Document::new(now);
-        fresh.reread();
-        match fresh.make(&self.edit) {
-            Some(save) => crate::settings::atomic_write(&self.path, save.text.as_bytes()),
-            None => anyhow::bail!(
-                "{} changed since it was read and is not a list of bindings now, so it was \
-                 left alone",
-                self.path.display()
-            ),
-        }
+            Ok(fresh.document.text().as_bytes().to_vec())
+        })
     }
 
     /// Where it would be written.

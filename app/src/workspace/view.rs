@@ -33,6 +33,10 @@ pub(super) const KEYBINDINGS_POLL: Duration = THEMES_POLL;
 /// something new — see [`crate::settings::watch`].
 pub(super) const SETTINGS_POLL: Duration = THEMES_POLL;
 
+/// How long a settings save that found another Crook holding the lock waits
+/// before it tries again. See [`crate::settings::LockBusy`].
+pub(super) const SETTINGS_SAVE_RETRY: Duration = Duration::from_millis(500);
+
 use crook_plugin_api::Event;
 use crook_terminal::{BlockId, Rows, Snapshot};
 use crookui_core::elements::{MouseStateHandle, ScrollStateHandle};
@@ -1182,6 +1186,12 @@ pub struct Workspace {
     /// The same, for the keybindings file, which is written by the same rule
     /// and by a different set of clicks.
     keybinding_saves: Arc<SaveOrder>,
+    /// Every edit to the keybindings not yet on disk, which each save carries
+    /// whole. See [`Self::save_keybindings`].
+    unwritten_keybindings: Option<PendingSave>,
+    /// How many times the bindings have been read afresh, so that a save
+    /// coming home to bindings read since does not take edits off them.
+    keybindings_epoch: u64,
     /// Why the last save of the settings did not land, while it has not: a
     /// folder that cannot be written to, a full disk. The option was applied
     /// to the window regardless, so without this the person sees it work and
@@ -1505,6 +1515,8 @@ impl Workspace {
             settings_changes: Arc::default(),
             settings_watch: None,
             keybinding_saves: Arc::default(),
+            unwritten_keybindings: None,
+            keybindings_epoch: 0,
             settings_save_problem: None,
             keybindings_save_problem: None,
             panel_scroll: ScrollStateHandle::default(),
@@ -2664,6 +2676,10 @@ impl Workspace {
     pub fn set_keybindings(&mut self, mut keybindings: Keybindings, ctx: &mut ViewContext<Self>) {
         keybindings.set_plugin_rules(self.host.suggested_rules());
         self.keybindings = keybindings;
+        // Bindings read afresh are what the file says: edits made on the ones
+        // before are the file's now, or were never going to be.
+        self.unwritten_keybindings = None;
+        self.keybindings_epoch += 1;
         self.pending_keys.borrow_mut().clear();
         ctx.notify();
     }
@@ -2721,7 +2737,13 @@ impl Workspace {
     /// is a file nobody is looking at, and the chain ends rather than adopt
     /// what it happened to read on the way out.
     fn adopt_keybindings(&mut self, mut keybindings: Keybindings, ctx: &mut ViewContext<Self>) {
-        if !self.settings_are_showing() || !self.keybinding_saves.is_settled() {
+        // Nor while an edit is still to be written — refused, or waiting for
+        // another Crook's lock: the file read is the file without it, and
+        // taking it would drop the edit.
+        if !self.settings_are_showing()
+            || !self.keybinding_saves.is_settled()
+            || self.unwritten_keybindings.is_some()
+        {
             return;
         }
         keybindings.set_plugin_rules(self.host.suggested_rules());
@@ -8670,10 +8692,21 @@ impl Workspace {
     /// `None` is an edit that had nothing to write — a run with no
     /// configuration directory, or a file no edit may guess at — and both were
     /// reported where they were found.
-    fn save_keybindings(&self, save: Option<PendingSave>, ctx: &mut ViewContext<Self>) {
-        let Some(save) = save else {
+    fn save_keybindings(&mut self, save: Option<PendingSave>, ctx: &mut ViewContext<Self>) {
+        // Every edit not yet on disk goes with this save, in order: the last
+        // save asked for is the one that writes, and one that carried only
+        // its own edit lost the edit before it whenever that save was
+        // overtaken. With nothing new, what is still waiting — a save that
+        // failed or found the lock held — is tried again.
+        match (save, self.unwritten_keybindings.as_mut()) {
+            (Some(save), Some(unwritten)) => unwritten.then(save),
+            (Some(save), None) => self.unwritten_keybindings = Some(save),
+            (None, _) => {}
+        }
+        let Some(save) = self.unwritten_keybindings.clone() else {
             return;
         };
+        let (count, epoch) = (save.edits(), self.keybindings_epoch);
 
         let asked_at = self.keybinding_saves.ask();
         let saves = self.keybinding_saves.clone();
@@ -8681,11 +8714,48 @@ impl Workspace {
             saves.write_if_last(asked_at, || {
                 save.write_blocking().map_err(|error| {
                     log::warn!("could not save the keybindings: {error:#}");
-                    format!("{error:#}")
+                    let busy = error.downcast_ref::<crate::settings::LockBusy>().is_some();
+                    (format!("{error:#}"), busy)
                 })
             })
         });
-        ctx.spawn(written, Self::note_keybindings_save).detach();
+        ctx.spawn(written, move |workspace, outcome, ctx| {
+            workspace.note_keybindings_written(outcome, epoch, count, ctx);
+        })
+        .detach();
+    }
+
+    /// Takes home what a keybindings save did: the edits it wrote are no
+    /// longer waiting — unless the bindings were read afresh from the file
+    /// since (`epoch`), when nothing of before is waiting anyway — and one
+    /// that found the lock held is tried again shortly.
+    fn note_keybindings_written(
+        &mut self,
+        outcome: Option<Result<(), (String, bool)>>,
+        epoch: u64,
+        count: usize,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(outcome) = outcome else {
+            return;
+        };
+        if outcome.is_ok()
+            && epoch == self.keybindings_epoch
+            && let Some(unwritten) = self.unwritten_keybindings.as_mut()
+            && !unwritten.written(count)
+        {
+            self.unwritten_keybindings = None;
+        }
+        if let Err((_, true)) = &outcome {
+            let waiting = ctx
+                .background()
+                .spawn(async { std::thread::sleep(SETTINGS_SAVE_RETRY) });
+            ctx.spawn(waiting, |workspace, (), ctx| {
+                workspace.save_keybindings(None, ctx);
+            })
+            .detach();
+        }
+        self.note_keybindings_save(Some(outcome.map_err(|(why, _)| why)), ctx);
     }
 
     /// Starts in a density the command line asked for, without adopting it.
@@ -13828,25 +13898,65 @@ impl Workspace {
         let asked_at = self.saves.ask();
         let saves = self.saves.clone();
         let pending = self.settings_changes.clone();
-        let fallback = self.settings.document().clone();
 
         let written = ctx.background().spawn(async move {
             saves.write_if_last(asked_at, || {
-                let changes =
-                    std::mem::take(&mut *pending.lock().unwrap_or_else(PoisonError::into_inner));
-                Settings::write_changes(&path, &changes, &fallback).map_err(|error| {
-                    // Kept for the next save to try again, under anything
-                    // changed since: those are newer.
-                    pending
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .under(changes);
-                    log::warn!("could not save the settings: {error:#}");
-                    format!("{error:#}")
-                })
+                // A copy, and the changes stay where they are until they are
+                // on disk: a look at the file taken while this is being
+                // written still sees them, and a save that fails has nothing
+                // to put back.
+                let changes = pending
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                match Settings::write_changes(&path, &changes) {
+                    Ok(stale) => {
+                        pending
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .forget_written(&changes);
+                        Ok(!stale.is_empty())
+                    }
+                    Err(error) => {
+                        log::warn!("could not save the settings: {error:#}");
+                        let busy = error.downcast_ref::<crate::settings::LockBusy>().is_some();
+                        Err((format!("{error:#}"), busy))
+                    }
+                }
             })
         });
-        ctx.spawn(written, Self::note_settings_save).detach();
+        ctx.spawn(written, Self::note_settings_written).detach();
+    }
+
+    /// Takes home what a settings save did.
+    ///
+    /// A grant it set aside — the plugin was answered for elsewhere since —
+    /// is a file this window has to read again, whether or not the save
+    /// changed it. A save that found another Crook holding the lock is tried
+    /// again shortly, its changes still waiting.
+    fn note_settings_written(
+        &mut self,
+        outcome: Option<Result<bool, (String, bool)>>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(outcome) = outcome else {
+            return;
+        };
+        let (outcome, stale, busy) = match outcome {
+            Ok(stale) => (Ok(()), stale, false),
+            Err((why, busy)) => (Err(why), false, busy),
+        };
+        if stale && let Some(watch) = self.settings_watch.as_ref() {
+            watch.again();
+        }
+        if busy {
+            let waiting = ctx
+                .background()
+                .spawn(async { std::thread::sleep(SETTINGS_SAVE_RETRY) });
+            ctx.spawn(waiting, |workspace, (), ctx| workspace.save_settings(ctx))
+                .detach();
+        }
+        self.note_settings_save(Some(outcome), ctx);
     }
 
     /// Starts looking at `settings.json` for changes made anywhere but here.
@@ -13900,8 +14010,8 @@ impl Workspace {
     /// it with a copy kept — see [`Settings::write_changes`].
     fn adopt_settings_file(&mut self, seen: Seen, ctx: &mut ViewContext<Self>) {
         let document = match seen.file {
-            OnDisk::Document(document) => document,
-            OnDisk::Missing => serde_json::Map::new(),
+            OnDisk::Document(document) => Some(document),
+            OnDisk::Missing => None,
             OnDisk::Unreadable(why) => {
                 if let Some(path) = self.settings.path() {
                     log::warn!(
@@ -13912,7 +14022,15 @@ impl Workspace {
                 return;
             }
         };
-        if seen.stamp != self.saves.quiet_at() {
+        // Only a look stamped quiet, and quiet at the same count now: one
+        // stamped while a save was on its way — `None` — may have read the
+        // file from before it, and so may one stamped before a save that has
+        // landed since.
+        let quiet = matches!(
+            (seen.stamp, self.saves.quiet_at()),
+            (Some(then), Some(now)) if then == now
+        );
+        if !quiet {
             if let Some(watch) = self.settings_watch.as_ref() {
                 watch.again();
             }
@@ -13920,14 +14038,24 @@ impl Workspace {
         }
 
         let before = self.settings.clone();
-        {
-            let pending = self
+        let waiting = {
+            let mut pending = self
                 .settings_changes
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            self.settings.adopt(document, &pending);
-        }
+            match document {
+                Some(document) => self.settings.adopt(document, &mut pending),
+                None => self.settings.adopt_missing(&mut pending),
+            }
+            !pending.is_empty()
+        };
         self.settings_changed_under(&before, ctx);
+        // Changes still waiting with nothing on its way are a save that did
+        // not land — the file did not read, the folder could not be written.
+        // A file that changed is a reason to try again.
+        if waiting {
+            self.save_settings(ctx);
+        }
     }
 
     /// Takes `document` as what `settings.json` says now, the way a look at
@@ -14031,29 +14159,11 @@ impl Workspace {
             changed = true;
         }
 
-        let (was, is) = (before.general(), after.general());
-        if was != is {
+        // The type size, the panel's width and whether it shows are this
+        // window's own and never arrive here: see `settings::WINDOW_KEYS`.
+        let was = before.general();
+        if was != after.general() {
             self.general_changed(was, ctx);
-            // The two the setters do more for than the file says: a panel
-            // taken away takes its menus and its search with it, and a type
-            // size is a font measured again.
-            if was.show_tabs_panel && !is.show_tabs_panel {
-                self.close_menu();
-                self.close_tab_context_menu(ctx);
-                self.forget_section_state();
-                self.panel_search.clear();
-                self.panel_search.set_focused(false);
-            }
-            let size = is.font_size();
-            if was.font_size() != size && (self.cell_font.font_size() - size).abs() >= f32::EPSILON
-            {
-                match self.cell_font.resized(size) {
-                    Ok(font) => self.cell_font = font,
-                    Err(error) => {
-                        log::warn!("could not set the terminal font to {size}: {error:#}");
-                    }
-                }
-            }
             changed = true;
         }
 

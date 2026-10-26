@@ -1483,3 +1483,70 @@ fn a_line_written_by_hand_since_the_file_was_read_survives_an_edit_on_the_page()
         "the edit was not written: {text}"
     );
 }
+
+#[test]
+fn a_save_carrying_two_edits_writes_both_whatever_the_file_held() {
+    // What a window hands its last save when the save of the first edit was
+    // overtaken: both edits, made again in order on the file as it is.
+    let (path, mut keybindings) = editable("two-edits", "");
+    let mut first = keybindings
+        .bind(&command("crook/window/new-tab"), &keys("ctrl+alt+n"))
+        .expect("an edit with a file to write");
+    let second = keybindings
+        .bind(&command("crook/window/close-pane"), &keys("ctrl+alt+w"))
+        .expect("an edit with a file to write");
+    first.then(second);
+    let text = saved(Some(first));
+    assert!(
+        text.contains("ctrl+alt+n") && text.contains("ctrl+alt+w"),
+        "{text}"
+    );
+    let _ = path;
+}
+
+#[test]
+fn a_keybindings_save_never_writes_without_the_lock() {
+    let (path, mut keybindings) = editable("held-lock", "");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_file_name(KEYBINDINGS_LOCK))
+        .expect("the lock file opens");
+    lock.lock().expect("the lock is taken");
+
+    let save = keybindings
+        .bind(&command("crook/window/new-tab"), &keys("ctrl+alt+n"))
+        .expect("an edit with a file to write");
+    let refused = save.write_blocking().expect_err("the lock is held");
+    assert!(
+        refused
+            .downcast_ref::<crate::settings::LockBusy>()
+            .is_some(),
+        "{refused:#}"
+    );
+    assert!(!path.exists(), "the save wrote without the lock");
+
+    drop(lock);
+    save.write_blocking()
+        .expect("the save lands once the lock is free");
+    assert!(
+        fs::read_to_string(&path)
+            .expect("readable")
+            .contains("ctrl+alt+n")
+    );
+}
+
+#[test]
+fn unbinding_a_command_twice_leaves_it_unbound() {
+    // The second unbind found the command's own removal line, took it out,
+    // and then — asking the rules from before it did — saw nothing bound and
+    // wrote no removal: the chord came back.
+    let (_, mut keybindings) = editable("unbind-twice", "");
+    let new_tab = command("crook/window/new-tab");
+    saved(keybindings.unbind(&new_tab));
+    let text = saved(keybindings.unbind(&new_tab));
+    assert!(text.contains("-crook/window/new-tab"), "{text}");
+    assert!(keybindings.chords_for(&new_tab).is_empty());
+}

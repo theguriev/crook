@@ -3655,16 +3655,24 @@ window changed (`Settings::take_changes`: the keys this build owns, compared wit
 window last agreed with the file about, and one entry at a time under `plugin_grants` and
 `resume_lines` and one name at a time in `disabled_plugins`), laid over the file as it is when
 the save lands, with the read and the write one step under a lock on `settings.lock` beside it
-(`Settings::write_changes`). A file that does not read is copied into `settings-backups/` and
-the changes are laid over the last copy that did. And every window looks at the file every
+(`Settings::write_changes`). A lock held past two seconds is never written through: the change
+waits, the page says it is not being saved, and the save is tried again; only a file system
+that keeps no locks is written without one, reading the file again just before the rename. A
+file that does not read is copied into `settings-backups/` and not written over at all until it
+reads. **A revoke always lands, and a grant only over the answer it was given over**: each
+changed grant remembers what the file said when the person answered, and if the file says
+something else by the time it lands — revoked in another window, removed on the command line —
+the grant is set aside and the file's answer stands. Every window looks at the file every
 three quarters of a second, on a thread of its own rather than a parked worker
-(`settings::watch`), and takes what it says: a grant revoked anywhere — another window,
-`--uninstall-plugin`, a hand edit — rebuilds the plugin here under the new answer, and whatever
-it had asked for under the old one goes with the old build. A look that may have read across
-one of the window's own saves is set aside for the next. `keybindings.json` keeps its own
-poll, but its edits are made the same way: the write reads the file again under
-`keybindings.lock`, and if it is no longer the text the edit was made on, makes the edit again on
-what it is now.
+(`settings::watch`), and takes what it says: a grant revoked anywhere rebuilds the plugin here
+under the new answer, and whatever it had asked for under the old one goes with the old build.
+A look stamped while one of the window's own saves was on its way is set aside for the next,
+and the save's changes stay visible to a look until they are on disk. A file gone for three
+seconds of looks is "do not know" for the plugins — nothing switched back on, nothing revoked.
+The type size, the tabs panel's width and whether it shows stay each window's own while it
+runs (`settings::WINDOW_KEYS`), though the last one written is what the next window opens with.
+`keybindings.json` keeps its own poll, but every save of it carries every edit not yet on disk
+and makes them again, in order, on the file as it is, under `keybindings.lock`.
 
 A sixth is where the window was. At first only its size came back, read off the frame, so a
 window kept maximised on a second monitor reopened as an ordinary window on the first, at the

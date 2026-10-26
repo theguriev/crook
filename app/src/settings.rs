@@ -72,6 +72,17 @@ const BACKUP_DIRECTORY: &str = "settings-backups";
 /// How many of those copies are kept.
 const BACKUPS_KEPT: usize = 3;
 
+/// The keys a window keeps as its own while it runs: the type size it was
+/// zoomed to, how wide its tabs panel was dragged, and whether that panel is
+/// showing.
+///
+/// Saved and merged like every other key, so the last one written is what
+/// the next window opens with — but not taken from another window's save
+/// while this one is open. Zooming one window is not zooming them all, and
+/// a panel dragged in one must not jump in another. Which keys belong here is
+/// the owner's to adjust. See [`Settings::adopt`].
+const WINDOW_KEYS: [&str; 3] = ["font_size", "tabs_panel_width", "show_tabs_panel"];
+
 /// The key the chosen theme's name is stored under.
 const THEME_KEY: &str = "theme";
 
@@ -764,15 +775,6 @@ pub struct Settings {
     /// admits to no configuration directory at all, which is a machine with no
     /// home directory rather than a machine that has never run Crook.
     path: Option<PathBuf>,
-    /// The file exactly as it was last read whole, including keys this build
-    /// knows nothing about.
-    ///
-    /// Not what a save writes over — a save writes over the file as it is on
-    /// disk at that moment, see [`Settings::write_changes`]. This is what it
-    /// falls back on when the file on disk is one that does not read: a hand
-    /// edit with a trailing comma must cost the person that edit, which is
-    /// kept in a copy, and not every option they had.
-    document: Map<String, Value>,
     /// What this instance last agreed with the file about: the keys this
     /// build owns, as [`Settings::owned`] renders them, at the load or the
     /// adoption that last brought the two together.
@@ -1000,7 +1002,6 @@ impl Settings {
 
         let mut settings = Self {
             path,
-            document,
             base: Map::new(),
             tab_options,
             general,
@@ -1066,12 +1067,6 @@ impl Settings {
     /// The file this instance reads and writes.
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
-    }
-
-    /// The file as it was last read whole, which a save falls back on when
-    /// the file on disk does not read. See [`Settings::write_changes`].
-    pub fn document(&self) -> &Map<String, Value> {
-        &self.document
     }
 
     /// The options as they stand.
@@ -1206,7 +1201,7 @@ impl Settings {
             .path
             .as_ref()
             .context("there is no per-user configuration directory to save into")?;
-        Self::write_changes(path, &self.changes(), &self.document)
+        Self::write_changes(path, &self.changes()).map(drop)
     }
 
     /// What this instance says differently from the file it last agreed
@@ -1245,82 +1240,105 @@ impl Settings {
     /// value — a grant revoked anywhere is revoked here — and the ones it did
     /// change keep this window's, because those are on their way to the file
     /// and will be what it says once they land.
-    pub fn adopt(&mut self, document: Map<String, Value>, pending: &Changes) {
+    ///
+    /// Except a grant given here over an answer the file no longer has: it
+    /// is set aside, taken out of `pending`, and the file's answer stands —
+    /// see [`Changes`]. And except [`WINDOW_KEYS`], which a window keeps as
+    /// its own while it runs.
+    pub fn adopt(&mut self, document: Map<String, Value>, pending: &mut Changes) {
         let unsaved = self.changes();
-        let mut agreed = document.clone();
-        pending.apply_to(&mut agreed);
+        let mut agreed = document;
+        let stale = pending.apply_to(&mut agreed);
+        pending.forget(&stale);
+        for key in WINDOW_KEYS {
+            match self.base.get(key) {
+                Some(value) => agreed.insert(key.to_owned(), value.clone()),
+                None => agreed.remove(key),
+            };
+        }
         let base = Self::from_document(self.path.clone(), agreed.clone()).base;
         let mut wanted = agreed;
         unsaved.apply_to(&mut wanted);
 
         let mut adopted = Self::from_document(self.path.clone(), wanted);
-        adopted.document = document;
         adopted.base = base;
         *self = adopted;
     }
 
+    /// [`Settings::adopt`] for a file that has gone: somebody deleted it, or
+    /// it is between an editor's two halves of a save that took longer than
+    /// a look's patience.
+    ///
+    /// Taken as "do not know" for what matters most. Every other key goes to
+    /// its default, which is what a file nobody wrote says; but the plugins
+    /// keep what this window last agreed about them — neither a plugin
+    /// switched off comes back on, nor are the grants rebuilt as nothing —
+    /// because a file that is not there has said nothing about either.
+    pub fn adopt_missing(&mut self, pending: &mut Changes) {
+        let mut document = Map::new();
+        for key in [PLUGIN_GRANTS_KEY, DISABLED_PLUGINS_KEY] {
+            if let Some(value) = self.base.get(key) {
+                document.insert(key.to_owned(), value.clone());
+            }
+        }
+        self.adopt(document, pending);
+    }
+
     /// Lays `changes` over the file at `path` as it is now, and writes the
-    /// result back atomically.
+    /// result back atomically. Hands back the plugins whose grant was set
+    /// aside because somebody had answered for them since — see [`Changes`].
     ///
     /// **One window at a time.** Two windows saving at once would each read
     /// the file, lay their own change over it, and the second rename would
     /// take the first one's change back out. So the read and the write are
     /// one step under an advisory lock on [`LOCK_FILE`] beside the file, which
-    /// every Crook takes before it saves; a window that finds it held waits
-    /// its turn. See [`hold_the_lock`] for what happens when there is no lock
-    /// to be had.
+    /// every Crook takes before it saves. See [`rewrite`] for a lock that is
+    /// held too long, and a file system that keeps none.
     ///
     /// A file that is not there is an empty one: the changes alone are
     /// written. A file that does not read — a hand edit with a trailing comma,
-    /// half a file from a tool that does not write atomically — is copied,
-    /// byte for byte, into [`BACKUP_DIRECTORY`] beside it, and the changes are
-    /// laid over `fallback` instead: the file as this window last read it
-    /// whole. The person's own text is kept where they can find it, and the
-    /// options they had are not traded for the one they just changed.
+    /// half a file from a tool that does not write atomically — is not
+    /// written over at all: it is copied, byte for byte, into
+    /// [`BACKUP_DIRECTORY`] beside it, and the save fails with the reason,
+    /// keeping its changes for when the file reads again. Writing them over
+    /// the last copy this window read whole would have taken back whatever
+    /// had changed since, a revoke included.
     ///
     /// Nothing changed is nothing written, so a save that has nothing to say
     /// leaves a person's file — its formatting, its key order — as it is.
-    pub fn write_changes(
-        path: &Path,
-        changes: &Changes,
-        fallback: &Map<String, Value>,
-    ) -> Result<()> {
+    pub fn write_changes(path: &Path, changes: &Changes) -> Result<Vec<String>> {
         if changes.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
-        if let Some(directory) = path.parent() {
-            ensure_directory(directory)?;
+        let mut stale = Vec::new();
+        rewrite(path, LOCK_FILE, |target, bytes| {
+            let mut document = match bytes {
+                None => Map::new(),
+                Some(bytes) => match parse_document(bytes) {
+                    Ok(document) => document,
+                    Err(why) => {
+                        back_up_unreadable(bytes, target);
+                        bail!(
+                            "{} {why}; what was changed here is kept, and saved once it reads",
+                            path.display()
+                        );
+                    }
+                },
+            };
+            stale = changes.apply_to(&mut document);
+            let mut json = serde_json::to_string_pretty(&Value::Object(document))
+                .context("could not serialize the settings")?;
+            // A file a person may open in an editor ends in a newline.
+            json.push('\n');
+            Ok(json.into_bytes())
+        })?;
+        for (_, plugin) in &stale {
+            log::info!(
+                "{plugin} was answered for elsewhere since it was allowed here; the answer \
+                 there stands"
+            );
         }
-
-        let _held = hold_the_lock(path, LOCK_FILE);
-        let target = &through_a_link(path);
-        let mut document = match fs::read(target) {
-            Ok(bytes) => match parse_document(&bytes) {
-                Ok(document) => document,
-                Err(why) => {
-                    log::warn!(
-                        "{} does not read ({why}); writing over the last copy that did",
-                        path.display()
-                    );
-                    back_up_unreadable(&bytes, target);
-                    fallback.clone()
-                }
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Map::new(),
-            // A file that is there and cannot be read is not one to write
-            // over blind: whatever it holds is somebody's, and the changes
-            // are kept for the next save to try again.
-            Err(error) => {
-                return Err(error).with_context(|| format!("could not read {}", path.display()));
-            }
-        };
-        changes.apply_to(&mut document);
-
-        let mut json = serde_json::to_string_pretty(&Value::Object(document))
-            .context("could not serialize the settings")?;
-        // A file a person may open in an editor ends in a newline.
-        json.push('\n');
-        write_then_rename(&temporary_path(target), target, json.as_bytes())
+        Ok(stale.into_iter().map(|(_, plugin)| plugin).collect())
     }
 
     /// The keys this build owns, as a save writes them.
@@ -1439,14 +1457,36 @@ impl Settings {
 ///
 /// A later change to the same key, entry or name replaces an earlier one:
 /// see [`Changes::then`].
+///
+/// # A grant is given only over what it was given over
+///
+/// **A revoke always lands; a grant lands only if nobody has answered for
+/// that plugin since.** Each entry remembers what it replaced — the value
+/// the window last agreed with the file about when the person answered —
+/// and a grant is laid over a file only while the file still says that.
+/// Anything else means the plugin was answered for somewhere else in the
+/// meantime: revoked in another window, removed on the command line. Then
+/// the grant is set aside, the window takes the file's answer, and the card
+/// asks again. Without this, a grant whose save failed, or one held up
+/// behind the lock, landed after a newer revoke and gave the grant back to
+/// every window. See [`Changes::apply_to`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Changes {
     /// Each key's new value, or `None` for a key the file should not have.
     values: BTreeMap<String, Option<Value>>,
     /// Each entry's, by the key it is under and its own name.
-    entries: BTreeMap<(String, String), Option<Value>>,
+    entries: BTreeMap<(String, String), Entry>,
     /// Each plugin switched off (`true`) or back on (`false`).
     switched_off: BTreeMap<String, bool>,
+}
+
+/// One entry's change: what it was when it was changed, and what it is now.
+#[derive(Clone, Debug, PartialEq)]
+struct Entry {
+    /// What the window agreed the file said when the entry was changed.
+    was: Option<Value>,
+    /// What it says now, or `None` for an entry the file should not have.
+    now: Option<Value>,
 }
 
 /// The keys whose value is an object of one answer per name.
@@ -1481,9 +1521,13 @@ impl Changes {
                     was.keys().chain(is.keys()).collect();
                 for name in names {
                     if was.get(name) != is.get(name) {
-                        changes
-                            .entries
-                            .insert((key.clone(), name.clone()), is.get(name).cloned());
+                        changes.entries.insert(
+                            (key.clone(), name.clone()),
+                            Entry {
+                                was: was.get(name).cloned(),
+                                now: is.get(name).cloned(),
+                            },
+                        );
                     }
                 }
             } else if was != is {
@@ -1494,28 +1538,65 @@ impl Changes {
     }
 
     /// Adds `later` on top of these: where both say something about the same
-    /// key, entry or name, `later` is what stands.
+    /// key, entry or name, `later` is what stands. An entry keeps what it was
+    /// before the *first* of the two, which is what the file said before this
+    /// window changed it at all.
     pub fn then(&mut self, later: Changes) {
         self.values.extend(later.values);
-        self.entries.extend(later.entries);
+        for (key, entry) in later.entries {
+            match self.entries.get_mut(&key) {
+                Some(mine) => mine.now = entry.now,
+                None => {
+                    self.entries.insert(key, entry);
+                }
+            }
+        }
         self.switched_off.extend(later.switched_off);
     }
 
-    /// Puts back `earlier` — changes a save took and could not write — under
-    /// these: where both say something, these are newer and stand.
-    pub fn under(&mut self, earlier: Changes) {
-        let mut restored = earlier;
-        restored.then(std::mem::take(self));
-        *self = restored;
+    /// Takes out what `written` wrote, now that it is on disk — unless it has
+    /// been changed again since, which is a change still to write.
+    ///
+    /// An entry `written` set aside as stale goes too: it is not to be
+    /// written at all, and the window takes the file's answer instead.
+    pub fn forget_written(&mut self, written: &Changes) {
+        for (key, value) in &written.values {
+            if self.values.get(key) == Some(value) {
+                self.values.remove(key);
+            }
+        }
+        for (key, entry) in &written.entries {
+            if self
+                .entries
+                .get(key)
+                .is_some_and(|mine| mine.now == entry.now)
+            {
+                self.entries.remove(key);
+            }
+        }
+        for (name, off) in &written.switched_off {
+            if self.switched_off.get(name) == Some(off) {
+                self.switched_off.remove(name);
+            }
+        }
     }
 
-    /// Lays these over `document`.
+    /// Takes these entries out, as [`Changes::apply_to`] set them aside.
+    fn forget(&mut self, stale: &[(String, String)]) {
+        for key in stale {
+            self.entries.remove(key);
+        }
+    }
+
+    /// Lays these over `document`, and hands back the grants that were set
+    /// aside: the ones given over an answer the file no longer has. See
+    /// [`Changes`].
     ///
     /// The object keys and the list are left out of the file once nothing
     /// is in them, which is the rule [`Settings::owned`] writes them by: a
     /// person who never allowed a plugin does not find an empty object in a
     /// file they opened to read.
-    fn apply_to(&self, document: &mut Map<String, Value>) {
+    fn apply_to(&self, document: &mut Map<String, Value>) -> Vec<(String, String)> {
         for (key, value) in &self.values {
             match value {
                 Some(value) => document.insert(key.clone(), value.clone()),
@@ -1523,6 +1604,7 @@ impl Changes {
             };
         }
 
+        let mut stale = Vec::new();
         for key in ENTRY_KEYS {
             let mut changed = self
                 .entries
@@ -1539,11 +1621,21 @@ impl Changes {
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
-            for ((_, name), value) in changed {
-                match value {
-                    Some(value) => object.insert(name.clone(), value.clone()),
-                    None => object.remove(name),
-                };
+            for ((under, name), entry) in changed {
+                match &entry.now {
+                    // A grant over an answer somebody has changed since.
+                    Some(_)
+                        if key == PLUGIN_GRANTS_KEY && object.get(name) != entry.was.as_ref() =>
+                    {
+                        stale.push((under.clone(), name.clone()));
+                    }
+                    Some(value) => {
+                        object.insert(name.clone(), value.clone());
+                    }
+                    None => {
+                        object.remove(name);
+                    }
+                }
             }
             match object.is_empty() {
                 true => document.remove(key),
@@ -1567,6 +1659,7 @@ impl Changes {
                 ),
             };
         }
+        stale
     }
 }
 
@@ -1756,8 +1849,32 @@ pub(crate) fn parse_document(bytes: &[u8]) -> std::result::Result<Map<String, Va
     }
 }
 
-/// Holds the lock every save of a file under the configuration directory
-/// takes — `name`, beside it — for as long as the returned file is kept.
+/// A save that found another Crook holding the lock past [`LOCK_PATIENCE`].
+///
+/// Not written without the lock: a slow writer still holding it would rename
+/// its file in after this one, and whatever this save said — a revoke — would
+/// be gone. The change is kept, and the save is tried again.
+#[derive(Debug)]
+pub struct LockBusy {
+    /// The lock that was held.
+    lock: PathBuf,
+}
+
+impl std::fmt::Display for LockBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} is held by another Crook; what was changed here is kept and tried again",
+            self.lock.display()
+        )
+    }
+}
+
+impl std::error::Error for LockBusy {}
+
+/// Takes the lock every write of a file under the configuration directory
+/// takes — `name`, beside `path` — and holds it for as long as the returned
+/// file is kept. `None` on a file system that keeps no locks at all.
 ///
 /// An advisory lock on a file of its own — [`LOCK_FILE`] for the settings —
 /// taken the way the session's is: through the standard library, `flock` on
@@ -1768,66 +1885,98 @@ pub(crate) fn parse_document(bytes: &[u8]) -> std::result::Result<Map<String, Va
 /// Waited for, but not forever. A save holds it for the milliseconds a small
 /// file takes to read and write, and a shell being started can hold a copy
 /// for as long as its fork takes to exec; [`LOCK_PATIENCE`] is far past both.
-/// Past it — and on a file system that keeps no locks at all — the save goes
-/// ahead without one, which is the way every save went before there was a
-/// lock, rather than a click whose change is never written.
-pub(crate) fn hold_the_lock(path: &Path, name: &str) -> Option<fs::File> {
+/// Past it the answer is [`LockBusy`], never a write without the lock.
+fn hold_the_lock(path: &Path, name: &str) -> Result<Option<fs::File>> {
     let lock = path.with_file_name(name);
     // Open for writing as well as reading, although nothing is written: NFS
     // on Linux refuses an exclusive lock on a file opened only for reading.
-    let file = match fs::OpenOptions::new()
+    let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .open(&lock)
-    {
-        Ok(file) => file,
-        Err(error) => {
-            log::warn!(
-                "could not open {} ({error}); saving without it",
-                lock.display()
-            );
-            return None;
-        }
-    };
+        .with_context(|| format!("could not open {}", lock.display()))?;
     let deadline = std::time::Instant::now() + LOCK_PATIENCE;
     loop {
         match file.try_lock() {
-            Ok(()) => return Some(file),
+            Ok(()) => return Ok(Some(file)),
             Err(fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            Err(fs::TryLockError::WouldBlock) => {
-                log::warn!(
-                    "{} was held for longer than {LOCK_PATIENCE:?}; saving without it",
-                    lock.display()
-                );
-                return None;
-            }
+            Err(fs::TryLockError::WouldBlock) => return Err(LockBusy { lock }.into()),
             Err(fs::TryLockError::Error(error)) => {
                 log::warn!(
-                    "could not lock {} ({error}); saving without it",
+                    "{} cannot be locked here ({error}); checking the file before writing it \
+                     instead",
                     lock.display()
                 );
-                return None;
+                return Ok(None);
             }
         }
     }
 }
 
+/// How many times a write with no lock to hold makes itself again over a
+/// file that changed under it before giving up. See [`rewrite`].
+const UNLOCKED_ATTEMPTS: u32 = 5;
+
+/// Reads the file at `path`, has `make` say what it should hold instead, and
+/// writes that atomically — the read and the write one step under the lock
+/// called `lock` beside it.
+///
+/// `make` is handed the file the write lands in (the target of a link at
+/// `path`, see [`through_a_link`]) and its bytes, or `None` for no file.
+///
+/// On a file system that keeps no locks, the file is read once more just
+/// before the rename, and if anybody changed it in between, `make` is asked
+/// again over what it holds now. That narrows the race rather than closing
+/// it, which is all a file system with no locks allows.
+pub(crate) fn rewrite(
+    path: &Path,
+    lock: &str,
+    mut make: impl FnMut(&Path, Option<&[u8]>) -> Result<Vec<u8>>,
+) -> Result<()> {
+    if let Some(directory) = path.parent() {
+        ensure_directory(directory)?;
+    }
+    let held = hold_the_lock(path, lock)?;
+    let target = &through_a_link(path);
+    let mut attempt = 1;
+    loop {
+        let before = read_bytes(target)?;
+        let contents = make(target, before.as_deref())?;
+        if held.is_none() && attempt < UNLOCKED_ATTEMPTS && read_bytes(target)? != before {
+            attempt += 1;
+            continue;
+        }
+        return write_then_rename(&temporary_path(target), target, &contents);
+    }
+}
+
+/// The bytes at `path`, `None` for no file, or why they cannot be read.
+///
+/// A file that is there and cannot be read is not one to write over blind:
+/// whatever it holds is somebody's.
+fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("could not read {}", path.display())),
+    }
+}
+
 /// Keeps a copy of a settings file that did not read, as it was.
 ///
-/// A save writes over a file that does not read — see
-/// [`Settings::write_changes`] — and without this a person who saved their
-/// editor with a typo in it and then clicked an option in Crook would find
-/// their edit gone. The bytes go untouched to
+/// A save refuses to write over a file that does not read — see
+/// [`Settings::write_changes`] — and keeps what it holds here as well, so the
+/// text is still somewhere if the person gives up on it and deletes the
+/// file. The bytes go untouched to
 /// `settings-backups/settings-<timestamp>.json` beside the file, and the
 /// newest [`BACKUPS_KEPT`] are kept. The same arrangement as the session
 /// file's, in a directory of its own so that neither prunes the other's.
 ///
-/// Nothing here can stop the save: a copy that cannot be made is a line in
-/// the log.
+/// A copy that cannot be made is a line in the log, and nothing more.
 fn back_up_unreadable(bytes: &[u8], path: &Path) {
     let Some(directory) = path.parent() else {
         return;
@@ -1835,6 +1984,15 @@ fn back_up_unreadable(bytes: &[u8], path: &Path) {
     let directory = directory.join(BACKUP_DIRECTORY);
     if let Err(error) = ensure_directory(&directory) {
         log::warn!("could not keep a copy of {}: {error:#}", path.display());
+        return;
+    }
+    // Once per text: a save refused over a file that does not read is tried
+    // again, and three copies of the same typo would push out the copies of
+    // anything else.
+    if backups_in(&directory)
+        .last()
+        .is_some_and(|newest| fs::read(newest).is_ok_and(|kept| kept == bytes))
+    {
         return;
     }
     // To the millisecond, because two saves over the same broken file are
@@ -1856,8 +2014,15 @@ fn back_up_unreadable(bytes: &[u8], path: &Path) {
         backup.display()
     );
 
-    let Ok(entries) = fs::read_dir(&directory) else {
-        return;
+    for stale in backups_in(&directory).iter().rev().skip(BACKUPS_KEPT) {
+        let _ = fs::remove_file(stale);
+    }
+}
+
+/// The copies [`back_up_unreadable`] kept in `directory`, oldest first.
+fn backups_in(directory: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
     };
     let mut backups: Vec<PathBuf> = entries
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -1868,9 +2033,7 @@ fn back_up_unreadable(bytes: &[u8], path: &Path) {
         })
         .collect();
     backups.sort();
-    for stale in backups.iter().rev().skip(BACKUPS_KEPT) {
-        let _ = fs::remove_file(stale);
-    }
+    backups
 }
 
 /// A name beside `path` that no other save can be using.
@@ -3156,8 +3319,7 @@ mod tests {
                             vec![format!("round-{round}")],
                         );
                         let changes = settings.take_changes();
-                        Settings::write_changes(&path, &changes, &Map::new())
-                            .expect("the save lands");
+                        Settings::write_changes(&path, &changes).expect("the save lands");
                     }
                 })
             })
@@ -3178,28 +3340,29 @@ mod tests {
     }
 
     #[test]
-    fn test_a_save_over_a_file_that_does_not_read_keeps_a_copy_and_every_option() {
-        // A person saved their editor with a trailing comma in it. The next
-        // option clicked in Crook writes a file that reads — with the
-        // options the window last read, not only the one clicked — and the
-        // person's text is kept where they can find it.
+    fn test_a_save_over_a_file_that_does_not_read_writes_nothing_and_keeps_a_copy() {
+        // A person saved their editor with a trailing comma in it. A save
+        // in Crook does not write over it — not with the one option clicked,
+        // and not with an older copy this window read, which could take back
+        // a revoke made since. The person's text is kept where they can find
+        // it, once however often the save is tried again.
         let scratch = ScratchDirectory::new("unreadable-at-save");
-        fs::write(
-            scratch.settings_file(),
-            r#"{"theme": "Midnight", "font_size": 20}"#,
-        )
-        .expect("the file should be writable");
         let mut settings = Settings::load(scratch.settings_file());
         let broken = r#"{"theme": "Midnight", "font_size": 21,}"#;
         fs::write(scratch.settings_file(), broken).expect("the file should be writable");
 
         settings.set_granted("eugen/probe", vec![String::from("tabs.read")]);
-        settings.save_blocking().expect("the save should succeed");
+        let refused = settings.save_blocking().expect_err("the save is refused");
+        assert!(format!("{refused:#}").contains("kept"), "{refused:#}");
+        settings
+            .save_blocking()
+            .expect_err("and refused again when tried again");
 
-        let after = Settings::load(scratch.settings_file());
-        assert_eq!(after.theme(), "Midnight", "the theme was lost");
-        assert_eq!(after.general().font_size(), 20., "the type size was lost");
-        assert_eq!(after.granted_to("eugen/probe"), ["tabs.read"]);
+        assert_eq!(
+            fs::read_to_string(scratch.settings_file()).expect("readable"),
+            broken,
+            "the save wrote over a file that does not read"
+        );
         let copies: Vec<_> = fs::read_dir(scratch.path.join(BACKUP_DIRECTORY))
             .expect("a copy was kept")
             .map(|entry| entry.expect("readable").path())
@@ -3210,6 +3373,15 @@ mod tests {
             broken,
             "the copy is not the person's text"
         );
+
+        // Fixed by hand, the same changes land.
+        fs::write(scratch.settings_file(), r#"{"theme": "Midnight"}"#).expect("writable");
+        settings
+            .save_blocking()
+            .expect("the save lands once the file reads");
+        let after = Settings::load(scratch.settings_file());
+        assert_eq!(after.theme(), "Midnight");
+        assert_eq!(after.granted_to("eugen/probe"), ["tabs.read"]);
     }
 
     #[test]
@@ -3240,7 +3412,7 @@ mod tests {
         .expect("the file should be writable");
         let document = read_document(&scratch.settings_file());
 
-        window.adopt(document, &Changes::default());
+        window.adopt(document, &mut Changes::default());
         assert_eq!(window.theme(), "Edited by hand");
         assert_eq!(window.granted_to("eugen/probe"), ["tabs.read"]);
         assert!(window.changes().is_empty(), "adopting is not a change");
@@ -3255,56 +3427,181 @@ mod tests {
 
     #[test]
     fn test_adopting_a_newer_file_keeps_what_this_window_has_not_written_yet() {
-        // A tabs panel being dragged is a width changed and not yet saved,
-        // and a save on its way is a change the file does not say yet: a
-        // look at the file in the middle of either must not take it back.
+        // A switch flipped and not yet saved, and a save on its way, are
+        // changes the file does not say yet: a look at the file in the
+        // middle of either must not take them back.
         let scratch = ScratchDirectory::new("adopt-unsaved");
         let mut window = Settings::load(scratch.settings_file());
         window.set_theme("Mine, on its way");
-        let pending = window.take_changes();
+        let mut pending = window.take_changes();
         window.set_general(GeneralOptions {
-            tabs_panel_width: 300.,
+            audible_bell: true,
             ..window.general()
         });
 
         let mut elsewhere = Map::new();
         elsewhere.insert(THEME_KEY.to_owned(), Value::from("From another window"));
-        elsewhere.insert("font_size".to_owned(), Value::from(20));
-        window.adopt(elsewhere, &pending);
+        elsewhere.insert("restore_session".to_owned(), Value::from(false));
+        window.adopt(elsewhere, &mut pending);
 
         assert_eq!(window.theme(), "Mine, on its way");
-        assert_eq!(window.general().tabs_panel_width, 300.);
-        assert_eq!(window.general().font_size(), 20.);
-        // The width is still this window's to save; the theme is the
-        // pending save's, and is not said twice.
+        assert!(window.general().audible_bell);
+        assert!(!window.general().restore_session);
+        // The bell is still this window's to save; the theme is the pending
+        // save's, and is not said twice.
         let changes = window.changes();
-        assert!(
-            changes.values.contains_key("tabs_panel_width"),
-            "{changes:?}"
-        );
+        assert!(changes.values.contains_key("audible_bell"), "{changes:?}");
         assert!(!changes.values.contains_key(THEME_KEY), "{changes:?}");
     }
 
     #[test]
-    fn test_changes_put_back_under_newer_ones_lose_to_them() {
-        let mut older = Changes::default();
-        older
+    fn test_a_window_keeps_its_own_zoom_and_panel_while_another_saves_them() {
+        // Zooming one window is not zooming them all, and a panel dragged in
+        // one must not jump in another. The keys are still written and
+        // merged, so the last one written is what the next window opens with.
+        let scratch = ScratchDirectory::new("window-keys");
+        let (mut here, mut elsewhere) = two_windows(&scratch);
+        elsewhere.set_general(GeneralOptions {
+            font_size: 20.,
+            tabs_panel_width: 300.,
+            show_tabs_panel: false,
+            audible_bell: true,
+            ..elsewhere.general()
+        });
+        elsewhere.save_blocking().expect("the other window saves");
+
+        here.adopt(
+            read_document(&scratch.settings_file()),
+            &mut Changes::default(),
+        );
+        let general = here.general();
+        assert_eq!(
+            general.font_size(),
+            DEFAULT_FONT_SIZE,
+            "zoomed by another window"
+        );
+        assert_eq!(general.tabs_panel_width, DEFAULT_TABS_PANEL_WIDTH);
+        assert!(
+            general.show_tabs_panel,
+            "the panel was hidden by another window"
+        );
+        assert!(
+            general.audible_bell,
+            "the rest of the change did not arrive"
+        );
+        assert!(here.changes().is_empty(), "keeping its own is not a change");
+
+        // A save of something else here leaves the other window's values in
+        // the file; this window's own zoom, when it zooms, is the last word.
+        here.set_theme("Midnight");
+        here.save_blocking().expect("this window saves");
+        assert_eq!(
+            Settings::load(scratch.settings_file())
+                .general()
+                .font_size(),
+            20.
+        );
+        here.set_general(GeneralOptions {
+            font_size: 14.,
+            ..here.general()
+        });
+        here.save_blocking().expect("this window saves its zoom");
+        assert_eq!(
+            Settings::load(scratch.settings_file())
+                .general()
+                .font_size(),
+            14.
+        );
+    }
+
+    #[test]
+    fn test_a_grant_given_over_an_answer_changed_since_is_set_aside() {
+        // Window B allowed a plugin and its save failed, or waited behind the
+        // lock; meanwhile window A revoked it. B's grant must not land over
+        // A's revoke — not when B's save is tried again, and not when B looks
+        // at the file — and B must take the file's answer.
+        let scratch = ScratchDirectory::new("grant-cas");
+        let mut first = Settings::load(scratch.settings_file());
+        first.set_granted("eugen/probe", vec![String::from("tabs.read")]);
+        first.save_blocking().expect("the first grant");
+
+        let (mut a, mut b) = two_windows(&scratch);
+        b.set_granted(
+            "eugen/probe",
+            vec![String::from("tabs.read"), String::from("clipboard")],
+        );
+        let mut waiting = b.take_changes();
+        a.set_granted("eugen/probe", Vec::new());
+        a.save_blocking().expect("A's revoke");
+
+        let stale =
+            Settings::write_changes(&scratch.settings_file(), &waiting).expect("B's save runs");
+        assert_eq!(stale, ["eugen/probe"]);
+        assert!(
+            Settings::load(scratch.settings_file())
+                .granted_to("eugen/probe")
+                .is_empty(),
+            "B's older grant landed over A's newer revoke"
+        );
+
+        // And when B looks, the revoke stands and nothing is left waiting.
+        b.adopt(read_document(&scratch.settings_file()), &mut waiting);
+        assert!(b.granted_to("eugen/probe").is_empty());
+        assert!(waiting.is_empty(), "{waiting:?}");
+
+        // A revoke lands whatever the file says: here over a grant that was
+        // widened in another window after this one read it.
+        let mut c = Settings::load(scratch.settings_file());
+        c.set_granted("eugen/other", vec![String::from("tabs.read")]);
+        c.save_blocking().expect("C grants");
+        let mut d = Settings::load(scratch.settings_file());
+        c.set_granted(
+            "eugen/other",
+            vec![String::from("tabs.read"), String::from("clipboard")],
+        );
+        c.save_blocking().expect("C widens the grant");
+        d.set_granted("eugen/other", Vec::new());
+        d.save_blocking().expect("D revokes the grant it saw");
+        assert!(
+            Settings::load(scratch.settings_file())
+                .granted_to("eugen/other")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_a_missing_file_switches_no_plugin_back_on_and_revokes_nothing() {
+        let scratch = ScratchDirectory::new("missing-adopt");
+        let mut window = Settings::load(scratch.settings_file());
+        window.set_plugin_disabled("eugen/off", true);
+        window.set_granted("eugen/probe", vec![String::from("tabs.read")]);
+        window.set_theme("Midnight");
+        let _ = window.take_changes();
+
+        window.adopt_missing(&mut Changes::default());
+        assert_eq!(window.disabled_plugins(), ["eugen/off"]);
+        assert_eq!(window.granted_to("eugen/probe"), ["tabs.read"]);
+        assert_eq!(window.theme(), crate::theme::DEFAULT_NAME);
+    }
+
+    #[test]
+    fn test_what_was_written_is_forgotten_and_what_changed_since_is_kept() {
+        let mut written = Changes::default();
+        written
             .values
             .insert("theme".to_owned(), Some(Value::from("old")));
-        older
+        written
             .values
             .insert("font_size".to_owned(), Some(Value::from(20)));
+        let mut pending = written.clone();
         let mut newer = Changes::default();
         newer
             .values
             .insert("theme".to_owned(), Some(Value::from("new")));
+        pending.then(newer);
 
-        newer.under(older.clone());
-        assert_eq!(newer.values["theme"], Some(Value::from("new")));
-        assert_eq!(newer.values["font_size"], Some(Value::from(20)));
-
-        let mut later = older;
-        later.then(newer.clone());
-        assert_eq!(later, newer);
+        pending.forget_written(&written);
+        assert_eq!(pending.values.len(), 1, "{pending:?}");
+        assert_eq!(pending.values["theme"], Some(Value::from("new")));
     }
 }

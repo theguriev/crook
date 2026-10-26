@@ -35,19 +35,21 @@ use std::time::Duration;
 
 use serde_json::{Map, Value};
 
-/// How long a look waits for a file that was not there to come back.
+/// How long the file has to stay gone, look after look, before a look says
+/// so.
 ///
 /// An editor that saves by moving the old file aside and writing a new one
-/// leaves a moment with no file at all. A look that fell in it would read
-/// every setting as gone — every grant revoked, the theme back to the
-/// default — and the next look would put them all back. A file still missing
-/// this much later is one somebody deleted.
-const MISSING_CONFIRM: Duration = Duration::from_millis(150);
+/// leaves a moment with no file at all, and one on a slow disk or a network
+/// home leaves a longer one. A look that fell in it and said "no file" would
+/// put every option back to its default for a moment and then back again.
+/// Even past this the window takes a missing file as "do not know" for the
+/// plugins: see `Settings::adopt_missing`.
+const MISSING_FOR: Duration = Duration::from_secs(3);
 
 /// What a look found.
 #[derive(Debug)]
 pub enum OnDisk {
-    /// No file: somebody deleted it, which is every setting at its default.
+    /// No file, look after look for [`MISSING_FOR`]: somebody deleted it.
     Missing,
     /// A file that does not read, and why. Not adopted: what the window has
     /// is the last thing the file said that did read, and a half-saved edit
@@ -203,15 +205,13 @@ fn look(
 ) {
     // `None` until the first look, which is therefore always delivered.
     let mut last: Option<Option<Vec<u8>>> = None;
+    // Since when the looks have found no file.
+    let mut gone_since: Option<std::time::Instant> = None;
     loop {
         std::thread::sleep(every);
-        let again = {
-            let mut state = mailbox.lock();
-            if state.closed {
-                return;
-            }
-            std::mem::take(&mut state.again)
-        };
+        if mailbox.lock().closed {
+            return;
+        }
 
         let stamped = stamp();
         let bytes = match read(path) {
@@ -223,6 +223,17 @@ fn look(
                 continue;
             }
         };
+        if bytes.is_none() {
+            let since = *gone_since.get_or_insert_with(std::time::Instant::now);
+            if since.elapsed() < MISSING_FOR {
+                continue;
+            }
+        } else {
+            gone_since = None;
+        }
+        // Taken only by a look that would deliver, so that one waiting out a
+        // missing file does not use it up.
+        let again = std::mem::take(&mut mailbox.lock().again);
         if !again && last.as_ref() == Some(&bytes) {
             continue;
         }
@@ -249,19 +260,11 @@ fn look(
     }
 }
 
-/// The file's bytes, or `None` for no file — once it has stayed gone for
-/// [`MISSING_CONFIRM`].
+/// The file's bytes, or `None` for no file.
 fn read(path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
-    let once = |path: &std::path::Path| match std::fs::read(path) {
+    match std::fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
-    };
-    match once(path)? {
-        Some(bytes) => Ok(Some(bytes)),
-        None => {
-            std::thread::sleep(MISSING_CONFIRM);
-            once(path)
-        }
     }
 }
