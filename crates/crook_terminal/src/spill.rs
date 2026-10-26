@@ -5,7 +5,8 @@
 //! the two things a long-lived open block does to them all the time. Rows
 //! arrive at the end, a slice of output's worth at a time, and go into the
 //! last piece where they are harvested, with no store built for them on the
-//! way. And once the scrollback is full the oldest go, a piece at a time,
+//! way. And once the scrollback is full the oldest go, a row at a time as
+//! far as anything reading them can tell, and a piece at a time underneath,
 //! which drops the piece and moves nothing else.
 
 use std::collections::VecDeque;
@@ -23,7 +24,13 @@ pub(crate) const PIECE_ROWS: usize = 512;
 #[derive(Debug, Default)]
 pub(crate) struct Spill {
     pieces: VecDeque<BlockRows>,
+    /// How many rows the pieces hold, [`Self::skip`] among them.
     rows: usize,
+    /// How many of the first piece's rows are gone, though the piece is
+    /// still held: the scrollback keeps exactly as many rows as it is long,
+    /// and the oldest piece goes only once every row of it has. See
+    /// [`Self::drop_oldest`].
+    skip: usize,
     /// The most rows a piece is filled to: see [`Self::harvest`].
     piece_rows: usize,
     /// Tests: how many rows have been harvested in all, kept or not.
@@ -34,12 +41,12 @@ pub(crate) struct Spill {
 impl Spill {
     /// How many rows there are.
     pub(crate) fn rows(&self) -> usize {
-        self.rows
+        self.rows - self.skip
     }
 
     /// Whether there are none.
     pub(crate) fn is_empty(&self) -> bool {
-        self.rows == 0
+        self.rows() == 0
     }
 
     /// How wide the rows are, or `None` when there are none.
@@ -51,10 +58,12 @@ impl Spill {
     pub(crate) fn clear(&mut self) {
         self.pieces.clear();
         self.rows = 0;
+        self.skip = 0;
     }
 
     /// The piece `row` is in, and its row there.
-    fn locate(&self, mut row: usize) -> Option<(&BlockRows, usize)> {
+    fn locate(&self, row: usize) -> Option<(&BlockRows, usize)> {
+        let mut row = row + self.skip;
         for piece in &self.pieces {
             if row < piece.rows() {
                 return Some((piece, row));
@@ -87,6 +96,7 @@ impl Spill {
 
     /// A copy of the rows in `range`, clamped to the rows there are.
     pub(crate) fn slice(&self, range: Range<usize>) -> BlockRows {
+        let range = range.start + self.skip..range.end.saturating_add(self.skip);
         let mut slice = BlockRows::with_columns(self.columns().unwrap_or(0));
         let mut at = 0;
         for piece in &self.pieces {
@@ -110,6 +120,7 @@ impl Spill {
         self.rows = 0;
         // One store, of every piece, which none of them is laid out for.
         let mut rows = pieces.pop_front().unwrap_or_default();
+        rows.drop_front(std::mem::take(&mut self.skip));
         for piece in pieces {
             rows.append(piece);
         }
@@ -228,21 +239,24 @@ impl Spill {
             let fresh = cut - fill;
             let skipped = fresh.saturating_sub(keep) / piece_rows * piece_rows;
             if every_held_piece_goes && fill + skipped > 0 {
+                let before = self.rows();
                 self.clear();
                 let from = first + (fill + skipped) as i32;
                 self.harvest(term, palette, (from, last), piece_rows);
-                return held_rows + fill + skipped;
+                self.skip = self.rows.saturating_sub(keep);
+                return before + cut - self.rows();
             }
         }
         self.harvest(term, palette, (top, bottom), piece_rows);
         self.drop_oldest(keep)
     }
 
-    /// Lets go of the oldest pieces for as long as at least `keep` rows are
-    /// left: the scrollback is full, and they are the furthest up. Answers
-    /// how many rows went.
+    /// Lets go of the oldest rows past the newest `keep`: the scrollback is
+    /// full, and they are the furthest up. Whole pieces go; the rows of the
+    /// one left first are [`Self::skip`]ped until the rest of it goes too.
+    /// Answers how many rows went.
     pub(crate) fn drop_oldest(&mut self, keep: usize) -> usize {
-        let before = self.rows;
+        let before = self.rows();
         while let Some(front) = self.pieces.front() {
             if self.rows - front.rows() < keep {
                 break;
@@ -250,7 +264,10 @@ impl Spill {
             self.rows -= front.rows();
             self.pieces.pop_front();
         }
-        before - self.rows
+        // And the oldest rows of the piece now first, past `keep`, which go
+        // with it once the rest of it has.
+        self.skip = self.rows.saturating_sub(keep);
+        before - self.rows()
     }
 
     /// Lays the rows out again at `columns`: see [`BlockRows::rewrapped_tracking`].

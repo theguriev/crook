@@ -1524,3 +1524,20 @@ fn a_column_change_on_a_blank_screen_keeps_the_row_the_cursor_is_on() {
         );
     }
 }
+
+#[test]
+fn a_burst_of_screenful_scrolls_keeps_the_scrollback_alike_however_it_is_read() {
+    // `CSI n S` over a short scrollback, fed in reads of every size a pty
+    // hands out: the spilling twin keeps as many lines as the whole one, and
+    // the same ones.
+    for read in [1, 7, 9, 31, 64, 128, 1000, 4096, 16 * 1024] {
+        let mut twins = Twins::new(60);
+        twins.feed(output(0, 40));
+        let burst = format!("\x1b[{ROWS}S").repeat(120);
+        for piece in burst.as_bytes().chunks(read) {
+            twins.feed(piece);
+        }
+        twins.feed(output(40, 45));
+        twins.alike(&format!("after the burst in {read}-byte reads"));
+    }
+}
