@@ -14027,6 +14027,8 @@ impl Workspace {
         let Some(path) = self.settings.path().map(Path::to_owned) else {
             return;
         };
+        // The parked files first, the way a look reads them.
+        let parked = crate::settings::parked_beside(&path).parked;
         let file = match std::fs::read(&path) {
             Ok(bytes) => match crate::settings::parse_document(&bytes) {
                 Ok(document) => OnDisk::Document(document),
@@ -14037,7 +14039,7 @@ impl Workspace {
         let seen = Seen {
             stamp: self.saves.quiet_at(),
             file,
-            parked: crate::settings::parked_beside(&path).parked,
+            parked,
         };
         self.adopt_settings_file(seen, ctx);
     }

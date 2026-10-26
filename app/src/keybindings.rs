@@ -813,26 +813,31 @@ impl PendingSave {
     /// editor for the same command, between the press and the write, goes
     /// with the rest. Lines about every other command stay.
     pub fn write_blocking(&self) -> anyhow::Result<()> {
-        crate::settings::rewrite(&self.path, KEYBINDINGS_LOCK, |_, bytes| {
-            let now = match bytes {
-                None => String::new(),
-                Some(bytes) => String::from_utf8(bytes.to_vec()).with_context(|| {
-                    format!("{} is not text, so it was left alone", self.path.display())
-                })?,
-            };
-            let mut fresh = (*self.with).clone();
-            fresh.document = Document::new(now);
-            fresh.reread();
-            for edit in &self.edits {
-                if fresh.make(edit).is_none() {
-                    anyhow::bail!(
-                        "{} is not a list of bindings, so it was left alone",
-                        self.path.display()
-                    );
+        crate::settings::rewrite(
+            &self.path,
+            KEYBINDINGS_LOCK,
+            |_, bytes| {
+                let now = match bytes {
+                    None => String::new(),
+                    Some(bytes) => String::from_utf8(bytes.to_vec()).with_context(|| {
+                        format!("{} is not text, so it was left alone", self.path.display())
+                    })?,
+                };
+                let mut fresh = (*self.with).clone();
+                fresh.document = Document::new(now);
+                fresh.reread();
+                for edit in &self.edits {
+                    if fresh.make(edit).is_none() {
+                        anyhow::bail!(
+                            "{} is not a list of bindings, so it was left alone",
+                            self.path.display()
+                        );
+                    }
                 }
-            }
-            Ok(fresh.document.text().as_bytes().to_vec())
-        })
+                Ok(fresh.document.text().as_bytes().to_vec())
+            },
+            || {},
+        )
     }
 
     /// Where it would be written.

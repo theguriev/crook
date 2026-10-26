@@ -921,8 +921,12 @@ impl Settings {
         {
             log::warn!("could not write the revokes kept beside the settings: {error:#}");
         }
+        // The parked files before the file they are laid over, the way a
+        // look reads them: one written in and removed in between is then in
+        // the file read, rather than in neither.
+        let parked = parked_beside(&path).parked;
         let mut document = read_document(&path);
-        parked_beside(&path).parked.lay_over(&mut document);
+        parked.lay_over(&mut document);
         Self::from_document(Some(path), document)
     }
 
@@ -1379,38 +1383,47 @@ impl Settings {
             return Ok(Applied::default());
         }
         let mut applied = Applied::default();
-        let mut unparked = Vec::new();
-        rewrite(path, LOCK_FILE, |target, bytes| {
-            let mut document = match bytes {
-                None => Map::new(),
-                Some(bytes) => match parse_document(bytes) {
-                    Ok(document) => document,
-                    Err(why) => {
-                        back_up_unreadable(bytes, target);
-                        bail!(
-                            "{} {why}; what was changed here is kept, and saved once it reads",
-                            path.display()
-                        );
-                    }
-                },
-            };
-            // Read under the lock, and each file removed below only if it is
-            // one read here: a parker never rewrites its file, so a file
-            // read is a file whose every revoke is in what this writes, and
-            // one parked after this read is left for the next save.
-            let parked = parked_beside(path);
-            unparked = parked.read;
-            parked.parked.changes().apply_to(&mut document);
-            applied = changes.apply_to(&mut document);
-            let mut json = serde_json::to_string_pretty(&Value::Object(document))
-                .context("could not serialize the settings")?;
-            // A file a person may open in an editor ends in a newline.
-            json.push('\n');
-            Ok(json.into_bytes())
-        })?;
-        for file in &unparked {
-            let _ = fs::remove_file(file);
-        }
+        let unparked = std::cell::RefCell::new(Vec::new());
+        rewrite(
+            path,
+            LOCK_FILE,
+            |target, bytes| {
+                let mut document = match bytes {
+                    None => Map::new(),
+                    Some(bytes) => match parse_document(bytes) {
+                        Ok(document) => document,
+                        Err(why) => {
+                            back_up_unreadable(bytes, target);
+                            bail!(
+                                "{} {why}; what was changed here is kept, and saved once it reads",
+                                path.display()
+                            );
+                        }
+                    },
+                };
+                // Read under the lock, and each file removed below only if it is
+                // one read here: a parker never rewrites its file, so a file
+                // read is a file whose every revoke is in what this writes, and
+                // one parked after this read is left for the next save.
+                let parked = parked_beside(path);
+                *unparked.borrow_mut() = parked.read;
+                parked.parked.changes().apply_to(&mut document);
+                applied = changes.apply_to(&mut document);
+                let mut json = serde_json::to_string_pretty(&Value::Object(document))
+                    .context("could not serialize the settings")?;
+                // A file a person may open in an editor ends in a newline.
+                json.push('\n');
+                Ok(json.into_bytes())
+            },
+            || {
+                // Inside the lock, right after the rename: removed outside it,
+                // another save could read these and lay them over the file
+                // again in the gap.
+                for file in unparked.borrow().iter() {
+                    let _ = fs::remove_file(file);
+                }
+            },
+        )?;
         for (_, plugin) in &applied.stale {
             log::info!(
                 "{plugin} was answered for elsewhere since it was allowed here; the answer \
@@ -2152,10 +2165,25 @@ pub fn parked_files(settings: &Path) -> Vec<PathBuf> {
 }
 
 /// Each parked file beside the settings at `settings`, with its bytes.
+///
+/// A file that is there and cannot be read is named in the log, the way one
+/// that does not parse is, and left where it is. One gone since the listing
+/// was removed by a save that wrote it in, and says nothing.
 pub fn parked_snapshot(settings: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     parked_files(settings)
         .into_iter()
-        .filter_map(|file| fs::read(&file).ok().map(|bytes| (file, bytes)))
+        .filter_map(|file| match fs::read(&file) {
+            Ok(bytes) => Some((file, bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                log::warn!(
+                    "could not read {} ({error}); it is kept as it is, and what it parked is \
+                     not known",
+                    file.display()
+                );
+                None
+            }
+        })
         .collect()
 }
 
@@ -2336,7 +2364,7 @@ fn hold_the_lock(path: &Path, name: &str) -> Result<Option<fs::File>> {
         .truncate(false)
         .open(&lock)
         .with_context(|| format!("could not open {}", lock.display()))?;
-    match file.try_lock() {
+    match retrying_interrupted(|| file.try_lock()) {
         Ok(()) => return Ok(Some(file)),
         Err(fs::TryLockError::WouldBlock) => {}
         Err(fs::TryLockError::Error(error)) => {
@@ -2476,7 +2504,7 @@ impl LockWaiter {
     /// The thread: waits in the system's queue, then hands the lock to a
     /// wait still waiting, or lets it go with nobody left.
     fn take_and_hand_on(self: Arc<Self>, file: fs::File, lock: &Path) {
-        let locked = file.lock();
+        let locked = retrying_interrupted(|| file.lock());
         // Out of the list first, so that a wait arriving from here on starts
         // a thread of its own rather than waiting on one that has finished.
         {
@@ -2520,6 +2548,40 @@ fn lock_waited_for(lock: &Path) -> bool {
         .contains_key(lock)
 }
 
+/// Runs a lock call again for as long as a signal interrupts it.
+///
+/// `File::lock` and `File::try_lock` hand `EINTR` back rather than trying
+/// again, and an interrupted wait read as a file system that keeps no locks:
+/// the save went ahead without one. Only an error that is not an
+/// interruption means that.
+fn retrying_interrupted<E: Interrupted>(mut call: impl FnMut() -> Result<(), E>) -> Result<(), E> {
+    loop {
+        match call() {
+            Err(error) if error.is_interrupted() => continue,
+            done => return done,
+        }
+    }
+}
+
+/// An error a lock call can hand back, which may be a signal arriving.
+trait Interrupted {
+    /// Whether this is a signal interrupting the call, which is to be tried
+    /// again.
+    fn is_interrupted(&self) -> bool;
+}
+
+impl Interrupted for std::io::Error {
+    fn is_interrupted(&self) -> bool {
+        self.kind() == std::io::ErrorKind::Interrupted
+    }
+}
+
+impl Interrupted for fs::TryLockError {
+    fn is_interrupted(&self) -> bool {
+        matches!(self, fs::TryLockError::Error(error) if error.is_interrupted())
+    }
+}
+
 /// How many times a write with no lock to hold makes itself again over a
 /// file that changed under it before giving up. See [`rewrite`].
 const UNLOCKED_ATTEMPTS: u32 = 5;
@@ -2539,6 +2601,7 @@ pub(crate) fn rewrite(
     path: &Path,
     lock: &str,
     mut make: impl FnMut(&Path, Option<&[u8]>) -> Result<Vec<u8>>,
+    landed: impl FnOnce(),
 ) -> Result<()> {
     if let Some(directory) = path.parent() {
         ensure_directory(directory)?;
@@ -2553,7 +2616,11 @@ pub(crate) fn rewrite(
             attempt += 1;
             continue;
         }
-        return write_then_rename(&temporary_path(target), target, &contents);
+        write_then_rename(&temporary_path(target), target, &contents)?;
+        // Still under the lock: whatever the write made redundant goes
+        // before another save can read it again.
+        landed();
+        return Ok(());
     }
 }
 
@@ -4579,5 +4646,40 @@ mod tests {
         let after = Settings::load(scratch.settings_file());
         assert!(after.granted_to("eugen/probe").is_empty());
         assert_eq!(after.revisions.get("eugen/probe"), Some(&u64::MAX));
+    }
+
+    #[test]
+    fn test_a_lock_call_interrupted_by_a_signal_is_tried_again() {
+        // `EINTR` read as "no locks here", and the save went ahead without
+        // one. Only an error that is not an interruption ends the wait.
+        let mut calls = 0;
+        let locked = retrying_interrupted(|| {
+            calls += 1;
+            match calls {
+                1 | 2 => Err(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+                _ => Ok(()),
+            }
+        });
+        assert!(locked.is_ok());
+        assert_eq!(calls, 3);
+
+        let mut calls = 0;
+        let tried = retrying_interrupted(|| {
+            calls += 1;
+            match calls {
+                1 => Err(fs::TryLockError::Error(std::io::Error::from(
+                    std::io::ErrorKind::Interrupted,
+                ))),
+                _ => Err(fs::TryLockError::WouldBlock),
+            }
+        });
+        assert!(matches!(tried, Err(fs::TryLockError::WouldBlock)));
+
+        let unsupported =
+            retrying_interrupted(|| Err(std::io::Error::from(std::io::ErrorKind::Unsupported)));
+        assert_eq!(
+            unsupported.map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::Unsupported)
+        );
     }
 }
