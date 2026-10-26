@@ -143,7 +143,7 @@ fn finished(emulator: &Emulator) -> Vec<Finished> {
         .map(|block| {
             (
                 block.command.clone(),
-                block.rows.clone(),
+                (*block.rows).clone(),
                 block.output_from,
                 block.images.iter().map(|image| image.row).collect(),
             )
@@ -728,6 +728,60 @@ fn bench_rss_spilling() {
 #[ignore = "a measurement; run it in release mode, alone"]
 fn bench_rss_grid_keeps_all() {
     rss_of_ten_panes(10_000);
+}
+
+/// Resident memory of a pane's finished blocks — two hundred commands of
+/// two thousand log lines at 120 columns — alone, with a list of them held
+/// the way the application holds one, and with the copy of every block the
+/// application used to make:
+/// `cargo test --release -p crook_terminal --lib bench_rss_finished -- --ignored --nocapture`.
+#[test]
+#[ignore = "a measurement; run it in release mode, alone"]
+fn bench_rss_finished_blocks_and_a_list_of_them() {
+    let mut emulator = Emulator::with_grid_lines(
+        TerminalSize::new(120, 40),
+        10_000,
+        GRID_LINES,
+        Palette::default(),
+    );
+    let before = rss_kib();
+    let lines = log_reads(2000).concat();
+    for _ in 0..200 {
+        emulator.advance(format!("{A}$ {B}make\r\n{C}").as_bytes());
+        emulator.advance(&lines);
+        emulator.advance(b"\x1b]133;D;0\x07");
+    }
+    let alone = rss_kib();
+    let rows: usize = emulator
+        .blocks()
+        .iter()
+        .map(|block| block.rows.rows())
+        .sum();
+    let bytes: usize = emulator
+        .blocks()
+        .iter()
+        .map(|block| block.rows.memory_usage())
+        .sum();
+    let shared = emulator.blocks().to_vec();
+    let with_list = rss_kib();
+    let copied: Vec<Block> = emulator
+        .blocks()
+        .iter()
+        .map(|block| Block {
+            rows: Arc::new((*block.rows).clone()),
+            ..(**block).clone()
+        })
+        .collect();
+    let with_copies = rss_kib();
+    println!(
+        "{} blocks, {rows} rows, {:.1} MiB of rows; resident {:.0} MB alone, {:.0} MB with a list of them, {:.0} MB with a copy of every block",
+        shared.len(),
+        bytes as f64 / 1048576.,
+        (alone - before) as f64 / 1024.,
+        (with_list - before) as f64 / 1024.,
+        (with_copies - before) as f64 / 1024.,
+    );
+    drop((shared, copied));
 }
 
 #[test]

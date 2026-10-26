@@ -1543,13 +1543,23 @@ impl Emulator {
         self.line_editor
     }
 
-    /// The finished blocks, oldest first.
-    pub fn blocks(&self) -> &[Block] {
+    /// The finished blocks, oldest first, each shared with whoever clones it
+    /// rather than copied: see [`Block`].
+    pub fn blocks(&self) -> &[Arc<Block>] {
         self.blocks.finished()
     }
 
+    /// Goes up whenever [`Self::blocks`] changes in any way, which a copy of
+    /// the list compares against the count it was made at. Blocks are added
+    /// and evicted, and a block's pictures can go while it stays: the block
+    /// is replaced by one around the same rows, and a copy that only looked
+    /// for new blocks at the end would keep every picture it ever had.
+    pub fn blocks_changes(&self) -> u64 {
+        self.blocks.changes()
+    }
+
     /// One finished block by id, or `None` once it has been evicted.
-    pub fn block(&self, id: BlockId) -> Option<&Block> {
+    pub fn block(&self, id: BlockId) -> Option<&Arc<Block>> {
         self.blocks
             .finished()
             .binary_search_by_key(&id, |block| block.id)
@@ -1574,7 +1584,7 @@ impl Emulator {
     /// Answers the finished blocks it let go of, oldest first, for a caller
     /// with something to keep of them: what the last command exited with
     /// still answers whether the pane's command has finished.
-    pub fn clear_blocks(&mut self) -> Vec<Block> {
+    pub fn clear_blocks(&mut self) -> Vec<Arc<Block>> {
         let dropped = self.blocks.clear(&mut self.term);
         self.above = 0;
         self.dirty = true;

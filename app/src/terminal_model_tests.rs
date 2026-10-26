@@ -2226,3 +2226,90 @@ fn a_shell_whose_pane_went_before_the_pool_got_to_it_is_never_spawned() {
         "a window would wait for a shell that was never spawned"
     );
 }
+
+/// One command, from its prompt to the prompt after it, printing `output`.
+fn command(output: &[u8]) -> Vec<u8> {
+    let mut bytes = b"\x1b]133;A\x07$ \x1b]133;B\x07work\r\n\x1b]133;C\x07".to_vec();
+    bytes.extend_from_slice(output);
+    bytes.extend_from_slice(b"\x1b]133;D;0\x07");
+    bytes
+}
+
+#[test]
+fn a_finished_commands_rows_are_held_once_however_many_lists_hold_them() {
+    // The list a frame paints from and the emulator's own are one list of
+    // blocks: a command's output, which can be millions of rows over a long
+    // session, is in memory once and not once more for every list.
+    let Some(shared) = session() else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    let lines: String = (0..2000).map(|n| format!("line {n}\r\n")).collect();
+    shared.feed(&command(lines.as_bytes()));
+    shared.publish();
+    let first = shared.blocks();
+    shared.feed(&command(b"more\r\n"));
+    shared.publish();
+    let second = shared.blocks();
+
+    let terminal = shared.lock();
+    let own = terminal.blocks();
+    assert_eq!(own.len(), 2);
+    assert_eq!(second.len(), 2);
+    for (at, block) in own.iter().enumerate() {
+        let held = second.get(at).expect("every block is in the list");
+        assert!(Arc::ptr_eq(block, held), "block {at} is a copy");
+    }
+    let rows = &own[0].rows;
+    assert!(rows.rows() > 2000, "{} rows", rows.rows());
+    assert!(Arc::ptr_eq(rows, &first.get(0).expect("the command").rows));
+    assert_eq!(
+        Arc::strong_count(rows),
+        1,
+        "the rows are held by one block, which every list shares"
+    );
+}
+
+#[test]
+fn the_list_lets_go_of_the_pictures_the_emulator_let_go_of() {
+    // The finished blocks' pictures are held to a budget, and the oldest go
+    // first: the blocks stay, without them. A list holding the blocks as
+    // they were when it took them would keep every picture past the budget
+    // for as long as the blocks themselves are kept, which is ten thousand
+    // commands.
+    let Some(shared) = session() else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    // A PNG's signature and header, which is all a picture is read for,
+    // over a cell; as `imgcat` prints it.
+    let picture =
+        b"\x1b]1337;File=width=1;height=1;inline=1:iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAA=\x07";
+    shared.feed(&command(&[&picture[..], b"\r\n"].concat()));
+    shared.publish();
+    let gone = {
+        let history = shared.blocks();
+        let block = history.get(0).expect("the command finished");
+        assert_eq!(block.images.len(), 1, "the picture was not kept");
+        Arc::downgrade(&block.images[0].image)
+    };
+
+    // Each picture weighs sixteen kilobytes at least, and the budget is 256
+    // MiB: two commands of half of that each and a little more go past it.
+    let half = (256 << 20) / (16 << 10) / 2 + 1;
+    for _ in 0..2 {
+        shared.feed(&command(&picture.repeat(half)));
+        shared.publish();
+    }
+
+    let history = shared.blocks();
+    assert_eq!(history.len(), 3);
+    assert!(
+        history.get(0).expect("the first command").images.is_empty(),
+        "the list still has the first command's picture"
+    );
+    assert!(
+        gone.upgrade().is_none(),
+        "something still holds the picture the budget let go of"
+    );
+}

@@ -105,7 +105,7 @@ fn session(columns: u16, rows: u16, commands: &[&str]) -> Session {
     }
 
     Session {
-        finished: BlockHistory::new(emulator.blocks().iter().cloned().map(Arc::new).collect(), 0),
+        finished: BlockHistory::new(emulator.blocks().to_vec(), 0),
         snapshot: emulator.snapshot(),
     }
 }
@@ -220,7 +220,7 @@ fn test_a_folded_line_copies_back_as_the_one_line_it_is() {
     let long = "abcdefghijklmnopqrstuvwxyz";
     emulator.advance(format!("{A}${B}long\r\n{C}{long}\r\n{D}{A}$ ").as_bytes());
     let session = Session {
-        finished: BlockHistory::new(emulator.blocks().iter().cloned().map(Arc::new).collect(), 0),
+        finished: BlockHistory::new(emulator.blocks().to_vec(), 0),
         snapshot: emulator.snapshot(),
     };
 
@@ -236,7 +236,7 @@ fn test_a_wide_character_copies_as_one_character() {
     let mut emulator = Emulator::new(TerminalSize::new(20, 8), 1000, Palette::default());
     emulator.advance(format!("{A}${B}wide\r\n{C}a漢b\r\n{D}{A}$ ").as_bytes());
     let session = Session {
-        finished: BlockHistory::new(emulator.blocks().iter().cloned().map(Arc::new).collect(), 0),
+        finished: BlockHistory::new(emulator.blocks().to_vec(), 0),
         snapshot: emulator.snapshot(),
     };
 
@@ -272,7 +272,7 @@ fn a_combining_mark_travels_with_its_letter_through_the_reconstruction() {
     // characters.
     emulator.advance(format!("{A}${B}accent\r\n{C}cafe\u{0301}\r\n{D}{A}$ ").as_bytes());
     let session = Session {
-        finished: BlockHistory::new(emulator.blocks().iter().cloned().map(Arc::new).collect(), 0),
+        finished: BlockHistory::new(emulator.blocks().to_vec(), 0),
         snapshot: emulator.snapshot(),
     };
 
@@ -292,7 +292,7 @@ fn a_double_click_keeps_a_combining_mark_on_its_word() {
     let mut emulator = Emulator::new(TerminalSize::new(20, 8), 1000, Palette::default());
     emulator.advance(format!("{A}${B}accent\r\n{C}cafe\u{0301}\r\n{D}{A}$ ").as_bytes());
     let session = Session {
-        finished: BlockHistory::new(emulator.blocks().iter().cloned().map(Arc::new).collect(), 0),
+        finished: BlockHistory::new(emulator.blocks().to_vec(), 0),
         snapshot: emulator.snapshot(),
     };
 
@@ -522,7 +522,7 @@ fn a_selection_holds_its_block_while_the_open_one_overflows_the_viewport() {
     emulator.advance(b"FIRST one\r\nFIRST two\r\n");
     emulator.advance(format!("{D}{A}{B}long\r\n{C}").as_bytes());
 
-    let finished = BlockHistory::new(emulator.blocks().iter().cloned().map(Arc::new).collect(), 0);
+    let finished = BlockHistory::new(emulator.blocks().to_vec(), 0);
     let block = finished.get(0).expect("a finished block").clone();
     let selection = Selection::new(
         SelectionKind::Simple,
@@ -644,7 +644,7 @@ fn find_all_lands_every_match_on_its_word_past_wide_and_accented_text() {
     }
     emulator.advance(format!("{D}{A}$ ").as_bytes());
     let session = Session {
-        finished: BlockHistory::new(emulator.blocks().iter().cloned().map(Arc::new).collect(), 0),
+        finished: BlockHistory::new(emulator.blocks().to_vec(), 0),
         snapshot: emulator.snapshot(),
     };
 
@@ -666,7 +666,7 @@ fn find_all_folds_case_outside_ascii_and_lands_on_the_word() {
     emulator.advance("ẞ Ошибка: ОШИБКА\r\n".as_bytes());
     emulator.advance(format!("{D}{A}$ ").as_bytes());
     let session = Session {
-        finished: BlockHistory::new(emulator.blocks().iter().cloned().map(Arc::new).collect(), 0),
+        finished: BlockHistory::new(emulator.blocks().to_vec(), 0),
         snapshot: emulator.snapshot(),
     };
 
@@ -855,7 +855,7 @@ fn folded(line: &str, finished: bool) -> Session {
         emulator.advance(format!("{D}{A}$ ").as_bytes());
     }
     Session {
-        finished: BlockHistory::new(emulator.blocks().iter().cloned().map(Arc::new).collect(), 0),
+        finished: BlockHistory::new(emulator.blocks().to_vec(), 0),
         snapshot: emulator.snapshot(),
     }
 }
@@ -897,7 +897,7 @@ fn narrow(columns: u16, output: &str) -> Session {
     let mut emulator = Emulator::new(TerminalSize::new(columns, 12), 100, Palette::default());
     emulator.advance(format!("{A}{B}x\r\n{C}{output}{D}{A}$ ").as_bytes());
     Session {
-        finished: BlockHistory::new(emulator.blocks().iter().cloned().map(Arc::new).collect(), 0),
+        finished: BlockHistory::new(emulator.blocks().to_vec(), 0),
         snapshot: emulator.snapshot(),
     }
 }
@@ -1006,7 +1006,7 @@ fn printed(columns: u16, lines: &[&str]) -> Session {
     }
     emulator.advance(format!("{D}{A}$ ").as_bytes());
     Session {
-        finished: BlockHistory::new(emulator.blocks().iter().cloned().map(Arc::new).collect(), 0),
+        finished: BlockHistory::new(emulator.blocks().to_vec(), 0),
         snapshot: emulator.snapshot(),
     }
 }

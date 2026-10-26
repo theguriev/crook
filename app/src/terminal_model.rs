@@ -507,9 +507,12 @@ pub enum TerminalUpdate {
 
 /// The finished blocks of one pane, as the surface holds them.
 ///
-/// One [`Arc`] per block rather than one per list, because the list is
-/// append-only: a batch that closes one command clones a pointer per block
-/// that was already there and copies the rows of exactly the new one. The
+/// The emulator's own blocks, not copies of them: each is an [`Arc`] the
+/// emulator holds too, so a batch that closes one command clones a pointer
+/// per block and copies no rows at all, and a pane's finished output is in
+/// memory once however many lists hold it. A block the emulator replaced —
+/// its pictures let go of under the budget — is replaced here at the next
+/// sync, so what the pictures weigh is bounded here as it is there. The
 /// whole structure is behind another `Arc`, so a frame takes the history for
 /// the cost of a pointer.
 ///
@@ -527,6 +530,9 @@ pub struct BlockHistory {
     /// What `evicted` came to when the pane was last cleared. See
     /// [`Self::evicted_since_clear`].
     cleared_at: usize,
+    /// The emulator's count of changes to its list when this was made: see
+    /// `crook_terminal::Terminal::blocks_changes`.
+    changes: u64,
 }
 
 impl BlockHistory {
@@ -537,6 +543,7 @@ impl BlockHistory {
             blocks,
             evicted,
             cleared_at: 0,
+            changes: 0,
         }
     }
 
@@ -2302,7 +2309,7 @@ impl TerminalHandle {
     /// come back from under the same lock, so a command that finishes while
     /// the clear waits for it is among them rather than lost between a look
     /// at the history and the clear.
-    pub fn clear_blocks(&self) -> Vec<Block> {
+    pub fn clear_blocks(&self) -> Vec<Arc<Block>> {
         self.drive(Terminal::clear_blocks)
     }
 
@@ -3052,37 +3059,37 @@ impl Shared {
             .clone()
     }
 
-    /// Brings the held block list up to date with the emulator's, cloning the
-    /// rows of the blocks that are new and the pointers of the ones that are
-    /// not.
+    /// Brings the held block list up to date with the emulator's, cloning
+    /// the pointer of every block and the rows of none: the blocks are the
+    /// emulator's own. See [`BlockHistory`].
+    ///
+    /// The whole list rather than the blocks new at its end, because a block
+    /// can change while it stays: the emulator lets go of the oldest
+    /// pictures by replacing their blocks, and a list that kept its own
+    /// pointers to the blocks it had would keep every picture they ever
+    /// held. Only when the emulator says its list changed, so a publication
+    /// with no command finished costs a comparison.
     ///
     /// Called under the same lock acquisition that builds a snapshot, because
     /// the two are one picture: a frame that had the new block but the old
     /// live-block anchor would paint the same rows twice.
     fn sync_blocks(&self, terminal: &Terminal) {
         let mut held = self.blocks.lock().unwrap_or_else(PoisonError::into_inner);
-        let evicted = terminal.blocks_evicted();
-        let cleared_at = terminal.blocks_cleared_at();
-        let finished = terminal.blocks();
-        if held.evicted == evicted && held.cleared_at == cleared_at && held.len() == finished.len()
-        {
+        let changes = terminal.blocks_changes();
+        if held.changes == changes {
             return;
         }
-
-        // What the emulator dropped off the front, dropped here too. The rest
-        // is still the same list with more on the end, because ids are handed
-        // out in order and never reused.
-        let dropped = evicted.saturating_sub(held.evicted);
-        let mut blocks: Vec<Arc<Block>> = held.iter().skip(dropped).cloned().collect();
-        blocks.truncate(finished.len());
-        blocks.extend(
-            finished
-                .iter()
-                .skip(blocks.len())
-                .map(|block| Arc::new(block.clone())),
-        );
-
-        *held = Arc::new(BlockHistory::new(blocks, evicted).cleared_at(cleared_at));
+        let history = BlockHistory {
+            changes,
+            ..BlockHistory::new(terminal.blocks().to_vec(), terminal.blocks_evicted())
+                .cleared_at(terminal.blocks_cleared_at())
+        };
+        // The list it replaces is let go of after the slot is, which holds
+        // the last pointer to any block evicted since: its rows are freed
+        // with nothing waiting on this slot.
+        let replaced = std::mem::replace(&mut *held, Arc::new(history));
+        drop(held);
+        drop(replaced);
     }
 
     fn take_events(&self) -> Vec<TerminalEvent> {

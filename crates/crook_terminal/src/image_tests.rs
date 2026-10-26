@@ -885,3 +885,45 @@ fn emulator_with_cells() -> Emulator {
         Palette::default(),
     )
 }
+
+#[test]
+fn finished_blocks_losing_their_pictures_keep_the_rows_every_copy_shares() {
+    // A copy of the finished list holds the very blocks the emulator does.
+    // When the budget takes the oldest block's pictures, that block is
+    // replaced by one around the same rows — not copied rows and all — and
+    // the change is counted, which is how the copy learns to take the new one.
+    let mut emulator = Emulator::new(
+        TerminalSize::new(200, 6).with_cell_size(10, 20),
+        1000,
+        Palette::default(),
+    );
+    let command = |output: &[u8]| {
+        let mut bytes = b"\x1b]133;A\x07$ \x1b]133;B\x07\x1b]133;C\x07".to_vec();
+        bytes.extend_from_slice(output);
+        bytes.extend_from_slice(b"\r\n\x1b]133;D;0\x07");
+        bytes
+    };
+    let header = osc("", &png(10, 10));
+    emulator.advance(&command(&[&header[..], b"\r\nfirst"].concat()));
+    let copy = emulator.blocks().to_vec();
+    assert_eq!(copy[0].images.len(), 1);
+    let changes = emulator.blocks_changes();
+
+    let half = MAX_IMAGE_BYTES / PICTURE_FLOOR / 2 + 1;
+    for _ in 0..2 {
+        emulator.advance(&command(&header.repeat(half)));
+    }
+
+    let first = &emulator.blocks()[0];
+    assert!(first.images.is_empty(), "the oldest picture was kept");
+    assert!(
+        !Arc::ptr_eq(first, &copy[0]),
+        "the shared block was changed"
+    );
+    assert!(
+        Arc::ptr_eq(&first.rows, &copy[0].rows),
+        "the block was copied rows and all"
+    );
+    assert_eq!(first.rows.to_text(), copy[0].rows.to_text());
+    assert!(emulator.blocks_changes() > changes);
+}
