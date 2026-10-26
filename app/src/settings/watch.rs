@@ -67,6 +67,9 @@ pub struct Seen {
     pub stamp: Option<u64>,
     /// What the file held.
     pub file: OnDisk,
+    /// What a Crook that could not write the file parked beside it. See
+    /// [`super::Parked`].
+    pub parked: super::Parked,
 }
 
 /// The look at one file, for as long as this is kept.
@@ -196,6 +199,10 @@ impl Future for Next {
     }
 }
 
+/// What one look read: the settings file's bytes and the parked file's,
+/// each `None` for no file.
+type Bytes = (Option<Vec<u8>>, Option<Vec<u8>>);
+
 /// The thread: a look every `every` until the window goes.
 fn look(
     path: &std::path::Path,
@@ -204,7 +211,7 @@ fn look(
     mailbox: &Mailbox,
 ) {
     // `None` until the first look, which is therefore always delivered.
-    let mut last: Option<Option<Vec<u8>>> = None;
+    let mut last: Option<Bytes> = None;
     // Since when the looks have found no file.
     let mut gone_since: Option<std::time::Instant> = None;
     loop {
@@ -214,6 +221,11 @@ fn look(
         }
 
         let stamped = stamp();
+        // The parked revokes beside the file are part of what it says: a
+        // change to either is a change.
+        let parked = read(&path.with_file_name(super::PARKED_FILE))
+            .ok()
+            .flatten();
         let bytes = match read(path) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -234,10 +246,16 @@ fn look(
         // Taken only by a look that would deliver, so that one waiting out a
         // missing file does not use it up.
         let again = std::mem::take(&mut mailbox.lock().again);
-        if !again && last.as_ref() == Some(&bytes) {
+        let seen = (bytes, parked);
+        if !again && last.as_ref() == Some(&seen) {
             continue;
         }
-        last = Some(bytes.clone());
+        last = Some(seen.clone());
+        let (bytes, parked) = seen;
+        let parked = parked
+            .and_then(|bytes| super::parse_document(&bytes).ok())
+            .map(|document| super::Parked::from_document(&document))
+            .unwrap_or_default();
 
         let file = match bytes {
             None => OnDisk::Missing,
@@ -251,6 +269,7 @@ fn look(
             state.seen = Some(Seen {
                 stamp: stamped,
                 file,
+                parked,
             });
             state.waker.take()
         };
@@ -266,5 +285,86 @@ fn read(path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
         Ok(bytes) => Ok(Some(bytes)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
+    }
+}
+
+/// Runs `work` on a thread of its own and hands back a future of its answer,
+/// for the window's chain to wait on.
+///
+/// For the settings' and the keybindings' writes, and for the pause before
+/// one is tried again. Either can wait — for another Crook's lock, for the
+/// pause itself — and a wait on the background pool holds a worker for all
+/// of it: see `crate::PARKED_WORKERS`. A thread that cannot be started runs
+/// `work` here and now, which is a frame late rather than a change lost.
+pub fn on_a_thread<T: Send + 'static>(
+    name: &str,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> impl Future<Output = T> + 'static {
+    let slot: Arc<Mutex<Answer<T>>> = Arc::new(Mutex::new(Answer {
+        value: None,
+        waker: None,
+    }));
+    // Shared with the thread, so that the work is still here to do if the
+    // thread never starts.
+    let job = Arc::new(Mutex::new(Some(work)));
+    let (filling, taking) = (slot.clone(), job.clone());
+    let started = std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || {
+            let work = taking.lock().unwrap_or_else(PoisonError::into_inner).take();
+            if let Some(work) = work {
+                fill(&filling, work());
+            }
+        });
+    if let Err(error) = started {
+        log::warn!("could not start {name}: {error}; doing it here instead");
+        let work = job.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(work) = work {
+            fill(&slot, work());
+        }
+    }
+    Answered { slot }
+}
+
+/// A future that is ready once `after` has passed, waited out on a thread.
+pub fn after(after: Duration) -> impl Future<Output = ()> + 'static {
+    on_a_thread("crook-settings-retry", move || std::thread::sleep(after))
+}
+
+/// Where a thread's answer waits for the future that takes it.
+struct Answer<T> {
+    value: Option<T>,
+    waker: Option<Waker>,
+}
+
+/// Puts the answer where the future will find it, and wakes the future.
+fn fill<T>(slot: &Mutex<Answer<T>>, value: T) {
+    let waker = {
+        let mut answer = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        answer.value = Some(value);
+        answer.waker.take()
+    };
+    if let Some(waker) = waker {
+        waker.wake();
+    }
+}
+
+/// The future [`on_a_thread`] hands back.
+struct Answered<T> {
+    slot: Arc<Mutex<Answer<T>>>,
+}
+
+impl<T> Future for Answered<T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<T> {
+        let mut answer = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+        match answer.value.take() {
+            Some(value) => Poll::Ready(value),
+            None => {
+                answer.waker = Some(ctx.waker().clone());
+                Poll::Pending
+            }
+        }
     }
 }

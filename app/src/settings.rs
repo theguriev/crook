@@ -95,6 +95,14 @@ const DISABLED_PLUGINS_KEY: &str = "disabled_plugins";
 /// The key the things a person has allowed a plugin to do are stored under.
 const PLUGIN_GRANTS_KEY: &str = "plugin_grants";
 
+/// The key the revision of each plugin's answer is counted under. See
+/// [`Changes`].
+const PLUGIN_GRANT_REVISIONS_KEY: &str = "plugin_grant_revisions";
+
+/// The file beside the settings that keeps revokes a closing window could
+/// not write. See [`Parked`].
+const PARKED_FILE: &str = "settings.pending.json";
+
 /// The key the lines a person gave their agents' resumes are stored under.
 const RESUME_LINES_KEY: &str = "resume_lines";
 
@@ -826,6 +834,9 @@ pub struct Settings {
     /// know: it is a plugin that has been uninstalled, and forgetting the
     /// grant would mean asking again for something already answered.
     plugin_grants: BTreeMap<String, Vec<String>>,
+    /// How many answers have been written for each plugin, as the file
+    /// counts them: what a grant made here is given over. See [`Changes`].
+    revisions: BTreeMap<String, u64>,
     /// The line each agent is resumed with in a restored pane, by the
     /// agent's program name, where a person has said something other than
     /// the built-in one.
@@ -894,8 +905,33 @@ impl Settings {
     /// Tests point this at a scratch directory; nothing else should need to.
     pub fn load(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let document = read_document(&path);
+        // Revokes a window closing could not write go into the file first —
+        // and, if that cannot be done either, over what this one reads, so
+        // that it does not open running a plugin somebody revoked.
+        let parked = path.with_file_name(PARKED_FILE);
+        if parked.exists()
+            && let Err(error) = Self::write_changes(&path, &Changes::default())
+        {
+            log::warn!("could not write the revokes kept beside the settings: {error:#}");
+        }
+        let mut document = read_document(&path);
+        Parked::read(&parked).lay_over(&mut document);
         Self::from_document(Some(path), document)
+    }
+
+    /// [`Settings::load`], refusing a file that is there and does not read
+    /// rather than reading it as every default.
+    ///
+    /// For the command line's edits, which have nobody to show a page to: a
+    /// revoke worked out against defaults is a revoke of nothing.
+    pub fn load_strictly(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        if let Some(bytes) = read_bytes(&path)?
+            && let Err(why) = parse_document(&bytes)
+        {
+            bail!("{} {why}; put it right and try again", path.display());
+        }
+        Ok(Self::load(path))
     }
 
     /// The settings a document says, defaulting past anything unusable in it,
@@ -966,16 +1002,7 @@ impl Settings {
             .map(|plugins| {
                 plugins
                     .iter()
-                    .filter_map(|(plugin, keys)| {
-                        let keys: Vec<String> = keys
-                            .as_array()?
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .filter(|key| !key.is_empty())
-                            .map(str::to_owned)
-                            .collect();
-                        (!keys.is_empty()).then(|| (plugin.clone(), keys))
-                    })
+                    .filter_map(|(plugin, keys)| Some((plugin.clone(), grant_keys(keys)?)))
                     .collect()
             })
             .unwrap_or_default();
@@ -1000,9 +1027,11 @@ impl Settings {
         let light_theme = named_theme(&document, LIGHT_THEME_KEY, crate::theme::DEFAULT_LIGHT_NAME);
         let dark_theme = named_theme(&document, DARK_THEME_KEY, crate::theme::DEFAULT_NAME);
 
+        let revisions = revisions_in(&document);
         let mut settings = Self {
             path,
             base: Map::new(),
+            revisions,
             tab_options,
             general,
             disabled_plugins,
@@ -1213,7 +1242,7 @@ impl Settings {
     /// are two different plugins' entries under `plugin_grants`, and both
     /// have to survive.
     pub fn changes(&self) -> Changes {
-        Changes::between(&self.base, &self.owned())
+        Changes::between(&self.base, &self.owned(), &self.revisions)
     }
 
     /// [`Settings::changes`], after which this instance agrees with the file
@@ -1224,7 +1253,7 @@ impl Settings {
     /// that a later one overtook, must not be what loses it.
     pub fn take_changes(&mut self) -> Changes {
         let owned = self.owned();
-        let changes = Changes::between(&self.base, &owned);
+        let changes = Changes::between(&self.base, &owned, &self.revisions);
         self.base = owned;
         changes
     }
@@ -1246,9 +1275,11 @@ impl Settings {
     /// see [`Changes`]. And except [`WINDOW_KEYS`], which a window keeps as
     /// its own while it runs.
     pub fn adopt(&mut self, document: Map<String, Value>, pending: &mut Changes) {
-        let unsaved = self.changes();
+        let revisions = revisions_in(&document);
+        let mut unsaved = self.changes();
+        unsaved.as_of(&pending.known);
         let mut agreed = document;
-        let stale = pending.apply_to(&mut agreed);
+        let stale = pending.apply_to(&mut agreed).stale;
         pending.forget(&stale);
         for key in WINDOW_KEYS {
             match self.base.get(key) {
@@ -1262,6 +1293,9 @@ impl Settings {
 
         let mut adopted = Self::from_document(self.path.clone(), wanted);
         adopted.base = base;
+        // The file's own revisions, not the ones laying this window's changes
+        // over it counted up: those are not on disk yet.
+        adopted.revisions = revisions;
         *self = adopted;
     }
 
@@ -1281,12 +1315,34 @@ impl Settings {
                 document.insert(key.to_owned(), value.clone());
             }
         }
+        if !self.revisions.is_empty() {
+            document.insert(
+                PLUGIN_GRANT_REVISIONS_KEY.to_owned(),
+                revisions_value(&self.revisions),
+            );
+        }
+        self.adopt(document, pending);
+    }
+
+    /// [`Settings::adopt`] of what this window last agreed the file said,
+    /// with the revokes and the switches off another Crook could not write
+    /// laid over it — see [`Parked`]. For a file that does not read, which
+    /// says nothing, while a revoke parked beside it still has to win.
+    pub fn adopt_parked(&mut self, parked: &Parked, pending: &mut Changes) {
+        let mut document = self.base.clone();
+        if !self.revisions.is_empty() {
+            document.insert(
+                PLUGIN_GRANT_REVISIONS_KEY.to_owned(),
+                revisions_value(&self.revisions),
+            );
+        }
+        parked.changes().apply_to(&mut document);
         self.adopt(document, pending);
     }
 
     /// Lays `changes` over the file at `path` as it is now, and writes the
-    /// result back atomically. Hands back the plugins whose grant was set
-    /// aside because somebody had answered for them since — see [`Changes`].
+    /// result back atomically. Hands back what became of each grant — see
+    /// [`Applied`].
     ///
     /// **One window at a time.** Two windows saving at once would each read
     /// the file, lay their own change over it, and the second rename would
@@ -1294,6 +1350,10 @@ impl Settings {
     /// one step under an advisory lock on [`LOCK_FILE`] beside the file, which
     /// every Crook takes before it saves. See [`rewrite`] for a lock that is
     /// held too long, and a file system that keeps none.
+    ///
+    /// Whatever another Crook parked beside the file because it could not
+    /// write it — see [`Parked`] — is laid over it first, and the parked file
+    /// goes once this lands.
     ///
     /// A file that is not there is an empty one: the changes alone are
     /// written. A file that does not read — a hand edit with a trailing comma,
@@ -1304,13 +1364,16 @@ impl Settings {
     /// the last copy this window read whole would have taken back whatever
     /// had changed since, a revoke included.
     ///
-    /// Nothing changed is nothing written, so a save that has nothing to say
-    /// leaves a person's file — its formatting, its key order — as it is.
-    pub fn write_changes(path: &Path, changes: &Changes) -> Result<Vec<String>> {
-        if changes.is_empty() {
-            return Ok(Vec::new());
+    /// Nothing changed and nothing parked is nothing written, so a save that
+    /// has nothing to say leaves a person's file — its formatting, its key
+    /// order — as it is.
+    pub fn write_changes(path: &Path, changes: &Changes) -> Result<Applied> {
+        let parked_path = path.with_file_name(PARKED_FILE);
+        if changes.is_empty() && !parked_path.exists() {
+            return Ok(Applied::default());
         }
-        let mut stale = Vec::new();
+        let mut applied = Applied::default();
+        let mut unparked = false;
         rewrite(path, LOCK_FILE, |target, bytes| {
             let mut document = match bytes {
                 None => Map::new(),
@@ -1325,20 +1388,48 @@ impl Settings {
                     }
                 },
             };
-            stale = changes.apply_to(&mut document);
+            let parked = Parked::read(&parked_path);
+            unparked = !parked.is_empty();
+            parked.changes().apply_to(&mut document);
+            applied = changes.apply_to(&mut document);
             let mut json = serde_json::to_string_pretty(&Value::Object(document))
                 .context("could not serialize the settings")?;
             // A file a person may open in an editor ends in a newline.
             json.push('\n');
             Ok(json.into_bytes())
         })?;
-        for (_, plugin) in &stale {
+        if unparked {
+            // Written into the file now, under the same lock that a parker
+            // would have had to wait for.
+            let _ = fs::remove_file(&parked_path);
+        }
+        for (_, plugin) in &applied.stale {
             log::info!(
                 "{plugin} was answered for elsewhere since it was allowed here; the answer \
                  there stands"
             );
         }
-        Ok(stale.into_iter().map(|(_, plugin)| plugin).collect())
+        Ok(applied)
+    }
+
+    /// Keeps the revokes and the switches off among `changes` beside the
+    /// file at `path`, for a window closing with a save it could not land —
+    /// the lock held, the file not reading — so that they still win.
+    ///
+    /// Merged with whatever is parked there already. Read by every window's
+    /// next save, by every look at the file and by the next launch, and
+    /// removed once a save has written it into the file. See [`Parked`].
+    pub fn park(path: &Path, changes: &Changes) -> Result<()> {
+        let parked_path = path.with_file_name(PARKED_FILE);
+        let mut parked = Parked::read(&parked_path);
+        parked.take_revokes_from(changes);
+        if parked.is_empty() {
+            return Ok(());
+        }
+        let mut json = serde_json::to_string_pretty(&parked.to_value())
+            .context("could not serialize the parked settings")?;
+        json.push('\n');
+        atomic_write(&parked_path, json.as_bytes())
     }
 
     /// The keys this build owns, as a save writes them.
@@ -1458,18 +1549,33 @@ impl Settings {
 /// A later change to the same key, entry or name replaces an earlier one:
 /// see [`Changes::then`].
 ///
-/// # A grant is given only over what it was given over
+/// # A grant is given only over the answer it was given over
 ///
 /// **A revoke always lands; a grant lands only if nobody has answered for
-/// that plugin since.** Each entry remembers what it replaced — the value
-/// the window last agreed with the file about when the person answered —
-/// and a grant is laid over a file only while the file still says that.
-/// Anything else means the plugin was answered for somewhere else in the
-/// meantime: revoked in another window, removed on the command line. Then
-/// the grant is set aside, the window takes the file's answer, and the card
-/// asks again. Without this, a grant whose save failed, or one held up
-/// behind the lock, landed after a newer revoke and gave the grant back to
-/// every window. See [`Changes::apply_to`].
+/// that plugin since.** "Since" is two facts, because either alone can be
+/// fooled:
+///
+/// - **The revision.** Every answer a Crook writes for a plugin counts its
+///   entry in [`PLUGIN_GRANT_REVISIONS_KEY`] up by one, a revoke as much as a
+///   grant. A grant remembers the revision it was given over and lands only
+///   on that revision. Comparing the *value* alone was fooled by a grant and
+///   a revoke made elsewhere in between: the plugin is back to "never
+///   answered", the value matches, and a grant clicked before both — held up
+///   behind the lock — landed over the revoke.
+/// - **The value**, read the way a load reads it. A person editing the file
+///   by hand counts nothing up, and a line they took out is a revoke all the
+///   same. Read the way a load reads it because that is what the window saw
+///   when the person answered: `"id": []` is "nothing allowed", the same as
+///   no line, and comparing it raw against a window that saw nothing set
+///   every grant over it aside.
+///
+/// A grant that finds the file already saying exactly what it would write
+/// has landed: two windows allowing the same thing agree. Anything else
+/// sets the grant aside; the window takes the file's answer and the card
+/// asks again. See [`Changes::apply_to`].
+///
+/// Older builds ignore the revisions — a key they do not know, which they
+/// carry through their own saves untouched — and read the grants as before.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Changes {
     /// Each key's new value, or `None` for a key the file should not have.
@@ -1478,19 +1584,88 @@ pub struct Changes {
     entries: BTreeMap<(String, String), Entry>,
     /// Each plugin switched off (`true`) or back on (`false`).
     switched_off: BTreeMap<String, bool>,
+    /// The revisions this window's own saves have written, by plugin, so that
+    /// an answer made here after one of them landed — and before the window
+    /// read the file again — is given over the revision it really saw.
+    known: BTreeMap<String, u64>,
 }
 
 /// One entry's change: what it was when it was changed, and what it is now.
 #[derive(Clone, Debug, PartialEq)]
 struct Entry {
-    /// What the window agreed the file said when the entry was changed.
+    /// What the window agreed the file said when the entry was changed, read
+    /// the way a load reads it.
     was: Option<Value>,
     /// What it says now, or `None` for an entry the file should not have.
     now: Option<Value>,
+    /// For a grant, the revision of the plugin's answer the window agreed
+    /// with when it was changed. See [`Changes`].
+    rev: u64,
+}
+
+/// What a save did with each grant it carried.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Applied {
+    /// The grants set aside: somebody had answered for the plugin since.
+    pub stale: Vec<(String, String)>,
+    /// What the file says about each plugin whose grant the save carried,
+    /// once it is written — its revision and its grant, landed or not.
+    after: BTreeMap<String, (u64, Option<Value>)>,
+}
+
+impl Applied {
+    /// Whether any grant was set aside.
+    pub fn set_aside(&self) -> bool {
+        !self.stale.is_empty()
+    }
 }
 
 /// The keys whose value is an object of one answer per name.
 const ENTRY_KEYS: [&str; 2] = [PLUGIN_GRANTS_KEY, RESUME_LINES_KEY];
+
+/// A plugin's grant as a load reads it: the non-empty strings in a list,
+/// or nothing when there are none — `[]`, `[""]`, a string, a number.
+fn normalized_grant(value: Option<&Value>) -> Option<Value> {
+    let keys = grant_keys(value?)?;
+    Some(Value::Array(keys.into_iter().map(Value::String).collect()))
+}
+
+/// The keys in one plugin's grant, as a load reads them. See
+/// [`normalized_grant`].
+fn grant_keys(value: &Value) -> Option<Vec<String>> {
+    let keys: Vec<String> = value
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
+        .collect();
+    (!keys.is_empty()).then_some(keys)
+}
+
+/// The revisions of the plugins' answers in a settings document.
+fn revisions_in(document: &Map<String, Value>) -> BTreeMap<String, u64> {
+    document
+        .get(PLUGIN_GRANT_REVISIONS_KEY)
+        .and_then(Value::as_object)
+        .map(|plugins| {
+            plugins
+                .iter()
+                .filter_map(|(plugin, rev)| Some((plugin.clone(), rev.as_u64()?)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The revisions as the file writes them.
+fn revisions_value(revisions: &BTreeMap<String, u64>) -> Value {
+    Value::Object(
+        revisions
+            .iter()
+            .map(|(plugin, rev)| (plugin.clone(), Value::from(*rev)))
+            .collect(),
+    )
+}
 
 impl Changes {
     /// Whether there is nothing to write.
@@ -1499,8 +1674,13 @@ impl Changes {
     }
 
     /// What turns the keys in `before` into the keys in `after`, both as
-    /// [`Settings::owned`] renders them.
-    fn between(before: &Map<String, Value>, after: &Map<String, Value>) -> Self {
+    /// [`Settings::owned`] renders them, with the grants given over
+    /// `revisions`.
+    fn between(
+        before: &Map<String, Value>,
+        after: &Map<String, Value>,
+        revisions: &BTreeMap<String, u64>,
+    ) -> Self {
         let mut changes = Self::default();
         let keys: std::collections::BTreeSet<&String> = before.keys().chain(after.keys()).collect();
         for key in keys {
@@ -1526,6 +1706,7 @@ impl Changes {
                             Entry {
                                 was: was.get(name).cloned(),
                                 now: is.get(name).cloned(),
+                                rev: revisions.get(name).copied().unwrap_or(0),
                             },
                         );
                     }
@@ -1537,11 +1718,26 @@ impl Changes {
         changes
     }
 
+    /// Gives every grant here over the newest revision this window knows it
+    /// wrote itself, where that is newer than the one the change was made
+    /// over. See [`Changes::known`].
+    fn as_of(&mut self, known: &BTreeMap<String, u64>) {
+        for ((key, plugin), entry) in &mut self.entries {
+            if key == PLUGIN_GRANTS_KEY
+                && let Some(rev) = known.get(plugin)
+            {
+                entry.rev = entry.rev.max(*rev);
+            }
+        }
+    }
+
     /// Adds `later` on top of these: where both say something about the same
     /// key, entry or name, `later` is what stands. An entry keeps what it was
     /// before the *first* of the two, which is what the file said before this
-    /// window changed it at all.
-    pub fn then(&mut self, later: Changes) {
+    /// window changed it at all — until a save writes the first, when
+    /// [`Changes::forget_written`] moves it on.
+    pub fn then(&mut self, mut later: Changes) {
+        later.as_of(&self.known);
         self.values.extend(later.values);
         for (key, entry) in later.entries {
             match self.entries.get_mut(&key) {
@@ -1555,23 +1751,36 @@ impl Changes {
     }
 
     /// Takes out what `written` wrote, now that it is on disk — unless it has
-    /// been changed again since, which is a change still to write.
+    /// been changed again since, which is a change still to write. Such an
+    /// entry is now a change over what the file says after the save, which
+    /// is what `applied` says: the answer just written, or the one a grant
+    /// set aside found there.
     ///
-    /// An entry `written` set aside as stale goes too: it is not to be
-    /// written at all, and the window takes the file's answer instead.
-    pub fn forget_written(&mut self, written: &Changes) {
+    /// An entry `written` set aside goes too, unless changed since: it is not
+    /// to be written at all, and the window takes the file's answer instead.
+    pub fn forget_written(&mut self, written: &Changes, applied: &Applied) {
+        for (plugin, (rev, _)) in &applied.after {
+            let known = self.known.entry(plugin.clone()).or_default();
+            *known = (*known).max(*rev);
+        }
         for (key, value) in &written.values {
             if self.values.get(key) == Some(value) {
                 self.values.remove(key);
             }
         }
         for (key, entry) in &written.entries {
-            if self
-                .entries
-                .get(key)
-                .is_some_and(|mine| mine.now == entry.now)
-            {
+            let Some(mine) = self.entries.get_mut(key) else {
+                continue;
+            };
+            if mine.now == entry.now {
                 self.entries.remove(key);
+            } else if key.0 == PLUGIN_GRANTS_KEY
+                && let Some((rev, value)) = applied.after.get(&key.1)
+            {
+                mine.was = value.clone();
+                mine.rev = *rev;
+            } else {
+                mine.was = entry.now.clone();
             }
         }
         for (name, off) in &written.switched_off {
@@ -1588,15 +1797,14 @@ impl Changes {
         }
     }
 
-    /// Lays these over `document`, and hands back the grants that were set
-    /// aside: the ones given over an answer the file no longer has. See
-    /// [`Changes`].
+    /// Lays these over `document`, and says what became of each grant: see
+    /// [`Changes`] for which land and which are set aside.
     ///
     /// The object keys and the list are left out of the file once nothing
     /// is in them, which is the rule [`Settings::owned`] writes them by: a
     /// person who never allowed a plugin does not find an empty object in a
     /// file they opened to read.
-    fn apply_to(&self, document: &mut Map<String, Value>) -> Vec<(String, String)> {
+    fn apply_to(&self, document: &mut Map<String, Value>) -> Applied {
         for (key, value) in &self.values {
             match value {
                 Some(value) => document.insert(key.clone(), value.clone()),
@@ -1604,7 +1812,9 @@ impl Changes {
             };
         }
 
-        let mut stale = Vec::new();
+        let mut applied = Applied::default();
+        let mut revisions = revisions_in(document);
+        let mut counted = false;
         for key in ENTRY_KEYS {
             let mut changed = self
                 .entries
@@ -1622,25 +1832,50 @@ impl Changes {
                 .cloned()
                 .unwrap_or_default();
             for ((under, name), entry) in changed {
-                match &entry.now {
-                    // A grant over an answer somebody has changed since.
-                    Some(_)
-                        if key == PLUGIN_GRANTS_KEY && object.get(name) != entry.was.as_ref() =>
-                    {
-                        stale.push((under.clone(), name.clone()));
-                    }
-                    Some(value) => {
-                        object.insert(name.clone(), value.clone());
-                    }
-                    None => {
-                        object.remove(name);
-                    }
+                if key != PLUGIN_GRANTS_KEY {
+                    match &entry.now {
+                        Some(value) => object.insert(name.clone(), value.clone()),
+                        None => object.remove(name),
+                    };
+                    continue;
                 }
+                let there = normalized_grant(object.get(name));
+                let rev = revisions.get(name).copied().unwrap_or(0);
+                let lands = match &entry.now {
+                    // Already what it would say: nothing to write, and
+                    // nothing set aside.
+                    now if *now == there => {
+                        applied.after.insert(name.clone(), (rev, there));
+                        continue;
+                    }
+                    None => true,
+                    Some(_) => rev == entry.rev && there == entry.was,
+                };
+                if !lands {
+                    applied.stale.push((under.clone(), name.clone()));
+                    applied.after.insert(name.clone(), (rev, there));
+                    continue;
+                }
+                match &entry.now {
+                    Some(value) => object.insert(name.clone(), value.clone()),
+                    None => object.remove(name),
+                };
+                revisions.insert(name.clone(), rev + 1);
+                counted = true;
+                applied
+                    .after
+                    .insert(name.clone(), (rev + 1, entry.now.clone()));
             }
             match object.is_empty() {
                 true => document.remove(key),
                 false => document.insert(key.to_owned(), Value::Object(object)),
             };
+        }
+        if counted {
+            document.insert(
+                PLUGIN_GRANT_REVISIONS_KEY.to_owned(),
+                revisions_value(&revisions),
+            );
         }
 
         if !self.switched_off.is_empty() {
@@ -1659,7 +1894,112 @@ impl Changes {
                 ),
             };
         }
-        stale
+        applied
+    }
+}
+
+/// Revokes and switches off a closing window could not write, kept beside
+/// the settings in [`PARKED_FILE`] until a save writes them in.
+///
+/// Only those two, because only they must never be lost: a grant or a theme
+/// that did not land is one the person can give again, and one that landed
+/// late could land over a newer answer. Every save lays these over the file
+/// first and removes the parked file once it has (see
+/// [`Settings::write_changes`]); every look at the file lays them over what
+/// it read, so a window keeps a plugin revoked even while the file itself
+/// does not read; and the next launch writes them in before anything else.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Parked {
+    /// Plugins whose grant was revoked.
+    revoked: std::collections::BTreeSet<String>,
+    /// Plugins switched off.
+    switched_off: std::collections::BTreeSet<String>,
+}
+
+impl Parked {
+    /// What is parked at `path`; nothing for no file or one that does not
+    /// read.
+    pub fn read(path: &Path) -> Self {
+        fs::read(path)
+            .ok()
+            .and_then(|bytes| parse_document(&bytes).ok())
+            .map(|document| Self::from_document(&document))
+            .unwrap_or_default()
+    }
+
+    /// What is parked, out of the parked file's object.
+    pub fn from_document(document: &Map<String, Value>) -> Self {
+        let names = |key: &str| {
+            document
+                .get(key)
+                .and_then(Value::as_array)
+                .map(|names| {
+                    names
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Self {
+            revoked: names("revoked"),
+            switched_off: names("switched_off"),
+        }
+    }
+
+    /// Whether nothing is parked.
+    pub fn is_empty(&self) -> bool {
+        self.revoked.is_empty() && self.switched_off.is_empty()
+    }
+
+    /// Adds the revokes and the switches off among `changes`.
+    fn take_revokes_from(&mut self, changes: &Changes) {
+        for ((key, plugin), entry) in &changes.entries {
+            if key == PLUGIN_GRANTS_KEY && entry.now.is_none() {
+                self.revoked.insert(plugin.clone());
+            }
+        }
+        for (plugin, off) in &changes.switched_off {
+            if *off {
+                self.switched_off.insert(plugin.clone());
+            }
+        }
+    }
+
+    /// These as changes to lay over a file: each revoke lands whatever the
+    /// file says, which a revoke always does.
+    fn changes(&self) -> Changes {
+        let mut changes = Changes::default();
+        for plugin in &self.revoked {
+            changes.entries.insert(
+                (PLUGIN_GRANTS_KEY.to_owned(), plugin.clone()),
+                Entry {
+                    was: None,
+                    now: None,
+                    rev: 0,
+                },
+            );
+        }
+        for plugin in &self.switched_off {
+            changes.switched_off.insert(plugin.clone(), true);
+        }
+        changes
+    }
+
+    /// Lays these over a settings document someone read.
+    pub fn lay_over(&self, document: &mut Map<String, Value>) {
+        if !self.is_empty() {
+            self.changes().apply_to(document);
+        }
+    }
+
+    /// The parked file's object.
+    fn to_value(&self) -> Value {
+        serde_json::json!({
+            "revoked": self.revoked,
+            "switched_off": self.switched_off,
+        })
     }
 }
 
@@ -1741,6 +2081,12 @@ fn owned_keys(options: impl Serialize, group: &str) -> Result<Map<String, Value>
         bail!("the {group} serialized to something other than a JSON object");
     };
     Ok(owned)
+}
+
+/// Where revokes a closing window could not write are kept beside the
+/// settings at `settings`. See [`Parked`].
+pub fn parked_path(settings: &Path) -> PathBuf {
+    settings.with_file_name(PARKED_FILE)
 }
 
 /// `<configuration directory>/crook/settings.json`, where there is one.
@@ -1897,23 +2243,45 @@ fn hold_the_lock(path: &Path, name: &str) -> Result<Option<fs::File>> {
         .truncate(false)
         .open(&lock)
         .with_context(|| format!("could not open {}", lock.display()))?;
-    let deadline = std::time::Instant::now() + LOCK_PATIENCE;
-    loop {
-        match file.try_lock() {
-            Ok(()) => return Ok(Some(file)),
-            Err(fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            Err(fs::TryLockError::WouldBlock) => return Err(LockBusy { lock }.into()),
-            Err(fs::TryLockError::Error(error)) => {
-                log::warn!(
-                    "{} cannot be locked here ({error}); checking the file before writing it \
-                     instead",
-                    lock.display()
-                );
-                return Ok(None);
-            }
+    match file.try_lock() {
+        Ok(()) => return Ok(Some(file)),
+        Err(fs::TryLockError::WouldBlock) => {}
+        Err(fs::TryLockError::Error(error)) => {
+            log::warn!(
+                "{} cannot be locked here ({error}); checking the file before writing it \
+                 instead",
+                lock.display()
+            );
+            return Ok(None);
         }
+    }
+
+    // Held: waited for in the system's own queue rather than by asking again
+    // every few milliseconds, which let a save that kept arriving at the
+    // right moment take the lock over and over while another starved past
+    // its patience. The wait is on a thread of its own so that it can be
+    // given up; one given up takes the lock when it comes and lets it go at
+    // once, since nobody is there to hand it to.
+    let (handed, taken) = std::sync::mpsc::channel();
+    let waiting = std::thread::Builder::new()
+        .name(String::from("crook-config-lock"))
+        .spawn(move || {
+            let locked = file.lock();
+            let _ = handed.send((file, locked));
+        });
+    if let Err(error) = waiting {
+        return Err(anyhow::Error::new(error).context("could not wait for the settings lock"));
+    }
+    match taken.recv_timeout(LOCK_PATIENCE) {
+        Ok((file, Ok(()))) => Ok(Some(file)),
+        Ok((_, Err(error))) => {
+            log::warn!(
+                "{} cannot be locked here ({error}); checking the file before writing it instead",
+                lock.display()
+            );
+            Ok(None)
+        }
+        Err(_) => Err(LockBusy { lock }.into()),
     }
 }
 
@@ -3311,15 +3679,22 @@ mod tests {
                 let path = scratch.settings_file();
                 let start = start.clone();
                 std::thread::spawn(move || {
+                    // A window's own protocol: changes go into what is
+                    // pending, and what landed comes out of it.
                     let mut settings = Settings::load(&path);
+                    let mut pending = Changes::default();
                     start.wait();
                     for round in 0..ROUNDS {
                         settings.set_granted(
                             &format!("eugen/window-{window}"),
                             vec![format!("round-{round}")],
                         );
-                        let changes = settings.take_changes();
-                        Settings::write_changes(&path, &changes).expect("the save lands");
+                        pending.then(settings.take_changes());
+                        let written = pending.clone();
+                        let applied =
+                            Settings::write_changes(&path, &written).expect("the save lands");
+                        assert!(!applied.set_aside(), "a window's own grant was set aside");
+                        pending.forget_written(&written, &applied);
                     }
                 })
             })
@@ -3536,7 +3911,10 @@ mod tests {
 
         let stale =
             Settings::write_changes(&scratch.settings_file(), &waiting).expect("B's save runs");
-        assert_eq!(stale, ["eugen/probe"]);
+        assert_eq!(
+            stale.stale,
+            [(PLUGIN_GRANTS_KEY.to_owned(), String::from("eugen/probe"))]
+        );
         assert!(
             Settings::load(scratch.settings_file())
                 .granted_to("eugen/probe")
@@ -3600,8 +3978,192 @@ mod tests {
             .insert("theme".to_owned(), Some(Value::from("new")));
         pending.then(newer);
 
-        pending.forget_written(&written);
+        pending.forget_written(&written, &Applied::default());
         assert_eq!(pending.values.len(), 1, "{pending:?}");
         assert_eq!(pending.values["theme"], Some(Value::from("new")));
+    }
+
+    /// What a window does with a change: into what is pending, written, and
+    /// out of what is pending once it has landed. Hands back what the save
+    /// did.
+    fn save_as_a_window(settings: &mut Settings, pending: &mut Changes) -> Applied {
+        pending.then(settings.take_changes());
+        let written = pending.clone();
+        let applied = Settings::write_changes(settings.path().expect("a file"), &written)
+            .expect("the save lands");
+        pending.forget_written(&written, &applied);
+        applied
+    }
+
+    #[test]
+    fn test_a_grant_over_a_hand_written_empty_list_lands() {
+        // `"id": []`, `[""]` and a bare string all read as "nothing
+        // allowed". A grant given over one was compared against the raw
+        // value, never matched, and was set aside without a word: the
+        // person's Allow vanished.
+        for written in [r#"[]"#, r#"[""]"#, r#""tabs.read""#] {
+            let scratch = ScratchDirectory::new("grant-over-empty");
+            fs::write(
+                scratch.settings_file(),
+                format!(r#"{{"plugin_grants": {{"eugen/probe": {written}}}}}"#),
+            )
+            .expect("writable");
+            let mut window = Settings::load(scratch.settings_file());
+            let mut pending = Changes::default();
+            window.set_granted("eugen/probe", vec![String::from("tabs.read")]);
+            let applied = save_as_a_window(&mut window, &mut pending);
+            assert!(!applied.set_aside(), "a grant over {written} was set aside");
+            assert_eq!(
+                Settings::load(scratch.settings_file()).granted_to("eugen/probe"),
+                ["tabs.read"],
+                "over {written}"
+            );
+
+            // And the same when the window looks at the file before it saves.
+            fs::write(
+                scratch.settings_file(),
+                format!(r#"{{"plugin_grants": {{"eugen/other": {written}}}}}"#),
+            )
+            .expect("writable");
+            let mut window = Settings::load(scratch.settings_file());
+            window.set_granted("eugen/other", vec![String::from("clipboard")]);
+            let mut pending = window.take_changes();
+            window.adopt(read_document(&scratch.settings_file()), &mut pending);
+            assert_eq!(
+                window.granted_to("eugen/other"),
+                ["clipboard"],
+                "over {written}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_grant_made_while_a_revoke_of_it_is_being_written_lands_after_it() {
+        // Revoke, and Allow again before the revoke's save has landed. The
+        // Allow kept the revoke's view of the file — granted, at the old
+        // revision — so once the revoke landed the Allow was set aside, and
+        // the person's last answer was lost.
+        let scratch = ScratchDirectory::new("regrant-in-flight");
+        let mut window = Settings::load(scratch.settings_file());
+        let mut pending = Changes::default();
+        window.set_granted("eugen/probe", vec![String::from("tabs.read")]);
+        save_as_a_window(&mut window, &mut pending);
+
+        window.set_granted("eugen/probe", Vec::new());
+        pending.then(window.take_changes());
+        let in_flight = pending.clone();
+        window.set_granted("eugen/probe", vec![String::from("tabs.read")]);
+        pending.then(window.take_changes());
+        let applied = Settings::write_changes(&scratch.settings_file(), &in_flight)
+            .expect("the revoke lands");
+        pending.forget_written(&in_flight, &applied);
+        assert!(
+            Settings::load(scratch.settings_file())
+                .granted_to("eugen/probe")
+                .is_empty()
+        );
+
+        let written = pending.clone();
+        let applied =
+            Settings::write_changes(&scratch.settings_file(), &written).expect("the grant runs");
+        assert!(
+            !applied.set_aside(),
+            "the grant made after the revoke was set aside"
+        );
+        assert_eq!(
+            Settings::load(scratch.settings_file()).granted_to("eugen/probe"),
+            ["tabs.read"]
+        );
+    }
+
+    #[test]
+    fn test_a_grant_held_up_does_not_land_over_a_grant_and_a_revoke_made_since() {
+        // The plugin is back to "never answered" by the time the held-up
+        // grant lands, so its value matches what the grant was given over —
+        // but two answers have been given in between, and the last was a
+        // revoke. The revision says so.
+        let scratch = ScratchDirectory::new("aba");
+        let (mut a, mut b) = two_windows(&scratch);
+        a.set_granted("eugen/probe", vec![String::from("tabs.read")]);
+        let held_up = a.take_changes();
+
+        let mut pending = Changes::default();
+        b.set_granted("eugen/probe", vec![String::from("clipboard")]);
+        save_as_a_window(&mut b, &mut pending);
+        b.set_granted("eugen/probe", Vec::new());
+        save_as_a_window(&mut b, &mut pending);
+
+        let applied = Settings::write_changes(&scratch.settings_file(), &held_up)
+            .expect("the held-up save runs");
+        assert!(
+            applied.set_aside(),
+            "a grant from before two answers landed"
+        );
+        assert!(
+            Settings::load(scratch.settings_file())
+                .granted_to("eugen/probe")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_two_windows_allowing_the_same_thing_agree() {
+        let scratch = ScratchDirectory::new("same-grant");
+        let (mut a, mut b) = two_windows(&scratch);
+        let keys = vec![String::from("tabs.read")];
+        a.set_granted("eugen/probe", keys.clone());
+        a.save_blocking().expect("A allows");
+        b.set_granted("eugen/probe", keys.clone());
+        let applied =
+            Settings::write_changes(&scratch.settings_file(), &b.take_changes()).expect("B allows");
+        assert!(
+            !applied.set_aside(),
+            "the same answer from two windows was set aside"
+        );
+    }
+
+    #[test]
+    fn test_revokes_parked_by_a_closing_window_win_at_the_next_launch() {
+        // The window closed with a revoke it could not write — the file did
+        // not read. The next launch must not run the plugin under the grant,
+        // and the first save that can write writes the revoke in.
+        let scratch = ScratchDirectory::new("parked");
+        let mut first = Settings::load(scratch.settings_file());
+        first.set_granted("eugen/probe", vec![String::from("tabs.read")]);
+        first.save_blocking().expect("granted");
+
+        let mut window = Settings::load(scratch.settings_file());
+        window.set_granted("eugen/probe", Vec::new());
+        window.set_plugin_disabled("eugen/off", true);
+        window.set_theme("Midnight");
+        let pending = window.take_changes();
+        let good = fs::read_to_string(scratch.settings_file()).expect("readable");
+        fs::write(scratch.settings_file(), "{").expect("writable");
+        Settings::write_changes(&scratch.settings_file(), &pending).expect_err("does not read");
+        Settings::park(&scratch.settings_file(), &pending).expect("parked");
+
+        // Next launch, the file still broken: the revoke holds in memory.
+        let next = Settings::load(scratch.settings_file());
+        assert!(next.granted_to("eugen/probe").is_empty());
+        assert_eq!(next.disabled_plugins(), ["eugen/off"]);
+
+        // Put right: the next launch writes the revoke in and unparks it.
+        fs::write(scratch.settings_file(), good).expect("writable");
+        let after = Settings::load(scratch.settings_file());
+        assert!(after.granted_to("eugen/probe").is_empty());
+        assert!(!parked_path(&scratch.settings_file()).exists());
+        let on_disk = Settings::load(scratch.settings_file());
+        assert!(on_disk.granted_to("eugen/probe").is_empty());
+        assert_eq!(on_disk.disabled_plugins(), ["eugen/off"]);
+        // Only the revokes: a theme that did not land is not parked.
+        assert_ne!(on_disk.theme(), "Midnight");
+    }
+
+    #[test]
+    fn test_a_strict_load_refuses_a_file_that_does_not_read() {
+        let scratch = ScratchDirectory::new("strict");
+        assert!(Settings::load_strictly(scratch.settings_file()).is_ok());
+        fs::write(scratch.settings_file(), "{").expect("writable");
+        assert!(Settings::load_strictly(scratch.settings_file()).is_err());
     }
 }

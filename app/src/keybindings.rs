@@ -806,6 +806,12 @@ impl PendingSave {
     /// other window's chord, stay. Each edit says the whole of what it means
     /// about its command, so making one again over a file that already has it
     /// changes nothing.
+    ///
+    /// Which also means an edit made again takes out every line about *its
+    /// own* command that it finds — the page's edits replace a command's
+    /// lines, they do not add to them — so a line a person wrote in their
+    /// editor for the same command, between the press and the write, goes
+    /// with the rest. Lines about every other command stay.
     pub fn write_blocking(&self) -> anyhow::Result<()> {
         crate::settings::rewrite(&self.path, KEYBINDINGS_LOCK, |_, bytes| {
             let now = match bytes {

@@ -1200,8 +1200,13 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
                 // not `owner/name``, `x is not installed` — and a line that
                 // began `x: x is not installed` said it twice.
                 let id = crook_plugin::PluginId::parse(&name).map_err(anyhow::Error::msg)?;
+                // The grant first, and nothing removed if it cannot go: a
+                // plugin taken off the disk with its grant still written down
+                // would run under it again on a reinstall.
+                let settings = crate::settings::user_settings_path()
+                    .context("there is no per-user configuration directory to forget it in")?;
+                forget_plugin(&settings, &id)?;
                 let removed = crate::plugins::wasm::uninstall(&id).map_err(anyhow::Error::msg)?;
-                forget_plugin(&id)?;
                 print_answer(format_args!("removed {}\n", removed.display()))?;
                 return Ok(Startup::Answered);
             }
@@ -2165,7 +2170,10 @@ THE INPUT FIELD:
 /// Nor does the look at `settings.json` that every window keeps for changes
 /// made in the others. It runs for the life of the window, which on this pool
 /// would be a sixth chain parked forever, so it is a thread of its own in the
-/// control socket's arrangement — see [`settings::watch`].
+/// control socket's arrangement — see [`settings::watch`]. The saves of the
+/// settings and the keybindings are on threads of their own for the same
+/// reason: each may wait up to two seconds for another Crook's lock, and the
+/// pause before one is tried again is a thread's sleep as well.
 ///
 /// **The test at the bottom of this file cannot check this number.** It builds
 /// its scenario out of the constant itself, so it proves what
@@ -3772,11 +3780,19 @@ struct Launch {
 /// open at the time hears it within a second and rebuilds the plugin with
 /// nothing allowed (see `settings::watch`), and its next save writes only
 /// what that window changed, so the grant is not written back.
-fn forget_plugin(id: &crook_plugin::PluginId) -> Result<()> {
-    let mut settings = Settings::for_user();
+///
+/// Read strictly: a `settings.json` that does not read is an error, and the
+/// uninstall stops before anything is removed. Read the forgiving way a
+/// window reads it, the file was every default — no grant to revoke, so
+/// nothing was written — and once the person fixed their typo the grant was
+/// back, for a reinstall to run under.
+fn forget_plugin(path: &Path, id: &crook_plugin::PluginId) -> Result<()> {
+    let mut settings = Settings::load_strictly(path)?;
     settings.set_granted(id.as_str(), Vec::new());
     settings.set_plugin_disabled(id.as_str(), false);
-    settings.save_blocking()
+    settings
+        .save_blocking()
+        .with_context(|| format!("{id} was not removed, because what it was allowed could not be"))
 }
 
 /// What `--plugins` prints: every plugin installed as a file, and where.
@@ -4562,6 +4578,9 @@ impl WindowDelegate for Shell {
         // written, and the pool that would write it ends with the process.
         self.workspace.read(&self.app, |workspace, _| {
             workspace.finish_saving_the_session();
+            // And the settings, whose waiting changes may hold a revoke: see
+            // `Workspace::finish_saving_the_settings`.
+            workspace.finish_saving_the_settings();
         });
         let workspace = &self.workspace;
         let endings = self
@@ -6623,6 +6642,34 @@ mod tests {
         let fresh = window_options(Channel::Stable, &Overrides::default(), None);
         assert_eq!(fresh.position, None);
         assert!(!fresh.maximized && !fresh.fullscreen);
+    }
+
+    #[test]
+    fn uninstalling_with_a_settings_file_that_does_not_read_fails_and_revokes_on_a_good_one() {
+        // Read the forgiving way, a file with a typo was every default: no
+        // grant to revoke, nothing written, "removed" printed — and once the
+        // typo was fixed the grant was back for a reinstall to run under.
+        use crate::plugins::wasm::tests::Scratch;
+
+        let scratch = Scratch::new("forget-strict");
+        let file = scratch.path().join("settings.json");
+        let id = crook_plugin::PluginId::parse("eugen/probe").expect("a literal");
+        let broken = r#"{"plugin_grants": {"eugen/probe": ["tabs.read"]},"#;
+        std::fs::write(&file, broken).expect("writable");
+        let refused = forget_plugin(&file, &id).expect_err("a file that does not read");
+        assert!(
+            format!("{refused:#}").contains("put it right"),
+            "{refused:#}"
+        );
+        assert_eq!(std::fs::read_to_string(&file).expect("readable"), broken);
+
+        std::fs::write(
+            &file,
+            r#"{"plugin_grants": {"eugen/probe": ["tabs.read"]}}"#,
+        )
+        .expect("writable");
+        forget_plugin(&file, &id).expect("the grant goes");
+        assert!(Settings::load(&file).granted_to("eugen/probe").is_empty());
     }
 
     #[test]
