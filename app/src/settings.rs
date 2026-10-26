@@ -41,6 +41,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -99,9 +100,12 @@ const PLUGIN_GRANTS_KEY: &str = "plugin_grants";
 /// [`Changes`].
 const PLUGIN_GRANT_REVISIONS_KEY: &str = "plugin_grant_revisions";
 
-/// The file beside the settings that keeps revokes a closing window could
-/// not write. See [`Parked`].
-const PARKED_FILE: &str = "settings.pending.json";
+/// How the files beside the settings that keep revokes a closing window
+/// could not write begin and end: `settings.pending.<pid>-<nonce>.json`, one
+/// per parker. See [`Parked`].
+const PARKED_PREFIX: &str = "settings.pending.";
+/// See [`PARKED_PREFIX`].
+const PARKED_SUFFIX: &str = ".json";
 
 /// The key the lines a person gave their agents' resumes are stored under.
 const RESUME_LINES_KEY: &str = "resume_lines";
@@ -908,14 +912,17 @@ impl Settings {
         // Revokes a window closing could not write go into the file first —
         // and, if that cannot be done either, over what this one reads, so
         // that it does not open running a plugin somebody revoked.
-        let parked = path.with_file_name(PARKED_FILE);
-        if parked.exists()
+        //
+        // Only for parked files that read: one that does not is kept and
+        // logged, and a launch that rewrote the settings for it every time
+        // would rewrite them for nothing.
+        if !parked_beside(&path).read.is_empty()
             && let Err(error) = Self::write_changes(&path, &Changes::default())
         {
             log::warn!("could not write the revokes kept beside the settings: {error:#}");
         }
         let mut document = read_document(&path);
-        Parked::read(&parked).lay_over(&mut document);
+        parked_beside(&path).parked.lay_over(&mut document);
         Self::from_document(Some(path), document)
     }
 
@@ -1368,12 +1375,11 @@ impl Settings {
     /// has nothing to say leaves a person's file — its formatting, its key
     /// order — as it is.
     pub fn write_changes(path: &Path, changes: &Changes) -> Result<Applied> {
-        let parked_path = path.with_file_name(PARKED_FILE);
-        if changes.is_empty() && !parked_path.exists() {
+        if changes.is_empty() && parked_beside(path).read.is_empty() {
             return Ok(Applied::default());
         }
         let mut applied = Applied::default();
-        let mut unparked = false;
+        let mut unparked = Vec::new();
         rewrite(path, LOCK_FILE, |target, bytes| {
             let mut document = match bytes {
                 None => Map::new(),
@@ -1388,9 +1394,13 @@ impl Settings {
                     }
                 },
             };
-            let parked = Parked::read(&parked_path);
-            unparked = !parked.is_empty();
-            parked.changes().apply_to(&mut document);
+            // Read under the lock, and each file removed below only if it is
+            // one read here: a parker never rewrites its file, so a file
+            // read is a file whose every revoke is in what this writes, and
+            // one parked after this read is left for the next save.
+            let parked = parked_beside(path);
+            unparked = parked.read;
+            parked.parked.changes().apply_to(&mut document);
             applied = changes.apply_to(&mut document);
             let mut json = serde_json::to_string_pretty(&Value::Object(document))
                 .context("could not serialize the settings")?;
@@ -1398,10 +1408,8 @@ impl Settings {
             json.push('\n');
             Ok(json.into_bytes())
         })?;
-        if unparked {
-            // Written into the file now, under the same lock that a parker
-            // would have had to wait for.
-            let _ = fs::remove_file(&parked_path);
+        for file in &unparked {
+            let _ = fs::remove_file(file);
         }
         for (_, plugin) in &applied.stale {
             log::info!(
@@ -1416,20 +1424,32 @@ impl Settings {
     /// file at `path`, for a window closing with a save it could not land —
     /// the lock held, the file not reading — so that they still win.
     ///
-    /// Merged with whatever is parked there already. Read by every window's
-    /// next save, by every look at the file and by the next launch, and
-    /// removed once a save has written it into the file. See [`Parked`].
+    /// In a file of this parker's own, written once and never again: every
+    /// window closing at once — a logout — parks at the same moment, and one
+    /// shared file read, added to and written back by each lost all but the
+    /// last one's revokes. Read by every window's next save, by every look at
+    /// the file and by the next launch, and removed once a save has written
+    /// it into the file. See [`Parked`].
     pub fn park(path: &Path, changes: &Changes) -> Result<()> {
-        let parked_path = path.with_file_name(PARKED_FILE);
-        let mut parked = Parked::read(&parked_path);
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+
+        let mut parked = Parked::default();
         parked.take_revokes_from(changes);
         if parked.is_empty() {
             return Ok(());
         }
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        let name = format!(
+            "{PARKED_PREFIX}{}-{nonce}-{}{PARKED_SUFFIX}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
         let mut json = serde_json::to_string_pretty(&parked.to_value())
             .context("could not serialize the parked settings")?;
         json.push('\n');
-        atomic_write(&parked_path, json.as_bytes())
+        atomic_write(&path.with_file_name(name), json.as_bytes())
     }
 
     /// The keys this build owns, as a save writes them.
@@ -1849,7 +1869,9 @@ impl Changes {
                         continue;
                     }
                     None => true,
-                    Some(_) => rev == entry.rev && there == entry.was,
+                    // A count that has run out cannot say "nobody answered
+                    // since" for anybody: a grant over it is set aside.
+                    Some(_) => rev == entry.rev && there == entry.was && rev < u64::MAX,
                 };
                 if !lands {
                     applied.stale.push((under.clone(), name.clone()));
@@ -1860,11 +1882,15 @@ impl Changes {
                     Some(value) => object.insert(name.clone(), value.clone()),
                     None => object.remove(name),
                 };
-                revisions.insert(name.clone(), rev + 1);
+                // Saturating, for a revoke over a count that has run out:
+                // the revoke lands, and the count stays where no grant can
+                // match it.
+                let next = rev.saturating_add(1);
+                revisions.insert(name.clone(), next);
                 counted = true;
                 applied
                     .after
-                    .insert(name.clone(), (rev + 1, entry.now.clone()));
+                    .insert(name.clone(), (next, entry.now.clone()));
             }
             match object.is_empty() {
                 true => document.remove(key),
@@ -1899,7 +1925,8 @@ impl Changes {
 }
 
 /// Revokes and switches off a closing window could not write, kept beside
-/// the settings in [`PARKED_FILE`] until a save writes them in.
+/// the settings in files of their own (see [`PARKED_PREFIX`]) until a save
+/// writes them in.
 ///
 /// Only those two, because only they must never be lost: a grant or a theme
 /// that did not land is one the person can give again, and one that landed
@@ -1917,14 +1944,32 @@ pub struct Parked {
 }
 
 impl Parked {
-    /// What is parked at `path`; nothing for no file or one that does not
-    /// read.
-    pub fn read(path: &Path) -> Self {
-        fs::read(path)
-            .ok()
-            .and_then(|bytes| parse_document(&bytes).ok())
-            .map(|document| Self::from_document(&document))
-            .unwrap_or_default()
+    /// What every parked file in `files` says, together, and which of them
+    /// did not read.
+    ///
+    /// A file that does not read is not "nothing parked": it may be a revoke
+    /// somebody's disk mangled. It is named in the log and left where it is,
+    /// for a person to look at, rather than read as empty and removed.
+    pub fn from_files(files: &[(PathBuf, Vec<u8>)]) -> (Self, Vec<PathBuf>) {
+        let mut parked = Self::default();
+        let mut unreadable = Vec::new();
+        for (file, bytes) in files {
+            match parse_document(bytes) {
+                Ok(document) => {
+                    let one = Self::from_document(&document);
+                    parked.revoked.extend(one.revoked);
+                    parked.switched_off.extend(one.switched_off);
+                }
+                Err(why) => {
+                    log::warn!(
+                        "{} {why}; it is kept as it is, and what it parked is not known",
+                        file.display()
+                    );
+                    unreadable.push(file.clone());
+                }
+            }
+        }
+        (parked, unreadable)
     }
 
     /// What is parked, out of the parked file's object.
@@ -2083,10 +2128,58 @@ fn owned_keys(options: impl Serialize, group: &str) -> Result<Map<String, Value>
     Ok(owned)
 }
 
-/// Where revokes a closing window could not write are kept beside the
-/// settings at `settings`. See [`Parked`].
-pub fn parked_path(settings: &Path) -> PathBuf {
-    settings.with_file_name(PARKED_FILE)
+/// The files beside the settings at `settings` that keep revokes a closing
+/// window could not write, by name. See [`Parked`].
+pub fn parked_files(settings: &Path) -> Vec<PathBuf> {
+    let Some(directory) = settings.parent() else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|file| {
+            file.file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| {
+                    name.starts_with(PARKED_PREFIX) && name.ends_with(PARKED_SUFFIX)
+                })
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// Each parked file beside the settings at `settings`, with its bytes.
+pub fn parked_snapshot(settings: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    parked_files(settings)
+        .into_iter()
+        .filter_map(|file| fs::read(&file).ok().map(|bytes| (file, bytes)))
+        .collect()
+}
+
+/// What the parked files beside the settings at `settings` say, and which of
+/// them were read whole.
+pub struct ParkedBeside {
+    /// What they say, together.
+    pub parked: Parked,
+    /// The files that read, which a save that writes them in may remove.
+    pub read: Vec<PathBuf>,
+}
+
+/// Reads the parked files beside the settings at `settings`.
+pub fn parked_beside(settings: &Path) -> ParkedBeside {
+    let files = parked_snapshot(settings);
+    let (parked, unreadable) = Parked::from_files(&files);
+    ParkedBeside {
+        parked,
+        read: files
+            .into_iter()
+            .map(|(file, _)| file)
+            .filter(|file| !unreadable.contains(file))
+            .collect(),
+    }
 }
 
 /// `<configuration directory>/crook/settings.json`, where there is one.
@@ -2259,30 +2352,172 @@ fn hold_the_lock(path: &Path, name: &str) -> Result<Option<fs::File>> {
     // Held: waited for in the system's own queue rather than by asking again
     // every few milliseconds, which let a save that kept arriving at the
     // right moment take the lock over and over while another starved past
-    // its patience. The wait is on a thread of its own so that it can be
-    // given up; one given up takes the lock when it comes and lets it go at
-    // once, since nobody is there to hand it to.
-    let (handed, taken) = std::sync::mpsc::channel();
-    let waiting = std::thread::Builder::new()
-        .name(String::from("crook-config-lock"))
-        .spawn(move || {
-            let locked = file.lock();
-            let _ = handed.send((file, locked));
-        });
-    if let Err(error) = waiting {
-        return Err(anyhow::Error::new(error).context("could not wait for the settings lock"));
-    }
-    match taken.recv_timeout(LOCK_PATIENCE) {
-        Ok((file, Ok(()))) => Ok(Some(file)),
-        Ok((_, Err(error))) => {
-            log::warn!(
-                "{} cannot be locked here ({error}); checking the file before writing it instead",
-                lock.display()
-            );
-            Ok(None)
+    // its patience. See [`LockWaiter`].
+    drop(file);
+    LockWaiter::wait(&lock, LOCK_PATIENCE)
+}
+
+/// The one thread in this process waiting in the system's queue for a lock
+/// file, and whoever is waiting on it.
+///
+/// One per lock file, not one per wait. A wait that gives up cannot take its
+/// thread back out of `File::lock`, and a thread per wait left one thread and
+/// one open file behind for every retry while another Crook held the lock —
+/// one every few seconds, until the process ran out of files. So a wait finds
+/// the thread already waiting and waits on it; the thread, once it has the
+/// lock, hands it to a wait still waiting or, with nobody left, lets it go.
+struct LockWaiter {
+    state: Mutex<WaiterState>,
+    handed: std::sync::Condvar,
+}
+
+/// What a [`LockWaiter`]'s thread and the waits on it share.
+#[derive(Default)]
+struct WaiterState {
+    /// The lock, taken, for the first wait to find it.
+    file: Option<fs::File>,
+    /// How many waits are waiting.
+    waiting: usize,
+    /// The thread has finished: it handed the lock on, let it go, or found
+    /// it cannot be had on this file system (`unlockable`).
+    done: bool,
+    /// `File::lock` failed outright, which is a file system with no locks.
+    unlockable: bool,
+}
+
+/// Every lock file a thread is waiting for, in this process.
+fn lock_waiters() -> &'static Mutex<std::collections::HashMap<PathBuf, Arc<LockWaiter>>> {
+    static WAITERS: std::sync::OnceLock<
+        Mutex<std::collections::HashMap<PathBuf, Arc<LockWaiter>>>,
+    > = std::sync::OnceLock::new();
+    WAITERS.get_or_init(Default::default)
+}
+
+impl LockWaiter {
+    /// Waits up to `patience` for the lock on `lock`, through the one thread
+    /// waiting for it — started here if there is none.
+    fn wait(lock: &Path, patience: std::time::Duration) -> Result<Option<fs::File>> {
+        let deadline = std::time::Instant::now() + patience;
+        loop {
+            let waiter = Self::for_lock(lock)?;
+            let mut state = waiter.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.waiting += 1;
+            loop {
+                if let Some(file) = state.file.take() {
+                    state.waiting -= 1;
+                    return Ok(Some(file));
+                }
+                if state.done {
+                    break;
+                }
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    state.waiting -= 1;
+                    return Err(LockBusy {
+                        lock: lock.to_owned(),
+                    }
+                    .into());
+                }
+                state = waiter
+                    .handed
+                    .wait_timeout(state, left)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+            }
+            state.waiting -= 1;
+            if state.unlockable {
+                log::warn!(
+                    "{} cannot be locked here; checking the file before writing it instead",
+                    lock.display()
+                );
+                return Ok(None);
+            }
+            // The thread handed the lock to another wait and finished: wait
+            // again, through a new one.
         }
-        Err(_) => Err(LockBusy { lock }.into()),
     }
+
+    /// The thread waiting for `lock`, started if there is none.
+    fn for_lock(lock: &Path) -> Result<Arc<Self>> {
+        let mut waiters = lock_waiters()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(waiter) = waiters.get(lock) {
+            return Ok(waiter.clone());
+        }
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock)
+            .with_context(|| format!("could not open {}", lock.display()))?;
+        let waiter = Arc::new(Self {
+            state: Mutex::default(),
+            handed: std::sync::Condvar::new(),
+        });
+        let (mine, path) = (waiter.clone(), lock.to_owned());
+        #[cfg(test)]
+        {
+            *lock_waiters_started()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(lock.to_owned())
+                .or_default() += 1;
+        }
+        std::thread::Builder::new()
+            .name(String::from("crook-config-lock"))
+            .spawn(move || mine.take_and_hand_on(file, &path))
+            .context("could not wait for the lock")?;
+        waiters.insert(lock.to_owned(), waiter.clone());
+        Ok(waiter)
+    }
+
+    /// The thread: waits in the system's queue, then hands the lock to a
+    /// wait still waiting, or lets it go with nobody left.
+    fn take_and_hand_on(self: Arc<Self>, file: fs::File, lock: &Path) {
+        let locked = file.lock();
+        // Out of the list first, so that a wait arriving from here on starts
+        // a thread of its own rather than waiting on one that has finished.
+        {
+            let mut waiters = lock_waiters()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if waiters
+                .get(lock)
+                .is_some_and(|waiter| Arc::ptr_eq(waiter, &self))
+            {
+                waiters.remove(lock);
+            }
+        }
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        match locked {
+            Ok(()) if state.waiting > 0 => state.file = Some(file),
+            // Nobody to hand it to: dropped, which lets it go.
+            Ok(()) => drop(file),
+            Err(_) => state.unlockable = true,
+        }
+        state.done = true;
+        drop(state);
+        self.handed.notify_all();
+    }
+}
+
+/// How many waiting threads have been started for each lock file, for a test.
+#[cfg(test)]
+fn lock_waiters_started() -> &'static Mutex<std::collections::HashMap<PathBuf, usize>> {
+    static STARTED: std::sync::OnceLock<Mutex<std::collections::HashMap<PathBuf, usize>>> =
+        std::sync::OnceLock::new();
+    STARTED.get_or_init(Default::default)
+}
+
+/// Whether a thread in this process is waiting for `lock`, for a test.
+#[cfg(test)]
+fn lock_waited_for(lock: &Path) -> bool {
+    lock_waiters()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains_key(lock)
 }
 
 /// How many times a write with no lock to hold makes itself again over a
@@ -4151,7 +4386,7 @@ mod tests {
         fs::write(scratch.settings_file(), good).expect("writable");
         let after = Settings::load(scratch.settings_file());
         assert!(after.granted_to("eugen/probe").is_empty());
-        assert!(!parked_path(&scratch.settings_file()).exists());
+        assert!(parked_files(&scratch.settings_file()).is_empty());
         let on_disk = Settings::load(scratch.settings_file());
         assert!(on_disk.granted_to("eugen/probe").is_empty());
         assert_eq!(on_disk.disabled_plugins(), ["eugen/off"]);
@@ -4165,5 +4400,184 @@ mod tests {
         assert!(Settings::load_strictly(scratch.settings_file()).is_ok());
         fs::write(scratch.settings_file(), "{").expect("writable");
         assert!(Settings::load_strictly(scratch.settings_file()).is_err());
+    }
+
+    #[test]
+    fn test_windows_parking_at_once_lose_no_revoke() {
+        // A logout closes every window at the same moment. One shared parked
+        // file, read, added to and written back by each, kept only the last
+        // writer's revokes.
+        let scratch = ScratchDirectory::new("park-at-once");
+        const PARKERS: usize = 6;
+        const ROUNDS: usize = 40;
+        let start = std::sync::Arc::new(std::sync::Barrier::new(PARKERS));
+        let threads: Vec<_> = (0..PARKERS)
+            .map(|parker| {
+                let (path, start) = (scratch.settings_file(), start.clone());
+                std::thread::spawn(move || {
+                    for round in 0..ROUNDS {
+                        let mut changes = Changes::default();
+                        changes.entries.insert(
+                            (
+                                PLUGIN_GRANTS_KEY.to_owned(),
+                                format!("eugen/p{parker}-{round}"),
+                            ),
+                            Entry {
+                                was: Some(Value::from(vec!["x"])),
+                                now: None,
+                                rev: 0,
+                            },
+                        );
+                        start.wait();
+                        Settings::park(&path, &changes).expect("parked");
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("no parker panicked");
+        }
+        let parked = parked_beside(&scratch.settings_file()).parked;
+        assert_eq!(parked.revoked.len(), PARKERS * ROUNDS, "revokes were lost");
+    }
+
+    #[test]
+    fn test_a_save_unparking_does_not_take_a_revoke_parked_after_it_read() {
+        // A save read the parked file under the lock and removed it after —
+        // and a revoke parked in between went with it, written nowhere.
+        let scratch = ScratchDirectory::new("unpark-race");
+        const PLUGINS: usize = 120;
+        let mut first = Settings::load(scratch.settings_file());
+        for plugin in 0..PLUGINS {
+            first.set_granted(&format!("eugen/p{plugin}"), vec![String::from("x")]);
+        }
+        first.save_blocking().expect("granted");
+
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saver = {
+            let (path, done) = (scratch.settings_file(), done.clone());
+            std::thread::spawn(move || {
+                while !done.load(Ordering::Relaxed) {
+                    Settings::write_changes(&path, &Changes::default()).expect("the save lands");
+                }
+            })
+        };
+        for plugin in 0..PLUGINS {
+            let mut changes = Changes::default();
+            changes.entries.insert(
+                (PLUGIN_GRANTS_KEY.to_owned(), format!("eugen/p{plugin}")),
+                Entry {
+                    was: Some(Value::from(vec!["x"])),
+                    now: None,
+                    rev: 1,
+                },
+            );
+            Settings::park(&scratch.settings_file(), &changes).expect("parked");
+        }
+        done.store(true, Ordering::Relaxed);
+        saver.join().expect("the saver did not panic");
+
+        let written = Settings::from_document(None, read_document(&scratch.settings_file()));
+        let parked = parked_beside(&scratch.settings_file()).parked;
+        for plugin in 0..PLUGINS {
+            let name = format!("eugen/p{plugin}");
+            assert!(
+                written.granted_to(&name).is_empty() || parked.revoked.contains(&name),
+                "the revoke of {name} is in neither file"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_parked_file_that_does_not_read_is_kept_and_rewrites_nothing() {
+        let scratch = ScratchDirectory::new("park-corrupt");
+        let mut first = Settings::load(scratch.settings_file());
+        first.set_theme("Midnight");
+        first.save_blocking().expect("saved");
+        let corrupt = scratch.path.join("settings.pending.1-2-3.json");
+        fs::write(&corrupt, "{").expect("writable");
+        let before = fs::read(scratch.settings_file()).expect("readable");
+
+        let _ = Settings::load(scratch.settings_file());
+        assert_eq!(
+            fs::read(scratch.settings_file()).expect("readable"),
+            before,
+            "a launch rewrote the settings for a parked file that does not read"
+        );
+        let mut window = Settings::load(scratch.settings_file());
+        window.set_theme("Kanagawa");
+        window.save_blocking().expect("saved");
+        assert!(
+            corrupt.exists(),
+            "a parked file that does not read was thrown away"
+        );
+    }
+
+    #[test]
+    fn test_waits_on_a_held_lock_share_one_thread() {
+        // A wait that gave up left its thread, and its open file, in
+        // `File::lock` — one more every retry for as long as another Crook
+        // held the lock.
+        let scratch = ScratchDirectory::new("one-waiter");
+        let lock = scratch.path.join(LOCK_FILE);
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock)
+            .expect("the lock file opens");
+        held.lock().expect("the lock is taken");
+
+        for _ in 0..5 {
+            let waited = LockWaiter::wait(&lock, std::time::Duration::from_millis(50));
+            assert!(waited.is_err(), "the lock is held");
+        }
+        let started = lock_waiters_started()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&lock)
+            .copied();
+        assert_eq!(started, Some(1), "each wait started a thread of its own");
+
+        drop(held);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while lock_waited_for(&lock) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the waiting thread never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let taken = LockWaiter::wait(&lock, std::time::Duration::from_millis(500));
+        assert!(
+            matches!(taken, Ok(Some(_))),
+            "the thread kept the lock it took"
+        );
+    }
+
+    #[test]
+    fn test_a_revision_that_has_run_out_sets_a_grant_aside_and_lets_a_revoke_land() {
+        let scratch = ScratchDirectory::new("rev-max");
+        fs::write(
+            scratch.settings_file(),
+            format!(
+                r#"{{"plugin_grants": {{"eugen/probe": ["x"]}}, "plugin_grant_revisions": {{"eugen/probe": {}}}}}"#,
+                u64::MAX
+            ),
+        )
+        .expect("writable");
+        let mut window = Settings::load(scratch.settings_file());
+        window.set_granted("eugen/probe", vec![String::from("x"), String::from("y")]);
+        let applied = Settings::write_changes(&scratch.settings_file(), &window.take_changes())
+            .expect("the save runs");
+        assert!(applied.set_aside());
+
+        let mut window = Settings::load(scratch.settings_file());
+        window.set_granted("eugen/probe", Vec::new());
+        window.save_blocking().expect("the revoke lands");
+        let after = Settings::load(scratch.settings_file());
+        assert!(after.granted_to("eugen/probe").is_empty());
+        assert_eq!(after.revisions.get("eugen/probe"), Some(&u64::MAX));
     }
 }

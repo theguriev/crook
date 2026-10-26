@@ -199,9 +199,9 @@ impl Future for Next {
     }
 }
 
-/// What one look read: the settings file's bytes and the parked file's,
-/// each `None` for no file.
-type Bytes = (Option<Vec<u8>>, Option<Vec<u8>>);
+/// What one look read: the settings file's bytes, `None` for no file, and
+/// each parked file's beside it.
+type Bytes = (Option<Vec<u8>>, Vec<(PathBuf, Vec<u8>)>);
 
 /// The thread: a look every `every` until the window goes.
 fn look(
@@ -223,9 +223,7 @@ fn look(
         let stamped = stamp();
         // The parked revokes beside the file are part of what it says: a
         // change to either is a change.
-        let parked = read(&path.with_file_name(super::PARKED_FILE))
-            .ok()
-            .flatten();
+        let parked = super::parked_snapshot(path);
         let bytes = match read(path) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -252,10 +250,7 @@ fn look(
         }
         last = Some(seen.clone());
         let (bytes, parked) = seen;
-        let parked = parked
-            .and_then(|bytes| super::parse_document(&bytes).ok())
-            .map(|document| super::Parked::from_document(&document))
-            .unwrap_or_default();
+        let (parked, _) = super::Parked::from_files(&parked);
 
         let file = match bytes {
             None => OnDisk::Missing,

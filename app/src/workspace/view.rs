@@ -14037,7 +14037,7 @@ impl Workspace {
         let seen = Seen {
             stamp: self.saves.quiet_at(),
             file,
-            parked: crate::settings::Parked::read(&crate::settings::parked_path(&path)),
+            parked: crate::settings::parked_beside(&path).parked,
         };
         self.adopt_settings_file(seen, ctx);
     }

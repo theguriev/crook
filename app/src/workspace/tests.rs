@@ -34982,7 +34982,7 @@ mod sandboxed {
         );
         assert!(Settings::load(&file).granted_to("eugen/probe").is_empty());
         assert!(
-            !crate::settings::parked_path(&file).exists(),
+            crate::settings::parked_files(&file).is_empty(),
             "the parked revoke was not written in and taken away"
         );
     }

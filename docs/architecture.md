@@ -3671,8 +3671,12 @@ was; the value catches a hand edit, which counts nothing. A grant set aside leav
 answer standing and the card asks again; a grant that finds the file already saying exactly it
 has landed. Older builds carry `plugin_grant_revisions` through their saves as a key they do not
 know. A window closing with revokes it could not write — the lock held, the file not reading —
-parks them in `settings.pending.json`; every save, every look at the file and the next launch lay
-them over it, and the first save that lands writes them in and removes the file.
+parks them in a file of its own, `settings.pending.<pid>-<nonce>.json`, written once and never
+rewritten, so windows closing together at a logout cannot lose each other's; every save, every
+look at the file and the next launch lay them over it, and a save that lands removes exactly the
+parked files it read under the lock. A parked file that does not read is kept and named in the
+log. The lock is waited for by one thread per lock file in a process, which a retry waits on
+rather than starting another.
 `--uninstall-plugin` reads the settings strictly and removes nothing when they do not read, since
 a revoke worked out against every default is a revoke of nothing.
 
