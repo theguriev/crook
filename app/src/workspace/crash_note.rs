@@ -110,7 +110,7 @@ pub(super) fn render(workspace: &Workspace) -> Option<Box<dyn Element>> {
 /// two things to say, a crash and a session another window keeps, shows them
 /// as two rows of one strip rather than as two kinds of banner.
 pub(super) fn line(
-    said: &'static str,
+    said: impl Into<String>,
     buttons: impl IntoIterator<Item = Box<dyn Element>>,
     ui: FamilyId,
 ) -> Box<dyn Element> {
@@ -122,7 +122,7 @@ pub(super) fn line(
             // narrow window and never the buttons after it.
             Expanded::new(
                 1.,
-                Text::new(said, ui, widgets::LABEL_SIZE)
+                Text::new(said.into(), ui, widgets::LABEL_SIZE)
                     .with_color(theme().text_primary)
                     .with_ellipsis(Cut::End)
                     .finish(),

@@ -972,6 +972,9 @@ pub enum SettingsAction {
     /// "Let agents ask in Crook": whether the window takes the questions
     /// agents' permission hooks hand it.
     ToggleAgentsAsk,
+    /// "Offer to connect agents": whether the window offers, under its
+    /// header, to connect an agent it sees at work with no plugin reporting.
+    ToggleConnectHints,
     /// One of the Notifications page's switches: whether this occasion posts
     /// a desktop notification while the window is behind another.
     ToggleNotification(Occasion),

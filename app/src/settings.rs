@@ -93,6 +93,11 @@ const FONT_FAMILY_KEY: &str = "font_family";
 /// The key the list of switched-off plugins is stored under.
 const DISABLED_PLUGINS_KEY: &str = "disabled_plugins";
 
+/// The keys whose value is a list of names that windows add to and take
+/// from one name at a time, merged by name as [`DISABLED_PLUGINS_KEY`] is:
+/// two windows saying "Not now" for two agents at once both land.
+const NAME_LIST_KEYS: [&str; 1] = ["agents_not_connected"];
+
 /// The key the things a person has allowed a plugin to do are stored under.
 const PLUGIN_GRANTS_KEY: &str = "plugin_grants";
 
@@ -609,6 +614,62 @@ pub struct GeneralOptions {
     /// Whether running marks breathe and the caret blinks, or the window
     /// keeps still. See [`Motion`].
     pub motion: Motion,
+    /// Whether the window offers, under its header, to connect an agent it
+    /// sees at work in a pane whose hooks never report — Crook's plugin not
+    /// installed. On, because the offer is one line, made once, and answered
+    /// with a press; off, from the Agents page, for a person who connects
+    /// their agents some other way or not at all.
+    pub hint_to_connect_agents: bool,
+    /// The agents somebody answered that offer with "Not now" for, which it
+    /// is never made for again.
+    pub agents_not_connected: AgentsNotConnected,
+}
+
+/// The agents a person said "Not now" to connecting, by their names in
+/// [`crate::agent`]'s table: written as a list of those names.
+///
+/// A set of bits rather than a list, so [`GeneralOptions`] stays [`Copy`]:
+/// there are three agents with a plugin to connect, and a name the table no
+/// longer has is dropped on read.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentsNotConnected(u8);
+
+impl AgentsNotConnected {
+    /// The bit `agent` is kept under, for one of the agents Crook has a
+    /// plugin for.
+    fn bit(agent: &str) -> Option<u8> {
+        crate::agent::connect::connectable()
+            .position(|name| name == agent)
+            .map(|place| 1 << place)
+    }
+
+    /// Whether somebody said "Not now" for `agent`.
+    pub fn contains(self, agent: &str) -> bool {
+        Self::bit(agent).is_some_and(|bit| self.0 & bit != 0)
+    }
+
+    /// The same, with `agent` among them.
+    pub fn with(self, agent: &str) -> Self {
+        Self(self.0 | Self::bit(agent).unwrap_or(0))
+    }
+}
+
+impl Serialize for AgentsNotConnected {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let names: Vec<&str> = crate::agent::connect::connectable()
+            .filter(|name| self.contains(name))
+            .collect();
+        names.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentsNotConnected {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let names = Vec::<String>::deserialize(deserializer)?;
+        Ok(names
+            .iter()
+            .fold(Self::default(), |kept, name| kept.with(name)))
+    }
 }
 
 /// How wide the tabs panel is until its edge is dragged: Warp's
@@ -638,6 +699,8 @@ impl Default for GeneralOptions {
             audible_bell: false,
             middle_click_paste: true,
             motion: Motion::System,
+            hint_to_connect_agents: true,
+            agents_not_connected: AgentsNotConnected::default(),
         }
     }
 }
@@ -1617,6 +1680,9 @@ pub struct Changes {
     entries: BTreeMap<(String, String), Entry>,
     /// Each plugin switched off (`true`) or back on (`false`).
     switched_off: BTreeMap<String, bool>,
+    /// Each name added to (`true`) or taken from (`false`) one of the
+    /// [`NAME_LIST_KEYS`], by the key and the name.
+    listed: BTreeMap<(String, String), bool>,
     /// The revisions this window's own saves have written, by plugin, so that
     /// an answer made here after one of them landed — and before the window
     /// read the file again — is given over the revision it really saw.
@@ -1703,7 +1769,10 @@ fn revisions_value(revisions: &BTreeMap<String, u64>) -> Value {
 impl Changes {
     /// Whether there is nothing to write.
     pub fn is_empty(&self) -> bool {
-        self.values.is_empty() && self.entries.is_empty() && self.switched_off.is_empty()
+        self.values.is_empty()
+            && self.entries.is_empty()
+            && self.switched_off.is_empty()
+            && self.listed.is_empty()
     }
 
     /// What turns the keys in `before` into the keys in `after`, both as
@@ -1725,6 +1794,14 @@ impl Changes {
                 }
                 for name in was.difference(&is) {
                     changes.switched_off.insert(name.clone(), false);
+                }
+            } else if NAME_LIST_KEYS.contains(&key.as_str()) {
+                let (was, is) = (names_in(was), names_in(is));
+                for name in is.difference(&was) {
+                    changes.listed.insert((key.clone(), name.clone()), true);
+                }
+                for name in was.difference(&is) {
+                    changes.listed.insert((key.clone(), name.clone()), false);
                 }
             } else if ENTRY_KEYS.contains(&key.as_str()) {
                 let empty = Map::new();
@@ -1781,6 +1858,7 @@ impl Changes {
             }
         }
         self.switched_off.extend(later.switched_off);
+        self.listed.extend(later.listed);
     }
 
     /// Takes out what `written` wrote, now that it is on disk — unless it has
@@ -1819,6 +1897,11 @@ impl Changes {
         for (name, off) in &written.switched_off {
             if self.switched_off.get(name) == Some(off) {
                 self.switched_off.remove(name);
+            }
+        }
+        for (name, listed) in &written.listed {
+            if self.listed.get(name) == Some(listed) {
+                self.listed.remove(name);
             }
         }
     }
@@ -1929,6 +2012,32 @@ impl Changes {
                 true => document.remove(DISABLED_PLUGINS_KEY),
                 false => document.insert(
                     DISABLED_PLUGINS_KEY.to_owned(),
+                    Value::Array(names.into_iter().map(Value::String).collect()),
+                ),
+            };
+        }
+
+        for key in NAME_LIST_KEYS {
+            let mine: Vec<(&String, bool)> = self
+                .listed
+                .iter()
+                .filter(|((list, _), _)| list == key)
+                .map(|((_, name), listed)| (name, *listed))
+                .collect();
+            if mine.is_empty() {
+                continue;
+            }
+            let mut names = names_in(document.get(key));
+            for (name, listed) in mine {
+                match listed {
+                    true => names.insert(name.clone()),
+                    false => names.remove(name),
+                };
+            }
+            match names.is_empty() {
+                true => document.remove(key),
+                false => document.insert(
+                    key.to_owned(),
                     Value::Array(names.into_iter().map(Value::String).collect()),
                 ),
             };
@@ -3361,6 +3470,9 @@ mod tests {
         let owned = settings.owned();
         assert_eq!(
             vec![
+                // Crook's own: the agents somebody said "Not now" to
+                // connecting, which the window does not offer again.
+                "agents_not_connected",
                 // Crook's own: whether the window takes the questions agents'
                 // permission hooks hand it.
                 "answer_agents_from_crook",
@@ -3377,6 +3489,9 @@ mod tests {
                 // Crook's own: Warp keeps the terminal's type size in its
                 // appearance settings, which this file is not a copy of.
                 "font_size",
+                // Crook's own: whether the window offers to connect an agent
+                // it sees at work with no plugin reporting.
+                "hint_to_connect_agents",
                 "light_theme",
                 // Crook's own, and the one key here that changes what the
                 // shell itself is rather than what the window looks like.
@@ -3965,6 +4080,27 @@ mod tests {
         assert_eq!(after.disabled_plugins(), ["eugen/off-in-b"]);
         assert!(after.granted_to("eugen/one").is_empty());
         assert_eq!(after.granted_to("eugen/two"), ["clipboard"]);
+    }
+
+    #[test]
+    fn test_two_windows_saying_not_now_for_two_agents_keep_both() {
+        // A list of names like the switched-off plugins, merged by name: a
+        // window that never saw the other's "Not now" does not write it away.
+        let scratch = ScratchDirectory::new("not-now-two-windows");
+        let (mut a, mut b) = two_windows(&scratch);
+        let mut general = a.general();
+        general.agents_not_connected = general.agents_not_connected.with("claude");
+        a.set_general(general);
+        a.save_blocking().expect("A saves");
+        let mut general = b.general();
+        general.agents_not_connected = general.agents_not_connected.with("codex");
+        b.set_general(general);
+        b.save_blocking().expect("B saves");
+
+        let after = Settings::load(scratch.settings_file());
+        let kept = after.general().agents_not_connected;
+        assert!(kept.contains("claude"), "B's save took back A's Not now");
+        assert!(kept.contains("codex"));
     }
 
     #[test]

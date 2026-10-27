@@ -1,0 +1,9 @@
+{
+  "agents": {
+    "claude": "missing",
+    "codex": "behind 0.1.30",
+    "copilot": "connected"
+  },
+  "claude_updates": false,
+  "hint": "claude"
+}

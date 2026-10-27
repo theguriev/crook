@@ -1,6 +1,7 @@
 {
   "name": "crook",
   "displayName": "Crook",
+  "version": "0.1.39",
   "description": "Tells the Crook tab Codex runs in what it is doing, and teaches Codex what a Crook pane can do. Does nothing in any other terminal.",
   "author": {
     "name": "Eugen Guriev",

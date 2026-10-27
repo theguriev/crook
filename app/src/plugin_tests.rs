@@ -619,6 +619,7 @@ fn the_settings_rail_is_what_the_plugins_put_in_it() {
             [
                 "Appearance",
                 "Shell",
+                "Agents",
                 "Notifications",
                 "Keyboard Shortcuts",
                 "About"
@@ -650,7 +651,13 @@ fn disabling_a_plugin_takes_its_settings_page_off_the_rail() {
             .collect();
         assert_eq!(
             titles,
-            ["Appearance", "Notifications", "Keyboard Shortcuts", "About"]
+            [
+                "Appearance",
+                "Agents",
+                "Notifications",
+                "Keyboard Shortcuts",
+                "About"
+            ]
         );
     });
 }
