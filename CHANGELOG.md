@@ -5,6 +5,22 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.38
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.37...v0.1.38)
+
+### Performance
+
+- **blocks:** Hold finished blocks once, bound their pictures in the app, and cut the spill's flood cost ([#562](https://github.com/theguriev/crook/pull/562))
+
+### Fixes
+
+- **terminal:** Prompt rows after no-newline output, file:// guard, OSC 7 escaping, floods parsed a slice at a time ([#563](https://github.com/theguriev/crook/pull/563))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.37
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.36...v0.1.37)
