@@ -1126,7 +1126,7 @@ fn overlays(character: char) -> bool {
 /// any other character Unicode says a renderer may draw as nothing, the two
 /// separators a renderer may break a line at, and every space but the
 /// plain one.
-fn hidden(character: char) -> bool {
+pub(crate) fn hidden(character: char) -> bool {
     character.is_control()
         || format(character)
         || ignorable(character)

@@ -115,8 +115,9 @@ pub mod code {
     /// The pane a `pane.close` names is the caller's own, which a request
     /// never closes: a pane that ends itself does so by exiting.
     pub const OWN_PANE: &str = "own-pane";
-    /// The pane a `pane.close` names is neither one the caller opened nor
-    /// one those opened: only a person closes those.
+    /// The pane a `pane.close` or a `pane.split`'s `beside` names is not one
+    /// the caller opened itself: a person's, another agent's, or one the
+    /// caller's own worker opened.
     pub const NOT_OPENED: &str = "not-opened";
     /// The pane a `pane.close` names is still working — its agent is running
     /// or waiting on a person, its hook is asking, or its shell has a command
@@ -126,6 +127,10 @@ pub mod code {
     /// The pane a `pane.close` names is the one a person is working in: the
     /// active tab's focused pane.
     pub const FOCUSED: &str = "focused";
+    /// The pane a `pane.close` names has a shell that reports no command
+    /// marks, and whether something runs in it could not be read: a close
+    /// that cannot tell whether it ends work is refused.
+    pub const UNKNOWN: &str = "unknown";
 }
 
 /// The longest a `pane.wait` may wait, in seconds, and how long one that

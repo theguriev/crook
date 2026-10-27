@@ -11709,6 +11709,12 @@ impl Workspace {
         self.terminals.as_ref(app).marks(pane)
     }
 
+    /// Whether a pane's shell has marked a prompt, so that its blocks say
+    /// whether a command is running: see [`TerminalModel::has_marked`].
+    pub(crate) fn shell_has_marked(&self, pane: PaneId, app: &AppContext) -> bool {
+        self.terminals.as_ref(app).has_marked(pane)
+    }
+
     /// Opens a tab whose shell starts in `directory`, in `tab`'s group.
     ///
     /// What the worktree menu opens into, and **it is a tab and not a pane**.

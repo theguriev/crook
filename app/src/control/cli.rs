@@ -1252,8 +1252,12 @@ pub mod unix {
     impl Asked {
         /// Connects to the window at `socket`, after every check
         /// [`connect_checked`] makes, and sends `verb`.
+        ///
+        /// The connect is given up on after [`server::DEADLINE`], as a
+        /// hook's is: a window that has stopped taking connections must not
+        /// hold `crook mcp` past its client's leaving.
         pub fn send(socket: &Path, verb: &Verb, token: Option<&str>) -> Result<Self> {
-            let stream = connect_checked(socket)?;
+            let stream = connect_checked_within(socket, server::DEADLINE)?;
             request(&stream, verb, token)?;
             Ok(Self { stream })
         }

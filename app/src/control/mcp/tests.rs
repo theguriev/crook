@@ -181,6 +181,17 @@ impl Drop for Client {
     }
 }
 
+/// The facts a tool result's text ends with, after [`DETAILS`]; `null`
+/// when it has none.
+pub(crate) fn details(result: &Value) -> Value {
+    text(result)
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix(DETAILS))
+        .map(|line| serde_json::from_str(line).expect("the details are JSON"))
+        .unwrap_or(Value::Null)
+}
+
 /// The text of a tool result.
 pub(crate) fn text(result: &Value) -> String {
     result["content"][0]["text"]
@@ -252,9 +263,20 @@ fn a_modern_request_says_its_version_and_one_not_spoken_here_is_refused_with_tho
         "crook"
     );
 
+    // The caching hints the revision requires of these two, without which
+    // a client refuses the list, and the server's name on every answer.
+    assert_eq!(result["ttlMs"], 0, "{discovered}");
+    assert_eq!(result["cacheScope"], "public", "{discovered}");
+
     let listed = client.request(2, "tools/list", meta(MODERN_VERSION));
     assert_eq!(listed["result"]["resultType"], "complete");
     assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(listed["result"]["ttlMs"], 0, "{listed}");
+    assert_eq!(listed["result"]["cacheScope"], "public", "{listed}");
+    assert_eq!(
+        listed["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "crook",
+        "{listed}"
+    );
 
     let refused = client.request(3, "tools/list", meta("1900-01-01"));
     assert_eq!(refused["error"]["code"], -32022, "{refused}");
@@ -270,6 +292,14 @@ fn a_modern_request_says_its_version_and_one_not_spoken_here_is_refused_with_tho
     );
     let called = client.answer_to(4, |message| panic!("{message}"));
     assert_eq!(called["result"]["resultType"], "complete", "{called}");
+    assert_eq!(
+        called["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "crook"
+    );
+    assert!(
+        called["result"].get("structuredContent").is_none(),
+        "{called}"
+    );
 
     // A legacy request has no `resultType`: it was not in that revision.
     let legacy = client.request(5, "tools/list", json!({}));
@@ -458,7 +488,7 @@ fn outside_crook_the_server_starts_lists_its_tools_and_every_call_says_where_it_
                 "{tool}: {said}"
             );
         }
-        assert_eq!(result["structuredContent"]["error"]["message"], said);
+        assert!(result.get("structuredContent").is_none(), "{result}");
     }
     client.finish();
 
@@ -559,6 +589,18 @@ fn a_call_with_arguments_a_tool_does_not_take_is_a_tool_error_that_says_which() 
             "is not a directory",
         ),
         (13, "crook_pane_close", json!({}), "`pane` is required"),
+        (
+            14,
+            "crook_tab_new",
+            json!({ "command": "x", "cwd": "." }),
+            "is relative",
+        ),
+        (
+            15,
+            "crook_pane_split",
+            json!({ "command": "x", "cwd": "app" }),
+            "is relative",
+        ),
     ] {
         let result = client.call(id, tool, arguments);
         assert_eq!(result["isError"], true, "{tool}: {result}");
@@ -635,6 +677,18 @@ fn escape_sequences_are_taken_out_and_other_controls_written_out() {
         ("\u{1b}[12\u{e9}t\u{e9}", "\u{e9}t\u{e9}"),
         ("unterminated \u{1b}]0;title", "unterminated "),
         ("ünïcödé 修正 ✓", "ünïcödé 修正 ✓"),
+        // Every format character, the tag block, the zero-width ones, the
+        // separators and the spaces that are not a space.
+        ("soft\u{ad}hyphen", "soft\\u{ad}hyphen"),
+        (
+            "zero\u{200b}width\u{2060}joiner\u{feff}",
+            "zero\\u{200b}width\\u{2060}joiner\\u{feff}",
+        ),
+        ("tag\u{e0041}\u{e007f}", "tag\\u{e0041}\\u{e007f}"),
+        ("line\u{2028}para\u{2029}", "line\\u{2028}para\\u{2029}"),
+        ("no\u{a0}break", "no\\u{a0}break"),
+        ("arabic\u{61c}mark", "arabic\\u{61c}mark"),
+        ("grapheme\u{34f}joiner", "grapheme\\u{34f}joiner"),
     ] {
         assert_eq!(clean(raw), cleaned, "{raw:?}");
     }
@@ -688,15 +742,56 @@ fn output_is_fenced_with_a_tag_it_cannot_know_and_cut_to_fit() {
         1
     );
     assert!(first.text.contains("[exit 1 · 1.5s · /w]"));
-    // Newest first: the newest is whole, and the older one has what is left.
-    let blocks = first.structured["blocks"].as_array().unwrap();
-    assert_eq!(blocks[1]["output"], fake);
-    assert_eq!(blocks[0]["truncated"], true);
-    let total: usize = blocks
-        .iter()
-        .map(|block| block["output"].as_str().unwrap().len())
-        .sum();
-    assert!(total <= MAX_OUTPUT_BYTES, "{total}");
+    // Newest first: the newest is whole, and the older one has what is left,
+    // within the cap over both.
+    assert!(first.text.contains(fake));
     assert!(first.text.contains("the start is cut"));
-    assert_eq!(first.structured["untrusted"], true);
+    assert!(
+        first.text.len() <= MAX_OUTPUT_BYTES + 1024,
+        "{}",
+        first.text.len()
+    );
+    // And it is the whole of the answer: no line of facts after the fence
+    // repeats what is inside it.
+    assert!(first.details.is_none());
+    assert_eq!(first.rendered(), first.text);
+}
+
+#[test]
+fn a_second_call_under_an_id_still_being_answered_is_refused_and_the_first_goes_on() {
+    // A pane whose socket is a listener that takes the connection and never
+    // answers, so the first call is still being answered when the second
+    // comes.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!("crook-mcp-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a directory");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("its mode");
+        let socket = directory.join("w.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bound");
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).expect("locked");
+        let client = Client::start(Place::from_environment(
+            Some(std::ffi::OsStr::new("Crook")),
+            Some("1".into()),
+            Some(socket.clone().into_os_string()),
+            Some("00".to_owned()),
+        ));
+        client.start_call(7, "crook_pane_list", json!({}), None);
+        let (held, _) = listener.accept().expect("the first call connects");
+        client.start_call(7, "crook_pane_list", json!({}), None);
+        let refused = client.next();
+        assert_eq!(refused["id"], 7, "{refused}");
+        assert_eq!(refused["error"]["code"], -32600, "{refused}");
+        // The first is still the server's to answer: its window hangs up,
+        // and it says so.
+        drop(held);
+        let first = client.next();
+        assert_eq!(first["id"], 7, "{first}");
+        assert_eq!(first["result"]["isError"], true, "{first}");
+        client.finish();
+        let _ = std::fs::remove_dir_all(&directory);
+    }
 }

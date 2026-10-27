@@ -270,19 +270,20 @@ Claude's own pane, by the same rules — nothing an agent could not do with thos
 - **No tool answers an agent's permission request.** A question is yours to answer, on its card
   in Crook or in the agent's dialog; `crook_events_wait` says one was asked, never what, and
   nothing answers it.
-- **Only what Claude opened.** It may watch, read and close its own pane and the tabs and panes
-  it opened — eight at most on behalf of the pane you opened — and list the rest, as `crook pane
-  list` does. Never close its own pane, one you opened, or another agent's.
+- **Only what Claude opened.** It may watch and read its own pane, the tabs and panes it opened
+  — eight at most on behalf of the pane you opened — and theirs in turn, and list the rest, as
+  `crook pane list` does. It closes, and splits beside, only the ones it opened itself: never
+  its own pane, one you opened, another agent's, or one its own worker opened.
 - **Nothing working is closed.** A pane whose agent is running or waiting, whose command is
   still running, or which you are working in, is refused, and Crook never puts its "end them?"
-  question up on Claude's behalf.
+  question up on Claude's behalf. A pane whose shell reports no command marks is closed only
+  when its terminal says the shell itself is in the foreground, and refused as `unknown` where
+  that cannot be read.
 - **Output is data.** What a pane printed reaches Claude between fence lines with a random tag,
   marked as untrusted program output, with its escape sequences taken out.
 
-Opening a tab runs a command with your privileges, as Claude's Bash tool does — and outside
-Claude's Bash sandbox, if you use one, since an MCP server is not sandboxed. Claude Code asks
-before each call unless you allow the tool; allowing `crook_tab_new` or `crook_pane_split` for
-good is allowing any command. Outside a Crook pane the server still starts and every call says
+Opening a tab or a split runs a command with your privileges, as Claude's Bash tool does, and
+Claude Code asks before each call unless you allow the tool. Do not give `crook_tab_new` or `crook_pane_split` "always allow": each runs any command it is given, so allowing either for good is allowing every command. The MCP server runs outside Claude Code's Bash sandbox, so a command opened through it is not sandboxed even when Claude's own Bash commands are. Outside a Crook pane the server still starts and every call says
 it is not in one, so the plugin costs a session in another terminal nothing. Not on Windows yet:
 there every call says the control socket is not there.
 

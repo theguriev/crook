@@ -1751,9 +1751,12 @@ COMMANDS:
     pane close <ID>    Close pane ID, which this pane opened with `tab new` or
                        `pane split` (and its tab, when it was the tab's last
                        pane). Never this pane, and never one a person or
-                       another agent opened; refused while anything in it is
-                       working or a person is in it, since Crook asks before
-                       a close ends work and a command is never the one asked.
+                       another agent opened, nor one this pane's worker
+                       opened; refused while anything in it is working or a
+                       person is in it, since Crook asks before a close ends
+                       work and a command is never the one asked, and while
+                       a shell with no command marks has given its terminal
+                       to something else, or nobody can tell.
                        Not on Windows yet
     tab new [...] -- <COMMAND>...
                        From inside a pane, open a tab beside it in the same

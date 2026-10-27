@@ -73,7 +73,7 @@ server that failed to start. `crook mcp` serves the control socket's verbs as to
 `crook_tab_new`, `crook_pane_split`, `crook_pane_list`, `crook_pane_wait`, `crook_pane_output`,
 `crook_pane_close` and `crook_events_wait` — asked as the pane the agent runs in, by the
 socket's own rules; none types into a pane and none answers a permission request. Outside a
-Crook pane it starts all the same, and every call says it is not in one. The variables are read
+Crook pane it starts all the same, and every call says it is not in one. Do not give `crook_tab_new` or `crook_pane_split` "always allow": each runs any command it is given, so allowing either for good is allowing every command. The MCP server runs outside Claude Code's Bash sandbox, so a command opened through it is not sandboxed even when Claude's own Bash commands are. The variables are read
 by the shell rather than by the agent, so nothing in it is `${…}` for Claude Code to expand.
 Codex reads no MCP server from a plugin here: the README at the repository's root gives the
 lines for `~/.codex/config.toml`. `app/tests/command_line.rs` starts the server the way the file

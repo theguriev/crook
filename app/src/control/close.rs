@@ -7,11 +7,13 @@
 //!
 //! # What may be closed
 //!
-//! Only a pane the caller opened, with `tab.new` or `pane.split`, or one
-//! those opened in turn: the panes [`watch`] lets it watch,
-//! less its own. Never the caller's own pane, which ends by its shell
-//! exiting, and never one a person opened, nor another agent's workers: a
-//! pane is a person's, or the agent's that asked for it.
+//! Only a pane the caller opened itself, with `tab.new` or `pane.split`:
+//! one whose lineage names the caller as the pane that asked for it. Not one
+//! a worker of the caller's opened in turn — that is the worker's to close,
+//! though the caller may watch it, as [`watch`] lets it. Never the caller's
+//! own pane, which ends by its shell exiting, and never one a person opened,
+//! nor another agent's: a pane is a person's, or the agent's that asked for
+//! it.
 //!
 //! # Nothing working, and nothing asked
 //!
@@ -26,12 +28,24 @@
 //! close under somebody's hands takes the rest of what they type with it.
 //! Everything else closes at once, as a shell at its prompt closes for a
 //! person with no question.
+//!
+//! # A shell that says nothing
+//!
+//! What is running is read off the shell's command marks, and a shell that
+//! has never marked a prompt — no integration for it, or one that did not
+//! run — says nothing either way. Its pane is closed only when the terminal
+//! itself says the shell is idle: the foreground process group of its pty is
+//! the shell's own, which on Linux and macOS is read off the shell's process
+//! — anything else in the foreground is `working`. Where that cannot be
+//! read, the pane is refused as `unknown`: a close that cannot tell whether
+//! it ends work fails closed.
 
 use crookui_core::prelude::*;
 use serde_json::Value;
 
 use super::protocol::{ClosePane, PaneClosed, Refusal, code};
 use super::watch;
+use crate::tab::PaneId;
 use crate::workspace::Workspace;
 
 /// Answers one `pane.close`.
@@ -66,13 +80,13 @@ pub fn close(
             ),
         ));
     }
-    if !workspace.watches().observes(strip, caller, pane) {
+    if !opened_by(workspace, pane, caller) {
         return Err(Refusal::new(
             code::NOT_OPENED,
             format!(
-                "pane {number} is not one this pane opened, and only a person closes a pane \
-                 they or another agent opened; close the tabs and panes you opened with `crook \
-                 tab new` or `crook pane split`"
+                "pane {number} is not one this pane opened, and a pane closes only the tabs and \
+                 panes it opened itself with `crook tab new` or `crook pane split`: one a person \
+                 opened is theirs, and one your worker opened is the worker's"
             ),
         ));
     }
@@ -98,6 +112,33 @@ pub fn close(
                  idle`), or ask the person to close it"
             ),
         ));
+    }
+    if !workspace.shell_has_marked(pane, ctx) {
+        let shell = workspace.shell_pid(pane, ctx);
+        let foreground = shell.and_then(foreground_group);
+        match unmarked(shell, foreground) {
+            Unmarked::Idle => {}
+            Unmarked::Busy => {
+                return Err(Refusal::new(
+                    code::WORKING,
+                    format!(
+                        "pane {number} is still working — its shell reports no command marks, \
+                         and a program other than the shell has its terminal — and closing it \
+                         would end that; wait until it is done, or ask the person to close it"
+                    ),
+                ));
+            }
+            Unmarked::Unknown => {
+                return Err(Refusal::new(
+                    code::UNKNOWN,
+                    format!(
+                        "pane {number}'s shell reports no command marks, and this machine cannot \
+                         say whether something is running in it, so it is not closed; ask the \
+                         person to close it"
+                    ),
+                ));
+            }
+        }
     }
     if strip.focused_pane_id() == Some(pane) {
         return Err(Refusal::new(
@@ -136,4 +177,47 @@ fn printable(text: &str) -> String {
             false => vec![character],
         })
         .collect()
+}
+
+/// Whether `pane` was opened by `caller` itself: its lineage names `caller`
+/// as the pane that asked for it.
+pub(super) fn opened_by(workspace: &Workspace, pane: PaneId, caller: PaneId) -> bool {
+    workspace
+        .tabs()
+        .pane(pane)
+        .and_then(|open| open.session().spawned_by.as_ref())
+        .is_some_and(|lineage| lineage.caller == caller)
+}
+
+/// What the terminal says of a pane whose shell has marked no prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Unmarked {
+    /// The shell has its terminal: nothing it started is in the foreground.
+    Idle,
+    /// Another process group has the terminal.
+    Busy,
+    /// Neither could be read.
+    Unknown,
+}
+
+/// What a pane's shell, `shell`, and its terminal's foreground process
+/// group, `foreground`, say — both as pids, `None` when unread.
+pub(super) fn unmarked(shell: Option<u32>, foreground: Option<u32>) -> Unmarked {
+    match (shell, foreground) {
+        (Some(shell), Some(foreground)) if shell == foreground => Unmarked::Idle,
+        (Some(_), Some(_)) => Unmarked::Busy,
+        _ => Unmarked::Unknown,
+    }
+}
+
+/// The foreground process group of the terminal `shell` controls.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn foreground_group(shell: u32) -> Option<u32> {
+    crate::agent::ancestors::foreground_group(shell)
+}
+
+/// Nowhere else can it be read yet.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn foreground_group(_: u32) -> Option<u32> {
+    None
 }

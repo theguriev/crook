@@ -2463,7 +2463,8 @@ a hook's report, the title's glyph, and the end of a command taking either back 
 nothing done at all while nobody watches.
 
 **`pane.split`** opens a pane rather than a tab: split off the caller's own pane, or off one it
-may watch (`beside`), `right` or `down`, by the rule a person's split keys follow, and never
+opened itself (`beside`) — not one a worker of its opened, which it may watch but which is the
+worker's to arrange — `right` or `down`, by the rule a person's split keys follow, and never
 focused — the anchor's group grows a pane beside it and the focus, the zoom and the active tab
 stay where they were (`TabStrip::split_beside`, which is not a `TabAction`, since no key, click
 or menu opens a pane nobody is moved to). It is `tab.new` in every other way: the token, the
@@ -2474,14 +2475,20 @@ take a `cwd`, an absolute path the window takes as given — a look at the disk 
 between two frames, and a directory that has gone is one a shell falls back from as a restored
 pane's does — which the CLI and `crook mcp` check is a directory before asking.
 
-**`pane.close`** closes a pane the caller may watch, less its own, and its tab with it when it
-was the tab's last pane: what a lead does with a worker whose answer it has read. Refused as
-`own-pane` for the caller's own pane, which ends by its shell exiting; as `not-opened` for a
-pane a person or another agent opened; as `working` while anything in the pane is working —
+**`pane.close`** closes a pane the caller opened itself — its lineage names the caller as the
+pane that asked — and its tab with it when it was the tab's last pane: what a lead does with a
+worker whose answer it has read. Watching reaches further, to the workers' own workers; closing
+does not, since those are the worker's. Refused as `own-pane` for the caller's own pane, which
+ends by its shell exiting; as `not-opened` for a pane a person, another agent or one of the
+caller's workers opened; as `working` while anything in the pane is working —
 `AgentSession::is_working`, which is the close question's own rule, or a question its agent's
 hook is waiting on — and as `focused` for the pane a person is in. A close that would end work
 is one Crook asks a person about, and a request is never that person: the verb never puts the
-question up, and what it closes is only ever what would close with no question at all.
+question up, and what it closes is only ever what would close with no question at all. What is
+running is read off the shell's command marks, so a shell that has never marked a prompt fails
+closed: its pane is closed only when its pty's foreground process group is the shell's own, read
+off the shell's process on Linux and macOS (`working` when another group has the terminal), and
+refused as `unknown` where that cannot be read.
 
 **Kept connections.** A wait with time to wait, and a stream, keep their connection, and neither
 fits a five-second deadline or one of the eight places a question is answered in: a lead
@@ -2544,7 +2551,9 @@ than handed a half-understood answer. A verb is a promise that is hard to take b
 version verbs and fields are only ever added, and a field that changes meaning is a new version.
 The codes are `bad-request`, `too-long`, `unknown-verb`, `version`, `busy`, `timeout`, `gone`,
 `unauthorized`, `budget`, `too-many-refusals`, `unsupported-shell`, `failed`, `no-such-pane`,
-`needs-grant`, `no-blocks`, `declined`, `own-pane`, `not-opened`, `working` and `focused`. An `events.follow` stream's lines after the first reply
+`needs-grant`, `no-blocks`, `declined`, `own-pane`, `not-opened`, `working`, `focused` and
+`unknown`. A `title` given to `tab.new` or `pane.split` has its bidirectional, format, tag and
+other invisible characters taken out, so a row asked for over the socket draws as what it says. An `events.follow` stream's lines after the first reply
 are events, `{"event":"status","pane_id":7,"status":"needs-input","message":"…"}`, not replies.
 
 **The CLI is the other end.** `crook pane list` prints a table, and `--json` prints the window's
@@ -2602,17 +2611,31 @@ four methods and two notifications, every MCP crate pulls an async runtime this 
 have, and the dependency policy at the top of the workspace manifest is that a crate earns its
 place. Both eras are answered: `initialize` for the handshake revisions up to `2025-11-25`, and
 `server/discover` and per-request `_meta` for `2026-07-28`, with `-32022` for a version it does
-not speak. A tool call runs on a thread of its own, sixteen at once, so a wait does not hold up
-the calls behind it. A wait waits 55 seconds unless asked for longer, at most 600, and sends
-`notifications/progress` every ten seconds to a call that carried a `progressToken`, which most
-clients take as a reason not to cut it off; `notifications/cancelled` hangs its connection up,
-which the window hears as the client leaving, and so does the client closing standard input,
-after the calls answered at once have been. `crook_events_wait` keeps one `events.follow`
-connection from its first call on, holding up to 256 events between calls, so nothing is lost
-while the model is busy elsewhere. Every string in an answer has its escape sequences taken out
-and its other control and bidirectional characters written out, and a block's output comes
-between two fence lines tagged with eight random bytes, under a line that calls it untrusted
-program output. Outside a Crook pane — no `TERM_PROGRAM=Crook`, no `CROOK_PANE_ID` — the server
+not speak; a modern answer carries `resultType` and the server's name in `_meta`, and
+`server/discover` and `tools/list` carry the caching hints that revision requires, `ttlMs: 0`
+and `cacheScope: "public"`, without which a client refuses the list. A tool's answer is one
+text block and no `structuredContent`: Claude Code hands the model the structured content in
+place of the text whenever there is one, and the text is where an answer says how to read it —
+so the facts ride at the end of the text as a line of JSON after `Details (JSON): `, and a pane's
+output has no such line, its fence being the whole answer. A tool call runs on a thread of its
+own, sixteen at once, so a wait does not hold up the calls behind it, and a second request under
+an `id` still being answered is refused. A wait waits 55 seconds unless asked for longer, at
+most 600, and sends `notifications/progress` every ten seconds to a call that carried a
+`progressToken`, which most clients take as a reason not to cut it off; `notifications/cancelled`
+hangs its connection up, which the window hears as the client leaving, and so does the client
+closing standard input. Every connect to the window is given up after the socket's five
+seconds, and once input has ended the server waits seven seconds at most for the calls answered
+at once before it exits. `crook_events_wait` keeps one `events.follow` connection from its first
+call on — a call that comes while another is opening it waits for that one — holding up to 256
+events between calls, so nothing is lost while the model is busy elsewhere. Every string in an
+answer has its escape sequences taken out and every other character that would not print as
+itself — controls, bidirectional controls, format characters, the tag block, zero-width and
+other ignorable characters, the line and paragraph separators — written out as an escape, by
+the rule the answering card uses; a block's output comes between two fence lines tagged with
+eight random bytes, under a line that calls it untrusted program output. A `cwd` is refused
+unless it is absolute: a relative one would be read from wherever the client started the
+server. Opening a tab through it is allowing a command, and the server runs outside Claude
+Code's Bash sandbox: the README says not to give the two tools that open one "always allow". Outside a Crook pane — no `TERM_PROGRAM=Crook`, no `CROOK_PANE_ID` — the server
 still starts and lists its tools, and every call says it is not in a pane, so a plugin installed
 everywhere costs a session elsewhere nothing; on Windows every call says there is no socket yet.
 The Claude Code plugin declares it in `packaging/claude-code/.mcp.json`, started through `sh` as

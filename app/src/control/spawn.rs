@@ -464,13 +464,13 @@ fn plan(
                     else {
                         return Err(super::watch::no_such_pane(number));
                     };
-                    if !workspace.watches().observes(strip, caller, pane) {
+                    if pane != caller && !super::close::opened_by(workspace, pane, caller) {
                         return Err(Refusal::new(
                             code::NOT_OPENED,
                             format!(
-                                "pane {number} is neither this pane nor one it opened, and a \
-                                 pane is split only off those; split off your own pane, or off \
-                                 a tab or pane you opened"
+                                "pane {number} is neither this pane nor one it opened itself, \
+                                 and a pane is split only off those; split off your own pane, \
+                                 or off a tab or pane you opened"
                             ),
                         ));
                     }
@@ -494,14 +494,14 @@ fn plan(
     let program = workspace.shell_standing(app).0.program;
     let line = command_line(&command, &program)?;
 
-    let title = match title.as_deref().map(str::trim) {
-        None | Some("") => None,
+    let title = match title.as_deref().map(shown) {
         Some(title) if title.chars().any(char::is_control) => {
             return Err(bad(
                 "a title is one line of text, with no control character".to_owned(),
             ));
         }
-        Some(title) => Some(title.to_owned()),
+        Some(title) if !title.trim().is_empty() => Some(title.trim().to_owned()),
+        _ => None,
     };
 
     let cwd = match cwd {
@@ -577,6 +577,18 @@ fn plan(
             title: super::title(session, workspace.home()),
         },
     })
+}
+
+/// `title` without the characters that would not print as themselves but
+/// for the controls, which are refused: a bidirectional override, a
+/// zero-width or format character, a tag. A row's name is what a person
+/// tells the work in the panel by, and one asked for over the socket must
+/// not draw as anything but what it says.
+fn shown(title: &str) -> String {
+    title
+        .chars()
+        .filter(|character| character.is_control() || !crate::agent::request::hidden(*character))
+        .collect()
 }
 
 /// The directory a request asked a new pane to start in, as a path —

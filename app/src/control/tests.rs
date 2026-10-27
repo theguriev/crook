@@ -1216,6 +1216,16 @@ fn crook_pane_split_and_close_take_their_flags_and_refuse_anything_else() {
 }
 
 #[test]
+fn a_shell_that_marks_nothing_is_idle_only_when_it_has_its_terminal_and_unknown_when_unread() {
+    use super::close::{Unmarked, unmarked};
+    assert_eq!(unmarked(Some(40), Some(40)), Unmarked::Idle);
+    assert_eq!(unmarked(Some(40), Some(41)), Unmarked::Busy);
+    assert_eq!(unmarked(Some(40), None), Unmarked::Unknown);
+    assert_eq!(unmarked(None, Some(40)), Unmarked::Unknown);
+    assert_eq!(unmarked(None, None), Unmarked::Unknown);
+}
+
+#[test]
 fn crook_events_needs_follow_and_takes_one_pane() {
     let arguments = |words: &[&str]| {
         cli::events_arguments(words.iter().map(|word| (*word).to_owned()))
@@ -8339,7 +8349,7 @@ mod socket {
 
     // `crook mcp`, asked by an MCP client in a pane, of a real window.
 
-    use super::super::mcp::tests::{Client as Mcp, text as said};
+    use super::super::mcp::tests::{Client as Mcp, details, text as said};
 
     /// An MCP server in `pane`'s environment, asking `served`'s window.
     fn mcp(served: &Served, pane: PaneId) -> Mcp {
@@ -8360,10 +8370,19 @@ mod socket {
         arguments: Value,
     ) -> (Mcp, Value) {
         let name = name.to_owned();
-        served.ask(move |_| {
+        let (client, result) = served.ask(move |_| {
             let result = client.call(id, &name, arguments);
             (client, result)
-        })
+        });
+        // One text block, and nothing beside it a client would hand the
+        // model in its place: Claude Code shows `structuredContent` alone
+        // when there is one, and the text is where an answer says how it is
+        // to be read.
+        assert!(result.get("structuredContent").is_none(), "{result}");
+        let content = result["content"].as_array().expect("content");
+        assert_eq!(content.len(), 1, "{result}");
+        assert_eq!(content[0]["type"], "text", "{result}");
+        (client, result)
     }
 
     #[test]
@@ -8386,23 +8405,20 @@ mod socket {
             }),
         );
         assert_eq!(opened["isError"], false, "{opened}");
-        let number = opened["structuredContent"]["pane_id"]
-            .as_u64()
-            .expect("a pane");
+        let number = details(&opened)["pane_id"].as_u64().expect("a pane");
         let worker = served.pane(number);
         assert_eq!(served.tab_count(), tabs + 1);
         assert!(said(&opened).contains(&format!("pane {number}")));
-        assert_eq!(opened["structuredContent"]["title"], "worker");
+        assert_eq!(details(&opened)["title"], "worker");
 
         let (client, listed) = tool(&mut served, client, 2, "crook_pane_list", json!({}));
-        let panes = listed["structuredContent"]["panes"]
-            .as_array()
-            .expect("panes");
+        let listed_details = details(&listed);
+        let panes = listed_details["panes"].as_array().expect("panes");
         assert!(
             panes.iter().any(|pane| pane["pane_id"] == number),
             "{listed}"
         );
-        assert_eq!(listed["structuredContent"]["own_pane"], lead.as_u64());
+        assert_eq!(details(&listed)["own_pane"], lead.as_u64());
         assert!(said(&listed).contains(&format!("Your own pane is {}", lead.as_u64())));
 
         // Long, and asked with a progress token: the window has not let the
@@ -8436,8 +8452,8 @@ mod socket {
         let (client, waited) = waited;
         let waited = &waited["result"];
         assert_eq!(waited["isError"], false, "{waited}");
-        assert_eq!(waited["structuredContent"]["reached"], true, "{waited}");
-        assert_eq!(waited["structuredContent"]["exit"], 4);
+        assert_eq!(details(waited)["reached"], true, "{waited}");
+        assert_eq!(details(waited)["exit"], 4);
         assert!(
             said(waited).contains("finished: exit 4"),
             "{}",
@@ -8461,7 +8477,10 @@ mod socket {
         assert!(text.contains("\nthe answer\n"), "{text}");
         assert!(text.contains("[exit 4"), "{text}");
         assert!(!text.contains('\u{1b}'), "{text:?}");
-        assert_eq!(read["structuredContent"]["blocks"][0]["exit"], 4);
+        assert!(
+            read.get("structuredContent").is_none() && !text.contains(super::super::mcp::DETAILS),
+            "the fenced text is the whole of what a client hands the model: {read}"
+        );
 
         let (client, closed) = tool(
             &mut served,
@@ -8471,7 +8490,7 @@ mod socket {
             json!({ "pane": number }),
         );
         assert_eq!(closed["isError"], false, "{closed}");
-        assert_eq!(closed["structuredContent"]["tab_closed"], true);
+        assert_eq!(details(&closed)["tab_closed"], true);
         assert_eq!(served.tab_count(), tabs);
         assert!(served.read(|workspace, _| workspace.tabs().pane(worker).is_none()));
 
@@ -8483,7 +8502,7 @@ mod socket {
             json!({ "pane": number }),
         );
         assert_eq!(again["isError"], true);
-        assert_eq!(again["structuredContent"]["error"]["code"], "no-such-pane");
+        assert_eq!(details(&again)["error"]["code"], "no-such-pane");
         client.finish();
     }
 
@@ -8503,7 +8522,7 @@ mod socket {
             json!({ "command": ["make", "it's"], "direction": "down", "title": "make" }),
         );
         assert_eq!(split["isError"], false, "{split}");
-        let worker = served.pane(split["structuredContent"]["pane_id"].as_u64().unwrap());
+        let worker = served.pane(details(&split)["pane_id"].as_u64().unwrap());
         assert_eq!(
             served.tab_of(worker),
             lead_tab,
@@ -8539,7 +8558,7 @@ mod socket {
             json!({ "command": "true", "beside": worker.as_u64() }),
         );
         assert_eq!(beside["isError"], false, "{beside}");
-        let second = served.pane(beside["structuredContent"]["pane_id"].as_u64().unwrap());
+        let second = served.pane(details(&beside)["pane_id"].as_u64().unwrap());
         assert_eq!(served.tab_of(second), lead_tab);
         assert_eq!(served.field(second), "'sh' '-c' 'true'");
 
@@ -8559,7 +8578,8 @@ mod socket {
             json!({ "command": "true", "beside": person.as_u64() }),
         );
         assert_eq!(
-            refused["structuredContent"]["error"]["code"], "not-opened",
+            details(&refused)["error"]["code"],
+            "not-opened",
             "{refused}"
         );
         let (client, refused) = tool(
@@ -8570,7 +8590,8 @@ mod socket {
             json!({ "pane": person.as_u64() }),
         );
         assert_eq!(
-            refused["structuredContent"]["error"]["code"], "not-opened",
+            details(&refused)["error"]["code"],
+            "not-opened",
             "{refused}"
         );
         let (client, refused) = tool(
@@ -8580,10 +8601,7 @@ mod socket {
             "crook_pane_close",
             json!({ "pane": lead.as_u64() }),
         );
-        assert_eq!(
-            refused["structuredContent"]["error"]["code"], "own-pane",
-            "{refused}"
-        );
+        assert_eq!(details(&refused)["error"]["code"], "own-pane", "{refused}");
 
         // Working is refused, and so is being looked at; done is closed.
         served.report(worker, AgentStatus::Running, None);
@@ -8594,10 +8612,7 @@ mod socket {
             "crook_pane_close",
             json!({ "pane": worker.as_u64() }),
         );
-        assert_eq!(
-            refused["structuredContent"]["error"]["code"], "working",
-            "{refused}"
-        );
+        assert_eq!(details(&refused)["error"]["code"], "working", "{refused}");
         assert!(said(&refused).contains("running"), "{}", said(&refused));
         assert!(served.read(|workspace, _| workspace.tabs().pane(worker).is_some()));
         assert!(
@@ -8615,10 +8630,7 @@ mod socket {
             "crook_pane_close",
             json!({ "pane": worker.as_u64() }),
         );
-        assert_eq!(
-            refused["structuredContent"]["error"]["code"], "focused",
-            "{refused}"
-        );
+        assert_eq!(details(&refused)["error"]["code"], "focused", "{refused}");
         served.update(|workspace, ctx| {
             workspace.apply(TabAction::FocusPane(person), ctx);
         });
@@ -8630,7 +8642,7 @@ mod socket {
             json!({ "pane": worker.as_u64() }),
         );
         assert_eq!(closed["isError"], false, "{closed}");
-        assert_eq!(closed["structuredContent"]["tab_closed"], false);
+        assert_eq!(details(&closed)["tab_closed"], false);
         assert!(served.read(|workspace, _| workspace.tabs().pane(worker).is_none()));
         assert_eq!(
             served.tab_of(second),
@@ -8671,7 +8683,7 @@ mod socket {
             "crook_tab_new",
             json!({ "command": ["sleep", "30"] }),
         );
-        let worker = served.pane(opened["structuredContent"]["pane_id"].as_u64().unwrap());
+        let worker = served.pane(details(&opened)["pane_id"].as_u64().unwrap());
         served.pump_until("the command never started", |served| {
             served.session(worker, |session| session.running_command.is_some())
         });
@@ -8682,10 +8694,7 @@ mod socket {
             "crook_pane_close",
             json!({ "pane": worker.as_u64() }),
         );
-        assert_eq!(
-            refused["structuredContent"]["error"]["code"], "working",
-            "{refused}"
-        );
+        assert_eq!(details(&refused)["error"]["code"], "working", "{refused}");
         assert!(said(&refused).contains("sleep"), "{}", said(&refused));
         assert!(served.read(|workspace, _| workspace.tabs().pane(worker).is_some()));
         client.finish();
@@ -8703,7 +8712,7 @@ mod socket {
             "crook_tab_new",
             json!({ "command": ["make"] }),
         );
-        let number = opened["structuredContent"]["pane_id"].as_u64().unwrap();
+        let number = details(&opened)["pane_id"].as_u64().unwrap();
         client.start_call(
             2,
             "crook_pane_wait",
@@ -8775,7 +8784,7 @@ mod socket {
             "crook_tab_new",
             json!({ "command": ["make"] }),
         );
-        let worker = served.pane(opened["structuredContent"]["pane_id"].as_u64().unwrap());
+        let worker = served.pane(details(&opened)["pane_id"].as_u64().unwrap());
         let (client, first) = tool(
             &mut served,
             client,
@@ -8789,7 +8798,8 @@ mod socket {
             "{}",
             said(&first)
         );
-        let following = first["structuredContent"]["following"].as_array().unwrap();
+        let first_details = details(&first);
+        let following = first_details["following"].as_array().unwrap();
         assert!(following.contains(&json!(worker.as_u64())), "{first}");
         served.pump_until("the stream was never registered", |served| {
             served.following() == 1
@@ -8804,7 +8814,8 @@ mod socket {
             "crook_events_wait",
             json!({ "pane": worker.as_u64(), "timeout_secs": 5 }),
         );
-        let events = next["structuredContent"]["events"].as_array().unwrap();
+        let next_details = details(&next);
+        let events = next_details["events"].as_array().unwrap();
         let status = events
             .iter()
             .find(|event| event["event"] == "status")
@@ -8812,7 +8823,7 @@ mod socket {
         assert_eq!(status["pane_id"], worker.as_u64());
         assert_eq!(status["status"], "needs-input");
         assert_eq!(status["message"], "run rm?", "escapes taken out");
-        assert!(next["structuredContent"].get("following").is_none());
+        assert!(details(&next).get("following").is_none());
         client.finish();
         let started = Instant::now();
         let mut status = [AgentStatus::Running, AgentStatus::Idle]
@@ -8841,11 +8852,253 @@ mod socket {
             !text.contains('\u{1b}') && !text.contains('\u{202e}'),
             "{text:?}"
         );
-        let title = listed["structuredContent"]["panes"][0]["title"]
-            .as_str()
-            .unwrap();
+        let listed_details = details(&listed);
+        let title = listed_details["panes"][0]["title"].as_str().unwrap();
         assert!(!title.contains('\u{1b}'), "{title:?}");
         assert!(title.contains("\\u{202e}"), "{title:?}");
+        client.finish();
+    }
+
+    #[test]
+    fn two_events_waits_at_once_follow_one_stream_and_hear_each_event_once() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let client = mcp(&served, lead);
+        for id in [1, 2] {
+            client.start_call(id, "crook_events_wait", json!({ "timeout_secs": 3 }), None);
+        }
+        // Both are started; the second is given the time to open a stream of
+        // its own, as it did before a start was one at a time.
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_millis(700) {
+            served.window.queue.run_until_parked();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(served.following(), 1, "two calls opened two streams");
+        served.report(lead, AgentStatus::Running, None);
+        let (client, results) = served.ask(move |_| {
+            let mut results = Vec::new();
+            while results.len() < 2 {
+                let message = client.next();
+                assert!(message.get("id").is_some(), "{message}");
+                results.push(message["result"].clone());
+            }
+            (client, results)
+        });
+        let statuses: usize = results
+            .iter()
+            .map(|result| {
+                details(result)["events"]
+                    .as_array()
+                    .expect("events")
+                    .iter()
+                    .filter(|event| event["event"] == "status")
+                    .count()
+            })
+            .sum();
+        assert_eq!(statuses, 1, "{results:?}");
+        client.finish();
+    }
+
+    #[test]
+    fn only_the_pane_that_opened_a_pane_closes_it_or_splits_beside_it() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let client = mcp(&served, lead);
+        let (client, opened) = tool(
+            &mut served,
+            client,
+            1,
+            "crook_tab_new",
+            json!({ "command": ["make"] }),
+        );
+        let worker = served.pane(details(&opened)["pane_id"].as_u64().unwrap());
+        served.pump_until("the worker never got its shell", |served| {
+            served.read(|workspace, app| workspace.terminal(worker, app).is_some())
+        });
+        // The worker opens one of its own.
+        let worker_token = served.token(worker);
+        let number = served
+            .open_tab(Some(worker_token), new_tab(&["make"]))
+            .expect("the worker opens a tab")
+            .pane_id;
+        let grandchild = served.pane(number);
+        served.pump_until("the grandchild never got its shell", |served| {
+            served.read(|workspace, app| workspace.terminal(grandchild, app).is_some())
+        });
+        let (client, refused) = tool(
+            &mut served,
+            client,
+            2,
+            "crook_pane_close",
+            json!({ "pane": number }),
+        );
+        assert_eq!(
+            details(&refused)["error"]["code"],
+            "not-opened",
+            "{refused}"
+        );
+        let (client, refused) = tool(
+            &mut served,
+            client,
+            3,
+            "crook_pane_split",
+            json!({ "command": "true", "beside": number }),
+        );
+        assert_eq!(
+            details(&refused)["error"]["code"],
+            "not-opened",
+            "{refused}"
+        );
+        // Watching it is as it was: the lead may still wait on it.
+        let (client, waited) = tool(
+            &mut served,
+            client,
+            4,
+            "crook_pane_wait",
+            json!({ "pane": number, "until": "idle", "timeout_secs": 0 }),
+        );
+        assert_eq!(waited["isError"], false, "{waited}");
+        assert!(served.read(|workspace, _| workspace.tabs().pane(grandchild).is_some()));
+        client.finish();
+    }
+
+    #[test]
+    fn a_title_asked_for_over_the_socket_draws_as_what_it_says() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let client = mcp(&served, lead);
+        let (client, opened) = tool(
+            &mut served,
+            client,
+            1,
+            "crook_tab_new",
+            json!({
+                "command": ["make"],
+                "title": "fix\u{202e}gnp.exe\u{200b} the \u{e0041}tests\u{2028}"
+            }),
+        );
+        let worker = served.pane(details(&opened)["pane_id"].as_u64().unwrap());
+        assert_eq!(
+            served.session(worker, |session| session.display_title().to_owned()),
+            "fixgnp.exe the tests"
+        );
+        client.finish();
+    }
+
+    #[test]
+    fn crook_mcp_ends_with_its_input_while_a_call_waits_on_a_window_taking_no_connections() {
+        let root = TempDir::runtime();
+        let (listener, socket) = planted(&root.sockets(), 0o700);
+        unsafe extern "C" {
+            fn listen(socket: i32, backlog: i32) -> i32;
+        }
+        use std::os::fd::AsRawFd;
+        // SAFETY: the descriptor is the listener's, open for the whole test.
+        assert_eq!(unsafe { listen(listener.as_raw_fd(), 0) }, 0, "relistened");
+        let mut waiting = Vec::new();
+        while let Ok(stream) =
+            cli::unix::connect_checked_within(&socket, Duration::from_millis(300))
+        {
+            waiting.push(stream);
+            assert!(waiting.len() < 64, "the backlog never filled");
+        }
+
+        let client = Mcp::start(super::super::mcp::Place::from_environment(
+            Some(std::ffi::OsStr::new("Crook")),
+            Some("1".into()),
+            Some(socket.into_os_string()),
+            Some("00".to_owned()),
+        ));
+        let started = Instant::now();
+        client.start_call(1, "crook_pane_list", json!({}), None);
+        // The connect gives up in its time, and says so.
+        let answer = client
+            .next_within(super::super::server::DEADLINE + Duration::from_secs(3))
+            .expect("the call was answered, not left connecting");
+        assert_eq!(answer["result"]["isError"], true, "{answer}");
+        assert!(
+            said(&answer["result"]).contains("took no connection"),
+            "{answer}"
+        );
+        client.finish();
+        assert!(
+            started.elapsed() < super::super::mcp::JOIN_DEADLINE + Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        drop(waiting);
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn a_pane_whose_shell_marks_nothing_is_closed_only_once_the_shell_has_its_terminal() {
+        let root = TempDir::new();
+        let Some(bash) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|directory| directory.join("bash"))
+            .find(|candidate| candidate.is_file())
+        else {
+            eprintln!("skipped: no bash here");
+            return;
+        };
+        // Named `sh`, which Crook has no marks for, and an interactive bash
+        // with job control behind it: a command it runs has the terminal.
+        let program = root.0.join("sh");
+        crate::process::write_program(
+            &program,
+            &format!(
+                "#!/bin/sh\nexport HISTFILE=/dev/null PS1='$ '\nexec '{}' --norc --noprofile -i\n",
+                bash.display()
+            ),
+        );
+        let shell = GatedShell {
+            gate: root.0.join("gate"),
+            program,
+        };
+        let mut served = Served::with(root, shell, |_, _, _| {});
+        let lead = first_pane(&served);
+        let client = mcp(&served, lead);
+        let (client, opened) = tool(
+            &mut served,
+            client,
+            1,
+            "crook_tab_new",
+            json!({ "command": ["sleep", "60"] }),
+        );
+        let worker = served.pane(details(&opened)["pane_id"].as_u64().unwrap());
+        let shell_pid = served
+            .read(|workspace, app| workspace.shell_pid(worker, app))
+            .expect("the worker's shell runs");
+        let foreground = || crate::agent::ancestors::foreground_group(shell_pid);
+        served.pump_until("the sleep never took the terminal", |_| {
+            foreground().is_some_and(|group| group != shell_pid)
+        });
+        assert!(!served.read(|workspace, app| workspace.shell_has_marked(worker, app)));
+        let (client, refused) = tool(
+            &mut served,
+            client,
+            2,
+            "crook_pane_close",
+            json!({ "pane": worker.as_u64() }),
+        );
+        assert_eq!(details(&refused)["error"]["code"], "working", "{refused}");
+        assert!(served.read(|workspace, _| workspace.tabs().pane(worker).is_some()));
+
+        let sleeping = foreground().expect("the sleep's group");
+        let _ = crate::process::command("kill")
+            .arg(sleeping.to_string())
+            .status();
+        served.pump_until("the shell never took its terminal back", |_| {
+            foreground() == Some(shell_pid)
+        });
+        let (client, closed) = tool(
+            &mut served,
+            client,
+            3,
+            "crook_pane_close",
+            json!({ "pane": worker.as_u64() }),
+        );
+        assert_eq!(closed["isError"], false, "{closed}");
         client.finish();
     }
 }
