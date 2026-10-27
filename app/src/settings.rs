@@ -93,6 +93,11 @@ const FONT_FAMILY_KEY: &str = "font_family";
 /// The key the list of switched-off plugins is stored under.
 const DISABLED_PLUGINS_KEY: &str = "disabled_plugins";
 
+/// The keys whose value is a list of names that windows add to and take
+/// from one name at a time, merged by name as [`DISABLED_PLUGINS_KEY`] is:
+/// two windows saying "Not now" for two agents at once both land.
+const NAME_LIST_KEYS: [&str; 1] = ["agents_not_connected"];
+
 /// The key the things a person has allowed a plugin to do are stored under.
 const PLUGIN_GRANTS_KEY: &str = "plugin_grants";
 
@@ -1675,6 +1680,9 @@ pub struct Changes {
     entries: BTreeMap<(String, String), Entry>,
     /// Each plugin switched off (`true`) or back on (`false`).
     switched_off: BTreeMap<String, bool>,
+    /// Each name added to (`true`) or taken from (`false`) one of the
+    /// [`NAME_LIST_KEYS`], by the key and the name.
+    listed: BTreeMap<(String, String), bool>,
     /// The revisions this window's own saves have written, by plugin, so that
     /// an answer made here after one of them landed — and before the window
     /// read the file again — is given over the revision it really saw.
@@ -1761,7 +1769,10 @@ fn revisions_value(revisions: &BTreeMap<String, u64>) -> Value {
 impl Changes {
     /// Whether there is nothing to write.
     pub fn is_empty(&self) -> bool {
-        self.values.is_empty() && self.entries.is_empty() && self.switched_off.is_empty()
+        self.values.is_empty()
+            && self.entries.is_empty()
+            && self.switched_off.is_empty()
+            && self.listed.is_empty()
     }
 
     /// What turns the keys in `before` into the keys in `after`, both as
@@ -1783,6 +1794,14 @@ impl Changes {
                 }
                 for name in was.difference(&is) {
                     changes.switched_off.insert(name.clone(), false);
+                }
+            } else if NAME_LIST_KEYS.contains(&key.as_str()) {
+                let (was, is) = (names_in(was), names_in(is));
+                for name in is.difference(&was) {
+                    changes.listed.insert((key.clone(), name.clone()), true);
+                }
+                for name in was.difference(&is) {
+                    changes.listed.insert((key.clone(), name.clone()), false);
                 }
             } else if ENTRY_KEYS.contains(&key.as_str()) {
                 let empty = Map::new();
@@ -1839,6 +1858,7 @@ impl Changes {
             }
         }
         self.switched_off.extend(later.switched_off);
+        self.listed.extend(later.listed);
     }
 
     /// Takes out what `written` wrote, now that it is on disk — unless it has
@@ -1877,6 +1897,11 @@ impl Changes {
         for (name, off) in &written.switched_off {
             if self.switched_off.get(name) == Some(off) {
                 self.switched_off.remove(name);
+            }
+        }
+        for (name, listed) in &written.listed {
+            if self.listed.get(name) == Some(listed) {
+                self.listed.remove(name);
             }
         }
     }
@@ -1987,6 +2012,32 @@ impl Changes {
                 true => document.remove(DISABLED_PLUGINS_KEY),
                 false => document.insert(
                     DISABLED_PLUGINS_KEY.to_owned(),
+                    Value::Array(names.into_iter().map(Value::String).collect()),
+                ),
+            };
+        }
+
+        for key in NAME_LIST_KEYS {
+            let mine: Vec<(&String, bool)> = self
+                .listed
+                .iter()
+                .filter(|((list, _), _)| list == key)
+                .map(|((_, name), listed)| (name, *listed))
+                .collect();
+            if mine.is_empty() {
+                continue;
+            }
+            let mut names = names_in(document.get(key));
+            for (name, listed) in mine {
+                match listed {
+                    true => names.insert(name.clone()),
+                    false => names.remove(name),
+                };
+            }
+            match names.is_empty() {
+                true => document.remove(key),
+                false => document.insert(
+                    key.to_owned(),
                     Value::Array(names.into_iter().map(Value::String).collect()),
                 ),
             };
@@ -4029,6 +4080,27 @@ mod tests {
         assert_eq!(after.disabled_plugins(), ["eugen/off-in-b"]);
         assert!(after.granted_to("eugen/one").is_empty());
         assert_eq!(after.granted_to("eugen/two"), ["clipboard"]);
+    }
+
+    #[test]
+    fn test_two_windows_saying_not_now_for_two_agents_keep_both() {
+        // A list of names like the switched-off plugins, merged by name: a
+        // window that never saw the other's "Not now" does not write it away.
+        let scratch = ScratchDirectory::new("not-now-two-windows");
+        let (mut a, mut b) = two_windows(&scratch);
+        let mut general = a.general();
+        general.agents_not_connected = general.agents_not_connected.with("claude");
+        a.set_general(general);
+        a.save_blocking().expect("A saves");
+        let mut general = b.general();
+        general.agents_not_connected = general.agents_not_connected.with("codex");
+        b.set_general(general);
+        b.save_blocking().expect("B saves");
+
+        let after = Settings::load(scratch.settings_file());
+        let kept = after.general().agents_not_connected;
+        assert!(kept.contains("claude"), "B's save took back A's Not now");
+        assert!(kept.contains("codex"));
     }
 
     #[test]
