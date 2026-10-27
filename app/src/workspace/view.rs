@@ -3113,7 +3113,9 @@ impl Workspace {
 
     /// Whether the question a close asks before it ends working agents is
     /// up, for a test outside the workspace that must not have put it up.
-    #[cfg(test)]
+    ///
+    /// Unix only, as the socket tests that ask are.
+    #[cfg(all(test, unix))]
     pub(crate) fn closing_question_is_up(&self) -> bool {
         self.closing.is_some()
     }
