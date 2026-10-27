@@ -436,15 +436,17 @@ fn look_within(
 /// Ends the look's agent and, on Unix, everything in its process group.
 ///
 /// By the shell's own `kill`, since nothing in this crate binds the system
-/// call: `kill -KILL -- -<group>`, the group being the agent's own id, as
-/// [`look_within`] started it. The group outlives an agent that has already
+/// call: `kill -9 -<group>`, the group being the agent's own id, as
+/// [`look_within`] started it. With no `--` before the group: dash, Debian's
+/// and Ubuntu's `sh`, reads the first word after the signal as a process
+/// id and refuses `--` as one. The group outlives an agent that has already
 /// exited for as long as anything it started is still in it.
 fn end_the_group(child: &mut std::process::Child) {
     #[cfg(unix)]
     {
         let group = format!("-{}", child.id());
         let _ = crate::process::command("/bin/sh")
-            .args(["-c", "kill -KILL -- \"$0\"", &group])
+            .args(["-c", "kill -9 \"$0\"", &group])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
