@@ -2228,12 +2228,14 @@ impl Workspace {
 
     /// Makes the window read Claude Code's files from `config`. A test's.
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn set_claude_config(&mut self, config: PathBuf) {
         self.connections.set_claude_config(Some(config));
     }
 
     /// The window's connections, to change. A test's.
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn connections_mut(&mut self) -> &mut Connections {
         &mut self.connections
     }

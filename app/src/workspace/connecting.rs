@@ -348,6 +348,7 @@ impl Connections {
 
     /// Makes the hint due after `after` in place of [`HINT_AFTER`]. A test's.
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn set_hint_after(&mut self, after: Duration) {
         self.hint_after = Some(after);
     }
@@ -423,6 +424,7 @@ impl Connections {
 
     /// See [`Self::claude_config`].
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn set_claude_config(&mut self, config: Option<std::path::PathBuf>) {
         self.claude_config = config;
     }
