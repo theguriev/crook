@@ -5,6 +5,18 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.39
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.38...v0.1.39)
+
+### Features
+
+- **mcp:** Let an agent open, split, watch, read and close its own panes with `crook mcp` ([#564](https://github.com/theguriev/crook/pull/564))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.38
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.37...v0.1.38)
