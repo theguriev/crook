@@ -8986,6 +8986,9 @@ mod socket {
         client.finish();
     }
 
+    // Linux only, as the hook's own test of a full backlog is: a Mac
+    // refuses a connect to one at once, so nothing waits.
+    #[cfg(target_os = "linux")]
     #[test]
     fn crook_mcp_ends_with_its_input_while_a_call_waits_on_a_window_taking_no_connections() {
         let root = TempDir::runtime();
@@ -8997,11 +9000,15 @@ mod socket {
         // SAFETY: the descriptor is the listener's, open for the whole test.
         assert_eq!(unsafe { listen(listener.as_raw_fd(), 0) }, 0, "relistened");
         let mut waiting = Vec::new();
-        while let Ok(stream) =
-            cli::unix::connect_checked_within(&socket, Duration::from_millis(300))
-        {
-            waiting.push(stream);
-            assert!(waiting.len() < 64, "the backlog never filled");
+        loop {
+            assert!(
+                waiting.len() < 64,
+                "a backlog of nought took 64 connections"
+            );
+            match cli::unix::connect_checked_within(&socket, Duration::from_millis(300)) {
+                Ok(stream) => waiting.push(stream),
+                Err(_) => break,
+            }
         }
 
         let client = Mcp::start(super::super::mcp::Place::from_environment(

@@ -585,7 +585,10 @@ fn a_call_with_arguments_a_tool_does_not_take_is_a_tool_error_that_says_which() 
         (
             12,
             "crook_tab_new",
-            json!({ "command": "x", "cwd": "/no/such/directory/here" }),
+            json!({
+                "command": "x",
+                "cwd": std::env::temp_dir().join("crook-no-such-directory-here")
+            }),
             "is not a directory",
         ),
         (13, "crook_pane_close", json!({}), "`pane` is required"),
