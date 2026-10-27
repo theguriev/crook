@@ -15,7 +15,8 @@
 #      commit, as gh reports it, completed with success.
 #   3. `version` under [workspace.package] in Cargo.toml becomes the new one and
 #      Cargo.lock is refreshed, because release.yml refuses a tag whose manifest
-#      disagrees with it.
+#      disagrees with it. The plugin's three manifests under
+#      packaging/claude-code take the same version.
 #   4. changelogen reads every commit since the previous v* tag and prepends a
 #      `## vX.Y.Z` section to CHANGELOG.md, grouped by the types in
 #      changelog.config.json. release.yml lifts that section into the release
@@ -47,6 +48,7 @@ set -eu
 
 CHANGELOGEN="changelogen@0.6.2"
 CI_WORKFLOW="Crook CI"
+PLUGIN_MANIFESTS="packaging/claude-code/.claude-plugin/plugin.json packaging/claude-code/.codex-plugin/plugin.json packaging/claude-code/.github/plugin/plugin.json"
 
 here=$(cd "$(dirname "$0")/.." && pwd)
 cd "$here"
@@ -148,13 +150,24 @@ echo "==> Setting Cargo.toml to $version"
 sed -i.bak "/^\[workspace\.package\]/,/^\[/ s/^version *= *\"[^\"]*\"/version = \"$version\"/" Cargo.toml
 rm -f Cargo.toml.bak
 grep -q "^version = \"$version\"" Cargo.toml || fail "could not set the version in Cargo.toml"
+
+# The plugin's manifests, one per agent, say the same version: Claude Code
+# names the copy it installs by it and updates that copy only when it
+# changes, so a release that left them behind would reach nobody who has the
+# plugin, and Crook's Agents page compares it with its own to offer Update.
+for manifest in $PLUGIN_MANIFESTS; do
+  echo "==> Setting $manifest to $version"
+  sed -i.bak "s/^  \"version\": *\"[^\"]*\"/  \"version\": \"$version\"/" "$manifest"
+  rm -f "$manifest.bak"
+  grep -q "^  \"version\": \"$version\"," "$manifest" || fail "could not set the version in $manifest"
+done
 cargo metadata --format-version 1 >/dev/null
 
 echo "==> Writing CHANGELOG.md"
 npx --yes "$CHANGELOGEN" --from "$previous" --to HEAD -r "$version" --output CHANGELOG.md >/dev/null
 grep -q "^## $tag" CHANGELOG.md || fail "changelogen wrote no '## $tag' section"
 
-git add Cargo.toml Cargo.lock CHANGELOG.md
+git add Cargo.toml Cargo.lock CHANGELOG.md $PLUGIN_MANIFESTS
 git commit -q -m "chore(release): $tag"
 git tag -a "$tag" -m "$tag"
 echo "==> Committed and tagged $tag"

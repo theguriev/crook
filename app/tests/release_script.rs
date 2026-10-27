@@ -141,7 +141,13 @@ impl Scratch {
         let _ = std::fs::remove_dir_all(&root);
         let scratch = Self { root };
         let (repo, bin) = (scratch.repo(), scratch.bin());
-        for dir in [repo.join("script"), bin.join("runs")] {
+        for dir in [
+            repo.join("script"),
+            bin.join("runs"),
+            repo.join("packaging/claude-code/.claude-plugin"),
+            repo.join("packaging/claude-code/.codex-plugin"),
+            repo.join("packaging/claude-code/.github/plugin"),
+        ] {
             std::fs::create_dir_all(dir).expect("the system temp directory is writable");
         }
 
@@ -154,7 +160,10 @@ impl Scratch {
             "script/release",
             "script/commit-lint",
             "changelog.config.json",
-        ] {
+        ]
+        .into_iter()
+        .chain(PLUGIN_MANIFESTS)
+        {
             std::fs::copy(workspace.join(file), repo.join(file))
                 .expect("the release scripts can be copied");
         }
@@ -362,6 +371,35 @@ fn git(dir: &Path, args: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// The plugin's manifests, one per agent, whose `version` a release sets.
+const PLUGIN_MANIFESTS: [&str; 3] = [
+    "packaging/claude-code/.claude-plugin/plugin.json",
+    "packaging/claude-code/.codex-plugin/plugin.json",
+    "packaging/claude-code/.github/plugin/plugin.json",
+];
+
+#[test]
+fn a_release_gives_every_plugin_manifest_its_version() {
+    let scratch = Scratch::new("manifests");
+    scratch.log_in();
+    let head = scratch.commit("HEAD");
+    scratch.ci(&head, "completed/success");
+
+    let verdict = scratch.release(&[]);
+
+    assert_released(&verdict);
+    for manifest in PLUGIN_MANIFESTS {
+        let text =
+            std::fs::read_to_string(scratch.repo().join(manifest)).expect("the manifest is there");
+        assert!(
+            text.contains("\n  \"version\": \"0.1.1\",\n"),
+            "{manifest}: {text}"
+        );
+        // And nothing else in it moved.
+        assert!(text.contains("\"name\": \"crook\""), "{manifest}: {text}");
+    }
 }
 
 #[test]
