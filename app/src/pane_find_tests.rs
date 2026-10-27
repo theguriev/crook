@@ -51,7 +51,6 @@ impl Pane {
                 .iter()
                 .skip(evicted)
                 .cloned()
-                .map(Arc::new)
                 .collect(),
             evicted,
         )

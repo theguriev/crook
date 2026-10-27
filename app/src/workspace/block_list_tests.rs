@@ -189,7 +189,11 @@ fn a_failed_command_reads_as_failed_and_an_interrupted_one_does_not() {
         cycle(&mut emulator, "run", "out", exit);
     }
 
-    let verdicts: Vec<_> = emulator.blocks().iter().map(verdict_of).collect();
+    let verdicts: Vec<_> = emulator
+        .blocks()
+        .iter()
+        .map(|block| verdict_of(block))
+        .collect();
     assert_eq!(
         verdicts,
         vec![
@@ -429,10 +433,7 @@ fn links_on_a_command_less_block_land_on_their_own_rows() {
         "the banner block carries no command"
     );
 
-    let history = Arc::new(BlockHistory::new(
-        emulator.blocks().iter().cloned().map(Arc::new).collect(),
-        0,
-    ));
+    let history = Arc::new(BlockHistory::new(emulator.blocks().to_vec(), 0));
     let font = crate::terminal_font::CellFont::headless(12.);
     let metrics = font.metrics();
     let mut list = BlockList::new(history, emulator.snapshot(), font, PaneBlocks::new());
@@ -514,10 +515,7 @@ fn a_folded_url_in_a_finished_block_is_one_link_on_both_of_its_rows() {
     let block = finished(&emulator);
     assert!(block.rows.wraps(1), "the emulator folded the URL");
 
-    let history = Arc::new(BlockHistory::new(
-        emulator.blocks().iter().cloned().map(Arc::new).collect(),
-        0,
-    ));
+    let history = Arc::new(BlockHistory::new(emulator.blocks().to_vec(), 0));
     let font = crate::terminal_font::CellFont::headless(12.);
     let metrics = font.metrics();
     let mut list = BlockList::new(history, emulator.snapshot(), font, PaneBlocks::new());
@@ -592,10 +590,7 @@ fn a_path_in_a_finished_block_is_read_against_the_directory_it_ran_in() {
         Some(Path::new("/project"))
     );
 
-    let history = Arc::new(BlockHistory::new(
-        emulator.blocks().iter().cloned().map(Arc::new).collect(),
-        0,
-    ));
+    let history = Arc::new(BlockHistory::new(emulator.blocks().to_vec(), 0));
     let font = crate::terminal_font::CellFont::headless(12.);
     let metrics = font.metrics();
     let mut list = BlockList::new(history, emulator.snapshot(), font, PaneBlocks::new())
@@ -675,10 +670,7 @@ fn no_path_printed_on_another_machine_is_a_link_but_a_url_is() {
         "the far side's block was not filed under the path it reported"
     );
 
-    let history = Arc::new(BlockHistory::new(
-        emulator.blocks().iter().cloned().map(Arc::new).collect(),
-        0,
-    ));
+    let history = Arc::new(BlockHistory::new(emulator.blocks().to_vec(), 0));
     let font = crate::terminal_font::CellFont::headless(12.);
     let metrics = font.metrics();
     // The pane is on buildbox, as the open block's command is.
@@ -763,7 +755,7 @@ fn a_list_scrolled_up_keeps_its_block_when_the_oldest_are_evicted() {
     // The block at the top of the view, laid out the way a frame lays it out.
     let first_in_view = |emulator: &mut Emulator| {
         let history = Arc::new(BlockHistory::new(
-            emulator.blocks().iter().cloned().map(Arc::new).collect(),
+            emulator.blocks().to_vec(),
             emulator.blocks_evicted(),
         ));
         let mut list = BlockList::new(history, emulator.snapshot(), font.clone(), view.clone());
@@ -813,10 +805,7 @@ fn a_block_s_controls_hide_the_line_they_sit_on_and_cut_no_row_under_it_at_any_s
 
     let mut emulator = emulator();
     cycle(&mut emulator, "c", "1\n2\n3\n4\n5\n6", 1);
-    let history = Arc::new(BlockHistory::new(
-        emulator.blocks().iter().cloned().map(Arc::new).collect(),
-        0,
-    ));
+    let history = Arc::new(BlockHistory::new(emulator.blocks().to_vec(), 0));
     let snapshot = emulator.snapshot();
     // The one block, laid out in a window `rows` of its own rows tall, and
     // the band its controls are drawn across with the part of it that hides

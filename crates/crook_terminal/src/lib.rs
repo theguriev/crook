@@ -380,12 +380,18 @@ impl Terminal {
     }
 
     /// The finished blocks, oldest first. Empty until the first command ends.
-    pub fn blocks(&self) -> &[Block] {
+    pub fn blocks(&self) -> &[Arc<Block>] {
         self.emulator.blocks()
     }
 
+    /// Goes up whenever [`Self::blocks`] changes. See
+    /// [`Emulator::blocks_changes`].
+    pub fn blocks_changes(&self) -> u64 {
+        self.emulator.blocks_changes()
+    }
+
     /// One finished block by id, or `None` once it has been evicted.
-    pub fn block(&self, id: BlockId) -> Option<&Block> {
+    pub fn block(&self, id: BlockId) -> Option<&Arc<Block>> {
         self.emulator.block(id)
     }
 
@@ -406,7 +412,7 @@ impl Terminal {
     /// and answers the blocks it let go of. The child is not told: it is the
     /// pane being cleared, not the program's screen. See
     /// [`Emulator::clear_blocks`].
-    pub fn clear_blocks(&mut self) -> Vec<Block> {
+    pub fn clear_blocks(&mut self) -> Vec<Arc<Block>> {
         self.emulator.clear_blocks()
     }
 

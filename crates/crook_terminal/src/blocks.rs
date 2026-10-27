@@ -95,6 +95,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::EventListener;
@@ -267,6 +268,13 @@ impl BlockState {
 /// The rows are owned, so a block outlives the lines it came from — the
 /// scrollback evicting them, a resize reflowing them and `clear` wiping them
 /// all leave it untouched.
+///
+/// Handed out as an [`Arc`], and the one the emulator keeps is the one every
+/// holder of the list shares: a pane's finished output is in memory once.
+/// The rows are behind an `Arc` of their own, so that what changes of a
+/// block once it is finished — its pictures going, oldest first, when there
+/// are too many to keep — is a new block around the same rows rather than a
+/// copy of them.
 #[derive(Clone, Debug)]
 pub struct Block {
     /// Its identity for the life of the session.
@@ -307,8 +315,9 @@ pub struct Block {
     /// When it finished.
     pub finished_at: Option<Instant>,
     /// Everything the block put on screen: its prompt, its command line and
-    /// its output, as the grid held them.
-    pub rows: BlockRows,
+    /// its output, as the grid held them. Never changed once the block is
+    /// finished, and shared by every block that is this one.
+    pub rows: Arc<BlockRows>,
     /// Which row of [`Self::rows`] the command's own output starts on: the
     /// rows before it are the prompt and the line that was echoed at it.
     ///
@@ -337,6 +346,25 @@ impl Block {
     pub fn duration(&self) -> Option<Duration> {
         let (started, finished) = (self.started_at?, self.finished_at?);
         finished.checked_duration_since(started)
+    }
+
+    /// The same block around the same rows, with no pictures: what the
+    /// budget leaves of one it takes the pictures of, built without a copy
+    /// of the pictures it is letting go of.
+    fn without_pictures(&self) -> Self {
+        Self {
+            id: self.id,
+            state: self.state,
+            command: self.command.clone(),
+            exit: self.exit,
+            working_directory: self.working_directory.clone(),
+            working_host: self.working_host.clone(),
+            started_at: self.started_at,
+            finished_at: self.finished_at,
+            rows: Arc::clone(&self.rows),
+            output_from: self.output_from,
+            images: Vec::new(),
+        }
     }
 }
 
@@ -1006,7 +1034,20 @@ struct OpenBlock {
 pub(crate) struct BlockTracker {
     next_id: u64,
     open: OpenBlock,
-    finished: Vec<Block>,
+    /// Oldest first, each shared with whoever holds a copy of the list, which
+    /// is why one is replaced rather than changed: see [`Block`].
+    ///
+    /// Bounded by [`MAX_BLOCKS`], and the pictures in them by
+    /// [`MAX_IMAGE_BYTES`]. Nothing bounds the rows they hold together but
+    /// the count. A bound by rows would go where the count's does, in
+    /// [`Self::close`], off the front the same way, and every holder of a
+    /// copy follows it by [`Self::evicted`].
+    finished: Vec<Arc<Block>>,
+    /// Goes up whenever [`Self::finished`] changes in any way — a block
+    /// added, blocks evicted, a block's pictures let go of, the list cleared
+    /// — so that a copy of the list can tell it is behind without comparing
+    /// it block by block.
+    changes: u64,
     evicted: usize,
     /// What [`Self::evicted`] came to at the last [`Self::clear`]. The blocks
     /// counted up to there went because somebody asked for an empty pane,
@@ -1071,6 +1112,7 @@ impl BlockTracker {
                 prompt: None,
             },
             finished: Vec::new(),
+            changes: 0,
             evicted: 0,
             cleared_at: 0,
             reflow_owed: false,
@@ -1189,8 +1231,13 @@ impl BlockTracker {
     }
 
     /// The finished blocks, oldest first.
-    pub(crate) fn finished(&self) -> &[Block] {
+    pub(crate) fn finished(&self) -> &[Arc<Block>] {
         &self.finished
+    }
+
+    /// How many times [`Self::finished`] has changed: see [`Self::changes`].
+    pub(crate) fn changes(&self) -> u64 {
+        self.changes
     }
 
     /// How many blocks have been dropped off the front to stay under
@@ -1602,7 +1649,7 @@ impl BlockTracker {
     ///
     /// The finished blocks go the way an eviction takes them, off the front
     /// and counted in [`Self::evicted`], so that whatever keeps a copy of the
-    /// list — cloned a block at a time, and told what went by that count —
+    /// list — the blocks themselves, and told what went by that count —
     /// lets them go too. [`Self::cleared_at`] marks where that count stood,
     /// for whoever has to tell blocks a clear let go of from blocks the cap
     /// pushed off: only the second kind leaves something before the first
@@ -1630,8 +1677,9 @@ impl BlockTracker {
     /// The history stays while a full-screen program is up. The one `Term`
     /// hands out then is the program's, and empty; the shell's is underneath,
     /// out of reach, with the anchors measured against it.
-    pub(crate) fn clear<T: EventListener>(&mut self, term: &mut Term<T>) -> Vec<Block> {
+    pub(crate) fn clear<T: EventListener>(&mut self, term: &mut Term<T>) -> Vec<Arc<Block>> {
         let dropped = std::mem::take(&mut self.finished);
+        self.changes += 1;
         self.evicted += dropped.len();
         self.cleared_at = self.evicted;
         self.image_bytes = 0;
@@ -1809,9 +1857,14 @@ impl BlockTracker {
         // two differ all the same, the older rows are the ones to lose: the
         // spill has to end where the grid begins.
         let piece = (room / 8).clamp(1, crate::spill::PIECE_ROWS);
-        self.spill.harvest(term, palette, (first, last), piece);
-        // A piece at a time, which moves nothing that is kept.
-        if self.spill.drop_oldest(room) > 0 {
+        // Past the scrollback the oldest go a piece at a time, which moves
+        // nothing that is kept, and the rows of the cut they would be are
+        // not harvested at all.
+        if self
+            .spill
+            .harvest_keeping(term, palette, (first, last), piece, room)
+            > 0
+        {
             self.trimmed_since_settle = true;
         }
     }
@@ -2135,7 +2188,8 @@ impl BlockTracker {
                 })
                 .collect();
             self.image_bytes += weight(&images);
-            self.finished.push(Block {
+            self.changes += 1;
+            self.finished.push(Arc::new(Block {
                 id: self.open.id,
                 state,
                 command: self.open.command.take(),
@@ -2144,10 +2198,10 @@ impl BlockTracker {
                 working_host: self.open.working_host.take(),
                 started_at: self.open.started_at,
                 finished_at: Some(Instant::now()),
-                rows,
+                rows: Arc::new(rows),
                 output_from,
                 images,
-            });
+            }));
             if self.finished.len() > MAX_BLOCKS {
                 // A batch at a time, because a `Vec` shifts everything left on
                 // a removal from the front: dropping one block per push past
@@ -2165,11 +2219,23 @@ impl BlockTracker {
                 self.evicted += over;
             }
             // The oldest pictures go first, and the blocks they were in stay.
+            // A block a copy of the list still holds is shared with it, so
+            // the one here becomes a new block around the same rows, and the
+            // copy, which is told by `changes`, takes it in place of the old
+            // one and lets the pictures go too: the copy would otherwise keep
+            // every picture the budget let go of. One nothing else holds is
+            // changed where it is.
             let mut oldest = self.finished.iter_mut();
             while self.image_bytes > MAX_IMAGE_BYTES {
                 let Some(block) = oldest.next() else { break };
+                if block.images.is_empty() {
+                    continue;
+                }
                 self.image_bytes -= weight(&block.images);
-                block.images = Vec::new();
+                match Arc::get_mut(block) {
+                    Some(own) => own.images = Vec::new(),
+                    None => *block = Arc::new(block.without_pictures()),
+                }
             }
         }
     }
