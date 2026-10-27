@@ -1033,6 +1033,20 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
         control::cli::events(args)?;
         return Ok(Startup::Answered);
     }
+    if args.next_if(|word| word == "mcp").is_some() {
+        if let Some(extra) = args.next() {
+            bail!(
+                "unrecognised argument {extra}; `crook mcp` takes none: it serves the Model \
+                 Context Protocol on standard input and output"
+            );
+        }
+        control::mcp::serve(
+            std::io::stdin().lock(),
+            std::io::stdout(),
+            control::mcp::Place::here(),
+        );
+        return Ok(Startup::Answered);
+    }
     if args.next_if(|word| word == "tab").is_some() {
         let printed = control::cli::tab(args)?;
         print_answer(format_args!("{}\n", printed.text))?;
@@ -1691,8 +1705,11 @@ USAGE:
     crook pane list [--json]
     crook pane wait <ID> --until <STATE> [--timeout <SECS>] [--json]
     crook pane blocks <ID> [--last <N>] [--json]
-    crook tab new [--worktree <BRANCH>] [--in-my-group] [--title <TITLE>] [--json] -- <COMMAND>...
+    crook pane split [--right|--down] [--beside <ID>] [--title <TITLE>] [--cwd <DIR>] [--json] -- <COMMAND>...
+    crook pane close <ID> [--json]
+    crook tab new [--worktree <BRANCH>] [--in-my-group] [--title <TITLE>] [--cwd <DIR>] [--json] -- <COMMAND>...
     crook events --follow [--pane <ID>]
+    crook mcp
 
 COMMANDS:
     pane list [--json] Ask the window this is run in which panes it has, over
@@ -1722,6 +1739,25 @@ COMMANDS:
                        than printing nothing. --json prints the window's
                        answer. Your own pane and the tabs it opened; not on
                        Windows yet
+    pane split [...] -- <COMMAND>...
+                       From inside a pane, split a new pane off it — or off a
+                       tab or pane it opened, with --beside — to the right
+                       (the default) or --down, without moving the focus, and
+                       run the command there as `tab new` does. --cwd is where
+                       its shell starts; --title names it. Prints the new
+                       pane's number, or with --json the window's answer.
+                       Counts toward the same eight as `tab new`; not on
+                       Windows yet
+    pane close <ID>    Close pane ID, which this pane opened with `tab new` or
+                       `pane split` (and its tab, when it was the tab's last
+                       pane). Never this pane, and never one a person or
+                       another agent opened, nor one this pane's worker
+                       opened; refused while anything in it is working or a
+                       person is in it, since Crook asks before a close ends
+                       work and a command is never the one asked, and while
+                       a shell with no command marks has given its terminal
+                       to something else, or nobody can tell.
+                       Not on Windows yet
     tab new [...] -- <COMMAND>...
                        From inside a pane, open a tab beside it in the same
                        window, without switching to it, and run the command
@@ -1729,7 +1765,7 @@ COMMANDS:
                        as itself. --worktree makes a worktree on a new branch
                        from this pane's HEAD and opens the tab in it;
                        --in-my-group puts the tab in this tab's group; --title
-                       names it. Prints the new pane's number, or with --json
+                       names it; --cwd starts it in another directory. Prints the new pane's number, or with --json
                        the window's answer. The pane is known by the secret in
                        its CROOK_TOKEN, and eight tabs may be open on behalf of
                        one pane a person opened. No word may hold a newline or
@@ -1746,6 +1782,15 @@ COMMANDS:
                        the window ends it. A reader that falls behind is sent
                        a `lagged` line counting what it missed. Not on Windows
                        yet
+    mcp                Serve these commands as Model Context Protocol tools on
+                       standard input and output, for an agent's MCP client
+                       (Claude Code's plugin starts it): crook_tab_new,
+                       crook_pane_split, crook_pane_list, crook_pane_wait,
+                       crook_pane_output, crook_pane_close and
+                       crook_events_wait, asked as the pane it runs in, by the
+                       same rules. No tool types into a pane or answers an
+                       agent's permission request. Outside a Crook pane every
+                       call says so
 
 OPTIONS:
     -e <PROGRAM> [ARGS]...

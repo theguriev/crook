@@ -1,7 +1,7 @@
 {
   "name": "crook",
   "displayName": "Crook",
-  "description": "Tells the Crook tab GitHub Copilot CLI runs in what it is doing, and teaches Copilot what a Crook pane can do. Does nothing in any other terminal.",
+  "description": "Tells the Crook tab GitHub Copilot CLI runs in what it is doing, gives Copilot tools to open, watch, read and close the tabs it opens (`crook mcp`), and teaches Copilot what a Crook pane can do. Does nothing in any other terminal.",
   "author": {
     "name": "Eugen Guriev",
     "url": "https://github.com/theguriev"
@@ -15,5 +15,6 @@
     "hooks"
   ],
   "hooks": "./hooks/copilot.json",
-  "skills": "./skills/"
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
 }

@@ -73,10 +73,10 @@ use std::rc::Rc;
 use crookui_core::prelude::*;
 
 use super::Answering;
-use super::protocol::{NewTab, Opened, Refusal, code};
+use super::protocol::{NewTab, Opened, Refusal, SplitPane, SplitSide, code};
 use crate::git::worktree;
 use crate::plugins::wasm::quote;
-use crate::tab::{Lineage, PaneId, TabId};
+use crate::tab::{Direction, Lineage, PaneId, TabId};
 use crate::workspace::Workspace;
 
 /// How many tabs may be open on behalf of one pane a person opened.
@@ -222,31 +222,11 @@ pub fn open(
     answer: Answering,
     ctx: &mut ViewContext<Workspace>,
 ) {
-    spawns
-        .borrow_mut()
-        .forget_closed(|pane| workspace.tabs().pane(pane).is_some());
-
-    let Some(caller) = token.and_then(|token| workspace.pane_with_token(token, ctx)) else {
-        spawns.borrow_mut().refuse_stranger();
-        answer.send(Err(Refusal::new(
-            code::UNAUTHORIZED,
-            "only a pane of this window can open a tab, and the request carries no pane's \
-             CROOK_TOKEN; run `crook tab new` inside a Crook pane",
-        )));
-        return;
+    let caller = match admitted(workspace, token, spawns, "open a tab", ctx) {
+        Ok(caller) => caller,
+        Err(refusal) => return answer.send(Err(refusal)),
     };
-    if spawns.borrow().stopped(caller) {
-        answer.send(Err(Refusal::new(
-            code::TOO_MANY_REFUSALS,
-            format!(
-                "this pane has been refused {REFUSALS_ALLOWED} tabs in a row, and this window \
-                 opens no more for it until it closes"
-            ),
-        )));
-        return;
-    }
-
-    let planned = plan(workspace, asked, caller, &spawns.borrow(), ctx);
+    let planned = plan(workspace, Asked::Tab(asked), caller, &spawns.borrow(), ctx);
     let plan = match planned {
         Ok(plan) => plan,
         Err(refusal) => {
@@ -315,6 +295,76 @@ pub fn open(
     .detach();
 }
 
+/// The pane a `tab.new` or a `pane.split` comes from, once it is one the
+/// window still answers — or the refusal.
+fn admitted(
+    workspace: &Workspace,
+    token: Option<&str>,
+    spawns: &Rc<RefCell<Spawns>>,
+    what: &str,
+    app: &AppContext,
+) -> Result<PaneId, Refusal> {
+    spawns
+        .borrow_mut()
+        .forget_closed(|pane| workspace.tabs().pane(pane).is_some());
+
+    let Some(caller) = token.and_then(|token| workspace.pane_with_token(token, app)) else {
+        spawns.borrow_mut().refuse_stranger();
+        return Err(Refusal::new(
+            code::UNAUTHORIZED,
+            format!(
+                "only a pane of this window can {what}, and the request carries no pane's \
+                 CROOK_TOKEN; run this inside a Crook pane"
+            ),
+        ));
+    };
+    if spawns.borrow().stopped(caller) {
+        return Err(Refusal::new(
+            code::TOO_MANY_REFUSALS,
+            format!(
+                "this pane has been refused {REFUSALS_ALLOWED} tabs or panes in a row, and this \
+                 window opens no more for it until it closes"
+            ),
+        ));
+    }
+    Ok(caller)
+}
+
+/// Answers one `pane.split`: a pane split off the caller's own, or off one
+/// it opened, running a command — never focused, and counted in the budget
+/// the caller's tabs are.
+///
+/// Everything `tab.new` checks, but for the worktree a split has no room
+/// for: it shares a tab with the pane it is split off, and a tab's panes
+/// work in whatever checkout their shells are in.
+pub fn split(
+    workspace: &mut Workspace,
+    asked: SplitPane,
+    token: Option<&str>,
+    spawns: &Rc<RefCell<Spawns>>,
+    answer: Answering,
+    ctx: &mut ViewContext<Workspace>,
+) {
+    let caller = match admitted(workspace, token, spawns, "split a pane", ctx) {
+        Ok(caller) => caller,
+        Err(refusal) => return answer.send(Err(refusal)),
+    };
+    let planned = plan(
+        workspace,
+        Asked::Split(asked),
+        caller,
+        &spawns.borrow(),
+        ctx,
+    );
+    match planned {
+        Ok(plan) => finish(workspace, plan, None, spawns, answer, ctx),
+        Err(refusal) => {
+            spawns.borrow_mut().refuse(caller, &refusal);
+            answer.send(Err(refusal));
+        }
+    }
+}
+
 /// A worktree git has made for a tab that is not open yet.
 struct Made {
     /// Where it is, which is where the tab opens.
@@ -327,15 +377,40 @@ struct Made {
     lacks: Option<String>,
 }
 
-/// A `tab.new` the window has agreed to, before the tab is open.
+/// What was asked for: a tab, or a pane split off one.
+enum Asked {
+    Tab(NewTab),
+    Split(SplitPane),
+}
+
+/// Where a new pane goes.
+enum Placement {
+    /// A tab of its own, beside the caller's.
+    Tab {
+        /// The caller's tab, which the new one opens beside.
+        beside: TabId,
+        /// Whether it joins the caller's group.
+        grouped: bool,
+    },
+    /// A pane split off one already open.
+    Split {
+        /// The pane it is split off.
+        beside: PaneId,
+        /// Which side of it.
+        direction: Direction,
+    },
+}
+
+/// A `tab.new` or a `pane.split` the window has agreed to, before the pane
+/// is open.
 struct Plan {
-    /// The caller's tab, which the new one opens beside.
-    beside: TabId,
-    /// Whether it joins the caller's group.
-    grouped: bool,
-    /// The caller's directory: where the tab opens, or the repository its
-    /// worktree is made from.
+    /// Where it goes.
+    placement: Placement,
+    /// The caller's directory: the repository a worktree is made from.
     directory: Option<PathBuf>,
+    /// Where its shell starts when that was asked for, in place of the
+    /// caller's directory — or of the split pane's.
+    cwd: Option<PathBuf>,
     /// The branch to make a worktree on, when one was asked for.
     branch: Option<String>,
     /// What to call it.
@@ -346,17 +421,18 @@ struct Plan {
     lineage: Lineage,
 }
 
-/// Decides whether `caller` may have the tab it asked for, and what it is.
+/// Decides whether `caller` may have the tab or the pane it asked for, and
+/// what it is.
 fn plan(
     workspace: &Workspace,
-    asked: NewTab,
+    asked: Asked,
     caller: PaneId,
     spawns: &Spawns,
     app: &AppContext,
 ) -> Result<Plan, Refusal> {
     let bad = |message: String| Refusal::new(code::BAD_REQUEST, message);
     let strip = workspace.tabs();
-    let Some((beside, session)) = strip
+    let Some((caller_tab, session)) = strip
         .panes()
         .find(|(_, pane)| pane.id() == caller)
         .map(|(tab, pane)| (tab, pane.session()))
@@ -366,24 +442,85 @@ fn plan(
         return Err(Refusal::new(code::GONE, "the pane that asked has closed"));
     };
 
-    let program = workspace.shell_standing(app).0.program;
-    let line = command_line(&asked.command, &program)?;
+    let (command, title, cwd, worktree, placement) = match asked {
+        Asked::Tab(asked) => (
+            asked.command,
+            asked.title,
+            asked.cwd,
+            asked.worktree,
+            Placement::Tab {
+                beside: caller_tab,
+                grouped: asked.in_my_group,
+            },
+        ),
+        Asked::Split(asked) => {
+            let beside = match asked.beside {
+                None => caller,
+                Some(number) => {
+                    let Some(pane) = strip
+                        .panes()
+                        .map(|(_, pane)| pane.id())
+                        .find(|pane| pane.as_u64() == number)
+                    else {
+                        return Err(super::watch::no_such_pane(number));
+                    };
+                    if pane != caller && !super::close::opened_by(workspace, pane, caller) {
+                        return Err(Refusal::new(
+                            code::NOT_OPENED,
+                            format!(
+                                "pane {number} is neither this pane nor one it opened itself, \
+                                 and a pane is split only off those; split off your own pane, \
+                                 or off a tab or pane you opened"
+                            ),
+                        ));
+                    }
+                    pane
+                }
+            };
+            let direction = match asked.direction {
+                SplitSide::Right => Direction::Right,
+                SplitSide::Down => Direction::Down,
+            };
+            (
+                asked.command,
+                asked.title,
+                asked.cwd,
+                None,
+                Placement::Split { beside, direction },
+            )
+        }
+    };
 
-    let title = match asked.title.as_deref().map(str::trim) {
-        None | Some("") => None,
+    let program = workspace.shell_standing(app).0.program;
+    let line = command_line(&command, &program)?;
+
+    let title = match title.as_deref().map(shown) {
         Some(title) if title.chars().any(char::is_control) => {
             return Err(bad(
                 "a title is one line of text, with no control character".to_owned(),
             ));
         }
-        Some(title) => Some(title.to_owned()),
+        Some(title) if !title.trim().is_empty() => Some(title.trim().to_owned()),
+        _ => None,
+    };
+
+    let cwd = match cwd {
+        None => None,
+        Some(_) if worktree.is_some() => {
+            return Err(bad(
+                "a tab in a new worktree starts in that worktree; give `cwd` or `worktree`, \
+                 not both"
+                    .to_owned(),
+            ));
+        }
+        Some(cwd) => Some(directory_asked(&cwd)?),
     };
 
     let directory = session.working_directory.clone();
     // Trimmed and required, as the worktree menu's creator takes it; the
     // name itself is git's to judge, and a name git refuses comes back as
     // what git said.
-    let branch = match asked.worktree.as_deref().map(str::trim) {
+    let branch = match worktree.as_deref().map(str::trim) {
         None => None,
         Some("") => return Err(bad("a worktree needs a branch name".to_owned())),
         Some(branch) => {
@@ -420,17 +557,17 @@ fn plan(
         return Err(Refusal::new(
             code::BUDGET,
             format!(
-                "{SPAWN_BUDGET} tabs are already open on behalf of the pane this work began in, \
-                 which is as many as it may have; wait for one of them to close — `crook pane \
-                 list` shows them — rather than asking again"
+                "{SPAWN_BUDGET} tabs and panes are already open on behalf of the pane this work \
+                 began in, which is as many as it may have; wait for one of them to close — \
+                 `crook pane list` shows them — rather than asking again"
             ),
         ));
     }
 
     Ok(Plan {
-        beside,
-        grouped: asked.in_my_group,
+        placement,
         directory,
+        cwd,
         branch,
         title,
         line,
@@ -442,11 +579,48 @@ fn plan(
     })
 }
 
-/// Opens the tab a [`Plan`] describes, in the worktree `made` for it or the
-/// caller's own directory, and answers with it.
+/// `title` without the characters that would not print as themselves but
+/// for the controls, which are refused: a bidirectional override, a
+/// zero-width or format character, a tag. A row's name is what a person
+/// tells the work in the panel by, and one asked for over the socket must
+/// not draw as anything but what it says.
+fn shown(title: &str) -> String {
+    title
+        .chars()
+        .filter(|character| character.is_control() || !crate::agent::request::hidden(*character))
+        .collect()
+}
+
+/// The directory a request asked a new pane to start in, as a path —
+/// or why it cannot be one: not absolute, too long, or holding a control
+/// character a shell's directory never does.
+///
+/// Whether it is there is the shell's to find, not the window's: a look at
+/// the disk is not done between two frames, and a pane whose directory has
+/// gone starts where a restored one would. `crook` checks it before asking.
+fn directory_asked(cwd: &str) -> Result<PathBuf, Refusal> {
+    let path = Path::new(cwd);
+    if !path.is_absolute()
+        || cwd.len() > super::protocol::MAX_CWD
+        || cwd.chars().any(char::is_control)
+    {
+        return Err(Refusal::new(
+            code::BAD_REQUEST,
+            format!(
+                "`cwd` is an absolute path of at most {} bytes with no control character",
+                super::protocol::MAX_CWD
+            ),
+        ));
+    }
+    Ok(path.to_path_buf())
+}
+
+/// Opens the tab or the pane a [`Plan`] describes, in the worktree `made`
+/// for it, the directory it asked for or the caller's own, and answers with
+/// it.
 ///
 /// The one place a caller's run of refusals ends, since it is the one place a
-/// tab is known to have opened — short of a stop, which [`Spawns::opened`]
+/// pane is known to have opened — short of a stop, which [`Spawns::opened`]
 /// leaves standing.
 fn finish(
     workspace: &mut Workspace,
@@ -457,9 +631,9 @@ fn finish(
     ctx: &mut ViewContext<Workspace>,
 ) {
     let Plan {
-        beside,
-        grouped,
+        placement,
         directory,
+        cwd,
         title,
         line,
         lineage,
@@ -469,16 +643,30 @@ fn finish(
     let checkout = made.as_ref().map(|made| made.path.clone());
     let (directory, heading, lacks) = match made {
         Some(made) => (Some(made.path), Some(made.repository), made.lacks),
-        None => (directory, None, None),
+        None => (cwd.clone().or(directory), None, None),
     };
-    let cwd = directory
-        .as_deref()
-        .map(|directory| directory.to_string_lossy().into_owned());
-    let opened = workspace.open_worker_tab(beside, grouped, directory, heading, ctx, |session| {
+    let prepare = |session: &mut crate::tab::AgentSession| {
         session.spawned_by = Some(lineage);
         if title.is_some() {
             session.custom_title = title;
         }
+    };
+    let opened = match placement {
+        Placement::Tab { beside, grouped } => {
+            workspace.open_worker_tab(beside, grouped, directory, heading, ctx, prepare)
+        }
+        Placement::Split { beside, direction } => {
+            // Where the pane it is split off works, unless a directory was
+            // asked for: a split is beside that pane, not the caller's.
+            workspace.open_worker_split(beside, direction, cwd, ctx, prepare)
+        }
+    };
+    let cwd = opened.and_then(|(_, pane)| {
+        workspace
+            .tabs()
+            .pane(pane)
+            .and_then(|pane| pane.session().working_directory.as_deref())
+            .map(|directory| directory.to_string_lossy().into_owned())
     });
     // Held from here, as the menu's creator holds the checkouts it opens: the
     // lock comes off when no pane in the window is working in the checkout.
@@ -489,7 +677,7 @@ fn finish(
         workspace.held_locks().opened(checkout);
     }
     let Some((tab, pane)) = opened else {
-        let refusal = Refusal::new(code::FAILED, "the tab could not be opened");
+        let refusal = Refusal::new(code::FAILED, "the pane could not be opened");
         spawns.borrow_mut().refuse(caller, &refusal);
         answer.send(Err(refusal));
         return;

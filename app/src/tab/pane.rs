@@ -948,6 +948,32 @@ impl PaneGroup {
         PaneEffect::Changed
     }
 
+    /// Puts a new pane named `title` on `direction`'s side of `anchor`, by
+    /// the rule [`Self::split`] follows, and leaves the focus where it was.
+    ///
+    /// What `crook pane split` opens: a pane an agent asked for beside its
+    /// own, which nobody switched to. Focusing it would move the keyboard
+    /// out from under whoever is typing, as selecting a tab `crook tab new`
+    /// opened would — see `TabAction::NewBeside`. A zoom stays as it is too:
+    /// it is the person's arrangement, and the pane is there to see when
+    /// they leave it. `None` when `anchor` is not in this group.
+    pub fn split_beside(
+        &mut self,
+        anchor: PaneId,
+        direction: Direction,
+        title: impl Into<String>,
+    ) -> Option<PaneId> {
+        self.get(anchor)?;
+        let pane = Pane::new(title);
+        let id = pane.id();
+        self.insert_beside(anchor, direction, Node::Leaf(Box::new(pane)));
+        self.repair(None);
+        // Last in the most-recently-used order, since nobody has used it.
+        self.mru.retain(|open| *open != id);
+        self.mru.push(id);
+        Some(id)
+    }
+
     /// Puts `node` on `direction`'s side of `anchor`: into the anchor's
     /// branch when that divides the same way, or into a new branch that
     /// takes the anchor's place and its share.

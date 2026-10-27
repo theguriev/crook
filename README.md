@@ -234,6 +234,71 @@ abort inside a system library ends the process without running any of Crook's co
 leaves no report. The log file is still there up to its last line, and the system's own crash
 reporter — `coredumpctl`, Console.app, the Event Viewer — has the rest.
 
+## Let Claude manage tabs (MCP)
+
+Crook's plugin for Claude Code gives Claude a handful of tools for the window it runs in: open
+a tab or split a pane that runs a command, list the panes, wait for one it opened to finish or
+to stop for you, read what a finished command printed, and close what it opened once it is done.
+
+```sh
+claude plugin marketplace add theguriev/crook
+claude plugin install crook@crook
+```
+
+Start Claude in a Crook pane and the tools are there: `/mcp` lists the plugin's `crook`
+server. Ask for something like *"run the tests in a tab under this one, wait for
+them and tell me what failed"*, and Claude opens the pane, waits, reads the output and closes
+it, all where you can see it.
+
+| tool | what it does |
+| --- | --- |
+| `crook_tab_new` | opens a tab beside Claude's — `command`, and `title`, `worktree`, `in_my_group`, `cwd` — without switching to it |
+| `crook_pane_split` | splits a pane off Claude's own, or off one it opened (`beside`), `right` or `down`, without moving the focus |
+| `crook_pane_list` | every pane: id, focus, status, title, group, branch, directory |
+| `crook_pane_wait` | waits until a pane is `finished`, `idle`, `needs-input` or `exited` — 55 seconds unless told, at most 600 |
+| `crook_pane_output` | a pane's newest finished commands, what they printed and how they exited |
+| `crook_pane_close` | closes a pane Claude opened, once nothing in it is working |
+| `crook_events_wait` | the next status changes, commands finished, tabs opened and closed |
+
+They are `crook mcp`, a stdio [Model Context Protocol](https://modelcontextprotocol.io) server
+the plugin starts as `$CROOK_BIN mcp` (or `crook mcp` from `PATH`), and every one of them is a
+request over the control socket `crook tab new` and `crook pane …` already use, asked as
+Claude's own pane, by the same rules — nothing an agent could not do with those commands:
+
+- **No tool types into a pane.** A tab or pane runs the command it was opened with, and nothing
+  can be sent to it afterwards.
+- **No tool answers an agent's permission request.** A question is yours to answer, on its card
+  in Crook or in the agent's dialog; `crook_events_wait` says one was asked, never what, and
+  nothing answers it.
+- **Only what Claude opened.** It may watch and read its own pane, the tabs and panes it opened
+  — eight at most on behalf of the pane you opened — and theirs in turn, and list the rest, as
+  `crook pane list` does. It closes, and splits beside, only the ones it opened itself: never
+  its own pane, one you opened, another agent's, or one its own worker opened.
+- **Nothing working is closed.** A pane whose agent is running or waiting, whose command is
+  still running, or which you are working in, is refused, and Crook never puts its "end them?"
+  question up on Claude's behalf. A pane whose shell reports no command marks is closed only
+  when its terminal says the shell itself is in the foreground, and refused as `unknown` where
+  that cannot be read.
+- **Output is data.** What a pane printed reaches Claude between fence lines with a random tag,
+  marked as untrusted program output, with its escape sequences taken out.
+
+Opening a tab or a split runs a command with your privileges, as Claude's Bash tool does, and
+Claude Code asks before each call unless you allow the tool. Do not give `crook_tab_new` or `crook_pane_split` "always allow": each runs any command it is given, so allowing either for good is allowing every command. The MCP server runs outside Claude Code's Bash sandbox, so a command opened through it is not sandboxed even when Claude's own Bash commands are. Outside a Crook pane the server still starts and every call says
+it is not in one, so the plugin costs a session in another terminal nothing. Not on Windows yet:
+there every call says the control socket is not there.
+
+Other MCP clients start the same command. Copilot CLI reads it from the plugin
+(`copilot plugin install crook@crook`). For Codex, add it to `~/.codex/config.toml`, passing on
+the pane's variables, which Codex does not hand an MCP server by default:
+
+```toml
+[mcp_servers.crook]
+command = "crook"
+args = ["mcp"]
+env_vars = ["TERM_PROGRAM", "CROOK_PANE_ID", "CROOK_SOCKET", "CROOK_TOKEN"]
+tool_timeout_sec = 660   # Codex cuts a call off at 60 seconds by default; a wait may ask for 600
+```
+
 ## v1 scope
 
 Twenty-two features, and the page that configures them:
@@ -605,6 +670,12 @@ Twenty-two features, and the page that configures them:
   Crook cannot ask for yet. A command still running has not finished, and an interactive agent
   is one live screen with no finished command to read: `pane blocks` says so rather than
   printing nothing, and a worker whose answer is meant to be read runs headless, `claude -p`.
+  **And split beside itself, and close what it opened.** `crook pane split --down -- npm run
+  dev` opens a pane under the caller's own, or `--beside` one it opened, without moving the
+  focus, counted in the same eight; `crook pane close 7` closes a pane it opened once nothing in
+  it is working and you are not in it, and never its own, yours or another agent's. `tab new`
+  and `pane split` take `--cwd`. All of it is also `crook mcp`, MCP tools Crook's Claude Code
+  plugin starts: see "Let Claude manage tabs (MCP)" above.
   Crook also reads the notifications other terminals show — OSC 9, 777 and 99 — as the pane
   asking for a look, with the notification's text on the row and the status left as it was, so
   an agent on a remote box with its notification channel set to `iterm2`, `ghostty` or `kitty`

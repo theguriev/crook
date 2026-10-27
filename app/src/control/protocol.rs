@@ -12,7 +12,7 @@
 //!
 //! # A question a hook asks, and never an answer
 //!
-//! Seven verbs, and the sixth, `agent.ask`, goes the other way: not a script
+//! Nine verbs, and the sixth, `agent.ask`, goes the other way: not a script
 //! asking the window something, but an agent's permission hook handing the
 //! window the question its agent is about to ask a person — the whole
 //! request, normalised — and waiting on the same connection for what the
@@ -28,6 +28,11 @@
 //! question: only the terminals of the tmux clients the agent's tmux has, so
 //! that a hook whose `CROOK_SOCKET` is stale can find the window holding one
 //! before it tells any window what its agent asks. See [`Find`].
+//!
+//! The eighth and ninth, `pane.split` and `pane.close`, are `tab.new`'s
+//! neighbours: a pane split off the caller's or off one it opened, and a pane
+//! it opened closed once nothing in it is working. Neither types into a pane
+//! and neither answers anything. See [`SplitPane`] and [`ClosePane`].
 
 use std::fmt;
 use std::time::Duration;
@@ -107,6 +112,25 @@ pub mod code {
     /// This window is set not to take agents' questions: the person turned
     /// answering them from Crook off, and the agent's own prompt is the one.
     pub const DECLINED: &str = "declined";
+    /// The pane a `pane.close` names is the caller's own, which a request
+    /// never closes: a pane that ends itself does so by exiting.
+    pub const OWN_PANE: &str = "own-pane";
+    /// The pane a `pane.close` or a `pane.split`'s `beside` names is not one
+    /// the caller opened itself: a person's, another agent's, or one the
+    /// caller's own worker opened.
+    pub const NOT_OPENED: &str = "not-opened";
+    /// The pane a `pane.close` names is still working — its agent is running
+    /// or waiting on a person, its hook is asking, or its shell has a command
+    /// open — and closing it would end that. Crook asks a person before a
+    /// close ends work, and a request is never that person.
+    pub const WORKING: &str = "working";
+    /// The pane a `pane.close` names is the one a person is working in: the
+    /// active tab's focused pane.
+    pub const FOCUSED: &str = "focused";
+    /// The pane a `pane.close` names has a shell that reports no command
+    /// marks, and whether something runs in it could not be read: a close
+    /// that cannot tell whether it ends work is refused.
+    pub const UNKNOWN: &str = "unknown";
 }
 
 /// The longest a `pane.wait` may wait, in seconds, and how long one that
@@ -127,11 +151,13 @@ pub const MAX_BLOCKS: usize = 100;
 
 /// What a request can ask for.
 ///
-/// Seven verbs: one that lists, one that opens a tab, three that watch a
+/// Nine verbs: one that lists, one that opens a tab, three that watch a
 /// pane the caller may watch — itself, and the tabs it opened — one an
-/// agent's hook asks its own question with, and one it finds the window to
-/// ask with. Every one is a promise that is hard to take back, which is why
-/// each is added on purpose and none by a pattern.
+/// agent's hook asks its own question with, one it finds the window to ask
+/// with, one that splits a pane off the caller's or off one it opened, and
+/// one that closes a pane it opened. Every one is a promise that is hard to
+/// take back, which is why each is added on purpose and none by a pattern.
+/// None of them types into a pane, and none answers an agent's question.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verb {
     /// Every pane of the window, as a list of [`PaneEntry`].
@@ -156,11 +182,17 @@ pub enum Verb {
     /// Whether one of this window's panes is on one of a few terminals: see
     /// [`Find`]. Answered with a [`Located`].
     PaneFind(Find),
+    /// A pane split off the caller's own, or off one it opened, running a
+    /// command: see [`SplitPane`]. Answered with an [`Opened`].
+    PaneSplit(SplitPane),
+    /// A pane the caller opened, closed: see [`ClosePane`]. Answered with a
+    /// [`PaneClosed`].
+    PaneClose(ClosePane),
 }
 
 impl Verb {
     /// Every verb's name, in the order a refusal names them.
-    pub const NAMES: [&str; 7] = [
+    pub const NAMES: [&str; 9] = [
         "pane.list",
         "tab.new",
         "pane.wait",
@@ -168,6 +200,8 @@ impl Verb {
         "events.follow",
         "agent.ask",
         "pane.find",
+        "pane.split",
+        "pane.close",
     ];
 
     /// Its name on the wire: a noun and a verb, joined by a dot.
@@ -180,6 +214,8 @@ impl Verb {
             Self::EventsFollow(_) => Self::NAMES[4],
             Self::AgentAsk(_) => Self::NAMES[5],
             Self::PaneFind(_) => Self::NAMES[6],
+            Self::PaneSplit(_) => Self::NAMES[7],
+            Self::PaneClose(_) => Self::NAMES[8],
         }
     }
 
@@ -193,6 +229,8 @@ impl Verb {
             Self::EventsFollow(asked) => serde_json::to_value(asked),
             Self::AgentAsk(asked) => serde_json::to_value(asked),
             Self::PaneFind(asked) => serde_json::to_value(asked),
+            Self::PaneSplit(asked) => serde_json::to_value(asked),
+            Self::PaneClose(asked) => serde_json::to_value(asked),
         };
         Some(encoded.expect("a verb's arguments are numbers, strings and booleans"))
     }
@@ -208,7 +246,12 @@ impl Verb {
         match self {
             Self::PaneWait(asked) => !asked.timeout().is_zero(),
             Self::EventsFollow(_) | Self::AgentAsk(_) => true,
-            Self::PaneList | Self::TabNew(_) | Self::PaneBlocks(_) | Self::PaneFind(_) => false,
+            Self::PaneList
+            | Self::TabNew(_)
+            | Self::PaneBlocks(_)
+            | Self::PaneFind(_)
+            | Self::PaneSplit(_)
+            | Self::PaneClose(_) => false,
         }
     }
 
@@ -551,6 +594,85 @@ pub struct NewTab {
     /// What to call the tab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Where the tab's shell starts, in place of the caller's directory: an
+    /// absolute path to a directory. Not beside a `worktree`, which says
+    /// where the tab starts on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+/// Which side of the pane it is split off a new pane goes: the two a
+/// person's split keys open.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SplitSide {
+    /// To its right, in a row.
+    #[default]
+    Right,
+    /// Under it, in a column.
+    Down,
+}
+
+impl SplitSide {
+    /// Every word, in the order a refusal names them.
+    pub const WORDS: [&str; 2] = ["right", "down"];
+
+    /// Its word on the wire and on the command line.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Right => Self::WORDS[0],
+            Self::Down => Self::WORDS[1],
+        }
+    }
+
+    /// The side a word names, if it names one.
+    pub fn from_word(word: &str) -> Option<Self> {
+        [Self::Right, Self::Down]
+            .into_iter()
+            .find(|side| side.word() == word)
+    }
+}
+
+/// What `pane.split` asks for: a command, and the pane to split it off.
+///
+/// Unknown fields refused, as [`NewTab`]'s are, and for its reason.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SplitPane {
+    /// The command, as the words it is made of, joined and quoted as
+    /// [`NewTab::command`] is.
+    pub command: Vec<String>,
+    /// Which side of `beside` the new pane goes.
+    #[serde(default)]
+    pub direction: SplitSide,
+    /// The pane to split it off: the caller's own when there is none, or a
+    /// pane it opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beside: Option<u64>,
+    /// What to call the pane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Where its shell starts, in place of where `beside` is working: an
+    /// absolute path to a directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+/// What `pane.close` asks for: a pane the caller opened.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClosePane {
+    /// The pane's number, as `pane.list` gives it.
+    pub pane: u64,
+}
+
+/// What `pane.close` answers: the pane has closed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneClosed {
+    /// The pane that closed.
+    pub pane_id: u64,
+    /// Whether its tab closed with it: it was the tab's last pane.
+    pub tab_closed: bool,
 }
 
 /// What `tab.new` answers: the tab that opened.
@@ -1223,6 +1345,22 @@ fn request_of(request: &Map<String, Value>) -> Result<Request, Refusal> {
                 ));
             }
             Verb::PaneFind(asked)
+        }
+        "pane.split" => {
+            let Some(args) = args else {
+                return Err(malformed("`pane.split` needs `args` naming its `command`"));
+            };
+            let asked = SplitPane::deserialize(args)
+                .map_err(|error| malformed(&format!("`pane.split`'s args: {error}")))?;
+            Verb::PaneSplit(asked)
+        }
+        "pane.close" => {
+            let Some(args) = args else {
+                return Err(malformed("`pane.close` needs `args` naming its `pane`"));
+            };
+            let asked = ClosePane::deserialize(args)
+                .map_err(|error| malformed(&format!("`pane.close`'s args: {error}")))?;
+            Verb::PaneClose(asked)
         }
         name => {
             return Err(Refusal::new(

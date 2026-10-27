@@ -694,7 +694,11 @@ fn watchable(strip: &TabStrip, closed: &VecDeque<Spawned>, caller: PaneId) -> Ve
 
 /// The pane a request comes from, by the token it carries — or the refusal
 /// of a request that carries no pane's.
-fn caller(workspace: &Workspace, token: Option<&str>, app: &AppContext) -> Result<PaneId, Refusal> {
+pub(super) fn caller(
+    workspace: &Workspace,
+    token: Option<&str>,
+    app: &AppContext,
+) -> Result<PaneId, Refusal> {
     token
         .and_then(|token| workspace.pane_with_token(token, app))
         .ok_or_else(|| {

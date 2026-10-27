@@ -1046,6 +1046,17 @@ impl TerminalModel {
         self.sessions.get(&pane).map(|session| session.marks)
     }
 
+    /// Whether a pane's shell has marked a prompt: it reports command marks
+    /// and its first `A` has come, so what it says of the commands it runs
+    /// can be taken as all there is. `false` for a shell with none, one
+    /// whose integration is installed and never ran, and a pane with no
+    /// shell.
+    pub fn has_marked(&self, pane: PaneId) -> bool {
+        self.sessions
+            .get(&pane)
+            .is_some_and(|session| session.marks && session.prompted)
+    }
+
     /// The shell a pane is running, or `None` when it has none.
     ///
     /// The one it was started with, not [`Self::shell`]: that is the next
