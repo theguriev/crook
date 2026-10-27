@@ -35398,8 +35398,12 @@ mod sandboxed {
             "a row's icon is {} tall",
             in_rows[0].height()
         );
-        // A row with an icon is the same height as every other row.
-        let rows = settings_rail_boxes(&scene);
+        // A row with an icon is the same height as every other row. Every
+        // row but the last, which the list scrolls under at its foot once
+        // there are more plugins than the window is tall: what a scroll cuts
+        // off is no row's height.
+        let mut rows = settings_rail_boxes(&scene);
+        rows.pop();
         assert!(
             rows.iter()
                 .all(|row| (row.height() - rows[0].height()).abs() < 0.5),
@@ -50992,6 +50996,9 @@ mod keyboard_settings {
 /// here is a program of the test's own; nothing asks the `claude` of whoever
 /// runs the suite anything.
 mod connecting_agents {
+    // Most of these speak to a fake agent that is a shell script.
+    #![cfg_attr(not(unix), allow(dead_code))]
+
     use std::time::Duration;
 
     use super::*;
