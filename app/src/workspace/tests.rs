@@ -17189,10 +17189,10 @@ fn the_rail_switches_pages_and_the_pane_shows_the_one_it_names() {
     harness.open_settings_page();
 
     let rail = settings_rail_boxes(&harness.frame());
-    assert_eq!(rail.len(), 5, "five pages in the rail");
+    assert_eq!(rail.len(), 6, "six pages in the rail");
 
-    // The fourth: Keyboard Shortcuts.
-    harness.click(center(rail[3]), MouseButton::Left);
+    // The fifth: Keyboard Shortcuts.
+    harness.click(center(rail[4]), MouseButton::Left);
     assert_eq!("Keyboard Shortcuts", harness.settings_section());
 
     let text = frame_text(&harness.frame());
@@ -31792,7 +31792,7 @@ fn the_shortcuts_page_lists_what_a_plugin_registered_and_the_chord_that_reaches_
     harness.bind(r#"[{ "key": "shift+cmd+u", "command": "crook/window/new-tab" }]"#);
     harness.open_settings_page();
     let rail = settings_rail_boxes(&harness.frame());
-    harness.click(center(rail[3]), MouseButton::Left);
+    harness.click(center(rail[4]), MouseButton::Left);
     assert_eq!("Keyboard Shortcuts", harness.settings_section());
 
     let text = frame_text(&harness.frame());
@@ -34581,7 +34581,7 @@ fn the_settings_rail_lists_the_pages_the_plugins_contributed() {
     let scene = harness.frame();
 
     let rail = settings_rail_boxes(&scene);
-    assert_eq!(rail.len(), 5, "five pages in the rail");
+    assert_eq!(rail.len(), 6, "six pages in the rail");
     // Top to bottom, which is the `order` each plugin asked for.
     assert_eq!(harness.settings_section(), "Appearance");
 
@@ -50494,7 +50494,8 @@ mod keyboard_settings {
         quick(&mut harness, "down");
         quick(&mut harness, "down");
         harness.frame();
-        assert_eq!(harness.settings_section(), "Notifications");
+        // Appearance, then Shell, then Agents.
+        assert_eq!(harness.settings_section(), "Agents");
     }
 
     #[test]
@@ -50983,5 +50984,698 @@ mod keyboard_settings {
         assert_eq!(place(&harness), Place::Search);
         harness.type_text("s");
         assert_eq!(harness.search_text(), "chips");
+    }
+}
+
+/// Connecting coding agents to Crook: the Agents page, the tab a Connect or an
+/// Update runs its commands in, and the hint under the header. Every agent
+/// here is a program of the test's own; nothing asks the `claude` of whoever
+/// runs the suite anything.
+mod connecting_agents {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::agent::SearchPath;
+    use crate::plugins::agents::PAGE_KEY;
+    use crate::terminal_model::TerminalUpdate;
+    use crate::workspace::{Looked, Outcome};
+
+    /// What the fake agent's list says once it has the plugin.
+    fn installed(version: &str) -> String {
+        format!(r#"[{{ "id": "crook@crook", "version": "{version}", "enabled": true }}]"#)
+    }
+
+    /// A directory of fake agents: a `claude` that lists what `listed` holds,
+    /// writes every other command it is given to `ran`, takes `installed` as
+    /// its list once it installs or updates, and exits with what `exit` holds.
+    struct Agents {
+        scratch: Scratch,
+    }
+
+    impl Agents {
+        fn new(listed: &str) -> Self {
+            let scratch = Scratch::new();
+            let agents = scratch.path().join("agents");
+            fs::create_dir_all(&agents).expect("the directory is made");
+            fs::write(agents.join("listed"), listed).unwrap();
+            fs::write(
+                agents.join("installed"),
+                installed(env!("CARGO_PKG_VERSION")),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            crate::process::write_program(
+                &agents.join("claude"),
+                "#!/bin/sh\n\
+                 here=$(dirname \"$0\")\n\
+                 if [ \"$*\" = 'plugin list --json' ]; then cat \"$here/listed\"; exit 0; fi\n\
+                 printf '%s\\n' \"$*\" >> \"$here/ran\"\n\
+                 case \"$*\" in\n\
+                 'plugin install crook@crook'|'plugin update crook@crook') \
+                 cp \"$here/installed\" \"$here/listed\";;\n\
+                 esac\n\
+                 exit \"$(cat \"$here/exit\" 2>/dev/null || echo 0)\"\n",
+            );
+            Self { scratch }
+        }
+
+        fn directory(&self) -> PathBuf {
+            self.scratch.path().join("agents")
+        }
+
+        /// Where the window finds them: only where an installer would put
+        /// them, so a line names the program by its path and the pane's
+        /// shell runs this one, whatever its `PATH` says.
+        fn found_by_path(&self) -> SearchPath {
+            SearchPath {
+                by_name: Vec::new(),
+                installers: vec![self.directory()],
+            }
+        }
+
+        /// Where a pane's shell would find them by name.
+        fn found_by_name(&self) -> SearchPath {
+            SearchPath {
+                by_name: vec![self.directory()],
+                installers: Vec::new(),
+            }
+        }
+
+        fn ran(&self) -> String {
+            fs::read_to_string(self.directory().join("ran")).unwrap_or_default()
+        }
+
+        fn exit_with(&self, code: i32) {
+            fs::write(self.directory().join("exit"), code.to_string()).unwrap();
+        }
+    }
+
+    /// A window that finds `agents` the way `search` says.
+    fn window(agents: &Agents, search: SearchPath) -> Harness {
+        let mut harness = Harness::new(1);
+        let config = agents.scratch.path().join("claude-config");
+        harness.workspace_update(|workspace, _| {
+            workspace.set_agent_directories(search);
+            workspace.set_claude_config(config);
+        });
+        harness
+    }
+
+    fn open_agents_page(harness: &mut Harness) {
+        harness.workspace_update(|workspace, ctx| {
+            let page = workspace.host().settings_page_id(PAGE_KEY);
+            workspace.open_settings_page(page, ctx);
+        });
+        harness.frame();
+    }
+
+    fn looked(harness: &Harness, agent: &str) -> Option<Looked> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.connections().looked_at(agent).cloned()
+        })
+    }
+
+    fn outcome(harness: &Harness, agent: &str) -> Option<Outcome> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.connections().outcome(agent).cloned()
+        })
+    }
+
+    /// Waits for the agents' lists to have answered.
+    fn wait_for_the_lists(harness: &mut Harness) {
+        harness.wait_for("the agents' lists never answered", |harness| {
+            looked(harness, "claude").is_some_and(|looked| looked != Looked::Asking)
+        });
+        harness.frame();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_page_asks_the_agent_and_offers_connect_where_it_has_no_plugin() {
+        let agents = Agents::new("[]");
+        let mut harness = window(&agents, agents.found_by_path());
+        open_agents_page(&mut harness);
+        wait_for_the_lists(&mut harness);
+
+        assert_eq!(
+            looked(&harness, "claude"),
+            Some(Looked::Said(crate::agent::connect::Standing::Missing))
+        );
+        let scene = harness.frame();
+        assert!(says(&scene, "Not connected"), "{}", frame_text(&scene));
+        assert!(says(&scene, "Connect"), "{}", frame_text(&scene));
+        assert!(
+            agents.ran().is_empty(),
+            "the look ran more than the list: {}",
+            agents.ran()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_that_has_the_plugin_is_connected_with_update_beside_it() {
+        let agents = Agents::new(&installed(env!("CARGO_PKG_VERSION")));
+        let mut harness = window(&agents, agents.found_by_path());
+        open_agents_page(&mut harness);
+        wait_for_the_lists(&mut harness);
+
+        let scene = harness.frame();
+        let text = frame_text(&scene);
+        assert!(
+            says(
+                &scene,
+                &format!(
+                    "Connected: Crook\u{2019}s plugin {}",
+                    env!("CARGO_PKG_VERSION")
+                )
+            ),
+            "{text}"
+        );
+        assert!(says(&scene, "Update"), "{text}");
+        assert!(!says(&scene, "Not connected"), "{text}");
+        // And how to have Claude Code keep it up to date, which it has no
+        // command for.
+        assert!(says(&scene, "Enable auto-update"), "{text}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn claude_saying_it_updates_by_itself_is_said_instead_of_how_to() {
+        let agents = Agents::new(&installed(env!("CARGO_PKG_VERSION")));
+        let config = agents.scratch.path().join("claude-config");
+        fs::create_dir_all(config.join("plugins")).unwrap();
+        fs::write(
+            config.join("plugins").join("known_marketplaces.json"),
+            r#"{ "crook": { "autoUpdate": true } }"#,
+        )
+        .unwrap();
+        let mut harness = window(&agents, agents.found_by_path());
+        open_agents_page(&mut harness);
+        wait_for_the_lists(&mut harness);
+        let scene = harness.frame();
+        assert!(
+            says(&scene, "auto-update is on for the crook marketplace"),
+            "{}",
+            frame_text(&scene)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_plugin_older_than_this_crook_is_offered_an_update() {
+        let agents = Agents::new(&installed("6b2a55f742d2"));
+        let mut harness = window(&agents, agents.found_by_path());
+        open_agents_page(&mut harness);
+        wait_for_the_lists(&mut harness);
+        let scene = harness.frame();
+        assert!(
+            says(&scene, "Update available: the plugin is 6b2a55f742d2"),
+            "{}",
+            frame_text(&scene)
+        );
+    }
+
+    /// Presses `name` about `agent` with shells running, and waits for what
+    /// it ran to end.
+    #[cfg(unix)]
+    fn press_and_wait(harness: &mut Harness, name: &str, agent: &str) -> Option<Outcome> {
+        harness.run_about(name, agent);
+        harness.wait_for("the press's line never finished", |harness| {
+            !matches!(outcome(harness, agent), Some(Outcome::Running { .. }))
+        });
+        outcome(harness, agent)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn connect_runs_the_agents_own_commands_in_a_tab_named_for_it() {
+        let agents = Agents::new("[]");
+        let mut harness = window(&agents, agents.found_by_path());
+        if !super::shells::a_shell_these_tests_speak() || !harness.start_terminals_with_marks() {
+            return;
+        }
+        open_agents_page(&mut harness);
+        wait_for_the_lists(&mut harness);
+        let before = harness.tab_ids();
+
+        harness.run_about("crook/agents/connect", "claude");
+
+        // A tab of its own, in front, with the settings out of its way, and
+        // the agent's commands in its field before they run.
+        let tabs = harness.tab_ids();
+        assert_eq!(tabs.len(), before.len() + 1, "no tab of its own");
+        let tab = harness.active_id();
+        assert!(!before.contains(&tab));
+        assert_eq!(harness.tab_name(tab), "Connect Claude Code");
+        assert!(!harness.is_settings_page_open(), "the settings hid the tab");
+        let program = agents.directory().join("claude");
+        let program = program.display();
+        let pane = harness.focused_pane_id().expect("the tab's pane");
+        let line = format!(
+            "{program} plugin marketplace add theguriev/crook; {program} plugin install crook@crook"
+        );
+        let typed = harness.field_text(pane);
+        assert!(
+            typed == line || harness.terminal_text(pane).contains(&line),
+            "{typed:?}"
+        );
+
+        harness.wait_for("the press's line never finished", |harness| {
+            !matches!(
+                outcome(harness, "claude"),
+                Some(Outcome::Running { .. }) | None
+            ) || looked(harness, "claude").is_some_and(|looked| {
+                matches!(
+                    looked,
+                    Looked::Said(crate::agent::connect::Standing::Connected { .. })
+                )
+            })
+        });
+        assert_eq!(
+            agents.ran(),
+            "plugin marketplace add theguriev/crook\nplugin install crook@crook\n"
+        );
+        // Asked again once it ended, and the list says what it came to.
+        harness.wait_for("the list was not asked again", |harness| {
+            matches!(
+                looked(harness, "claude"),
+                Some(Looked::Said(
+                    crate::agent::connect::Standing::Connected { .. }
+                ))
+            )
+        });
+        open_agents_page(&mut harness);
+        let scene = harness.frame();
+        assert!(says(&scene, "Connected"), "{}", frame_text(&scene));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_connect_whose_commands_fail_says_so_and_offers_to_try_again() {
+        let agents = Agents::new("[]");
+        agents.exit_with(1);
+        let mut harness = window(&agents, agents.found_by_path());
+        if !super::shells::a_shell_these_tests_speak() || !harness.start_terminals_with_marks() {
+            return;
+        }
+        open_agents_page(&mut harness);
+        wait_for_the_lists(&mut harness);
+
+        let ended = press_and_wait(&mut harness, "crook/agents/connect", "claude");
+        assert_eq!(
+            ended,
+            Some(Outcome::Failed {
+                step: crate::agent::connect::Step::Connect,
+                title: "Connect Claude Code".into(),
+                exit: Some(1),
+            })
+        );
+        open_agents_page(&mut harness);
+        let scene = harness.frame();
+        let text = frame_text(&scene);
+        assert!(
+            says(&scene, "tab ended with status 1; the tab says why"),
+            "{text}"
+        );
+        assert!(says(&scene, "Try again"), "{text}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn update_runs_the_marketplaces_refresh_then_the_plugins() {
+        let agents = Agents::new(&installed("0.1.1"));
+        let mut harness = window(&agents, agents.found_by_path());
+        if !super::shells::a_shell_these_tests_speak() || !harness.start_terminals_with_marks() {
+            return;
+        }
+        open_agents_page(&mut harness);
+        wait_for_the_lists(&mut harness);
+
+        let ended = press_and_wait(&mut harness, "crook/agents/update", "claude");
+        assert_eq!(
+            ended,
+            Some(Outcome::Done(crate::agent::connect::Step::Update)),
+        );
+        assert_eq!(
+            harness.tab_name(harness.active_id()),
+            "Update Crook\u{2019}s Claude Code plugin"
+        );
+        assert_eq!(
+            agents.ran(),
+            "plugin marketplace update crook\nplugin update crook@crook\n"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_line_the_person_changed_before_it_ran_is_not_reported_as_the_press() {
+        let agents = Agents::new("[]");
+        let mut harness = window(&agents, agents.found_by_path());
+        open_agents_page(&mut harness);
+        wait_for_the_lists(&mut harness);
+        // No shell yet, so the line waits in the field for its prompt.
+        harness.run_about("crook/agents/connect", "claude");
+        let pane = harness.focused_pane_id().expect("the tab's pane");
+        harness.type_field(pane, " # not this");
+        if !super::shells::a_shell_these_tests_speak() || !harness.start_terminals_with_marks() {
+            return;
+        }
+        harness.settle(Duration::from_secs(2));
+        assert_eq!(
+            outcome(&harness, "claude"),
+            None,
+            "the row still waits on a line nobody sent"
+        );
+        assert!(
+            agents.ran().is_empty(),
+            "a line the person changed was sent: {}",
+            agents.ran()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_second_press_while_the_first_runs_shows_its_tab_rather_than_opening_another() {
+        let agents = Agents::new("[]");
+        let mut harness = window(&agents, agents.found_by_path());
+        open_agents_page(&mut harness);
+        wait_for_the_lists(&mut harness);
+        harness.run_about("crook/agents/connect", "claude");
+        let connecting = harness.active_id();
+        let tabs = harness.tab_ids();
+
+        harness.dispatch_workspace_action(WorkspaceAction::Tab(TabAction::Select(tabs[0])));
+        open_agents_page(&mut harness);
+        let scene = harness.frame();
+        assert!(says(&scene, "Show tab"), "{}", frame_text(&scene));
+        harness.run_about("crook/agents/connect", "claude");
+        assert_eq!(harness.tab_ids(), tabs, "a second tab for the same press");
+        assert_eq!(harness.active_id(), connecting);
+        assert!(!harness.is_settings_page_open());
+    }
+
+    // ---- the hint ----
+
+    /// Claude Code's title at work, in a pane that runs `claude`.
+    fn claude_at_work(harness: &mut Harness, pane: PaneId, turn: usize) {
+        harness.update_session(pane, |session| {
+            session.running_command = Some("claude".to_owned());
+        });
+        let glyph = if turn.is_multiple_of(2) {
+            '\u{25d0}'
+        } else {
+            '\u{25d1}'
+        };
+        let update = TerminalUpdate::Title(pane, Some(format!("{glyph} Fix the flaky test")));
+        harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(&update, ctx));
+        harness.frame();
+    }
+
+    /// A window that finds a `claude` where a pane's shell would, with the
+    /// hint due at once, and the pane it runs in.
+    fn hinted_window(agents: &Agents) -> (Harness, PaneId) {
+        let mut harness = window(agents, agents.found_by_name());
+        harness.workspace_update(|workspace, _| {
+            workspace.connections_mut().set_hint_after(Duration::ZERO);
+        });
+        let pane = harness.pane_ids()[0];
+        (harness, pane)
+    }
+
+    /// Two turns of the title, with the look for the agents let land between.
+    fn at_work_a_while(harness: &mut Harness, pane: PaneId) {
+        claude_at_work(harness, pane, 0);
+        harness.wait_for("the agents were never looked for", |harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.connections().found().is_some()
+            })
+        });
+        claude_at_work(harness, pane, 1);
+    }
+
+    /// The same two turns where no look for the agents should come between
+    /// them: long enough apart that one would have.
+    fn at_work_unhinted(harness: &mut Harness, pane: PaneId) {
+        claude_at_work(harness, pane, 0);
+        harness.settle(Duration::from_millis(300));
+        claude_at_work(harness, pane, 1);
+        harness.settle(Duration::from_millis(100));
+    }
+
+    const HINT: &str = "Connect Claude Code to Crook";
+
+    fn hint_shows(harness: &mut Harness) -> bool {
+        says(&harness.frame(), HINT)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_hint_is_offered_once_for_an_agent_at_work_that_never_reported() {
+        let agents = Agents::new("[]");
+        let (mut harness, pane) = hinted_window(&agents);
+        assert!(!hint_shows(&mut harness));
+        at_work_a_while(&mut harness, pane);
+        let scene = harness.frame();
+        assert!(
+            says(
+                &scene,
+                "Connect Claude Code to Crook \u{2014} status, answers from the card, tabs from the chat"
+            ),
+            "{}",
+            frame_text(&scene)
+        );
+        assert!(says(&scene, "Not now"), "{}", frame_text(&scene));
+        // It takes nothing from the pane.
+        assert_eq!(harness.focused_pane_id(), Some(pane));
+        assert!(harness.pane_takes_keys(), "the hint took the keyboard");
+        assert!(
+            agents.ran().is_empty(),
+            "the hint ran something: {}",
+            agents.ran()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn not_now_takes_the_hint_down_for_good() {
+        let agents = Agents::new("[]");
+        let (mut harness, pane) = hinted_window(&agents);
+        at_work_a_while(&mut harness, pane);
+        assert!(hint_shows(&mut harness));
+
+        harness.run_about("crook/agents/not-now", "claude");
+        assert!(!hint_shows(&mut harness));
+        assert!(harness.general().agents_not_connected.contains("claude"));
+        assert!(
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace
+                    .settings()
+                    .general()
+                    .agents_not_connected
+                    .contains("claude")),
+            "Not now was not written to the settings"
+        );
+        assert!(agents.ran().is_empty(), "Not now ran something");
+
+        // Nor in another pane, nor in another window with the same settings.
+        harness.dispatch_workspace_action(WorkspaceAction::Tab(TabAction::New));
+        let other = harness.focused_pane_id().expect("a new pane");
+        at_work_unhinted(&mut harness, other);
+        assert!(!hint_shows(&mut harness));
+
+        let mut settings = Settings::ephemeral();
+        let mut general = settings.general();
+        general.agents_not_connected = general.agents_not_connected.with("claude");
+        settings.set_general(general);
+        let mut again = Harness::with_settings(1, settings);
+        again.workspace_update(|workspace, _| {
+            workspace.set_agent_directories(agents.found_by_name());
+            workspace.connections_mut().set_hint_after(Duration::ZERO);
+        });
+        let pane = again.pane_ids()[0];
+        claude_at_work(&mut again, pane, 0);
+        again.settle(Duration::from_millis(300));
+        claude_at_work(&mut again, pane, 1);
+        assert!(!hint_shows(&mut again), "asked again after Not now");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn connect_on_the_hint_runs_the_same_tab_as_the_page() {
+        let agents = Agents::new("[]");
+        let (mut harness, pane) = hinted_window(&agents);
+        at_work_a_while(&mut harness, pane);
+        assert!(hint_shows(&mut harness));
+        harness.run_about("crook/agents/connect", "claude");
+        assert!(
+            !hint_shows(&mut harness),
+            "the hint stayed up after Connect"
+        );
+        assert_eq!(harness.tab_name(harness.active_id()), "Connect Claude Code");
+        let typed = harness.field_text(harness.focused_pane_id().unwrap());
+        assert!(
+            typed.starts_with("claude plugin marketplace add theguriev/crook; "),
+            "{typed:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn no_hint_over_a_pane_whose_hooks_report() {
+        let agents = Agents::new("[]");
+        let (mut harness, pane) = hinted_window(&agents);
+        let report = TerminalUpdate::Agent {
+            session: None,
+            pane,
+            status: AgentStatus::Running,
+            title: None,
+            message: None,
+        };
+        harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(&report, ctx));
+        at_work_unhinted(&mut harness, pane);
+        assert!(
+            !hint_shows(&mut harness),
+            "hinted over a pane whose plugin reports"
+        );
+
+        // And one up already goes when the hooks speak.
+        let (mut harness, pane) = hinted_window(&agents);
+        at_work_a_while(&mut harness, pane);
+        assert!(hint_shows(&mut harness));
+        let report = TerminalUpdate::Agent {
+            session: None,
+            pane,
+            status: AgentStatus::Running,
+            title: None,
+            message: None,
+        };
+        harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(&report, ctx));
+        assert!(!hint_shows(&mut harness));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn no_hint_while_a_question_waits_to_be_answered() {
+        let agents = Agents::new("[]");
+        let (mut harness, pane) = hinted_window(&agents);
+        let fixture = agents.scratch.path().join("asks.json");
+        fs::write(
+            &fixture,
+            r#"{ "asks": [{ "tab": "Asking", "command": "rm -rf build" }] }"#,
+        )
+        .unwrap();
+        let fixture = crate::workspace::AskFixture::read(&fixture).expect("a fixture");
+        harness.workspace_update(|workspace, ctx| fixture.seed(workspace, ctx));
+        at_work_unhinted(&mut harness, pane);
+        assert!(!hint_shows(&mut harness), "hinted while a question waited");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn no_hint_with_the_hints_off_for_an_agent_not_here_or_one_run_some_other_way() {
+        let agents = Agents::new("[]");
+
+        let (mut harness, pane) = hinted_window(&agents);
+        harness.dispatch_workspace_action(SettingsAction::ToggleConnectHints.into());
+        assert!(!harness.general().hint_to_connect_agents);
+        at_work_unhinted(&mut harness, pane);
+        assert!(!hint_shows(&mut harness), "hinted with the hints off");
+
+        let mut harness = window(&agents, SearchPath::default());
+        harness.workspace_update(|workspace, _| {
+            workspace.connections_mut().set_hint_after(Duration::ZERO);
+        });
+        let pane = harness.pane_ids()[0];
+        at_work_unhinted(&mut harness, pane);
+        assert!(
+            !hint_shows(&mut harness),
+            "hinted for an agent this machine lacks"
+        );
+
+        // Over ssh, where connecting this machine's would connect nothing.
+        let (mut harness, pane) = hinted_window(&agents);
+        for turn in 0..3 {
+            harness.update_session(pane, |session| {
+                session.running_command = Some("ssh build-box".to_owned());
+            });
+            let update = TerminalUpdate::Title(pane, Some(format!("\u{25d0} Fix {turn}")));
+            harness
+                .workspace_update(|workspace, ctx| workspace.apply_terminal_update(&update, ctx));
+            harness.settle(Duration::from_millis(100));
+        }
+        assert!(!hint_shows(&mut harness), "hinted over ssh");
+    }
+
+    #[test]
+    fn no_plugin_may_connect_an_agent_or_answer_the_hint() {
+        let harness = Harness::new(1);
+        for name in [
+            "crook/agents/connect",
+            "crook/agents/update",
+            "crook/agents/not-now",
+            "crook/agents/check",
+            "crook/agents/open",
+        ] {
+            let name = ActionName::parse(name).expect("a literal");
+            assert!(
+                harness
+                    .workspace
+                    .read(&harness.app, |workspace, _| workspace
+                        .host()
+                        .answered_by_a_person(&name)),
+                "{name} can be run by a plugin"
+            );
+        }
+    }
+
+    #[test]
+    fn the_agents_row_is_reached_and_pressed_from_the_keyboard() {
+        use crate::workspace::settings_page::focus::Place;
+
+        let mut harness = Harness::new(1);
+        let program = PathBuf::from("/nonexistent/agents/claude");
+        harness.workspace_update(|workspace, ctx| {
+            let located = crate::agent::connect::Located {
+                agent: "claude",
+                file: program.clone(),
+                typed: program.display().to_string(),
+            };
+            workspace.fix_connections(
+                |connections, _| {
+                    connections.fix(
+                        vec![located],
+                        vec![(
+                            "claude",
+                            Looked::Said(crate::agent::connect::Standing::Missing),
+                        )],
+                        false,
+                        None,
+                    );
+                },
+                ctx,
+            );
+        });
+        open_agents_page(&mut harness);
+        harness.type_text("Claude Code");
+        harness.frame();
+        harness.press("down", Modifiers::default(), "");
+        harness.frame();
+        assert_eq!(
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace
+                    .settings_page()
+                    .focus
+                    .place()),
+            Place::Control
+        );
+        harness.press("enter", Modifiers::default(), "");
+        harness.frame();
+        assert_eq!(
+            harness.tab_name(harness.active_id()),
+            "Connect Claude Code",
+            "Enter on the row did not press Connect"
+        );
     }
 }

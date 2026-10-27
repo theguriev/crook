@@ -99,6 +99,7 @@ use super::block_list::block_text;
 use super::changes_panel::{ChangesPanelState, Editor, HunkRead};
 use super::closed::{Closed, Taking};
 use super::closing::{self, Close, Question};
+use super::connecting::{self, Connections};
 use super::crash_note::CrashNote;
 use super::finish::{Again, Finishing};
 use super::header_chip::HeaderChip;
@@ -117,6 +118,7 @@ use super::tabs_panel::geometry::RowGeometry;
 use super::tabs_panel::search::SearchState;
 use super::theme_panel::{Mode, ThemePanelState};
 use super::{body, crash_note, header_toolbar, session_note, tabs_panel};
+use crate::agent::connect::Step;
 
 /// How far into a panel row `--carry` presses.
 ///
@@ -1059,6 +1061,10 @@ pub struct Workspace {
     /// The line under the header that says another window keeps the session,
     /// until it is dismissed. See [`session_note`].
     session_note: Option<SessionNote>,
+    /// Which coding agents are installed, where Crook's plugin stands in
+    /// each, the tabs a Connect or an Update is running in, and the hint that
+    /// offers a connection. See [`connecting`].
+    connections: Connections,
     /// The options, kept beside [`Self::settings`] rather than read out of it
     /// on every access. A renderer reads this dozens of times per frame and
     /// wants a `Copy` snapshot, not a borrow of the thing a save is cloning.
@@ -1516,6 +1522,7 @@ impl Workspace {
             diagnostics_folder: None,
             crash_note: None,
             session_note: None,
+            connections: Connections::default(),
             options,
             overridden: Overridden::default(),
             menu: MenuState::default(),
@@ -1954,6 +1961,281 @@ impl Workspace {
                 ctx.notify();
             }
         }
+    }
+
+    /// What the window knows about connecting agents to it. See
+    /// [`connecting`].
+    pub(crate) fn connections(&self) -> &Connections {
+        &self.connections
+    }
+
+    /// The hint that offers to connect an agent, while it may be drawn: not
+    /// while a question is waiting, or a card answers one, and not once the
+    /// hints are turned off or Not now was said for its agent.
+    pub(crate) fn connect_hint(&self) -> Option<&connecting::Hint> {
+        let hint = self.connections.hint()?;
+        let general = self.general();
+        let wanted =
+            general.hint_to_connect_agents && !general.agents_not_connected.contains(hint.agent);
+        let quiet = self.asks.is_empty() && self.ask_card.is_none();
+        (wanted && quiet).then_some(hint)
+    }
+
+    /// Where this window looks for agents: the test's own directories in a
+    /// test, which looks nowhere without them — a suite that asked the real
+    /// `claude` what it has would be asking the person who runs it.
+    fn agent_search(&self) -> crate::agent::SearchPath {
+        match &self.agent_directories {
+            Some(directories) => directories.clone(),
+            None if cfg!(test) => crate::agent::SearchPath::default(),
+            None => crate::agent::search_path(),
+        }
+    }
+
+    /// Looks, on the pool, for the agents Crook can connect: a `stat` in
+    /// each directory, and nothing run. Once a window.
+    fn find_agents(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self.connections.start_finding() {
+            return;
+        }
+        let search = self.agent_search();
+        let finding = ctx
+            .background()
+            .spawn(async move { crate::agent::connect::located(&search) });
+        ctx.spawn(finding, |workspace, found, ctx| {
+            workspace.connections.found_them(found);
+            ctx.notify();
+        })
+        .detach();
+    }
+
+    /// Asks every connectable agent installed here what it has, on the pool:
+    /// each one's own `plugin list --json`, read-only. Not again within a
+    /// minute of the last unless `force`d — after a Connect or an Update
+    /// ends, or the page's Check again.
+    pub(crate) fn look_at_agents(&mut self, force: bool, ctx: &mut ViewContext<Self>) {
+        if !self.connections.start_looking(force, Instant::now()) {
+            return;
+        }
+        let search = self.agent_search();
+        let config = self.connections.claude_config();
+        ctx.notify();
+        let asking = ctx.background().spawn(async move {
+            use crate::agent::connect;
+            let found = connect::located(&search);
+            // Side by side: each is a program starting, a second or two
+            // apiece.
+            let said = std::thread::scope(|scope| {
+                let asked: Vec<_> = found
+                    .iter()
+                    .map(|located| {
+                        let file = located.file.clone();
+                        let agent = located.agent;
+                        let asking = scope.spawn(move || connect::look(&file, &[]));
+                        (agent, asking)
+                    })
+                    .collect();
+                asked
+                    .into_iter()
+                    .map(|(agent, asking)| {
+                        let looked = match asking.join() {
+                            Ok(Ok(listed)) => connecting::Looked::Said(connect::standing(
+                                &listed,
+                                env!("CARGO_PKG_VERSION"),
+                            )),
+                            Ok(Err(why)) => connecting::Looked::Unanswered(why),
+                            Err(_) => connecting::Looked::Unanswered(String::from(
+                                "the look at it stopped",
+                            )),
+                        };
+                        (agent, looked)
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let updates = config.is_some_and(|config| connect::claude_updates_by_itself(&config));
+            (found, said, updates)
+        });
+        ctx.spawn(asking, |workspace, (found, said, updates), ctx| {
+            workspace.connections.looked(found, said, updates);
+            ctx.notify();
+        })
+        .detach();
+    }
+
+    /// The Agents page was shown: its agents are asked what they have.
+    fn agents_page_shown(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self.settings_are_showing() {
+            return;
+        }
+        let shown = self
+            .page
+            .selected(&self.host)
+            .and_then(|page| self.host.settings_page_key(page));
+        if shown == Some(crate::plugins::agents::PAGE_KEY) {
+            self.look_at_agents(false, ctx);
+        }
+    }
+
+    /// Connects `agent` to Crook, or brings its plugin up to date: opens a
+    /// tab named for it and types the agent's own commands into it, sent at
+    /// the tab's first prompt. See [`connecting`].
+    ///
+    /// A person's press, and only a person's: the actions that call this are
+    /// answers, which no plugin is handed, and nothing on the control socket
+    /// reaches them. A press for an agent whose tab is still running shows
+    /// that tab rather than opening another.
+    pub(crate) fn connect_agent(&mut self, agent: &str, step: Step, ctx: &mut ViewContext<Self>) {
+        if let Some(tab) = self.connections.tab_of(agent)
+            && self.tabs.get(tab).is_some()
+        {
+            self.stop_searching();
+            self.show_section(None, ctx);
+            self.apply(TabAction::Select(tab), ctx);
+            return;
+        }
+        let Some(located) = self.connections.located(agent).cloned() else {
+            // Pressed before the look for the agents came back, which a
+            // press on the hint can be: look, then press again for them.
+            if self.connections.found().is_none() && self.connections.start_finding() {
+                let search = self.agent_search();
+                let agent = agent.to_owned();
+                let finding = ctx
+                    .background()
+                    .spawn(async move { crate::agent::connect::located(&search) });
+                ctx.spawn(finding, move |workspace, found, ctx| {
+                    workspace.connections.found_them(found);
+                    if workspace.connections.located(&agent).is_some() {
+                        workspace.connect_agent(&agent, step, ctx);
+                    }
+                })
+                .detach();
+            }
+            return;
+        };
+        let shell = self.terminals.as_ref(ctx).shell();
+        let Some(line) =
+            crate::agent::connect::line(located.agent, step, &located.typed, shell.as_os_str())
+        else {
+            return;
+        };
+        // Home, which is where the agent's own commands mean what they say:
+        // a project's directory could hold settings of its own.
+        let Some(directory) = self
+            .home()
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
+        else {
+            return;
+        };
+        let title = crate::agent::connect::tab_title(located.agent, step);
+        // In front, as a file opened from the desktop is: the person is to
+        // see what runs, and a settings page over the panes would hide it.
+        self.stop_searching();
+        self.show_section(None, ctx);
+        self.open_tab_in(directory, ctx);
+        let (Some(pane), tab) = (self.tabs.focused_pane_id(), self.tabs.active_id()) else {
+            return;
+        };
+        self.rename_tab(tab, Some(title.clone()), ctx);
+        self.connections.ran(located.agent, step, tab, pane, title);
+        self.run_at_first_prompt(pane, line, ctx);
+        ctx.notify();
+    }
+
+    /// A command ran to its end in `pane`: when it was a Connect's or an
+    /// Update's line, the agent is asked again what it has now.
+    fn connection_ran(&mut self, pane: PaneId, exit: Option<i32>, ctx: &mut ViewContext<Self>) {
+        if self.connections.finished(pane, exit).is_some() {
+            self.look_at_agents(true, ctx);
+            ctx.notify();
+        }
+    }
+
+    /// "Not now" on the hint for `agent`: the hint goes, and is never offered
+    /// for that agent again.
+    pub(crate) fn not_now_connecting(&mut self, agent: &str, ctx: &mut ViewContext<Self>) {
+        let mut general = self.general();
+        general.agents_not_connected = general.agents_not_connected.with(agent);
+        self.set_general(general, ctx);
+        self.connections.withdraw(agent);
+        ctx.notify();
+    }
+
+    /// `pane`'s title says `agent` is at work: the hint goes up over it once
+    /// it has said so for [`connecting::HINT_AFTER`] with no hook heard, the
+    /// agent is installed here, and nothing more pressing is on screen.
+    ///
+    /// `agent` is what the pane runs by its command line, so an agent over
+    /// `ssh` or through a wrapper is never hinted at: connecting this
+    /// machine's would not connect that one.
+    fn consider_the_hint(
+        &mut self,
+        pane: PaneId,
+        agent: &'static str,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if !crate::agent::connect::is_connectable(agent) {
+            return;
+        }
+        let general = self.general();
+        if !general.hint_to_connect_agents || general.agents_not_connected.contains(agent) {
+            return;
+        }
+        if !self.connections.at_work(pane, agent, Instant::now()) {
+            return;
+        }
+        // A question is the person's to answer first; the next title asks
+        // again.
+        if !self.asks.is_empty() || self.ask_card.is_some() {
+            return;
+        }
+        if self.connections.found().is_none() {
+            self.find_agents(ctx);
+            return;
+        }
+        let answerable = self
+            .host
+            .action(&crate::plugins::agents::action("connect"))
+            .is_some();
+        if !answerable || !self.connections.may_offer(agent) {
+            return;
+        }
+        self.connections.offer(agent, pane);
+        ctx.notify();
+    }
+
+    /// Writes what the agents fixture says into the window, for a picture.
+    pub(crate) fn fix_connections(
+        &mut self,
+        fix: impl FnOnce(&mut Connections, Option<PaneId>),
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let pane = self.tabs.focused_pane_id();
+        fix(&mut self.connections, pane);
+        ctx.notify();
+    }
+
+    /// The shell a new pane runs, which is what a line typed into one is
+    /// read by.
+    pub(crate) fn shell_for_new_panes(&self, app: &AppContext) -> PathBuf {
+        self.terminals.as_ref(app).shell()
+    }
+
+    /// Asks the agents nothing, for a picture.
+    pub fn hold_agent_looks(&mut self) {
+        self.connections.hold();
+    }
+
+    /// Makes the window read Claude Code's files from `config`. A test's.
+    #[cfg(test)]
+    pub(crate) fn set_claude_config(&mut self, config: PathBuf) {
+        self.connections.set_claude_config(Some(config));
+    }
+
+    /// The window's connections, to change. A test's.
+    #[cfg(test)]
+    pub(crate) fn connections_mut(&mut self) -> &mut Connections {
+        &mut self.connections
     }
 
     /// The settings page's state.
@@ -5617,6 +5899,7 @@ impl Workspace {
         // Asked afresh each time the page is shown, since it is the system's
         // and another terminal may have taken it since.
         if self.settings_are_showing() {
+            self.agents_page_shown(ctx);
             self.ask_default_terminal(ctx);
             // And whether the desktop asks for less motion, for the same
             // reason: it may have been switched since, and a person who just
@@ -10972,6 +11255,11 @@ impl Workspace {
                 if self.asks.titled(*pane, claude) {
                     self.asks_changed(ctx);
                 }
+                if let (Some(said), Some(agent)) = (said, agent)
+                    && said.status == AgentStatus::Running
+                {
+                    self.consider_the_hint(*pane, agent, ctx);
+                }
                 match said {
                     Some(said) => self.title_reported(*pane, said, ctx),
                     None if title.is_none() => self.take_back_a_running_title(*pane, ctx),
@@ -11077,6 +11365,9 @@ impl Workspace {
                 // report before it hands the end over: the row is idle by the
                 // time anything is told the command ended.
                 self.take_back_a_running_title(*pane, ctx);
+                if *ran {
+                    self.connection_ran(*pane, *exit, ctx);
+                }
                 self.command_finished(*pane, *exit, *took, ctx);
                 self.tell_the_desktop_a_command_ended(*pane, *exit, *took, ctx);
                 true
@@ -11096,15 +11387,22 @@ impl Workspace {
                 title,
                 message,
                 session,
-            } => self.agent_reported(
-                *pane,
-                *status,
-                title.clone(),
-                message.clone(),
-                session.as_deref(),
-                StatusSource::Agent(Instant::now()),
-                ctx,
-            ),
+            } => {
+                // A hook said it, so the plugin, or hooks merged by hand,
+                // are there: nothing offers to connect this pane's agent.
+                if self.connections.heard(*pane) {
+                    ctx.notify();
+                }
+                self.agent_reported(
+                    *pane,
+                    *status,
+                    title.clone(),
+                    message.clone(),
+                    session.as_deref(),
+                    StatusSource::Agent(Instant::now()),
+                    ctx,
+                )
+            }
             // The same path as a report of idle, attention included: a pane
             // whose command ended while nobody was looking is a pane whose
             // agent stopped, whichever of the two said so.
@@ -11580,6 +11878,7 @@ impl Workspace {
         };
         if input.editor().text() != line {
             log::info!("pane {pane:?}'s first line was changed before its prompt; not sending it");
+            self.connections.abandoned(pane);
             return;
         }
         let Some((terminal, _)) = self.terminal(pane, ctx) else {
@@ -11588,10 +11887,11 @@ impl Workspace {
         let Some(line) = input.apply(Intent::Submit, &self.clipboard) else {
             return;
         };
-        if terminal.submit(&line)
-            && let Some(view) = self.pane_blocks(pane)
-        {
-            view.apply(ScrollCause::Submit);
+        if terminal.submit(&line) {
+            self.connections.sent(pane);
+            if let Some(view) = self.pane_blocks(pane) {
+                view.apply(ScrollCause::Submit);
+            }
         }
         ctx.notify();
     }
@@ -12975,6 +13275,7 @@ impl Workspace {
         // A line waiting for a prompt in a pane that closed first waits for
         // nothing.
         self.first_lines.retain(|id, _| open.contains(id));
+        self.connections.keep_only(&open);
         self.cleared_exits.retain(|id, _| open.contains(id));
         self.resume_offers.retain(|id, _| open.contains(id));
         // A closed pane's half-written command line goes with it. Keeping it
@@ -13486,6 +13787,9 @@ impl Workspace {
                 // over is about to stop existing without a hover-out.
                 self.page.scroll.lock().scroll_to_top();
                 self.page.forget_hover_state();
+                // The Agents page asks the agents what they have when it is
+                // shown, and at no other time.
+                self.agents_page_shown(ctx);
                 ctx.notify();
             }
             SettingsAction::FocusField(field) => {
@@ -13563,6 +13867,11 @@ impl Workspace {
             SettingsAction::ToggleAgentsAsk => {
                 let mut general = self.general();
                 general.answer_agents_from_crook = !general.answer_agents_from_crook;
+                self.set_general(general, ctx);
+            }
+            SettingsAction::ToggleConnectHints => {
+                let mut general = self.general();
+                general.hint_to_connect_agents = !general.hint_to_connect_agents;
                 self.set_general(general, ctx);
             }
             SettingsAction::ToggleNotification(occasion) => {
@@ -14721,6 +15030,9 @@ impl Workspace {
             main.add_child(note);
         }
         if let Some(note) = session_note::render(self) {
+            main.add_child(note);
+        }
+        if let Some(note) = connecting::render(self) {
             main.add_child(note);
         }
         let main = main.with_child(Expanded::new(1., body).finish()).finish();

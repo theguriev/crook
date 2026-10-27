@@ -33,6 +33,7 @@ mod box_drawing;
 mod changes_panel;
 mod closed;
 mod closing;
+pub(crate) mod connecting;
 mod controls;
 mod crash_note;
 mod finish;
@@ -73,6 +74,8 @@ pub use action::{
     WindowAction, WorkspaceAction, WorktreeAction,
 };
 pub use answer_list::AskFixture;
+pub use connecting::AgentsFixture;
+pub(crate) use connecting::{Looked, Outcome};
 pub use held_locks::HeldLocks;
 pub(crate) use settings_page::widgets::Category;
 pub use text_field::TextField;

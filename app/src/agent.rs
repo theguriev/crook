@@ -125,6 +125,7 @@ use serde_json::{Value, json};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod ancestors;
 pub mod ask;
+pub mod connect;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod holders;
 #[cfg(unix)]
@@ -802,6 +803,10 @@ struct Agent {
     /// The commands that install Crook's own plugin for this agent, which
     /// carries the fragment's hooks; empty when there is none.
     plugin: &'static [&'static str],
+    /// The commands that bring that plugin up to date: the marketplace's copy
+    /// of this repository first, then the plugin from it. Empty with
+    /// `plugin`. See [`connect`].
+    plugin_update: &'static [&'static str],
     /// The line that goes back to the most recent conversation in the
     /// directory it is run in, when the agent has one — see [`resume_line`].
     last: Option<&'static str>,
@@ -996,6 +1001,16 @@ const CLAUDE_PLUGIN: &[&str] = &[
 /// it tell a person to run. See [`CLAUDE_UPDATE`].
 pub const CLAUDE_PLUGIN_UPDATE: &str = "claude plugin update crook@crook";
 
+/// What the Agents page's Update runs for Claude Code: the marketplace's copy
+/// of this repository brought up to date, then [`CLAUDE_PLUGIN_UPDATE`].
+/// The first because `claude plugin marketplace update` is what Claude
+/// Code's own docs pair with the second, and a catalog read before the
+/// release would name the version the plugin already has.
+const CLAUDE_PLUGIN_REFRESH: &[&str] = &[
+    "claude plugin marketplace update crook",
+    CLAUDE_PLUGIN_UPDATE,
+];
+
 /// What the lead says after [`CLAUDE_PLUGIN`]'s commands: that Claude Code
 /// keeps the copy of the plugin it installed until it is told to update it.
 ///
@@ -1070,6 +1085,14 @@ const CODEX_PLUGIN: &[&str] = &[
     "codex plugin add crook@crook",
 ];
 
+/// What brings Codex's copy up to date. Codex has no `plugin update`: its
+/// `marketplace upgrade` refreshes the snapshot of this repository, and a
+/// second `plugin add` installs the plugin from it over the one it had.
+const CODEX_PLUGIN_REFRESH: &[&str] = &[
+    "codex plugin marketplace upgrade crook",
+    "codex plugin add crook@crook",
+];
+
 /// The Gemini CLI hooks: the same object, in `~/.gemini/settings.json`,
 /// under its own names — `BeforeAgent` for the prompt, `BeforeTool` and
 /// `AfterTool` around a tool, `AfterAgent` for the end of a turn.
@@ -1140,6 +1163,13 @@ const COPILOT_EVENTS: &[(&str, &str)] = &[
 const COPILOT_PLUGIN: &[&str] = &[
     "copilot plugin marketplace add theguriev/crook",
     "copilot plugin install crook@crook",
+];
+
+/// What brings Copilot CLI's copy up to date: its catalog of this
+/// repository, then the plugin.
+const COPILOT_PLUGIN_REFRESH: &[&str] = &[
+    "copilot plugin marketplace update crook",
+    "copilot plugin update crook@crook",
 ];
 
 /// The OpenCode plugin: a TypeScript file its plugin directory loads at
@@ -1298,6 +1328,7 @@ const AGENTS: &[Agent] = &[
         },
         prompt_flag: None,
         plugin: CLAUDE_PLUGIN,
+        plugin_update: CLAUDE_PLUGIN_REFRESH,
         last: Some("claude --continue"),
         pick: Some("claude --resume"),
     },
@@ -1317,6 +1348,7 @@ in Plan mode, in its question dialog, keeps the row running until it is answered
         },
         prompt_flag: None,
         plugin: CODEX_PLUGIN,
+        plugin_update: CODEX_PLUGIN_REFRESH,
         last: Some("codex resume --last"),
         pick: Some("codex resume"),
     },
@@ -1336,6 +1368,7 @@ in its reply ends its turn as idle.",
         },
         prompt_flag: Some("-i"),
         plugin: &[],
+        plugin_update: &[],
         last: Some("gemini --resume latest"),
         pick: None,
     },
@@ -1349,6 +1382,7 @@ in its reply ends its turn as idle.",
         },
         prompt_flag: Some("-i"),
         plugin: COPILOT_PLUGIN,
+        plugin_update: COPILOT_PLUGIN_REFRESH,
         last: Some("copilot --resume"),
         pick: Some("copilot --resume"),
     },
@@ -1362,6 +1396,7 @@ in its reply ends its turn as idle.",
         },
         prompt_flag: Some("--prompt"),
         plugin: &[],
+        plugin_update: &[],
         last: None,
         pick: None,
     },
@@ -1377,6 +1412,7 @@ wrapper script that runs `BINARY --agent running` first.",
         ),
         prompt_flag: Some("--message"),
         plugin: &[],
+        plugin_update: &[],
         last: None,
         pick: None,
     },
